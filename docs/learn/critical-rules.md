@@ -105,9 +105,62 @@ import { keys, values, entries, has_key } from "std/collections"
 
 ## IDD (Intent-Driven Development)
 
-```bash
-ntnt intent check file.tnt    # Verify code matches .intent specs
-ntnt intent studio file.intent # Live visual feedback
+IDD is the core workflow for ntnt. Write requirements as `.intent` files, implement with annotations, verify automatically.
+
+### Workflow
+
+1. **Draft** a `.intent` file from requirements
+2. **Present** to user for approval — do NOT implement before approval
+3. **Implement** with `@implements: feature.id` annotations
+4. **Verify** with `ntnt intent check` or `ntnt intent studio`
+
+### .intent File Format
+
+```yaml
+# server.intent
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the home page | / |
+| the page loads | status 200 |
+| they see "{text}" | body contains "{text}" |
+
+---
+
+Feature: Home Page
+  id: feature.home
+  description: "Welcome page for visitors"
+
+  Scenario: Shows welcome message
+    When a user visits the home page
+    → the page loads
+    → they see "Welcome"
+
+---
+
+Constraint: Security Headers
+  description: "All pages include security headers"
+  applies_to: [feature.home]
 ```
 
-Annotate code: `// @implements: feature.id`
+### Code Annotations
+
+```ntnt
+// @implements: feature.home
+fn home_handler(req) { return html("<h1>Welcome</h1>") }
+
+// @utility — helper, not a feature
+fn hash_password(pw) { ... }
+```
+
+### Commands
+
+```bash
+ntnt intent check file.tnt       # Verify code matches .intent specs
+ntnt intent studio file.intent   # Live visual feedback (opens :3001)
+ntnt intent coverage file.tnt    # Feature coverage report
+ntnt intent init file.intent     # Generate scaffolding from intent
+```
