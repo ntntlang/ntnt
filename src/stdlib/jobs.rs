@@ -373,21 +373,21 @@ impl JobRuntime {
 
     /// Get or lazily initialize the KV handle.
     ///
-    /// Uses double-checked locking to avoid holding locks during I/O:
-    /// 1. Check kv_handle_info (fast path — already initialized)
-    /// 2. Clone URL under kv_url lock, drop it
-    /// 3. Open KV connection (slow I/O, no locks held)
-    /// 4. Store result under kv_handle_info lock (short critical section)
+    /// Get (or lazily create) the KV handle for job storage.
+    ///
+    /// Holds the kv_handle_info lock across the entire init to prevent the
+    /// TOCTOU race where two concurrent callers both see None, both call
+    /// open_kv(), and end up with different store_ids (especially fatal with
+    /// sqlite::memory: where each open creates a separate in-memory DB).
     pub fn get_or_init_kv(&self) -> Result<Value> {
+        let mut info = self.kv_handle_info.lock().map_err(|e| {
+            IntentError::runtime_error(format!("Job KV handle lock poisoned: {}", e))
+        })?;
+
         // Fast path: already initialized
-        {
-            let info = self.kv_handle_info.lock().map_err(|e| {
-                IntentError::runtime_error(format!("Job KV handle lock poisoned: {}", e))
-            })?;
-            if let Some(ref h) = *info {
-                return Ok(h.to_value());
-            }
-        } // drop kv_handle_info lock
+        if let Some(ref h) = *info {
+            return Ok(h.to_value());
+        }
 
         // Clone URL under its own lock, then drop
         let url = {
@@ -397,17 +397,13 @@ impl JobRuntime {
             url_guard.clone()
         }; // drop kv_url lock
 
-        // Open KV connection — no locks held during I/O
+        // Open KV connection (holds kv_handle_info lock during I/O —
+        // acceptable because this only happens once per URL change)
         let kv_handle_value = kv::open_kv(&url)?;
         let handle_info = extract_kv_handle_info(&kv_handle_value)?;
 
-        // Store result (short critical section)
-        {
-            let mut info = self.kv_handle_info.lock().map_err(|e| {
-                IntentError::runtime_error(format!("Job KV handle lock poisoned: {}", e))
-            })?;
-            *info = Some(handle_info);
-        }
+        // Store result (still under same lock — no race window)
+        *info = Some(handle_info);
 
         Ok(kv_handle_value)
     }
@@ -5440,16 +5436,12 @@ pub(crate) mod tests {
     }
 
     /// Set up an isolated in-memory SQLite KV store for the duration of a test.
-    /// Uses `sqlite::memory:` so each invocation gets a completely separate DB
-    /// with no file I/O, no stale files, and no cross-test contamination.
+    /// Uses `sqlite::memory:` for a clean, isolated DB per test.
     /// The `db_name` parameter is kept for API compatibility but is ignored.
     fn with_temp_kv<F: FnOnce(&Value)>(_db_name: &str, f: F) {
         with_clean_runtime(|| {
-            // Use in-memory SQLite — each open_kv(":memory:") creates a fresh,
-            // isolated DB with a unique store_id in the global registry.
-            let url = "sqlite::memory:".to_string();
             if let Ok(mut u) = JOB_RUNTIME.kv_url.lock() {
-                *u = url;
+                *u = "sqlite::memory:".to_string();
             }
             let kv = JOB_RUNTIME.get_or_init_kv().unwrap();
             f(&kv);
