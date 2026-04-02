@@ -2010,10 +2010,10 @@ seal(b)
 **Dynamic additions** — add jobs to a sealed batch from within a running job:
 
 ```ntnt
-Job ImportUser on imports {
+job ImportUser on imports {
     perform(id) {
         let children = fetch_children(id)
-        let bid = batch_id()  // Get current batch ID (None if not in a batch)
+        let bid = unwrap(batch_id())  // Get current batch ID (panics if not in a batch)
         for child in children {
             enqueue_into(bid, "ImportChild", map { "child_id": child })
         }

@@ -6558,7 +6558,7 @@ enqueue_in("PurgeCache", 300, map {})  // Purge cache in 5 minutes
 #### `enqueue_into`
 
 ```ntnt
-enqueue_into(batch_id: String, job_type: String, args: Map) -> Result<String, String>
+enqueue_into(batch_id_or_handle: String | Map, job_type: String, args: Map) -> Result<String, String>
 ```
 
 Dynamically add a job to a sealed batch.
@@ -6567,7 +6567,7 @@ Writes the job directly to KV and atomically increments the batch's pending and 
 
 **Parameters:**
 
-- `batch_id` — The batch ID string (from batch_id() or batch handle)
+- `batch_id_or_handle` — Batch ID string or batch handle map (from batch_id() or batch())
 - `job_type` — The registered job type name
 - `args` — The job payload map
 
@@ -6576,7 +6576,7 @@ Writes the job directly to KV and atomically increments the batch's pending and 
 **Examples:**
 
 ```ntnt
-enqueue_into(batch_id(), "ProcessChild", map { "id": child.id })  // Add a child job to the current batch
+enqueue_into(unwrap(batch_id()), "ProcessChild", map { "id": child.id })  // Add a child job to the current batch
 ```
 
 **See also:** `batch`, `batch_id`, `enqueue`, `seal`

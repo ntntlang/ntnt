@@ -2322,8 +2322,10 @@ pub fn kv_expire(handle: &Value, key: &str, seconds: i64) -> Result<bool> {
 }
 
 /// Read the remaining TTL (in seconds) for a key.
-/// Returns `Ok(Some(seconds))` if a TTL is set, `Ok(None)` if the key has no expiry
-/// or does not exist, or an error on backend failure.
+/// Returns `Ok(Some(seconds))` if a TTL is set, `Ok(None)` if the key has no expiry.
+/// Also returns `Ok(None)` if the key does not exist (callers should check existence
+/// separately with `kv_get` if the distinction matters).
+/// Returns an error on backend failure.
 pub fn kv_ttl(handle: &Value, key: &str) -> Result<Option<i64>> {
     let backend = get_backend_type(handle)?;
     match backend {

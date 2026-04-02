@@ -721,7 +721,7 @@ fn try_fire_batch_callback(
 /// Returns `Ok(job_id)` on success, or an error if the batch doesn't exist,
 /// is complete, or is closed.
 fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Result<String> {
-    // Step 1: Validate job type is registered (before any counter mutation).
+    // Step 1: Validate job type is registered (before any KV access).
     let job_def = JOB_RUNTIME.get_job(job_name)?.ok_or_else(|| {
         IntentError::runtime_error(format!(
             "Unknown job type '{}' — define it with a job block before enqueueing",
@@ -732,17 +732,36 @@ fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Re
     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
     let meta_key = format!("jobs:batch:{}", batch_id);
 
-    // Step 2-4: Read metadata and validate status.
-    let status = match kv::kv_get(&kv_handle, &meta_key)? {
-        Value::Map(m) => match m.get("status") {
-            Some(Value::String(s)) => s.clone(),
-            _ => {
+    // Step 2: Read metadata and validate status.
+    let meta_total = match kv::kv_get(&kv_handle, &meta_key)? {
+        Value::Map(m) => {
+            let status = match m.get("status") {
+                Some(Value::String(s)) => s.clone(),
+                _ => {
+                    return Err(IntentError::runtime_error(format!(
+                        "batch '{}' has missing or invalid status",
+                        batch_id
+                    )));
+                }
+            };
+            if status == "complete" {
                 return Err(IntentError::runtime_error(format!(
-                    "batch '{}' has missing or invalid status",
+                    "batch '{}' is complete — cannot add jobs after all jobs have reached terminal state",
                     batch_id
                 )));
             }
-        },
+            if status != "sealing" && status != "sealed" {
+                return Err(IntentError::runtime_error(format!(
+                    "batch '{}' has status '{}' — dynamic adds only allowed for sealing/sealed batches",
+                    batch_id, status
+                )));
+            }
+            // Extract metadata total for legacy counter seeding below.
+            match m.get("total") {
+                Some(Value::Int(n)) => *n,
+                _ => 0,
+            }
+        }
         _ => {
             return Err(IntentError::runtime_error(format!(
                 "batch '{}' not found — it may have expired or the ID is invalid",
@@ -751,41 +770,65 @@ fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Re
         }
     };
 
-    if status == "complete" {
-        return Err(IntentError::runtime_error(format!(
-            "batch '{}' is complete — cannot add jobs after all jobs have reached terminal state",
-            batch_id
-        )));
-    }
+    // Step 3: Pre-check dedup BEFORE any counter mutation.
+    // If this job type has a `unique` option and the dedup key already exists,
+    // return the existing job ID immediately — no counters touched, no rollback
+    // needed, no risk of absorbing a concurrent completion decrement.
+    let unique_secs = match job_def.options.get("unique") {
+        Some(JobOptionValue::Int(n)) if *n > 0 => Some(*n),
+        _ => None,
+    };
+    if let Some(_ttl) = unique_secs {
+        let pjson = serde_json::to_string(&crate::stdlib::kv::value_to_json_public(&payload))
+            .map_err(|e| {
+                IntentError::runtime_error(format!(
+                    "Failed to serialize payload for dedup hash: {}",
+                    e
+                ))
+            })?;
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{}:{}", job_name, pjson).as_bytes());
+        let full_hash = format!("{:x}", hasher.finalize());
+        let dedup_key = format!("jobs:unique:{}:{}", job_name, &full_hash[..32]);
 
-    // Step 5: Check closed flag.
-    let closed_key = format!("jobs:batch:{}:closed", batch_id);
-    match kv::kv_get(&kv_handle, &closed_key) {
-        Ok(Value::Bool(true)) => {
-            return Err(IntentError::runtime_error(format!(
-                "batch '{}' is closing — a completion callback is in flight, cannot add jobs",
-                batch_id
-            )));
+        // If the dedup key exists and references a live (non-terminal) job,
+        // this is a duplicate — return the existing ID without touching counters.
+        if let Ok(Value::String(existing_id)) = kv::kv_get(&kv_handle, &dedup_key) {
+            let data_key = format!("jobs:data:{}", existing_id);
+            let is_terminal = match kv::kv_get(&kv_handle, &data_key) {
+                Ok(Value::Map(data)) => match data.get("status") {
+                    Some(Value::String(s)) => {
+                        matches!(s.as_str(), "cancelled" | "dead" | "expired" | "failed")
+                    }
+                    _ => true,
+                },
+                _ => false,
+            };
+            if !is_terminal {
+                return Ok(existing_id);
+            }
         }
-        Ok(_) => {} // Key missing (Unit) or false — batch is open, proceed
-        Err(e) => {
-            return Err(IntentError::runtime_error(format!(
-                "batch '{}' closed flag check failed: {} — refusing to add jobs during KV error",
-                batch_id, e
-            )));
-        }
     }
 
-    // Step 6: Only allow dynamic adds for sealing/sealed batches.
-    if status != "sealing" && status != "sealed" {
-        return Err(IntentError::runtime_error(format!(
-            "batch '{}' has status '{}' — dynamic adds only allowed for sealing/sealed batches",
-            batch_id, status
-        )));
-    }
-
-    // Step 7: Increment counters BEFORE writing the job.
     let counter_prefix = format!("jobs:batch:{}:counter", batch_id);
+
+    // Step 4: Seed counter:total for legacy Phase 2 batches.
+    // Phase 2 batches don't have counter:total — kv_incr on a missing key
+    // initializes to 1, not metadata.total+1. Seed with kv_set_nx so the
+    // first increment produces the correct value. No-op if already set.
+    let _ = kv::kv_set_nx(
+        &kv_handle,
+        &format!("{}:total", counter_prefix),
+        &Value::Int(meta_total),
+        Some(30 * 24 * 3600),
+    );
+
+    // Step 5: Increment counters BEFORE checking closed flag.
+    // This ordering prevents the TOCTOU race: if we checked closed first, then
+    // incremented, the last job could complete between those two steps — setting
+    // closed=true and firing callbacks while our increment hadn't happened yet.
+    // By incrementing first, a concurrent completion sees pending=N+1 (not N-1→0)
+    // and defers callback firing to our job's eventual completion.
     kv::kv_incr(&kv_handle, &format!("{}:pending", counter_prefix), 1).map_err(|e| {
         IntentError::runtime_error(format!(
             "batch '{}' pending counter increment failed: {}",
@@ -801,7 +844,29 @@ fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Re
         ))
     })?;
 
-    // Step 8: Write job to KV via enqueue_internal.
+    // Step 6: Check closed flag AFTER incrementing counters.
+    // If closed, roll back and return error. The batch completed between our
+    // metadata read and counter increment — our increment is stale.
+    let closed_key = format!("jobs:batch:{}:closed", batch_id);
+    match kv::kv_get(&kv_handle, &closed_key) {
+        Ok(Value::Bool(true)) => {
+            rollback_batch_counters(&kv_handle, &counter_prefix);
+            return Err(IntentError::runtime_error(format!(
+                "batch '{}' is closing — a completion callback is in flight, cannot add jobs",
+                batch_id
+            )));
+        }
+        Ok(_) => {} // Key missing (Unit) or false — batch is open, proceed
+        Err(e) => {
+            rollback_batch_counters(&kv_handle, &counter_prefix);
+            return Err(IntentError::runtime_error(format!(
+                "batch '{}' closed flag check failed: {} — refusing to add jobs during KV error",
+                batch_id, e
+            )));
+        }
+    }
+
+    // Step 7: Write job to KV.
     let result = enqueue_internal_with_def(
         &job_def,
         job_name,
@@ -815,12 +880,11 @@ fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Re
     match result {
         Ok(EnqueueResult::Created(job_id)) => Ok(job_id),
         Ok(EnqueueResult::Deduplicated(existing_id)) => {
-            // Dedup collision — roll back both counters.
+            // Dedup collision (shouldn't happen after pre-check, but defensive).
             rollback_batch_counters(&kv_handle, &counter_prefix);
             Ok(existing_id)
         }
         Err(e) => {
-            // Enqueue failed — roll back both counters.
             rollback_batch_counters(&kv_handle, &counter_prefix);
             Err(e)
         }
@@ -5149,25 +5213,28 @@ pub fn init() -> HashMap<String, Value> {
                         prepared.push((i, job.job_type.clone(), payload, ts));
                     }
 
-                    // Write "sealing" metadata BEFORE flushing jobs.
-                    // This ensures batch_status() can always find the batch even if
-                    // a crash occurs mid-flush (prevents orphaned jobs with batch_id
-                    // but no batch metadata).
-                    let meta = build_batch_meta(
-                        &batch_id, &batch_state.name, &batch_state.created_at,
-                        "sealing", total, total,
-                    );
-                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), batch_ttl_30d)?;
-
-                    // Initialize atomic counter keys BEFORE flushing jobs.
-                    // Workers can claim jobs as soon as pending keys exist —
-                    // counters must be ready before the first job is written.
+                    // Initialize atomic counter keys BEFORE writing "sealing" metadata.
+                    // A concurrent enqueue_into() observes "sealing" and immediately
+                    // kv_incr's counter keys — they must already exist so the increment
+                    // adds to N rather than creating a new key at value 1 (which seal
+                    // would then overwrite back to N, losing the dynamic add).
                     let cp = format!("jobs:batch:{}:counter", batch_id);
                     kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(total), batch_ttl_30d)?;
                     kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), batch_ttl_30d)?;
                     kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), batch_ttl_30d)?;
                     kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), batch_ttl_30d)?;
                     kv::kv_set(&kv_handle, &format!("{}:total", cp), &Value::Int(total), batch_ttl_30d)?;
+
+                    // Write "sealing" metadata AFTER counter keys are ready.
+                    // batch_status() can find the batch even if a crash occurs mid-flush
+                    // (prevents orphaned jobs with batch_id but no batch metadata).
+                    // Any enqueue_into() that reads "sealing" is guaranteed to find
+                    // initialized counters above.
+                    let meta = build_batch_meta(
+                        &batch_id, &batch_state.name, &batch_state.created_at,
+                        "sealing", total, total,
+                    );
+                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), batch_ttl_30d)?;
 
                     // Flush jobs to KV.
                     // Mark each flushed so retries skip already-written jobs.
@@ -5344,7 +5411,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |_args| {
                 let bid = CURRENT_BATCH_ID.with(|c| c.borrow().clone());
                 match bid {
-                    Some(id) => Ok(Value::String(id)),
+                    Some(id) => Ok(Value::some(Value::String(id))),
                     None => Ok(Value::none()),
                 }
             },
@@ -5353,17 +5420,17 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt enqueue_into
     // @module std/jobs
-    // @signature enqueue_into(batch_id: String, job_type: String, args: Map) -> Result<String, String>
+    // @signature enqueue_into(batch_id_or_handle: String | Map, job_type: String, args: Map) -> Result<String, String>
     // Dynamically add a job to a sealed batch.
     //
     // Writes the job directly to KV and atomically increments the batch's
     // pending and total counters. Use this from within a batch job's perform
     // block to add more work to the same batch.
-    // @param batch_id The batch ID string (from batch_id() or batch handle)
+    // @param batch_id_or_handle Batch ID string or batch handle map (from batch_id() or batch())
     // @param job_type The registered job type name
     // @param args The job payload map
     // @returns Result<String, String> — Ok(job_id) or Err(message)
-    // @example enqueue_into(batch_id(), "ProcessChild", map { "id": child.id }) ~ "Add a child job to the current batch"
+    // @example enqueue_into(unwrap(batch_id()), "ProcessChild", map { "id": child.id }) ~ "Add a child job to the current batch"
     // @see_also batch, batch_id, enqueue, seal
     module.insert(
         "enqueue_into".to_string(),
@@ -9097,9 +9164,16 @@ pub(crate) mod tests {
 
             let result = batch_id_fn(&[]).unwrap();
             match result {
-                Value::String(ref s) => assert_eq!(s, "test-batch-123"),
+                Value::EnumValue {
+                    ref variant,
+                    ref values,
+                    ..
+                } if variant == "Some" && values.len() == 1 => match &values[0] {
+                    Value::String(s) => assert_eq!(s, "test-batch-123"),
+                    other => panic!("batch_id() Some must wrap String, got {:?}", other),
+                },
                 _ => panic!(
-                    "batch_id() must return String inside a batch job, got {:?}",
+                    "batch_id() must return Some(String) inside a batch job, got {:?}",
                     result
                 ),
             }
@@ -9180,15 +9254,25 @@ pub(crate) mod tests {
 
             let result1 = batch_id_fn(&[]).unwrap();
             match &result1 {
-                Value::String(s) => assert_eq!(s, "failure-batch"),
-                _ => panic!("batch_id() must return String, got {:?}", result1),
+                Value::EnumValue {
+                    variant, values, ..
+                } if variant == "Some" && values.len() == 1 => match &values[0] {
+                    Value::String(s) => assert_eq!(s, "failure-batch"),
+                    other => panic!("batch_id() Some must wrap String, got {:?}", other),
+                },
+                _ => panic!("batch_id() must return Some(String), got {:?}", result1),
             }
 
             let result2 = batch_id_fn(&[]).unwrap();
             match &result2 {
-                Value::String(s) => assert_eq!(s, "failure-batch"),
+                Value::EnumValue {
+                    variant, values, ..
+                } if variant == "Some" && values.len() == 1 => match &values[0] {
+                    Value::String(s) => assert_eq!(s, "failure-batch"),
+                    other => panic!("batch_id() Some must wrap String, got {:?}", other),
+                },
                 _ => panic!(
-                    "batch_id() must still return String in on_failure context, got {:?}",
+                    "batch_id() must still return Some(String) in on_failure context, got {:?}",
                     result2
                 ),
             }
