@@ -170,6 +170,21 @@ Once decisions are locked, implementation order:
 
 ---
 
+## CLI: File-Optional Mode via Control Socket
+
+**Added 2026-04-02** — All `ntnt jobs` CLI commands currently require a `<file>` argument to locate the KV store. When a worker is already running, the control socket (`.ntnt.sock`) has the same data available. Adding file-optional auto-discovery would improve DX:
+
+**Proposed behavior:**
+1. If `<file>` is provided → load KV directly (current behavior)
+2. If no `<file>` → look for `.ntnt.sock` in CWD → route through control socket
+3. If no file and no socket → error with clear message
+
+**Applies to:** `ntnt jobs status`, `ntnt jobs list`, `ntnt jobs inspect`, `ntnt jobs batches`, `ntnt jobs batch`, `ntnt workers status` (already file-optional)
+
+**Effort:** Low-medium — refactor `jobs_load_kv()` into a `jobs_connect()` that tries socket first, falls back to file parse. Each command handler already produces the same output shape from either source.
+
+---
+
 ## References
 
 - `src/parser.rs` — `statement_inner()` (line ~1301), `let_declaration()` (line ~202), `is_nested_map_literal()` (line ~1795), `parse_map_contents()` (line ~1849)
