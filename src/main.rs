@@ -2019,7 +2019,7 @@ fn run_jobs_batches_command(
             let comma = if i + 1 < n { "," } else { "" };
             println!(
                 "  {}{}",
-                serde_json::to_string(&json_val).unwrap_or_default(),
+                serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string()),
                 comma
             );
         }
@@ -2104,7 +2104,7 @@ fn run_jobs_batch_command(
         let json_val = ntnt::stdlib::json::intent_value_to_json(&Value::Map(batch.clone()));
         println!(
             "{}",
-            serde_json::to_string_pretty(&json_val).unwrap_or_default()
+            serde_json::to_string_pretty(&json_val).unwrap_or_else(|_| "null".to_string())
         );
     } else {
         let id = jobs_str_field(&batch, "id");

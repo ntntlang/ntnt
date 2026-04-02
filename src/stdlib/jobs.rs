@@ -1125,32 +1125,30 @@ fn update_batch_on_terminal(
     let mut did_fire_complete = false;
     let mut did_fire_success = false;
 
+    // Emit lifecycle events on state transitions, independent of callback
+    // enqueue success. This ensures observability even if KV metadata read
+    // fails or callback enqueueing errors — events are unconditional like
+    // batch.created and batch.sealed.
     if fire_death {
+        emit_job_event(
+            "batch.death",
+            &[("batch_id", Value::String(batch_id.clone()))],
+        );
         did_fire_death = try_fire_batch_callback(&batch_id, "on_death", &meta_snapshot);
-        if did_fire_death {
-            emit_job_event(
-                "batch.death",
-                &[("batch_id", Value::String(batch_id.clone()))],
-            );
-        }
     }
     if fire_complete {
+        emit_job_event(
+            "batch.complete",
+            &[("batch_id", Value::String(batch_id.clone()))],
+        );
         did_fire_complete = try_fire_batch_callback(&batch_id, "on_complete", &meta_snapshot);
-        if did_fire_complete {
-            emit_job_event(
-                "batch.complete",
-                &[("batch_id", Value::String(batch_id.clone()))],
-            );
-        }
     }
     if fire_success {
+        emit_job_event(
+            "batch.succeeded",
+            &[("batch_id", Value::String(batch_id.clone()))],
+        );
         did_fire_success = try_fire_batch_callback(&batch_id, "on_success", &meta_snapshot);
-        if did_fire_success {
-            emit_job_event(
-                "batch.succeeded",
-                &[("batch_id", Value::String(batch_id.clone()))],
-            );
-        }
     }
 
     // Step 2: Set fired flags AFTER successful enqueue (or skip if enqueue failed).
@@ -3238,9 +3236,10 @@ pub fn list_batches(opts: ListBatchesOpts) -> Result<Vec<HashMap<String, Value>>
     let mut results = Vec::new();
     for key in &meta_keys {
         // Skip counter keys, done-set keys, closed flags, fired flags — only want metadata.
+        // Use suffix/infix checks to avoid false positives on batch names.
         if key.contains(":counter:")
             || key.contains(":done:")
-            || key.contains(":closed")
+            || key.ends_with(":closed")
             || key.contains(":fired:")
         {
             continue;
@@ -5347,6 +5346,21 @@ pub fn init() -> HashMap<String, Value> {
                         kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), completion_ttl)?;
                         kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), completion_ttl)?;
                         kv::kv_set(&kv_handle, &format!("{}:total", cp), &Value::Int(0), completion_ttl)?;
+                        emit_job_event(
+                            "batch.sealed",
+                            &[
+                                ("batch_id", Value::String(batch_id.clone())),
+                                ("total", Value::Int(0)),
+                            ],
+                        );
+                        emit_job_event(
+                            "batch.complete",
+                            &[("batch_id", Value::String(batch_id.clone()))],
+                        );
+                        emit_job_event(
+                            "batch.succeeded",
+                            &[("batch_id", Value::String(batch_id.clone()))],
+                        );
                         return Ok(());
                     }
 

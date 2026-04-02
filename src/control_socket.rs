@@ -243,7 +243,11 @@ fn dispatch_command(line: &str) -> String {
         },
         Some("batches") => {
             let status = cmd.get("status").and_then(|v| v.as_str());
-            let limit = cmd.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+            let limit = cmd
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50)
+                .min(10_000) as usize;
             cmd_batches(status, limit)
         }
         Some("batch_status") => match cmd.get("batch_id").and_then(|v| v.as_str()) {
