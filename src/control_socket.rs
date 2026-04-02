@@ -241,7 +241,16 @@ fn dispatch_command(line: &str) -> String {
             Ok(q) => cmd_queue_paused(&q, false),
             Err(e) => e,
         },
-        _ => serde_json::json!({ "error": "unknown command; expected 'status', 'scale', 'pause', or 'resume'" })
+        Some("batches") => {
+            let status = cmd.get("status").and_then(|v| v.as_str());
+            let limit = cmd.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+            cmd_batches(status, limit)
+        }
+        Some("batch_status") => match cmd.get("batch_id").and_then(|v| v.as_str()) {
+            Some(bid) => cmd_batch_status(bid),
+            None => serde_json::json!({ "error": "missing 'batch_id' field" }).to_string(),
+        },
+        _ => serde_json::json!({ "error": "unknown command; expected 'status', 'scale', 'pause', 'resume', 'batches', or 'batch_status'" })
             .to_string(),
     }
 }
@@ -269,6 +278,28 @@ fn get_queue(cmd: &serde_json::Value) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .ok_or_else(|| serde_json::json!({ "error": "missing 'queue' field" }).to_string())
+}
+
+fn cmd_batches(status: Option<&str>, limit: usize) -> String {
+    match crate::stdlib::jobs::list_batches_impl(status, limit) {
+        Ok(value) => {
+            let json = crate::stdlib::json::intent_value_to_json(&value);
+            serde_json::to_string(&json)
+                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+        }
+        Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+    }
+}
+
+fn cmd_batch_status(batch_id: &str) -> String {
+    match crate::stdlib::jobs::batch_status_impl(batch_id) {
+        Ok(value) => {
+            let json = crate::stdlib::json::intent_value_to_json(&value);
+            serde_json::to_string(&json)
+                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+        }
+        Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+    }
 }
 
 fn cmd_queue_paused(queue: &str, paused: bool) -> String {

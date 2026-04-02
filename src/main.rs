@@ -566,6 +566,52 @@ enum JobsCommands {
         #[arg(long)]
         force: bool,
     },
+    /// List batches with optional status filter
+    ///
+    /// Scans KV for batch metadata and displays a summary table with status,
+    /// counters, and timing information.
+    ///
+    /// Examples:
+    ///   ntnt jobs batches server.tnt
+    ///   ntnt jobs batches server.tnt --status=sealed
+    ///   ntnt jobs batches server.tnt --limit=10 --format=json
+    Batches {
+        /// The source file containing job/queue configuration
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Filter by status (sealing/sealed/complete)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Maximum number of batches to show (default: 50)
+        #[arg(long, default_value = "50")]
+        limit: usize,
+
+        /// Output format: json (default: table)
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// Show full details of a single batch
+    ///
+    /// Displays batch metadata, counters, callback status, and timing.
+    ///
+    /// Examples:
+    ///   ntnt jobs batch server.tnt abc-def-123
+    ///   ntnt jobs batch server.tnt abc-def-123 --format=json
+    Batch {
+        /// The source file containing job/queue configuration
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Batch ID to inspect
+        #[arg(value_name = "BATCH_ID")]
+        batch_id: String,
+
+        /// Output format: json (default: table)
+        #[arg(long)]
+        format: Option<String>,
+    },
     /// Bulk delete jobs by status
     ///
     /// Requires --status to prevent accidental wipe-all. Use --older-than
@@ -1582,6 +1628,17 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
             job_id,
             force,
         } => run_jobs_cancel_command(&file, &job_id, force),
+        JobsCommands::Batches {
+            file,
+            status,
+            limit,
+            format,
+        } => run_jobs_batches_command(&file, status.as_deref(), limit, format.as_deref()),
+        JobsCommands::Batch {
+            file,
+            batch_id,
+            format,
+        } => run_jobs_batch_command(&file, &batch_id, format.as_deref()),
         JobsCommands::Clear {
             file,
             status,
@@ -1936,6 +1993,224 @@ fn run_jobs_clear_command(
             std::process::exit(1);
         }
     }
+}
+
+/// List batches with optional status filter
+fn run_jobs_batches_command(
+    path: &PathBuf,
+    status_filter: Option<&str>,
+    limit: usize,
+    format: Option<&str>,
+) -> anyhow::Result<()> {
+    use ntnt::interpreter::Value;
+
+    let _kv_handle = jobs_load_kv(path)?;
+
+    let batches = ntnt::stdlib::jobs::list_batches(ntnt::stdlib::jobs::ListBatchesOpts {
+        status: status_filter.map(|s| s.to_string()),
+        limit,
+    })?;
+
+    if format == Some("json") {
+        println!("[");
+        let n = batches.len();
+        for (i, batch) in batches.iter().enumerate() {
+            let json_val = ntnt::stdlib::json::intent_value_to_json(&Value::Map(batch.clone()));
+            let comma = if i + 1 < n { "," } else { "" };
+            println!(
+                "  {}{}",
+                serde_json::to_string(&json_val).unwrap_or_default(),
+                comma
+            );
+        }
+        println!("]");
+    } else {
+        if batches.is_empty() {
+            println!("{}", "No batches found.".yellow());
+            return Ok(());
+        }
+        println!(
+            "{}  {}  {}  {}  {}  {}  {}",
+            format!("{:<10}", "ID").cyan().bold(),
+            format!("{:<15}", "NAME").cyan().bold(),
+            format!("{:<10}", "STATUS").cyan().bold(),
+            format!("{:<8}", "PENDING").cyan().bold(),
+            format!("{:<8}", "DONE").cyan().bold(),
+            format!("{:<8}", "TOTAL").cyan().bold(),
+            "CREATED AT".cyan().bold(),
+        );
+        println!("{}", "─".repeat(80).dimmed());
+        for batch in &batches {
+            let id = jobs_str_field(batch, "id");
+            let id_short: String = id.chars().take(8).collect();
+            let name = jobs_str_field(batch, "name");
+            let name_trunc = if name.chars().count() > 15 {
+                format!("{}…", name.chars().take(14).collect::<String>())
+            } else {
+                name.clone()
+            };
+            let status = jobs_str_field(batch, "status");
+            let status_padded = format!("{:<10}", &status);
+            let status_col = match status.as_str() {
+                "sealing" => status_padded.yellow().to_string(),
+                "sealed" => status_padded.cyan().to_string(),
+                "complete" => status_padded.green().to_string(),
+                _ => status_padded,
+            };
+            let pending = jobs_int_field(batch, "pending");
+            let succeeded = jobs_int_field(batch, "succeeded");
+            let dead = jobs_int_field(batch, "dead");
+            let cancelled = jobs_int_field(batch, "cancelled");
+            let done = succeeded + dead + cancelled;
+            let total = jobs_int_field(batch, "total");
+            let created_at = format_ns_timestamp(&jobs_str_field(batch, "created_at"));
+            println!(
+                "{}  {}  {}  {}  {}  {}  {}",
+                format!("{:<10}", id_short),
+                format!("{:<15}", name_trunc),
+                status_col,
+                format!("{:<8}", pending),
+                format!("{:<8}", done),
+                format!("{:<8}", total),
+                created_at,
+            );
+        }
+        println!("{}", "─".repeat(80).dimmed());
+        println!("Showing {} batch(es)", batches.len());
+    }
+
+    Ok(())
+}
+
+/// Show full details of a single batch
+fn run_jobs_batch_command(
+    path: &PathBuf,
+    batch_id: &str,
+    format: Option<&str>,
+) -> anyhow::Result<()> {
+    use ntnt::interpreter::Value;
+
+    let _kv_handle = jobs_load_kv(path)?;
+
+    let batch = match ntnt::stdlib::jobs::get_batch_detail(batch_id) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{}: {}", "error".red().bold(), e);
+            std::process::exit(1);
+        }
+    };
+
+    if format == Some("json") {
+        let json_val = ntnt::stdlib::json::intent_value_to_json(&Value::Map(batch.clone()));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_val).unwrap_or_default()
+        );
+    } else {
+        let id = jobs_str_field(&batch, "id");
+        let name = jobs_str_field(&batch, "name");
+        let status = jobs_str_field(&batch, "status");
+        let pending = jobs_int_field(&batch, "pending");
+        let succeeded = jobs_int_field(&batch, "succeeded");
+        let dead = jobs_int_field(&batch, "dead");
+        let cancelled = jobs_int_field(&batch, "cancelled");
+        let total = jobs_int_field(&batch, "total");
+        let created_at = format_ns_timestamp(&jobs_str_field(&batch, "created_at"));
+        let sealed_at = jobs_str_field(&batch, "sealed_at");
+        let completed_at = jobs_str_field(&batch, "completed_at");
+
+        println!("{}", "Batch Detail".cyan().bold());
+        println!("{}", "─".repeat(50).dimmed());
+        println!("  {}  {}", "ID:".bold(), id);
+        println!("  {}  {}", "Name:".bold(), name);
+        let status_display = match status.as_str() {
+            "sealing" => status.yellow().to_string(),
+            "sealed" => status.cyan().to_string(),
+            "complete" => status.green().to_string(),
+            _ => status.clone(),
+        };
+        println!("  {}  {}", "Status:".bold(), status_display);
+        println!();
+        println!("  {}", "Counters".cyan().bold());
+        println!("  {}  {}", "Total:".bold(), total);
+        println!("  {}  {}", "Pending:".bold(), pending);
+        println!(
+            "  {}  {}",
+            "Succeeded:".bold(),
+            succeeded.to_string().green()
+        );
+        println!(
+            "  {}  {}",
+            "Dead:".bold(),
+            if dead > 0 {
+                dead.to_string().red().to_string()
+            } else {
+                "0".to_string()
+            }
+        );
+        println!(
+            "  {}  {}",
+            "Cancelled:".bold(),
+            if cancelled > 0 {
+                cancelled.to_string().yellow().to_string()
+            } else {
+                "0".to_string()
+            }
+        );
+        println!();
+        println!("  {}", "Timing".cyan().bold());
+        println!("  {}  {}", "Created:".bold(), created_at);
+        if !sealed_at.is_empty() {
+            println!(
+                "  {}  {}",
+                "Sealed:".bold(),
+                format_ns_timestamp(&sealed_at)
+            );
+        }
+        if !completed_at.is_empty() {
+            println!(
+                "  {}  {}",
+                "Completed:".bold(),
+                format_ns_timestamp(&completed_at)
+            );
+        }
+
+        // Callback status
+        let closed = match batch.get("closed") {
+            Some(Value::Bool(true)) => true,
+            _ => false,
+        };
+        let fired_death = match batch.get("fired_death") {
+            Some(Value::Bool(true)) => true,
+            _ => false,
+        };
+        let fired_complete = match batch.get("fired_complete") {
+            Some(Value::Bool(true)) => true,
+            _ => false,
+        };
+        let fired_success = match batch.get("fired_success") {
+            Some(Value::Bool(true)) => true,
+            _ => false,
+        };
+        if closed || fired_death || fired_complete || fired_success {
+            println!();
+            println!("  {}", "Callbacks".cyan().bold());
+            if closed {
+                println!("  {}  {}", "Closed:".bold(), "yes".green());
+            }
+            if fired_death {
+                println!("  {}  {}", "on_death:".bold(), "fired".red());
+            }
+            if fired_complete {
+                println!("  {}  {}", "on_complete:".bold(), "fired".green());
+            }
+            if fired_success {
+                println!("  {}  {}", "on_success:".bold(), "fired".green());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ─── Jobs CLI helper functions ────────────────────────────────────────────────

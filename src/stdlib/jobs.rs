@@ -1127,12 +1127,30 @@ fn update_batch_on_terminal(
 
     if fire_death {
         did_fire_death = try_fire_batch_callback(&batch_id, "on_death", &meta_snapshot);
+        if did_fire_death {
+            emit_job_event(
+                "batch.death",
+                &[("batch_id", Value::String(batch_id.clone()))],
+            );
+        }
     }
     if fire_complete {
         did_fire_complete = try_fire_batch_callback(&batch_id, "on_complete", &meta_snapshot);
+        if did_fire_complete {
+            emit_job_event(
+                "batch.complete",
+                &[("batch_id", Value::String(batch_id.clone()))],
+            );
+        }
     }
     if fire_success {
         did_fire_success = try_fire_batch_callback(&batch_id, "on_success", &meta_snapshot);
+        if did_fire_success {
+            emit_job_event(
+                "batch.succeeded",
+                &[("batch_id", Value::String(batch_id.clone()))],
+            );
+        }
     }
 
     // Step 2: Set fired flags AFTER successful enqueue (or skip if enqueue failed).
@@ -3203,6 +3221,137 @@ pub fn job_status_counts() -> Result<JobStatusCounts> {
 }
 
 // ============================================================================
+// Batch CLI helpers — called by src/main.rs for `ntnt jobs batches/batch`
+// ============================================================================
+
+/// Options for listing batches
+pub struct ListBatchesOpts {
+    pub status: Option<String>,
+    pub limit: usize,
+}
+
+/// List batches with optional status filter, sorted newest-first.
+pub fn list_batches(opts: ListBatchesOpts) -> Result<Vec<HashMap<String, Value>>> {
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+    let meta_keys = kv::kv_list(&kv_handle, Some("jobs:batch:"))?;
+
+    let mut results = Vec::new();
+    for key in &meta_keys {
+        // Skip counter keys, done-set keys, closed flags, fired flags — only want metadata.
+        if key.contains(":counter:")
+            || key.contains(":done:")
+            || key.contains(":closed")
+            || key.contains(":fired:")
+        {
+            continue;
+        }
+        if let Ok(Value::Map(mut m)) = kv::kv_get(&kv_handle, key) {
+            // Apply status filter.
+            if let Some(ref sf) = opts.status {
+                match m.get("status") {
+                    Some(Value::String(s)) if s == sf.as_str() => {}
+                    _ => continue,
+                }
+            }
+            // Merge authoritative counter values from atomic keys.
+            let batch_id = match m.get("id") {
+                Some(Value::String(s)) => s.clone(),
+                _ => continue,
+            };
+            let cp = format!("jobs:batch:{}:counter", batch_id);
+            for counter in &["pending", "succeeded", "dead", "cancelled", "total"] {
+                if let Ok(Value::Int(n)) = kv::kv_get(&kv_handle, &format!("{}:{}", cp, counter)) {
+                    m.insert(counter.to_string(), Value::Int(n));
+                }
+            }
+            results.push(m);
+        }
+    }
+
+    // Sort newest-first by created_at.
+    results.sort_by(|a, b| {
+        let ts = |m: &HashMap<String, Value>| -> String {
+            match m.get("created_at") {
+                Some(Value::String(s)) => s.clone(),
+                _ => String::new(),
+            }
+        };
+        ts(b).cmp(&ts(a))
+    });
+    results.truncate(opts.limit);
+
+    Ok(results)
+}
+
+/// Get full detail for a single batch, including counters and closed/fired flags.
+pub fn get_batch_detail(batch_id: &str) -> Result<HashMap<String, Value>> {
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+    let meta_key = format!("jobs:batch:{}", batch_id);
+
+    let mut m = match kv::kv_get(&kv_handle, &meta_key)? {
+        Value::Map(m) => m,
+        _ => {
+            return Err(IntentError::runtime_error(format!(
+                "Batch '{}' not found — it may have expired or the ID is invalid",
+                batch_id
+            )));
+        }
+    };
+
+    // Merge authoritative counter values.
+    let cp = format!("jobs:batch:{}:counter", batch_id);
+    for counter in &["pending", "succeeded", "dead", "cancelled", "total"] {
+        if let Ok(Value::Int(n)) = kv::kv_get(&kv_handle, &format!("{}:{}", cp, counter)) {
+            m.insert(counter.to_string(), Value::Int(n));
+        }
+    }
+
+    // Include closed flag.
+    let closed_key = format!("jobs:batch:{}:closed", batch_id);
+    match kv::kv_get(&kv_handle, &closed_key) {
+        Ok(Value::Bool(true)) => {
+            m.insert("closed".to_string(), Value::Bool(true));
+        }
+        _ => {
+            m.insert("closed".to_string(), Value::Bool(false));
+        }
+    }
+
+    // Include fired callback flags.
+    let fired_prefix = format!("jobs:batch:{}:fired:", batch_id);
+    for cb in &["on_death", "on_complete", "on_success"] {
+        let fired_key = format!("{}{}", fired_prefix, cb);
+        match kv::kv_get(&kv_handle, &fired_key) {
+            Ok(Value::Bool(true)) => {
+                m.insert(
+                    format!("fired_{}", cb.replace("on_", "")),
+                    Value::Bool(true),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(m)
+}
+
+/// Get batch detail for the control socket (returns Value for JSON serialization).
+pub(crate) fn batch_status_impl(batch_id: &str) -> Result<Value> {
+    let m = get_batch_detail(batch_id)?;
+    Ok(Value::Map(m))
+}
+
+/// List batches for the control socket (returns Value for JSON serialization).
+pub(crate) fn list_batches_impl(status: Option<&str>, limit: usize) -> Result<Value> {
+    let batches = list_batches(ListBatchesOpts {
+        status: status.map(|s| s.to_string()),
+        limit,
+    })?;
+    let list: Vec<Value> = batches.into_iter().map(Value::Map).collect();
+    Ok(Value::Array(list))
+}
+
+// ============================================================================
 // Control-socket helpers — called by src/control_socket.rs
 // ============================================================================
 
@@ -5047,6 +5196,10 @@ pub fn init() -> HashMap<String, Value> {
                     })
                 });
                 batches.insert(batch_id.clone(), state);
+                emit_job_event(
+                    "batch.created",
+                    &[("batch_id", Value::String(batch_id.clone()))],
+                );
                 let mut handle = HashMap::new();
                 handle.insert("_batch_id".to_string(), Value::String(batch_id));
                 Ok(Value::Map(handle))
@@ -5260,6 +5413,14 @@ pub fn init() -> HashMap<String, Value> {
                     );
                     meta.insert("sealed_at".to_string(), Value::String(sealed_at));
                     kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), batch_ttl_30d)?;
+
+                    emit_job_event(
+                        "batch.sealed",
+                        &[
+                            ("batch_id", Value::String(batch_id.clone())),
+                            ("total", Value::Int(total)),
+                        ],
+                    );
 
                     Ok(())
                 })();

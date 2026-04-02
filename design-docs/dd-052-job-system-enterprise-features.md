@@ -387,10 +387,10 @@ Inside a job's perform block, `batch_id()` returns the batch ID if the job belon
 - [x] Tests: dynamic job addition, empty batch, nested batches via callbacks
 
 **Phase 4: CLI + observability**
-- [ ] `ntnt jobs batches` — list active batches with counters
-- [ ] `ntnt jobs batch <bid>` — detail view
-- [ ] Streaming events: `batch.created`, `batch.sealed`, `batch.complete`, `batch.succeeded`, `batch.death`
-- [ ] Control socket: `batch_status` command
+- [x] `ntnt jobs batches` — list active batches with counters
+- [x] `ntnt jobs batch <bid>` — detail view
+- [x] Streaming events: `batch.created`, `batch.sealed`, `batch.complete`, `batch.succeeded`, `batch.death`
+- [x] Control socket: `batch_status` and `batches` commands
 
 ### Open Questions
 
