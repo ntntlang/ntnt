@@ -3355,6 +3355,7 @@ pub(crate) fn resume_queue_impl(queue_name: &str) -> crate::error::Result<Value>
 
 const PAUSE_CACHE_STALE_SECS: u64 = 5;
 
+#[cfg(test)]
 fn mark_pause_cache_stale() {
     if let Ok(mut ts) = JOB_RUNTIME.paused_cache_updated_at.lock() {
         *ts =
@@ -8532,13 +8533,13 @@ pub(crate) mod tests {
         let data_keys = kv::kv_list(&kv, Some("jobs:data:")).unwrap_or_default();
         let mut result = Vec::new();
         for key in &data_keys {
-            if key.contains("cb-") {
-                continue;
-            }
             let jid = match key.strip_prefix("jobs:data:") {
                 Some(s) => s.to_string(),
                 None => continue,
             };
+            if jid.starts_with("cb-") {
+                continue;
+            }
             if let Ok(Value::Map(m)) = kv::kv_get(&kv, key) {
                 if let Some(Value::String(bid)) = m.get("batch_id") {
                     if bid == batch_id {
@@ -9178,7 +9179,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_total_counter_initialized_at_seal() {
-        with_temp_kv("ntnt_total_counter_seal_test.db", |kv| {
+        with_temp_kv("ntnt_total_counter_seal_test.db", |_kv| {
             JOB_RUNTIME
                 .register_job(test_job_def("ProcessRow", "imports"))
                 .unwrap();
@@ -9313,7 +9314,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_seal_sets_30d_ttl_on_metadata() {
-        with_temp_kv("ntnt_seal_ttl_meta_test.db", |kv| {
+        with_temp_kv("ntnt_seal_ttl_meta_test.db", |_kv| {
             JOB_RUNTIME
                 .register_job(test_job_def("ProcessRow", "imports"))
                 .unwrap();
@@ -9356,7 +9357,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_seal_sets_30d_ttl_on_counters() {
-        with_temp_kv("ntnt_seal_ttl_counters_test.db", |kv| {
+        with_temp_kv("ntnt_seal_ttl_counters_test.db", |_kv| {
             JOB_RUNTIME
                 .register_job(test_job_def("ProcessRow", "imports"))
                 .unwrap();
@@ -9522,7 +9523,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_empty_batch_gets_24h_ttl() {
-        with_temp_kv("ntnt_empty_batch_ttl_test.db", |kv| {
+        with_temp_kv("ntnt_empty_batch_ttl_test.db", |_kv| {
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let seal_fn = get_fn(&module, "seal");
@@ -9869,7 +9870,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_enqueue_into_rejects_closed_batch() {
-        with_temp_kv("ntnt_enqueue_into_closed_test.db", |kv| {
+        with_temp_kv("ntnt_enqueue_into_closed_test.db", |_kv| {
             JOB_RUNTIME
                 .register_job(test_job_def("ProcessRow", "imports"))
                 .unwrap();
@@ -9918,7 +9919,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_enqueue_into_allowed_during_sealing() {
-        with_temp_kv("ntnt_enqueue_into_sealing_test.db", |kv| {
+        with_temp_kv("ntnt_enqueue_into_sealing_test.db", |_kv| {
             JOB_RUNTIME
                 .register_job(test_job_def("ProcessRow", "imports"))
                 .unwrap();
@@ -10009,7 +10010,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_enqueue_into_dedup_rolls_back_counters() {
-        with_temp_kv("ntnt_enqueue_into_dedup_test.db", |kv| {
+        with_temp_kv("ntnt_enqueue_into_dedup_test.db", |_kv| {
             let mut opts = HashMap::new();
             opts.insert("unique".to_string(), JobOptionValue::Int(3600));
             JOB_RUNTIME
@@ -10249,7 +10250,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_total_counter_incremented_on_dynamic_add() {
-        with_temp_kv("ntnt_total_counter_dynamic_test.db", |kv| {
+        with_temp_kv("ntnt_total_counter_dynamic_test.db", |_kv| {
             JOB_RUNTIME
                 .register_job(test_job_def("ProcessRow", "imports"))
                 .unwrap();
@@ -10401,7 +10402,7 @@ pub(crate) mod tests {
     /// fires correctly and batch_status reports the right total.
     #[test]
     fn test_legacy_batch_without_counter_total() {
-        with_temp_kv("ntnt_legacy_batch_total_test.db", |kv| {
+        with_temp_kv("ntnt_legacy_batch_total_test.db", |_kv| {
             JOB_RUNTIME
                 .register_job(test_job_def("ProcessRow", "imports"))
                 .unwrap();
