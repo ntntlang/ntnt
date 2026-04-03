@@ -3771,8 +3771,7 @@ impl Interpreter {
                 requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
-                        "transform() must be called directly, not stored in a variable"
-                            .to_string(),
+                        "transform() must be called directly, not stored in a variable".to_string(),
                     ))
                 },
             },
