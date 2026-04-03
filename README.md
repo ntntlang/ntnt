@@ -12,25 +12,46 @@ From install to verified app in five prompts. Pick your tool, copy the prompt. Y
 
 **Prompt 1 — Your First App:**
 
-> Install NTNT (`curl -sSf https://raw.githubusercontent.com/ntntlang/ntnt/main/install.sh | bash`), then run `ntnt learn <your-platform>` and read the generated rules before writing any code. Build a web app in `server.tnt`: a GET `/` that returns a greeting and a GET `/api/status` that returns JSON. Add a `requires` contract on one handler. Write a `server.intent` file with scenarios for both routes. Run `ntnt intent check server.tnt` until all pass, then `ntnt run server.tnt`.
+```
+Install NTNT (curl -sSf https://raw.githubusercontent.com/ntntlang/ntnt/main/install.sh | bash),
+then run `ntnt learn <your-platform>` and read the generated rules before writing any code.
+Build a web app in server.tnt: a GET / that returns a greeting and a GET /api/status that returns
+JSON. Add a requires contract on one handler. Write a server.intent file with scenarios for both
+routes. Run `ntnt intent check server.tnt` until all pass, then `ntnt run server.tnt`.
+```
 
 Replace `<your-platform>` with `claude-code`, `codex`, `cursor`, or `copilot`. The `ntnt learn` command generates platform-native config files so your agent loads the rules every session.
 
 **Prompt 2 — Add a Database:**
 
-> Add a SQLite database to the app. Create a messages table, add `POST /messages` to save a message and `GET /messages` to list them. Update `server.intent` with scenarios for both endpoints. Run `ntnt intent check server.tnt` until all pass.
+```
+Add a SQLite database to the app. Create a messages table, add POST /messages to save a message
+and GET /messages to list them. Update server.intent with scenarios for both endpoints. Run
+`ntnt intent check server.tnt` until all pass.
+```
 
 **Prompt 3 — Add Authentication:**
 
-> Add session-based authentication. Create a login page, protect `POST /messages` so only logged-in users can post, and redirect unauthenticated users to `/login`. Add contracts on the protected handlers. Update `server.intent` and run `ntnt intent check server.tnt` until all pass.
+```
+Add session-based authentication. Create a login page, protect POST /messages so only logged-in
+users can post, and redirect unauthenticated users to /login. Add contracts on the protected
+handlers. Update server.intent and run `ntnt intent check server.tnt` until all pass.
+```
 
 **Prompt 4 — Real HTML Templates:**
 
-> Refactor the app to use external HTML templates in a `views/` directory and add a static CSS file. Make it look decent. Verify `ntnt intent check server.tnt` still passes.
+```
+Refactor the app to use external HTML templates in a views/ directory and add a static CSS file.
+Make it look decent. Verify `ntnt intent check server.tnt` still passes.
+```
 
 **Prompt 5 — PostgreSQL & Deploy:**
 
-> Migrate from SQLite to PostgreSQL. Create a `Dockerfile` and `docker-compose.yml` with the ntnt app and a postgres container. Use environment variables for the connection string. Verify `ntnt intent check server.tnt` still passes.
+```
+Migrate from SQLite to PostgreSQL. Create a Dockerfile and docker-compose.yml with the ntnt app
+and a postgres container. Use environment variables for the connection string. Verify
+`ntnt intent check server.tnt` still passes.
+```
 
 Five prompts. You've got a full-stack web app with a database, auth, templates, and Docker deployment. You didn't write any NTNT. Your agent did, and `ntnt intent check` proved it's correct at every step.
 
@@ -229,12 +250,13 @@ Everything's built in. No package manager needed.
 |----------|---------|----------|
 | **Web** | `std/http/server`, `std/http` | HTTP server with routing, middleware, static files; HTTP client |
 | **Data** | `std/json`, `std/csv`, `std/db/postgres`, `std/db/sqlite` | Parse/stringify; PostgreSQL and SQLite with transactions |
-| **Key-Value** | `std/kv` | Unified KV store (Redis, Valkey, SQLite, in-memory) |
-| **Auth** | `std/auth` | OAuth 2.0, OIDC, JWT, session management, bcrypt, TOTP |
-| **Jobs** | `std/jobs` | Background job DSL with priority queues, cron, unique jobs, retry, dead letters |
+| **Key-Value** | `std/kv` | Unified KV store (Redis, Valkey, DragonflyDB, SQLite, in-memory) |
+| **Auth** | `std/auth` | OAuth 2.0, OIDC, JWT, CSRF, session management, bcrypt, Argon2, TOTP |
+| **Jobs** | `std/jobs` | Background job DSL with priority queues, cron, unique jobs, retry, dead letters. Memory, PostgreSQL, and Redis backends |
 | **Concurrency** | `std/concurrent` | Spawn, typed channels (Tx/Rx), select, parallel, race, schedule, after |
+| **Collections** | `std/collections` | push, pop, sort, reverse, keys, values, entries, map, filter, reduce, find, any, all |
 | **I/O** | `std/fs`, `std/path`, `std/env` | File operations, path manipulation, environment variables |
-| **Text** | `std/string`, `std/url`, `std/markdown` | Split, join, trim, regex; URL encode/decode; Markdown → HTML |
+| **Text** | `std/string`, `std/url`, `std/markdown` | Split, join, trim, replace, regex; URL encode/decode/parse; Markdown → HTML |
 | **Utilities** | `std/time`, `std/math`, `std/crypto` | Timestamps, formatting; trig, log, exp; SHA256, AES-256-GCM, Argon2, UUID |
 | **Logging** | `std/log` | Structured request logging with levels and JSON context |
 
@@ -242,26 +264,29 @@ Everything's built in. No package manager needed.
 
 ## CLI Commands
 
-```bash
-ntnt run file.tnt              # Run a program
-ntnt lint file.tnt             # Check for errors
-ntnt intent check file.tnt     # Verify code matches intent
-ntnt intent studio file.intent # Live visual test feedback
-ntnt intent coverage file.tnt  # Feature coverage report
-ntnt test server.tnt --get /   # Test HTTP endpoints
-ntnt validate file.tnt         # Validate with JSON output
-ntnt inspect file.tnt          # Project structure as JSON
-ntnt learn <platform>          # Set up AI agent config
-ntnt worker file.tnt           # Start background job workers
-ntnt jobs status               # Queue depths, completed/failed counts
-ntnt jobs list                 # List jobs by status, queue, or type
-ntnt workers status            # Live worker status
-ntnt workers scale             # Scale worker pools at runtime
-ntnt migrate .                 # Migrate {expr} → #{expr}
-ntnt docs std/string           # Look up module/function docs
-ntnt completions               # Generate shell completions
-ntnt repl                      # Interactive REPL
-```
+| Command | Description |
+|---------|-------------|
+| `ntnt run file.tnt` | Run a program |
+| `ntnt test server.tnt --get /health` | Test HTTP endpoints (start, request, stop) |
+| `ntnt lint file.tnt` | Check for errors |
+| `ntnt intent check file.tnt` | Verify code matches intent |
+| `ntnt intent studio file.intent` | Live visual test feedback |
+| `ntnt intent coverage file.tnt` | Feature coverage report |
+| `ntnt validate file.tnt` | Validate with JSON output |
+| `ntnt inspect file.tnt` | Project structure as JSON |
+| `ntnt learn <platform>` | Set up AI agent config (claude-code, cursor, codex, copilot) |
+| `ntnt check file.tnt` | Quick syntax check |
+| `ntnt worker file.tnt` | Start background job workers for jobs defined in a file |
+| `ntnt jobs status` | Queue depths, completed/failed/dead counts |
+| `ntnt jobs list` | List jobs by status, queue, or type |
+| `ntnt jobs inspect <id>` | Detailed view of a single job |
+| `ntnt jobs retry <id>` | Re-queue a failed or dead job |
+| `ntnt workers status` | Live worker status and active jobs |
+| `ntnt workers scale` | Scale worker pools at runtime via control socket |
+| `ntnt migrate .` | Migrate old `{expr}` interpolation to `#{expr}` |
+| `ntnt docs std/string` | Look up module/function docs |
+| `ntnt completions` | Generate shell completion scripts (bash, zsh, fish) |
+| `ntnt repl` | Interactive REPL |
 
 ---
 
@@ -272,8 +297,11 @@ ntnt repl                      # Interactive REPL
 | [AI Agent Guide](docs/AI_AGENT_GUIDE.md) | The guide your agent reads — syntax rules, patterns, gotchas |
 | [Language Specification](docs/SYNTAX_REFERENCE.md) | Complete syntax, types, contracts, and features |
 | [Stdlib Reference](docs/STDLIB_REFERENCE.md) | Every function across all stdlib modules |
+| [Runtime Reference](docs/RUNTIME_REFERENCE.md) | CLI, environment variables, server configuration |
 | [IAL Reference](docs/IAL_REFERENCE.md) | Intent Assertion Language primitives |
+| [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) | Docker, production config, hot-reload, environment setup |
 | [Architecture](ARCHITECTURE.md) | System internals and design decisions |
+| [IDD Design Document](design-docs/INTENT_DRIVEN_DEVELOPMENT.md) | Intent-Driven Development philosophy and workflow |
 | [Whitepaper](whitepaper.md) | Technical motivation and language design philosophy |
 | **Website** | [ntnt-lang.org](https://ntnt-lang.org) — learn, docs, benchmarks |
 
