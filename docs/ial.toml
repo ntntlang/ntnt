@@ -55,6 +55,20 @@ parameters = ["function_name", "property_type", "test_inputs"]
 context_sets = ["property.passed", "property.failures"]
 example = "PropertyCheck(hash, Deterministic, [\"test\", \"data\"])"
 
+[primitives.sql]
+name = "Sql"
+description = "Execute a SQL query with parameters"
+parameters = ["query", "params"]
+context_sets = ["sql.result", "sql.rows"]
+example = "Sql(SELECT * FROM users WHERE id = $1, [42])"
+
+[primitives.invariant_check]
+name = "InvariantCheck"
+description = "Verify a named invariant holds for a value"
+parameters = ["invariant_id", "value"]
+context_sets = ["invariant.passed", "invariant.failures"]
+example = "InvariantCheck(invariant.url_slug, \"hello-world\")"
+
 [primitives.check]
 name = "Check"
 description = "Universal assertion - compare context value against expected"
@@ -147,7 +161,7 @@ resolves_to = "Check(NotEquals, response.body, \"\")"
 example = "body is not empty"
 
 [standard_terms.http_body."body has field {field}"]
-resolves_to = "Check(Exists, response.body.{field})"
+resolves_to = "Check(Contains, response.body, {field})"
 example = "body has field \"id\""
 
 [standard_terms.http_body."response is valid JSON"]
@@ -273,7 +287,7 @@ resolves_to = "PropertyCheck(_, Deterministic)"
 example = "is predictable"
 
 [standard_terms.properties."is stable"]
-resolves_to = "PropertyCheck(_, Deterministic)"
+resolves_to = "PropertyCheck(_, Idempotent)"
 example = "is stable"
 
 # String/Value checks
@@ -301,7 +315,7 @@ resolves_to = "Check(Not(EndsWith), result, {suffix})"
 example = "does not end with \"_temp\""
 
 [standard_terms.string_checks."is lowercase"]
-resolves_to = "Check(Matches, result, ^[a-z_]+$)"
+resolves_to = "Check(Matches, result, ^[^A-Z]*$)"
 example = "is lowercase"
 
 [standard_terms.string_checks."is non-empty"]

@@ -502,8 +502,23 @@ Based on impact, effort, and dependencies:
 
 ---
 
+## IAL Assertion Gaps
+
+### `body has field` should do structural JSON checking
+
+**Current:** `body has field {field}` expands to `body contains "{field}"` — raw string substring search. `body has field "id"` passes on `{"error": "invalid id supplied"}` because the string "id" appears as text.
+
+**Proposed:** Parse response body as JSON, check that the field exists as a key. Fall back to string containment if body isn't valid JSON.
+
+**Implementation:** In `src/ial/standard.rs`, change from `vocab.add_terms` (which expands to `body contains`) to a new `Primitive::JsonFieldCheck` or a `Check` with `CheckOp::Exists` that actually parses JSON. The `execute.rs` handler for `Exists` on `response.body.{field}` would need to JSON-parse the body and check key existence.
+
+**Effort:** Low — isolated change in standard.rs + execute.rs.
+
+---
+
 ## Version History
 
 | Date | Change |
 |------|--------|
 | 2026-03-31 | Initial draft — gap analysis against top npm/PyPI packages |
+| 2026-04-02 | Added IAL `body has field` JSON structural check gap |

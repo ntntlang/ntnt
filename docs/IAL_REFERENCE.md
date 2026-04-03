@@ -27,9 +27,11 @@ IAL primitives are the leaf nodes of term resolution - they execute directly
 | **Http** | Execute an HTTP request and capture response in context | `response.status`, `response.body`, `response.headers.*`, `response.time_ms` |
 | **Cli** | Execute a CLI command and capture output | `cli.exit_code`, `cli.stdout`, `cli.stderr` |
 | **CodeQuality** | Run lint/validation checks on source files | `code.quality.passed`, `code.quality.error_count`, `code.quality.warning_count`, `code.quality.errors` |
+| **Sql** | Execute a SQL query with parameters | `sql.result`, `sql.rows` |
 | **ReadFile** | Read file contents into context | `file.content`, `file.exists` |
 | **FunctionCall** | Call an NTNT function for unit testing | `result` |
 | **PropertyCheck** | Verify a function property (deterministic, idempotent, round-trips) | `property.passed`, `property.failures` |
+| **InvariantCheck** | Verify a named invariant holds for a value | `invariant.passed`, `invariant.failures` |
 | **Check** | Universal assertion - compare context value against expected |  |
 
 ---
@@ -106,7 +108,7 @@ _HTTP response body assertions_
 | Term | Resolves To |
 |------|-------------|
 | `body contains {text}` | `Check(Contains, response.body, {text})` |
-| `body has field {field}` | `Check(Exists, response.body.{field})` |
+| `body has field {field}` | `Check(Contains, response.body, {field})` |
 | `body is empty` | `Check(Equals, response.body, "")` |
 | `body is not empty` | `Check(NotEquals, response.body, "")` |
 | `body matches {pattern}` | `Check(Matches, response.body, {pattern})` |
@@ -183,7 +185,7 @@ _Function property assertions_
 | `is deterministic` | `PropertyCheck(_, Deterministic)` |
 | `is idempotent` | `PropertyCheck(_, Idempotent)` |
 | `is predictable` | `PropertyCheck(_, Deterministic)` |
-| `is stable` | `PropertyCheck(_, Deterministic)` |
+| `is stable` | `PropertyCheck(_, Idempotent)` |
 
 ### String/Value Checks
 
@@ -195,7 +197,7 @@ _General string and value assertions_
 | `does not end with {suffix}` | `Check(Not(EndsWith), result, {suffix})` |
 | `does not start with {prefix}` | `Check(Not(StartsWith), result, {prefix})` |
 | `ends with {suffix}` | `Check(EndsWith, result, {suffix})` |
-| `is lowercase` | `Check(Matches, result, ^[a-z_]+$)` |
+| `is lowercase` | `Check(Matches, result, ^[^A-Z]*$)` |
 | `is non-empty` | `Check(NotEquals, result, "")` |
 | `starts with {prefix}` | `Check(StartsWith, result, {prefix})` |
 | `uses only {pattern}` | `Check(Matches, result, ^{pattern}+$)` |

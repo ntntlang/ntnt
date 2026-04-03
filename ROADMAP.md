@@ -798,11 +798,13 @@ Error[E012]: Type mismatch in function call
 - [x] Type checker forward-scanning cursor (`find_line_near`) — fixes line number accuracy for all 26 diagnostic sites without AST changes
 - [x] Expression-aware search hints (`expr_search_hint`) — uses AST structure to build better search needles for line lookup
 - [x] Actionable type hints for conditions (Int → "use != 0"), comparisons (Int vs String → "use int()/str()"), and let bindings (untyped map access)
-- [ ] Full AST span tracking on all nodes (line, column, span) — the proper fix; would eliminate heuristic line search entirely and enable exact column-level diagnostics. Requires adding a `Span { line, col, offset, len }` to every AST node, propagating spans through the parser, and updating the type checker to read spans directly instead of searching source text.
-- [ ] Runtime error line numbers via AST span tracking — deferred, depends on full span tracking above
-- [ ] "Did you mean?" suggestions for wrong imports (scan stdlib for similar names) — see 7.13
-- [ ] Contract violation messages show the contract expression and actual values
-- [ ] `ntnt lint --format=json` structured error output for agent consumption
+- [x] AST location tracking (`Statement::Located { line, col, stmt }`) — parser wraps every statement with source position, interpreter tracks `current_line`/`current_col`, runtime errors annotated with line numbers
+- [x] Runtime error line numbers via AST location tracking
+- [x] "Did you mean?" suggestions for wrong imports — both wrong module names and wrong export names get Levenshtein suggestions with available exports list
+- [x] Contract violation messages show the contract expression (`"Precondition failed in 'fn': b != 0"`)
+- [ ] Contract violation messages show actual values (e.g., "b was 0") — expression is shown but runtime values are not
+- [x] `ntnt lint --fix` outputs JSON patch suggestions for auto-fixes
+- [ ] `ntnt lint --format=json` explicit structured output mode for full agent consumption
 
 ### 7.7 Route Pattern Auto-Detection
 
@@ -999,17 +1001,17 @@ ntnt docs --generate                  # Markdown + JSON output
 ntnt docs --update-agent-docs         # Regenerate auto-sections in AI_AGENT_GUIDE.md
 ```
 
-- [x] `ntnt docs [query]` — search and display function docs from embedded data
+- [x] `ntnt docs [query]` — search and display function docs from embedded data (full-text search across all modules)
+- [x] `ntnt docs std/module` — list all functions in a module with signatures
 - [x] `ntnt docs --generate` — generate markdown reference docs + AI agent guide sync
+- [x] `ntnt docs --json` — JSON output for tooling (full structured data including examples, params, see_also)
+- [x] `ntnt docs --validate` — documentation coverage report (also enforced at compile time via build.rs)
 - [x] REPL integration: `:doc` command
-- [ ] `ntnt docs --examples` — show just examples for a function
-- [ ] `ntnt docs --search` — full-text search across all docs
-- [ ] `ntnt docs --related` — cross-reference via `@see_also`
-- [ ] `ntnt docs --json` — JSON output for tooling
+- [ ] `ntnt docs --examples` — show just examples for a function (data available in --json, needs dedicated flag)
+- [ ] `ntnt docs --related` — cross-reference via `@see_also` (data in --json, needs dedicated flag)
 - [ ] `ntnt docs --ai-context` — full dump for AI session start
-- [ ] `ntnt docs --coverage` — documentation completeness report
 - [ ] `ntnt docs --test` — execute all doc examples (doctests, see below)
-- [ ] `ntnt docs --orphans` — detect orphaned doc blocks
+- [ ] `ntnt docs --orphans` — detect orphaned doc blocks (build.rs catches at compile time, needs CLI)
 - [ ] `ntnt docs --diff` — version diffing between releases
 
 #### Phase 3.5: Doctests (Execute Documentation Examples)
@@ -1559,133 +1561,15 @@ Feature: User Authentication
 
 ---
 
-## Phase 9: Package & Module Ecosystem
+## Phase 9: Reserved
 
-**Status:** Not Started
-
-**Goal:** Let NTNT be extended beyond the standard library. This is the single biggest barrier to adoption — every project eventually needs something the stdlib doesn't have.
-
-> This phase delivers the foundation: local packages, git dependencies, and a project manifest. The full registry and publishing infrastructure comes later in Phase 12.2 (Tooling & DX). This is the single feature the assessment identified as "the biggest barrier to adoption."
-
-### 9.1 Project Manifest (`ntnt.toml`)
-
-Every NTNT project gets a manifest file that declares metadata and dependencies:
-
-```toml
-[project]
-name = "my-app"
-version = "0.1.0"
-entry = "server.tnt"
-
-[dependencies]
-markdown = { path = "../ntnt-markdown" }        # Local path
-email = { git = "https://github.com/user/ntnt-email.git" }  # Git URL
-```
-
-**Implementation plan:**
-
-- [ ] `ntnt.toml` parser (TOML format, Rust `toml` crate)
-- [ ] `ntnt new <name>` — scaffold a new project with `ntnt.toml`, `server.tnt`, and directory structure
-- [ ] Project metadata: name, version, description, author, license, entry point
-- [ ] `ntnt run` auto-detects `ntnt.toml` and resolves dependencies before execution
-- [ ] `ntnt.lock` lockfile for reproducible builds
-
-### 9.2 NTNT-Native Packages
-
-Packages are directories of NTNT code with a `ntnt.toml` manifest that other projects can import:
-
-```
-ntnt-markdown/
-├── ntnt.toml
-├── lib.tnt          # Package entry point (exports public API)
-├── src/
-│   ├── parser.tnt
-│   ├── renderer.tnt
-│   └── extensions.tnt
-└── tests/
-    └── markdown_tests.tnt
-```
-
-**lib.tnt (package entry point):**
-```ntnt
-// Re-export public API
-import { parse } from "./src/parser"
-import { render_html, render_text } from "./src/renderer"
-
-export { parse, render_html, render_text }
-```
-
-**Consumer usage:**
-```ntnt
-import { parse, render_html } from "markdown"
-
-fn blog_handler(req: Request) -> Response {
-    let content = read_file("posts/" + req.params["slug"] + ".md")
-    let html_content = render_html(parse(content))
-    return html(html_content)
-}
-```
-
-**Implementation plan:**
-
-- [ ] Package resolution: name in `ntnt.toml` [dependencies] → path or git URL → directory with `ntnt.toml`
-- [ ] Package imports: `import { x } from "package-name"` resolves to the package's `lib.tnt` exports
-- [ ] Local path dependencies: `{ path = "../my-package" }`
-- [ ] Git dependencies: `{ git = "https://..." }` — clone to a cache directory
-- [ ] Git ref pinning: `{ git = "...", tag = "v1.0.0" }` or `{ git = "...", rev = "abc123" }`
-- [ ] Dependency caching: packages cached in `~/.ntnt/packages/`
-- [ ] `ntnt add <name> --path <path>` — add a local dependency
-- [ ] `ntnt add <name> --git <url>` — add a git dependency
-- [ ] Circular dependency detection
-
-### 9.3 Rust Extension Packages (FFI)
-
-For capabilities that can't be written in pure NTNT (system libraries, performance-critical code, bindings to existing ecosystems):
-
-```toml
-# ntnt-redis/ntnt.toml
-[project]
-name = "redis"
-version = "0.1.0"
-type = "native"          # Indicates Rust extension
-
-[native]
-crate = "ntnt-redis"     # Rust crate name
-```
-
-**Implementation plan:**
-
-- [ ] Extension API: Rust trait that native packages implement to expose functions to NTNT
-- [ ] Dynamic loading: `.so`/`.dylib`/`.dll` loaded at runtime
-- [ ] Type marshaling: Rust types ↔ NTNT `Value` conversion
-- [ ] Standard extension trait with `register_functions()` method
-- [ ] Pre-built extensions for common needs (Redis, email, image processing)
-- [ ] `ntnt build-ext` command for compiling Rust extensions
-
-### 9.4 Stdlib as Packages
-
-Refactor parts of the standard library to use the same package infrastructure, proving the system works:
-
-- [ ] Extract `std/csv` as a standalone package (simple, good test case)
-- [ ] Extract `std/crypto` as a standalone package
-- [ ] Built-in packages resolve from the interpreter binary (no download needed)
-- [ ] Stdlib packages serve as reference implementations for package authors
-
-**Deliverables:**
-
-- `ntnt.toml` project manifest with dependency declaration
-- `ntnt new` project scaffolding
-- Local path and git URL dependency resolution
-- Package import system (`import { x } from "package-name"`)
-- Rust FFI extension API for native packages
-- Dependency caching and lockfile
-- At least two stdlib modules extracted as proof-of-concept packages
+*Content moved to Future Considerations.*
 
 ---
 
 ## Phase 10: Background Jobs, WebSockets & Real-Time
 
-**Status:** Not Started
+**Status:** Jobs Complete ✅ (DD-037, DD-051, DD-052) · WebSockets Not Started
 
 **Goal:** Production-ready background job system with a declarative Job DSL, pluggable backends, and deep IDD integration — plus WebSocket and SSE support for pushing data to clients. Jobs are first-class language constructs — the `Job` keyword is syntax, not a library import — with the runtime and queue management provided by `std/jobs`.
 
@@ -1723,91 +1607,62 @@ ProcessPayment.enqueue_in(3600, map { "order_id": "456", "amount": 29.99 })
 
 **Implementation plan:**
 
-- [ ] `Job` declaration syntax in parser (new AST node: `JobDeclaration`)
-- [ ] `perform()` handler with typed arguments
-- [ ] `on_failure()` hook
-- [ ] `Job.enqueue()`, `Job.enqueue_at()`, `Job.enqueue_in()` methods
-- [ ] Queue configuration: `Queue.configure(map { "backend": "memory" })`
-- [ ] In-memory backend (zero dependencies, default)
-- [ ] Worker loop with retry logic and exponential backoff
-- [ ] Priority queues (`low`, `normal`, `high`)
-- [ ] Dead letter queue for exhausted retries
-- [ ] Job cancellation: `Queue.cancel(job_id)`
-- [ ] Graceful shutdown (drain in-progress jobs on SIGTERM)
-- [ ] Job options: `retry`, `timeout`, `backoff`, `priority`, `rate`, `concurrency`, `unique`, `expires`, `idempotent`
+- [x] `job` declaration syntax in parser (language-level keyword)
+- [x] `perform()` handler with typed arguments
+- [x] `on_failure()` hook
+- [x] `enqueue()`, `enqueue_at()`, `enqueue_in()` functions
+- [x] Queue configuration: `configure_queue(map { ... })`
+- [x] In-memory backend (zero dependencies, default)
+- [x] Worker loop with retry logic and exponential backoff
+- [x] Priority queues with configurable bands (critical/high/normal/low, 0-99)
+- [x] Dead letter queue for exhausted retries
+- [x] Job cancellation: `cancel_job(job_id)`
+- [x] Graceful shutdown (drain in-progress jobs on SIGTERM)
+- [x] Job options: `retry`, `timeout`, `backoff`, `priority`, `rate`, `concurrency`, `unique`, `expires`
 - [ ] Doc comment metadata parsing (`/// Triggers:`, `/// Affects:`, `/// Side effects:`)
 
-### 10.2 Resilience & Production Features
+### 10.2 Resilience & Production Features ✅
 
-**Priority:** High — required for any production deployment.
-
+- [x] Rate limiting per job type (`rate: "100/minute"`)
+- [x] Concurrency limits per job type (`concurrency: 5`)
+- [x] Job TTL/expiration
+- [x] Queue pause/resume (`pause_queue()`, `resume_queue()`)
+- [x] `work_async()` for combined HTTP server + worker mode
+- [x] `work_jobs()` for dedicated worker processes
+- [x] Priority bands with independent thread pools
 - [ ] Worker heartbeats (detect crashed workers)
 - [ ] Visibility timeout (re-enqueue stale jobs after no heartbeat)
-- [ ] Rate limiting per job type (e.g., `rate: 100/minute`)
-- [ ] Concurrency limits per job type
-- [ ] Job TTL/expiration (`expires: 5m` — discard stale jobs)
 - [ ] Automatic pruning of completed/cancelled jobs
-- [ ] Weighted queue processing (prevent starvation of low-priority queues)
-- [ ] `Queue.work_async()` for combined HTTP server + worker mode
 
-### 10.3 Persistent Backends
+### 10.3 Persistent Backends ✅
 
-**Priority:** High — in-memory jobs are lost on restart.
-
-```ntnt
-import { Queue } from "std/jobs"
-
-// PostgreSQL backend (reliable, ACID, multi-worker)
-Queue.configure(map {
-    "backend": "postgres",
-    "postgres_url": env("DATABASE_URL")
-})
-
-// Redis/Valkey backend (high throughput, 10k+ jobs/sec)
-Queue.configure(map {
-    "backend": "redis",
-    "redis_url": env("REDIS_URL")
-})
-```
-
-- [ ] PostgreSQL backend with auto-migration (`ntnt_jobs` table)
-- [ ] Distributed locking via `SELECT FOR UPDATE SKIP LOCKED`
-- [ ] Redis/Valkey backend for high-throughput workloads
-- [ ] Feature flags to avoid bloating the binary (`jobs-postgres`, `jobs-redis`)
-- [ ] Separate worker processes for production: `Queue.work(map { "queues": ["emails", "payments"], "concurrency": 10 })`
+- [x] SQLite KV backend (default — reliable, zero-config)
+- [x] PostgreSQL backend (`ntnt_jobs` table, connection pooling via deadpool-postgres)
+- [x] Redis backend (Redis Streams with XADD/XREADGROUP consumer groups)
+- [x] Separate worker processes: `work_jobs()` with queue/band configuration
+- [ ] Distributed locking via `SELECT FOR UPDATE SKIP LOCKED` (PostgreSQL)
 
 ### 10.4 Composition (Chains, Workflows, Batches)
 
-**Priority:** Moderate — needed for multi-step business processes.
+**Batches: Complete ✅ (DD-052 Phases 1-4)**
 
-```ntnt
-// Sequential chain — each job receives the previous job's result
-Chain ProcessOrder {
-    ValidateOrder -> ReserveInventory -> ChargePayment -> SendConfirmation
-}
-ProcessOrder.start(map { "order_id": "123" })
+- [x] `batch(name, callbacks)` / `seal(handle)` — batch lifecycle
+- [x] `enqueue_into(batch_id, job_type, args)` — dynamic batch additions post-seal
+- [x] `batch_id()` — thread-local batch context in perform blocks
+- [x] `batch_status(handle)` — counter/state introspection
+- [x] Batch callbacks: `on_complete`, `on_success`, `on_death`
+- [x] Atomic counters (pending/succeeded/dead/cancelled/total)
+- [x] Closed-flag race protection, TTL expiry (30d seal, 24h complete)
+- [x] Unique jobs / deduplication (`unique: 3600` with SHA256 hash)
+- [x] `ntnt jobs batches` / `ntnt jobs batch <bid>` CLI
+- [x] Control socket: `batches` and `batch_status` commands
+- [x] Streaming events: `batch.created`, `batch.sealed`, `batch.complete`, `batch.succeeded`, `batch.death`
 
-// DAG workflow — fan-out and fan-in
-Workflow UserOnboarding {
-    CreateAccount -> SendWelcomeEmail
-    CreateAccount -> SetupBilling
-    [SendWelcomeEmail, SetupBilling] -> ActivateAccount
-}
-
-// Batch — parallel with completion callback
-let batch = Batch.create(map {
-    "on_complete": fn(results) { db.update_total(sum(results)) },
-    "on_failure": fn(errors) { alert("Batch failed") }
-})
-for chunk in data_chunks { batch.add(ProcessChunk, map { "chunk": chunk }) }
-batch.run()
-```
+**Chains & Workflows: Not Started**
 
 - [ ] `Chain` declaration syntax (sequential job pipelines)
 - [ ] `Workflow` declaration syntax (DAG dependencies with fan-out/fan-in)
-- [ ] `Batch.create()` / `batch.add()` / `batch.run()` API
-- [ ] Unique jobs / deduplication (`unique: args for 1h`)
-- [ ] Workflow status tracking: `Workflow.status(workflow_id)`
+- [ ] Workflow status tracking
 
 ### 10.5 WebSocket Support
 
@@ -1882,11 +1737,14 @@ Feature: Welcome Email Job
 
 - [ ] Job testing in `.intent` files (`job:` assertion type)
 - [ ] Mock support for job dependencies in IDD scenarios
-- [ ] `ntnt jobs status` — summary of all queues
-- [ ] `ntnt jobs list [--pending|--failed|--dead]` — filter jobs by status
-- [ ] `ntnt jobs inspect <job-id>` — full job details
-- [ ] `ntnt jobs retry <job-id>` — retry a failed/dead job
-- [ ] `ntnt jobs cancel <job-id>` — cancel a pending job
+- [x] `ntnt jobs status` — summary of all queues
+- [x] `ntnt jobs list [--status|--queue|--limit|--format]` — filter jobs
+- [x] `ntnt jobs inspect <job-id>` — full job details
+- [x] `ntnt jobs retry <job-id>` — retry a failed/dead job
+- [x] `ntnt jobs cancel <job-id>` — cancel a pending job
+- [x] `ntnt jobs clear --status=completed` — bulk delete
+- [x] `ntnt jobs batches` — list batches with counters
+- [x] `ntnt jobs batch <bid>` — batch detail view
 - [ ] `ntnt jobs simulate <JobName> --args='...'` — dry-run without side effects
 - [ ] `ntnt jobs replay <job-id>` — re-run with exact same inputs for debugging
 - [ ] `--format=json` for agent-consumable output on all commands
@@ -2032,26 +1890,7 @@ ntnt test --coverage
 - [ ] Code actions (quick fixes)
 - [ ] Contract visualization
 
-### 12.2 Package Registry & Publishing
-
-> **Note:** The package foundation (manifest, local/git dependencies, imports) is built in Phase 9 (Package Ecosystem). This section adds the public registry and publishing infrastructure.
-
-- [ ] Central package registry (hosted service)
-- [ ] `ntnt publish` — publish packages to the registry
-- [ ] Semantic versioning enforcement
-- [ ] Dependency resolution with version ranges (`^1.0`, `~2.3`)
-- [ ] `ntnt add <name>` — install from registry (in addition to Phase 9's path/git support)
-- [ ] Package search: `ntnt search <query>`
-
-```bash
-ntnt new my-app
-ntnt add http
-ntnt add db/postgres --version "^1.0"
-ntnt test
-ntnt build --release
-```
-
-### 12.3 Human Approval Mechanisms (From Whitepaper)
+### 12.2 Human Approval Mechanisms (From Whitepaper)
 
 - [ ] `@requires_approval` annotations
 - [ ] Approval workflows in IDE
@@ -2070,7 +1909,7 @@ pub fn get_user(id: String) -> User {
 }
 ```
 
-### 12.4 Debugger
+### 12.3 Debugger
 
 - [ ] Breakpoints
 - [ ] Step debugging
@@ -2079,7 +1918,7 @@ pub fn get_user(id: String) -> User {
 - [ ] Contract state inspection
 - [ ] DAP (Debug Adapter Protocol) support
 
-### 12.5 User Code Documentation (.tnt Files)
+### 12.4 User Code Documentation (.tnt Files)
 
 > **Design Doc:** [plans/tnt_code_documentation_design.md](plans/tnt_code_documentation_design.md)
 >
@@ -2097,196 +1936,21 @@ pub fn get_user(id: String) -> User {
 **Deliverables:**
 
 - Full LSP server
-- Package registry and publishing
 - Human approval system
 - Debugger
 - User code documentation (doc comments, doctests, contract-as-documentation)
 
 ---
 
-## Phase 13: Performance & Compilation
+## Phase 13: Advanced Static Analysis & Type System
 
-**Goal:** Production-ready performance through progressive compilation strategies.
+**Status:** Not Started
 
-### Current Architecture
+**Goal:** Deeper static analysis, contract inference, and advanced type system features that make NTNT's safety guarantees stronger without runtime cost.
 
-```
-NTNT Source (.tnt)
-       ↓
-    Lexer (src/lexer.rs)         ✅ Reusable
-       ↓
-    Parser (src/parser.rs)       ✅ Reusable
-       ↓
-      AST (src/ast.rs)           ✅ Reusable
-       ↓
-  Interpreter (src/interpreter.rs)  ← Tree-walking (current, slowest)
-       ↓
-    Result
-```
+### 13.1 Contract Inference
 
-### Compilation Roadmap
-
-| Approach                            | Effort     | Speedup   | When       |
-| ----------------------------------- | ---------- | --------- | ---------- |
-| Tree-walking Interpreter            | ✅ Done    | Baseline  | Current    |
-| Bytecode VM                         | 2-4 weeks  | 10-50x    | Phase 13.1 |
-| Native Compilation (Cranelift/LLVM) | 2-3 months | 100-1000x | Phase 13.4 |
-
-### What Can Be Reused
-
-| Component   | Reusable?   | Notes                       |
-| ----------- | ----------- | --------------------------- |
-| Lexer       | ✅ 100%     | Tokens don't change         |
-| Parser      | ✅ 100%     | AST structure stays same    |
-| AST         | ✅ 100%     | Core data structures        |
-| Type System | ✅ 100%     | Expansion for optimization  |
-| Interpreter | ❌ Replaced | Becomes compiler/codegen    |
-| Stdlib      | ⚠️ Partial  | Need native implementations |
-
-### 13.1 Bytecode VM (First Target)
-
-**Goal:** 10-50x performance improvement with moderate effort.
-
-- [ ] Design NTNT bytecode format (NBC)
-- [ ] Implement bytecode compiler (`src/compiler.rs`)
-- [ ] Implement stack-based VM (`src/vm.rs`)
-- [ ] Bytecode serialization/loading (`.tnc` files)
-- [ ] Debug info preservation for stack traces
-- [ ] Keep interpreter for REPL (faster startup)
-
-```rust
-// Example bytecode instructions
-enum OpCode {
-    LoadConst(usize),      // Push constant onto stack
-    LoadVar(String),       // Push variable value
-    StoreVar(String),      // Pop and store to variable
-    Add, Sub, Mul, Div,    // Arithmetic
-    Eq, Lt, Gt, Le, Ge,    // Comparison
-    Call(usize),           // Call function with N args
-    Return,                // Return from function
-    Jump(usize),           // Unconditional jump
-    JumpIfFalse(usize),    // Conditional jump
-    MakeArray(usize),      // Create array from N stack values
-    MakeMap(usize),        // Create map from N key-value pairs
-    GetField(String),      // Map/struct field access
-    SetField(String),      // Map/struct field assignment
-}
-```
-
-**CLI Integration:**
-
-```bash
-ntnt compile app.tnt        # Compile to bytecode (.tnc)
-ntnt run app.tnc            # Run bytecode directly
-ntnt run app.tnt            # Auto-compile and run (caches .tnc)
-```
-
-### 13.2 VM Optimizations
-
-- [ ] Constant folding at compile time
-- [ ] Dead code elimination
-- [ ] Inline caching for method calls
-- [ ] Escape analysis for stack allocation
-- [ ] Contract elision in release builds (configurable)
-- [ ] Hot path detection and optimization
-
-### 13.3 Memory Management
-
-- [ ] Reference counting with cycle detection
-- [ ] Memory pools for hot paths
-- [ ] String interning
-- [ ] Small string optimization
-- [ ] Arena allocators for request handling
-
-### 13.4 Native Compilation (Future)
-
-**Goal:** Native machine code for maximum performance (100-1000x faster than interpreter).
-
-#### Option A: Cranelift Backend (Recommended)
-
-```
-AST → Cranelift IR → Native Machine Code
-```
-
-- Simpler API than LLVM
-- Good optimization passes
-- Used by rustc (experimental) and Wasmtime
-- Estimated effort: 1-2 months
-
-```rust
-// Using cranelift crate
-use cranelift::prelude::*;
-use cranelift_module::Module;
-
-fn compile_function(ast: &Function, module: &mut Module) {
-    let mut func = Function::new();
-    let mut builder = FunctionBuilder::new(&mut func, &mut ctx);
-
-    // Generate Cranelift IR from AST
-    for stmt in &ast.body {
-        compile_statement(stmt, &mut builder);
-    }
-}
-```
-
-#### Option B: LLVM Backend
-
-```
-AST → LLVM IR → LLVM Optimizer → Native Machine Code
-```
-
-- Best-in-class optimizations
-- Used by Rust, Swift, Julia, Clang
-- More complex API
-- Estimated effort: 2-3 months
-
-```rust
-// Using inkwell (LLVM Rust bindings)
-use inkwell::context::Context;
-use inkwell::builder::Builder;
-
-fn compile_to_llvm(ast: &Module) -> inkwell::module::Module {
-    let context = Context::create();
-    let module = context.create_module("ntnt");
-    let builder = context.create_builder();
-
-    // Generate LLVM IR from AST
-}
-```
-
-#### Option C: Transpile to Rust (Creative Alternative)
-
-```
-AST → Rust Source Code → cargo build → Native Binary
-```
-
-- Leverage Rust's optimizer for free
-- Easier debugging (human-readable output)
-- Estimated effort: 2-4 weeks
-
-```ntnt
-// NTNT source
-fn add(a: Int, b: Int) -> Int { a + b }
-
-// Generated Rust
-fn add(a: i64, b: i64) -> i64 { a + b }
-```
-
-**CLI Integration:**
-
-```bash
-ntnt build app.tnt              # Compile to native binary
-ntnt build app.tnt --release    # Optimized build
-./app                           # Run native binary directly
-```
-
-### 13.5 Advanced Static Analysis & Contract Inference
-
-> **Note:** Basic type inference and enforcement are in Phase 7.1 (including contract expression type-checking). This section covers deep analysis that builds on the bytecode compiler, including the full contract inference system.
-
-**Contract Inference:**
-
-Contract inference warns when you call a function with contracts without satisfying them. Contracts remain completely optional — inference only activates for contracts that someone chose to write. No contracts on your function? No warnings, no obligations.
+Contract inference warns when you call a function with contracts without satisfying them. Contracts remain completely optional — inference only activates for contracts that someone chose to write.
 
 ```ntnt
 fn divide(a: Int, b: Int) -> Int
@@ -2310,15 +1974,9 @@ fn compute(x: Int, y: Int) -> Int {
 - [ ] Contract static verification (prove contracts hold using SMT solvers or abstract interpretation)
 - [ ] Auto-generate `requires` clauses from analysis of function body
 - [ ] Contract inference across module boundaries
-
-**Type Analysis:**
-
-- [x] Flow-sensitive typing (type narrows after null checks) — implemented in Phase 7.1
-- [x] Exhaustive type checking at compile time (match exhaustiveness for Option/Result/enums) — implemented in Phase 7.1
-- [x] Type narrowing in conditionals and match arms — implemented in Phase 7.1
 - [ ] Escape analysis for optimization hints
 
-### 13.6 Advanced Type System Features
+### 13.2 Advanced Type System Features
 
 - [ ] Associated types in traits
 - [ ] Where clauses for complex constraints
@@ -2327,31 +1985,15 @@ fn compute(x: Int, y: Int) -> Int {
 - [ ] Contravariant preconditions, covariant postconditions
 - [ ] Error context/wrapping: `result.context("message")?`
 
-### 13.7 Runtime Library (for Native Compilation)
-
-Native compilation requires re-implementing stdlib in the target:
-
-- [ ] Core runtime (memory, strings, arrays, maps)
-- [ ] I/O operations (file system, HTTP)
-- [ ] Database drivers (PostgreSQL bindings)
-- [ ] Concurrency primitives (threads, channels)
-
-### 13.8 Advanced Concurrency
-
-Building on Phase 5's channel-based concurrency:
-
-- [ ] `spawn(fn)` / `join(handle)` - background task execution
-- [ ] `parallel([fn1, fn2, ...])` - run multiple functions in parallel
-- [ ] `select([ch1, ch2, ...])` - wait on multiple channels (Go-style)
-- [ ] Async HTTP requests (requires async runtime)
+**Already completed (Phase 7.1):**
+- [x] Flow-sensitive typing (type narrows after null checks)
+- [x] Exhaustive type checking at compile time (match exhaustiveness)
+- [x] Type narrowing in conditionals and match arms
 
 **Deliverables:**
 
-- Bytecode compiler and VM (10-50x speedup)
-- Static type checker
-- Advanced type system
-- Optimized memory management
-- Native compilation path (100-1000x speedup)
+- Contract inference with single-level and transitive propagation
+- Advanced type system features (associated types, where clauses, contract inheritance)
 
 ---
 
@@ -2498,60 +2140,76 @@ reduce hallucinated imports by suggesting correct paths.
 
 **Goal:** Production deployment support.
 
-### 15.1 Build & Distribution
+### 15.1 Build & Distribution ✅
 
-- [ ] Single binary compilation
-- [ ] Cross-compilation support
-- [ ] Minimal Docker image generation
-- [ ] Build profiles (dev, release, test)
+- [x] Single binary compilation (Rust `cargo build --release`)
+- [x] Cross-compilation — CI builds for macOS (aarch64), Linux (x86_64), Windows (x86_64)
+- [x] Build profiles (`dev-release`, `release`)
+- [x] GitHub Release workflow — tag push triggers cross-platform builds + artifacts
+- [x] Install script (`install.sh`, `install.ps1`)
+- [ ] Minimal Docker image generation (users create Dockerfiles manually)
 
 ### 15.2 Configuration
 
-- [ ] Environment-based config
-- [ ] Config file support (TOML, JSON)
+- [x] Environment-based config (`get_env()`, `load_env()` for .env files)
+- [x] Config file support (`ntnt.toml` for lint settings)
 - [ ] Secrets management patterns
 - [ ] Validation with contracts
 
 ### 15.3 Observability
 
-- [ ] Structured logging (`std/log`)
+- [x] Structured logging (`std/log` — `log_debug`, `log_info`, `log_warn`, `log_error`, `set_log_level`)
+- [x] Request logger middleware (`request_logger()`)
 - [ ] Metrics collection (Prometheus format)
 - [ ] Distributed tracing (OpenTelemetry compatible)
-- [ ] Health check endpoints
+- [ ] Health check endpoint (trivial to add manually, not built-in)
 - [ ] Contract violation reporting
-
-```ntnt
-import { Logger, Metrics } from "std/observe"
-
-let log = Logger.new("api")
-let requests = Metrics.counter("http_requests_total")
-
-fn handle_request(req: Request) -> Response {
-    requests.inc({ path: req.path, method: req.method })
-    log.info("Handling request", { path: req.path })
-    // ...
-}
-```
 
 ### 15.4 Graceful Lifecycle
 
-- [ ] Signal handling (SIGTERM, SIGINT)
-- [ ] Connection draining
-- [ ] Shutdown hooks
+- [x] Signal handling — `ctrlc` handler in worker mode, `tokio::signal::ctrl_c` in async server
+- [x] Graceful shutdown — async server uses `with_graceful_shutdown`, workers drain via channel close
+- [ ] Connection draining (in-flight request completion)
+- [ ] Shutdown hooks (first-class API)
 - [ ] Startup/readiness probes
 
 **Deliverables:**
 
-- Binary compilation
-- Docker support
-- Observability stack
-- Graceful lifecycle management
+- ✅ Cross-platform binary distribution via GitHub Releases
+- ✅ Structured logging
+- ✅ Graceful shutdown on SIGTERM/SIGINT
+- Remaining: Prometheus metrics, OpenTelemetry, shutdown hooks
 
 ---
 
 ## Future Considerations (Post-1.0)
 
 These features are valuable but not essential for the initial release:
+
+### Package & Module Ecosystem (was Phase 9)
+
+Deferred for simplicity and security. The stdlib-first approach covers the majority of web application needs.
+
+- Project manifest (`ntnt.toml`) with dependency declaration
+- NTNT-native packages with `lib.tnt` entry points
+- Local path and git URL dependency resolution
+- Rust FFI extension API for native packages
+- Package registry and publishing (`ntnt publish`, `ntnt add`)
+- Dependency caching and lockfile
+
+### Performance & Compilation (was Phase 13)
+
+Deferred — current interpreter performance is sufficient for target use cases.
+
+- Bytecode VM (10-50x speedup) — bytecode format, compiler, stack-based VM
+- VM optimizations — constant folding, dead code elimination, inline caching
+- Memory management — reference counting, string interning, arena allocators
+- Native compilation via Cranelift, LLVM, or Rust transpilation (100-1000x speedup)
+- Runtime library for native compilation targets
+
+### Concurrency — Async HTTP Requests
+
+- [ ] Async HTTP requests (requires async runtime integration with interpreter)
 
 ### Pipeline Operator (`|>`) → Moved to Phase 7.5
 
@@ -2649,19 +2307,19 @@ The HTTP server now uses Axum + Tokio for async request handling:
 
 ## Implementation Priority Matrix
 
-| Phase      | Focus                            | Business Value     | Effort     |
+| Phase      | Focus                            | Business Value     | Status     |
 | ---------- | -------------------------------- | ------------------ | ---------- |
 | 1-5 ✅     | Core Language + Web              | Foundation         | Complete   |
 | 6 ✅       | Intent-Driven Dev                | High               | Complete   |
-| **7**      | **Ergonomics & Documentation**   | **High (Up Next)** | **Medium** |
-| **8**      | **Intent System Maturity**       | **High**           | **Medium** |
-| **9**      | **Package Ecosystem**            | **Critical**       | **Medium** |
-| **10**     | **Jobs, WebSockets & Real-Time** | **High**           | **Medium** |
-| 11         | Testing Framework                | High               | Medium     |
-| 12         | Tooling & DX                     | Very High          | High       |
-| 13         | Performance                      | High               | Medium     |
-| 14         | AI Integration                   | **Differentiator** | Medium     |
-| 15         | Deployment                       | High               | Medium     |
+| 7 ✅       | Ergonomics & Documentation       | High               | ~95% done  |
+| **8**      | **Intent System Maturity**       | **High**           | **Up Next**|
+| 9          | Reserved                         |                    |            |
+| 10 🟡     | Jobs ✅, WebSockets ❌           | High               | Partial    |
+| 11         | Testing Framework                | High               | Not Started|
+| 12         | Tooling & DX (LSP, Debugger)     | Very High          | Not Started|
+| 13         | Static Analysis & Type System    | High               | Not Started|
+| 14         | AI Integration                   | **Differentiator** | Not Started|
+| 15         | Deployment                       | High               | Not Started|
 
 ---
 
@@ -2694,36 +2352,27 @@ The HTTP server now uses Axum + Tokio for async request handling:
 - Decision records for human-agent accountability
 - Intent system is a tool agents genuinely rely on
 
-### M5: Extensible Language (End of Phase 9)
+### M5: Background Processing (End of Phase 10) ✅ PARTIAL
 
-- Package manifest (`ntnt.toml`)
-- Local and git dependencies
-- NTNT-native packages with `lib.tnt` entry points
-- Rust FFI for native extensions
-- Ecosystem can grow beyond stdlib
+- ✅ `job` language-level declarations with perform/on_failure
+- ✅ `std/jobs` with SQLite KV, PostgreSQL, and Redis backends
+- ✅ Resilience: retries, rate limiting, concurrency limits, dead letter queue, pause/resume
+- ✅ Batch system with dynamic adds, callbacks, TTL expiry
+- ✅ `ntnt jobs` CLI for monitoring and management
+- ❌ WebSocket and SSE support (not started)
 
-### M6: Real-Time & Background Processing (End of Phase 10)
-
-- `Job`, `Chain`, `Workflow` language-level declarations
-- `std/jobs` with in-memory, PostgreSQL, and Redis backends
-- Resilience: heartbeats, retries, dead letter queue, rate limiting
-- WebSocket and SSE support for real-time client communication
-- Job testing in `.intent` files
-- `ntnt jobs` CLI for monitoring and management
-
-### M7: Developer Ready (End of Phase 12)
+### M6: Developer Ready (End of Phase 12)
 
 - Full IDE support (LSP)
-- Package registry and publishing
 - Human approval workflows
 - Comprehensive testing framework (unit + IDD)
 
-### M8: Production Ready / 1.0 (End of Phase 15)
+### M7: Production Ready / 1.0 (End of Phase 15)
 
-- Performance optimized (bytecode VM, native compilation)
-- AI integration complete (structured edits, agent SDK)
-- Deployment tooling
-- Observability
+- ✅ Cross-platform distribution
+- ✅ Structured logging + graceful shutdown
+- AI integration (structured edits, agent SDK)
+- Metrics + tracing (Prometheus, OpenTelemetry)
 
 ---
 
@@ -2932,4 +2581,4 @@ See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) and [PERFORMANCE_AUDIT.md](PERFORMANC
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: February 2026 (v0.3.14 — Security & Performance Audit)_
+_Last updated: April 2026 (v0.4.7 — Jobs complete, Phase 9/13 deferred)_
