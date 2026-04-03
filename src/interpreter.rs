@@ -2989,18 +2989,22 @@ impl Interpreter {
         );
 
         // @ntnt is_some
-        // @signature is_some(opt: Option<Any>) -> Bool
-        // Checks if an Option is Some.
+        // @signature is_some(val: Any) -> Bool
+        // Checks if a value is "present" (not None).
         //
-        // Returns true if the Option contains a value, false if it is None.
-        // @param opt The Option to check
-        // @returns true if Some, false if None
+        // Returns true for Option::Some, and true for any non-Option value
+        // (Map, String, Int, etc.). Returns false only for Option::None.
+        // This makes it safe to use after query_one() or any function that
+        // returns a value that might be None.
+        // @param val The value to check
+        // @returns true if the value is not None, false if None
         // @tags #pure, #deterministic
         // @see_also is_none, Some, unwrap, unwrap_or
         // @since v0.1.0
         // @example is_some(Some(42)) => true ~ "Some is some"
         // @example is_some(None) => false ~ "None is not some"
-        // @error TypeError ~ "is_some() requires an Option" fix: "Pass an Option value"
+        // @example is_some("hello") => true ~ "Non-Option values are considered present"
+        // @example is_some(map { "a": 1 }) => true ~ "Maps are considered present"
         self.environment.borrow_mut().define(
             "is_some".to_string(),
             Value::NativeFunction {
@@ -3012,26 +3016,29 @@ impl Interpreter {
                     Value::EnumValue {
                         enum_name, variant, ..
                     } if enum_name == "Option" => Ok(Value::Bool(variant == "Some")),
-                    _ => Err(IntentError::type_error(
-                        "is_some() requires an Option".to_string(),
-                    )),
+                    // Any non-Option value is considered "present" (not None)
+                    _ => Ok(Value::Bool(true)),
                 },
             },
         );
 
         // @ntnt is_none
-        // @signature is_none(opt: Option<Any>) -> Bool
-        // Checks if an Option is None.
+        // @signature is_none(val: Any) -> Bool
+        // Checks if a value is None.
         //
-        // Returns true if the Option is None, false if it contains a value.
-        // @param opt The Option to check
-        // @returns true if None, false if Some
+        // Returns true for Option::None, false for Option::Some and any
+        // non-Option value (Map, String, Int, etc.). This makes it safe
+        // to use after query_one() or any function that returns a value
+        // that might be None without wrapping in Option.
+        // @param val The value to check
+        // @returns true if None, false otherwise
         // @tags #pure, #deterministic
         // @see_also is_some, Some, unwrap, unwrap_or
         // @since v0.1.0
         // @example is_none(None) => true ~ "None is none"
         // @example is_none(Some(42)) => false ~ "Some is not none"
-        // @error TypeError ~ "is_none() requires an Option" fix: "Pass an Option value"
+        // @example is_none("hello") => false ~ "Non-Option values are not none"
+        // @example is_none(map { "a": 1 }) => false ~ "Maps are not none"
         self.environment.borrow_mut().define(
             "is_none".to_string(),
             Value::NativeFunction {
@@ -3043,9 +3050,8 @@ impl Interpreter {
                     Value::EnumValue {
                         enum_name, variant, ..
                     } if enum_name == "Option" => Ok(Value::Bool(variant == "None")),
-                    _ => Err(IntentError::type_error(
-                        "is_none() requires an Option".to_string(),
-                    )),
+                    // Any non-Option value is considered "present" (not None)
+                    _ => Ok(Value::Bool(false)),
                 },
             },
         );

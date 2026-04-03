@@ -57,9 +57,9 @@ These functions are available everywhere without importing.
 | [`is_float(val: Any)`](#isfloat) | Returns true if the value is a Float. |
 | [`is_int(val: Any)`](#isint) | Returns true if the value is an integer. |
 | [`is_map(val: Any)`](#ismap) | Returns true if the value is a Map (dictionary/object). |
-| [`is_none(opt: Option<Any>)`](#isnone) | Checks if an Option is None. |
+| [`is_none(val: Any)`](#isnone) | Checks if a value is None. |
 | [`is_ok(res: Result<Any, Any>)`](#isok) | Checks if a Result is Ok. |
-| [`is_some(opt: Option<Any>)`](#issome) | Checks if an Option is Some. |
+| [`is_some(val: Any)`](#issome) | Checks if a value is "present" (not None). |
 | [`is_string(val: Any)`](#isstring) | Returns true if the value is a String. |
 | [`jobs(directory: String)`](#jobs) | Auto-discover and register job definitions from .tnt files in a directory. |
 | [`len(x: String \| Array \| Map)`](#len) | Returns the length of a string, array, or map. |
@@ -697,29 +697,27 @@ is_map(None)  // => false  // None is not a map
 #### `is_none`
 
 ```ntnt
-is_none(opt: Option<Any>) -> Bool
+is_none(val: Any) -> Bool
 ```
 
-Checks if an Option is None.
+Checks if a value is None.
 
-Returns true if the Option is None, false if it contains a value.
+Returns true for Option::None, false for Option::Some and any non-Option value (Map, String, Int, etc.). This makes it safe to use after query_one() or any function that returns a value that might be None without wrapping in Option.
 
 **Parameters:**
 
-- `opt` — The Option to check
+- `val` — The value to check
 
-**Returns:** true if None, false if Some
+**Returns:** true if None, false otherwise
 
 **Examples:**
 
 ```ntnt
 is_none(None)  // => true  // None is none
 is_none(Some(42))  // => false  // Some is not none
+is_none("hello")  // => false  // Non-Option values are not none
+is_none(map { "a": 1 })  // => false  // Maps are not none
 ```
-
-**Errors:**
-
-- **TypeError**: is_none() requires an Option — *Fix: Pass an Option value*
 
 **See also:** `is_some`, `Some`, `unwrap`, `unwrap_or`
 
@@ -763,29 +761,27 @@ is_ok(Err("fail"))  // => false  // Err is not ok
 #### `is_some`
 
 ```ntnt
-is_some(opt: Option<Any>) -> Bool
+is_some(val: Any) -> Bool
 ```
 
-Checks if an Option is Some.
+Checks if a value is "present" (not None).
 
-Returns true if the Option contains a value, false if it is None.
+Returns true for Option::Some, and true for any non-Option value (Map, String, Int, etc.). Returns false only for Option::None. This makes it safe to use after query_one() or any function that returns a value that might be None.
 
 **Parameters:**
 
-- `opt` — The Option to check
+- `val` — The value to check
 
-**Returns:** true if Some, false if None
+**Returns:** true if the value is not None, false if None
 
 **Examples:**
 
 ```ntnt
 is_some(Some(42))  // => true  // Some is some
 is_some(None)  // => false  // None is not some
+is_some("hello")  // => true  // Non-Option values are considered present
+is_some(map { "a": 1 })  // => true  // Maps are considered present
 ```
-
-**Errors:**
-
-- **TypeError**: is_some() requires an Option — *Fix: Pass an Option value*
 
 **See also:** `is_none`, `Some`, `unwrap`, `unwrap_or`
 
