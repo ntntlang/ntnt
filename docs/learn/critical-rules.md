@@ -10,6 +10,20 @@ ntnt run file.tnt                   # Run (hot-reload in dev)
 ntnt test server.tnt --get /health  # Test HTTP endpoints
 ```
 
+## Looking Up Functions
+
+Use `ntnt docs` to look up any function — docs are embedded in the binary:
+
+```bash
+ntnt docs fetch              # Full docs for fetch()
+ntnt docs std/time           # All functions in a module
+ntnt docs std/crypto         # Crypto functions: sha256, bcrypt, AES, etc.
+ntnt docs hash_password      # Search by function name
+ntnt docs fetch --json       # JSON output for structured access
+```
+
+**When unsure about a function's signature or behavior, run `ntnt docs <name>` — it's faster and more accurate than guessing.**
+
 ## Critical Syntax Rules
 
 ### 1. Maps require `map` keyword — bare `{}` is a code block
