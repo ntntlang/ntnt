@@ -124,12 +124,13 @@ pub fn standard_vocabulary() -> Vocabulary {
     );
 
     // "response is valid JSON" → body matches JSON pattern
+    // Uses (?s) dotall mode so `.` matches newlines in multiline JSON bodies
     vocab.add_primitive(
         "response is valid JSON",
         Primitive::Check {
             op: CheckOp::Matches,
             path: "response.body".to_string(),
-            expected: Value::Regex(r"^\s*[\{\[].*[\}\]]\s*$".to_string()),
+            expected: Value::Regex(r"(?s)^\s*[\{\[].*[\}\]]\s*$".to_string()),
         },
     );
 

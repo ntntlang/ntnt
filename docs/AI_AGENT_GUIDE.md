@@ -261,6 +261,20 @@ These work in `→` lines without needing glossary entries:
 
 For the complete list, see [IAL_REFERENCE.md](IAL_REFERENCE.md).
 
+### Output Symbols
+
+| Symbol | Meaning |
+|--------|---------|
+| ✓ | Passed |
+| ✗ | Failed |
+| ⏭️ | Skipped (precondition not met) |
+| ⧗ | Warning/Pending — unresolved outcome terms or unresolvable scenario. Counts as failed in summary. Check that all `→` outcome terms are in your Glossary or match a built-in assertion term. |
+
+### Tips
+
+- Prefer `body has field "key"` or `content-type is json` over `response is valid JSON` for checking JSON responses — they're more reliable and specific.
+- If a scenario shows ⧗, an outcome term wasn't recognized. Rephrase using built-in terms like `body contains`, `status 200`, `body has field`.
+
 ### Commands
 
 ```bash
