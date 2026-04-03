@@ -279,7 +279,7 @@ These work in any `→` line without needing a glossary entry:
 | `body matches {pattern}` | Body matches regex pattern |
 | `body is empty` | Body is empty string |
 | `body is not empty` | Body is not empty |
-| `body has field {field}` | Body contains a field name (JSON) |
+| `body has field {field}` | Body contains the field name as text |
 | `response is valid JSON` | Body parses as JSON |
 | `header {name} exists` | Response header exists |
 | `header {name} equals {value}` | Header has exact value |
