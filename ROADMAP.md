@@ -1561,127 +1561,9 @@ Feature: User Authentication
 
 ---
 
-## ~~Phase 9: Package & Module Ecosystem~~ → Moved to Future Considerations
+## Phase 9: Reserved
 
-**Status:** Deferred — moved to Future Considerations for simplicity and security. The stdlib-first approach covers the majority of web application needs without the complexity of a package registry.
-
-~~**Goal:** Let NTNT be extended beyond the standard library.~~
-
-> This phase delivers the foundation: local packages, git dependencies, and a project manifest. The full registry and publishing infrastructure comes later in Phase 12.2 (Tooling & DX). This is the single feature the assessment identified as "the biggest barrier to adoption."
-
-### 9.1 Project Manifest (`ntnt.toml`)
-
-Every NTNT project gets a manifest file that declares metadata and dependencies:
-
-```toml
-[project]
-name = "my-app"
-version = "0.1.0"
-entry = "server.tnt"
-
-[dependencies]
-markdown = { path = "../ntnt-markdown" }        # Local path
-email = { git = "https://github.com/user/ntnt-email.git" }  # Git URL
-```
-
-**Implementation plan:**
-
-- [ ] `ntnt.toml` parser (TOML format, Rust `toml` crate)
-- [ ] `ntnt new <name>` — scaffold a new project with `ntnt.toml`, `server.tnt`, and directory structure
-- [ ] Project metadata: name, version, description, author, license, entry point
-- [ ] `ntnt run` auto-detects `ntnt.toml` and resolves dependencies before execution
-- [ ] `ntnt.lock` lockfile for reproducible builds
-
-### 9.2 NTNT-Native Packages
-
-Packages are directories of NTNT code with a `ntnt.toml` manifest that other projects can import:
-
-```
-ntnt-markdown/
-├── ntnt.toml
-├── lib.tnt          # Package entry point (exports public API)
-├── src/
-│   ├── parser.tnt
-│   ├── renderer.tnt
-│   └── extensions.tnt
-└── tests/
-    └── markdown_tests.tnt
-```
-
-**lib.tnt (package entry point):**
-```ntnt
-// Re-export public API
-import { parse } from "./src/parser"
-import { render_html, render_text } from "./src/renderer"
-
-export { parse, render_html, render_text }
-```
-
-**Consumer usage:**
-```ntnt
-import { parse, render_html } from "markdown"
-
-fn blog_handler(req: Request) -> Response {
-    let content = read_file("posts/" + req.params["slug"] + ".md")
-    let html_content = render_html(parse(content))
-    return html(html_content)
-}
-```
-
-**Implementation plan:**
-
-- [ ] Package resolution: name in `ntnt.toml` [dependencies] → path or git URL → directory with `ntnt.toml`
-- [ ] Package imports: `import { x } from "package-name"` resolves to the package's `lib.tnt` exports
-- [ ] Local path dependencies: `{ path = "../my-package" }`
-- [ ] Git dependencies: `{ git = "https://..." }` — clone to a cache directory
-- [ ] Git ref pinning: `{ git = "...", tag = "v1.0.0" }` or `{ git = "...", rev = "abc123" }`
-- [ ] Dependency caching: packages cached in `~/.ntnt/packages/`
-- [ ] `ntnt add <name> --path <path>` — add a local dependency
-- [ ] `ntnt add <name> --git <url>` — add a git dependency
-- [ ] Circular dependency detection
-
-### 9.3 Rust Extension Packages (FFI)
-
-For capabilities that can't be written in pure NTNT (system libraries, performance-critical code, bindings to existing ecosystems):
-
-```toml
-# ntnt-redis/ntnt.toml
-[project]
-name = "redis"
-version = "0.1.0"
-type = "native"          # Indicates Rust extension
-
-[native]
-crate = "ntnt-redis"     # Rust crate name
-```
-
-**Implementation plan:**
-
-- [ ] Extension API: Rust trait that native packages implement to expose functions to NTNT
-- [ ] Dynamic loading: `.so`/`.dylib`/`.dll` loaded at runtime
-- [ ] Type marshaling: Rust types ↔ NTNT `Value` conversion
-- [ ] Standard extension trait with `register_functions()` method
-- [ ] Pre-built extensions for common needs (Redis, email, image processing)
-- [ ] `ntnt build-ext` command for compiling Rust extensions
-
-### 9.4 Stdlib as Packages
-
-Refactor parts of the standard library to use the same package infrastructure, proving the system works:
-
-- [ ] Extract `std/csv` as a standalone package (simple, good test case)
-- [ ] Extract `std/crypto` as a standalone package
-- [ ] Built-in packages resolve from the interpreter binary (no download needed)
-- [ ] Stdlib packages serve as reference implementations for package authors
-
-**Deliverables:**
-
-- `ntnt.toml` project manifest with dependency declaration
-- `ntnt new` project scaffolding
-- Local path and git URL dependency resolution
-- Package import system (`import { x } from "package-name"`)
-- Rust FFI extension API for native packages
-- Dependency caching and lockfile
-- At least two stdlib modules extracted as proof-of-concept packages
+*Content moved to Future Considerations.*
 
 ---
 
@@ -2008,26 +1890,7 @@ ntnt test --coverage
 - [ ] Code actions (quick fixes)
 - [ ] Contract visualization
 
-### 12.2 Package Registry & Publishing
-
-> **Note:** The package foundation (manifest, local/git dependencies, imports) is built in Phase 9 (Package Ecosystem). This section adds the public registry and publishing infrastructure.
-
-- [ ] Central package registry (hosted service)
-- [ ] `ntnt publish` — publish packages to the registry
-- [ ] Semantic versioning enforcement
-- [ ] Dependency resolution with version ranges (`^1.0`, `~2.3`)
-- [ ] `ntnt add <name>` — install from registry (in addition to Phase 9's path/git support)
-- [ ] Package search: `ntnt search <query>`
-
-```bash
-ntnt new my-app
-ntnt add http
-ntnt add db/postgres --version "^1.0"
-ntnt test
-ntnt build --release
-```
-
-### 12.3 Human Approval Mechanisms (From Whitepaper)
+### 12.2 Human Approval Mechanisms (From Whitepaper)
 
 - [ ] `@requires_approval` annotations
 - [ ] Approval workflows in IDE
@@ -2046,7 +1909,7 @@ pub fn get_user(id: String) -> User {
 }
 ```
 
-### 12.4 Debugger
+### 12.3 Debugger
 
 - [ ] Breakpoints
 - [ ] Step debugging
@@ -2055,7 +1918,7 @@ pub fn get_user(id: String) -> User {
 - [ ] Contract state inspection
 - [ ] DAP (Debug Adapter Protocol) support
 
-### 12.5 User Code Documentation (.tnt Files)
+### 12.4 User Code Documentation (.tnt Files)
 
 > **Design Doc:** [plans/tnt_code_documentation_design.md](plans/tnt_code_documentation_design.md)
 >
@@ -2073,198 +1936,21 @@ pub fn get_user(id: String) -> User {
 **Deliverables:**
 
 - Full LSP server
-- Package registry and publishing
 - Human approval system
 - Debugger
 - User code documentation (doc comments, doctests, contract-as-documentation)
 
 ---
 
-## ~~Phase 13: Performance & Compilation~~ → Moved to Future Considerations
+## Phase 13: Advanced Static Analysis & Type System
 
-**Status:** Deferred — current interpreter performance is sufficient for target use cases. Bytecode VM and native compilation moved to Future Considerations.
+**Status:** Not Started
 
-~~**Goal:** Production-ready performance through progressive compilation strategies.~~
+**Goal:** Deeper static analysis, contract inference, and advanced type system features that make NTNT's safety guarantees stronger without runtime cost.
 
-### Current Architecture
+### 13.1 Contract Inference
 
-```
-NTNT Source (.tnt)
-       ↓
-    Lexer (src/lexer.rs)         ✅ Reusable
-       ↓
-    Parser (src/parser.rs)       ✅ Reusable
-       ↓
-      AST (src/ast.rs)           ✅ Reusable
-       ↓
-  Interpreter (src/interpreter.rs)  ← Tree-walking (current, slowest)
-       ↓
-    Result
-```
-
-### Compilation Roadmap
-
-| Approach                            | Effort     | Speedup   | When       |
-| ----------------------------------- | ---------- | --------- | ---------- |
-| Tree-walking Interpreter            | ✅ Done    | Baseline  | Current    |
-| Bytecode VM                         | 2-4 weeks  | 10-50x    | Phase 13.1 |
-| Native Compilation (Cranelift/LLVM) | 2-3 months | 100-1000x | Phase 13.4 |
-
-### What Can Be Reused
-
-| Component   | Reusable?   | Notes                       |
-| ----------- | ----------- | --------------------------- |
-| Lexer       | ✅ 100%     | Tokens don't change         |
-| Parser      | ✅ 100%     | AST structure stays same    |
-| AST         | ✅ 100%     | Core data structures        |
-| Type System | ✅ 100%     | Expansion for optimization  |
-| Interpreter | ❌ Replaced | Becomes compiler/codegen    |
-| Stdlib      | ⚠️ Partial  | Need native implementations |
-
-### 13.1 Bytecode VM (First Target)
-
-**Goal:** 10-50x performance improvement with moderate effort.
-
-- [ ] Design NTNT bytecode format (NBC)
-- [ ] Implement bytecode compiler (`src/compiler.rs`)
-- [ ] Implement stack-based VM (`src/vm.rs`)
-- [ ] Bytecode serialization/loading (`.tnc` files)
-- [ ] Debug info preservation for stack traces
-- [ ] Keep interpreter for REPL (faster startup)
-
-```rust
-// Example bytecode instructions
-enum OpCode {
-    LoadConst(usize),      // Push constant onto stack
-    LoadVar(String),       // Push variable value
-    StoreVar(String),      // Pop and store to variable
-    Add, Sub, Mul, Div,    // Arithmetic
-    Eq, Lt, Gt, Le, Ge,    // Comparison
-    Call(usize),           // Call function with N args
-    Return,                // Return from function
-    Jump(usize),           // Unconditional jump
-    JumpIfFalse(usize),    // Conditional jump
-    MakeArray(usize),      // Create array from N stack values
-    MakeMap(usize),        // Create map from N key-value pairs
-    GetField(String),      // Map/struct field access
-    SetField(String),      // Map/struct field assignment
-}
-```
-
-**CLI Integration:**
-
-```bash
-ntnt compile app.tnt        # Compile to bytecode (.tnc)
-ntnt run app.tnc            # Run bytecode directly
-ntnt run app.tnt            # Auto-compile and run (caches .tnc)
-```
-
-### 13.2 VM Optimizations
-
-- [ ] Constant folding at compile time
-- [ ] Dead code elimination
-- [ ] Inline caching for method calls
-- [ ] Escape analysis for stack allocation
-- [ ] Contract elision in release builds (configurable)
-- [ ] Hot path detection and optimization
-
-### 13.3 Memory Management
-
-- [ ] Reference counting with cycle detection
-- [ ] Memory pools for hot paths
-- [ ] String interning
-- [ ] Small string optimization
-- [ ] Arena allocators for request handling
-
-### 13.4 Native Compilation (Future)
-
-**Goal:** Native machine code for maximum performance (100-1000x faster than interpreter).
-
-#### Option A: Cranelift Backend (Recommended)
-
-```
-AST → Cranelift IR → Native Machine Code
-```
-
-- Simpler API than LLVM
-- Good optimization passes
-- Used by rustc (experimental) and Wasmtime
-- Estimated effort: 1-2 months
-
-```rust
-// Using cranelift crate
-use cranelift::prelude::*;
-use cranelift_module::Module;
-
-fn compile_function(ast: &Function, module: &mut Module) {
-    let mut func = Function::new();
-    let mut builder = FunctionBuilder::new(&mut func, &mut ctx);
-
-    // Generate Cranelift IR from AST
-    for stmt in &ast.body {
-        compile_statement(stmt, &mut builder);
-    }
-}
-```
-
-#### Option B: LLVM Backend
-
-```
-AST → LLVM IR → LLVM Optimizer → Native Machine Code
-```
-
-- Best-in-class optimizations
-- Used by Rust, Swift, Julia, Clang
-- More complex API
-- Estimated effort: 2-3 months
-
-```rust
-// Using inkwell (LLVM Rust bindings)
-use inkwell::context::Context;
-use inkwell::builder::Builder;
-
-fn compile_to_llvm(ast: &Module) -> inkwell::module::Module {
-    let context = Context::create();
-    let module = context.create_module("ntnt");
-    let builder = context.create_builder();
-
-    // Generate LLVM IR from AST
-}
-```
-
-#### Option C: Transpile to Rust (Creative Alternative)
-
-```
-AST → Rust Source Code → cargo build → Native Binary
-```
-
-- Leverage Rust's optimizer for free
-- Easier debugging (human-readable output)
-- Estimated effort: 2-4 weeks
-
-```ntnt
-// NTNT source
-fn add(a: Int, b: Int) -> Int { a + b }
-
-// Generated Rust
-fn add(a: i64, b: i64) -> i64 { a + b }
-```
-
-**CLI Integration:**
-
-```bash
-ntnt build app.tnt              # Compile to native binary
-ntnt build app.tnt --release    # Optimized build
-./app                           # Run native binary directly
-```
-
-### 13.5 Advanced Static Analysis & Contract Inference
-
-> **Note:** Basic type inference and enforcement are in Phase 7.1 (including contract expression type-checking). This section covers deep analysis that builds on the bytecode compiler, including the full contract inference system.
-
-**Contract Inference:**
-
-Contract inference warns when you call a function with contracts without satisfying them. Contracts remain completely optional — inference only activates for contracts that someone chose to write. No contracts on your function? No warnings, no obligations.
+Contract inference warns when you call a function with contracts without satisfying them. Contracts remain completely optional — inference only activates for contracts that someone chose to write.
 
 ```ntnt
 fn divide(a: Int, b: Int) -> Int
@@ -2288,15 +1974,9 @@ fn compute(x: Int, y: Int) -> Int {
 - [ ] Contract static verification (prove contracts hold using SMT solvers or abstract interpretation)
 - [ ] Auto-generate `requires` clauses from analysis of function body
 - [ ] Contract inference across module boundaries
-
-**Type Analysis:**
-
-- [x] Flow-sensitive typing (type narrows after null checks) — implemented in Phase 7.1
-- [x] Exhaustive type checking at compile time (match exhaustiveness for Option/Result/enums) — implemented in Phase 7.1
-- [x] Type narrowing in conditionals and match arms — implemented in Phase 7.1
 - [ ] Escape analysis for optimization hints
 
-### 13.6 Advanced Type System Features
+### 13.2 Advanced Type System Features
 
 - [ ] Associated types in traits
 - [ ] Where clauses for complex constraints
@@ -2305,34 +1985,15 @@ fn compute(x: Int, y: Int) -> Int {
 - [ ] Contravariant preconditions, covariant postconditions
 - [ ] Error context/wrapping: `result.context("message")?`
 
-### 13.7 Runtime Library (for Native Compilation)
-
-Native compilation requires re-implementing stdlib in the target:
-
-- [ ] Core runtime (memory, strings, arrays, maps)
-- [ ] I/O operations (file system, HTTP)
-- [ ] Database drivers (PostgreSQL bindings)
-- [ ] Concurrency primitives (threads, channels)
-
-### 13.8 Advanced Concurrency ✅
-
-Built in v0.4.5 (feat/concurrency-v2):
-
-- [x] `spawn(fn)` → `TaskHandle`, `await_task(h)`, `try_await(h)`
-- [x] `channel()` → `[TxChannel, RxChannel]` — two-handle design
-- [x] `send(tx, val)`, `recv(rx)`, `recv_timeout(rx, ms)`, `try_recv(rx)`, `close(rx)`
-- [x] `select([rx_a, rx_b], timeout?)` — crossbeam-channel
-- [x] `schedule(interval, fn)` → `ScheduleHandle`, `after(delay, fn)` → `TaskHandle`
-- [x] `parallel([fn1, fn2, ...])`, `race([fn1, fn2, ...])`
-- [ ] Async HTTP requests (requires async runtime)
+**Already completed (Phase 7.1):**
+- [x] Flow-sensitive typing (type narrows after null checks)
+- [x] Exhaustive type checking at compile time (match exhaustiveness)
+- [x] Type narrowing in conditionals and match arms
 
 **Deliverables:**
 
-- Bytecode compiler and VM (10-50x speedup)
-- Static type checker
-- Advanced type system
-- Optimized memory management
-- Native compilation path (100-1000x speedup)
+- Contract inference with single-level and transitive propagation
+- Advanced type system features (associated types, where clauses, contract inheritance)
 
 ---
 
@@ -2534,6 +2195,31 @@ fn handle_request(req: Request) -> Response {
 
 These features are valuable but not essential for the initial release:
 
+### Package & Module Ecosystem (was Phase 9)
+
+Deferred for simplicity and security. The stdlib-first approach covers the majority of web application needs.
+
+- Project manifest (`ntnt.toml`) with dependency declaration
+- NTNT-native packages with `lib.tnt` entry points
+- Local path and git URL dependency resolution
+- Rust FFI extension API for native packages
+- Package registry and publishing (`ntnt publish`, `ntnt add`)
+- Dependency caching and lockfile
+
+### Performance & Compilation (was Phase 13)
+
+Deferred — current interpreter performance is sufficient for target use cases.
+
+- Bytecode VM (10-50x speedup) — bytecode format, compiler, stack-based VM
+- VM optimizations — constant folding, dead code elimination, inline caching
+- Memory management — reference counting, string interning, arena allocators
+- Native compilation via Cranelift, LLVM, or Rust transpilation (100-1000x speedup)
+- Runtime library for native compilation targets
+
+### Concurrency — Async HTTP Requests
+
+- [ ] Async HTTP requests (requires async runtime integration with interpreter)
+
 ### Pipeline Operator (`|>`) → Moved to Phase 7.5
 
 ### Response Caching (Server-Side)
@@ -2636,11 +2322,11 @@ The HTTP server now uses Axum + Tokio for async request handling:
 | 6 ✅       | Intent-Driven Dev                | High               | Complete   |
 | 7 ✅       | Ergonomics & Documentation       | High               | ~95% done  |
 | **8**      | **Intent System Maturity**       | **High**           | **Up Next**|
-| ~~9~~      | ~~Package Ecosystem~~            | Deferred           | Future     |
+| 9          | Reserved                         |                    |            |
 | 10 🟡     | Jobs ✅, WebSockets ❌           | High               | Partial    |
 | 11         | Testing Framework                | High               | Not Started|
-| 12         | Tooling & DX                     | Very High          | Not Started|
-| ~~13~~     | ~~Performance & Compilation~~    | Deferred           | Future     |
+| 12         | Tooling & DX (LSP, Debugger)     | Very High          | Not Started|
+| 13         | Static Analysis & Type System    | High               | Not Started|
 | 14         | AI Integration                   | **Differentiator** | Not Started|
 | 15         | Deployment                       | High               | Not Started|
 
