@@ -1559,11 +1559,11 @@ Feature: User Authentication
 
 ---
 
-## Phase 9: Package & Module Ecosystem
+## ~~Phase 9: Package & Module Ecosystem~~ → Moved to Future Considerations
 
-**Status:** Not Started
+**Status:** Deferred — moved to Future Considerations for simplicity and security. The stdlib-first approach covers the majority of web application needs without the complexity of a package registry.
 
-**Goal:** Let NTNT be extended beyond the standard library. This is the single biggest barrier to adoption — every project eventually needs something the stdlib doesn't have.
+~~**Goal:** Let NTNT be extended beyond the standard library.~~
 
 > This phase delivers the foundation: local packages, git dependencies, and a project manifest. The full registry and publishing infrastructure comes later in Phase 12.2 (Tooling & DX). This is the single feature the assessment identified as "the biggest barrier to adoption."
 
@@ -1685,7 +1685,7 @@ Refactor parts of the standard library to use the same package infrastructure, p
 
 ## Phase 10: Background Jobs, WebSockets & Real-Time
 
-**Status:** Not Started
+**Status:** Jobs Complete ✅ (DD-037, DD-051, DD-052) · WebSockets Not Started
 
 **Goal:** Production-ready background job system with a declarative Job DSL, pluggable backends, and deep IDD integration — plus WebSocket and SSE support for pushing data to clients. Jobs are first-class language constructs — the `Job` keyword is syntax, not a library import — with the runtime and queue management provided by `std/jobs`.
 
@@ -1723,91 +1723,62 @@ ProcessPayment.enqueue_in(3600, map { "order_id": "456", "amount": 29.99 })
 
 **Implementation plan:**
 
-- [ ] `Job` declaration syntax in parser (new AST node: `JobDeclaration`)
-- [ ] `perform()` handler with typed arguments
-- [ ] `on_failure()` hook
-- [ ] `Job.enqueue()`, `Job.enqueue_at()`, `Job.enqueue_in()` methods
-- [ ] Queue configuration: `Queue.configure(map { "backend": "memory" })`
-- [ ] In-memory backend (zero dependencies, default)
-- [ ] Worker loop with retry logic and exponential backoff
-- [ ] Priority queues (`low`, `normal`, `high`)
-- [ ] Dead letter queue for exhausted retries
-- [ ] Job cancellation: `Queue.cancel(job_id)`
-- [ ] Graceful shutdown (drain in-progress jobs on SIGTERM)
-- [ ] Job options: `retry`, `timeout`, `backoff`, `priority`, `rate`, `concurrency`, `unique`, `expires`, `idempotent`
+- [x] `job` declaration syntax in parser (language-level keyword)
+- [x] `perform()` handler with typed arguments
+- [x] `on_failure()` hook
+- [x] `enqueue()`, `enqueue_at()`, `enqueue_in()` functions
+- [x] Queue configuration: `configure_queue(map { ... })`
+- [x] In-memory backend (zero dependencies, default)
+- [x] Worker loop with retry logic and exponential backoff
+- [x] Priority queues with configurable bands (critical/high/normal/low, 0-99)
+- [x] Dead letter queue for exhausted retries
+- [x] Job cancellation: `cancel_job(job_id)`
+- [x] Graceful shutdown (drain in-progress jobs on SIGTERM)
+- [x] Job options: `retry`, `timeout`, `backoff`, `priority`, `rate`, `concurrency`, `unique`, `expires`
 - [ ] Doc comment metadata parsing (`/// Triggers:`, `/// Affects:`, `/// Side effects:`)
 
-### 10.2 Resilience & Production Features
+### 10.2 Resilience & Production Features ✅
 
-**Priority:** High — required for any production deployment.
-
+- [x] Rate limiting per job type (`rate: "100/minute"`)
+- [x] Concurrency limits per job type (`concurrency: 5`)
+- [x] Job TTL/expiration
+- [x] Queue pause/resume (`pause_queue()`, `resume_queue()`)
+- [x] `work_async()` for combined HTTP server + worker mode
+- [x] `work_jobs()` for dedicated worker processes
+- [x] Priority bands with independent thread pools
 - [ ] Worker heartbeats (detect crashed workers)
 - [ ] Visibility timeout (re-enqueue stale jobs after no heartbeat)
-- [ ] Rate limiting per job type (e.g., `rate: 100/minute`)
-- [ ] Concurrency limits per job type
-- [ ] Job TTL/expiration (`expires: 5m` — discard stale jobs)
 - [ ] Automatic pruning of completed/cancelled jobs
-- [ ] Weighted queue processing (prevent starvation of low-priority queues)
-- [ ] `Queue.work_async()` for combined HTTP server + worker mode
 
-### 10.3 Persistent Backends
+### 10.3 Persistent Backends ✅
 
-**Priority:** High — in-memory jobs are lost on restart.
-
-```ntnt
-import { Queue } from "std/jobs"
-
-// PostgreSQL backend (reliable, ACID, multi-worker)
-Queue.configure(map {
-    "backend": "postgres",
-    "postgres_url": env("DATABASE_URL")
-})
-
-// Redis/Valkey backend (high throughput, 10k+ jobs/sec)
-Queue.configure(map {
-    "backend": "redis",
-    "redis_url": env("REDIS_URL")
-})
-```
-
-- [ ] PostgreSQL backend with auto-migration (`ntnt_jobs` table)
-- [ ] Distributed locking via `SELECT FOR UPDATE SKIP LOCKED`
-- [ ] Redis/Valkey backend for high-throughput workloads
-- [ ] Feature flags to avoid bloating the binary (`jobs-postgres`, `jobs-redis`)
-- [ ] Separate worker processes for production: `Queue.work(map { "queues": ["emails", "payments"], "concurrency": 10 })`
+- [x] SQLite KV backend (default — reliable, zero-config)
+- [x] PostgreSQL backend (`ntnt_jobs` table, connection pooling via deadpool-postgres)
+- [x] Redis backend (Redis Streams with XADD/XREADGROUP consumer groups)
+- [x] Separate worker processes: `work_jobs()` with queue/band configuration
+- [ ] Distributed locking via `SELECT FOR UPDATE SKIP LOCKED` (PostgreSQL)
 
 ### 10.4 Composition (Chains, Workflows, Batches)
 
-**Priority:** Moderate — needed for multi-step business processes.
+**Batches: Complete ✅ (DD-052 Phases 1-4)**
 
-```ntnt
-// Sequential chain — each job receives the previous job's result
-Chain ProcessOrder {
-    ValidateOrder -> ReserveInventory -> ChargePayment -> SendConfirmation
-}
-ProcessOrder.start(map { "order_id": "123" })
+- [x] `batch(name, callbacks)` / `seal(handle)` — batch lifecycle
+- [x] `enqueue_into(batch_id, job_type, args)` — dynamic batch additions post-seal
+- [x] `batch_id()` — thread-local batch context in perform blocks
+- [x] `batch_status(handle)` — counter/state introspection
+- [x] Batch callbacks: `on_complete`, `on_success`, `on_death`
+- [x] Atomic counters (pending/succeeded/dead/cancelled/total)
+- [x] Closed-flag race protection, TTL expiry (30d seal, 24h complete)
+- [x] Unique jobs / deduplication (`unique: 3600` with SHA256 hash)
+- [x] `ntnt jobs batches` / `ntnt jobs batch <bid>` CLI
+- [x] Control socket: `batches` and `batch_status` commands
+- [x] Streaming events: `batch.created`, `batch.sealed`, `batch.complete`, `batch.succeeded`, `batch.death`
 
-// DAG workflow — fan-out and fan-in
-Workflow UserOnboarding {
-    CreateAccount -> SendWelcomeEmail
-    CreateAccount -> SetupBilling
-    [SendWelcomeEmail, SetupBilling] -> ActivateAccount
-}
-
-// Batch — parallel with completion callback
-let batch = Batch.create(map {
-    "on_complete": fn(results) { db.update_total(sum(results)) },
-    "on_failure": fn(errors) { alert("Batch failed") }
-})
-for chunk in data_chunks { batch.add(ProcessChunk, map { "chunk": chunk }) }
-batch.run()
-```
+**Chains & Workflows: Not Started**
 
 - [ ] `Chain` declaration syntax (sequential job pipelines)
 - [ ] `Workflow` declaration syntax (DAG dependencies with fan-out/fan-in)
-- [ ] `Batch.create()` / `batch.add()` / `batch.run()` API
-- [ ] Unique jobs / deduplication (`unique: args for 1h`)
-- [ ] Workflow status tracking: `Workflow.status(workflow_id)`
+- [ ] Workflow status tracking
 
 ### 10.5 WebSocket Support
 
@@ -1882,11 +1853,14 @@ Feature: Welcome Email Job
 
 - [ ] Job testing in `.intent` files (`job:` assertion type)
 - [ ] Mock support for job dependencies in IDD scenarios
-- [ ] `ntnt jobs status` — summary of all queues
-- [ ] `ntnt jobs list [--pending|--failed|--dead]` — filter jobs by status
-- [ ] `ntnt jobs inspect <job-id>` — full job details
-- [ ] `ntnt jobs retry <job-id>` — retry a failed/dead job
-- [ ] `ntnt jobs cancel <job-id>` — cancel a pending job
+- [x] `ntnt jobs status` — summary of all queues
+- [x] `ntnt jobs list [--status|--queue|--limit|--format]` — filter jobs
+- [x] `ntnt jobs inspect <job-id>` — full job details
+- [x] `ntnt jobs retry <job-id>` — retry a failed/dead job
+- [x] `ntnt jobs cancel <job-id>` — cancel a pending job
+- [x] `ntnt jobs clear --status=completed` — bulk delete
+- [x] `ntnt jobs batches` — list batches with counters
+- [x] `ntnt jobs batch <bid>` — batch detail view
 - [ ] `ntnt jobs simulate <JobName> --args='...'` — dry-run without side effects
 - [ ] `ntnt jobs replay <job-id>` — re-run with exact same inputs for debugging
 - [ ] `--format=json` for agent-consumable output on all commands
@@ -2104,9 +2078,11 @@ pub fn get_user(id: String) -> User {
 
 ---
 
-## Phase 13: Performance & Compilation
+## ~~Phase 13: Performance & Compilation~~ → Moved to Future Considerations
 
-**Goal:** Production-ready performance through progressive compilation strategies.
+**Status:** Deferred — current interpreter performance is sufficient for target use cases. Bytecode VM and native compilation moved to Future Considerations.
+
+~~**Goal:** Production-ready performance through progressive compilation strategies.~~
 
 ### Current Architecture
 
@@ -2336,13 +2312,16 @@ Native compilation requires re-implementing stdlib in the target:
 - [ ] Database drivers (PostgreSQL bindings)
 - [ ] Concurrency primitives (threads, channels)
 
-### 13.8 Advanced Concurrency
+### 13.8 Advanced Concurrency ✅
 
-Building on Phase 5's channel-based concurrency:
+Built in v0.4.5 (feat/concurrency-v2):
 
-- [ ] `spawn(fn)` / `join(handle)` - background task execution
-- [ ] `parallel([fn1, fn2, ...])` - run multiple functions in parallel
-- [ ] `select([ch1, ch2, ...])` - wait on multiple channels (Go-style)
+- [x] `spawn(fn)` → `TaskHandle`, `await_task(h)`, `try_await(h)`
+- [x] `channel()` → `[TxChannel, RxChannel]` — two-handle design
+- [x] `send(tx, val)`, `recv(rx)`, `recv_timeout(rx, ms)`, `try_recv(rx)`, `close(rx)`
+- [x] `select([rx_a, rx_b], timeout?)` — crossbeam-channel
+- [x] `schedule(interval, fn)` → `ScheduleHandle`, `after(delay, fn)` → `TaskHandle`
+- [x] `parallel([fn1, fn2, ...])`, `race([fn1, fn2, ...])`
 - [ ] Async HTTP requests (requires async runtime)
 
 **Deliverables:**
@@ -2649,19 +2628,19 @@ The HTTP server now uses Axum + Tokio for async request handling:
 
 ## Implementation Priority Matrix
 
-| Phase      | Focus                            | Business Value     | Effort     |
+| Phase      | Focus                            | Business Value     | Status     |
 | ---------- | -------------------------------- | ------------------ | ---------- |
 | 1-5 ✅     | Core Language + Web              | Foundation         | Complete   |
 | 6 ✅       | Intent-Driven Dev                | High               | Complete   |
-| **7**      | **Ergonomics & Documentation**   | **High (Up Next)** | **Medium** |
-| **8**      | **Intent System Maturity**       | **High**           | **Medium** |
-| **9**      | **Package Ecosystem**            | **Critical**       | **Medium** |
-| **10**     | **Jobs, WebSockets & Real-Time** | **High**           | **Medium** |
-| 11         | Testing Framework                | High               | Medium     |
-| 12         | Tooling & DX                     | Very High          | High       |
-| 13         | Performance                      | High               | Medium     |
-| 14         | AI Integration                   | **Differentiator** | Medium     |
-| 15         | Deployment                       | High               | Medium     |
+| 7 ✅       | Ergonomics & Documentation       | High               | ~95% done  |
+| **8**      | **Intent System Maturity**       | **High**           | **Up Next**|
+| ~~9~~      | ~~Package Ecosystem~~            | Deferred           | Future     |
+| 10 🟡     | Jobs ✅, WebSockets ❌           | High               | Partial    |
+| 11         | Testing Framework                | High               | Not Started|
+| 12         | Tooling & DX                     | Very High          | Not Started|
+| ~~13~~     | ~~Performance & Compilation~~    | Deferred           | Future     |
+| 14         | AI Integration                   | **Differentiator** | Not Started|
+| 15         | Deployment                       | High               | Not Started|
 
 ---
 
@@ -2932,4 +2911,4 @@ See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) and [PERFORMANCE_AUDIT.md](PERFORMANC
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: February 2026 (v0.3.14 — Security & Performance Audit)_
+_Last updated: April 2026 (v0.4.7 — Jobs complete, Phase 9/13 deferred)_
