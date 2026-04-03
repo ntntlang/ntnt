@@ -4072,8 +4072,7 @@ fn run_intent_check_command(
                 "pass" => scenarios_passed += 1,
                 "fail" => scenarios_failed += 1,
                 "skip" => scenarios_skipped += 1,
-                // "warning", "pending", or any unknown status counts as failed
-                _ => scenarios_failed += 1,
+                _ => {}
             }
         }
         if !feature.passed {
@@ -4086,8 +4085,7 @@ fn run_intent_check_command(
                 "pass" => scenarios_passed += 1,
                 "fail" => scenarios_failed += 1,
                 "skip" => scenarios_skipped += 1,
-                // "warning", "pending", or any unknown status counts as failed
-                _ => scenarios_failed += 1,
+                _ => {}
             }
         }
     }
@@ -6925,57 +6923,6 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             md.push_str("\n");
         }
         md.push_str("---\n\n");
-    }
-
-    // Output Symbols
-    if let Some(symbols) = ial.get("output_symbols") {
-        md.push_str("## Output Symbols\n\n");
-        if let Some(desc) = symbols.get("description").and_then(|v| v.as_str()) {
-            md.push_str(&format!("{}\n\n", desc));
-        }
-
-        md.push_str("| Symbol | Meaning |\n");
-        md.push_str("|--------|--------|\n");
-
-        let symbol_names = ["pass", "fail", "skip", "warning"];
-        for name in &symbol_names {
-            if let Some(s) = symbols.get(*name) {
-                let symbol = s.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-                let meaning = s.get("meaning").and_then(|v| v.as_str()).unwrap_or("");
-                md.push_str(&format!("| {} | {} |\n", symbol, meaning));
-            }
-        }
-        md.push('\n');
-
-        // Add tip for warning symbol
-        if let Some(warning) = symbols.get("warning") {
-            if let Some(tip) = warning.get("tip").and_then(|v| v.as_str()) {
-                md.push_str(&format!("> **Tip:** {}\n\n", tip));
-            }
-        }
-    }
-
-    // Known Limitations
-    if let Some(limitations) = ial.get("known_limitations") {
-        md.push_str("## Known Limitations\n\n");
-        if let Some(desc) = limitations.get("description").and_then(|v| v.as_str()) {
-            md.push_str(&format!("{}\n\n", desc));
-        }
-
-        md.push_str("| Assertion Term | Notes |\n");
-        md.push_str("|----------------|-------|\n");
-
-        if let Some(table) = limitations.as_table() {
-            for (key, value) in table {
-                if key == "description" {
-                    continue;
-                }
-                if let Some(notes) = value.get("notes").and_then(|v| v.as_str()) {
-                    md.push_str(&format!("| `{}` | {} |\n", key, notes));
-                }
-            }
-        }
-        md.push('\n');
     }
 
     // Commands

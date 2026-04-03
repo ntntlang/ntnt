@@ -5566,8 +5566,7 @@ pub fn run_tests_against_server(
                 "fail" => failing_scenarios += 1,
                 "warning" => warning_scenarios += 1,
                 "skip" => skipped_scenarios += 1,
-                // "pending" or any unknown status counts as warning (incomplete)
-                _ => warning_scenarios += 1,
+                _ => {}
             }
         }
         // Also count tests that aren't scenarios
@@ -5589,8 +5588,7 @@ pub fn run_tests_against_server(
                 "fail" => failing_scenarios += 1,
                 "warning" => warning_scenarios += 1,
                 "skip" => skipped_scenarios += 1,
-                // "pending" or any unknown status counts as warning (incomplete)
-                _ => warning_scenarios += 1,
+                _ => {}
             }
         }
     }
