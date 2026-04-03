@@ -6653,9 +6653,11 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             "http",
             "cli",
             "code_quality",
+            "sql",
             "read_file",
             "function_call",
             "property_check",
+            "invariant_check",
             "check",
         ];
         for prim in &prim_names {

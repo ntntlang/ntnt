@@ -215,6 +215,52 @@ fn home_handler(req) { return html("<h1>Welcome</h1>") }
 fn hash_password(pw) { ... }
 ```
 
+### Function Unit Testing (call: syntax)
+
+Test individual functions without an HTTP server. Add `call:` and `source:` keywords in the glossary:
+
+```intent
+## Glossary
+
+| Term | Means |
+|------|-------|
+| slugifying {text} | call: to_slug({text}), source: utils.tnt |
+| validating email {email} | call: is_valid_email({email}), source: validators.tnt |
+
+---
+
+Feature: URL Slugs
+  id: feature.slugs
+
+  Scenario: Basic slug conversion
+    When slugifying "Hello World"
+    → result is "hello-world"
+    → is lowercase
+    → does not contain " "
+
+  Scenario: Slug is deterministic
+    When slugifying "Hello World"
+    → is deterministic
+```
+
+**Required keywords:** `call:` (function with `{param}` placeholders) and `source:` (`.tnt` file containing the function).
+
+### Built-in Assertion Terms
+
+These work in `→` lines without needing glossary entries:
+
+| Category | Examples |
+|----------|---------|
+| **HTTP status** | `status: 200`, `status 2xx`, `status 4xx` |
+| **HTTP body** | `body contains {text}`, `body not contains {text}`, `body matches {pattern}`, `body is empty`, `response is valid JSON` |
+| **Headers** | `header {name} exists`, `header {name} equals {value}`, `content-type is json` |
+| **Function result** | `result is {expected}`, `is lowercase`, `is non-empty`, `starts with {prefix}`, `ends with {suffix}`, `does not contain {text}` |
+| **Properties** | `is deterministic`, `is idempotent` |
+| **Code quality** | `code passes lint`, `no syntax errors`, `no lint warnings` |
+| **Response time** | `response time < {ms}ms` |
+
+For the complete list, see [IAL_REFERENCE.md](IAL_REFERENCE.md).
+
 ### Commands
 
 ```bash
@@ -223,8 +269,6 @@ ntnt intent studio server.intent   # Live visual feedback (opens :3001)
 ntnt intent coverage server.tnt    # Feature coverage report
 ntnt intent init server.intent     # Generate scaffolding from intent
 ```
-
-For unit testing individual functions with IAL `call:` syntax, see [IAL_REFERENCE.md](IAL_REFERENCE.md).
 
 ---
 
