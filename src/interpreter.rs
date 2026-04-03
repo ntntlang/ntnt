@@ -3684,6 +3684,249 @@ impl Interpreter {
             },
         );
 
+        // @ntnt compile
+        // @signature compile(path: String) -> Map
+        // Pre-compile a template file for repeated rendering.
+        //
+        // Loads and caches a template file, returning a compiled template handle
+        // (a Map with a `_template_id` field). Use with `render()` for better
+        // performance when rendering the same template multiple times (e.g. in
+        // a loop or across requests). The template is automatically reloaded
+        // if the file changes (mtime-based cache invalidation).
+        // @param path Path to the template file (e.g. "views/layout.html")
+        // @returns A compiled template handle (Map with `_template_id` and `path`)
+        // @tags #template, #html, #performance
+        // @see_also render, template
+        // @since v0.3.0
+        // @example compile("views/layout.html") => { "_template_id": 1, "path": "views/layout.html" } ~ "Pre-compile a template"
+        self.environment.borrow_mut().define(
+            "compile".to_string(),
+            Value::NativeFunction {
+                name: "compile".to_string(),
+                arity: 1,
+                max_arity: 1,
+                requires: None,
+                func: |_args| {
+                    Err(IntentError::runtime_error(
+                        "compile() must be called directly, not stored in a variable".to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt render
+        // @signature render(compiled: Map, data: Map) -> String
+        // Render a pre-compiled template with data.
+        //
+        // Takes a compiled template handle (from `compile()`) and a data map,
+        // returns the rendered HTML string. Automatically reloads the template
+        // if the source file has changed since compilation.
+        //
+        // Typically used with `html()`:
+        // `let tpl = compile("views/page.html")`
+        // `return html(render(tpl, map { "title": "Home" }))`
+        // @param compiled A compiled template handle from compile()
+        // @param data A Map of variables available in the template
+        // @returns The rendered HTML string
+        // @tags #template, #html, #performance
+        // @see_also compile, template
+        // @since v0.3.0
+        // @example render(tpl, map { "title": "Home" }) => "<html>..." ~ "Render a compiled template"
+        self.environment.borrow_mut().define(
+            "render".to_string(),
+            Value::NativeFunction {
+                name: "render".to_string(),
+                arity: 2,
+                max_arity: 2,
+                requires: None,
+                func: |_args| {
+                    Err(IntentError::runtime_error(
+                        "render() must be called directly, not stored in a variable".to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt transform
+        // @signature transform(arr: Array, fn: Function) -> Array
+        // Apply a function to each element of an array, returning a new array.
+        //
+        // Similar to `map` in other languages. The function receives each element
+        // and returns the transformed value.
+        // @param arr The array to transform
+        // @param fn A function(element) -> transformed_value
+        // @returns A new array with each element transformed
+        // @tags #pure, #collections, #higher-order
+        // @see_also filter, reduce, find, flat_map
+        // @since v0.2.0
+        // @example transform([1, 2, 3], fn(x) { x * 2 }) => [2, 4, 6] ~ "Double each element"
+        // @example transform(["a", "b"], fn(s) { s + "!" }) => ["a!", "b!"] ~ "Transform strings"
+        self.environment.borrow_mut().define(
+            "transform".to_string(),
+            Value::NativeFunction {
+                name: "transform".to_string(),
+                arity: 2,
+                max_arity: 2,
+                requires: None,
+                func: |_args| {
+                    Err(IntentError::runtime_error(
+                        "transform() must be called directly, not stored in a variable"
+                            .to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt reduce
+        // @signature reduce(arr: Array, initial: Any, fn: Function) -> Any
+        // Reduce an array to a single value by applying a function cumulatively.
+        //
+        // Calls `fn(accumulator, element)` for each element, threading the result
+        // as the accumulator for the next call. Returns the final accumulator value.
+        // @param arr The array to reduce
+        // @param initial The initial accumulator value
+        // @param fn A function(accumulator, element) -> new_accumulator
+        // @returns The final accumulated value
+        // @tags #pure, #collections, #higher-order
+        // @see_also transform, filter, flat_map
+        // @since v0.2.0
+        // @example reduce([1, 2, 3], 0, fn(acc, x) { acc + x }) => 6 ~ "Sum an array"
+        // @example reduce(["a", "b", "c"], "", fn(acc, s) { acc + s }) => "abc" ~ "Concatenate strings"
+        self.environment.borrow_mut().define(
+            "reduce".to_string(),
+            Value::NativeFunction {
+                name: "reduce".to_string(),
+                arity: 3,
+                max_arity: 3,
+                requires: None,
+                func: |_args| {
+                    Err(IntentError::runtime_error(
+                        "reduce() must be called directly, not stored in a variable".to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt flat_map
+        // @signature flat_map(arr: Array, fn: Function) -> Array
+        // Apply a function to each element and flatten the results into a single array.
+        //
+        // Like `transform()` but when the function returns an array, its elements
+        // are flattened into the result rather than nested. Non-array return values
+        // are included as-is.
+        // @param arr The array to flat-map
+        // @param fn A function(element) -> value_or_array
+        // @returns A flattened array of results
+        // @tags #pure, #collections, #higher-order
+        // @see_also transform, filter, reduce
+        // @since v0.3.0
+        // @example flat_map([[1, 2], [3, 4]], fn(x) { x }) => [1, 2, 3, 4] ~ "Flatten nested arrays"
+        // @example flat_map([1, 2, 3], fn(x) { [x, x * 10] }) => [1, 10, 2, 20, 3, 30] ~ "Expand each element"
+        self.environment.borrow_mut().define(
+            "flat_map".to_string(),
+            Value::NativeFunction {
+                name: "flat_map".to_string(),
+                arity: 2,
+                max_arity: 2,
+                requires: None,
+                func: |_args| {
+                    Err(IntentError::runtime_error(
+                        "flat_map() must be called directly, not stored in a variable".to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt sort_desc
+        // @signature sort_desc(arr: Array, key_or_fn?: String | Function) -> Array
+        // Sort an array in descending order.
+        //
+        // Like `sort()` but in reverse order. Optionally takes a key string
+        // (for sorting maps by field) or a function (for custom sort keys).
+        // @param arr The array to sort
+        // @param key_or_fn Optional: field name string or function(element) -> sort_key
+        // @returns A new array sorted in descending order
+        // @tags #pure, #collections
+        // @see_also sort, sort_by
+        // @since v0.3.0
+        // @example sort_desc([3, 1, 2]) => [3, 2, 1] ~ "Sort numbers descending"
+        // @example sort_desc([map { "age": 30 }, map { "age": 20 }], "age") => [{ "age": 30 }, { "age": 20 }] ~ "Sort by field descending"
+        self.environment.borrow_mut().define(
+            "sort_desc".to_string(),
+            Value::NativeFunction {
+                name: "sort_desc".to_string(),
+                arity: 1,
+                max_arity: 2,
+                requires: None,
+                func: |_args| {
+                    Err(IntentError::runtime_error(
+                        "sort_desc() must be called directly, not stored in a variable".to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt use_middleware
+        // @signature use_middleware(handler: Function) -> Unit
+        // Register a middleware function for the HTTP server.
+        //
+        // Middleware runs before route handlers on every request. The function
+        // receives the request and can modify it, short-circuit with a response,
+        // or pass through by returning Unit. Middleware is called in registration
+        // order. Must be called before `listen()`.
+        // @param handler A function(req: Request) -> Response | Unit
+        // @returns Unit
+        // @tags #server, #http, #middleware
+        // @see_also get, post, listen, enable_cors
+        // @since v0.3.0
+        // @example use_middleware(fn(req) { print("Request: " + req.method + " " + req.path) }) ~ "Logging middleware"
+        self.environment.borrow_mut().define(
+            "use_middleware".to_string(),
+            Value::NativeFunction {
+                name: "use_middleware".to_string(),
+                arity: 1,
+                max_arity: 1,
+                requires: None,
+                func: |_args| {
+                    Err(IntentError::runtime_error(
+                        "use_middleware() must be called directly, not stored in a variable"
+                            .to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt on_shutdown
+        // @signature on_shutdown(handler: Function) -> Unit
+        // Register a function to run when the server shuts down.
+        //
+        // The handler is called during graceful shutdown (e.g. SIGINT/Ctrl+C).
+        // Use for cleanup: closing database connections, flushing logs, etc.
+        // Multiple handlers can be registered; they run in registration order.
+        // Must be called before `listen()`.
+        // @param handler A function() -> Unit
+        // @returns Unit
+        // @tags #server, #lifecycle
+        // @see_also listen, on_error
+        // @since v0.3.0
+        // @example on_shutdown(fn() { print("Server shutting down...") }) ~ "Register shutdown hook"
+        // @example on_shutdown(fn() { close(db) }) ~ "Close database on shutdown"
+        self.environment.borrow_mut().define(
+            "on_shutdown".to_string(),
+            Value::NativeFunction {
+                name: "on_shutdown".to_string(),
+                arity: 1,
+                max_arity: 1,
+                requires: None,
+                func: |_args| {
+                    Err(IntentError::runtime_error(
+                        "on_shutdown() must be called directly, not stored in a variable"
+                            .to_string(),
+                    ))
+                },
+            },
+        );
+
         // @ntnt enable_cors
         // @signature enable_cors(options?: Map) -> Unit
         // Enable CORS (Cross-Origin Resource Sharing) for the HTTP server.
