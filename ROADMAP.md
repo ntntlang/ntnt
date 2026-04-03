@@ -800,9 +800,11 @@ Error[E012]: Type mismatch in function call
 - [x] Actionable type hints for conditions (Int → "use != 0"), comparisons (Int vs String → "use int()/str()"), and let bindings (untyped map access)
 - [x] AST location tracking (`Statement::Located { line, col, stmt }`) — parser wraps every statement with source position, interpreter tracks `current_line`/`current_col`, runtime errors annotated with line numbers
 - [x] Runtime error line numbers via AST location tracking
-- [ ] "Did you mean?" suggestions for wrong imports (scan stdlib for similar names) — see 7.13
-- [ ] Contract violation messages show the contract expression and actual values
-- [ ] `ntnt lint --format=json` structured error output for agent consumption
+- [x] "Did you mean?" suggestions for wrong imports — both wrong module names and wrong export names get Levenshtein suggestions with available exports list
+- [x] Contract violation messages show the contract expression (`"Precondition failed in 'fn': b != 0"`)
+- [ ] Contract violation messages show actual values (e.g., "b was 0") — expression is shown but runtime values are not
+- [x] `ntnt lint --fix` outputs JSON patch suggestions for auto-fixes
+- [ ] `ntnt lint --format=json` explicit structured output mode for full agent consumption
 
 ### 7.7 Route Pattern Auto-Detection
 
