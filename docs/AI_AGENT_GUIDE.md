@@ -245,6 +245,34 @@ Feature: URL Slugs
 
 **Required keywords:** `call:` (function with `{param}` placeholders) and `source:` (`.tnt` file containing the function).
 
+### POST Requests in Intent Scenarios
+
+To test POST endpoints with a request body, define glossary terms using the `body` keyword:
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user creates a message with {body} | POST /messages body {body} |
+| a user visits {path} | GET {path} |
+
+---
+
+Feature: Messages API
+  id: feature.messages
+
+  Scenario: Create a message
+    When a user creates a message with {"text": "hello"}
+    → status: 201
+    → body has field "id"
+    → body has field "text"
+```
+
+The `body` keyword in the Means column separates the path from the JSON body: `POST /path body {json}`.
+
+> **Tip:** For endpoints that require a body, design your handler to parse `req.body` as JSON. The intent checker sends the body as `Content-Type: application/json`.
+
 ### Built-in Assertion Terms
 
 These work in `→` lines without needing glossary entries:
@@ -252,7 +280,7 @@ These work in `→` lines without needing glossary entries:
 | Category | Examples |
 |----------|---------|
 | **HTTP status** | `status: 200`, `status 2xx`, `status 4xx` |
-| **HTTP body** | `body contains {text}`, `body not contains {text}`, `body matches {pattern}`, `body is empty`, `response is valid JSON` |
+| **HTTP body** | `body contains {text}`, `body not contains {text}`, `body matches {pattern}`, `body is empty`, `body has field {name}`, `response is valid JSON` |
 | **Headers** | `header {name} exists`, `header {name} equals {value}`, `content-type is json` |
 | **Function result** | `result is {expected}`, `is lowercase`, `is non-empty`, `starts with {prefix}`, `ends with {suffix}`, `does not contain {text}` |
 | **Properties** | `is deterministic`, `is idempotent` |

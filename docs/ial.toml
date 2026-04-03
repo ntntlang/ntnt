@@ -531,6 +531,42 @@ tip = "If you see ⧗, check that all terms in your → outcome lines are define
 # KNOWN LIMITATIONS
 # =============================================================================
 
+# =============================================================================
+# POST REQUESTS
+# =============================================================================
+
+[post_requests]
+description = "Sending POST (and PUT/PATCH/DELETE) requests with bodies in intent scenarios"
+note = "Use the `body` keyword in glossary Means to separate the path from the JSON payload."
+example = """
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user creates a message with {body} | POST /messages body {body} |
+| a user updates message {id} with {body} | PUT /messages/{id} body {body} |
+| a user visits {path} | GET {path} |
+
+---
+
+Feature: Messages API
+  id: feature.messages
+
+  Scenario: Create a message
+    When a user creates a message with {"text": "hello"}
+    → status: 201
+    → body has field "id"
+
+  Scenario: List messages
+    When a user visits /messages
+    → status: 200
+    → response is valid JSON
+"""
+
+# =============================================================================
+# KNOWN LIMITATIONS
+# =============================================================================
+
 [known_limitations]
 description = "Known limitations and workarounds for assertion terms"
 

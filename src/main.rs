@@ -6955,6 +6955,20 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
         }
     }
 
+    // POST Requests
+    if let Some(post) = ial.get("post_requests") {
+        md.push_str("## POST Requests\n\n");
+        if let Some(desc) = post.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+        if let Some(note) = post.get("note").and_then(|v| v.as_str()) {
+            md.push_str(&format!("> {}\n\n", note));
+        }
+        if let Some(example) = post.get("example").and_then(|v| v.as_str()) {
+            md.push_str(&format!("```yaml\n{}\n```\n\n", example.trim()));
+        }
+    }
+
     // Known Limitations
     if let Some(limitations) = ial.get("known_limitations") {
         md.push_str("## Known Limitations\n\n");

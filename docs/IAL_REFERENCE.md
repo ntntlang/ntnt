@@ -419,6 +419,37 @@ Status icons in `ntnt intent check` output
 
 > **Tip:** If you see ⧗, check that all terms in your → outcome lines are defined in your Glossary or match a built-in assertion term. Unresolved outcomes often mean a term wasn't recognized — try rephrasing to use a built-in term like `body contains`, `body has field`, or `status 200`.
 
+## POST Requests
+
+Sending POST (and PUT/PATCH/DELETE) requests with bodies in intent scenarios
+
+> Use the `body` keyword in glossary Means to separate the path from the JSON payload.
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user creates a message with {body} | POST /messages body {body} |
+| a user updates message {id} with {body} | PUT /messages/{id} body {body} |
+| a user visits {path} | GET {path} |
+
+---
+
+Feature: Messages API
+  id: feature.messages
+
+  Scenario: Create a message
+    When a user creates a message with {"text": "hello"}
+    → status: 201
+    → body has field "id"
+
+  Scenario: List messages
+    When a user visits /messages
+    → status: 200
+    → response is valid JSON
+```
+
 ## Known Limitations
 
 Known limitations and workarounds for assertion terms
