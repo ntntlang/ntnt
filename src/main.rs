@@ -3778,7 +3778,28 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
 
     // Check source-level patterns that might indicate issues
     // These are heuristic checks on the raw source
+    let mut in_triple_quote = false;
     for (line_num, line) in source_lines.iter().enumerate() {
+        // Track whether we're inside a multi-line triple-quoted template string ("""...""")
+        // Lines inside triple-quoted strings should not trigger lint warnings
+        // for semicolons, CSS properties, JS syntax, etc.
+        let trimmed_for_tq = line.trim();
+        // Ignore comment lines — a """ inside a comment shouldn't toggle state
+        if !trimmed_for_tq.starts_with("//") {
+            let triple_count = line.matches("\"\"\"").count();
+            if triple_count >= 2 {
+                // Open+close on same line — skip lint for this line (may contain CSS/HTML)
+                continue;
+            } else if triple_count == 1 {
+                // Toggles multi-line template state
+                in_triple_quote = !in_triple_quote;
+                continue;
+            }
+        }
+        if in_triple_quote {
+            continue;
+        }
+
         // Check for JavaScript-style template strings
         if line.contains("${") && line.contains("`") {
             issues.push(json!({
@@ -4072,7 +4093,8 @@ fn run_intent_check_command(
                 "pass" => scenarios_passed += 1,
                 "fail" => scenarios_failed += 1,
                 "skip" => scenarios_skipped += 1,
-                _ => {}
+                // "warning", "pending", or any unknown status counts as failed
+                _ => scenarios_failed += 1,
             }
         }
         if !feature.passed {
@@ -4085,7 +4107,8 @@ fn run_intent_check_command(
                 "pass" => scenarios_passed += 1,
                 "fail" => scenarios_failed += 1,
                 "skip" => scenarios_skipped += 1,
-                _ => {}
+                // "warning", "pending", or any unknown status counts as failed
+                _ => scenarios_failed += 1,
             }
         }
     }
@@ -6923,6 +6946,71 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             md.push_str("\n");
         }
         md.push_str("---\n\n");
+    }
+
+    // Output Symbols
+    if let Some(symbols) = ial.get("output_symbols") {
+        md.push_str("## Output Symbols\n\n");
+        if let Some(desc) = symbols.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Symbol | Meaning |\n");
+        md.push_str("|--------|--------|\n");
+
+        let symbol_names = ["pass", "fail", "skip", "warning"];
+        for name in &symbol_names {
+            if let Some(s) = symbols.get(*name) {
+                let symbol = s.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+                let meaning = s.get("meaning").and_then(|v| v.as_str()).unwrap_or("");
+                md.push_str(&format!("| {} | {} |\n", symbol, meaning));
+            }
+        }
+        md.push('\n');
+
+        // Add tip for warning symbol
+        if let Some(warning) = symbols.get("warning") {
+            if let Some(tip) = warning.get("tip").and_then(|v| v.as_str()) {
+                md.push_str(&format!("> **Tip:** {}\n\n", tip));
+            }
+        }
+    }
+
+    // POST Requests
+    if let Some(post) = ial.get("post_requests") {
+        md.push_str("## POST Requests\n\n");
+        if let Some(desc) = post.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+        if let Some(note) = post.get("note").and_then(|v| v.as_str()) {
+            md.push_str(&format!("> {}\n\n", note));
+        }
+        if let Some(example) = post.get("example").and_then(|v| v.as_str()) {
+            md.push_str(&format!("```yaml\n{}\n```\n\n", example.trim()));
+        }
+    }
+
+    // Known Limitations
+    if let Some(limitations) = ial.get("known_limitations") {
+        md.push_str("## Known Limitations\n\n");
+        if let Some(desc) = limitations.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Assertion Term | Notes |\n");
+        md.push_str("|----------------|-------|\n");
+
+        if let Some(table) = limitations.as_table() {
+            for (key, value) in table {
+                if key == "description" {
+                    continue;
+                }
+                if let Some(notes) = value.get("notes").and_then(|v| v.as_str()) {
+                    md.push_str(&format!("| `{}` | {} |\n", key, notes));
+                }
+            }
+        }
+        md.push('\n');
     }
 
     // Commands

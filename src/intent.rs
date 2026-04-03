@@ -727,14 +727,27 @@ impl Glossary {
             expanded = expanded.replace(&format!("{{{}}}", name), value);
         }
 
-        // Parse the expanded meaning to extract method and path
-        // Expected format: "GET /path" or "POST /path"
+        // Parse the expanded meaning to extract method, path, and optional body
+        // Expected formats:
+        //   "GET /path"
+        //   "POST /path"
+        //   "POST /path body {\"key\":\"value\"}"
+        //   "POST /path body {key}"  (where {key} was substituted from glossary param)
         let parts: Vec<&str> = expanded.trim().splitn(2, ' ').collect();
         if parts.len() == 2 {
             let method = parts[0].to_uppercase();
-            let path = parts[1].to_string();
             if ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&method.as_str()) {
-                return Some((method, path, None));
+                // Check if the remainder contains " body " separator (case-insensitive)
+                // Uses ASCII-safe lowercase comparison — " body " is pure ASCII so
+                // byte indices from the lowercased string are valid on the original.
+                let remainder = parts[1];
+                if let Some(body_idx) = remainder.to_ascii_lowercase().find(" body ") {
+                    let path = remainder[..body_idx].trim().to_string();
+                    let body = remainder[body_idx + 6..].trim().to_string();
+                    let body = if body.is_empty() { None } else { Some(body) };
+                    return Some((method, path, body));
+                }
+                return Some((method, remainder.to_string(), None));
             }
         }
 
@@ -5566,7 +5579,10 @@ pub fn run_tests_against_server(
                 "fail" => failing_scenarios += 1,
                 "warning" => warning_scenarios += 1,
                 "skip" => skipped_scenarios += 1,
-                _ => {}
+                // "pending" or any unknown status counts as warning (incomplete).
+                // JSON output tracks warning_scenarios separately for granularity;
+                // the CLI summary counts these as failed for a clear pass/fail signal.
+                _ => warning_scenarios += 1,
             }
         }
         // Also count tests that aren't scenarios
@@ -5588,10 +5604,14 @@ pub fn run_tests_against_server(
                 "fail" => failing_scenarios += 1,
                 "warning" => warning_scenarios += 1,
                 "skip" => skipped_scenarios += 1,
-                _ => {}
+                // "pending" or any unknown status counts as warning (incomplete).
+                _ => warning_scenarios += 1,
             }
         }
     }
+
+    // Note: warning_scenarios are tracked separately in JSON for granularity,
+    // but the CLI (src/main.rs) counts them as failed for a clear pass/fail exit code.
 
     let pass_percentage = if total_assertions > 0 {
         (passed_assertions as f32 / total_assertions as f32) * 100.0

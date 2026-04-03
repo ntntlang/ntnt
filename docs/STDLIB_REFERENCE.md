@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.4.7
+> Last updated: v0.4.8
 
 ## Table of Contents
 
@@ -44,9 +44,11 @@ These functions are available everywhere without importing.
 | [`assert(condition: Bool)`](#assert) | Asserts a condition is truthy, throws ContractViolation if not. |
 | [`ceil(x: Int \| Float)`](#ceil) | Rounds up to the nearest integer. |
 | [`clamp(x: Int \| Float, min_val: Int \| Float, max_val: Int \| Float)`](#clamp) | Constrains a value between a minimum and maximum. |
+| [`compile(path: String)`](#compile) | Pre-compile a template file for repeated rendering. |
 | [`delete(pattern: String, handler: Function)`](#delete) | Registers a DELETE route handler. |
 | [`enable_cors(options?: Map)`](#enablecors) | Enable CORS (Cross-Origin Resource Sharing) for the HTTP server. |
 | [`enable_csp(options?: Map \| Bool)`](#enablecsp) | Enable Content-Security-Policy headers for the HTTP server. |
+| [`flat_map(arr: Array, fn: Function)`](#flatmap) | Apply a function to each element and flatten the results into a single array. |
 | [`float(x: Int \| Float \| String)`](#float) | Converts a value to float. |
 | [`floor(x: Int \| Float)`](#floor) | Rounds down to the nearest integer. |
 | [`get(pattern: String, handler: Function)`](#get) | Registers a GET route handler. |
@@ -57,9 +59,9 @@ These functions are available everywhere without importing.
 | [`is_float(val: Any)`](#isfloat) | Returns true if the value is a Float. |
 | [`is_int(val: Any)`](#isint) | Returns true if the value is an integer. |
 | [`is_map(val: Any)`](#ismap) | Returns true if the value is a Map (dictionary/object). |
-| [`is_none(opt: Option<Any>)`](#isnone) | Checks if an Option is None. |
+| [`is_none(val: Any)`](#isnone) | Checks if a value is None. |
 | [`is_ok(res: Result<Any, Any>)`](#isok) | Checks if a Result is Ok. |
-| [`is_some(opt: Option<Any>)`](#issome) | Checks if an Option is Some. |
+| [`is_some(val: Any)`](#issome) | Checks if a value is "present" (not None). |
 | [`is_string(val: Any)`](#isstring) | Returns true if the value is a String. |
 | [`jobs(directory: String)`](#jobs) | Auto-discover and register job definitions from .tnt files in a directory. |
 | [`len(x: String \| Array \| Map)`](#len) | Returns the length of a string, array, or map. |
@@ -68,21 +70,29 @@ These functions are available everywhere without importing.
 | [`max(a: Int \| Float, b: Int \| Float)`](#max) | Returns the larger of two numbers. |
 | [`min(a: Int \| Float, b: Int \| Float)`](#min) | Returns the smaller of two numbers. |
 | [`new_server()`](#newserver) | Resets the server, clearing all registered routes. |
+| [`on_shutdown(handler: Function)`](#onshutdown) | Register a function to run when the server shuts down. |
 | [`patch(pattern: String, handler: Function)`](#patch) | Registers a PATCH route handler. |
 | [`post(pattern: String, handler: Function)`](#post) | Registers a POST route handler. |
 | [`pow(base: Int \| Float, exp: Int \| Float)`](#pow) | Raises base to the power of exponent. |
 | [`print(value: Any)`](#print) | Prints values to stdout, one per line. |
 | [`push(arr: Array, item: Any)`](#push) | Appends an item to an array, returns a new array. |
 | [`put(pattern: String, handler: Function)`](#put) | Registers a PUT route handler. |
+| [`reduce(arr: Array, initial: Any, fn: Function)`](#reduce) | Reduce an array to a single value by applying a function cumulatively. |
+| [`render(compiled: Map, data: Map)`](#render) | Render a pre-compiled template with data. |
 | [`round(x: Int \| Float, decimals?: Int)`](#round) | Rounds to the nearest integer, or to N decimal places. |
+| [`serve_static(prefix: String, directory: String)`](#servestatic) | Serve static files from a directory under a URL prefix. |
 | [`sign(x: Int \| Float)`](#sign) | Returns the sign of a number: -1, 0, or 1. |
+| [`sort_desc(arr: Array, key_or_fn?: String \| Function)`](#sortdesc) | Sort an array in descending order. |
 | [`sqrt(x: Int \| Float)`](#sqrt) | Returns the square root of a number. |
 | [`str(x: Any)`](#str) | Converts any value to its string representation. |
+| [`template(path: String, data: Map)`](#template) | Load and render an external HTML template with data. |
+| [`transform(arr: Array, fn: Function)`](#transform) | Apply a function to each element of an array, returning a new array. |
 | [`trunc(x: Int \| Float)`](#trunc) | Truncates a number toward zero. |
 | [`type(x: Any)`](#type) | Returns the type name of a value as a string. |
 | [`typeof(x: Any)`](#typeof) | Returns the type name of a value as a string. |
 | [`unwrap(x: Option<Any> \| Result<Any, Any>)`](#unwrap) | Extracts the value from Some or Ok, panics on None or Err. |
 | [`unwrap_or(x: Option<Any> \| Result<Any, Any>, default: Any)`](#unwrapor) | Extracts the value from Some or Ok, returns default on None or Err. |
+| [`use_middleware(handler: Function)`](#usemiddleware) | Register a middleware function for the HTTP server. |
 
 #### `Err`
 
@@ -299,6 +309,34 @@ clamp(5, 0, 10)  // => 5  // Value within range
 
 ---
 
+#### `compile`
+
+```ntnt
+compile(path: String) -> Map
+```
+
+Pre-compile a template file for repeated rendering.
+
+Loads and caches a template file, returning a compiled template handle (a Map with a `_template_id` field). Use with `render()` for better performance when rendering the same template multiple times (e.g. in a loop or across requests). The template is automatically reloaded if the file changes (mtime-based cache invalidation).
+
+**Parameters:**
+
+- `path` — Path to the template file (e.g. "views/layout.html")
+
+**Returns:** A compiled template handle (Map with `_template_id` and `path`)
+
+**Examples:**
+
+```ntnt
+compile("views/layout.html")  // => { "_template_id": 1, "path": "views/layout.html" }  // Pre-compile a template
+```
+
+**See also:** `render`, `template`
+
+*Since v0.3.0*
+
+---
+
 #### `delete`
 
 ```ntnt
@@ -388,6 +426,36 @@ enable_csp(false)  // Disable CSP entirely
 **See also:** `enable_cors`, `listen`
 
 *Since v0.4.4*
+
+---
+
+#### `flat_map`
+
+```ntnt
+flat_map(arr: Array, fn: Function) -> Array
+```
+
+Apply a function to each element and flatten the results into a single array.
+
+Like `transform()` but when the function returns an array, its elements are flattened into the result rather than nested. Non-array return values are included as-is.
+
+**Parameters:**
+
+- `arr` — The array to flat-map
+- `fn` — A function(element) -> value_or_array
+
+**Returns:** A flattened array of results
+
+**Examples:**
+
+```ntnt
+flat_map([[1, 2], [3, 4]], fn(x) { x })  // => [1, 2, 3, 4]  // Flatten nested arrays
+flat_map([1, 2, 3], fn(x) { [x, x * 10] })  // => [1, 10, 2, 20, 3, 30]  // Expand each element
+```
+
+**See also:** `transform`, `filter`, `reduce`
+
+*Since v0.3.0*
 
 ---
 
@@ -697,29 +765,27 @@ is_map(None)  // => false  // None is not a map
 #### `is_none`
 
 ```ntnt
-is_none(opt: Option<Any>) -> Bool
+is_none(val: Any) -> Bool
 ```
 
-Checks if an Option is None.
+Checks if a value is None.
 
-Returns true if the Option is None, false if it contains a value.
+Returns true for Option::None, false for Option::Some and any non-Option value (Map, String, Int, etc.). This makes it safe to use after query_one() or any function that returns a value that might be None without wrapping in Option.
 
 **Parameters:**
 
-- `opt` — The Option to check
+- `val` — The value to check
 
-**Returns:** true if None, false if Some
+**Returns:** true if None, false otherwise
 
 **Examples:**
 
 ```ntnt
 is_none(None)  // => true  // None is none
 is_none(Some(42))  // => false  // Some is not none
+is_none("hello")  // => false  // Non-Option values are not none
+is_none(map { "a": 1 })  // => false  // Maps are not none
 ```
-
-**Errors:**
-
-- **TypeError**: is_none() requires an Option — *Fix: Pass an Option value*
 
 **See also:** `is_some`, `Some`, `unwrap`, `unwrap_or`
 
@@ -763,29 +829,27 @@ is_ok(Err("fail"))  // => false  // Err is not ok
 #### `is_some`
 
 ```ntnt
-is_some(opt: Option<Any>) -> Bool
+is_some(val: Any) -> Bool
 ```
 
-Checks if an Option is Some.
+Checks if a value is "present" (not None).
 
-Returns true if the Option contains a value, false if it is None.
+Returns true for Option::Some, and true for any non-Option value (Map, String, Int, etc.). Returns false only for Option::None. This makes it safe to use after query_one() or any function that returns a value that might be None.
 
 **Parameters:**
 
-- `opt` — The Option to check
+- `val` — The value to check
 
-**Returns:** true if Some, false if None
+**Returns:** true if the value is not None, false if None
 
 **Examples:**
 
 ```ntnt
 is_some(Some(42))  // => true  // Some is some
 is_some(None)  // => false  // None is not some
+is_some("hello")  // => true  // Non-Option values are considered present
+is_some(map { "a": 1 })  // => true  // Maps are considered present
 ```
-
-**Errors:**
-
-- **TypeError**: is_some() requires an Option — *Fix: Pass an Option value*
 
 **See also:** `is_none`, `Some`, `unwrap`, `unwrap_or`
 
@@ -1028,6 +1092,35 @@ new_server()  // => Unit  // Clear all routes and start fresh
 
 ---
 
+#### `on_shutdown`
+
+```ntnt
+on_shutdown(handler: Function) -> Unit
+```
+
+Register a function to run when the server shuts down.
+
+The handler is called during graceful shutdown (e.g. SIGINT/Ctrl+C). Use for cleanup: closing database connections, flushing logs, etc. Multiple handlers can be registered; they run in registration order. Must be called before `listen()`.
+
+**Parameters:**
+
+- `handler` — A function() -> Unit
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+on_shutdown(fn() { print("Server shutting down...") })  // Register shutdown hook
+on_shutdown(fn() { close(db) })  // Close database on shutdown
+```
+
+**See also:** `listen`, `on_error`
+
+*Since v0.3.0*
+
+---
+
 #### `patch`
 
 ```ntnt
@@ -1201,6 +1294,68 @@ put("/users/{id}", fn(req) { return json(map { "updated": true }) })  // => Unit
 
 ---
 
+#### `reduce`
+
+```ntnt
+reduce(arr: Array, initial: Any, fn: Function) -> Any
+```
+
+Reduce an array to a single value by applying a function cumulatively.
+
+Calls `fn(accumulator, element)` for each element, threading the result as the accumulator for the next call. Returns the final accumulator value.
+
+**Parameters:**
+
+- `arr` — The array to reduce
+- `initial` — The initial accumulator value
+- `fn` — A function(accumulator, element) -> new_accumulator
+
+**Returns:** The final accumulated value
+
+**Examples:**
+
+```ntnt
+reduce([1, 2, 3], 0, fn(acc, x) { acc + x })  // => 6  // Sum an array
+reduce(["a", "b", "c"], "", fn(acc, s) { acc + s })  // => "abc"  // Concatenate strings
+```
+
+**See also:** `transform`, `filter`, `flat_map`
+
+*Since v0.2.0*
+
+---
+
+#### `render`
+
+```ntnt
+render(compiled: Map, data: Map) -> String
+```
+
+Render a pre-compiled template with data.
+
+Takes a compiled template handle (from `compile()`) and a data map, returns the rendered HTML string. Automatically reloads the template if the source file has changed since compilation.
+
+Typically used with `html()`: `let tpl = compile("views/page.html")` `return html(render(tpl, map { "title": "Home" }))`
+
+**Parameters:**
+
+- `compiled` — A compiled template handle from compile()
+- `data` — A Map of variables available in the template
+
+**Returns:** The rendered HTML string
+
+**Examples:**
+
+```ntnt
+render(tpl, map { "title": "Home" })  // => "<html>..."  // Render a compiled template
+```
+
+**See also:** `compile`, `template`
+
+*Since v0.3.0*
+
+---
+
 #### `round`
 
 ```ntnt
@@ -1231,6 +1386,38 @@ round(3.14159, 2)  // => 3.14  // Round to 2 decimal places
 - **TypeError**: round() decimal places must be non-negative — *Fix: Use a non-negative integer for decimals*
 
 **See also:** `floor`, `ceil`, `trunc`
+
+*Since v0.1.0*
+
+---
+
+#### `serve_static`
+
+```ntnt
+serve_static(prefix: String, directory: String) -> Unit
+```
+
+Serve static files from a directory under a URL prefix.
+
+Maps a URL path prefix to a local directory. For example, `serve_static("/assets", "./public")` serves `./public/style.css` at `/assets/style.css`. Relative paths are resolved from the `.tnt` file's location. Must be called before `listen()`.
+
+Supports gzip compression and common MIME types automatically.
+
+**Parameters:**
+
+- `prefix` — The URL path prefix (e.g. "/assets", "/static")
+- `directory` — The local directory to serve files from (e.g. "./public")
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+serve_static("/assets", "./public")  // => Unit  // Serve ./public/ at /assets/
+serve_static("/css", "./styles")  // => Unit  // Serve CSS files
+```
+
+**See also:** `listen`, `get`, `template`
 
 *Since v0.1.0*
 
@@ -1267,6 +1454,36 @@ sign(7)  // => 1  // Positive number
 **See also:** `abs`, `clamp`
 
 *Since v0.1.0*
+
+---
+
+#### `sort_desc`
+
+```ntnt
+sort_desc(arr: Array, key_or_fn?: String | Function) -> Array
+```
+
+Sort an array in descending order.
+
+Like `sort()` but in reverse order. Optionally takes a key string (for sorting maps by field) or a function (for custom sort keys).
+
+**Parameters:**
+
+- `arr` — The array to sort
+- `key_or_fn` — Optional: field name string or function(element) -> sort_key
+
+**Returns:** A new array sorted in descending order
+
+**Examples:**
+
+```ntnt
+sort_desc([3, 1, 2])  // => [3, 2, 1]  // Sort numbers descending
+sort_desc([map { "age": 30 }, map { "age": 20 }], "age")  // => [{ "age": 30 }, { "age": 20 }]  // Sort by field descending
+```
+
+**See also:** `sort`, `sort_by`
+
+*Since v0.3.0*
 
 ---
 
@@ -1330,6 +1547,75 @@ str(true)  // => "true"  // Boolean to string
 **See also:** `int`, `float`, `type`
 
 *Since v0.1.0*
+
+---
+
+#### `template`
+
+```ntnt
+template(path: String, data: Map) -> String
+```
+
+Load and render an external HTML template with data.
+
+Loads a `.html` template file and renders it using Mustache-style syntax. Templates use `{{var}}` for escaped output, `{{{var}}}` for raw/unescaped output, `{{#key}}...{{/key}}` for sections (conditionals and loops), and `{{> partial}}` for including other templates.
+
+Template paths are relative to the `.tnt` file's location. Partials are resolved from the same directory as the parent template.
+
+Typically used with `html()` from `std/http/server`: `return html(template("views/home.html", map { "title": "Home" }))`
+
+**Parameters:**
+
+- `path` — Path to the template file (e.g. "views/home.html")
+- `data` — A Map of variables available in the template
+
+**Returns:** The rendered HTML string
+
+**Examples:**
+
+```ntnt
+template("views/home.html", map { "title": "Home" })  // => "<html>..."  // Render a template
+template("views/user.html", map { "name": "Alice", "posts": [...] })  // => "<html>..."  // Render with loop data
+```
+
+**Gotchas:**
+
+- Use {{var}} (double braces) for escaped output in templates — this is Mustache syntax, not NTNT string interpolation (#{var})
+- There is no escape syntax for literal {{ in templates. Workaround: pass the braces as a variable (e.g. map { "lb": "{{", "rb": "}}" }) and use {{lb}} in the template.
+
+**See also:** `serve_static`, `html`, `get`
+
+*Since v0.2.0*
+
+---
+
+#### `transform`
+
+```ntnt
+transform(arr: Array, fn: Function) -> Array
+```
+
+Apply a function to each element of an array, returning a new array.
+
+Similar to `map` in other languages. The function receives each element and returns the transformed value.
+
+**Parameters:**
+
+- `arr` — The array to transform
+- `fn` — A function(element) -> transformed_value
+
+**Returns:** A new array with each element transformed
+
+**Examples:**
+
+```ntnt
+transform([1, 2, 3], fn(x) { x * 2 })  // => [2, 4, 6]  // Double each element
+transform(["a", "b"], fn(s) { s + "!" })  // => ["a!", "b!"]  // Transform strings
+```
+
+**See also:** `filter`, `reduce`, `find`, `flat_map`
+
+*Since v0.2.0*
 
 ---
 
@@ -1492,6 +1778,34 @@ unwrap_or(Err("fail"), "fallback")  // => "fallback"  // Default returned for Er
 **See also:** `unwrap`, `is_some`, `is_ok`, `Some`, `Ok`
 
 *Since v0.1.0*
+
+---
+
+#### `use_middleware`
+
+```ntnt
+use_middleware(handler: Function) -> Unit
+```
+
+Register a middleware function for the HTTP server.
+
+Middleware runs before route handlers on every request. The function receives the request and can modify it, short-circuit with a response, or pass through by returning Unit. Middleware is called in registration order. Must be called before `listen()`.
+
+**Parameters:**
+
+- `handler` — A function(req: Request) -> Response | Unit
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+use_middleware(fn(req) { print("Request: " + req.method + " " + req.path) })  // Logging middleware
+```
+
+**See also:** `get`, `post`, `listen`, `enable_cors`
+
+*Since v0.3.0*
 
 ---
 
@@ -9039,6 +9353,7 @@ query_one(db, "SELECT * FROM users WHERE id = $1", [999])  // => Result::Ok(None
 **Gotchas:**
 
 - SQL NULL column values are returned as None, not Unit
+- After `otherwise`, the value is a Map (row found) or None (no match). Use `is_none(user)` or `user == None` to check for no match — both work.
 
 **See also:** `query`, `execute`, `connect`
 
@@ -9344,6 +9659,7 @@ query_one(db, "SELECT * FROM users WHERE id = ?", [999])  // => Result::Ok(None)
 **Gotchas:**
 
 - SQL NULL column values are returned as None, not Unit
+- After `otherwise`, the value is a Map (row found) or None (no match). Use `is_none(user)` or `user == None` to check for no match — both work.
 
 **See also:** `query`, `execute`, `connect`
 

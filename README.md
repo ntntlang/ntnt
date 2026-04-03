@@ -50,7 +50,7 @@ Make it look decent. Verify `ntnt intent check server.tnt` still passes.
 ```
 Migrate from SQLite to PostgreSQL. Create a Dockerfile and docker-compose.yml with the ntnt app
 and a postgres container. Use environment variables for the connection string. Verify
-`ntnt intent check server.tnt` still passes.
+`ntnt intent check server.tnt` still passes. Leave the app running when you're done.
 ```
 
 Five prompts. You've got a full-stack web app with a database, auth, templates, and Docker deployment. You didn't write any NTNT. Your agent did, and `ntnt intent check` proved it's correct at every step.

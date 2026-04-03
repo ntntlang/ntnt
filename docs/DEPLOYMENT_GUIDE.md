@@ -556,6 +556,58 @@ Hot-reload is disabled in production (`NTNT_ENV=production`).
 
 ---
 
+## Local Development with PostgreSQL
+
+When migrating from SQLite to PostgreSQL, the dev workflow changes: you need a running database before `ntnt run` works. The recommended pattern is to run **just the database** in Docker while running the app natively for hot-reload.
+
+### docker-compose.dev.yml
+
+```yaml
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+```
+
+### Makefile
+
+```makefile
+.PHONY: dev dev-db stop
+
+dev: dev-db  ## Start database and run app with hot-reload
+	DATABASE_URL=postgresql://app:dev@localhost/app ntnt run server.tnt
+
+dev-db:  ## Start just the database
+	docker compose -f docker-compose.dev.yml up -d db
+
+stop:  ## Stop the database
+	docker compose -f docker-compose.dev.yml down
+```
+
+### Usage
+
+```bash
+make dev          # Start Postgres + app (hot-reload enabled)
+# Ctrl+C to stop the app; database stays running
+make stop         # Stop the database when done
+```
+
+This preserves the zero-config feel of SQLite development while using PostgreSQL. The production `docker-compose.yml` runs everything in containers; the dev setup runs only the database in Docker.
+
+> **Tip:** When an agent migrates your app from SQLite to PostgreSQL, ask it to create a `Makefile` or dev script so you don't have to remember the startup sequence.
+
+---
+
 ## Troubleshooting
 
 ### Tunnel shows "Unhealthy"

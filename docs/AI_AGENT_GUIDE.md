@@ -245,6 +245,34 @@ Feature: URL Slugs
 
 **Required keywords:** `call:` (function with `{param}` placeholders) and `source:` (`.tnt` file containing the function).
 
+### POST Requests in Intent Scenarios
+
+To test POST endpoints with a request body, define glossary terms using the `body` keyword:
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user creates a message with {body} | POST /messages body {body} |
+| a user visits {path} | GET {path} |
+
+---
+
+Feature: Messages API
+  id: feature.messages
+
+  Scenario: Create a message
+    When a user creates a message with {"text": "hello"}
+    → status: 201
+    → body has field "id"
+    → body has field "text"
+```
+
+The `body` keyword in the Means column separates the path from the JSON body: `POST /path body {json}`.
+
+> **Tip:** For endpoints that require a body, design your handler to parse `req.body` as JSON. The intent checker sends the body as `Content-Type: application/json`.
+
 ### Built-in Assertion Terms
 
 These work in `→` lines without needing glossary entries:
@@ -252,7 +280,7 @@ These work in `→` lines without needing glossary entries:
 | Category | Examples |
 |----------|---------|
 | **HTTP status** | `status: 200`, `status 2xx`, `status 4xx` |
-| **HTTP body** | `body contains {text}`, `body not contains {text}`, `body matches {pattern}`, `body is empty`, `response is valid JSON` |
+| **HTTP body** | `body contains {text}`, `body not contains {text}`, `body matches {pattern}`, `body is empty`, `body has field {name}`, `response is valid JSON` |
 | **Headers** | `header {name} exists`, `header {name} equals {value}`, `content-type is json` |
 | **Function result** | `result is {expected}`, `is lowercase`, `is non-empty`, `starts with {prefix}`, `ends with {suffix}`, `does not contain {text}` |
 | **Properties** | `is deterministic`, `is idempotent` |
@@ -260,6 +288,20 @@ These work in `→` lines without needing glossary entries:
 | **Response time** | `response time < {ms}ms` |
 
 For the complete list, see [IAL_REFERENCE.md](IAL_REFERENCE.md).
+
+### Output Symbols
+
+| Symbol | Meaning |
+|--------|---------|
+| ✓ | Passed |
+| ✗ | Failed |
+| ⏭️ | Skipped (precondition not met) |
+| ⧗ | Warning/Pending — unresolved outcome terms or unresolvable scenario. Counts as failed in summary. Check that all `→` outcome terms are in your Glossary or match a built-in assertion term. |
+
+### Tips
+
+- Prefer `body has field "key"` or `content-type is json` over `response is valid JSON` for checking JSON responses — they're more reliable and specific.
+- If a scenario shows ⧗, an outcome term wasn't recognized. Rephrase using built-in terms like `body contains`, `status 200`, `body has field`.
 
 ### Commands
 
@@ -2334,6 +2376,141 @@ ntnt test server.tnt -v --get /api/status
 
 # Custom port
 ntnt test server.tnt --port 9090 --get /
+```
+
+---
+
+## Common Patterns
+
+Patterns agents will need frequently. Copy these — they work as-is.
+
+### Database: Check if Row Exists
+
+```ntnt
+import { connect, query_one } from "std/db/postgres"
+
+let db = unwrap(connect(get_env("DATABASE_URL")))
+
+// query_one returns Result<Map | None, String>
+// After `otherwise`, the value is Map (row found) or None (no match)
+let user = query_one(db, "SELECT * FROM users WHERE email = $1", [email]) otherwise {
+    return status(500, "Database error")
+}
+
+// Check for no match — use is_none() or == None
+if is_none(user) {
+    return status(404, "User not found")
+}
+
+// user is now a Map — access fields directly
+let name = user["name"]
+```
+
+### Sessions: Login with Cookies
+
+```ntnt
+import { html, json, redirect, parse_form, set_cookie, get_cookie, with_cookie } from "std/http/server"
+import { connect, query_one, execute } from "std/db/postgres"
+
+let db = unwrap(connect(get_env("DATABASE_URL")))
+
+fn login(req) {
+    let form = parse_form(req)
+    let user = query_one(db, "SELECT * FROM users WHERE username = $1", [form["username"]]) otherwise {
+        return status(500, "Database error")
+    }
+    if is_none(user) {
+        return html("<p>Invalid credentials</p>")
+    }
+    // Set session cookie and redirect
+    let resp = redirect("/dashboard")
+    return with_cookie(resp, "session", user["id"], map { "httpOnly": true, "path": "/" })
+}
+
+fn dashboard(req) {
+    let session_id = get_cookie(req, "session") ?? redirect("/login")
+    let user = query_one(db, "SELECT * FROM users WHERE id = $1", [session_id]) otherwise {
+        return redirect("/login")
+    }
+    if is_none(user) {
+        return redirect("/login")
+    }
+    return html(template("views/dashboard.html", map { "user": user }))
+}
+
+post("/login", login)
+get("/dashboard", dashboard)
+```
+
+### Parse JSON POST Body
+
+```ntnt
+import { json, parse_json } from "std/http/server"
+
+fn create_item(req) {
+    let data = parse_json(req) otherwise {
+        return status(400, "Invalid JSON: #{err}")
+    }
+    // data is a Map — access fields
+    let name = data["name"]
+    let price = data["price"]
+    return json(map { "created": true, "name": name }, 201)
+}
+
+post("/items", create_item)
+```
+
+### Templates + Static Files
+
+```ntnt
+import { html } from "std/http/server"
+
+// Serve CSS/JS/images from ./public/ at /assets/
+serve_static("/assets", "./public")
+
+fn home(req) {
+    // template() loads views/home.html and renders with data
+    // Templates use {{var}} for escaped output, {{{var}}} for raw HTML
+    return html(template("views/home.html", map {
+        "title": "Home",
+        "items": query(db, "SELECT * FROM items", [])
+    }))
+}
+
+get("/", home)
+listen(8080)
+```
+
+### Request Object Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `req.method` | String | HTTP method (GET, POST, etc.) |
+| `req.path` | String | Request path (e.g. "/users/42") |
+| `req.params` | Map | Route parameters (e.g. `req.params["id"]` for `/users/{id}`) |
+| `req.query_params` | Map | Query string parameters (e.g. `?page=2`) |
+| `req.headers` | Map | Request headers (lowercase keys) |
+| `req.body` | String | Raw request body |
+| `req.json` | Map \| None | Parsed JSON body (if Content-Type is JSON) |
+| `req.form` | Map \| None | Parsed form body (if Content-Type is form) |
+| `req.ip` | String | Client IP address |
+| `req.id` | String | Unique request ID |
+| `req.context` | Map | Middleware-injected context |
+
+### Response Helpers
+
+```ntnt
+import { html, json, redirect, status, text, with_cookie, with_header } from "std/http/server"
+
+html("<h1>Hello</h1>")             // 200 HTML
+html("<h1>Hello</h1>", 201)        // Custom status code
+json(map { "ok": true })           // 200 JSON
+json(map { "ok": true }, 201)      // Custom status code
+text("plain text")                 // 200 text/plain
+redirect("/login")                 // 302 redirect
+status(404, "Not found")           // Custom status + body
+with_cookie(resp, "k", "v", map { "httpOnly": true })  // Add cookie
+with_header(resp, "X-Custom", "value")                  // Add header
 ```
 
 ---
