@@ -3612,6 +3612,78 @@ impl Interpreter {
             },
         );
 
+        // @ntnt serve_static
+        // @signature serve_static(prefix: String, directory: String) -> Unit
+        // Serve static files from a directory under a URL prefix.
+        //
+        // Maps a URL path prefix to a local directory. For example,
+        // `serve_static("/assets", "./public")` serves `./public/style.css`
+        // at `/assets/style.css`. Relative paths are resolved from the
+        // `.tnt` file's location. Must be called before `listen()`.
+        //
+        // Supports gzip compression and common MIME types automatically.
+        // @param prefix The URL path prefix (e.g. "/assets", "/static")
+        // @param directory The local directory to serve files from (e.g. "./public")
+        // @returns Unit
+        // @tags #server, #http, #static
+        // @see_also listen, get, template
+        // @since v0.1.0
+        // @example serve_static("/assets", "./public") => Unit ~ "Serve ./public/ at /assets/"
+        // @example serve_static("/css", "./styles") => Unit ~ "Serve CSS files"
+        self.environment.borrow_mut().define(
+            "serve_static".to_string(),
+            Value::NativeFunction {
+                name: "serve_static".to_string(),
+                arity: 2,
+                max_arity: 2,
+                requires: None,
+                func: |_args| {
+                    Err(IntentError::runtime_error(
+                        "serve_static() must be called directly, not stored in a variable"
+                            .to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt template
+        // @signature template(path: String, data: Map) -> String
+        // Load and render an external HTML template with data.
+        //
+        // Loads a `.html` template file and renders it using Mustache-style
+        // syntax. Templates use `{{var}}` for escaped output, `{{{var}}}` for
+        // raw/unescaped output, `{{#key}}...{{/key}}` for sections (conditionals
+        // and loops), and `{{> partial}}` for including other templates.
+        //
+        // Template paths are relative to the `.tnt` file's location.
+        // Partials are resolved from the same directory as the parent template.
+        //
+        // Typically used with `html()` from `std/http/server`:
+        // `return html(template("views/home.html", map { "title": "Home" }))`
+        // @param path Path to the template file (e.g. "views/home.html")
+        // @param data A Map of variables available in the template
+        // @returns The rendered HTML string
+        // @tags #template, #html, #server
+        // @see_also serve_static, html, get
+        // @since v0.2.0
+        // @example template("views/home.html", map { "title": "Home" }) => "<html>..." ~ "Render a template"
+        // @example template("views/user.html", map { "name": "Alice", "posts": [...] }) => "<html>..." ~ "Render with loop data"
+        // @gotcha Use {{var}} (double braces) for escaped output in templates — this is Mustache syntax, not NTNT string interpolation (#{var})
+        self.environment.borrow_mut().define(
+            "template".to_string(),
+            Value::NativeFunction {
+                name: "template".to_string(),
+                arity: 2,
+                max_arity: 2,
+                requires: None,
+                func: |_args| {
+                    Err(IntentError::runtime_error(
+                        "template() must be called directly, not stored in a variable".to_string(),
+                    ))
+                },
+            },
+        );
+
         // @ntnt enable_cors
         // @signature enable_cors(options?: Map) -> Unit
         // Enable CORS (Cross-Origin Resource Sharing) for the HTTP server.

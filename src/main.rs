@@ -3778,7 +3778,24 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
 
     // Check source-level patterns that might indicate issues
     // These are heuristic checks on the raw source
+    let mut in_triple_quote = false;
     for (line_num, line) in source_lines.iter().enumerate() {
+        // Track whether we're inside a triple-quoted template string ("""...""")
+        // Lines inside triple-quoted strings should not trigger lint warnings
+        // for semicolons, CSS properties, JS syntax, etc.
+        let triple_count = line.matches("\"\"\"").count();
+        if triple_count > 0 {
+            if triple_count % 2 == 1 {
+                // Odd number of """ on this line toggles the state
+                in_triple_quote = !in_triple_quote;
+            }
+            // If we just entered a triple-quote, skip this line; if we just exited, skip too
+            continue;
+        }
+        if in_triple_quote {
+            continue;
+        }
+
         // Check for JavaScript-style template strings
         if line.contains("${") && line.contains("`") {
             issues.push(json!({

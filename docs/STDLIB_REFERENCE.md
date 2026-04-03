@@ -75,9 +75,11 @@ These functions are available everywhere without importing.
 | [`push(arr: Array, item: Any)`](#push) | Appends an item to an array, returns a new array. |
 | [`put(pattern: String, handler: Function)`](#put) | Registers a PUT route handler. |
 | [`round(x: Int \| Float, decimals?: Int)`](#round) | Rounds to the nearest integer, or to N decimal places. |
+| [`serve_static(prefix: String, directory: String)`](#servestatic) | Serve static files from a directory under a URL prefix. |
 | [`sign(x: Int \| Float)`](#sign) | Returns the sign of a number: -1, 0, or 1. |
 | [`sqrt(x: Int \| Float)`](#sqrt) | Returns the square root of a number. |
 | [`str(x: Any)`](#str) | Converts any value to its string representation. |
+| [`template(path: String, data: Map)`](#template) | Load and render an external HTML template with data. |
 | [`trunc(x: Int \| Float)`](#trunc) | Truncates a number toward zero. |
 | [`type(x: Any)`](#type) | Returns the type name of a value as a string. |
 | [`typeof(x: Any)`](#typeof) | Returns the type name of a value as a string. |
@@ -1232,6 +1234,38 @@ round(3.14159, 2)  // => 3.14  // Round to 2 decimal places
 
 ---
 
+#### `serve_static`
+
+```ntnt
+serve_static(prefix: String, directory: String) -> Unit
+```
+
+Serve static files from a directory under a URL prefix.
+
+Maps a URL path prefix to a local directory. For example, `serve_static("/assets", "./public")` serves `./public/style.css` at `/assets/style.css`. Relative paths are resolved from the `.tnt` file's location. Must be called before `listen()`.
+
+Supports gzip compression and common MIME types automatically.
+
+**Parameters:**
+
+- `prefix` — The URL path prefix (e.g. "/assets", "/static")
+- `directory` — The local directory to serve files from (e.g. "./public")
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+serve_static("/assets", "./public")  // => Unit  // Serve ./public/ at /assets/
+serve_static("/css", "./styles")  // => Unit  // Serve CSS files
+```
+
+**See also:** `listen`, `get`, `template`
+
+*Since v0.1.0*
+
+---
+
 #### `sign`
 
 ```ntnt
@@ -1326,6 +1360,44 @@ str(true)  // => "true"  // Boolean to string
 **See also:** `int`, `float`, `type`
 
 *Since v0.1.0*
+
+---
+
+#### `template`
+
+```ntnt
+template(path: String, data: Map) -> String
+```
+
+Load and render an external HTML template with data.
+
+Loads a `.html` template file and renders it using Mustache-style syntax. Templates use `{{var}}` for escaped output, `{{{var}}}` for raw/unescaped output, `{{#key}}...{{/key}}` for sections (conditionals and loops), and `{{> partial}}` for including other templates.
+
+Template paths are relative to the `.tnt` file's location. Partials are resolved from the same directory as the parent template.
+
+Typically used with `html()` from `std/http/server`: `return html(template("views/home.html", map { "title": "Home" }))`
+
+**Parameters:**
+
+- `path` — Path to the template file (e.g. "views/home.html")
+- `data` — A Map of variables available in the template
+
+**Returns:** The rendered HTML string
+
+**Examples:**
+
+```ntnt
+template("views/home.html", map { "title": "Home" })  // => "<html>..."  // Render a template
+template("views/user.html", map { "name": "Alice", "posts": [...] })  // => "<html>..."  // Render with loop data
+```
+
+**Gotchas:**
+
+- Use {{var}} (double braces) for escaped output in templates — this is Mustache syntax, not NTNT string interpolation (#{var})
+
+**See also:** `serve_static`, `html`, `get`
+
+*Since v0.2.0*
 
 ---
 
