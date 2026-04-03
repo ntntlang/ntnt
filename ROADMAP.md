@@ -2140,54 +2140,45 @@ reduce hallucinated imports by suggesting correct paths.
 
 **Goal:** Production deployment support.
 
-### 15.1 Build & Distribution
+### 15.1 Build & Distribution ✅
 
-- [ ] Single binary compilation
-- [ ] Cross-compilation support
-- [ ] Minimal Docker image generation
-- [ ] Build profiles (dev, release, test)
+- [x] Single binary compilation (Rust `cargo build --release`)
+- [x] Cross-compilation — CI builds for macOS (aarch64), Linux (x86_64), Windows (x86_64)
+- [x] Build profiles (`dev-release`, `release`)
+- [x] GitHub Release workflow — tag push triggers cross-platform builds + artifacts
+- [x] Install script (`install.sh`, `install.ps1`)
+- [ ] Minimal Docker image generation (users create Dockerfiles manually)
 
 ### 15.2 Configuration
 
-- [ ] Environment-based config
-- [ ] Config file support (TOML, JSON)
+- [x] Environment-based config (`get_env()`, `load_env()` for .env files)
+- [x] Config file support (`ntnt.toml` for lint settings)
 - [ ] Secrets management patterns
 - [ ] Validation with contracts
 
 ### 15.3 Observability
 
-- [ ] Structured logging (`std/log`)
+- [x] Structured logging (`std/log` — `log_debug`, `log_info`, `log_warn`, `log_error`, `set_log_level`)
+- [x] Request logger middleware (`request_logger()`)
 - [ ] Metrics collection (Prometheus format)
 - [ ] Distributed tracing (OpenTelemetry compatible)
-- [ ] Health check endpoints
+- [ ] Health check endpoint (trivial to add manually, not built-in)
 - [ ] Contract violation reporting
-
-```ntnt
-import { Logger, Metrics } from "std/observe"
-
-let log = Logger.new("api")
-let requests = Metrics.counter("http_requests_total")
-
-fn handle_request(req: Request) -> Response {
-    requests.inc({ path: req.path, method: req.method })
-    log.info("Handling request", { path: req.path })
-    // ...
-}
-```
 
 ### 15.4 Graceful Lifecycle
 
-- [ ] Signal handling (SIGTERM, SIGINT)
-- [ ] Connection draining
-- [ ] Shutdown hooks
+- [x] Signal handling — `ctrlc` handler in worker mode, `tokio::signal::ctrl_c` in async server
+- [x] Graceful shutdown — async server uses `with_graceful_shutdown`, workers drain via channel close
+- [ ] Connection draining (in-flight request completion)
+- [ ] Shutdown hooks (first-class API)
 - [ ] Startup/readiness probes
 
 **Deliverables:**
 
-- Binary compilation
-- Docker support
-- Observability stack
-- Graceful lifecycle management
+- ✅ Cross-platform binary distribution via GitHub Releases
+- ✅ Structured logging
+- ✅ Graceful shutdown on SIGTERM/SIGINT
+- Remaining: Prometheus metrics, OpenTelemetry, shutdown hooks
 
 ---
 
@@ -2361,36 +2352,27 @@ The HTTP server now uses Axum + Tokio for async request handling:
 - Decision records for human-agent accountability
 - Intent system is a tool agents genuinely rely on
 
-### M5: Extensible Language (End of Phase 9)
+### M5: Background Processing (End of Phase 10) ✅ PARTIAL
 
-- Package manifest (`ntnt.toml`)
-- Local and git dependencies
-- NTNT-native packages with `lib.tnt` entry points
-- Rust FFI for native extensions
-- Ecosystem can grow beyond stdlib
+- ✅ `job` language-level declarations with perform/on_failure
+- ✅ `std/jobs` with SQLite KV, PostgreSQL, and Redis backends
+- ✅ Resilience: retries, rate limiting, concurrency limits, dead letter queue, pause/resume
+- ✅ Batch system with dynamic adds, callbacks, TTL expiry
+- ✅ `ntnt jobs` CLI for monitoring and management
+- ❌ WebSocket and SSE support (not started)
 
-### M6: Real-Time & Background Processing (End of Phase 10)
-
-- `Job`, `Chain`, `Workflow` language-level declarations
-- `std/jobs` with in-memory, PostgreSQL, and Redis backends
-- Resilience: heartbeats, retries, dead letter queue, rate limiting
-- WebSocket and SSE support for real-time client communication
-- Job testing in `.intent` files
-- `ntnt jobs` CLI for monitoring and management
-
-### M7: Developer Ready (End of Phase 12)
+### M6: Developer Ready (End of Phase 12)
 
 - Full IDE support (LSP)
-- Package registry and publishing
 - Human approval workflows
 - Comprehensive testing framework (unit + IDD)
 
-### M8: Production Ready / 1.0 (End of Phase 15)
+### M7: Production Ready / 1.0 (End of Phase 15)
 
-- Performance optimized (bytecode VM, native compilation)
-- AI integration complete (structured edits, agent SDK)
-- Deployment tooling
-- Observability
+- ✅ Cross-platform distribution
+- ✅ Structured logging + graceful shutdown
+- AI integration (structured edits, agent SDK)
+- Metrics + tracing (Prometheus, OpenTelemetry)
 
 ---
 
