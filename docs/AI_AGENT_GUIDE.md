@@ -2380,6 +2380,141 @@ ntnt test server.tnt --port 9090 --get /
 
 ---
 
+## Common Patterns
+
+Patterns agents will need frequently. Copy these — they work as-is.
+
+### Database: Check if Row Exists
+
+```ntnt
+import { connect, query_one } from "std/db/postgres"
+
+let db = unwrap(connect(get_env("DATABASE_URL")))
+
+// query_one returns Result<Map | None, String>
+// After `otherwise`, the value is Map (row found) or None (no match)
+let user = query_one(db, "SELECT * FROM users WHERE email = $1", [email]) otherwise {
+    return status(500, "Database error")
+}
+
+// Check for no match — use is_none() or == None
+if is_none(user) {
+    return status(404, "User not found")
+}
+
+// user is now a Map — access fields directly
+let name = user["name"]
+```
+
+### Sessions: Login with Cookies
+
+```ntnt
+import { html, json, redirect, parse_form, set_cookie, get_cookie, with_cookie } from "std/http/server"
+import { connect, query_one, execute } from "std/db/postgres"
+
+let db = unwrap(connect(get_env("DATABASE_URL")))
+
+fn login(req) {
+    let form = parse_form(req)
+    let user = query_one(db, "SELECT * FROM users WHERE username = $1", [form["username"]]) otherwise {
+        return status(500, "Database error")
+    }
+    if is_none(user) {
+        return html("<p>Invalid credentials</p>")
+    }
+    // Set session cookie and redirect
+    let resp = redirect("/dashboard")
+    return with_cookie(resp, "session", user["id"], map { "httpOnly": true, "path": "/" })
+}
+
+fn dashboard(req) {
+    let session_id = get_cookie(req, "session") ?? redirect("/login")
+    let user = query_one(db, "SELECT * FROM users WHERE id = $1", [session_id]) otherwise {
+        return redirect("/login")
+    }
+    if is_none(user) {
+        return redirect("/login")
+    }
+    return html(template("views/dashboard.html", map { "user": user }))
+}
+
+post("/login", login)
+get("/dashboard", dashboard)
+```
+
+### Parse JSON POST Body
+
+```ntnt
+import { json, parse_json } from "std/http/server"
+
+fn create_item(req) {
+    let data = parse_json(req) otherwise {
+        return status(400, "Invalid JSON: #{err}")
+    }
+    // data is a Map — access fields
+    let name = data["name"]
+    let price = data["price"]
+    return json(map { "created": true, "name": name }, 201)
+}
+
+post("/items", create_item)
+```
+
+### Templates + Static Files
+
+```ntnt
+import { html } from "std/http/server"
+
+// Serve CSS/JS/images from ./public/ at /assets/
+serve_static("/assets", "./public")
+
+fn home(req) {
+    // template() loads views/home.html and renders with data
+    // Templates use {{var}} for escaped output, {{{var}}} for raw HTML
+    return html(template("views/home.html", map {
+        "title": "Home",
+        "items": query(db, "SELECT * FROM items", [])
+    }))
+}
+
+get("/", home)
+listen(8080)
+```
+
+### Request Object Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `req.method` | String | HTTP method (GET, POST, etc.) |
+| `req.path` | String | Request path (e.g. "/users/42") |
+| `req.params` | Map | Route parameters (e.g. `req.params["id"]` for `/users/{id}`) |
+| `req.query_params` | Map | Query string parameters (e.g. `?page=2`) |
+| `req.headers` | Map | Request headers (lowercase keys) |
+| `req.body` | String | Raw request body |
+| `req.json` | Map \| None | Parsed JSON body (if Content-Type is JSON) |
+| `req.form` | Map \| None | Parsed form body (if Content-Type is form) |
+| `req.ip` | String | Client IP address |
+| `req.id` | String | Unique request ID |
+| `req.context` | Map | Middleware-injected context |
+
+### Response Helpers
+
+```ntnt
+import { html, json, redirect, status, text, with_cookie, with_header } from "std/http/server"
+
+html("<h1>Hello</h1>")             // 200 HTML
+html("<h1>Hello</h1>", 201)        // Custom status code
+json(map { "ok": true })           // 200 JSON
+json(map { "ok": true }, 201)      // Custom status code
+text("plain text")                 // 200 text/plain
+redirect("/login")                 // 302 redirect
+status(404, "Not found")           // Custom status + body
+with_cookie(resp, "k", "v", map { "httpOnly": true })  // Add cookie
+with_header(resp, "X-Custom", "value")                  // Add header
+```
+
+---
+
 ## Quick Reference Tables
 
 ### Global Builtins (No Import)

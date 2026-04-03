@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.4.7
+> Last updated: v0.4.8
 
 ## Table of Contents
 
@@ -9353,6 +9353,7 @@ query_one(db, "SELECT * FROM users WHERE id = $1", [999])  // => Result::Ok(None
 **Gotchas:**
 
 - SQL NULL column values are returned as None, not Unit
+- After `otherwise`, the value is a Map (row found) or None (no match). Use `is_none(user)` or `user == None` to check for no match — both work.
 
 **See also:** `query`, `execute`, `connect`
 
@@ -9658,6 +9659,7 @@ query_one(db, "SELECT * FROM users WHERE id = ?", [999])  // => Result::Ok(None)
 **Gotchas:**
 
 - SQL NULL column values are returned as None, not Unit
+- After `otherwise`, the value is a Map (row found) or None (no match). Use `is_none(user)` or `user == None` to check for no match — both work.
 
 **See also:** `query`, `execute`, `connect`
 

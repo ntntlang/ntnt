@@ -353,6 +353,7 @@ pub fn init() -> HashMap<String, Value> {
     // @example query_one(db, "SELECT * FROM users WHERE id = ?", [1]) => Result::Ok({...}) ~ "Fetch single row"
     // @example query_one(db, "SELECT * FROM users WHERE id = ?", [999]) => Result::Ok(None) ~ "No matching row"
     // @gotcha SQL NULL column values are returned as None, not Unit
+    // @gotcha After `otherwise`, the value is a Map (row found) or None (no match). Use `is_none(user)` or `user == None` to check for no match — both work.
     // @error TypeError ~ "query_one() requires (connection, sql_string, params_array)" fix: "Pass (connection, sql_string, params_array)"
     // @error RuntimeError ~ "Query preparation failed: ..." fix: "Check SQL syntax and table/column names"
     // @error RuntimeError ~ "Failed to lock connection: ..." fix: "Ensure connection is not used concurrently in conflicting ways"
