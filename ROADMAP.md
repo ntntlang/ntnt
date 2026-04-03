@@ -798,8 +798,8 @@ Error[E012]: Type mismatch in function call
 - [x] Type checker forward-scanning cursor (`find_line_near`) — fixes line number accuracy for all 26 diagnostic sites without AST changes
 - [x] Expression-aware search hints (`expr_search_hint`) — uses AST structure to build better search needles for line lookup
 - [x] Actionable type hints for conditions (Int → "use != 0"), comparisons (Int vs String → "use int()/str()"), and let bindings (untyped map access)
-- [ ] Full AST span tracking on all nodes (line, column, span) — the proper fix; would eliminate heuristic line search entirely and enable exact column-level diagnostics. Requires adding a `Span { line, col, offset, len }` to every AST node, propagating spans through the parser, and updating the type checker to read spans directly instead of searching source text.
-- [ ] Runtime error line numbers via AST span tracking — deferred, depends on full span tracking above
+- [x] AST location tracking (`Statement::Located { line, col, stmt }`) — parser wraps every statement with source position, interpreter tracks `current_line`/`current_col`, runtime errors annotated with line numbers
+- [x] Runtime error line numbers via AST location tracking
 - [ ] "Did you mean?" suggestions for wrong imports (scan stdlib for similar names) — see 7.13
 - [ ] Contract violation messages show the contract expression and actual values
 - [ ] `ntnt lint --format=json` structured error output for agent consumption
