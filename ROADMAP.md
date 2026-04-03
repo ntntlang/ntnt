@@ -1001,17 +1001,17 @@ ntnt docs --generate                  # Markdown + JSON output
 ntnt docs --update-agent-docs         # Regenerate auto-sections in AI_AGENT_GUIDE.md
 ```
 
-- [x] `ntnt docs [query]` — search and display function docs from embedded data
+- [x] `ntnt docs [query]` — search and display function docs from embedded data (full-text search across all modules)
+- [x] `ntnt docs std/module` — list all functions in a module with signatures
 - [x] `ntnt docs --generate` — generate markdown reference docs + AI agent guide sync
+- [x] `ntnt docs --json` — JSON output for tooling (full structured data including examples, params, see_also)
+- [x] `ntnt docs --validate` — documentation coverage report (also enforced at compile time via build.rs)
 - [x] REPL integration: `:doc` command
-- [ ] `ntnt docs --examples` — show just examples for a function
-- [ ] `ntnt docs --search` — full-text search across all docs
-- [ ] `ntnt docs --related` — cross-reference via `@see_also`
-- [ ] `ntnt docs --json` — JSON output for tooling
+- [ ] `ntnt docs --examples` — show just examples for a function (data available in --json, needs dedicated flag)
+- [ ] `ntnt docs --related` — cross-reference via `@see_also` (data in --json, needs dedicated flag)
 - [ ] `ntnt docs --ai-context` — full dump for AI session start
-- [ ] `ntnt docs --coverage` — documentation completeness report
 - [ ] `ntnt docs --test` — execute all doc examples (doctests, see below)
-- [ ] `ntnt docs --orphans` — detect orphaned doc blocks
+- [ ] `ntnt docs --orphans` — detect orphaned doc blocks (build.rs catches at compile time, needs CLI)
 - [ ] `ntnt docs --diff` — version diffing between releases
 
 #### Phase 3.5: Doctests (Execute Documentation Examples)
