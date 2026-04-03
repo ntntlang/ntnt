@@ -738,15 +738,12 @@ impl Glossary {
             let method = parts[0].to_uppercase();
             if ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&method.as_str()) {
                 // Check if the remainder contains " body " separator (case-insensitive)
+                // Uses ASCII-safe lowercase comparison — " body " is pure ASCII so
+                // byte indices from the lowercased string are valid on the original.
                 let remainder = parts[1];
-                let body_re = regex::RegexBuilder::new(r" body ")
-                    .case_insensitive(true)
-                    .build()
-                    .ok();
-                let body_match = body_re.as_ref().and_then(|re| re.find(remainder));
-                if let Some(m) = body_match {
-                    let path = remainder[..m.start()].trim().to_string();
-                    let body = remainder[m.end()..].trim().to_string();
+                if let Some(body_idx) = remainder.to_ascii_lowercase().find(" body ") {
+                    let path = remainder[..body_idx].trim().to_string();
+                    let body = remainder[body_idx + 6..].trim().to_string();
                     let body = if body.is_empty() { None } else { Some(body) };
                     return Some((method, path, body));
                 }

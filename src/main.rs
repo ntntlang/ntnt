@@ -3783,15 +3783,17 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
         // Track whether we're inside a multi-line triple-quoted template string ("""...""")
         // Lines inside triple-quoted strings should not trigger lint warnings
         // for semicolons, CSS properties, JS syntax, etc.
-        let triple_count = line.matches("\"\"\"").count();
-        if triple_count > 0 {
+        let trimmed_for_tq = line.trim();
+        // Ignore comment lines — a """ inside a comment shouldn't toggle state
+        if !trimmed_for_tq.starts_with("//") {
+            let triple_count = line.matches("\"\"\"").count();
             if triple_count >= 2 {
-                // Two or more """ on the same line (open+close) — single-line template,
-                // don't skip this line and don't change state
-            } else {
-                // Exactly one """ — toggles multi-line template state
+                // Open+close on same line — skip lint for this line (may contain CSS/HTML)
+                continue;
+            } else if triple_count == 1 {
+                // Toggles multi-line template state
                 in_triple_quote = !in_triple_quote;
-                continue; // Skip the opening/closing line itself
+                continue;
             }
         }
         if in_triple_quote {
