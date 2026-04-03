@@ -7992,11 +7992,16 @@ fn learn_cursor() -> anyhow::Result<()> {
     );
     println!();
 
-    let content = format!("{}\n{}\n", learn_version_header("cursor"), CRITICAL_RULES,);
+    let content = format!(
+        "{}\n{}\n\n---\n\n# Full Language Reference\n\n{}\n",
+        learn_version_header("cursor"),
+        CRITICAL_RULES,
+        FULL_GUIDE,
+    );
     let wrote = write_learn_file(".cursorrules", &content)?;
     if wrote {
         println!(
-            "  {} Created {} (critical syntax rules)",
+            "  {} Created {} (critical rules + full language reference)",
             "✓".green(),
             ".cursorrules".cyan()
         );
@@ -8028,11 +8033,16 @@ fn learn_codex() -> anyhow::Result<()> {
     );
     println!();
 
-    let content = format!("{}\n{}\n", learn_version_header("codex"), CRITICAL_RULES,);
+    let content = format!(
+        "{}\n{}\n\n---\n\n# Full Language Reference\n\n{}\n",
+        learn_version_header("codex"),
+        CRITICAL_RULES,
+        FULL_GUIDE,
+    );
     let wrote = write_learn_file("AGENTS.md", &content)?;
     if wrote {
         println!(
-            "  {} Created {} (critical syntax rules)",
+            "  {} Created {} (critical rules + full language reference)",
             "✓".green(),
             "AGENTS.md".cyan()
         );
@@ -8067,17 +8077,19 @@ fn learn_copilot() -> anyhow::Result<()> {
     let path = ".github/copilot-instructions.md";
     let p = std::path::Path::new(path);
 
+    let ntnt_content = format!(
+        "{}\n{}\n\n---\n\n# Full Language Reference\n\n{}\n",
+        learn_version_header("copilot"),
+        CRITICAL_RULES,
+        FULL_GUIDE,
+    );
+
     let content = if p.exists() {
         let existing = std::fs::read_to_string(p)?;
         if let Some(pos) = existing.find(LEARN_VERSION_PREFIX) {
             // Replace from the ntnt section onwards, preserve user content above
             let prefix = &existing[..pos];
-            format!(
-                "{}{}\n{}\n",
-                prefix,
-                learn_version_header("copilot"),
-                CRITICAL_RULES,
-            )
+            format!("{}{}", prefix, ntnt_content)
         } else {
             // Append ntnt section to existing file
             let separator = if existing.ends_with('\n') {
@@ -8085,22 +8097,16 @@ fn learn_copilot() -> anyhow::Result<()> {
             } else {
                 "\n\n"
             };
-            format!(
-                "{}{}{}\n{}\n",
-                existing,
-                separator,
-                learn_version_header("copilot"),
-                CRITICAL_RULES,
-            )
+            format!("{}{}{}", existing, separator, ntnt_content)
         }
     } else {
-        format!("{}\n{}\n", learn_version_header("copilot"), CRITICAL_RULES,)
+        ntnt_content
     };
 
     let wrote = write_learn_file(path, &content)?;
     if wrote {
         println!(
-            "  {} Created {} (critical syntax rules)",
+            "  {} Created {} (critical rules + full language reference)",
             "✓".green(),
             path.cyan()
         );

@@ -2227,6 +2227,94 @@ let safe_html = to_html_safe("<script>alert('xss')</script> **bold**")
 
 ---
 
+## Cryptography (`std/crypto`)
+
+```ntnt
+import { sha256, uuid, hash_password, verify_password } from "std/crypto"
+import { aes_encrypt, aes_decrypt, aes_generate_key } from "std/crypto"
+import { base64_encode, base64_decode, hmac_sha256 } from "std/crypto"
+import { argon2_hash, argon2_verify } from "std/crypto"
+
+let hash = sha256("data")                          // SHA-256 hex string
+let id = uuid()                                     // Random UUID v4
+let pw_hash = hash_password("secret", 12)           // bcrypt (cost 12)
+let valid = verify_password("secret", pw_hash)      // true
+
+let key = aes_generate_key()                        // 256-bit AES key (hex)
+let encrypted = aes_encrypt("plaintext", key)?      // AES-256-GCM
+let decrypted = aes_decrypt(encrypted, key)?        // "plaintext"
+
+let encoded = base64_encode("hello")                // "aGVsbG8="
+let decoded = base64_decode(encoded)?               // "hello"
+let sig = hmac_sha256("message", "secret-key")      // HMAC signature
+```
+
+---
+
+## File System (`std/fs`)
+
+```ntnt
+import { read_file, write_file, append_file, exists, is_dir, is_file } from "std/fs"
+import { list_dir, create_dir, remove, copy, file_size, file_stat } from "std/fs"
+
+let content = read_file("config.json")?
+write_file("output.txt", "hello")?
+append_file("log.txt", "new entry\n")?
+
+if exists("data/") && is_dir("data/") {
+    let files = list_dir("data/")?
+    for f in files { print(f) }
+}
+
+create_dir("uploads")?
+copy("a.txt", "b.txt")?
+let size = file_size("data.db")?
+```
+
+---
+
+## Math (`std/math`)
+
+Built-in: `abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `clamp`
+
+```ntnt
+import { sin, cos, tan, asin, acos, atan, atan2, log, log2, log10, exp, cbrt } from "std/math"
+
+let x = sin(3.14159 / 2)   // ~1.0
+let y = log(100)            // natural log
+let z = atan2(1, 1)         // π/4
+```
+
+`round(value, decimals?)` — round to N decimal places: `round(3.14159, 2)` → `3.14`
+
+---
+
+## Time (`std/time`)
+
+```ntnt
+import { now, now_millis, format, parse_datetime, diff } from "std/time"
+import { add_days, add_hours, add_months, to_timezone } from "std/time"
+import { year, month, day, hour, minute, weekday, month_name, day_name } from "std/time"
+
+let ts = now()                                      // Unix timestamp (seconds)
+let formatted = format(ts, "%Y-%m-%d %H:%M:%S")    // "2026-04-02 18:30:00"
+let parsed = parse_datetime("2026-04-02", "%Y-%m-%d")?  // Unix timestamp
+
+let tomorrow = add_days(ts, 1)
+let next_month = add_months(ts, 1)
+let hours_diff = diff(start, end, "hours")
+
+let mountain = to_timezone(ts, "America/Denver")
+let wd = weekday(ts)                                // 0=Mon ... 6=Sun
+let name = day_name(ts)                             // "Wednesday"
+```
+
+---
+
+> **Complete function listings:** For every function signature, parameter, and example across all 21 modules, see [STDLIB_REFERENCE.md](STDLIB_REFERENCE.md) or run `ntnt docs <module>` (e.g., `ntnt docs std/time`).
+
+---
+
 ## Testing with `ntnt test`
 
 Test HTTP servers directly from the command line — starts the server, makes requests, prints responses, then shuts down:
