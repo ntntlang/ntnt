@@ -1581,6 +1581,7 @@ template("views/user.html", map { "name": "Alice", "posts": [...] })  // => "<ht
 **Gotchas:**
 
 - Use {{var}} (double braces) for escaped output in templates — this is Mustache syntax, not NTNT string interpolation (#{var})
+- There is no escape syntax for literal {{ in templates. Workaround: pass the braces as a variable (e.g. map { "lb": "{{", "rb": "}}" }) and use {{lb}} in the template.
 
 **See also:** `serve_static`, `html`, `get`
 

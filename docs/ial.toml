@@ -528,10 +528,6 @@ meaning = "Warning/Pending — scenario has unresolved outcomes (terms that coul
 tip = "If you see ⧗, check that all terms in your → outcome lines are defined in your Glossary or match a built-in assertion term. Unresolved outcomes often mean a term wasn't recognized — try rephrasing to use a built-in term like `body contains`, `body has field`, or `status 200`."
 
 # =============================================================================
-# KNOWN LIMITATIONS
-# =============================================================================
-
-# =============================================================================
 # POST REQUESTS
 # =============================================================================
 
@@ -571,7 +567,7 @@ Feature: Messages API
 description = "Known limitations and workarounds for assertion terms"
 
 [known_limitations."response is valid JSON"]
-notes = "Uses regex matching on the response body. Works for single-line and multiline JSON. For more reliable JSON validation, prefer `content-type is json` (checks the Content-Type header) or `body has field \"key\"` (checks for a specific field)."
+notes = 'Uses regex matching on the response body. Works for single-line and multiline JSON. For more reliable JSON validation, prefer `content-type is json` (checks the Content-Type header) or `body has field "key"` (checks for a specific field).'
 
 # =============================================================================
 # COMMANDS

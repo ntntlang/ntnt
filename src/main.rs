@@ -3780,17 +3780,19 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
     // These are heuristic checks on the raw source
     let mut in_triple_quote = false;
     for (line_num, line) in source_lines.iter().enumerate() {
-        // Track whether we're inside a triple-quoted template string ("""...""")
+        // Track whether we're inside a multi-line triple-quoted template string ("""...""")
         // Lines inside triple-quoted strings should not trigger lint warnings
         // for semicolons, CSS properties, JS syntax, etc.
         let triple_count = line.matches("\"\"\"").count();
         if triple_count > 0 {
-            if triple_count % 2 == 1 {
-                // Odd number of """ on this line toggles the state
+            if triple_count >= 2 {
+                // Two or more """ on the same line (open+close) — single-line template,
+                // don't skip this line and don't change state
+            } else {
+                // Exactly one """ — toggles multi-line template state
                 in_triple_quote = !in_triple_quote;
+                continue; // Skip the opening/closing line itself
             }
-            // If we just entered a triple-quote, skip this line; if we just exited, skip too
-            continue;
         }
         if in_triple_quote {
             continue;

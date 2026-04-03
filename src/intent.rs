@@ -737,11 +737,16 @@ impl Glossary {
         if parts.len() == 2 {
             let method = parts[0].to_uppercase();
             if ["GET", "POST", "PUT", "DELETE", "PATCH"].contains(&method.as_str()) {
-                // Check if the remainder contains " body " separator
+                // Check if the remainder contains " body " separator (case-insensitive)
                 let remainder = parts[1];
-                if let Some(body_idx) = remainder.to_lowercase().find(" body ") {
-                    let path = remainder[..body_idx].trim().to_string();
-                    let body = remainder[body_idx + 6..].trim().to_string();
+                let body_re = regex::RegexBuilder::new(r" body ")
+                    .case_insensitive(true)
+                    .build()
+                    .ok();
+                let body_match = body_re.as_ref().and_then(|re| re.find(remainder));
+                if let Some(m) = body_match {
+                    let path = remainder[..m.start()].trim().to_string();
+                    let body = remainder[m.end()..].trim().to_string();
                     let body = if body.is_empty() { None } else { Some(body) };
                     return Some((method, path, body));
                 }
@@ -5577,7 +5582,9 @@ pub fn run_tests_against_server(
                 "fail" => failing_scenarios += 1,
                 "warning" => warning_scenarios += 1,
                 "skip" => skipped_scenarios += 1,
-                // "pending" or any unknown status counts as warning (incomplete)
+                // "pending" or any unknown status counts as warning (incomplete).
+                // JSON output tracks warning_scenarios separately for granularity;
+                // the CLI summary counts these as failed for a clear pass/fail signal.
                 _ => warning_scenarios += 1,
             }
         }
@@ -5600,11 +5607,14 @@ pub fn run_tests_against_server(
                 "fail" => failing_scenarios += 1,
                 "warning" => warning_scenarios += 1,
                 "skip" => skipped_scenarios += 1,
-                // "pending" or any unknown status counts as warning (incomplete)
+                // "pending" or any unknown status counts as warning (incomplete).
                 _ => warning_scenarios += 1,
             }
         }
     }
+
+    // Note: warning_scenarios are tracked separately in JSON for granularity,
+    // but the CLI (src/main.rs) counts them as failed for a clear pass/fail exit code.
 
     let pass_percentage = if total_assertions > 0 {
         (passed_assertions as f32 / total_assertions as f32) * 100.0

@@ -3669,6 +3669,7 @@ impl Interpreter {
         // @example template("views/home.html", map { "title": "Home" }) => "<html>..." ~ "Render a template"
         // @example template("views/user.html", map { "name": "Alice", "posts": [...] }) => "<html>..." ~ "Render with loop data"
         // @gotcha Use {{var}} (double braces) for escaped output in templates — this is Mustache syntax, not NTNT string interpolation (#{var})
+        // @gotcha There is no escape syntax for literal {{ in templates. Workaround: pass the braces as a variable (e.g. map { "lb": "{{", "rb": "}}" }) and use {{lb}} in the template.
         self.environment.borrow_mut().define(
             "template".to_string(),
             Value::NativeFunction {
