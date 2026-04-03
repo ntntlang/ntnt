@@ -178,8 +178,7 @@ ntnt completions <shell>     # Generate shell completions
 
 | Document | Description |
 |----------|-------------|
-| [Language Guide](LANGUAGE_GUIDE.md) | Learning guide with examples |
-| [AI Agent Guide](docs/AI_AGENT_GUIDE.md) | Syntax rules for AI-assisted development |
+| [AI Agent Guide](docs/AI_AGENT_GUIDE.md) | Comprehensive language guide and syntax reference |
 | [Stdlib Reference](docs/STDLIB_REFERENCE.md) | All standard library functions |
 | [IAL Reference](docs/IAL_REFERENCE.md) | Intent Assertion Language primitives |
 | [Architecture](ARCHITECTURE.md) | System design details |

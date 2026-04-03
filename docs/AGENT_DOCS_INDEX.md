@@ -60,5 +60,4 @@ ntnt run file.tnt     # Only after lint passes
 
 ## Related Documentation
 
-- [Language Guide](../LANGUAGE_GUIDE.md) - Learning guide with examples
 - [Design Documents](../design-docs/) - Planning docs (may not reflect current implementation)

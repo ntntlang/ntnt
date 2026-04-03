@@ -209,8 +209,7 @@ For compiler/runtime Rust work, use the **`/ntnt-core-dev`** skill (`.claude/ski
 1. `// @ntnt` doc blocks on all new/changed functions (build enforces this)
 2. `docs/AI_AGENT_GUIDE.md` for user-facing syntax or patterns
 3. `ntnt docs --generate` to regenerate `STDLIB_REFERENCE.md` and sync agent files (`.github/copilot-instructions.md`)
-4. `LANGUAGE_GUIDE.md` for detailed explanations
-5. `ARCHITECTURE.md` for structural changes
+4. `ARCHITECTURE.md` for structural changes
 6. `ROADMAP.md` to update feature status
 7. Add integration tests and example files
 

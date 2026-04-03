@@ -7,7 +7,7 @@ This index lists all current, maintained documentation for the NTNT programming 
 | Document | Description |
 |----------|-------------|
 | [README](../README.md) | Project overview, installation, quick start |
-| [Language Guide](../LANGUAGE_GUIDE.md) | Learning guide with examples |
+| [AI Agent Guide](AI_AGENT_GUIDE.md) | Comprehensive language guide and syntax reference |
 | [Whitepaper](../whitepaper.md) | Theoretical foundations and motivation |
 
 ## Reference (Auto-Generated)
