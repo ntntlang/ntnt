@@ -406,6 +406,27 @@ Link code to intent features with annotations
 
 ---
 
+## Output Symbols
+
+Status icons in `ntnt intent check` output
+
+| Symbol | Meaning |
+|--------|--------|
+| ✓ | Passed — scenario or assertion succeeded |
+| ✗ | Failed — scenario or assertion failed |
+| ⏭️ | Skipped — preconditions not met (Given clause failed) |
+| ⧗ | Warning/Pending — scenario has unresolved outcomes (terms that couldn't be mapped to executable checks) or could not be resolved at all. Counts as failed in the summary. |
+
+> **Tip:** If you see ⧗, check that all terms in your → outcome lines are defined in your Glossary or match a built-in assertion term. Unresolved outcomes often mean a term wasn't recognized — try rephrasing to use a built-in term like `body contains`, `body has field`, or `status 200`.
+
+## Known Limitations
+
+Known limitations and workarounds for assertion terms
+
+| Assertion Term | Notes |
+|----------------|-------|
+| `response is valid JSON` | Uses regex matching on the response body. Works for single-line and multiline JSON. For more reliable JSON validation, prefer `content-type is json` (checks the Content-Type header) or `body has field "key"` (checks for a specific field). |
+
 ## Commands
 
 CLI commands for IAL
