@@ -43,23 +43,40 @@ server.intent to test login page renders, unauthenticated access redirects and P
 `ntnt intent check server.tnt` until all pass.
 ```
 
-**Prompt 4 — Templates & Static Files:**
+**Prompt 4 — Refactor:**
 
 ```
-Refactor the app to use middleware, external HTML templates in a views/ directory for all pages,
-partials for nav and footer and add a static CSS file. Verify `ntnt intent check server.tnt`
-still passes.
+Refactor the app to use middleware, file-based routing, external HTML templates in a views/
+directory for all pages, partials for nav and footer and add a static CSS file. Move functions
+to lib folder. Make sure it still looks decent. Verify `ntnt intent check server.tnt` still
+passes.
 ```
 
-**Prompt 5 — PostgreSQL & Docker:**
+Four prompts. You've got a full-stack web app with a database, auth, templates, middleware, and file-based routing. You didn't write any NTNT. Your agent did, and `ntnt intent check` proved it's correct at every step.
+
+<details>
+<summary><b>Advanced Demo Prompts</b></summary>
+
+These prompts extend the app further. Docker is required for Prompt 5.
+
+**Prompt 5 — PostgreSQL & Docker** *(requires Docker)*:
 
 ```
 Migrate from SQLite to PostgreSQL. Create a Dockerfile and docker-compose.yml with the ntnt app
-in development mode and a postgres container. Use environment variables for the connection string.
-Verify `ntnt intent check server.tnt` still passes. Verify the app is still running when done.
+and a postgres container. Use environment variables for the connection string. Verify
+`ntnt intent check server.tnt` still passes. Leave the app running when you're done.
 ```
 
-Five prompts. You've got a full-stack web app with a database, auth, templates, and Docker deployment. You didn't write any NTNT. Your agent did, and `ntnt intent check` proved it's correct at every step.
+**Prompt 6 — Background Jobs:**
+
+```
+Add a background job that fetches a new random cat fact from an API every 10 minutes and stores
+it in the database. Display the latest cat fact on the homepage with a button that schedules an
+immediate job to fetch a new one. Add a job log page that shows a record of all jobs run with
+their status and timestamps. Verify `ntnt intent check server.tnt` still passes.
+```
+
+</details>
 
 <details>
 <summary><b>Hand-Crafted Code Path</b></summary>
