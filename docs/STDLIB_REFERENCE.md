@@ -4382,6 +4382,10 @@ hash_password("secret123", 14)  // => Ok("$2b$14$...")  // Hash with higher cost
 
 - **InvalidCost**: Cost must be between 10 and 31 — *Fix: Use a cost value of 10 or higher (OWASP minimum)*
 
+**Gotchas:**
+
+- Also available in std/auth as hash_password(password) without the cost parameter. If using std/auth for OAuth/sessions, prefer the std/auth version for consistency.
+
 **See also:** `verify_password`, `is_valid_hash`
 
 *Since v0.4.0*

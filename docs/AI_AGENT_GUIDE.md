@@ -1452,7 +1452,50 @@ let page = template("views/home.html", map {
 return html(page)
 ```
 
-Template paths are relative to the `.tnt` file.
+### Path Resolution
+
+Template paths resolve relative to the **entry-point `.tnt` file** (the file passed to `ntnt run`), NOT the file containing the `template()` call. If `server.tnt` is your entry point and `lib/helpers.tnt` calls `template("views/page.html", data)`, the path resolves from `server.tnt`'s directory.
+
+```ntnt
+// In lib/helpers.tnt, called from server.tnt in project root:
+template("views/page.html", data)    // CORRECT — resolves from project root
+template("../views/page.html", data) // WRONG — don't use relative paths from lib/
+```
+
+### Template Strings vs template() — Key Difference
+
+Template strings in `.tnt` code (`"""...{{expr}}..."""`) **auto-escape HTML** in interpolated values. The `template()` function uses Mustache syntax where `{{var}}` escapes HTML and `{{{var}}}` outputs raw HTML.
+
+If you need to inject pre-rendered HTML (like from another template call), use `{{{var}}}` triple-braces in the template file:
+
+```html
+<!-- views/layout.html -->
+<div class="content">{{{body}}}</div>  <!-- Raw HTML, not escaped -->
+<p>User: {{username}}</p>              <!-- Escaped (safe for user input) -->
+```
+
+### Conditionals: Use `{{#if}}`, NOT `{{#var}}`
+
+NTNT uses `{{#if var}}` syntax for conditionals — NOT Mustache-style section syntax `{{#var}}...{{/var}}`:
+
+```html
+<!-- CORRECT -->
+{{#if error}}<p class="error">{{error}}</p>{{/if}}
+{{#if user}}Welcome, {{user.name}}!{{#else}}Please log in.{{/if}}
+
+<!-- WRONG — Mustache section syntax is NOT supported -->
+{{#error}}<p>{{error}}</p>{{/error}}
+```
+
+Loops use `{{#for}}`: `{{#for item in items}}...{{/for}}`
+
+### Reserved Names — Don't Shadow Builtins
+
+These names are built-in functions. Don't use them for your own functions:
+
+`render`, `compile`, `template`, `sort`, `filter`, `reduce`, `find`, `any`, `all`, `count`, `transform`, `flat_map`
+
+If you name a function `render()`, you'll get a confusing error like "render() first argument must be a compiled template" instead of calling your function. Use names like `render_page()`, `render_layout()`, etc.
 
 **Important:** External template files (`.html`) are rendered internally by wrapping their content in `"""..."""` triple quotes. This means template HTML **must not contain literal `"""`** anywhere in the content — the lexer will interpret it as the closing delimiter and truncate the output. If you need to display triple quotes (e.g., in code examples showing Elixir's `@doc """`), use HTML entities `&quot;&quot;&quot;` instead. They render identically in the browser.
 
@@ -1588,6 +1631,8 @@ import { round_1dp } from "./lib/helpers.tnt"
 libs("lib/")
 // All exported names from all .tnt files in lib/ are now available
 ```
+
+> **⚠️ `libs()` only affects the calling file's scope.** Route files loaded by `routes()` have isolated scopes and do NOT see `libs()` exports. Route files must use explicit imports: `import { helper } from "../lib/module.tnt"`
 
 ---
 

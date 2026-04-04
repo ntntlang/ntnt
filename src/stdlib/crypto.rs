@@ -310,6 +310,7 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also verify_password, is_valid_hash
     // @since v0.4.0
     // @tags #io
+    // @gotcha Also available in std/auth as hash_password(password) without the cost parameter. If using std/auth for OAuth/sessions, prefer the std/auth version for consistency.
     // @example hash_password("secret123") => Ok("$2b$12$...") ~ "Hash with default cost"
     // @example hash_password("secret123", 10) => Ok("$2b$10$...") ~ "Hash with minimum cost (faster but still secure)"
     // @example hash_password("secret123", 14) => Ok("$2b$14$...") ~ "Hash with higher cost (more secure)"
