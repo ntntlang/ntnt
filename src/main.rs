@@ -252,9 +252,9 @@ enum Commands {
     /// understands NTNT syntax. Run this after installing ntnt.
     ///
     /// Examples:
-    ///   ntnt learn claude-code    # Generate .claude/CLAUDE.md + .claude/rules/ntnt.md
-    ///   ntnt learn cursor         # Generate .cursorrules
-    ///   ntnt learn codex          # Generate AGENTS.md
+    ///   ntnt learn claude-code    # Generate .claude/CLAUDE.md + .claude/rules/ntnt.md (paths-scoped)
+    ///   ntnt learn cursor         # Generate .cursor/rules/ntnt-primer.mdc + ntnt-reference.mdc (globs-scoped)
+    ///   ntnt learn codex          # Generate AGENTS.md + .agents/skills/ntnt/SKILL.md
     ///   ntnt learn copilot        # Update .github/copilot-instructions.md
     ///   ntnt learn                # Show guide to stdout (any agent)
     ///   ntnt learn --check        # Check if config files are up to date
@@ -7556,8 +7556,14 @@ const LEARN_PLATFORMS: &[(&str, &[&str])] = &[
         "claude-code",
         &[".claude/CLAUDE.md", ".claude/rules/ntnt.md"],
     ),
-    ("cursor", &[".cursorrules"]),
-    ("codex", &["AGENTS.md"]),
+    (
+        "cursor",
+        &[
+            ".cursor/rules/ntnt-primer.mdc",
+            ".cursor/rules/ntnt-reference.mdc",
+        ],
+    ),
+    ("codex", &["AGENTS.md", ".agents/skills/ntnt/SKILL.md"]),
     ("copilot", &[".github/copilot-instructions.md"]),
 ];
 
@@ -7973,9 +7979,9 @@ fn run_learn_command(platform: Option<String>, check: bool, update: bool) -> any
             );
             eprintln!();
             eprintln!("Supported platforms:");
-            eprintln!("  claude-code  — .claude/CLAUDE.md + .claude/rules/ntnt.md");
-            eprintln!("  cursor       — .cursorrules");
-            eprintln!("  codex        — AGENTS.md");
+            eprintln!("  claude-code  — .claude/CLAUDE.md + .claude/rules/ntnt.md (paths-scoped)");
+            eprintln!("  cursor       — .cursor/rules/ntnt-primer.mdc + ntnt-reference.mdc (globs-scoped)");
+            eprintln!("  codex        — AGENTS.md + .agents/skills/ntnt/SKILL.md");
             eprintln!("  copilot      — .github/copilot-instructions.md");
             eprintln!();
             eprintln!(
@@ -8043,8 +8049,13 @@ fn learn_claude_code() -> anyhow::Result<()> {
         );
     }
 
-    // 2. .claude/rules/ntnt.md — full guide
-    let rules_md = format!("{}\n{}", learn_version_header("claude-code"), FULL_GUIDE,);
+    // 2. .claude/rules/ntnt.md — full guide with paths frontmatter
+    //    Only loaded when Claude is working on .tnt or .intent files
+    let rules_md = format!(
+        "---\npaths:\n  - \"**/*.tnt\"\n  - \"**/*.intent\"\n---\n\n{}\n{}",
+        learn_version_header("claude-code"),
+        FULL_GUIDE,
+    );
     let wrote = write_learn_file(".claude/rules/ntnt.md", &rules_md)?;
     if wrote {
         println!(
@@ -8080,29 +8091,60 @@ fn learn_cursor() -> anyhow::Result<()> {
     );
     println!();
 
-    let content = format!(
-        "{}\n{}\n\n---\n\n# Full Language Reference\n\n{}\n",
+    // 1. .cursor/rules/ntnt-primer.mdc — always active, critical rules
+    let primer = format!(
+        "---\ndescription: NTNT language critical syntax rules\nalwaysApply: true\n---\n\n{}\n{}\n",
         learn_version_header("cursor"),
         CRITICAL_RULES,
-        FULL_GUIDE,
     );
-    let wrote = write_learn_file(".cursorrules", &content)?;
+    let wrote = write_learn_file(".cursor/rules/ntnt-primer.mdc", &primer)?;
     if wrote {
         println!(
-            "  {} Created {} (critical rules + full language reference)",
+            "  {} Created {} (critical syntax rules — always active)",
             "✓".green(),
-            ".cursorrules".cyan()
+            ".cursor/rules/ntnt-primer.mdc".cyan()
         );
     } else {
         println!(
             "  {} {} (already up to date)",
+            "✓".green(),
+            ".cursor/rules/ntnt-primer.mdc".dimmed()
+        );
+    }
+
+    // 2. .cursor/rules/ntnt-reference.mdc — only when editing .tnt/.intent files
+    let reference = format!(
+        "---\ndescription: NTNT full language reference — stdlib, patterns, IDD\nglobs:\n  - \"**/*.tnt\"\n  - \"**/*.intent\"\n---\n\n{}\n{}\n",
+        learn_version_header("cursor"),
+        FULL_GUIDE,
+    );
+    let wrote = write_learn_file(".cursor/rules/ntnt-reference.mdc", &reference)?;
+    if wrote {
+        println!(
+            "  {} Created {} (full reference — loads when editing .tnt/.intent)",
+            "✓".green(),
+            ".cursor/rules/ntnt-reference.mdc".cyan()
+        );
+    } else {
+        println!(
+            "  {} {} (already up to date)",
+            "✓".green(),
+            ".cursor/rules/ntnt-reference.mdc".dimmed()
+        );
+    }
+
+    // Clean up legacy .cursorrules if it exists
+    if std::path::Path::new(".cursorrules").exists() {
+        std::fs::remove_file(".cursorrules").ok();
+        println!(
+            "  {} Removed legacy {} (migrated to .cursor/rules/)",
             "✓".green(),
             ".cursorrules".dimmed()
         );
     }
 
     println!();
-    println!("Cursor will load these rules for all files in this project.");
+    println!("Cursor will load the primer for all files and the full reference when editing .tnt/.intent files.");
     println!(
         "Run {} after updating ntnt to verify rules are current.",
         "ntnt learn --check".cyan()
@@ -8121,16 +8163,18 @@ fn learn_codex() -> anyhow::Result<()> {
     );
     println!();
 
-    let content = format!(
-        "{}\n{}\n\n---\n\n# Full Language Reference\n\n{}\n",
+    // 1. AGENTS.md — primer (always loaded)
+    let agents_md = format!(
+        "{}\n{}\n\n\
+         For the full ntnt language reference, invoke the ntnt skill: `$ntnt`\n\
+         Or use `ntnt docs <function>` to look up any function.\n",
         learn_version_header("codex"),
         CRITICAL_RULES,
-        FULL_GUIDE,
     );
-    let wrote = write_learn_file("AGENTS.md", &content)?;
+    let wrote = write_learn_file("AGENTS.md", &agents_md)?;
     if wrote {
         println!(
-            "  {} Created {} (critical rules + full language reference)",
+            "  {} Created {} (critical syntax rules — always loaded)",
             "✓".green(),
             "AGENTS.md".cyan()
         );
@@ -8142,8 +8186,35 @@ fn learn_codex() -> anyhow::Result<()> {
         );
     }
 
+    // 2. .agents/skills/ntnt/SKILL.md — full guide (loaded on-demand by description match)
+    let skill_md = format!(
+        "---\n\
+         name: ntnt\n\
+         description: Build web applications with the NTNT programming language (.tnt files). \
+         Use when writing, editing, debugging, or reviewing .tnt or .intent files. \
+         Covers syntax, stdlib, HTTP servers, databases, templates, auth, IDD, concurrency, and jobs.\n\
+         ---\n\n\
+         {}\n{}\n",
+        learn_version_header("codex"),
+        FULL_GUIDE,
+    );
+    let wrote = write_learn_file(".agents/skills/ntnt/SKILL.md", &skill_md)?;
+    if wrote {
+        println!(
+            "  {} Created {} (full reference — loaded on-demand)",
+            "✓".green(),
+            ".agents/skills/ntnt/SKILL.md".cyan()
+        );
+    } else {
+        println!(
+            "  {} {} (already up to date)",
+            "✓".green(),
+            ".agents/skills/ntnt/SKILL.md".dimmed()
+        );
+    }
+
     println!();
-    println!("Codex will load AGENTS.md as project instructions.");
+    println!("Codex will load AGENTS.md as project instructions and the ntnt skill on-demand.");
     println!(
         "Run {} after updating ntnt to verify rules are current.",
         "ntnt learn --check".cyan()
