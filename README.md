@@ -15,9 +15,11 @@ From install to verified app in five prompts. Pick your tool, copy the prompt. Y
 ```
 Install NTNT (curl -sSf https://raw.githubusercontent.com/ntntlang/ntnt/main/install.sh | bash),
 then run `ntnt learn <your-platform>` and read the generated rules before writing any code.
+
 Build a web app in server.tnt: a GET / that returns a greeting and a GET /api/status that returns
-JSON. Add a requires contract on one handler. Write a server.intent file with scenarios for both
-routes. Run `ntnt intent check server.tnt` until all pass, then `ntnt run server.tnt`.
+JSON. Add a requires contract on one handler. Make the app look good. Write a server.intent file
+with scenarios for both routes. Run `ntnt intent check server.tnt` until all pass, then
+`ntnt run server.tnt`. Respond with the URL of the running app.
 ```
 
 Replace `<your-platform>` with `claude-code`, `codex`, `cursor`, or `copilot`. The `ntnt learn` command generates platform-native config files so your agent loads the rules every session.
@@ -27,30 +29,34 @@ Replace `<your-platform>` with `claude-code`, `codex`, `cursor`, or `copilot`. T
 ```
 Add a SQLite database to the app. Create a messages table, add POST /messages to save a message
 and GET /messages to list them. Update server.intent with scenarios for both endpoints. Run
-`ntnt intent check server.tnt` until all pass.
+`ntnt intent check server.tnt` until all pass. Add a link to the homepage to /messages and a
+form that posts a new message.
 ```
 
 **Prompt 3 — Add Authentication:**
 
 ```
-Add session-based authentication. Create a login page, protect POST /messages so only logged-in
-users can post, and redirect unauthenticated users to /login. Add contracts on the protected
-handlers. Update server.intent and run `ntnt intent check server.tnt` until all pass.
+Add session-based authentication using cookies and SQLite. Create a login page, protect the
+homepage and /messages so only logged-in users can access the site, and redirect unauthenticated
+users to /login. Add a logout link to the app. Add contracts on the protected handlers. Update
+server.intent to test login page renders, unauthenticated access redirects and POSTS and run
+`ntnt intent check server.tnt` until all pass.
 ```
 
-**Prompt 4 — Real HTML Templates:**
+**Prompt 4 — Templates & Static Files:**
 
 ```
-Refactor the app to use external HTML templates in a views/ directory and add a static CSS file.
-Make it look decent. Verify `ntnt intent check server.tnt` still passes.
+Refactor the app to use middleware, external HTML templates in a views/ directory for all pages,
+partials for nav and footer and add a static CSS file. Verify `ntnt intent check server.tnt`
+still passes.
 ```
 
-**Prompt 5 — PostgreSQL & Deploy:**
+**Prompt 5 — PostgreSQL & Docker:**
 
 ```
 Migrate from SQLite to PostgreSQL. Create a Dockerfile and docker-compose.yml with the ntnt app
-and a postgres container. Use environment variables for the connection string. Verify
-`ntnt intent check server.tnt` still passes. Leave the app running when you're done.
+in development mode and a postgres container. Use environment variables for the connection string.
+Verify `ntnt intent check server.tnt` still passes. Verify the app is still running when done.
 ```
 
 Five prompts. You've got a full-stack web app with a database, auth, templates, and Docker deployment. You didn't write any NTNT. Your agent did, and `ntnt intent check` proved it's correct at every step.
