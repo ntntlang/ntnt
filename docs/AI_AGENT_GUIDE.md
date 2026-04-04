@@ -706,6 +706,54 @@ let m = capture_named_pattern("2024-01-15", r"(?P<year>\d{4})-(?P<month>\d{2})-(
 // m = Some({"0": "2024-01-15", "year": "2024", "month": "01", "day": "15"})
 ```
 
+### 17. `??` Precedence: Lower Than `[]`
+
+The null-coalescing operator has lower precedence than bracket access. This is a common footgun:
+
+```ntnt
+// WRONG — returns the entire query_params map, not the value:
+let x = req["query_params"] ?? map {}["status"] ?? "all"
+
+// RIGHT — split into two lines:
+let params = req["query_params"] ?? map {}
+let status_filter = params["status"] ?? "all"
+```
+
+### 18. `[]` Returns None on Type Mismatch
+
+Index access on a non-collection returns `None` instead of crashing (v0.3.17+):
+
+```ntnt
+42["key"]          // → None (not TypeError)
+true["field"]      // → None
+```
+
+Use `??` as a universal safety net: `val["key"] ?? default`.
+
+### 19. `for..in` Skips Non-Collections Silently
+
+Iterating over a non-collection (string, int, None) does zero iterations with a dev-mode warning:
+
+```ntnt
+for c in "hello" { print(c) }   // Does nothing — use chars("hello") instead
+for x in None { print(x) }      // Does nothing — no crash
+```
+
+### 20. Module-Level `let` Doesn't Support `map {}` Literals
+
+`let X = map { ... }` at the top level of a library file fails. Use arrays or move maps inside functions:
+
+```ntnt
+// WRONG — at module top level:
+let CONFIG = map { "timeout": 30 }
+
+// RIGHT — wrap in a function:
+fn get_config() { return map { "timeout": 30 } }
+
+// RIGHT — arrays work at top level:
+let ALLOWED = ["admin", "editor"]
+```
+
 ---
 
 ## HTTP Server Pattern
@@ -1443,6 +1491,43 @@ fn render_page(options) {
 
 This eliminates manual `?v=N` bumping. The timestamp changes on every server restart, which in Docker deployments happens on every build.
 
+### Template Filters
+
+Apply filters with `|` inside `{{}}`:
+
+```html
+{{name | uppercase}}                   <!-- ALICE -->
+{{title | truncate(50)}}               <!-- First 50 chars... -->
+{{description | escape}}               <!-- HTML-escaped -->
+{{data | json}}                        <!-- JSON serialized -->
+{{url | url_encode}}                   <!-- URL-encoded -->
+{{name | default("Anonymous")}}        <!-- Default if empty/None -->
+```
+
+**Available filters:** `uppercase`/`upper`, `lowercase`/`lower`, `capitalize`, `trim`, `truncate(n)`, `replace(old, new)`, `escape`, `json`, `url_encode`, `safe`/`raw`, `default(val)`, `length`, `first`, `last`, `reverse`, `join(sep)`, `slice(start, end)`, `number(decimals)`
+
+### Template Loop Metadata
+
+Inside `{{#for item in items}}` blocks:
+
+| Variable | Description |
+|----------|-------------|
+| `@index` | 0-based index |
+| `@index1` | 1-based index |
+| `@length` | Total items |
+| `@first` | true if first item |
+| `@last` | true if last item |
+| `@even` | true if even index |
+| `@odd` | true if odd index |
+
+```html
+{{#for item in items}}
+<div class="item {{#if @last}}last{{/if}}">
+    {{@index1}}. {{item.name}}
+</div>
+{{/for}}
+```
+
 ---
 
 ## File-Based Routing
@@ -1461,6 +1546,28 @@ routes/
 ```
 
 Route files export `get`, `post`, etc. functions.
+
+> **API-only routes must go under `routes/api/`** — file-based route handlers automatically look for a matching `views/<route>.html` template. If the template doesn't exist, the server returns a 500. Routes under `routes/api/` skip template auto-loading, making them safe for JSON-only endpoints.
+
+---
+
+## Stdlib Prelude (Auto-Available Functions)
+
+The most-used stdlib functions are auto-injected — no import needed:
+
+| Module | Auto-available functions |
+|--------|------------------------|
+| `std/string` | `split`, `trim`, `contains`, `replace`, `join`, `starts_with`, `ends_with`, `to_lower`, `to_upper` |
+| `std/json` | `parse_json`, `stringify` |
+| `std/collections` | `keys`, `values`, `entries`, `has_key`, `get_key`, `reverse`, `sort` |
+| `std/http/server` | `json`, `html`, `text`, `redirect`, `status`, `not_found`, `error`, `parse_form` |
+| `std/env` | `get_env`, `load_env` |
+| `std/time` | `now`, `format` |
+| `std/crypto` | `uuid`, `sha256` |
+
+**NOT in prelude** (still need explicit import): `fetch` (std/http), `connect`/`query`/`execute` (database modules), `set_cookie`/`get_cookie`/`with_cookie` (std/http/server), `sort_by`/`first`/`last`/`push`/`pop` (std/collections), KV, jobs, fs, csv, concurrent.
+
+Explicit imports still work — prelude just makes them unnecessary for common functions.
 
 ---
 
@@ -1656,6 +1763,19 @@ del(kv, "session:abc")
 ```
 
 Values are automatically serialized — maps and arrays are stored as JSON.
+
+### KV Typed Helpers
+
+One-liners that handle Result unwrap + string conversion + type parsing + default on failure:
+
+```ntnt
+import { open, get_int, get_float, get_json, get_str } from "std/kv"
+
+let count = get_int(kv, "stats:visits", 0)          // Int, default 0
+let rate = get_float(kv, "config:rate", 1.0)         // Float, default 1.0
+let data = get_json(kv, "cache:user:1", map {})      // Parsed JSON, default empty map
+let name = get_str(kv, "user:name", "Anonymous")     // String, default "Anonymous"
+```
 
 ---
 
