@@ -14,7 +14,7 @@ configuration files.
 
 1. `ntnt learn <platform>` generates config files for a specific AI coding agent
 2. The critical rules are included in all generated files
-3. For Claude Code, the full `AI_AGENT_GUIDE.md` is also included as a rules file
+3. For platforms that support a larger full-reference file (for example Claude Code rules, Cursor rules, or the Codex ntnt skill), `AI_AGENT_GUIDE.md` is included alongside the critical rules
 4. Generated files include a version header for `ntnt learn --check` to detect staleness
 
 ## Updating
@@ -23,7 +23,8 @@ Edit `critical-rules.md` directly — it's curated content, not auto-generated.
 After editing, rebuild (`cargo build --profile dev-release`) to embed the changes.
 
 The full guide (`AI_AGENT_GUIDE.md`) is also embedded and used for platforms that
-support larger config files (Claude Code `.claude/rules/`).
+support a larger full-reference file (for example Claude Code `.claude/rules/`,
+Cursor `.cursor/rules/`, and the Codex ntnt skill).
 
 ## Validation
 

@@ -72,7 +72,7 @@ ntnt run hello.tnt               # Visit http://localhost:3000
 
 ### Set Up Your Agent for NTNT Development
 
-After trying NTNT, set up persistent agent knowledge so every future session writes correct code. Add the following to your project's agent configuration (`CLAUDE.md`, `.cursorrules`, `AGENTS.md`, or equivalent):
+After trying NTNT, set up persistent agent knowledge so every future session writes correct code. Add the following to your project's agent configuration (`CLAUDE.md`, `.cursor/rules/*.mdc`, `AGENTS.md`, or equivalent):
 
 ~~~markdown
 # NTNT Language Rules
@@ -711,7 +711,8 @@ let m = capture_named_pattern("2024-01-15", r"(?P<year>\d{4})-(?P<month>\d{2})-(
 The null-coalescing operator has lower precedence than bracket access. This is a common footgun:
 
 ```ntnt
-// WRONG — returns the entire query_params map, not the value:
+// WRONG — when query_params exists, returns the entire map (not the "status" value);
+// when query_params is None, silently falls through to "all" and hides the problem:
 let x = req["query_params"] ?? map {}["status"] ?? "all"
 
 // RIGHT — split into two lines:
@@ -1590,7 +1591,7 @@ routes/
 
 Route files export `get`, `post`, etc. functions.
 
-> **API-only routes must go under `routes/api/`** — file-based route handlers automatically look for a matching `views/<route>.html` template. If the template doesn't exist, the server returns a 500. Routes under `routes/api/` skip template auto-loading, making them safe for JSON-only endpoints.
+> File-based route handlers return whatever your function returns. If you return `json(...)`, it's a JSON endpoint. If you return `html(template(...))`, it's a page. There is no auto-template-loading in this routing model. `routes/api/` is still a useful organizational convention for JSON endpoints, but not a runtime special case.
 
 ---
 
@@ -1601,7 +1602,7 @@ The most-used stdlib functions are auto-injected — no import needed:
 | Module | Auto-available functions |
 |--------|------------------------|
 | `std/string` | `split`, `trim`, `contains`, `replace`, `join`, `starts_with`, `ends_with`, `to_lower`, `to_upper` |
-| `std/json` | `parse_json`, `stringify` |
+| `std/json` | `parse_json` (also re-exported by `std/http/server`), `stringify` |
 | `std/collections` | `keys`, `values`, `entries`, `has_key`, `get_key`, `reverse`, `sort` |
 | `std/http/server` | `json`, `html`, `text`, `redirect`, `status`, `not_found`, `error`, `parse_form` |
 | `std/env` | `get_env`, `load_env` |

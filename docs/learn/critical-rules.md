@@ -144,4 +144,4 @@ Feature: Home Page
 fn home(req) { return html("<h1>Welcome</h1>") }
 ```
 
-For full IDD docs (glossary patterns, unit testing, property testing, all assertion terms), see the complete reference in `.claude/rules/ntnt.md`.
+For full IDD docs (glossary patterns, unit testing, property testing, all assertion terms), run `ntnt docs` or see your platform's generated full reference via `ntnt learn <platform>`.
