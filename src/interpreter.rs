@@ -7738,10 +7738,12 @@ impl Interpreter {
                         ))
                     }
                 };
-                if s.len() <= max_len {
+                let char_len = s.chars().count();
+                if char_len <= max_len {
                     Ok(Value::String(s))
                 } else {
-                    Ok(Value::String(format!("{}...", &s[..max_len])))
+                    let truncated: String = s.chars().take(max_len).collect();
+                    Ok(Value::String(format!("{}...", truncated)))
                 }
             }
             "replace" => {
@@ -11350,6 +11352,22 @@ c")
             assert_eq!(s, "hello...");
         } else {
             panic!("Expected string");
+        }
+    }
+
+    #[test]
+    fn test_template_truncate_filter_handles_unicode() {
+        let mut interp = Interpreter::new();
+        let filter = crate::ast::TemplateFilter {
+            name: "truncate".to_string(),
+            args: vec![crate::ast::Expression::Integer(3)],
+        };
+        let result = interp
+            .apply_template_filter(&Value::String("😀😁😂😃".to_string()), &filter)
+            .unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "😀😁😂..."),
+            other => panic!("Expected String, got {:?}", other),
         }
     }
 

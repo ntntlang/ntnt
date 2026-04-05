@@ -8198,12 +8198,12 @@ fn learn_codex() -> anyhow::Result<()> {
     // 2. .agents/skills/ntnt/SKILL.md — full guide (loaded on-demand by description match)
     let skill_md = format!(
         "---\n\
-         name: ntnt\n\
-         description: Build web applications with the NTNT programming language (.tnt files). \
-         Use when writing, editing, debugging, or reviewing .tnt or .intent files. \
-         Covers syntax, stdlib, HTTP servers, databases, templates, auth, IDD, concurrency, and jobs.\n\
-         ---\n\n\
-         {}\n{}\n",
+name: ntnt\n\
+description: Build web applications with the NTNT programming language (.tnt files). \
+Use when writing, editing, debugging, or reviewing .tnt or .intent files. \
+Covers syntax, stdlib, HTTP servers, databases, templates, auth, IDD, concurrency, and jobs.\n\
+---\n\n\
+{}\n{}\n",
         learn_version_header("codex"),
         FULL_GUIDE,
     );
@@ -8335,6 +8335,40 @@ fn learn_check() -> anyhow::Result<()> {
                         file.dimmed()
                     );
                 }
+            }
+        }
+    }
+
+    // Legacy Cursor file managed by older ntnt learn versions
+    let legacy_cursor = std::path::Path::new(".cursorrules");
+    if legacy_cursor.exists() {
+        found += 1;
+        let content = std::fs::read_to_string(legacy_cursor)?;
+        match extract_learn_version(&content) {
+            Some(v) if v == version => {
+                println!(
+                    "  {} {} — up to date (v{})",
+                    "✓".green(),
+                    ".cursorrules (legacy cursor)".cyan(),
+                    v
+                );
+            }
+            Some(v) => {
+                stale += 1;
+                println!(
+                    "  {} {} — stale (v{} -> v{})",
+                    "⚠".yellow(),
+                    ".cursorrules (legacy cursor)".yellow(),
+                    v,
+                    version
+                );
+            }
+            None => {
+                println!(
+                    "  {} {} — not managed by ntnt learn",
+                    "-".dimmed(),
+                    ".cursorrules".dimmed()
+                );
             }
         }
     }
