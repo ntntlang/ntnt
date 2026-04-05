@@ -72,7 +72,7 @@ ntnt run hello.tnt               # Visit http://localhost:3000
 
 ### Set Up Your Agent for NTNT Development
 
-After trying NTNT, set up persistent agent knowledge so every future session writes correct code. Add the following to your project's agent configuration (`CLAUDE.md`, `.cursorrules`, `AGENTS.md`, or equivalent):
+After trying NTNT, set up persistent agent knowledge so every future session writes correct code. Add the following to your project's agent configuration (`CLAUDE.md`, `.cursor/rules/*.mdc`, `AGENTS.md`, or equivalent):
 
 ~~~markdown
 # NTNT Language Rules
@@ -704,6 +704,55 @@ let all = capture_all_pattern("2024-01 and 2025-02", r"(\d{4})-(\d{2})")
 // Named groups as map keys (use (?P<name>...) syntax)
 let m = capture_named_pattern("2024-01-15", r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})")
 // m = Some({"0": "2024-01-15", "year": "2024", "month": "01", "day": "15"})
+```
+
+### 17. `??` Precedence: Lower Than `[]`
+
+The null-coalescing operator has lower precedence than bracket access. This is a common footgun:
+
+```ntnt
+// WRONG — when query_params exists, returns the entire map (not the "status" value);
+// when query_params is None, silently falls through to "all" and hides the problem:
+let x = req["query_params"] ?? map {}["status"] ?? "all"
+
+// RIGHT — split into two lines:
+let params = req["query_params"] ?? map {}
+let status_filter = params["status"] ?? "all"
+```
+
+### 18. `[]` Returns None on Type Mismatch
+
+Index access on a non-collection returns `None` instead of crashing (v0.3.17+):
+
+```ntnt
+42["key"]          // → None (not TypeError)
+true["field"]      // → None
+```
+
+Use `??` as a universal safety net: `val["key"] ?? default`.
+
+### 19. `for..in` Skips Non-Collections Silently
+
+Iterating over a non-collection (string, int, None) does zero iterations with a dev-mode warning:
+
+```ntnt
+for c in "hello" { print(c) }   // Does nothing — use chars("hello") instead
+for x in None { print(x) }      // Does nothing — no crash
+```
+
+### 20. Module-Level `let` Doesn't Support `map {}` Literals
+
+`let X = map { ... }` at the top level of a library file fails. Use arrays or move maps inside functions:
+
+```ntnt
+// WRONG — at module top level:
+let CONFIG = map { "timeout": 30 }
+
+// RIGHT — wrap in a function:
+fn get_config() { return map { "timeout": 30 } }
+
+// RIGHT — arrays work at top level:
+let ALLOWED = ["admin", "editor"]
 ```
 
 ---
@@ -1404,7 +1453,50 @@ let page = template("views/home.html", map {
 return html(page)
 ```
 
-Template paths are relative to the `.tnt` file.
+### Path Resolution
+
+Template paths resolve relative to the **entry-point `.tnt` file** (the file passed to `ntnt run`), NOT the file containing the `template()` call. If `server.tnt` is your entry point and `lib/helpers.tnt` calls `template("views/page.html", data)`, the path resolves from `server.tnt`'s directory.
+
+```ntnt
+// In lib/helpers.tnt, called from server.tnt in project root:
+template("views/page.html", data)    // CORRECT — resolves from project root
+template("../views/page.html", data) // WRONG — don't use relative paths from lib/
+```
+
+### Template Strings vs template() — Key Difference
+
+Template strings in `.tnt` code (`"""...{{expr}}..."""`) **auto-escape HTML** in interpolated values. The `template()` function uses Mustache syntax where `{{var}}` escapes HTML and `{{{var}}}` outputs raw HTML.
+
+If you need to inject pre-rendered HTML (like from another template call), use `{{{var}}}` triple-braces in the template file:
+
+```html
+<!-- views/layout.html -->
+<div class="content">{{{body}}}</div>  <!-- Raw HTML, not escaped -->
+<p>User: {{username}}</p>              <!-- Escaped (safe for user input) -->
+```
+
+### Conditionals: Use `{{#if}}`, NOT `{{#var}}`
+
+NTNT uses `{{#if var}}` syntax for conditionals — NOT Mustache-style section syntax `{{#var}}...{{/var}}`:
+
+```html
+<!-- CORRECT -->
+{{#if error}}<p class="error">{{error}}</p>{{/if}}
+{{#if user}}Welcome, {{user.name}}!{{#else}}Please log in.{{/if}}
+
+<!-- WRONG — Mustache section syntax is NOT supported -->
+{{#error}}<p>{{error}}</p>{{/error}}
+```
+
+Loops use `{{#for}}`: `{{#for item in items}}...{{/for}}`
+
+### Reserved Names — Don't Shadow Builtins
+
+These names are built-in functions. Don't use them for your own functions:
+
+`render`, `compile`, `template`, `sort`, `filter`, `reduce`, `find`, `any`, `all`, `count`, `transform`, `flat_map`
+
+If you name a function `render()`, you'll get a confusing error like "render() first argument must be a compiled template" instead of calling your function. Use names like `render_page()`, `render_layout()`, etc.
 
 **Important:** External template files (`.html`) are rendered internally by wrapping their content in `"""..."""` triple quotes. This means template HTML **must not contain literal `"""`** anywhere in the content — the lexer will interpret it as the closing delimiter and truncate the output. If you need to display triple quotes (e.g., in code examples showing Elixir's `@doc """`), use HTML entities `&quot;&quot;&quot;` instead. They render identically in the browser.
 
@@ -1443,6 +1535,43 @@ fn render_page(options) {
 
 This eliminates manual `?v=N` bumping. The timestamp changes on every server restart, which in Docker deployments happens on every build.
 
+### Template Filters
+
+Apply filters with `|` inside `{{}}`:
+
+```html
+{{name | uppercase}}                   <!-- ALICE -->
+{{title | truncate(50)}}               <!-- First 50 chars... -->
+{{description | escape}}               <!-- HTML-escaped -->
+{{data | json}}                        <!-- JSON serialized -->
+{{url | url_encode}}                   <!-- URL-encoded -->
+{{name | default("Anonymous")}}        <!-- Default if empty/None -->
+```
+
+**Available filters:** `uppercase`/`upper`, `lowercase`/`lower`, `capitalize`, `trim`, `truncate(n)`, `replace(old, new)`, `escape`, `json`, `url_encode`, `safe`/`raw`, `default(val)`, `length`, `first`, `last`, `reverse`, `join(sep)`, `slice(start, end)`, `number(decimals)`
+
+### Template Loop Metadata
+
+Inside `{{#for item in items}}` blocks:
+
+| Variable | Description |
+|----------|-------------|
+| `@index` | 0-based index |
+| `@index1` | 1-based index |
+| `@length` | Total items |
+| `@first` | true if first item |
+| `@last` | true if last item |
+| `@even` | true if even index |
+| `@odd` | true if odd index |
+
+```html
+{{#for item in items}}
+<div class="item {{#if @last}}last{{/if}}">
+    {{@index1}}. {{item.name}}
+</div>
+{{/for}}
+```
+
 ---
 
 ## File-Based Routing
@@ -1461,6 +1590,28 @@ routes/
 ```
 
 Route files export `get`, `post`, etc. functions.
+
+> File-based route handlers return whatever your function returns. If you return `json(...)`, it's a JSON endpoint. If you return `html(template(...))`, it's a page. There is no auto-template-loading in this routing model. `routes/api/` is still a useful organizational convention for JSON endpoints, but not a runtime special case.
+
+---
+
+## Stdlib Prelude (Auto-Available Functions)
+
+The most-used stdlib functions are auto-injected — no import needed:
+
+| Module | Auto-available functions |
+|--------|------------------------|
+| `std/string` | `split`, `trim`, `contains`, `replace`, `join`, `starts_with`, `ends_with`, `to_lower`, `to_upper` |
+| `std/json` | `parse_json` (also re-exported by `std/http/server`), `stringify` |
+| `std/collections` | `keys`, `values`, `entries`, `has_key`, `get_key`, `reverse`, `sort` |
+| `std/http/server` | `json`, `html`, `text`, `redirect`, `status`, `not_found`, `error`, `parse_form` |
+| `std/env` | `get_env`, `load_env` |
+| `std/time` | `now`, `format` |
+| `std/crypto` | `uuid`, `sha256` |
+
+**NOT in prelude** (still need explicit import): `fetch` (std/http), `connect`/`query`/`execute` (database modules), `set_cookie`/`get_cookie`/`with_cookie` (std/http/server), `sort_by`/`first`/`last`/`push`/`pop` (std/collections), KV, jobs, fs, csv, concurrent.
+
+Explicit imports still work — prelude just makes them unnecessary for common functions.
 
 ---
 
@@ -1481,6 +1632,8 @@ import { round_1dp } from "./lib/helpers.tnt"
 libs("lib/")
 // All exported names from all .tnt files in lib/ are now available
 ```
+
+> **⚠️ `libs()` only affects the calling file's scope.** Route files loaded by `routes()` have isolated scopes and do NOT see `libs()` exports. Route files must use explicit imports: `import { helper } from "../lib/module.tnt"`
 
 ---
 
@@ -1656,6 +1809,19 @@ del(kv, "session:abc")
 ```
 
 Values are automatically serialized — maps and arrays are stored as JSON.
+
+### KV Typed Helpers
+
+One-liners that handle Result unwrap + string conversion + type parsing + default on failure:
+
+```ntnt
+import { open, get_int, get_float, get_json, get_str } from "std/kv"
+
+let count = get_int(kv, "stats:visits", 0)          // Int, default 0
+let rate = get_float(kv, "config:rate", 1.0)         // Float, default 1.0
+let data = get_json(kv, "cache:user:1", map {})      // Parsed JSON, default empty map
+let name = get_str(kv, "user:name", "Anonymous")     // String, default "Anonymous"
+```
 
 ---
 

@@ -310,6 +310,7 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also verify_password, is_valid_hash
     // @since v0.4.0
     // @tags #io
+    // @gotcha `hash_password()` was previously available in `std/auth` (now deprecated — emits a runtime warning). Always use the `std/crypto` version, which supports a configurable cost factor. The `std/auth` version will be removed in a future release.
     // @example hash_password("secret123") => Ok("$2b$12$...") ~ "Hash with default cost"
     // @example hash_password("secret123", 10) => Ok("$2b$10$...") ~ "Hash with minimum cost (faster but still secure)"
     // @example hash_password("secret123", 14) => Ok("$2b$14$...") ~ "Hash with higher cost (more secure)"
