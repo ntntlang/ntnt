@@ -490,6 +490,56 @@ Based on impact, effort, and dependencies:
 
 ---
 
+## Implementation Checklist
+
+This turns the gap analysis into an execution plan instead of a catalog.
+
+### Phase 0 — Scope and sequencing
+- [ ] Confirm DD-058 is the backlog/strategy doc, not a promise to ship every item in one release
+- [ ] Approve the next-version scope as the **web-app-core gap set**, not the full DD
+- [ ] Split major features that need their own design docs (`std/db/model`, `std/graphql`, possibly `std/ws`) into separate follow-up DDs before implementation
+
+### Phase 1 — v0.5.0 core gap closure
+- [ ] Implement `std/validate`
+- [ ] Implement `std/email`
+- [ ] Implement rate limiting (likely from DD-051)
+- [ ] Implement multipart file uploads
+- [ ] Add quick wins to existing modules:
+  - [ ] `slugify()`
+  - [ ] `paginate()`
+  - [ ] `from_now()` / `time_ago()`
+- [ ] Implement IAL structural JSON `body has field` checking
+- [ ] Add docs + examples for each shipped Phase 1 feature
+- [ ] Add tests for each shipped Phase 1 feature
+
+### Phase 2 — v0.6.0 medium-priority gaps
+- [ ] Implement HTML sanitization
+- [ ] Implement cron expression helpers
+- [ ] Implement `std/xml`
+- [ ] Re-evaluate whether WebSocket support belongs here or should stay deferred to its own DD
+- [ ] Add docs + examples for each shipped Phase 2 feature
+- [ ] Add tests for each shipped Phase 2 feature
+
+### Phase 3 — major framework features (separate DDs first)
+- [ ] Write a dedicated DD for `std/db/model` (ORM / query builder / migrations)
+- [ ] Decide whether ORM lands in v0.7.0 or later after the dedicated DD is reviewed
+- [ ] Write a dedicated DD for `std/graphql`
+- [ ] Decide whether GraphQL lands in v0.7.0 or later after the dedicated DD is reviewed
+- [ ] Decide whether `std/ws` should ship before or after ORM / GraphQL work
+
+### Cross-cutting implementation requirements
+- [ ] For each accepted stdlib addition, decide module placement before coding starts
+- [ ] Prefer mature Rust crates only when the dependency meaningfully reduces implementation risk
+- [ ] Keep the ntnt API idiomatic — do not expose crate-shaped APIs directly
+- [ ] Add `@ntnt` docs / examples so `ntnt docs --generate` stays useful
+- [ ] Update README / reference docs if a new module materially changes the platform story
+- [ ] Validate that each addition reduces real package pressure rather than just adding surface area
+
+### Explicitly deferred / not part of the immediate next version
+- [ ] Keep ORM (`std/db/model`) out of the immediate next version unless separately approved
+- [ ] Keep GraphQL out of the immediate next version unless separately approved
+- [ ] Keep WebSocket support out of the immediate next version unless scope is intentionally expanded
+
 ## Open Questions
 
 | Question | Options | Recommendation |
