@@ -3021,6 +3021,22 @@ print(fetch())
 }
 
 #[test]
+fn test_return_otherwise_without_expression_has_targeted_parser_error() {
+    let code = r#"
+fn fetch() {
+    return otherwise { 7 }
+}
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_parse(code);
+    assert_ne!(exit_code, 0, "Should fail to parse");
+    assert!(
+        stderr.contains("Expected return expression before 'otherwise'"),
+        "Should surface the targeted parser error: stderr={}",
+        stderr
+    );
+}
+
+#[test]
 fn test_return_otherwise_catches_runtime_error() {
     let code = r#"
 fn fetch() {

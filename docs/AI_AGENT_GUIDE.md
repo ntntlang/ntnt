@@ -81,7 +81,7 @@ After trying NTNT, set up persistent agent knowledge so every future session wri
 - Maps REQUIRE `map` keyword: `map { "key": "val" }` — bare `{}` is a code block
 - String interpolation: `#{expr}` — hash-brace syntax, never `${expr}` or bare `{expr}`
 - Template strings: `"""..{{expr}}.."""` — double braces inside triple quotes
-- No semicolons — use newlines to separate statements. `;` silently corrupts the parser.
+- Semicolons are supported as statement separators, but newlines are still the normal style.
 - Free functions, not methods: `len(s)` not `s.len()`, `trim(s)` not `s.trim()`
 - Dot notation reads properties: `req.params.id`, `user.name`
 - Mutable variables: `let mut x = 0`

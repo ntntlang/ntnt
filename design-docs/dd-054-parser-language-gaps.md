@@ -13,9 +13,9 @@
 This DD originally treated three parser/language findings as equally active. After re-verifying them against current ntnt on this branch, that was no longer true.
 
 Verified status:
-- **#54 — `return expr otherwise { ... }`** → real gap, now implemented on this branch
-- **#55 — module-level `let` with `map {}` literal** → does not reproduce now; locked with regression coverage
-- **#56 — semicolon separator corruption/misreporting** → does not reproduce now; locked with regression coverage
+- **Finding 54 — `return expr otherwise { ... }`** → real gap, now implemented on this branch
+- **Finding 55 — module-level `let` with `map {}` literal** → does not reproduce now; locked with regression coverage
+- **Finding 56 — semicolon separator corruption/misreporting** → does not reproduce now; locked with regression coverage
 
 So DD-054 became:
 1. a real implementation plan for #54, and
@@ -29,9 +29,9 @@ That revised scope has now been implemented on this branch.
 
 | Finding | Old DD status | Current status on this branch | Recommendation |
 |---------|---------------|-------------------------------|----------------|
-| #54 `return expr otherwise { ... }` parse error | Active | **Implemented** | Ship |
-| #55 module-level `let` with `map {}` literal parse error | Active | **Does not reproduce** | Regression-lock only |
-| #56 semicolons corrupt parser state / misreport errors | Active | **Does not reproduce** | Regression-lock only |
+| Finding 54 `return expr otherwise { ... }` parse error | Active | **Implemented** | Ship |
+| Finding 55 module-level `let` with `map {}` literal parse error | Active | **Does not reproduce** | Regression-lock only |
+| Finding 56 semicolons corrupt parser state / misreport errors | Active | **Does not reproduce** | Regression-lock only |
 
 ---
 

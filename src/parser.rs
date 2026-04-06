@@ -1307,6 +1307,12 @@ impl Parser {
                 || self.check(&TokenKind::Semicolon)
             {
                 None
+            } else if self.check(&TokenKind::Otherwise) {
+                return Err(IntentError::ParserError {
+                    line: self.current_line(),
+                    column: self.current_column(),
+                    message: "Expected return expression before 'otherwise'".to_string(),
+                });
             } else {
                 Some(self.expression()?)
             };
