@@ -484,9 +484,9 @@ Based on impact, effort, and dependencies:
 **Total:** ~8,000-11,000 lines of Rust across all additions. Items 1-4 cover the critical gaps. Items 5-7 are quick wins. Items 8-9 are medium effort. Items 10-11 are major features that each deserve their own design doc. Item 12 is a nice-to-have.
 
 **Suggested phasing:**
-- **v0.5.0:** Items 1-5 (validation, email, rate limiting, uploads, quick wins) — closes the most common gaps
-- **v0.6.0:** Items 6-9 (sanitization, cron, XML, WebSocket) — fills remaining holes
-- **v0.7.0:** Items 10-11 (ORM + GraphQL) — the headline features that make ntnt a complete application framework, not just a web server language
+- **v0.4.8:** validation, email, rate limiting, uploads, quick wins, and the IAL `body has field` structural fix
+- **v0.4.9 / v0.4.10:** sanitization, cron helpers, XML, and any other medium-scope additions we explicitly approve
+- **later 0.4.x (for example v0.4.11+) only after separate DD review:** ORM, GraphQL, and any intentionally expanded real-time work
 
 ---
 
@@ -499,7 +499,7 @@ This turns the gap analysis into an execution plan instead of a catalog.
 - [ ] Approve the next-version scope as the **web-app-core gap set**, not the full DD
 - [ ] Split major features that need their own design docs (`std/db/model`, `std/graphql`, possibly `std/ws`) into separate follow-up DDs before implementation
 
-### Phase 1 — v0.5.0 core gap closure
+### Phase 1 — v0.4.8 core gap closure
 - [ ] Implement `std/validate`
 - [ ] Implement `std/email`
 - [ ] Implement rate limiting (likely from DD-051)
@@ -512,7 +512,7 @@ This turns the gap analysis into an execution plan instead of a catalog.
 - [ ] Add docs + examples for each shipped Phase 1 feature
 - [ ] Add tests for each shipped Phase 1 feature
 
-### Phase 2 — v0.6.0 medium-priority gaps
+### Phase 2 — v0.4.9 / v0.4.10 medium-priority gaps
 - [ ] Implement HTML sanitization
 - [ ] Implement cron expression helpers
 - [ ] Implement `std/xml`
@@ -520,11 +520,11 @@ This turns the gap analysis into an execution plan instead of a catalog.
 - [ ] Add docs + examples for each shipped Phase 2 feature
 - [ ] Add tests for each shipped Phase 2 feature
 
-### Phase 3 — major framework features (separate DDs first)
+### Phase 3 — later 0.4.x releases / separate DDs first
 - [ ] Write a dedicated DD for `std/db/model` (ORM / query builder / migrations)
-- [ ] Decide whether ORM lands in v0.7.0 or later after the dedicated DD is reviewed
+- [ ] Decide whether ORM lands in a later 0.4.x release after the dedicated DD is reviewed
 - [ ] Write a dedicated DD for `std/graphql`
-- [ ] Decide whether GraphQL lands in v0.7.0 or later after the dedicated DD is reviewed
+- [ ] Decide whether GraphQL lands in a later 0.4.x release after the dedicated DD is reviewed
 - [ ] Decide whether `std/ws` should ship before or after ORM / GraphQL work
 
 ### Cross-cutting implementation requirements
