@@ -1014,26 +1014,48 @@ impl TypeContext {
                 self.pop_scope();
             }
 
-            Statement::Return(expr) => {
-                if let Some(expr) = expr {
-                    let actual = self.infer_expression(expr);
-                    self.collected_returns.push(actual.clone());
-                    if let Some(expected) = self.current_return_type.clone() {
-                        if !self.compatible(&actual, &expected) && !matches!(actual, Type::Any) {
-                            let line = self.find_line_near("return");
-                            self.error(
-                                format!(
-                                    "Return type mismatch: expected {} but returning {}",
-                                    expected.name(),
-                                    actual.name()
-                                ),
-                                line,
-                                None,
-                            );
+            Statement::Return { value, otherwise } => {
+                let mut actual = if let Some(expr) = value {
+                    let expr_ty = self.infer_expression(expr);
+                    if otherwise.is_some() {
+                        match &expr_ty {
+                            Type::Optional(inner) => (**inner).clone(),
+                            Type::Generic { name, args }
+                                if name == "Result" && !args.is_empty() =>
+                            {
+                                args[0].clone()
+                            }
+                            _ => expr_ty,
                         }
+                    } else {
+                        expr_ty
                     }
                 } else {
-                    self.collected_returns.push(Type::Unit);
+                    Type::Unit
+                };
+
+                if let Some(otherwise_block) = otherwise {
+                    self.push_scope();
+                    self.bind("err", Type::Any);
+                    let fallback_ty = self.check_block(otherwise_block);
+                    self.pop_scope();
+                    actual = self.union_type(&actual, &fallback_ty);
+                }
+
+                self.collected_returns.push(actual.clone());
+                if let Some(expected) = self.current_return_type.clone() {
+                    if !self.compatible(&actual, &expected) && !matches!(actual, Type::Any) {
+                        let line = self.find_line_near("return");
+                        self.error(
+                            format!(
+                                "Return type mismatch: expected {} but returning {}",
+                                expected.name(),
+                                actual.name()
+                            ),
+                            line,
+                            None,
+                        );
+                    }
                 }
             }
 
@@ -1490,7 +1512,7 @@ impl TypeContext {
             other => other,
         });
         match last {
-            Some(Statement::Return(_)) => true,
+            Some(Statement::Return { .. }) => true,
             Some(Statement::Break) | Some(Statement::Continue) => true,
             Some(Statement::If {
                 then_branch,
@@ -1515,8 +1537,27 @@ impl TypeContext {
             // Track the type of expression statements (for implicit return)
             if let Statement::Expression(expr) = inner {
                 last_type = self.infer_expression(expr);
-            } else if let Statement::Return(Some(expr)) = inner {
-                last_type = self.infer_expression(expr);
+            } else if let Statement::Return {
+                value: Some(expr),
+                otherwise,
+            } = inner
+            {
+                let mut ty = self.infer_expression(expr);
+                if let Some(otherwise_block) = otherwise {
+                    match &ty {
+                        Type::Optional(inner) => ty = (**inner).clone(),
+                        Type::Generic { name, args } if name == "Result" && !args.is_empty() => {
+                            ty = args[0].clone()
+                        }
+                        _ => {}
+                    }
+                    self.push_scope();
+                    self.bind("err", Type::Any);
+                    let fallback_ty = self.check_block(otherwise_block);
+                    self.pop_scope();
+                    ty = self.union_type(&ty, &fallback_ty);
+                }
+                last_type = ty;
             } else {
                 last_type = Type::Unit;
             }

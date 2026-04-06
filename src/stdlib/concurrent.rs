@@ -1322,7 +1322,17 @@ fn collect_free_vars(
                 collect_free_vars(&body.statements, referenced, &mut body_bound);
             }
             Statement::Expression(expr) => collect_free_vars_expr(expr, referenced, bound),
-            Statement::Return(Some(expr)) => collect_free_vars_expr(expr, referenced, bound),
+            Statement::Return {
+                value: Some(expr),
+                otherwise,
+            } => {
+                collect_free_vars_expr(expr, referenced, bound);
+                if let Some(block) = otherwise {
+                    let mut otherwise_bound = bound.clone();
+                    otherwise_bound.insert("err".to_string());
+                    collect_free_vars(&block.statements, referenced, &mut otherwise_bound);
+                }
+            }
             Statement::If {
                 condition,
                 then_branch,
@@ -1457,7 +1467,10 @@ fn collect_free_vars(
                     bound.insert(variant.name.clone());
                 }
             }
-            Statement::Return(None)
+            Statement::Return {
+                value: None,
+                otherwise: _,
+            }
             | Statement::Break
             | Statement::Continue
             | Statement::Use { .. }
@@ -3333,11 +3346,14 @@ mod tests {
                     value: Some(Expression::Identifier("seed".to_string())),
                     pattern: None,
                     otherwise: Some(Block {
-                        statements: vec![Statement::Return(Some(Expression::Binary {
-                            left: Box::new(Expression::Identifier("err".to_string())),
-                            operator: BinaryOp::Add,
-                            right: Box::new(Expression::Identifier("fallback".to_string())),
-                        }))],
+                        statements: vec![Statement::Return {
+                            value: Some(Expression::Binary {
+                                left: Box::new(Expression::Identifier("err".to_string())),
+                                operator: BinaryOp::Add,
+                                right: Box::new(Expression::Identifier("fallback".to_string())),
+                            }),
+                            otherwise: None,
+                        }],
                     }),
                 },
                 Statement::Expression(Expression::Call {
