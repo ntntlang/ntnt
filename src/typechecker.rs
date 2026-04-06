@@ -598,6 +598,29 @@ impl TypeContext {
             } else {
                 a.clone()
             }
+
+            fn unwrap_return_otherwise_success_type(&self, ty: &Type) -> Type {
+                match ty {
+                    Type::Optional(inner) => (**inner).clone(),
+                    Type::Generic { name, args } if name == "Result" && !args.is_empty() => {
+                        args[0].clone()
+                    }
+                    _ => ty.clone(),
+                }
+            }
+
+            fn merge_return_otherwise_type(
+                &mut self,
+                expr_ty: &Type,
+                otherwise_block: &Block,
+            ) -> Type {
+                let success_ty = self.unwrap_return_otherwise_success_type(expr_ty);
+                self.push_scope();
+                self.bind("err", Type::Any);
+                let fallback_ty = self.check_block(otherwise_block);
+                self.pop_scope();
+                self.union_type(&success_ty, &fallback_ty)
+            }
         } else if b.is_compatible(a) {
             b.clone()
         } else {
@@ -1542,22 +1565,12 @@ impl TypeContext {
                 otherwise,
             } = inner
             {
-                let mut ty = self.infer_expression(expr);
-                if let Some(otherwise_block) = otherwise {
-                    match &ty {
-                        Type::Optional(inner) => ty = (**inner).clone(),
-                        Type::Generic { name, args } if name == "Result" && !args.is_empty() => {
-                            ty = args[0].clone()
-                        }
-                        _ => {}
-                    }
-                    self.push_scope();
-                    self.bind("err", Type::Any);
-                    let fallback_ty = self.check_block(otherwise_block);
-                    self.pop_scope();
-                    ty = self.union_type(&ty, &fallback_ty);
-                }
-                last_type = ty;
+                let ty = self.infer_expression(expr);
+                last_type = if let Some(otherwise_block) = otherwise {
+                    self.merge_return_otherwise_type(&ty, otherwise_block)
+                } else {
+                    ty
+                };
             } else {
                 last_type = Type::Unit;
             }
