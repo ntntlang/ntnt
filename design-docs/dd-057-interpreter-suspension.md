@@ -1,67 +1,50 @@
-# DD-057: Interpreter Suspension for Async I/O
+# DD-057: Interpreter Suspension for Async I/O (Post-Worker-Pool Plan)
 
-**Status:** Draft
-**Author:** Larri + Josh
-**Created:** 2026-03-31
-**App:** ntnt
-**Origin:** DD-038 benchmarks (2026-03-12) — ntnt matches Hono/Bun on HTTP-only but is 4-20× slower on DB workloads. Phase 1 (connection pooling) shipped in v0.4.2 with zero throughput gain, confirming the bottleneck is the interpreter, not the pool.
+**Status:** Draft  
+**Author:** Larri + Josh  
+**Created:** 2026-03-31  
+**Revised:** 2026-04-05  
+**App:** ntnt  
+**Origin:** DD-038 benchmarks (2026-03-12) showed ntnt matching Hono/Bun on HTTP-only workloads but lagging badly on DB-heavy workloads. Connection pooling shipped earlier and did not materially improve throughput, confirming the bottleneck is interpreter-side blocking during I/O.
+
+---
+
+## Executive Summary
+
+This problem is **real**, but the old version of this DD was stale in one important way: the “quick win” worker-pool phase is no longer hypothetical — ntnt already has a production worker pool.
+
+So the actual question now is **not**:
+> should ntnt move from one worker to many workers?
+
+It is:
+> should ntnt add **per-worker interpreter suspension** on top of the existing worker pool so each worker can multiplex requests while waiting on DB/HTTP/file I/O?
+
+My judgment:
+- **Worker pool:** easy / already done
+- **True interpreter suspension:** hard, but tractable
+- **Best plan:** keep the worker pool, add suspension **inside worker mode first**, and scope the MVP tightly to the highest-value blocking operations (`std/db/postgres` query path)
+
+This is a **high-complexity runtime refactor**, not a quick patch. It is probably one of the harder runtime changes on the current ntnt roadmap, but it is also one of the few with clear benchmark upside.
 
 ---
 
 ## Problem
 
-The ntnt interpreter blocks the entire worker thread during every database call. Even with a deadpool connection pool (5 connections available), only one query executes at a time because the interpreter calls `DB_RUNTIME.block_on()` synchronously for every operation.
+The interpreter still blocks **each worker thread** during synchronous I/O operations such as PostgreSQL queries.
 
-### Current Architecture
+Even after connection pooling, a worker that hits `DB_RUNTIME.block_on(...)` is frozen until the operation completes. The worker pool improves throughput by parallelizing the blocking across multiple interpreters, but it does **not** remove the per-worker idle time.
 
-```
-Axum (async, multi-threaded)
-  │
-  ▼
-flume MPMC channel
-  │
-  ▼
-Single interpreter worker thread (Rc<RefCell<>>, not Send)
-  │
-  ├─ Evaluate request handler (fast — microseconds)
-  ├─ Hit pg_query() → DB_RUNTIME.block_on(pool.get() + client.query()) ← BLOCKS HERE
-  ├─ ... entire worker frozen for 1-10ms ...
-  ├─ Result comes back, continue evaluation
-  ├─ Maybe hit another pg_query() → BLOCKS AGAIN
-  └─ Return response
-```
+### Current Real Baseline
 
-While the interpreter is blocked on a DB call, every other request in the channel queue waits. Under load, this serializes all DB access regardless of how many pool connections exist.
+The old version of this DD described a single-worker bridge as if that were the whole production architecture. That is no longer accurate.
 
-### Benchmark Evidence (DD-038, 2026-03-12)
+Current server behavior:
+- production mode already supports multiple interpreter workers (`NTNT_WORKERS`)
+- worker 0 (main thread) handles hot-reload-aware behavior
+- additional workers parse/eval the same source independently and process requests without hot-reload
+- each worker still blocks on DB calls inside the interpreter
 
-| Benchmark | ntnt v0.4.1 | ntnt v0.4.2 (pool) | FastAPI | Gin | Hono/Bun |
-|-----------|----------:|--------:|--------:|----:|---------:|
-| plaintext | 118K | 119K | 174K | 406K | 118K |
-| db (1 query) | 8.4K | 8.3K | 37K | 130K | 32K |
-| 20 queries | 457 | 418 | 5.8K | 9.3K | 2.8K |
-
-Pool alone: **no improvement** (8.4K → 8.3K). The interpreter thread is the bottleneck, not the connection count. HTTP-only throughput (118K) proves the Axum/Tokio layer is fine — the interpreter can evaluate handlers at >100K/s when there's no I/O blocking.
-
-### The 11 `block_on()` Calls
-
-`src/stdlib/postgres.rs` has 11 `DB_RUNTIME.block_on()` calls:
-- `connect()` — pool creation + verify
-- `pg_query()` — query execution
-- `pg_query_one()` — single-row query
-- `pg_execute()` — execute (no results)
-- `pg_transaction_begin/commit/rollback()` — transaction management
-- `pg_close()` — pool shutdown
-
-Each one freezes the interpreter thread for the duration of the network round-trip.
-
----
-
-## Solution: Interpreter Suspension
-
-When the interpreter hits an I/O operation (DB query, HTTP fetch, file read), instead of blocking, it **suspends** the current evaluation, returns control to the worker loop, and picks up another request from the channel. When the I/O completes, the suspended evaluation resumes where it left off.
-
-### Target Architecture
+So the current architecture is already:
 
 ```
 Axum (async, multi-threaded)
@@ -69,250 +52,310 @@ Axum (async, multi-threaded)
   ▼
 flume MPMC channel
   │
-  ▼
-Interpreter worker thread
-  │
-  ├─ Pick up Request A from channel
-  ├─ Evaluate A's handler → hit pg_query()
-  ├─ Suspend A, save continuation
-  ├─ Pick up Request B from channel       ← no longer blocked!
-  ├─ Evaluate B's handler → hit pg_query()
-  ├─ Suspend B, save continuation
-  ├─ A's query result arrives → resume A
-  ├─ A finishes → send response
-  ├─ B's query result arrives → resume B
-  ├─ B finishes → send response
-  └─ ...
+  ├─ Worker 0 interpreter (main thread, hot-reload aware)
+  ├─ Worker 1 interpreter (blocking on I/O per request)
+  ├─ Worker 2 interpreter (blocking on I/O per request)
+  └─ Worker N interpreter (blocking on I/O per request)
 ```
 
-The interpreter thread is never idle while waiting for I/O. It interleaves evaluations like an async runtime, but at the language level — ntnt code stays synchronous.
+This means DD-057 should be framed as a **Phase 2 / Phase 3 runtime improvement after worker-pool support**, not as the first step.
+
+### Why this still matters
+
+Worker pools help, but they have limits:
+- each worker still goes idle while waiting on I/O
+- more workers means more interpreter clones and more memory
+- more workers also mean more potential DB fan-out (`workers × pool size`)
+- hot-reload complexity remains concentrated in the main worker
+
+Interpreter suspension attacks the real inefficiency directly:
+- don’t waste a worker while it waits on network/file I/O
+- let one worker advance other suspended requests instead
 
 ---
 
-## Design Options
+## Critical Review of the Previous DD
 
-### Option A: Continuation-Based Suspension (Recommended)
+The previous version of DD-057 had the right instinct but several structural problems:
 
-Save the interpreter's evaluation state as a continuation when hitting I/O, restore it when the I/O completes.
+### 1. It treated the worker pool as future work when it already exists
+That made the whole plan look more greenfield than it really is.
 
-**What gets saved (the continuation):**
-- Environment chain (`Rc<RefCell<Environment>>` — the scope stack)
-- Current statement index in the block being evaluated
-- Call stack (which function called which, with locals)
-- The pending I/O operation + callback channel
+### 2. It mixed two different documents into one
+The old draft tried to be both:
+- a justification for the already-shipped worker-pool direction, and
+- a design for true interpreter suspension
 
-**How it works:**
+Those are different decisions with very different difficulty.
+
+### 3. It made Phase 1 look more speculative than it should
+The worker-pool path is no longer “what if we did this?” It is the live baseline we should benchmark against.
+
+### 4. It made suspension sound slightly cleaner than it really is
+The hard part is **not** dispatching async I/O. The hard part is making the recursive interpreter resumable without turning it into a bug farm.
+
+### 5. It lacked a tight MVP boundary
+“suspend all I/O” is too broad. The right first target is:
+- production worker mode only
+- PostgreSQL query path first
+- keep dev/hot-reload behavior unchanged initially
+
+### 6. Its success metrics were too speculative
+The old draft gave optimistic numeric targets without benchmarking the current worker-pool baseline first. That’s not a great basis for implementation gating.
+
+---
+
+## Recommendation
+
+### Recommended architecture: **hybrid, worker-mode-first suspension**
+
+Keep the existing worker pool.
+
+Then add **cooperative suspension inside each worker** so a worker can pause one request on I/O, continue another, and resume the first when the operation completes.
+
+This gives us:
+- current production parallelism from multiple workers
+- future per-worker multiplexing within each worker
+- much lower risk than trying to replace the whole server model in one shot
+
+### Recommended initial scope
+
+**Implement suspension only in production worker mode first.**
+
+Do **not** try to solve all of these at once:
+- hot-reload-aware main worker
+- all stdlib I/O modules
+- every blocking native function
+- dev mode semantics
+
+#### MVP scope
+- production worker mode only
+- `std/db/postgres` first
+  - `pg_query`
+  - `pg_query_one`
+  - `pg_execute`
+- optionally transaction begin/commit/rollback once the basic mechanism works
+
+#### Explicitly out of MVP scope
+- dev-mode hot reload
+- file I/O suspension
+- HTTP fetch suspension
+- Redis / KV suspension
+- replacing the worker pool entirely
+
+---
+
+## How hard is this?
+
+### Short answer
+**Hard.** Roughly **7.5/10** difficulty.
+
+### Why
+Because the problem is not “make DB async.” The DB is already async-capable behind the blocking boundary. The hard part is teaching the interpreter to **yield and resume safely**.
+
+That means:
+- preserving execution state at an I/O boundary
+- restoring the right continuation with the right value/error
+- keeping environment/call-frame semantics correct
+- not breaking error propagation, transactions, or return behavior
+- avoiding weird starvation/reentrancy bugs in the worker loop
+
+### My practical estimate
+- **Not** a one-evening patch
+- **Not** something I’d want to squeeze into a noisy feature train casually
+- **Yes** something we can do if scoped tightly and benchmarked carefully
+
+If the benchmark delta over the current worker-pool baseline is small, this may not be worth the complexity right now.
+If the delta is big, it becomes one of the highest-leverage runtime projects in ntnt.
+
+---
+
+## Design Direction
+
+### Core principle
+Do **not** try to capture the Rust call stack.
+
+Instead, make the interpreter resumable via an **explicit evaluation stack / continuation model**.
+
+That means moving toward:
+- resumable `EvalOutcome`
+- explicit `Continuation`
+- explicit frame / program-counter state
+
+### Recommended approach: explicit continuation / scheduler model
 
 ```rust
-enum EvalResult {
-    Complete(Value),                          // Normal return
-    Suspended(Continuation, IoOperation),     // Yielded on I/O
+enum EvalOutcome {
+    Complete(Value),
+    Suspended(Continuation, PendingIo),
 }
 
 struct Continuation {
     env: Rc<RefCell<Environment>>,
-    call_stack: Vec<StackFrame>,
-    resume_point: ResumePoint,                // Where to continue after I/O
-    request_context: BridgeCallContext,        // Axum reply channel, etc.
+    frames: Vec<EvalFrame>,
+    request_context: RequestContext,
 }
 
-enum IoOperation {
-    DbQuery { pool_id: u64, sql: String, params: Vec<Value>, result_tx: oneshot::Sender<Value> },
-    HttpFetch { url: String, opts: Value, result_tx: oneshot::Sender<Value> },
-    FileRead { path: String, result_tx: oneshot::Sender<Value> },
-}
-```
-
-**Worker loop becomes:**
-
-```rust
-loop {
-    // 1. Check for completed I/O results (non-blocking)
-    while let Ok(completed) = io_completion_rx.try_recv() {
-        let continuation = suspended.remove(&completed.id);
-        let result = resume_evaluation(continuation, completed.value);
-        match result {
-            EvalResult::Complete(response) => send_response(response),
-            EvalResult::Suspended(cont, io) => {
-                dispatch_io(io);
-                suspended.insert(cont);
-            }
-        }
-    }
-
-    // 2. Pick up new requests (non-blocking if we have suspended work)
-    match request_rx.try_recv() {
-        Ok(request) => {
-            let result = evaluate_handler(request);
-            match result {
-                EvalResult::Complete(response) => send_response(response),
-                EvalResult::Suspended(cont, io) => {
-                    dispatch_io(io);
-                    suspended.insert(cont);
-                }
-            }
-        }
-        Err(TryRecvError::Empty) if suspended.is_empty() => {
-            // Nothing to do — block on the channel
-            let request = request_rx.recv().unwrap();
-            // ... evaluate ...
-        }
-        _ => {}  // Channel empty but we have suspended work — keep polling
-    }
+enum PendingIo {
+    PgQuery { op_id: u64, ... },
+    PgQueryOne { op_id: u64, ... },
+    PgExecute { op_id: u64, ... },
 }
 ```
 
-**Pros:**
-- Single interpreter thread (no thread-safety changes to `Rc<RefCell<>>`)
-- Cooperative scheduling — no preemption, no race conditions
-- ntnt user code stays 100% synchronous
-- Compatible with existing environment/scope model
+Each worker then becomes a tiny scheduler:
+- receive new requests
+- evaluate until complete or suspended
+- dispatch async I/O for suspended operations
+- poll completion queue
+- resume the saved continuation
 
-**Cons:**
-- Requires refactoring the interpreter's recursive `evaluate()` to be resumable
-- Call stack must be capturable and restorable — significant refactor
-- Every I/O call site needs a suspension point
+### Why not stackful coroutines first?
+Because they look elegant but usually make debugging, control-flow reasoning, and runtime portability worse. They may still be worth a spike, but they should not be the default assumption.
 
-### Option B: Worker Pool (Multiple Interpreter Instances)
-
-Spawn N interpreter threads, each with its own `Rc<RefCell<>>` environment. The flume channel already supports MPMC — just add more consumers.
-
-**What changes:**
-- `num_workers` default goes from 1 → `num_cpus` (or configurable)
-- Each worker gets a fresh interpreter clone with the same loaded code
-- Workers are fully independent — no shared mutable state between interpreters
-
-```rust
-for _ in 0..config.num_workers {
-    let rx = request_rx.clone();  // flume supports MPMC
-    let program = program.clone();
-    std::thread::spawn(move || {
-        let mut interpreter = Interpreter::new();
-        interpreter.load(program);
-        loop {
-            let call = rx.recv().unwrap();
-            let response = interpreter.handle_request(call.request);
-            call.reply_tx.send(response).ok();
-        }
-    });
-}
-```
-
-**Pros:**
-- Simple — no interpreter changes at all
-- Each worker blocks independently (while worker 1 is blocked on DB, workers 2-N handle requests)
-- `Rc<RefCell<>>` stays as-is (each worker has its own)
-- The bridge architecture already supports this (flume MPMC + the ASCII art in http_bridge.rs shows it)
-- Proven model (uvicorn/gunicorn workers, PHP-FPM, etc.)
-
-**Cons:**
-- N× memory usage (each interpreter is a full clone of the program + stdlib)
-- Shared state (DB pools, KV stores) needs to be `Arc` — already is (`POOL_REGISTRY` is static)
-- Hot-reload must propagate to all workers
-- N workers with M pool connections = N×M potential concurrent queries (may overwhelm DB)
-- Doesn't solve the fundamental per-worker blocking — just parallelizes it
-
-### Option C: Hybrid (Workers Now, Suspension Later)
-
-Ship Option B first (it's a small change — `num_workers` already exists, flume already supports MPMC). Then pursue Option A for the long term.
-
-**Rationale:** Option B is a config change + some worker initialization code. It gets immediate throughput gains on DB workloads by paralleling the blocking. Option A is the architecturally correct solution but requires a major interpreter refactor.
+### Why not keep pure worker parallelism and stop?
+That is the control/baseline. It may be enough. But we should decide that with fresh benchmarks against the already-shipped worker pool, not by assumption.
 
 ---
 
-## Recommendation: Option C (Hybrid)
+## Proposed Architecture
 
-### Phase 1: Worker Pool (Quick Win)
+### Current target architecture (after suspension MVP)
 
-The infrastructure is already there — `num_workers` config field exists, flume is MPMC, the bridge diagram shows multi-worker. Just wire it up.
+```
+Axum
+  │
+  ▼
+flume MPMC channel
+  │
+  ├─ Worker 0 (hot-reload aware, still mostly current behavior)
+  ├─ Worker 1 scheduler
+  │    ├─ ready queue
+  │    ├─ suspended map
+  │    └─ I/O completion queue
+  ├─ Worker 2 scheduler
+  └─ Worker N scheduler
+```
 
-**Expected impact:** With 4 workers and a 5-connection pool, DB throughput should approach 4× current (limited by the slowest of workers or connections). 8.3K → ~25-30K on single-query benchmark, closing most of the gap with FastAPI (37K).
+Each production worker can:
+1. start evaluating a request
+2. suspend on `pg_query` / `pg_query_one` / `pg_execute`
+3. dispatch the query onto the async DB runtime
+4. continue processing other ready requests
+5. resume the suspended continuation when the result arrives
 
-**Checklist:**
-- [ ] Worker pool initialization: spawn N interpreter threads from the loaded program
-- [ ] Each worker gets its own `Interpreter` instance (clone the AST, re-run module loading)
-- [ ] `num_workers` config: default to `min(num_cpus, 4)` in production, 1 in development
-- [ ] Hot-reload propagation: file watcher signals all workers to reload
-- [ ] Worker health monitoring: detect panicked workers, respawn
-- [ ] `ntnt run server.tnt --workers 8` CLI flag
-- [ ] Benchmark: re-run DD-038 suite, compare against v0.4.2
-- [ ] Verify shared state is safe: `POOL_REGISTRY`, `DB_RUNTIME`, KV stores all use `static LazyLock<Mutex<>>` — already thread-safe
+### Key design choice
+**Suspension complements workers; it does not replace them initially.**
 
-**Risks:**
-- Memory: each worker holds a full interpreter clone. Measure RSS with 4 workers on a real app.
-- DB overload: 4 workers × 5 pool connections = 20 concurrent queries possible. PG default `max_connections` is 100, so fine. Add `NTNT_DB_POOL_SIZE` awareness to the docs.
-- Hot-reload race: if file watcher fires while a worker is mid-request, need to queue the reload for the next request boundary.
-
-### Phase 2: Interpreter Suspension (Long Term)
-
-The architecturally clean solution. The interpreter yields on I/O and interleaves multiple evaluations on a single thread — true cooperative multitasking.
-
-This is a significant refactor of the interpreter's evaluation model. The current recursive `evaluate()` function would need to become resumable — either via:
-
-1. **Explicit continuation passing** — refactor `evaluate()` to return `EvalResult::Suspended` at I/O points
-2. **Stackful coroutines** — use a crate like `corosensei` or `genawaiter` to save/restore the call stack
-3. **CPS transform** — transform the interpreter to continuation-passing style internally
-
-Each has tradeoffs in complexity, performance, and debuggability. This needs its own design spike before committing to an approach.
-
-**Checklist:**
-- [ ] Design spike: prototype each suspension approach, measure overhead
-- [ ] Pick approach based on spike results
-- [ ] Refactor interpreter evaluation to be suspendable
-- [ ] Add suspension points at all I/O operations: `pg_query*`, `pg_execute`, `fetch()`, `read_file()`, etc.
-- [ ] Worker loop: poll for I/O completions + new requests
-- [ ] Benchmark: single-worker suspended vs multi-worker blocking
-- [ ] Consider: does suspension replace workers, or complement them? (suspended workers = best of both)
-
-**Deferred until:** Phase 1 results are measured. If 4 workers closes the gap sufficiently for production use, Phase 2 becomes an optimization rather than a necessity.
+That means:
+- we keep multi-core parallelism
+- we reduce idle time inside each worker
+- we avoid having one giant all-powerful scheduler refactor as the first move
 
 ---
 
-## I/O Operations Requiring Suspension Points
+## Implementation Plan
 
-| Module | Functions | Current Behavior |
-|--------|-----------|-----------------|
-| `std/db/postgres` | `pg_query`, `pg_query_one`, `pg_execute`, `connect`, transaction ops | `DB_RUNTIME.block_on()` — 11 call sites |
-| `std/db/sqlite` | `query`, `execute`, `connect` | Synchronous (file I/O, usually fast) |
-| `std/http` | `fetch`, `download` | `DB_RUNTIME.block_on()` via reqwest |
-| `std/fs` | `read_file`, `write_file` | Synchronous `std::fs` |
-| `std/kv` | `get`, `set` (when backed by Redis) | Synchronous |
+### Phase 0 — Re-baseline the current system
+Before any runtime refactor:
+- [ ] Benchmark the current worker-pool baseline at `NTNT_WORKERS=1,2,4,8`
+- [ ] Measure memory/RSS for a representative real app under those worker counts
+- [ ] Measure single-query and multi-query throughput against the current baseline, not the old DD-038 single-worker numbers
+- [ ] Decide whether the current worker-pool baseline is already “good enough” for near-term needs
 
-Priority order: postgres (biggest impact), HTTP fetch (common in APIs), everything else (diminishing returns).
+### Phase 1 — Design spike for suspension shape
+- [ ] Identify the smallest interpreter slice that can suspend and resume safely
+- [ ] Prototype an explicit `EvalOutcome::{Complete,Suspended}` path at one native-function boundary
+- [ ] Prove that a saved continuation can resume with a returned `Value` cleanly
+- [ ] Decide whether the interpreter needs a partial frame-stack refactor before real suspension work can proceed
+- [ ] Explicitly reject or accept stackful-coroutine experiments based on debuggability, not aesthetics
+
+### Phase 2 — Worker-mode scheduler core
+- [ ] Implement a per-worker ready/suspended/completion scheduling loop
+- [ ] Keep the implementation limited to production worker mode initially
+- [ ] Leave hot-reload-aware main-worker behavior unchanged for the first suspension slice
+- [ ] Add operation IDs and completion routing for suspended I/O
+- [ ] Ensure errors resume into the interpreter with normal ntnt error semantics
+
+### Phase 3 — PostgreSQL MVP
+- [ ] Add suspension support for `pg_query`
+- [ ] Add suspension support for `pg_query_one`
+- [ ] Add suspension support for `pg_execute`
+- [ ] Benchmark after the PostgreSQL MVP before widening scope
+- [ ] Decide whether transaction begin/commit/rollback should be included immediately after the MVP or in Phase 4
+
+### Phase 4 — Transaction and semantics hardening
+- [ ] Add transaction-safe suspension handling
+- [ ] Verify suspended operations do not violate transaction pinning semantics
+- [ ] Verify request-scoped environment/state survives suspend/resume correctly
+- [ ] Verify return/error propagation across suspend/resume boundaries
+- [ ] Add stress tests for many concurrent suspended requests inside one worker
+
+### Phase 5 — Re-evaluate scope expansion
+- [ ] Decide whether to extend suspension to `std/http`
+- [ ] Decide whether to extend suspension to file I/O
+- [ ] Decide whether dev-mode/main-worker hot-reload path should ever become suspendable
+- [ ] Revisit default worker counts once suspension exists (current worker defaults may be too high or too low after multiplexing)
 
 ---
 
 ## Success Criteria
 
-### Phase 1 (Worker Pool)
+### Benchmark gates
+Use benchmark deltas relative to the **current worker-pool baseline**, not the old single-worker DD-038 numbers.
 
-| Metric | Current (1 worker) | Target (4 workers) |
-|--------|-------------------:|-------------------:|
-| db single query | 8.3K req/s | 25-30K req/s |
-| db 20 queries | 418 req/s | 1.5-2K req/s |
-| plaintext (baseline) | 119K req/s | ~119K req/s (no change expected) |
-| Memory (real app) | ~50MB | <200MB |
+#### Required for Phase 3 to be considered a success
+- [ ] 1-worker suspended PostgreSQL throughput beats 1-worker blocking baseline materially
+- [ ] 4-worker suspended PostgreSQL throughput beats current 4-worker blocking baseline materially
+- [ ] plaintext / non-I/O benchmarks do not regress in a meaningful way
+- [ ] memory growth is measured and acceptable for the achieved throughput gain
 
-### Phase 2 (Suspension)
+### Correctness gates
+- [ ] No request-context leakage across suspended continuations
+- [ ] No broken transaction semantics
+- [ ] No broken return / throw / contract behavior after resume
+- [ ] No hot-reload regressions in dev mode (because dev mode is intentionally left mostly unchanged initially)
 
-| Metric | Target |
-|--------|--------|
-| db single query (1 worker, suspended) | 30-40K req/s |
-| db 20 queries (1 worker, suspended) | 3-5K req/s |
-| Memory overhead per suspended request | <10KB |
-| Max concurrent suspended evaluations | 1000+ |
+---
+
+## Risks
+
+| Risk | Why it matters | Mitigation |
+|------|----------------|------------|
+| Continuation bugs | Most likely source of subtle runtime breakage | Keep MVP tiny; add explicit scheduler tests before widening scope |
+| Transaction breakage | Suspending in the middle of DB workflows can corrupt semantics | Treat transaction support as a separate hardening phase |
+| Hot-reload interaction | Main worker has special behavior today | Keep suspension out of hot-reload path initially |
+| Complexity > payoff | Worker pool may already close enough of the gap | Benchmark current baseline first |
+| Scheduler starvation | A bad polling loop can starve ready or resumed work | Add fairness tests and explicit queue policy |
 
 ---
 
 ## Open Questions
 
-| Question | Options | Recommendation |
-|----------|---------|----------------|
-| Default worker count? | 1 (safe) vs `num_cpus` (fast) | `min(num_cpus, 4)` in production, 1 in development |
-| Worker memory sharing? | Clone AST per worker vs Arc-shared AST | Clone for simplicity — AST is small (~1-5MB for real apps) |
-| Should `num_workers` affect dev mode? | Same as prod vs always 1 | Always 1 in dev (simpler debugging, hot-reload) |
-| Suspension approach? | Continuations vs coroutines vs CPS | Defer to Phase 2 design spike |
-| Phase 2 timeline? | After Phase 1 ships vs parallel | After Phase 1 benchmarks — measure first |
+| Question | Recommendation |
+|----------|----------------|
+| Should suspension replace workers eventually? | Not initially. Keep workers + add per-worker suspension first. |
+| Should dev mode use suspension? | No, not in the MVP. Keep dev simpler. |
+| Should HTTP/file I/O be in scope for the MVP? | No. PostgreSQL first. |
+| Should transactions be in the MVP? | Probably not. Add them immediately after the query/execute MVP if the core scheduler works. |
+| What if worker pool benchmarks are already good enough? | Then this becomes a deferred optimization, not an immediate roadmap item. |
+
+---
+
+## Recommendation Summary
+
+If you’re asking **“how hard would this be?”**, my answer is:
+
+- **worker-pool part:** already done
+- **true suspension MVP:** hard but tractable
+- **full generalized suspension runtime:** very hard / should be staged carefully
+
+If you’re asking **“should we do it?”**, my answer is:
+
+- **yes, maybe** — but only after re-benchmarking the already-shipped worker-pool baseline
+- and only with a **very tight MVP**: production worker mode + PostgreSQL query path only
+
+That is the version of this project that feels ambitious but sane, instead of clever but unbounded.
 
 ---
 
@@ -320,4 +363,5 @@ Priority order: postgres (biggest impact), HTTP fetch (common in APIs), everythi
 
 | Date | Change |
 |------|--------|
-| 2026-03-31 | Initial draft — consolidating DD-038 benchmark findings and Phase 1/2 plan from daily notes |
+| 2026-03-31 | Initial draft — consolidated DD-038 benchmark findings and the original worker-pool + suspension concept |
+| 2026-04-05 | Major revision — updated for the reality that worker-pool support already exists, narrowed the suspension MVP, added critical review, staged implementation plan, and reframed success around the current multi-worker baseline |
