@@ -137,7 +137,10 @@ pub enum Statement {
     Expression(Expression),
 
     /// Return statement
-    Return(Option<Expression>),
+    Return {
+        value: Option<Expression>,
+        otherwise: Option<Block>,
+    },
 
     /// If statement
     If {

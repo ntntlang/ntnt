@@ -5070,13 +5070,73 @@ impl Interpreter {
 
             Statement::Expression(expr) => self.eval_expression(expr),
 
-            Statement::Return(expr) => {
-                let value = if let Some(e) = expr {
-                    self.eval_expression(e)?
+            Statement::Return { value, otherwise } => {
+                let value = if let Some(expr) = value {
+                    if otherwise.is_some() {
+                        match self.eval_expression(expr) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                if !is_production_mode() {
+                                    eprintln!(
+                                        "[WARN] return-otherwise caught runtime error: {}",
+                                        e
+                                    );
+                                }
+                                Value::err(Value::String(format!("{}", e)))
+                            }
+                        }
+                    } else {
+                        self.eval_expression(expr)?
+                    }
                 } else {
                     Value::Unit
                 };
-                Ok(Value::Return(Box::new(value)))
+
+                if let Value::Return(_) = &value {
+                    return Ok(value);
+                }
+
+                let final_value = if let Some(otherwise_block) = otherwise {
+                    match &value {
+                        Value::EnumValue {
+                            enum_name,
+                            variant,
+                            values,
+                        } => match (enum_name.as_str(), variant.as_str()) {
+                            ("Result", "Ok") | ("Option", "Some") => {
+                                values.first().cloned().unwrap_or(Value::Unit)
+                            }
+                            ("Result", "Err") | ("Option", "None") => {
+                                let err_val = values.first().cloned().unwrap_or(Value::Unit);
+
+                                let previous = Rc::clone(&self.environment);
+                                self.environment = Rc::new(RefCell::new(Environment::with_parent(
+                                    Rc::clone(&previous),
+                                )));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("err".to_string(), err_val);
+
+                                let result = self.eval_block(otherwise_block);
+                                self.environment = previous;
+                                let result = result?;
+
+                                match result {
+                                    Value::Return(_) | Value::Break | Value::Continue => {
+                                        return Ok(result)
+                                    }
+                                    other => other,
+                                }
+                            }
+                            _ => value,
+                        },
+                        _ => value,
+                    }
+                } else {
+                    value
+                };
+
+                Ok(Value::Return(Box::new(final_value)))
             }
 
             Statement::If {

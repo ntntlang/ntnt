@@ -3679,8 +3679,16 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                     check_stmt_for_issues(s, source_lines, issues, http_route_functions);
                 }
             }
-            Statement::Return(Some(expr)) => {
+            Statement::Return {
+                value: Some(expr),
+                otherwise,
+            } => {
                 check_expr_for_issues(expr, source_lines, issues, http_route_functions);
+                if let Some(block) = otherwise {
+                    for s in &block.statements {
+                        check_stmt_for_issues(s, source_lines, issues, http_route_functions);
+                    }
+                }
             }
             Statement::Defer(expr) => {
                 check_expr_for_issues(expr, source_lines, issues, http_route_functions);
@@ -5235,7 +5243,17 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                 collect_used_names(s, names);
             }
         }
-        Statement::Return(Some(expr)) => collect_from_expr(expr, names),
+        Statement::Return {
+            value: Some(expr),
+            otherwise,
+        } => {
+            collect_from_expr(expr, names);
+            if let Some(block) = otherwise {
+                for s in &block.statements {
+                    collect_used_names(s, names);
+                }
+            }
+        }
         Statement::Defer(expr) => collect_from_expr(expr, names),
         Statement::Impl {
             methods,
@@ -5263,7 +5281,10 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
             collect_used_names(target, names);
         }
         // These don't contain expressions to analyze
-        Statement::Return(None)
+        Statement::Return {
+            value: None,
+            otherwise: _,
+        }
         | Statement::Break
         | Statement::Continue
         | Statement::Struct { .. }

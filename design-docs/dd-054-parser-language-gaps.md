@@ -1,193 +1,207 @@
-# DD-054: Parser Language Gaps — ntnt-findings #54, #55, #56
+# DD-054: Parser Language Gaps — Verified Status and Implemented Plan
 
-- **Status:** draft
+- **Status:** implemented on branch / awaiting PR review
 - **Author:** larri
 - **Created:** 2026-03-30
+- **Revised:** 2026-04-05
 - **Related findings:** ntnt-findings #54, #55, #56 (documented in SKILL.md)
 
 ---
 
-## Summary
+## Executive Summary
 
-Three parser-level issues surfaced during real-world ntnt development, filed as ntnt-findings in February 2026 and documented with workarounds in SKILL.md. All three are confirmed still present as of v0.4.5. They are not blockers (workarounds exist) but they are user-hostile — especially #54 and #56, which bite any developer coming from JS/Rust/Go. This DD formalizes the decisions and fix plan.
+This DD originally treated three parser/language findings as equally active. After re-verifying them against current ntnt on this branch, that was no longer true.
+
+Verified status:
+- **Finding 54 — `return expr otherwise { ... }`** → real gap, now implemented on this branch
+- **Finding 55 — module-level `let` with `map {}` literal** → does not reproduce now; locked with regression coverage
+- **Finding 56 — semicolon separator corruption/misreporting** → does not reproduce now; locked with regression coverage
+
+So DD-054 became:
+1. a real implementation plan for #54, and
+2. a regression-lock plan for #55 and #56.
+
+That revised scope has now been implemented on this branch.
 
 ---
 
-## Issue #54 — `return expr otherwise { ... }` is a parse error
+## Verified Status Table
 
-### Description
+| Finding | Old DD status | Current status on this branch | Recommendation |
+|---------|---------------|-------------------------------|----------------|
+| Finding 54 `return expr otherwise { ... }` parse error | Active | **Implemented** | Ship |
+| Finding 55 module-level `let` with `map {}` literal parse error | Active | **Does not reproduce** | Regression-lock only |
+| Finding 56 semicolons corrupt parser state / misreport errors | Active | **Does not reproduce** | Regression-lock only |
 
-The natural pattern for returning a fallback value from a function that calls a failable operation:
+---
+
+## Final Design Decision for #54
+
+### Chosen semantics
+Implement:
 
 ```ntnt
-fn get_users(pg) {
-  return pg_query(pg, "SELECT * FROM users", []) otherwise { [] }
+return EXPR otherwise { BLOCK }
+```
+
+with **fallback-value semantics**.
+
+Meaning:
+- success → return the original successful value
+- `Result::Err` → evaluate fallback block and return its value
+- `Option::None` → evaluate fallback block and return its value
+- caught runtime error → bind `err`, evaluate fallback block, and return its value
+
+### Why this design
+This is better than copying `let-otherwise` divergence semantics onto `return`, because users want a natural value fallback:
+
+```ntnt
+return pg_query(...) otherwise { [] }
+```
+
+not an awkward diverging block like:
+
+```ntnt
+return pg_query(...) otherwise { return [] }
+```
+
+---
+
+## Implemented Shape
+
+### AST
+`Statement::Return` now uses a struct-style variant:
+
+```rust
+Return {
+    value: Option<Expression>,
+    otherwise: Option<Block>,
 }
 ```
 
-…is a parse error. The parser consumes `pg_query(...)` as the return value, then hits `otherwise` as an unexpected token.
+### Parser
+`statement_inner()` now:
+1. parses optional `return <expr>` as before
+2. accepts optional `otherwise { ... }` after a return expression
+3. requires block form for the initial implementation
+4. rejects malformed `return otherwise ...` with a targeted parser error
 
-### Root Cause
+### Interpreter
+`return ... otherwise { ... }` now:
+- unwraps `Result::Ok` / `Option::Some`
+- evaluates fallback for `Result::Err` / `Option::None`
+- catches runtime errors from the return expression, binds `err`, and evaluates fallback
+- returns the fallback block value directly
 
-`statement_inner()` handles `return` by calling `self.expression()`. The `otherwise` clause is only wired into `let_declaration()`. The grammar doesn't allow `return <expr> otherwise { ... }`.
-
-Workaround: split into two statements:
-```ntnt
-let r = pg_query(pg, "SELECT * FROM users", []) otherwise { return [] }
-return r
-```
-
-This was used across 11 lib functions before the bug was identified.
-
-### Fix
-
-In `statement_inner()`, after parsing the return expression, check for `otherwise` and attach it — the same pattern `let_declaration()` already uses at line 229 of `parser.rs`:
-
-```rust
-// After: Some(self.expression()?)
-let otherwise = if self.match_token(&[TokenKind::Otherwise]) {
-    if self.match_token(&[TokenKind::LeftBrace]) {
-        let block = self.block()?;
-        Some(block)
-    } else {
-        let stmt = self.statement()?;
-        Some(Block { statements: vec![stmt] })
-    }
-} else {
-    None
-};
-```
-
-Then `Statement::Return` needs an `otherwise` field, and the interpreter needs to handle it (evaluate the otherwise block if the return value is an error/None).
-
-### Effort: Medium
-- Parser change: small and well-defined
-- AST change: `Statement::Return` gains an `otherwise: Option<Block>` field
-- Interpreter change: evaluate otherwise block on error/None return value
-- Tests: straightforward
-
-### Decision needed
-- [ ] Fix it (recommended — this is the natural pattern and the current behavior is surprising)
-- [ ] Leave as-is and document split-form as idiomatic
+### Typechecker
+The typechecker now:
+- understands the new `Statement::Return` shape
+- unwraps `Optional<T>` / `Result<T, E>` for `return-otherwise`
+- unions the success type with the fallback-block type
+- binds `err` as `Any` inside the fallback block for checking purposes
 
 ---
 
-## Issue #55 — Module-level `let` doesn't support `map {}` literals
+## Implementation Checklist
 
-### Description
+### Phase 0 — Re-verify and lock scope
+- [x] Add a regression test for #55 showing module-level `map {}` literals parse successfully
+- [x] Add a regression test for #56 showing semicolons in the documented case parse successfully
+- [x] Update the DD to mark #55 and #56 as resolved/non-repro on current head
+- [x] Keep DD-054 scoped to #54 implementation + #55/#56 regression coverage
 
-In a lib file, array constants work at the top level:
-```ntnt
-let ALLOWED_METHODS = ["GET", "POST", "PUT", "DELETE"]
-```
+### Phase 1 — AST and parser for #54
+- [x] Change `Statement::Return` from tuple form to struct form:
+  - [x] `value: Option<Expression>`
+  - [x] `otherwise: Option<Block>`
+- [x] Update all parser/interpreter/tests affected by the `Statement::Return` shape change
+- [x] In `statement_inner()`, after parsing `return <expr>`, accept optional `otherwise { ... }`
+- [x] Require block form for the initial implementation (`otherwise { ... }` only)
+- [x] Reject malformed `return otherwise ...` / missing expression / missing block with targeted parser diagnostics
 
-But map constants don't:
-```ntnt
-let STATUS_LABELS = map { "active": "Active", "archived": "Archived" }  // parse error
-```
+### Phase 2 — Interpreter semantics for #54
+- [x] Implement fallback-value semantics for `return ... otherwise { ... }`
+- [x] On success: return the original value
+- [x] On `Result::Err`: evaluate fallback block and return its value
+- [x] On `Option::None`: evaluate fallback block and return its value
+- [x] On caught runtime error: bind `err`, evaluate fallback block, and return that
+- [x] Ensure fallback block is value-producing, not divergence-required
 
-Forces map constants into function bodies, which either means re-creating them on every call or threading them as parameters.
+### Phase 3 — Test matrix
+- [x] Parser/runtime test: `return expr otherwise { ... }` parses successfully
+- [x] Interpreter test: success path does not execute fallback
+- [x] Interpreter test: `Result::Err` executes fallback and returns fallback value
+- [x] Interpreter test: `Option::None` executes fallback and returns fallback value
+- [x] Interpreter test: runtime error executes fallback and exposes `err`
+- [x] Interpreter test: fallback block can return array/map/string/etc. as the final returned value
+- [x] Parser regression test: top-level `map {}` module constant still parses
+- [x] Parser regression test: documented semicolon sample still parses
 
-### Root Cause
-
-`expression()` → `primary()` handles `map { ... }` via `TokenKind::Map`, but the `is_nested_map_literal()` heuristic at line 2041 of `parser.rs` may reject top-level map literals due to parser context state. Needs a targeted test to confirm the exact failure point.
-
-### Fix
-
-Two options:
-
-**Option A (targeted):** Identify and fix the context flag/heuristic that rejects map literals at top-level `let` scope. Low risk.
-
-**Option B (consistency):** Audit all literal types at module scope — verify arrays, maps, strings, numbers, and structs all work uniformly. Fix any gaps. Slightly broader but gives a stronger guarantee.
-
-### Effort: Small–Medium
-
-### Decision needed
-- [ ] Option A — targeted fix
-- [ ] Option B — consistency audit + fix
-- [ ] Leave as-is (not recommended — inconsistent behavior with no good reason)
-
----
-
-## Issue #56 — Semicolons as statement separators silently corrupt parser state
-
-### Description
-
-```ntnt
-fn f(x) { let a = 1; return a }
-```
-
-This silently mangles parser state and reports errors on unrelated lines — not on the actual semicolon. The semicolon is tokenized (`TokenKind::Semicolon`) and consumed opportunistically via `match_token` in most places, but inside function bodies the surrounding statement loop gets confused and the error message points at a random later line.
-
-Every developer coming from JS, Rust, Go, or C hits this immediately. The current error message gives no indication that the semicolon is the problem.
-
-### Fix Options
-
-**Option A — Better error message (low effort, high value):**
-
-In the statement parser, when we hit a `Semicolon` token as a statement start (i.e., after a statement boundary), emit a targeted diagnostic:
-
-```
-Error at line N: unexpected ';'
-  ntnt uses newlines as statement separators, not semicolons.
-  Remove the semicolon and place each statement on its own line.
-```
-
-**Option B — Tolerate semicolons as whitespace:**
-
-Treat `;` as a newline-equivalent statement separator. This is a design call — ntnt is intentionally newline-delimited, but silently accepting semicolons would reduce friction significantly for JS/Rust/Go immigrants.
-
-**Option C — Both:** Tolerate them in normal code, warn in strict/lint mode.
-
-### Effort
-- Option A: Very low — targeted error diagnostic
-- Option B: Medium — parser/lexer change with broad testing needed
-- Option C: Medium + adds a lint-mode toggle
-
-### Decision needed
-- [ ] Option A only (recommended baseline — minimum viable fix)
-- [ ] Option B — tolerate semicolons as statement separators
-- [ ] Option C — tolerate + warn in lint mode
-- [ ] Leave as-is (not recommended)
+### Phase 4 — Docs and cleanup
+- [x] Update DD-054 and implementation notes so the split-form workaround is no longer the recommended path for #54
+- [x] Update DD-054 itself as the active status tracker for #54, #55, and #56 (no standalone `ntnt-findings/README.md` exists in the current repo)
+- [x] Regenerate docs: `cargo build --release --locked && ./target/release/ntnt docs --generate`
+- [x] Run the standard validation loop
+- [ ] Push PR and complete Greptile self-review loop
 
 ---
 
-## Implementation Plan
+## Validation Note
 
-Once decisions are locked, implementation order:
+Implemented and validated on branch `feat/dd-054-return-otherwise`.
 
-- [ ] #56-A: Add semicolon diagnostic error message (if A chosen)
-- [ ] #56-B: Tolerate semicolons as separators (if B/C chosen)
-- [ ] #55: Fix module-level map literal parsing
-- [ ] #54-parser: Extend `statement_inner()` return to support `otherwise`
-- [ ] #54-ast: Add `otherwise: Option<Block>` to `Statement::Return`
-- [ ] #54-interpreter: Handle otherwise block on error/None return value
-- [ ] Tests: Add parser tests for all three fixes
-- [ ] Update SKILL.md: Remove workaround notes for fixed items
-- [ ] Update ntnt-findings/README.md: Mark #54/#55/#56 as resolved
-- [ ] `cargo build --release --locked && ./target/release/ntnt docs --generate`
-- [ ] PR + Greptile self-review loop
+Validated behavior:
+- `return Ok(42) otherwise { 0 }` returns `42`
+- `return Err("fail") otherwise { "fallback" }` returns fallback value and exposes `err`
+- `return None otherwise { "empty" }` returns fallback value
+- `return 1 / 0 otherwise { 7 }` catches the runtime error, binds `err`, and returns `7`
+- top-level `map { ... }` module constants still parse
+- documented semicolon statement-separator case still parses
 
----
-
-## CLI: File-Optional Mode via Control Socket
-
-**Added 2026-04-02** — All `ntnt jobs` CLI commands currently require a `<file>` argument to locate the KV store. When a worker is already running, the control socket (`.ntnt.sock`) has the same data available. Adding file-optional auto-discovery would improve DX:
-
-**Proposed behavior:**
-1. If `<file>` is provided → load KV directly (current behavior)
-2. If no `<file>` → look for `.ntnt.sock` in CWD → route through control socket
-3. If no file and no socket → error with clear message
-
-**Applies to:** `ntnt jobs status`, `ntnt jobs list`, `ntnt jobs inspect`, `ntnt jobs batches`, `ntnt jobs batch`, `ntnt workers status` (already file-optional)
-
-**Effort:** Low-medium — refactor `jobs_load_kv()` into a `jobs_connect()` that tries socket first, falls back to file parse. Each command handler already produces the same output shape from either source.
+Validation loop completed:
+- `cargo fmt`
+- `cargo build --profile dev-release`
+- `cargo test --lib`
+- `cargo test --test language_features_tests --test type_checker_tests --test cli_tests`
+- `cargo build --release --locked`
+- `./target/release/ntnt docs --generate`
+- `cargo fmt -- --check`
 
 ---
 
-## References
+## Risks
 
-- `src/parser.rs` — `statement_inner()` (line ~1301), `let_declaration()` (line ~202), `is_nested_map_literal()` (line ~1795), `parse_map_contents()` (line ~1849)
-- `src/lexer.rs` — `TokenKind::Semicolon` (line ~172)
-- `~/.openclaw/skills/ntnt/SKILL.md` — lines 61–63 (workaround docs)
-- `~/repos/ntnt-findings/README.md` — findings log
+| Risk | Why it matters | Mitigation |
+|------|----------------|------------|
+| Reusing `otherwise` with the wrong semantics | Could make the feature still feel awkward | Explicitly choose fallback-value semantics for `return-otherwise` |
+| AST churn | `Statement::Return` shape change touches many matches | Use struct-style variant and update exhaustively |
+| Error-handling inconsistency | `return-otherwise` and `let-otherwise` are intentionally different | Document the difference clearly |
+| Hidden #55/#56 edge cases remain | Old report may have had a narrower reproducer | Keep future reports scoped to fresh repros |
+
+---
+
+## Open Questions
+
+| Question | Recommendation |
+|----------|----------------|
+| Should `return-otherwise` require divergence like `let-otherwise`? | No |
+| Should initial syntax support single-statement fallback form? | No — block-only first |
+| Should #55 still be treated as open? | No, not without a current reproducer |
+| Should #56 still be treated as open? | No, not without a current reproducer |
+
+---
+
+## Bottom-Line Recommendation
+
+This is now a good next parser/runtime improvement to ship:
+- #54 is real and now implemented with the right semantics
+- #55 and #56 are not active implementation work and should stay locked down with regression tests
+
+---
+
+## Version History
+
+| Date | Change |
+|------|--------|
+| 2026-03-30 | Initial draft — treated #54, #55, and #56 as active parser gaps |
+| 2026-04-05 | Major revision and implementation — re-verified all three findings against current ntnt, narrowed active scope to #54, reclassified #55/#56 as regression-lock items, implemented `return-otherwise` with fallback-value semantics, and completed the validation loop |

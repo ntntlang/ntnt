@@ -626,6 +626,128 @@ impl TypeContext {
         }
     }
 
+    fn unwrap_return_otherwise_success_type(&self, expr_ty: &Type) -> Type {
+        match expr_ty {
+            Type::Optional(inner) => (**inner).clone(),
+            Type::Generic { name, args } if name == "Result" && !args.is_empty() => args[0].clone(),
+            _ => expr_ty.clone(),
+        }
+    }
+
+    fn return_otherwise_uses_value_fallback_union(&self, expr_ty: &Type) -> bool {
+        matches!(expr_ty, Type::Optional(_))
+            || matches!(expr_ty, Type::Generic { name, args } if name == "Result" && !args.is_empty())
+    }
+
+    fn return_otherwise_expr_may_runtime_fail(expr: &Expression) -> bool {
+        match expr {
+            Expression::Integer(_)
+            | Expression::Float(_)
+            | Expression::String(_)
+            | Expression::Bool(_)
+            | Expression::Unit
+            | Expression::Identifier(_) => false,
+            Expression::Array(items) => items
+                .iter()
+                .any(Self::return_otherwise_expr_may_runtime_fail),
+            Expression::MapLiteral(entries) => entries.iter().any(|(k, v)| {
+                Self::return_otherwise_expr_may_runtime_fail(k)
+                    || Self::return_otherwise_expr_may_runtime_fail(v)
+            }),
+            Expression::InterpolatedString(parts) => parts.iter().any(|part| match part {
+                StringPart::Literal(_) => false,
+                StringPart::Expr(expr) => Self::return_otherwise_expr_may_runtime_fail(expr),
+            }),
+            _ => true,
+        }
+    }
+
+    fn merge_return_otherwise_type(&self, expr_ty: &Type, fallback_ty: Type) -> Type {
+        let success_ty = self.unwrap_return_otherwise_success_type(expr_ty);
+
+        if self.return_otherwise_uses_value_fallback_union(expr_ty) {
+            self.union_type(&success_ty, &fallback_ty)
+        } else {
+            // For plain expressions, the otherwise block only runs on runtime failure.
+            // Keep the declared success type as the main return type and separately
+            // validate the fallback branch when the expression can actually fail.
+            success_ty
+        }
+    }
+
+    fn check_return_otherwise_fallback_block(&mut self, otherwise_block: &Block) -> Type {
+        self.push_scope();
+        self.bind("err", Type::Any);
+        let fallback_ty = self.check_block(otherwise_block);
+        self.pop_scope();
+        fallback_ty
+    }
+
+    fn infer_statement_terminal_type(&mut self, stmt: &Statement) -> Type {
+        let inner = match stmt {
+            Statement::Located { stmt, .. } => stmt.as_ref(),
+            other => other,
+        };
+
+        match inner {
+            Statement::Expression(expr) => self.infer_expression(expr),
+            Statement::Return {
+                value: Some(expr),
+                otherwise,
+            } => {
+                let expr_ty = self.infer_expression(expr);
+                if let Some(otherwise_block) = otherwise {
+                    let fallback_ty = self.infer_block_terminal_type(otherwise_block);
+                    self.merge_return_otherwise_type(&expr_ty, fallback_ty)
+                } else {
+                    expr_ty
+                }
+            }
+            _ => Type::Unit,
+        }
+    }
+
+    fn infer_block_terminal_type(&mut self, block: &Block) -> Type {
+        block
+            .statements
+            .last()
+            .map(|stmt| self.infer_statement_terminal_type(stmt))
+            .unwrap_or(Type::Unit)
+    }
+
+    fn validate_return_otherwise_plain_fallback(
+        &mut self,
+        expr: &Expression,
+        expr_ty: &Type,
+        fallback_ty: &Type,
+    ) {
+        if self.return_otherwise_uses_value_fallback_union(expr_ty)
+            || !Self::return_otherwise_expr_may_runtime_fail(expr)
+        {
+            return;
+        }
+
+        let expected = self
+            .current_return_type
+            .clone()
+            .unwrap_or_else(|| self.unwrap_return_otherwise_success_type(expr_ty));
+
+        if !self.compatible(fallback_ty, &expected) && !matches!(fallback_ty, Type::Any) {
+            let line = self.find_line_near("otherwise");
+            self.error(
+                format!(
+                    "Return-otherwise fallback type mismatch: expected {} but fallback returns {}",
+                    expected.name(),
+                    fallback_ty.name()
+                ),
+                line,
+                Some(
+                    "Use a fallback value compatible with the surrounding return type".to_string(),
+                ),
+            );
+        }
+    }
+
     /// Try to determine the return type of a callback argument.
     /// Checks: (1) Lambda expression type, (2) Named function lookup.
     fn resolve_callback_return_type(
@@ -1014,26 +1136,36 @@ impl TypeContext {
                 self.pop_scope();
             }
 
-            Statement::Return(expr) => {
-                if let Some(expr) = expr {
-                    let actual = self.infer_expression(expr);
-                    self.collected_returns.push(actual.clone());
-                    if let Some(expected) = self.current_return_type.clone() {
-                        if !self.compatible(&actual, &expected) && !matches!(actual, Type::Any) {
-                            let line = self.find_line_near("return");
-                            self.error(
-                                format!(
-                                    "Return type mismatch: expected {} but returning {}",
-                                    expected.name(),
-                                    actual.name()
-                                ),
-                                line,
-                                None,
-                            );
-                        }
+            Statement::Return { value, otherwise } => {
+                let expr_ty = value
+                    .as_ref()
+                    .map(|expr| self.infer_expression(expr))
+                    .unwrap_or(Type::Unit);
+
+                let actual = if let Some(otherwise_block) = otherwise {
+                    let fallback_ty = self.check_return_otherwise_fallback_block(otherwise_block);
+                    if let Some(expr) = value.as_ref() {
+                        self.validate_return_otherwise_plain_fallback(expr, &expr_ty, &fallback_ty);
                     }
+                    self.merge_return_otherwise_type(&expr_ty, fallback_ty)
                 } else {
-                    self.collected_returns.push(Type::Unit);
+                    expr_ty
+                };
+
+                self.collected_returns.push(actual.clone());
+                if let Some(expected) = self.current_return_type.clone() {
+                    if !self.compatible(&actual, &expected) && !matches!(actual, Type::Any) {
+                        let line = self.find_line_near("return");
+                        self.error(
+                            format!(
+                                "Return type mismatch: expected {} but returning {}",
+                                expected.name(),
+                                actual.name()
+                            ),
+                            line,
+                            None,
+                        );
+                    }
                 }
             }
 
@@ -1490,7 +1622,7 @@ impl TypeContext {
             other => other,
         });
         match last {
-            Some(Statement::Return(_)) => true,
+            Some(Statement::Return { .. }) => true,
             Some(Statement::Break) | Some(Statement::Continue) => true,
             Some(Statement::If {
                 then_branch,
@@ -1507,19 +1639,7 @@ impl TypeContext {
         let mut last_type = Type::Unit;
         for stmt in &block.statements {
             self.check_statement(stmt);
-            // Unwrap Located to inspect the inner statement for type tracking
-            let inner = match stmt {
-                Statement::Located { stmt, .. } => stmt.as_ref(),
-                other => other,
-            };
-            // Track the type of expression statements (for implicit return)
-            if let Statement::Expression(expr) = inner {
-                last_type = self.infer_expression(expr);
-            } else if let Statement::Return(Some(expr)) = inner {
-                last_type = self.infer_expression(expr);
-            } else {
-                last_type = Type::Unit;
-            }
+            last_type = self.infer_statement_terminal_type(stmt);
         }
         last_type
     }
@@ -5484,6 +5604,64 @@ mod tests {
             otherwise_warnings.is_empty(),
             "otherwise with if/else both returning should not warn: {:?}",
             otherwise_warnings
+        );
+    }
+
+    #[test]
+    fn test_return_otherwise_plain_expression_keeps_plain_return_type() {
+        let errors = check_errors(
+            r#"
+            fn plain() -> Int {
+                return 42 otherwise { "fallback" }
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Plain return-otherwise should not widen to Int | String: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_return_otherwise_fallback_diagnostics_are_not_duplicated() {
+        let diags = check(
+            r#"
+            fn foo() -> Int {
+                return Some(42) otherwise {
+                    let bad: Int = "oops"
+                    0
+                }
+            }
+            "#,
+        );
+        let bad_binding_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("variable 'bad'"))
+            .collect();
+        assert_eq!(
+            bad_binding_diags.len(),
+            1,
+            "Fallback block diagnostics should only fire once: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_return_otherwise_runtime_fallback_must_match_return_type() {
+        let errors = check_errors(
+            r#"
+            fn plain() -> Int {
+                return 1 / 0 otherwise { "fallback" }
+            }
+            "#,
+        );
+        assert!(
+            errors.iter().any(|e| e
+                .message
+                .contains("Return-otherwise fallback type mismatch")),
+            "Runtime fallback should stay compatible with the surrounding return type: {:?}",
+            errors
         );
     }
 

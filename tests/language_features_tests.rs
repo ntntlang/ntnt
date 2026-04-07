@@ -2963,6 +2963,135 @@ print(result)
 }
 
 #[test]
+fn test_return_otherwise_unwraps_ok() {
+    let code = r#"
+fn fetch() {
+    return Ok(42) otherwise { 0 }
+}
+
+print(fetch())
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("42"), "Should print 42: stdout={}", stdout);
+}
+
+#[test]
+fn test_return_otherwise_executes_on_err() {
+    let code = r##"
+fn fetch() {
+    return Err("fail") otherwise {
+        print("handled: #{err}")
+        "fallback"
+    }
+}
+
+print(fetch())
+"##;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("handled: fail"),
+        "Should print bound err: stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("fallback"),
+        "Should return fallback value: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_return_otherwise_executes_on_none() {
+    let code = r#"
+fn fetch() {
+    return None otherwise { "empty" }
+}
+
+print(fetch())
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("empty"),
+        "Should return fallback value: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_return_otherwise_without_expression_has_targeted_parser_error() {
+    let code = r#"
+fn fetch() {
+    return otherwise { 7 }
+}
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_parse(code);
+    assert_ne!(exit_code, 0, "Should fail to parse");
+    assert!(
+        stderr.contains("Expected return expression before 'otherwise'"),
+        "Should surface the targeted parser error: stderr={}",
+        stderr
+    );
+}
+
+#[test]
+fn test_return_otherwise_catches_runtime_error() {
+    let code = r#"
+fn fetch() {
+    return 1 / 0 otherwise {
+        print(err)
+        7
+    }
+}
+
+print(fetch())
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("Division by zero")
+            || stdout.contains("division by zero")
+            || stdout.contains("divide by zero"),
+        "Should expose runtime error via err: stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("7"),
+        "Should return fallback value: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_module_level_map_literal_parses() {
+    let code = r#"
+let STATUS_LABELS = map { "active": "Active", "archived": "Archived" }
+
+print(STATUS_LABELS["active"])
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("Active"),
+        "Should print map value: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_semicolon_statement_separator_parses() {
+    let code = r#"
+fn f(x) { let a = 1; return a }
+print(f(0))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("1"), "Should print 1: stdout={}", stdout);
+}
+
+#[test]
 fn test_otherwise_err_is_bound() {
     let code = r##"
 fn main() {

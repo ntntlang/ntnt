@@ -1307,11 +1307,29 @@ impl Parser {
                 || self.check(&TokenKind::Semicolon)
             {
                 None
+            } else if self.check(&TokenKind::Otherwise) {
+                return Err(IntentError::ParserError {
+                    line: self.current_line(),
+                    column: self.current_column(),
+                    message: "Expected return expression before 'otherwise'".to_string(),
+                });
             } else {
                 Some(self.expression()?)
             };
+            let otherwise = if value.is_some() && self.match_token(&[TokenKind::Otherwise]) {
+                self.consume(&TokenKind::LeftBrace, "Expected '{' after 'otherwise'")?;
+                Some(self.block()?)
+            } else if value.is_none() && self.check(&TokenKind::Otherwise) {
+                return Err(IntentError::ParserError {
+                    line: self.current_line(),
+                    column: self.current_column(),
+                    message: "Expected return expression before 'otherwise'".to_string(),
+                });
+            } else {
+                None
+            };
             self.match_token(&[TokenKind::Semicolon]);
-            Ok(Statement::Return(value))
+            Ok(Statement::Return { value, otherwise })
         } else if self.match_token(&[TokenKind::If]) {
             self.if_statement()
         } else if self.match_token(&[TokenKind::While]) {
