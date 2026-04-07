@@ -1831,7 +1831,6 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`enable_auth`](#enableauth) | Initialize the authentication system with OAuth providers. |
 | [`get_session`](#getsession) | Get the current session from the request. |
 | [`get_user`](#getuser) | Get the current authenticated user from the request. |
-| [`hash_password`](#hashpassword) | Hash a password using bcrypt. |
 | [`jwt_decode`](#jwtdecode) | Decode a JWT token WITHOUT verifying the signature. |
 | [`jwt_sign`](#jwtsign) | Create a signed JWT token from claims. |
 | [`jwt_verify`](#jwtverify) | Verify a JWT token and return its claims. |
@@ -1853,7 +1852,6 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`user_sessions`](#usersessions) | Get all active sessions for the current user. |
 | [`validate_csrf`](#validatecsrf) | Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH). |
 | [`verify_csrf`](#verifycsrf) | Verify a CSRF token against the session's token. |
-| [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
 | [`verify_totp`](#verifytotp) | Verify a TOTP code against a secret. |
 
 #### `auth_callback`
@@ -2140,34 +2138,6 @@ get_user(req) otherwise return redirect("/login")  // Require auth
 ```
 
 **See also:** `get_session`, `logout_user`
-
-*Since v0.3.11*
-
----
-
-#### `hash_password`
-
-```ntnt
-hash_password(password: String) -> Result<String, String>
-```
-
-Hash a password using bcrypt.
-
-Utility function to hash passwords for custom storage or verification. Uses bcrypt with default cost factor.
-
-**Parameters:**
-
-- `password` — The password to hash
-
-**Returns:** Ok(hash) on success, Err(message) on failure
-
-**Examples:**
-
-```ntnt
-hash_password("mypassword")  // => Ok("$2b$12$...")  // Hash a password
-```
-
-**See also:** `verify_password`
 
 *Since v0.3.11*
 
@@ -2783,35 +2753,6 @@ verify_csrf(req, form["_csrf"])  // Validate form submission
 ```
 
 **See also:** `csrf_token`, `csrf_field`
-
-*Since v0.3.11*
-
----
-
-#### `verify_password`
-
-```ntnt
-verify_password(password: String, hash: String) -> Bool
-```
-
-Verify a password against a bcrypt hash.
-
-Utility function to verify passwords hashed with hash_password.
-
-**Parameters:**
-
-- `password` — The password to verify
-- `hash` — The bcrypt hash to verify against
-
-**Returns:** true if password matches hash, false otherwise
-
-**Examples:**
-
-```ntnt
-verify_password("mypassword", stored_hash)  // => true  // Verify password
-```
-
-**See also:** `hash_password`
 
 *Since v0.3.11*
 
@@ -4384,7 +4325,7 @@ hash_password("secret123", 14)  // => Ok("$2b$14$...")  // Hash with higher cost
 
 **Gotchas:**
 
-- `hash_password()` was previously available in `std/auth` (now deprecated — emits a runtime warning). Always use the `std/crypto` version, which supports a configurable cost factor. The `std/auth` version will be removed in a future release.
+- `hash_password()` used to be available from `std/auth`, but the auth alias has been removed. Import it from `std/crypto`.
 
 **See also:** `verify_password`, `is_valid_hash`
 
@@ -4635,6 +4576,11 @@ verify_password("secret123", "$2b$12$...valid_hash...")  // => Ok(true)  // Corr
 verify_password("wrong", "$2b$12$...valid_hash...")  // => Ok(false)  // Wrong password
 verify_password("secret", "not-a-hash")  // => Err("...")  // Invalid hash format
 ```
+
+**Gotchas:**
+
+- `verify_password()` used to be available from `std/auth`, but the auth alias has been removed. Import it from `std/crypto`.
+- `verify_password()` used to be available from `std/auth`, but the auth alias has been removed. Import it from `std/crypto`.
 
 **See also:** `hash_password`, `is_valid_hash`
 

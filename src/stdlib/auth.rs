@@ -3666,19 +3666,7 @@ fn delete_all_sessions_for_user_redis(
 // SECTION 9: Password Utilities
 // ============================================================================
 
-/// Hash a password using bcrypt
-pub fn hash_password(password: &str) -> std::result::Result<String, String> {
-    bcrypt::hash(password, bcrypt::DEFAULT_COST)
-        .map_err(|e| format!("Password hashing failed: {}", e))
-}
-
-/// Verify a password against a bcrypt hash
-pub fn verify_password_hash(password: &str, hash: &str) -> bool {
-    bcrypt::verify(password, hash).unwrap_or(false)
-}
-
-// ============================================================================
-// SECTION 11: MFA/TOTP Functions
+// SECTION 9: MFA/TOTP Functions
 // ============================================================================
 
 /// Generate a new TOTP secret
@@ -6871,106 +6859,6 @@ pub fn init() -> HashMap<String, Value> {
             },
         },
     );
-
-    // @ntnt hash_password
-    // @module std/auth
-    // @signature hash_password(password: String) -> Result<String, String>
-    // Hash a password using bcrypt.
-    //
-    // Utility function to hash passwords for custom storage or verification.
-    // Uses bcrypt with default cost factor.
-    // @param password The password to hash
-    // @returns Ok(hash) on success, Err(message) on failure
-    // @see_also verify_password
-    // @since v0.3.11
-    // @tags #auth, #utility
-    // @example hash_password("mypassword") => Ok("$2b$12$...") ~ "Hash a password"
-    module.insert(
-        "hash_password".to_string(),
-        Value::NativeFunction {
-            name: "hash_password".to_string(),
-            arity: 1,
-            max_arity: 1,
-            requires: None,
-            func: |args| {
-                eprintln!("[DEPRECATED] hash_password() in std/auth is deprecated. Use hash_password() from std/crypto instead.");
-                if args.is_empty() {
-                    return Err(IntentError::type_error(
-                        "[auth] hash_password() requires a password".to_string(),
-                    ));
-                }
-
-                let password = match &args[0] {
-                    Value::String(s) => s.clone(),
-                    _ => {
-                        return Err(IntentError::type_error(
-                            "[auth] password must be a string".to_string(),
-                        ))
-                    }
-                };
-
-                match hash_password(&password) {
-                    Ok(hash) => Ok(make_ok(Value::String(hash))),
-                    Err(e) => Ok(make_err(Value::String(e))),
-                }
-            },
-        },
-    );
-
-    // @ntnt verify_password
-    // @module std/auth
-    // @signature verify_password(password: String, hash: String) -> Bool
-    // Verify a password against a bcrypt hash.
-    //
-    // Utility function to verify passwords hashed with hash_password.
-    // @param password The password to verify
-    // @param hash The bcrypt hash to verify against
-    // @returns true if password matches hash, false otherwise
-    // @see_also hash_password
-    // @since v0.3.11
-    // @tags #auth, #utility
-    // @example verify_password("mypassword", stored_hash) => true ~ "Verify password"
-    module.insert(
-        "verify_password".to_string(),
-        Value::NativeFunction {
-            name: "verify_password".to_string(),
-            arity: 2,
-            max_arity: 2,
-            requires: None,
-            func: |args| {
-                eprintln!("[DEPRECATED] verify_password() in std/auth is deprecated. Use verify_password() from std/crypto instead.");
-                if args.len() < 2 {
-                    return Err(IntentError::type_error(
-                        "[auth] verify_password() requires (password, hash)".to_string(),
-                    ));
-                }
-
-                let password = match &args[0] {
-                    Value::String(s) => s.clone(),
-                    _ => {
-                        return Err(IntentError::type_error(
-                            "[auth] password must be a string".to_string(),
-                        ))
-                    }
-                };
-
-                let hash = match &args[1] {
-                    Value::String(s) => s.clone(),
-                    _ => {
-                        return Err(IntentError::type_error(
-                            "[auth] hash must be a string".to_string(),
-                        ))
-                    }
-                };
-
-                Ok(Value::Bool(verify_password_hash(&password, &hash)))
-            },
-        },
-    );
-
-    // ==========================================================================
-    // MFA/2FA Functions
-    // ==========================================================================
 
     // @ntnt totp_secret
     // @module std/auth

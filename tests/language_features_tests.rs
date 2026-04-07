@@ -4360,6 +4360,52 @@ print(argon2_verify("wrongpassword", hash))
 }
 
 #[test]
+fn test_crypto_password_helpers_import_from_std_crypto() {
+    let code = r#"
+import { hash_password, verify_password } from "std/crypto"
+
+let hash = hash_password("secret123")
+match hash {
+    Ok(h) => {
+        print("HASHED")
+        print(verify_password("secret123", h))
+    }
+    Err(e) => print(e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("HASHED"),
+        "Should hash password: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("true"),
+        "Should verify password via std/crypto: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_crypto_password_helpers_removed_from_std_auth() {
+    let code = r#"
+import { hash_password } from "std/auth"
+print(hash_password("secret123"))
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(
+        exit_code, 0,
+        "Import should fail once std/auth alias is removed"
+    );
+    assert!(
+        stderr.contains("'hash_password' is not exported from 'std/auth'"),
+        "Should mention missing std/auth export: stderr={}",
+        stderr
+    );
+}
+
+#[test]
 fn test_collections_includes_strings() {
     let code = r#"
 import { includes } from "std/collections"
