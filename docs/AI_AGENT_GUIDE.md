@@ -1697,6 +1697,8 @@ fn get(req) {
 
 ## Authentication (`std/auth`)
 
+Boundary rule: use `std/auth` for auth flows, sessions, CSRF, current-user helpers, and TOTP. Use `std/crypto` for generic crypto helpers like `uuid`, `hash_password`, and `verify_password`.
+
 Full OAuth, session management, CSRF, JWT, and TOTP support — 34 functions.
 
 ### Basic OAuth Setup

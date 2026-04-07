@@ -17,6 +17,10 @@
 //! - OIDC Discovery (auto-configure from issuer)
 //! - ID token claims as user info source
 //!
+//! # Boundary
+//! - `std/auth` is for auth flows, sessions, CSRF, current-user helpers, and TOTP
+//! - generic crypto helpers like `uuid`, `hash_password`, and `verify_password` belong in `std/crypto`
+//!
 //! # Quick Start
 //! ```ntnt
 //! import { oauth, enable_auth, get_user } from "std/auth"

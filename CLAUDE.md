@@ -171,6 +171,7 @@ import { now, format } from "std/time"
 import { sha256, uuid } from "std/crypto"
 import { first, last, keys, values, entries, has_key, get_key } from "std/collections"
 import { oauth, enable_auth, get_user, validate_csrf } from "std/auth"
+// Boundary: use std/auth for auth/session/TOTP helpers, and std/crypto for generic crypto helpers like uuid/hash_password/verify_password
 import { open, get, set, del, list } from "std/kv"
 import { log_info, log_warn, log_error, set_log_level } from "std/log"
 import { channel, send, recv, sleep_ms, spawn, await_task, parallel, race } from "std/concurrent"
