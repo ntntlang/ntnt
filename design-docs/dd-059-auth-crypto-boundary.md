@@ -3,84 +3,48 @@
 ## Status: implemented on branch / awaiting PR review
 
 ## Problem
-`std/auth` should own authentication concerns, not serve as a second home for generic crypto helpers.
+`std/auth` should own authentication concerns, not generic crypto utilities.
 
-That boundary had drifted. Historically, some generic helpers were reachable from `std/auth`, specifically password helpers that already belonged conceptually in `std/crypto`.
-
-On current head, the real remaining overlap was narrower than the original draft assumed:
+On current head, the real remaining overlap was narrower than the first draft assumed:
 - `hash_password` was still exported from `std/auth`
 - `verify_password` was still exported from `std/auth`
-- `uuid` was **already canonical in `std/crypto`** on current head, so there was no active `std/auth` export left to remove there
+- `uuid` was already canonical in `std/crypto`
 
-This DD tightens the boundary all the way instead of carrying a deprecation alias forever.
+So the actual cleanup is to remove the remaining password-helper aliases from `std/auth`, not to pretend all three paths still exist there.
 
 ## Decision
-Hard-remove the remaining generic crypto exports from `std/auth`.
+Hard-remove the remaining generic crypto aliases from `std/auth`.
 
 After this change:
 - `hash_password` must be imported from `std/crypto`
 - `verify_password` must be imported from `std/crypto`
 - `uuid` remains in `std/crypto`
-- auth-owned helpers stay in `std/auth`
+- auth-owned helpers remain in `std/auth`
 
-## What stays in `std/auth`
-This DD does **not** flatten `std/auth` into nothing. The module still owns:
-- OAuth helpers
-- session helpers
-- CSRF helpers
-- auth middleware / current-user helpers
-- TOTP / MFA helpers such as `totp_secret` and `verify_totp`
+## Explicitly In Scope vs Out of Scope
+**In scope**
+- remove `hash_password` from `std/auth`
+- remove `verify_password` from `std/auth`
+- update docs/tests to reflect the hard removal
 
-TOTP remains intentionally in scope for `std/auth` because it is authentication-specific, not a generic crypto utility.
+**Out of scope**
+- moving TOTP helpers out of `std/auth`
+- changing OAuth/session/CSRF/current-user helpers
+- inventing a deprecation bridge or compatibility shim
 
-## Why hard removal is the right call
-- The boundary becomes obvious instead of “mostly true except for a few old helpers”
-- AI agents and humans get one canonical import path for crypto primitives
-- We avoid indefinite warning-only compatibility clutter
-- The local audit did not find substantial app usage of the soon-removed `std/auth` imports
+TOTP stays in `std/auth` because it is authentication-specific, not generic crypto.
 
 ## Local Audit
-I audited the local NTNT app stack and nearby repos before implementing this change.
+I checked the local NTNT app stack before shipping this change.
 
-Substantial local apps using `std/auth` were using auth-owned helpers only, for example:
-- `larri-dashboard`
-- `larri-design-ntnt`
-
-I did **not** find substantial local apps importing the removed names from `std/auth`:
+Substantial local apps do use `std/auth`, but only for auth-owned helpers. I did **not** find substantial local apps importing these soon-removed names from `std/auth`:
 - `uuid`
 - `hash_password`
 - `verify_password`
 
-One nearby repo did show auth-specific usage that should remain untouched:
-- `~/repos/larri-site-template/lib/admin_db.tnt` imports `totp_secret` and `verify_totp` from `std/auth`
-
-That reinforces the intended boundary instead of arguing against it.
-
-## Implementation Notes
-### Runtime/module surface
-- remove `hash_password` from `std/auth`
-- remove `verify_password` from `std/auth`
-- keep the `std/crypto` implementations as the canonical path
-- leave TOTP helpers in `std/auth`
-
-### Docs
-- update the DD to reflect the narrower real scope discovered during implementation
-- update generated docs/comments so they no longer talk about the `std/auth` aliases as merely deprecated
-- make the boundary explicit: generic crypto in `std/crypto`, auth-specific flows in `std/auth`
-
-### Tests
-- add regression coverage that `hash_password` / `verify_password` still work from `std/crypto`
-- add regression coverage that importing `hash_password` from `std/auth` now fails with a missing-export error
-
-## Risks
-| Risk | Why it matters | Mitigation |
-|------|----------------|------------|
-| External apps may still import removed names from `std/auth` | This is a breaking change | Intentional. Break loudly and keep the boundary clean. |
-| Scope creep into TOTP | Could accidentally move auth-specific helpers out of `std/auth` | Keep TOTP explicitly in `std/auth` and document that it is out of scope for this DD. |
-| Draft drift from reality | Original DD assumed `uuid` was still exported from `std/auth` | Update the DD to reflect the actual audited current-head state. |
+One nearby repo, `larri-site-template`, still imports `totp_secret` / `verify_totp` from `std/auth`, which is consistent with the intended boundary and stays untouched.
 
 ## Implementation Checklist
-
 ### Phase 1 — Re-audit current-head reality
 - [x] Re-check whether `uuid` is still exported from `std/auth`
 - [x] Re-check whether `hash_password` is still exported from `std/auth`
@@ -93,15 +57,14 @@ That reinforces the intended boundary instead of arguing against it.
 - [x] Remove `hash_password` export from `std/auth`
 - [x] Remove `verify_password` export from `std/auth`
 - [x] Confirm `std/crypto` remains the canonical import path for both helpers
-- [x] Confirm `uuid` is already canonical in `std/crypto` and does not need a new removal patch in `std/auth`
-- [x] Leave auth-owned helpers, including TOTP, untouched in `std/auth`
+- [x] Confirm `uuid` is already canonical in `std/crypto`
+- [x] Leave TOTP and other auth-owned helpers untouched in `std/auth`
 
 ### Phase 3 — Tests and docs
 - [x] Add a regression test proving password helpers still work from `std/crypto`
-- [x] Add a regression test proving `hash_password` is no longer exported from `std/auth`
-- [x] Update crypto docs/comments so they describe the auth alias as removed, not merely deprecated
+- [x] Add a regression test proving password helpers are no longer exported from `std/auth`
+- [x] Update docs/comments so they reflect hard removal, not deprecation rhetoric
 - [x] Regenerate docs with `ntnt docs --generate`
-- [x] Re-run `ntnt learn`-driven generated docs via the standard docs generation path
 
 ### Phase 4 — Validation and ship readiness
 - [x] Run `cargo fmt`
@@ -114,30 +77,15 @@ That reinforces the intended boundary instead of arguing against it.
 - [x] Open PR with the DD, implementation, and audit context together
 
 ## Validation
-Implemented and validated on branch `feat/dd-059-auth-crypto-boundary`.
+Implemented on branch `feat/dd-059-auth-crypto-boundary`.
 
-Validation loop completed:
-- `cargo fmt`
-- `cargo build --profile dev-release`
-- `cargo test --lib`
-- `cargo test --test language_features_tests --test type_checker_tests --test cli_tests`
-- `cargo build --release --locked`
-- `./target/release/ntnt docs --generate`
-- `cargo fmt -- --check`
-
-Behavior validated:
+Validated behavior:
 - `hash_password` works from `std/crypto`
 - `verify_password` works from `std/crypto`
-- importing `hash_password` from `std/auth` now fails as a missing export
+- importing password helpers from `std/auth` now fails as a missing export
 - TOTP helpers remain in `std/auth`
 
-## Bottom-Line Recommendation
+## Bottom Line
 Ship it.
 
-This is the right kind of breaking change:
-- small
-- conceptually clean
-- locally low-risk
-- boundary-improving
-
-The only real caveat is to keep the scope disciplined: this DD removes the remaining generic crypto aliases from `std/auth`, but it does **not** argue that auth-specific helpers such as TOTP should move.
+This is a small breaking change, but it is the right one: it removes the remaining generic crypto aliases from `std/auth` without dragging auth-specific helpers into unnecessary churn.

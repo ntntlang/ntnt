@@ -310,7 +310,6 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also verify_password, is_valid_hash
     // @since v0.4.0
     // @tags #io
-    // @gotcha `hash_password()` used to be available from `std/auth`, but the auth alias has been removed. Import it from `std/crypto`.
     // @example hash_password("secret123") => Ok("$2b$12$...") ~ "Hash with default cost"
     // @example hash_password("secret123", 10) => Ok("$2b$10$...") ~ "Hash with minimum cost (faster but still secure)"
     // @example hash_password("secret123", 14) => Ok("$2b$14$...") ~ "Hash with higher cost (more secure)"
@@ -384,8 +383,6 @@ pub fn init() -> HashMap<String, Value> {
     // @example verify_password("secret123", "$2b$12$...valid_hash...") => Ok(true) ~ "Correct password"
     // @example verify_password("wrong", "$2b$12$...valid_hash...") => Ok(false) ~ "Wrong password"
     // @example verify_password("secret", "not-a-hash") => Err("...") ~ "Invalid hash format"
-    // @gotcha `verify_password()` used to be available from `std/auth`, but the auth alias has been removed. Import it from `std/crypto`.
-    // @gotcha `verify_password()` used to be available from `std/auth`, but the auth alias has been removed. Import it from `std/crypto`.
     module.insert(
         "verify_password".to_string(),
         Value::NativeFunction {

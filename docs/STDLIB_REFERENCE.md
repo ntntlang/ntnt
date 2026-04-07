@@ -4323,10 +4323,6 @@ hash_password("secret123", 14)  // => Ok("$2b$14$...")  // Hash with higher cost
 
 - **InvalidCost**: Cost must be between 10 and 31 — *Fix: Use a cost value of 10 or higher (OWASP minimum)*
 
-**Gotchas:**
-
-- `hash_password()` used to be available from `std/auth`, but the auth alias has been removed. Import it from `std/crypto`.
-
 **See also:** `verify_password`, `is_valid_hash`
 
 *Since v0.4.0*
@@ -4576,11 +4572,6 @@ verify_password("secret123", "$2b$12$...valid_hash...")  // => Ok(true)  // Corr
 verify_password("wrong", "$2b$12$...valid_hash...")  // => Ok(false)  // Wrong password
 verify_password("secret", "not-a-hash")  // => Err("...")  // Invalid hash format
 ```
-
-**Gotchas:**
-
-- `verify_password()` used to be available from `std/auth`, but the auth alias has been removed. Import it from `std/crypto`.
-- `verify_password()` used to be available from `std/auth`, but the auth alias has been removed. Import it from `std/crypto`.
 
 **See also:** `hash_password`, `is_valid_hash`
 

@@ -4375,32 +4375,27 @@ match hash {
 "#;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
-    assert!(
-        stdout.contains("HASHED"),
-        "Should hash password: {}",
-        stdout
-    );
-    assert!(
-        stdout.contains("true"),
-        "Should verify password via std/crypto: {}",
-        stdout
-    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "HASHED");
+    assert_eq!(lines[1], "true");
 }
 
 #[test]
 fn test_crypto_password_helpers_removed_from_std_auth() {
     let code = r#"
-import { hash_password } from "std/auth"
+import { hash_password, verify_password } from "std/auth"
 print(hash_password("secret123"))
+print(verify_password("secret123", "fake"))
 "#;
     let (_stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_ne!(
         exit_code, 0,
-        "Import should fail once std/auth alias is removed"
+        "Import should fail once std/auth aliases are removed"
     );
     assert!(
-        stderr.contains("'hash_password' is not exported from 'std/auth'"),
-        "Should mention missing std/auth export: stderr={}",
+        stderr.contains("'hash_password' is not exported from 'std/auth'")
+            || stderr.contains("'verify_password' is not exported from 'std/auth'"),
+        "Should mention missing std/auth exports: stderr={}",
         stderr
     );
 }
