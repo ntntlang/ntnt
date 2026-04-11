@@ -190,6 +190,7 @@ pub struct AuthConfig {
     pub success_url: String,
     pub failure_url: String,
     pub logout_url: String,
+    pub protected_paths: Vec<String>,
     pub cookie_name: String,
     pub cookie_secure: bool,
     pub cookie_same_site: String,
@@ -207,6 +208,7 @@ impl Default for AuthConfig {
             success_url: "/".to_string(),
             failure_url: "/".to_string(),
             logout_url: "/".to_string(),
+            protected_paths: Vec::new(),
             cookie_name: "ntnt_session".to_string(),
             cookie_secure: true,
             cookie_same_site: "lax".to_string(),
@@ -1398,6 +1400,11 @@ static REDIS_URL: std::sync::LazyLock<Arc<Mutex<Option<String>>>> =
 static AUTH_CONFIG: std::sync::LazyLock<Arc<Mutex<Option<AuthConfig>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(None)));
 
+// Protected path patterns registered via enable_auth(..., map { "protected_paths": [...] })
+// and require_auth("/admin/*") helper calls.
+static AUTH_PROTECTED_PATHS: std::sync::LazyLock<Arc<Mutex<Vec<String>>>> =
+    std::sync::LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
+
 fn initialize_session_store(store: &SessionStore) -> std::result::Result<(), String> {
     match store {
         SessionStore::Sqlite(path) => init_sqlite_sessions(path),
@@ -1469,6 +1476,7 @@ fn auth_option_suggestion(key: &str) -> Option<String> {
         "cookie_secure",
         "session_store",
         "store_tokens",
+        "protected_paths",
     ];
 
     valid
@@ -1558,7 +1566,243 @@ pub fn init_auth(config: AuthConfig) {
     }
 
     let mut auth_config = AUTH_CONFIG.lock().unwrap();
-    *auth_config = Some(config);
+    *auth_config = Some(config.clone());
+
+    reset_protected_paths();
+    if !config.protected_paths.is_empty() {
+        register_protected_paths(&config.protected_paths);
+    }
+}
+
+fn normalize_protected_path(pattern: &str) -> String {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if trimmed == "/" || trimmed == "/*" {
+        return trimmed.to_string();
+    }
+
+    if let Some(base) = trimmed.strip_suffix("/*") {
+        let normalized = if base.len() > 1 {
+            base.trim_end_matches('/')
+        } else {
+            base
+        };
+        return format!("{}/*", normalized);
+    }
+
+    if trimmed.len() > 1 {
+        trimmed.trim_end_matches('/').to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn dedupe_protected_paths(paths: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+}
+
+pub fn reset_protected_paths() {
+    let mut protected = AUTH_PROTECTED_PATHS.lock().unwrap();
+    protected.clear();
+}
+
+pub fn register_protected_paths(paths: &[String]) {
+    let mut protected = AUTH_PROTECTED_PATHS.lock().unwrap();
+    for path in paths {
+        let normalized = normalize_protected_path(path);
+        if !normalized.is_empty() {
+            protected.push(normalized);
+        }
+    }
+    dedupe_protected_paths(&mut protected);
+}
+
+pub fn get_protected_paths() -> Vec<String> {
+    AUTH_PROTECTED_PATHS.lock().unwrap().clone()
+}
+
+fn path_matches_protected_pattern(path: &str, pattern: &str) -> bool {
+    let normalized_path = normalize_protected_path(path);
+    let normalized_pattern = normalize_protected_path(pattern);
+
+    if normalized_pattern.is_empty() {
+        return false;
+    }
+
+    if normalized_pattern == "/*" {
+        return true;
+    }
+
+    if let Some(base) = normalized_pattern.strip_suffix("/*") {
+        if base.is_empty() || base == "/" {
+            return true;
+        }
+        return normalized_path == base
+            || normalized_path
+                .strip_prefix(base)
+                .map(|rest| rest.starts_with('/'))
+                .unwrap_or(false);
+    }
+
+    normalized_path == normalized_pattern
+}
+
+fn is_auth_exempt_path(path: &str) -> bool {
+    let normalized = normalize_protected_path(path);
+    normalized == "/auth" || normalized.starts_with("/auth/")
+}
+
+fn request_path(request: &Value) -> String {
+    if let Value::Map(req_map) = request {
+        if let Some(Value::String(path)) = req_map.get("path") {
+            return path.clone();
+        }
+    }
+    "/".to_string()
+}
+
+fn request_headers_map(request: &Value) -> Option<HashMap<String, Value>> {
+    if let Value::Map(req_map) = request {
+        if let Some(Value::Map(headers)) = req_map.get("headers") {
+            return Some(headers.clone());
+        }
+    }
+    None
+}
+
+fn request_prefers_api(request: &Value) -> bool {
+    let path = request_path(request);
+    if path == "/api" || path.starts_with("/api/") {
+        return true;
+    }
+
+    let Some(headers) = request_headers_map(request) else {
+        return false;
+    };
+
+    let accept = headers
+        .get("accept")
+        .and_then(|v| match v {
+            Value::String(s) => Some(s.to_ascii_lowercase()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if accept.contains("application/json") {
+        return true;
+    }
+
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| match v {
+            Value::String(s) => Some(s.to_ascii_lowercase()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if content_type.contains("application/json") {
+        return true;
+    }
+
+    headers
+        .get("x-requested-with")
+        .and_then(|v| match v {
+            Value::String(s) => Some(s.eq_ignore_ascii_case("xmlhttprequest")),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+fn auth_required_response(request: &Value) -> Value {
+    if request_prefers_api(request) {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Content-Type".to_string(),
+            Value::String("application/json".to_string()),
+        );
+
+        let mut response = HashMap::new();
+        response.insert("status".to_string(), Value::Int(401));
+        response.insert("headers".to_string(), Value::Map(headers));
+        response.insert(
+            "body".to_string(),
+            Value::String(
+                serde_json::json!({
+                    "error": "unauthorized",
+                    "message": "Authentication required"
+                })
+                .to_string(),
+            ),
+        );
+        return Value::Map(response);
+    }
+
+    redirect_response("/auth", None)
+}
+
+fn session_from_request(request: &Value) -> Option<Session> {
+    let session_id = get_session_id_from_request(request)?;
+    get_session_by_id(&session_id)
+}
+
+pub fn attach_auth_to_request(request: &Value) -> Value {
+    let mut req_map = match request {
+        Value::Map(map) => map.clone(),
+        _ => return request.clone(),
+    };
+
+    let session = session_from_request(request);
+    let mut auth_map = HashMap::new();
+    auth_map.insert("authenticated".to_string(), Value::Bool(session.is_some()));
+
+    if let Some(session) = &session {
+        auth_map.insert("user".to_string(), user_to_value(session));
+        auth_map.insert("session".to_string(), session_to_value(session));
+    }
+
+    req_map.insert("auth".to_string(), Value::Map(auth_map));
+    Value::Map(req_map)
+}
+
+fn path_requires_auth(path: &str) -> bool {
+    if is_auth_exempt_path(path) {
+        return false;
+    }
+
+    get_protected_paths()
+        .iter()
+        .any(|pattern| path_matches_protected_pattern(path, pattern))
+}
+
+pub fn enforce_auth_for_request(
+    request: &Value,
+    force_auth: bool,
+) -> std::result::Result<Value, Value> {
+    let request_with_auth = attach_auth_to_request(request);
+    let path = request_path(&request_with_auth);
+
+    if !force_auth && !path_requires_auth(&path) {
+        return Ok(request_with_auth);
+    }
+
+    let Some(_config) = get_auth_config() else {
+        return Err(crate::stdlib::http_server::create_error_response(
+            500,
+            "Auth not initialized. Call enable_auth() before require_auth().",
+        ));
+    };
+
+    if let Value::Map(req_map) = &request_with_auth {
+        if let Some(Value::Map(auth)) = req_map.get("auth") {
+            if matches!(auth.get("authenticated"), Some(Value::Bool(true))) {
+                return Ok(request_with_auth);
+            }
+        }
+    }
+
+    Err(auth_required_response(&request_with_auth))
 }
 
 /// Initialize SQLite session storage
@@ -3824,6 +4068,14 @@ pub fn get_session_id_from_request(request: &Value) -> Option<String> {
 
 /// Get user from request as HashMap (internal helper)
 fn get_user_from_request(request: &Value) -> Option<HashMap<String, Value>> {
+    if let Value::Map(req_map) = request {
+        if let Some(Value::Map(auth)) = req_map.get("auth") {
+            if let Some(Value::Map(user)) = auth.get("user") {
+                return Some(user.clone());
+            }
+        }
+    }
+
     let session_id = get_session_id_from_request(request)?;
     let session = get_session_by_id(&session_id)?;
     if let Value::Map(m) = user_to_value(&session) {
@@ -4188,6 +4440,56 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
     );
 
     Ok(redirect_response(&auth_url, None))
+}
+
+/// Handle GET /auth - minimal auth landing route.
+///
+/// If exactly one provider is configured, redirect straight into that OAuth flow.
+/// If multiple providers are configured, render a small provider chooser.
+pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
+    let config = get_auth_config()
+        .ok_or_else(|| IntentError::runtime_error("[auth] Auth not configured".to_string()))?;
+
+    if config.providers.len() == 1 {
+        let provider = &config.providers[0];
+        return Ok(redirect_response(&format!("/auth/{}", provider.name), None));
+    }
+
+    let provider_links = config
+        .providers
+        .iter()
+        .map(|provider| {
+            format!(
+                r#"<li><a href="/auth/{name}">Sign in with {label}</a></li>"#,
+                name = provider.name,
+                label = provider.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+
+    Ok(html_response(&format!(
+        r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in</title>
+  </head>
+  <body>
+    <main>
+      <h1>Sign in</h1>
+      <p>Choose a provider to continue.</p>
+      <ul>
+        {provider_links}
+      </ul>
+    </main>
+  </body>
+</html>"#,
+    )))
 }
 
 /// Handle GET /auth/callback - OAuth callback
@@ -5369,6 +5671,14 @@ pub fn init() -> HashMap<String, Value> {
                     ));
                 }
 
+                if let Value::Map(req_map) = &args[0] {
+                    if let Some(Value::Map(auth)) = req_map.get("auth") {
+                        if let Some(session) = auth.get("session") {
+                            return Ok(make_some(session.clone()));
+                        }
+                    }
+                }
+
                 let session_id = get_session_id_from_request(&args[0]);
                 if let Some(id) = session_id {
                     if let Some(session) = get_session_by_id(&id) {
@@ -6281,7 +6591,7 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
     // @param providers Array of provider configs created by oauth() or oauth_discover()
-    // @param options Optional map with keys: session_secret, session_ttl, refresh_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, cookie_name, cookie_secure, session_store, store_tokens
+    // @param options Optional map with keys: session_secret, session_ttl, refresh_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, cookie_name, cookie_secure, session_store, store_tokens
     // @returns Unit
     // @see_also oauth, oauth_discover, auth_start
     // @since v0.3.11
@@ -6367,6 +6677,7 @@ pub fn init() -> HashMap<String, Value> {
                                 | "cookie_secure"
                                 | "session_store"
                                 | "store_tokens"
+                                | "protected_paths"
                         );
                         if !known {
                             let suggestion = auth_option_suggestion(key)
@@ -6441,6 +6752,32 @@ pub fn init() -> HashMap<String, Value> {
                     None => "/".to_string(),
                 };
 
+                let protected_paths = match get_option(&["protected_paths"]) {
+                    Some(Value::String(s)) => vec![s.clone()],
+                    Some(Value::Array(arr)) => {
+                        let mut paths = Vec::new();
+                        for value in arr {
+                            match value {
+                                Value::String(path) => paths.push(path.clone()),
+                                other => {
+                                    return Err(IntentError::type_error(format!(
+                                        "[auth] enable_auth() option \"protected_paths\" entries must be strings, got {}",
+                                        other.type_name()
+                                    )));
+                                }
+                            }
+                        }
+                        paths
+                    }
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"protected_paths\" must be a string or array of strings, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => Vec::new(),
+                };
+
                 let cookie_name = match get_option(&["cookie_name"]) {
                     Some(Value::String(s)) => s.clone(),
                     Some(other) => {
@@ -6512,6 +6849,7 @@ pub fn init() -> HashMap<String, Value> {
                     success_url,
                     failure_url,
                     logout_url,
+                    protected_paths,
                     cookie_name,
                     cookie_secure,
                     cookie_same_site: "Lax".to_string(),
@@ -6533,6 +6871,93 @@ pub fn init() -> HashMap<String, Value> {
     // ==========================================================================
     // OAuth Primitives (for manual flow control)
     // ==========================================================================
+
+    // @ntnt require_auth
+    // @module std/auth
+    // @signature require_auth(paths?: String | [String]) -> Function | Unit | Response
+    // Protect routes with the configured auth session.
+    //
+    // Usage patterns:
+    // - `use_middleware(require_auth())` protects every request that reaches that middleware.
+    // - `require_auth("/admin/*")` registers protected path patterns for file-routed apps.
+    // - `require_auth(req)` may be called directly inside custom middleware.
+    // @param paths Optional request object, single path pattern, or array of path patterns
+    // @returns Middleware function, Unit for path registration, or a redirect/401 response when called with a request
+    // @see_also enable_auth, get_user, get_session
+    // @since v0.4.9
+    // @tags #auth, #middleware
+    // @example use_middleware(require_auth()) ~ "Protect every request"
+    // @example require_auth("/admin/*") ~ "Protect all admin file routes"
+    module.insert(
+        "require_auth".to_string(),
+        Value::NativeFunction {
+            name: "require_auth".to_string(),
+            arity: 0,
+            max_arity: 0,
+            requires: None,
+            func: |args| {
+                if args.len() == 1 {
+                    if let Value::Map(map) = &args[0] {
+                        if map.contains_key("method") && map.contains_key("path") {
+                            return match enforce_auth_for_request(&args[0], true) {
+                                Ok(request) => Ok(request),
+                                Err(response) => Ok(response),
+                            };
+                        }
+                    }
+                }
+
+                if !args.is_empty() {
+                    if get_auth_config().is_none() {
+                        return Err(IntentError::runtime_error(
+                            "[auth] require_auth(path) requires enable_auth() to be called first"
+                                .to_string(),
+                        ));
+                    }
+
+                    let mut paths = Vec::new();
+                    for arg in args {
+                        match arg {
+                            Value::String(path) => paths.push(path.clone()),
+                            Value::Array(items) => {
+                                for item in items {
+                                    match item {
+                                        Value::String(path) => paths.push(path.clone()),
+                                        other => {
+                                            return Err(IntentError::type_error(format!(
+                                                "[auth] require_auth() path entries must be strings, got {}",
+                                                other.type_name()
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+                            other => {
+                                return Err(IntentError::type_error(format!(
+                                    "[auth] require_auth() expects a request, string path, or array of string paths, got {}",
+                                    other.type_name()
+                                )));
+                            }
+                        }
+                    }
+
+                    register_protected_paths(&paths);
+                    return Ok(Value::Unit);
+                }
+
+                Ok(Value::NativeFunction {
+                    name: "require_auth_middleware".to_string(),
+                    arity: 1,
+                    max_arity: 1,
+                    requires: None,
+                    func: |mw_args| match enforce_auth_for_request(&mw_args[0], true) {
+                        Ok(request) => Ok(request),
+                        Err(response) => Ok(response),
+                    },
+                })
+            },
+        },
+    );
 
     // @ntnt oauth_start
     // @module std/auth
@@ -7209,5 +7634,83 @@ mod tests {
         // Ensure the TTL constant is sensible (between 10s and 300s)
         assert!(EXCHANGE_TOKEN_TTL >= 10);
         assert!(EXCHANGE_TOKEN_TTL <= 300);
+    }
+
+    #[test]
+    fn test_path_matches_protected_pattern_exact_and_subtree() {
+        assert!(path_matches_protected_pattern("/admin", "/admin"));
+        assert!(path_matches_protected_pattern("/admin", "/admin/*"));
+        assert!(path_matches_protected_pattern("/admin/users", "/admin/*"));
+        assert!(!path_matches_protected_pattern("/adminish", "/admin/*"));
+        assert!(!path_matches_protected_pattern(
+            "/settings/profile",
+            "/settings"
+        ));
+    }
+
+    #[test]
+    fn test_enforce_auth_for_request_redirects_html_routes() {
+        reset_protected_paths();
+        init_auth(AuthConfig {
+            providers: vec![ProviderConfig {
+                name: "google".to_string(),
+                ..ProviderConfig::default()
+            }],
+            protected_paths: vec!["/admin/*".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let req = Value::Map(HashMap::from([
+            ("path".to_string(), Value::String("/admin".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "accept".to_string(),
+                    Value::String("text/html".to_string()),
+                )])),
+            ),
+        ]));
+
+        let response = enforce_auth_for_request(&req, false).unwrap_err();
+        if let Value::Map(map) = response {
+            assert!(matches!(map.get("status"), Some(Value::Int(302))));
+        } else {
+            panic!("expected response map");
+        }
+    }
+
+    #[test]
+    fn test_enforce_auth_for_request_returns_json_for_api_routes() {
+        reset_protected_paths();
+        init_auth(AuthConfig {
+            providers: vec![ProviderConfig {
+                name: "google".to_string(),
+                ..ProviderConfig::default()
+            }],
+            protected_paths: vec!["/admin/*".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let req = Value::Map(HashMap::from([
+            ("path".to_string(), Value::String("/admin/data".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "accept".to_string(),
+                    Value::String("application/json".to_string()),
+                )])),
+            ),
+        ]));
+
+        let response = enforce_auth_for_request(&req, false).unwrap_err();
+        if let Value::Map(map) = response {
+            assert!(matches!(map.get("status"), Some(Value::Int(401))));
+            match map.get("body") {
+                Some(Value::String(body)) => assert!(body.contains("unauthorized")),
+                other => panic!("expected json body, got {:?}", other),
+            }
+        } else {
+            panic!("expected response map");
+        }
     }
 }

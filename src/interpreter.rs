@@ -7287,6 +7287,7 @@ impl Interpreter {
             "store_tokens",
             "session_secret",
             "refresh_ttl",
+            "protected_paths",
         ];
 
         valid
@@ -7337,6 +7338,26 @@ impl Interpreter {
             "cookie_secure" => match value {
                 Value::Bool(b) => config.cookie_secure = *b,
                 _ => return Err(self.auth_option_type_error(key, "Bool", value)),
+            },
+            "protected_paths" => match value {
+                Value::String(s) => config.protected_paths = vec![s.clone()],
+                Value::Array(arr) => {
+                    let mut paths = Vec::new();
+                    for item in arr {
+                        match item {
+                            Value::String(path) => paths.push(path.clone()),
+                            _ => {
+                                return Err(self.auth_option_type_error(
+                                    key,
+                                    "String or [String]",
+                                    value,
+                                ))
+                            }
+                        }
+                    }
+                    config.protected_paths = paths;
+                }
+                _ => return Err(self.auth_option_type_error(key, "String or [String]", value)),
             },
             "session_ttl" => match value {
                 Value::Int(i) => config.session_ttl = *i,
@@ -7391,6 +7412,21 @@ impl Interpreter {
 
     /// Set up OAuth routes for the given auth configuration
     fn setup_auth_routes(&mut self, config: &crate::stdlib::auth::AuthConfig) -> Result<()> {
+        // Create minimal auth landing page / chooser.
+        if !self.server_state.has_route("GET", "/auth") {
+            self.server_state.add_route(
+                "GET",
+                "/auth",
+                Value::NativeFunction {
+                    name: "_auth_index".to_string(),
+                    arity: 1,
+                    max_arity: 1,
+                    requires: None,
+                    func: crate::stdlib::auth::handle_auth_index,
+                },
+            );
+        }
+
         // Create handlers for each provider - use dynamic route with provider param
         // Register a single route with {provider} parameter
         if !self.server_state.has_route("GET", "/auth/{provider}") {
@@ -7453,6 +7489,12 @@ impl Interpreter {
             "[auth] Cookie: {} (Secure={}, HttpOnly=true)",
             config.cookie_name, config.cookie_secure
         );
+        if !config.protected_paths.is_empty() {
+            eprintln!(
+                "[auth] Protected paths: {}",
+                config.protected_paths.join(", ")
+            );
+        }
 
         Ok(())
     }
@@ -8865,7 +8907,32 @@ impl Interpreter {
 
                 // Process request to get request Value
                 match http_server::process_request(request, route_params) {
-                    Ok((mut req_value, http_request)) => {
+                    Ok((req_value, http_request)) => {
+                        let mut req_value = match crate::stdlib::auth::enforce_auth_for_request(
+                            &req_value, false,
+                        ) {
+                            Ok(request_with_auth) => request_with_auth,
+                            Err(response) => {
+                                let response = if let Some(cors_config) =
+                                    self.server_state.get_cors_config()
+                                {
+                                    if let Value::Map(mut resp_map) = response {
+                                        cors_config.apply_to_response(
+                                            &mut resp_map,
+                                            request_origin.as_deref(),
+                                        );
+                                        Value::Map(resp_map)
+                                    } else {
+                                        response
+                                    }
+                                } else {
+                                    response
+                                };
+                                let _ = http_server::send_response(http_request, &response);
+                                continue;
+                            }
+                        };
+
                         // Run middleware chain and determine final response
                         let middleware_handlers: Vec<Value> =
                             self.server_state.get_middleware().to_vec();
@@ -9376,6 +9443,12 @@ impl Interpreter {
 
             // Convert to NTNT Value
             let req_value = full_request.to_value();
+            let req_value = match crate::stdlib::auth::enforce_auth_for_request(&req_value, false) {
+                Ok(request_with_auth) => request_with_auth,
+                Err(response) => {
+                    return crate::stdlib::http_bridge::BridgeResponse::from_value(&response)
+                }
+            };
 
             // Run middleware
             let middleware_handlers: Vec<Value> = self.server_state.get_middleware().to_vec();
@@ -15620,5 +15693,47 @@ page
             .unwrap();
 
         assert_eq!(config.refresh_ttl, 86_400 * 30);
+    }
+
+    #[test]
+    fn enable_auth_accepts_protected_paths() {
+        let interp = Interpreter::new();
+        let providers = Value::Array(vec![test_auth_provider("google")]);
+        let mut options = HashMap::new();
+        options.insert(
+            "protected_paths".to_string(),
+            Value::Array(vec![
+                Value::String("/admin/*".to_string()),
+                Value::String("/settings".to_string()),
+            ]),
+        );
+
+        let config = interp
+            .parse_auth_config(&[providers, Value::Map(options)])
+            .unwrap();
+
+        assert_eq!(
+            config.protected_paths,
+            vec!["/admin/*".to_string(), "/settings".to_string()]
+        );
+    }
+
+    #[test]
+    fn enable_auth_rejects_non_string_protected_paths() {
+        let interp = Interpreter::new();
+        let providers = Value::Array(vec![test_auth_provider("google")]);
+        let mut options = HashMap::new();
+        options.insert(
+            "protected_paths".to_string(),
+            Value::Array(vec![Value::Int(42)]),
+        );
+
+        let err = interp
+            .parse_auth_config(&[providers, Value::Map(options)])
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("config[\"protected_paths\"] must be String or [String]"));
     }
 }
