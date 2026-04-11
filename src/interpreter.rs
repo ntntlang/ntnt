@@ -7286,6 +7286,7 @@ impl Interpreter {
             "session_store",
             "store_tokens",
             "session_secret",
+            "refresh_ttl",
         ];
 
         valid
@@ -7339,6 +7340,10 @@ impl Interpreter {
             },
             "session_ttl" => match value {
                 Value::Int(i) => config.session_ttl = *i,
+                _ => return Err(self.auth_option_type_error(key, "Int", value)),
+            },
+            "refresh_ttl" => match value {
+                Value::Int(i) => config.refresh_ttl = *i,
                 _ => return Err(self.auth_option_type_error(key, "Int", value)),
             },
             "session_store" => match value {
@@ -15599,5 +15604,19 @@ page
             }
             other => panic!("expected sqlite session store, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn enable_auth_accepts_refresh_ttl_in_options() {
+        let interp = Interpreter::new();
+        let providers = Value::Array(vec![test_auth_provider("google")]);
+        let mut options = HashMap::new();
+        options.insert("refresh_ttl".to_string(), Value::Int(86_400 * 30));
+
+        let config = interp
+            .parse_auth_config(&[providers, Value::Map(options)])
+            .unwrap();
+
+        assert_eq!(config.refresh_ttl, 86_400 * 30);
     }
 }
