@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.4.8
+> Last updated: v0.4.9
 
 ## Table of Contents
 
@@ -2067,7 +2067,7 @@ Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url
 **Parameters:**
 
 - `providers` — Array of provider configs created by oauth() or oauth_discover()
-- `options` — Optional map with keys: session_secret, session_ttl, after_login, after_logout, session_store
+- `options` — Optional map with keys: session_secret, session_ttl, refresh_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, cookie_name, cookie_secure, session_store, store_tokens
 
 **Returns:** Unit
 
