@@ -654,6 +654,13 @@ impl ServerState {
         self.add_route_with_source(method, pattern, handler, None, HashMap::new());
     }
 
+    /// Returns true if a route with the exact method and pattern is already registered.
+    pub fn has_route(&self, method: &str, pattern: &str) -> bool {
+        self.routes
+            .iter()
+            .any(|(route, _, _)| route.method == method && route.pattern == pattern)
+    }
+
     /// Detect if a new route would conflict with existing routes
     ///
     /// Two routes conflict if:

@@ -7212,6 +7212,11 @@ impl Interpreter {
                     self.apply_auth_option(&mut config, key, value)?;
                 }
             }
+            [Value::Map(_)] => {
+                return Err(IntentError::type_error(
+                    "enable_auth() config map must include a \"providers\" array".to_string(),
+                ));
+            }
             [providers] => {
                 config.providers = self.parse_auth_providers(providers)?;
             }
@@ -8653,6 +8658,12 @@ impl Interpreter {
             None => (env_port.unwrap_or(port), false, None),
         };
 
+        if let Some(auth_config) = crate::stdlib::auth::get_auth_config() {
+            if !self.server_state.has_route("GET", "/auth/{provider}") {
+                self.setup_auth_routes(&auth_config)?;
+            }
+        }
+
         // Check if any routes or static dirs are registered
         let has_routes = self.server_state.route_count() > 0;
         let has_static = !self.server_state.static_dirs.is_empty();
@@ -9079,6 +9090,12 @@ impl Interpreter {
         };
         use std::sync::Arc;
         use std::thread;
+
+        if let Some(auth_config) = crate::stdlib::auth::get_auth_config() {
+            if !self.server_state.has_route("GET", "/auth/{provider}") {
+                self.setup_auth_routes(&auth_config)?;
+            }
+        }
 
         // Check if any routes are registered
         if self.server_state.route_count() == 0 && self.server_state.static_dirs.is_empty() {
