@@ -1454,6 +1454,36 @@ pub fn ensure_auth_session_store(config: &AuthConfig) -> std::result::Result<(),
     initialize_session_store(&config.session_store)
 }
 
+fn auth_option_suggestion(key: &str) -> Option<String> {
+    let valid = [
+        "session_secret",
+        "session_ttl",
+        "refresh_ttl",
+        "success_url",
+        "after_login",
+        "failure_url",
+        "after_failure",
+        "logout_url",
+        "after_logout",
+        "cookie_name",
+        "cookie_secure",
+        "session_store",
+        "store_tokens",
+    ];
+
+    valid
+        .iter()
+        .map(|candidate| {
+            (
+                *candidate,
+                crate::error::levenshtein_distance(key, candidate),
+            )
+        })
+        .filter(|(_, distance)| *distance <= 4)
+        .min_by_key(|(_, distance)| *distance)
+        .map(|(candidate, _)| candidate.to_string())
+}
+
 /// Initialize auth with config
 pub fn init_auth(config: AuthConfig) {
     let is_prod = std::env::var("NTNT_ENV")
@@ -6251,7 +6281,7 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
     // @param providers Array of provider configs created by oauth() or oauth_discover()
-    // @param options Optional map with keys: session_secret, session_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, cookie_name, cookie_secure, session_store, store_tokens
+    // @param options Optional map with keys: session_secret, session_ttl, refresh_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, cookie_name, cookie_secure, session_store, store_tokens
     // @returns Unit
     // @see_also oauth, oauth_discover, auth_start
     // @since v0.3.11
@@ -6315,6 +6345,36 @@ pub fn init() -> HashMap<String, Value> {
                             return Err(IntentError::type_error(format!(
                                 "[auth] Provider at index {} must be a map (use oauth() to create)",
                                 idx
+                            )));
+                        }
+                    }
+                }
+
+                if let Some(opts) = &options {
+                    for key in opts.keys() {
+                        let known = matches!(
+                            key.as_str(),
+                            "session_secret"
+                                | "session_ttl"
+                                | "refresh_ttl"
+                                | "success_url"
+                                | "after_login"
+                                | "failure_url"
+                                | "after_failure"
+                                | "logout_url"
+                                | "after_logout"
+                                | "cookie_name"
+                                | "cookie_secure"
+                                | "session_store"
+                                | "store_tokens"
+                        );
+                        if !known {
+                            let suggestion = auth_option_suggestion(key)
+                                .map(|s| format!(" Did you mean \"{}\"?", s))
+                                .unwrap_or_default();
+                            return Err(IntentError::type_error(format!(
+                                "[auth] enable_auth() unknown option \"{}\".{}",
+                                key, suggestion
                             )));
                         }
                     }

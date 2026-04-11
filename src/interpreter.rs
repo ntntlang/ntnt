@@ -7393,43 +7393,49 @@ impl Interpreter {
     fn setup_auth_routes(&mut self, config: &crate::stdlib::auth::AuthConfig) -> Result<()> {
         // Create handlers for each provider - use dynamic route with provider param
         // Register a single route with {provider} parameter
-        self.server_state.add_route(
-            "GET",
-            "/auth/{provider}",
-            Value::NativeFunction {
-                name: "_auth_start".to_string(),
-                arity: 1,
-                max_arity: 1,
-                requires: None,
-                func: crate::stdlib::auth::handle_auth_start,
-            },
-        );
+        if !self.server_state.has_route("GET", "/auth/{provider}") {
+            self.server_state.add_route(
+                "GET",
+                "/auth/{provider}",
+                Value::NativeFunction {
+                    name: "_auth_start".to_string(),
+                    arity: 1,
+                    max_arity: 1,
+                    requires: None,
+                    func: crate::stdlib::auth::handle_auth_start,
+                },
+            );
+        }
 
         // Create callback handler: GET /auth/callback
-        self.server_state.add_route(
-            "GET",
-            "/auth/callback",
-            Value::NativeFunction {
-                name: "_auth_callback".to_string(),
-                arity: 1,
-                max_arity: 1,
-                requires: None,
-                func: crate::stdlib::auth::handle_auth_callback,
-            },
-        );
+        if !self.server_state.has_route("GET", "/auth/callback") {
+            self.server_state.add_route(
+                "GET",
+                "/auth/callback",
+                Value::NativeFunction {
+                    name: "_auth_callback".to_string(),
+                    arity: 1,
+                    max_arity: 1,
+                    requires: None,
+                    func: crate::stdlib::auth::handle_auth_callback,
+                },
+            );
+        }
 
         // Create logout handler: POST /auth/logout
-        self.server_state.add_route(
-            "POST",
-            "/auth/logout",
-            Value::NativeFunction {
-                name: "_auth_logout".to_string(),
-                arity: 1,
-                max_arity: 1,
-                requires: None,
-                func: crate::stdlib::auth::handle_auth_logout,
-            },
-        );
+        if !self.server_state.has_route("POST", "/auth/logout") {
+            self.server_state.add_route(
+                "POST",
+                "/auth/logout",
+                Value::NativeFunction {
+                    name: "_auth_logout".to_string(),
+                    arity: 1,
+                    max_arity: 1,
+                    requires: None,
+                    func: crate::stdlib::auth::handle_auth_logout,
+                },
+            );
+        }
 
         let providers = config
             .providers
@@ -8664,9 +8670,7 @@ impl Interpreter {
         };
 
         if let Some(auth_config) = crate::stdlib::auth::get_auth_config() {
-            if !self.server_state.has_route("GET", "/auth/{provider}") {
-                self.setup_auth_routes(&auth_config)?;
-            }
+            self.setup_auth_routes(&auth_config)?;
         }
 
         // Check if any routes or static dirs are registered
@@ -9097,9 +9101,7 @@ impl Interpreter {
         use std::thread;
 
         if let Some(auth_config) = crate::stdlib::auth::get_auth_config() {
-            if !self.server_state.has_route("GET", "/auth/{provider}") {
-                self.setup_auth_routes(&auth_config)?;
-            }
+            self.setup_auth_routes(&auth_config)?;
         }
 
         // Check if any routes are registered
