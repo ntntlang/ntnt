@@ -7473,6 +7473,21 @@ impl Interpreter {
             );
         }
 
+        if !self.server_state.middleware.iter().any(|mw| {
+            matches!(
+                mw,
+                Value::NativeFunction { name, .. } if name == "_auth_protect"
+            )
+        }) {
+            self.server_state.add_middleware(Value::NativeFunction {
+                name: "_auth_protect".to_string(),
+                arity: 1,
+                max_arity: 1,
+                requires: None,
+                func: crate::stdlib::auth::handle_auth_protect,
+            });
+        }
+
         let providers = config
             .providers
             .iter()
@@ -8907,32 +8922,7 @@ impl Interpreter {
 
                 // Process request to get request Value
                 match http_server::process_request(request, route_params) {
-                    Ok((req_value, http_request)) => {
-                        let mut req_value = match crate::stdlib::auth::enforce_auth_for_request(
-                            &req_value, false,
-                        ) {
-                            Ok(request_with_auth) => request_with_auth,
-                            Err(response) => {
-                                let response = if let Some(cors_config) =
-                                    self.server_state.get_cors_config()
-                                {
-                                    if let Value::Map(mut resp_map) = response {
-                                        cors_config.apply_to_response(
-                                            &mut resp_map,
-                                            request_origin.as_deref(),
-                                        );
-                                        Value::Map(resp_map)
-                                    } else {
-                                        response
-                                    }
-                                } else {
-                                    response
-                                };
-                                let _ = http_server::send_response(http_request, &response);
-                                continue;
-                            }
-                        };
-
+                    Ok((mut req_value, http_request)) => {
                         // Run middleware chain and determine final response
                         let middleware_handlers: Vec<Value> =
                             self.server_state.get_middleware().to_vec();
@@ -9443,12 +9433,6 @@ impl Interpreter {
 
             // Convert to NTNT Value
             let req_value = full_request.to_value();
-            let req_value = match crate::stdlib::auth::enforce_auth_for_request(&req_value, false) {
-                Ok(request_with_auth) => request_with_auth,
-                Err(response) => {
-                    return crate::stdlib::http_bridge::BridgeResponse::from_value(&response)
-                }
-            };
 
             // Run middleware
             let middleware_handlers: Vec<Value> = self.server_state.get_middleware().to_vec();

@@ -1747,25 +1747,6 @@ fn session_from_request(request: &Value) -> Option<Session> {
     get_session_by_id(&session_id)
 }
 
-pub fn attach_auth_to_request(request: &Value) -> Value {
-    let mut req_map = match request {
-        Value::Map(map) => map.clone(),
-        _ => return request.clone(),
-    };
-
-    let session = session_from_request(request);
-    let mut auth_map = HashMap::new();
-    auth_map.insert("authenticated".to_string(), Value::Bool(session.is_some()));
-
-    if let Some(session) = &session {
-        auth_map.insert("user".to_string(), user_to_value(session));
-        auth_map.insert("session".to_string(), session_to_value(session));
-    }
-
-    req_map.insert("auth".to_string(), Value::Map(auth_map));
-    Value::Map(req_map)
-}
-
 fn path_requires_auth(path: &str) -> bool {
     if is_auth_exempt_path(path) {
         return false;
@@ -1780,11 +1761,14 @@ pub fn enforce_auth_for_request(
     request: &Value,
     force_auth: bool,
 ) -> std::result::Result<Value, Value> {
-    let request_with_auth = attach_auth_to_request(request);
-    let path = request_path(&request_with_auth);
+    let path = request_path(request);
+
+    if is_auth_exempt_path(&path) {
+        return Ok(request.clone());
+    }
 
     if !force_auth && !path_requires_auth(&path) {
-        return Ok(request_with_auth);
+        return Ok(request.clone());
     }
 
     let Some(_config) = get_auth_config() else {
@@ -1794,15 +1778,11 @@ pub fn enforce_auth_for_request(
         ));
     };
 
-    if let Value::Map(req_map) = &request_with_auth {
-        if let Some(Value::Map(auth)) = req_map.get("auth") {
-            if matches!(auth.get("authenticated"), Some(Value::Bool(true))) {
-                return Ok(request_with_auth);
-            }
-        }
+    if session_from_request(request).is_some() {
+        return Ok(request.clone());
     }
 
-    Err(auth_required_response(&request_with_auth))
+    Err(auth_required_response(request))
 }
 
 /// Initialize SQLite session storage
@@ -4068,14 +4048,6 @@ pub fn get_session_id_from_request(request: &Value) -> Option<String> {
 
 /// Get user from request as HashMap (internal helper)
 fn get_user_from_request(request: &Value) -> Option<HashMap<String, Value>> {
-    if let Value::Map(req_map) = request {
-        if let Some(Value::Map(auth)) = req_map.get("auth") {
-            if let Some(Value::Map(user)) = auth.get("user") {
-                return Some(user.clone());
-            }
-        }
-    }
-
     let session_id = get_session_id_from_request(request)?;
     let session = get_session_by_id(&session_id)?;
     if let Value::Map(m) = user_to_value(&session) {
@@ -4446,6 +4418,13 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
 ///
 /// If exactly one provider is configured, redirect straight into that OAuth flow.
 /// If multiple providers are configured, render a small provider chooser.
+pub fn handle_auth_protect(args: &[Value]) -> Result<Value> {
+    match enforce_auth_for_request(&args[0], false) {
+        Ok(_) => Ok(Value::Unit),
+        Err(response) => Ok(response),
+    }
+}
+
 pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
     let config = get_auth_config()
         .ok_or_else(|| IntentError::runtime_error("[auth] Auth not configured".to_string()))?;
@@ -5671,14 +5650,6 @@ pub fn init() -> HashMap<String, Value> {
                     ));
                 }
 
-                if let Value::Map(req_map) = &args[0] {
-                    if let Some(Value::Map(auth)) = req_map.get("auth") {
-                        if let Some(session) = auth.get("session") {
-                            return Ok(make_some(session.clone()));
-                        }
-                    }
-                }
-
                 let session_id = get_session_id_from_request(&args[0]);
                 if let Some(id) = session_id {
                     if let Some(session) = get_session_by_id(&id) {
@@ -6874,14 +6845,14 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt require_auth
     // @module std/auth
-    // @signature require_auth(paths?: String | [String]) -> Function | Unit | Response
+    // @signature require_auth(target?: Request | String | [String]) -> Function | Unit | Response
     // Protect routes with the configured auth session.
     //
     // Usage patterns:
     // - `use_middleware(require_auth())` protects every request that reaches that middleware.
     // - `require_auth("/admin/*")` registers protected path patterns for file-routed apps.
     // - `require_auth(req)` may be called directly inside custom middleware.
-    // @param paths Optional request object, single path pattern, or array of path patterns
+    // @param target Optional request object, single path pattern, or array of path patterns
     // @returns Middleware function, Unit for path registration, or a redirect/401 response when called with a request
     // @see_also enable_auth, get_user, get_session
     // @since v0.4.9
@@ -6893,14 +6864,14 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "require_auth".to_string(),
             arity: 0,
-            max_arity: 0,
+            max_arity: 1,
             requires: None,
             func: |args| {
                 if args.len() == 1 {
                     if let Value::Map(map) = &args[0] {
                         if map.contains_key("method") && map.contains_key("path") {
                             return match enforce_auth_for_request(&args[0], true) {
-                                Ok(request) => Ok(request),
+                                Ok(_) => Ok(Value::Unit),
                                 Err(response) => Ok(response),
                             };
                         }
@@ -6951,7 +6922,7 @@ pub fn init() -> HashMap<String, Value> {
                     max_arity: 1,
                     requires: None,
                     func: |mw_args| match enforce_auth_for_request(&mw_args[0], true) {
-                        Ok(request) => Ok(request),
+                        Ok(_) => Ok(Value::Unit),
                         Err(response) => Ok(response),
                     },
                 })
@@ -7712,5 +7683,25 @@ mod tests {
         } else {
             panic!("expected response map");
         }
+    }
+
+    #[test]
+    fn test_enforce_auth_for_request_skips_auth_routes_even_when_forced() {
+        reset_protected_paths();
+        init_auth(AuthConfig {
+            providers: vec![ProviderConfig {
+                name: "google".to_string(),
+                ..ProviderConfig::default()
+            }],
+            protected_paths: vec!["/admin/*".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let req = Value::Map(HashMap::from([(
+            "path".to_string(),
+            Value::String("/auth/google".to_string()),
+        )]));
+
+        assert!(enforce_auth_for_request(&req, true).is_ok());
     }
 }

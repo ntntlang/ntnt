@@ -2536,7 +2536,7 @@ oauth_validate(token, map { "issuer": "https://...", "audience": "my-api" })  //
 #### `require_auth`
 
 ```ntnt
-require_auth(paths?: String | [String]) -> Function | Unit | Response
+require_auth(target?: Request | String | [String]) -> Function | Unit | Response
 ```
 
 Protect routes with the configured auth session.
@@ -2545,7 +2545,7 @@ Usage patterns: - `use_middleware(require_auth())` protects every request that r
 
 **Parameters:**
 
-- `paths` — Optional request object, single path pattern, or array of path patterns
+- `target` — Optional request object, single path pattern, or array of path patterns
 
 **Returns:** Middleware function, Unit for path registration, or a redirect/401 response when called with a request
 
