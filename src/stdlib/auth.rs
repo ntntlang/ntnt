@@ -1398,6 +1398,19 @@ static REDIS_URL: std::sync::LazyLock<Arc<Mutex<Option<String>>>> =
 static AUTH_CONFIG: std::sync::LazyLock<Arc<Mutex<Option<AuthConfig>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(None)));
 
+fn initialize_session_store(store: &SessionStore) -> std::result::Result<(), String> {
+    match store {
+        SessionStore::Sqlite(path) => init_sqlite_sessions(path),
+        SessionStore::Postgres(url) => init_postgres_sessions(url),
+        SessionStore::Redis(url) => init_redis_sessions(url),
+        SessionStore::Memory => Ok(()),
+    }
+}
+
+pub fn ensure_auth_session_store(config: &AuthConfig) -> std::result::Result<(), String> {
+    initialize_session_store(&config.session_store)
+}
+
 /// Initialize auth with config
 pub fn init_auth(config: AuthConfig) {
     let is_prod = std::env::var("NTNT_ENV")
@@ -6351,35 +6364,12 @@ pub fn init() -> HashMap<String, Value> {
                     .unwrap_or(SessionStore::Memory);
 
                 // Initialize database/cache if needed
-                match &session_store {
-                    SessionStore::Sqlite(path) => {
-                        if let Err(e) = init_sqlite_sessions(path) {
-                            eprintln!("[auth] Failed to initialize SQLite sessions: {}", e);
-                            return Err(IntentError::runtime_error(format!(
-                                "Failed to initialize SQLite session store: {}",
-                                e
-                            )));
-                        }
-                    }
-                    SessionStore::Postgres(url) => {
-                        if let Err(e) = init_postgres_sessions(url) {
-                            eprintln!("[auth] Failed to initialize PostgreSQL sessions: {}", e);
-                            return Err(IntentError::runtime_error(format!(
-                                "Failed to initialize PostgreSQL session store: {}",
-                                e
-                            )));
-                        }
-                    }
-                    SessionStore::Redis(url) => {
-                        if let Err(e) = init_redis_sessions(url) {
-                            eprintln!("[auth] Failed to initialize Redis sessions: {}", e);
-                            return Err(IntentError::runtime_error(format!(
-                                "Failed to initialize Redis session store: {}",
-                                e
-                            )));
-                        }
-                    }
-                    SessionStore::Memory => {}
+                if let Err(e) = initialize_session_store(&session_store) {
+                    eprintln!("[auth] Failed to initialize session store: {}", e);
+                    return Err(IntentError::runtime_error(format!(
+                        "Failed to initialize session store: {}",
+                        e
+                    )));
                 }
 
                 // Create auth config

@@ -533,6 +533,9 @@ impl AritySpec {
     fn exact(n: usize) -> Self {
         Self { min: n, max: n }
     }
+    fn between(min: usize, max: usize) -> Self {
+        Self { min, max }
+    }
     fn at_most(n: usize) -> Self {
         Self { min: 0, max: n }
     }
@@ -937,7 +940,7 @@ impl Interpreter {
         register!(
             "enable_auth",
             Some(RuntimeCapability::HttpConfig),
-            AritySpec::exact(1),
+            AritySpec::between(1, 2),
             Interpreter::sa_enable_auth
         );
         register!(
@@ -1106,8 +1109,19 @@ impl Interpreter {
     }
 
     fn sa_enable_auth(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
-        let arg = interp.eval_expression(&args[0])?;
-        let config = interp.parse_auth_config(arg)?;
+        if args.is_empty() || args.len() > 2 {
+            return Err(IntentError::type_error(
+                "enable_auth() requires 1 or 2 arguments (providers, optional config)".to_string(),
+            ));
+        }
+
+        let values = args
+            .iter()
+            .map(|arg| interp.eval_expression(arg))
+            .collect::<Result<Vec<_>>>()?;
+        let config = interp.parse_auth_config(&values)?;
+        crate::stdlib::auth::ensure_auth_session_store(&config)
+            .map_err(IntentError::runtime_error)?;
         interp.setup_auth_routes(&config)?;
         crate::stdlib::auth::init_auth(config);
         Ok(Value::Unit)
@@ -7182,61 +7196,224 @@ impl Interpreter {
     }
 
     /// Parse auth configuration from enable_auth() argument
-    fn parse_auth_config(&self, arg: Value) -> Result<crate::stdlib::auth::AuthConfig> {
-        use crate::stdlib::auth::{value_to_provider, AuthConfig};
+    fn parse_auth_config(&self, args: &[Value]) -> Result<crate::stdlib::auth::AuthConfig> {
+        use crate::stdlib::auth::AuthConfig;
 
-        match arg {
-            // Single provider: enable_auth(google(...))
-            Value::Map(ref map) if map.contains_key("_provider") => {
-                let provider = value_to_provider(&arg)?;
-                let mut config = AuthConfig::default();
-                config.providers.push(provider);
-                Ok(config)
-            }
-            // Config map: enable_auth(map { "providers": [...], ... })
-            Value::Map(ref map) => {
-                let mut config = AuthConfig::default();
+        let mut config = AuthConfig::default();
+        config.cookie_secure = self.default_auth_cookie_secure();
 
-                // Parse providers array
-                if let Some(Value::Array(providers)) = map.get("providers") {
-                    for p in providers {
-                        let provider = value_to_provider(p)?;
-                        config.providers.push(provider);
+        match args {
+            [Value::Map(map)] if map.contains_key("providers") => {
+                config.providers = self.parse_auth_providers(map.get("providers").unwrap())?;
+                for (key, value) in map {
+                    if key == "providers" {
+                        continue;
                     }
-                } else {
-                    return Err(IntentError::type_error(
-                        "enable_auth() requires a provider or config with 'providers' array"
-                            .to_string(),
-                    ));
+                    self.apply_auth_option(&mut config, key, value)?;
                 }
-
-                // Parse optional settings
-                if let Some(Value::String(s)) = map.get("success_url") {
-                    config.success_url = s.clone();
-                }
-                if let Some(Value::String(s)) = map.get("failure_url") {
-                    config.failure_url = s.clone();
-                }
-                if let Some(Value::String(s)) = map.get("cookie_name") {
-                    config.cookie_name = s.clone();
-                }
-                if let Some(Value::Bool(b)) = map.get("cookie_secure") {
-                    config.cookie_secure = *b;
-                }
-                if let Some(Value::Int(i)) = map.get("session_ttl") {
-                    config.session_ttl = *i;
-                }
-
-                Ok(config)
             }
-            _ => Err(IntentError::type_error(
-                "enable_auth() requires a provider or config map".to_string(),
-            )),
+            [providers] => {
+                config.providers = self.parse_auth_providers(providers)?;
+            }
+            [providers, Value::Map(options)] => {
+                config.providers = self.parse_auth_providers(providers)?;
+                for (key, value) in options {
+                    self.apply_auth_option(&mut config, key, value)?;
+                }
+            }
+            [_, other] => {
+                return Err(IntentError::type_error(format!(
+                    "enable_auth() config must be a map, got {}",
+                    other.type_name()
+                )));
+            }
+            _ => {
+                return Err(IntentError::type_error(
+                    "enable_auth() requires a provider, provider array, or config map".to_string(),
+                ));
+            }
+        }
+
+        if config.providers.is_empty() {
+            return Err(IntentError::type_error(
+                "enable_auth() requires at least one provider".to_string(),
+            ));
+        }
+
+        Ok(config)
+    }
+
+    fn parse_auth_providers(
+        &self,
+        value: &Value,
+    ) -> Result<Vec<crate::stdlib::auth::ProviderConfig>> {
+        use crate::stdlib::auth::value_to_provider;
+
+        match value {
+            Value::Array(providers) => providers
+                .iter()
+                .map(value_to_provider)
+                .collect::<Result<Vec<_>>>(),
+            Value::Map(map) if map.contains_key("_provider") => Ok(vec![value_to_provider(value)?]),
+            _ => Err(IntentError::type_error(format!(
+                "enable_auth() providers must be a provider or provider array, got {}",
+                value.type_name()
+            ))),
+        }
+    }
+
+    fn default_auth_cookie_secure(&self) -> bool {
+        if let Ok(env) = std::env::var("NTNT_ENV") {
+            if env.eq_ignore_ascii_case("development") {
+                return false;
+            }
+        }
+
+        if let Ok(site_url) = std::env::var("SITE_URL") {
+            let lower = site_url.to_ascii_lowercase();
+            if lower.starts_with("http://localhost")
+                || lower.starts_with("http://127.0.0.1")
+                || lower.starts_with("http://0.0.0.0")
+            {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn auth_option_suggestion(&self, key: &str) -> Option<String> {
+        let valid = [
+            "providers",
+            "success_url",
+            "failure_url",
+            "logout_url",
+            "after_login",
+            "after_failure",
+            "after_logout",
+            "session_ttl",
+            "cookie_name",
+            "cookie_secure",
+            "session_store",
+            "store_tokens",
+            "session_secret",
+        ];
+
+        valid
+            .iter()
+            .map(|candidate| {
+                (
+                    *candidate,
+                    crate::error::levenshtein_distance(key, candidate),
+                )
+            })
+            .filter(|(_, distance)| *distance <= 4)
+            .min_by_key(|(_, distance)| *distance)
+            .map(|(candidate, _)| candidate.to_string())
+    }
+
+    fn auth_option_type_error(&self, key: &str, expected: &str, value: &Value) -> IntentError {
+        IntentError::type_error(format!(
+            "enable_auth() config[\"{}\"] must be {}, got {}",
+            key,
+            expected,
+            value.type_name()
+        ))
+    }
+
+    fn apply_auth_option(
+        &self,
+        config: &mut crate::stdlib::auth::AuthConfig,
+        key: &str,
+        value: &Value,
+    ) -> Result<()> {
+        match key {
+            "success_url" | "after_login" => match value {
+                Value::String(s) => config.success_url = s.clone(),
+                _ => return Err(self.auth_option_type_error(key, "String", value)),
+            },
+            "failure_url" | "after_failure" => match value {
+                Value::String(s) => config.failure_url = s.clone(),
+                _ => return Err(self.auth_option_type_error(key, "String", value)),
+            },
+            "logout_url" | "after_logout" => match value {
+                Value::String(s) => config.logout_url = s.clone(),
+                _ => return Err(self.auth_option_type_error(key, "String", value)),
+            },
+            "cookie_name" => match value {
+                Value::String(s) => config.cookie_name = s.clone(),
+                _ => return Err(self.auth_option_type_error(key, "String", value)),
+            },
+            "cookie_secure" => match value {
+                Value::Bool(b) => config.cookie_secure = *b,
+                _ => return Err(self.auth_option_type_error(key, "Bool", value)),
+            },
+            "session_ttl" => match value {
+                Value::Int(i) => config.session_ttl = *i,
+                _ => return Err(self.auth_option_type_error(key, "Int", value)),
+            },
+            "session_store" => match value {
+                Value::String(s) => {
+                    config.session_store = if s == "memory" {
+                        crate::stdlib::auth::SessionStore::Memory
+                    } else if s.starts_with("sqlite:") {
+                        let path = s.strip_prefix("sqlite:").unwrap_or("./sessions.db");
+                        let path = if path.is_empty() {
+                            "./sessions.db"
+                        } else {
+                            path
+                        };
+                        crate::stdlib::auth::SessionStore::Sqlite(path.to_string())
+                    } else if s.starts_with("postgres:") || s.starts_with("postgresql:") {
+                        crate::stdlib::auth::SessionStore::Postgres(s.clone())
+                    } else if s.starts_with("redis:") || s.starts_with("valkey:") {
+                        crate::stdlib::auth::SessionStore::Redis(s.clone())
+                    } else {
+                        return Err(IntentError::type_error(format!(
+                            "enable_auth() config[\"session_store\"] must be one of: memory, sqlite:PATH, postgres://..., redis://..., valkey://..."
+                        )));
+                    };
+                }
+                _ => return Err(self.auth_option_type_error(key, "String", value)),
+            },
+            "store_tokens" => match value {
+                Value::Bool(b) => config.store_tokens = *b,
+                _ => return Err(self.auth_option_type_error(key, "Bool", value)),
+            },
+            "session_secret" => match value {
+                Value::String(s) => config.session_secret = s.clone(),
+                _ => return Err(self.auth_option_type_error(key, "String", value)),
+            },
+            "providers" => {}
+            other => {
+                let suggestion = self
+                    .auth_option_suggestion(other)
+                    .map(|s| format!(" Did you mean \"{}\"?", s))
+                    .unwrap_or_default();
+                return Err(IntentError::type_error(format!(
+                    "enable_auth() unknown config key \"{}\".{}",
+                    other, suggestion
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn format_auth_duration(&self, seconds: i64) -> String {
+        if seconds % 86_400 == 0 {
+            format!("{}d", seconds / 86_400)
+        } else if seconds % 3_600 == 0 {
+            format!("{}h", seconds / 3_600)
+        } else if seconds % 60 == 0 {
+            format!("{}m", seconds / 60)
+        } else {
+            format!("{}s", seconds)
         }
     }
 
     /// Set up OAuth routes for the given auth configuration
-    fn setup_auth_routes(&mut self, _config: &crate::stdlib::auth::AuthConfig) -> Result<()> {
+    fn setup_auth_routes(&mut self, config: &crate::stdlib::auth::AuthConfig) -> Result<()> {
         // Create handlers for each provider - use dynamic route with provider param
         // Register a single route with {provider} parameter
         self.server_state.add_route(
@@ -7275,6 +7452,23 @@ impl Interpreter {
                 requires: None,
                 func: crate::stdlib::auth::handle_auth_logout,
             },
+        );
+
+        let providers = config
+            .providers
+            .iter()
+            .map(|provider| provider.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("[auth] Enabled providers: {}", providers);
+        eprintln!("[auth] Routes: /auth/{{provider}}, /auth/callback, POST /auth/logout");
+        eprintln!(
+            "[auth] Session TTL: {}",
+            self.format_auth_duration(config.session_ttl)
+        );
+        eprintln!(
+            "[auth] Cookie: {} (Secure={}, HttpOnly=true)",
+            config.cookie_name, config.cookie_secure
         );
 
         Ok(())
@@ -15296,5 +15490,130 @@ page
         assert!(names.contains(&"send.tnt".to_string()));
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    fn test_auth_provider(name: &str) -> Value {
+        let mut map = HashMap::new();
+        map.insert("_provider".to_string(), Value::Bool(true));
+        map.insert("name".to_string(), Value::String(name.to_string()));
+        map.insert(
+            "client_id".to_string(),
+            Value::String("client-id".to_string()),
+        );
+        map.insert(
+            "client_secret".to_string(),
+            Value::String("client-secret".to_string()),
+        );
+        map.insert(
+            "authorize_url".to_string(),
+            Value::String("https://example.com/oauth/authorize".to_string()),
+        );
+        map.insert(
+            "token_url".to_string(),
+            Value::String("https://example.com/oauth/token".to_string()),
+        );
+        map.insert(
+            "userinfo_url".to_string(),
+            Value::String("https://example.com/oauth/userinfo".to_string()),
+        );
+        map.insert(
+            "scopes".to_string(),
+            Value::Array(vec![Value::String("openid".to_string())]),
+        );
+        map.insert(
+            "user_id_field".to_string(),
+            Value::String("sub".to_string()),
+        );
+        map.insert(
+            "user_email_field".to_string(),
+            Value::String("email".to_string()),
+        );
+        map.insert(
+            "user_name_field".to_string(),
+            Value::String("name".to_string()),
+        );
+        Value::Map(map)
+    }
+
+    #[test]
+    fn enable_auth_accepts_provider_array_plus_options() {
+        let interp = Interpreter::new();
+        let providers = Value::Array(vec![test_auth_provider("google")]);
+        let mut options = HashMap::new();
+        options.insert(
+            "after_login".to_string(),
+            Value::String("/dashboard".to_string()),
+        );
+        options.insert(
+            "cookie_name".to_string(),
+            Value::String("auth_session".to_string()),
+        );
+        options.insert("session_ttl".to_string(), Value::Int(3_600));
+
+        let config = interp
+            .parse_auth_config(&[providers, Value::Map(options)])
+            .unwrap();
+
+        assert_eq!(config.providers.len(), 1);
+        assert_eq!(config.success_url, "/dashboard");
+        assert_eq!(config.cookie_name, "auth_session");
+        assert_eq!(config.session_ttl, 3_600);
+    }
+
+    #[test]
+    fn enable_auth_rejects_unknown_config_keys_with_suggestion() {
+        let interp = Interpreter::new();
+        let providers = Value::Array(vec![test_auth_provider("google")]);
+        let mut options = HashMap::new();
+        options.insert("session_tt".to_string(), Value::Int(3_600));
+
+        let err = interp
+            .parse_auth_config(&[providers, Value::Map(options)])
+            .unwrap_err();
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("unknown config key \"session_tt\""));
+        assert!(rendered.contains("Did you mean \"session_ttl\"?"));
+    }
+
+    #[test]
+    fn enable_auth_rejects_wrong_option_types() {
+        let interp = Interpreter::new();
+        let providers = Value::Array(vec![test_auth_provider("google")]);
+        let mut options = HashMap::new();
+        options.insert(
+            "cookie_secure".to_string(),
+            Value::String("yes".to_string()),
+        );
+
+        let err = interp
+            .parse_auth_config(&[providers, Value::Map(options)])
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("config[\"cookie_secure\"] must be Bool, got String"));
+    }
+
+    #[test]
+    fn enable_auth_defaults_empty_sqlite_store_path() {
+        let interp = Interpreter::new();
+        let providers = Value::Array(vec![test_auth_provider("google")]);
+        let mut options = HashMap::new();
+        options.insert(
+            "session_store".to_string(),
+            Value::String("sqlite:".to_string()),
+        );
+
+        let config = interp
+            .parse_auth_config(&[providers, Value::Map(options)])
+            .unwrap();
+
+        match config.session_store {
+            crate::stdlib::auth::SessionStore::Sqlite(path) => {
+                assert_eq!(path, "./sessions.db");
+            }
+            other => panic!("expected sqlite session store, got {:?}", other),
+        }
     }
 }
