@@ -1605,6 +1605,37 @@ fn dedupe_protected_paths(paths: &mut Vec<String>) {
     paths.retain(|path| seen.insert(path.clone()));
 }
 
+fn with_protected_paths<T>(f: impl FnOnce(&[String]) -> T) -> T {
+    let protected = AUTH_PROTECTED_PATHS.lock().unwrap();
+    f(&protected)
+}
+
+fn is_safe_provider_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn validate_provider_name(name: &str) -> std::result::Result<(), String> {
+    if is_safe_provider_name(name) {
+        Ok(())
+    } else {
+        Err(
+            "provider name must use only ASCII letters, numbers, underscores, or hyphens"
+                .to_string(),
+        )
+    }
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 pub fn reset_protected_paths() {
     let mut protected = AUTH_PROTECTED_PATHS.lock().unwrap();
     protected.clear();
@@ -1665,44 +1696,40 @@ fn request_path(request: &Value) -> String {
     "/".to_string()
 }
 
-fn request_headers_map(request: &Value) -> Option<HashMap<String, Value>> {
-    if let Value::Map(req_map) = request {
-        if let Some(Value::Map(headers)) = req_map.get("headers") {
-            return Some(headers.clone());
-        }
-    }
-    None
-}
-
 fn request_prefers_api(request: &Value) -> bool {
     let path = request_path(request);
     if path == "/api" || path.starts_with("/api/") {
         return true;
     }
 
-    let Some(headers) = request_headers_map(request) else {
+    let Value::Map(req_map) = request else {
+        return false;
+    };
+    let Some(Value::Map(headers)) = req_map.get("headers") else {
         return false;
     };
 
-    let accept = headers
+    if headers
         .get("accept")
         .and_then(|v| match v {
             Value::String(s) => Some(s.to_ascii_lowercase()),
             _ => None,
         })
-        .unwrap_or_default();
-    if accept.contains("application/json") {
+        .map(|accept| accept.contains("application/json"))
+        .unwrap_or(false)
+    {
         return true;
     }
 
-    let content_type = headers
+    if headers
         .get("content-type")
         .and_then(|v| match v {
             Value::String(s) => Some(s.to_ascii_lowercase()),
             _ => None,
         })
-        .unwrap_or_default();
-    if content_type.contains("application/json") {
+        .map(|content_type| content_type.contains("application/json"))
+        .unwrap_or(false)
+    {
         return true;
     }
 
@@ -1752,23 +1779,25 @@ fn path_requires_auth(path: &str) -> bool {
         return false;
     }
 
-    get_protected_paths()
-        .iter()
-        .any(|pattern| path_matches_protected_pattern(path, pattern))
+    with_protected_paths(|patterns| {
+        patterns
+            .iter()
+            .any(|pattern| path_matches_protected_pattern(path, pattern))
+    })
 }
 
 pub fn enforce_auth_for_request(
     request: &Value,
     force_auth: bool,
-) -> std::result::Result<Value, Value> {
+) -> std::result::Result<(), Value> {
     let path = request_path(request);
 
     if is_auth_exempt_path(&path) {
-        return Ok(request.clone());
+        return Ok(());
     }
 
     if !force_auth && !path_requires_auth(&path) {
-        return Ok(request.clone());
+        return Ok(());
     }
 
     let Some(_config) = get_auth_config() else {
@@ -1779,7 +1808,7 @@ pub fn enforce_auth_for_request(
     };
 
     if session_from_request(request).is_some() {
-        return Ok(request.clone());
+        return Ok(());
     }
 
     Err(auth_required_response(request))
@@ -4271,6 +4300,8 @@ fn value_map_to_provider(
     let token_url = get_str("token_url").ok_or("Provider must have 'token_url'")?;
     let client_id = get_str("client_id").ok_or("Provider must have 'client_id'")?;
 
+    validate_provider_name(&name)?;
+
     Ok(ProviderConfig {
         name,
         client_id,
@@ -4414,17 +4445,18 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
     Ok(redirect_response(&auth_url, None))
 }
 
-/// Handle GET /auth - minimal auth landing route.
-///
-/// If exactly one provider is configured, redirect straight into that OAuth flow.
-/// If multiple providers are configured, render a small provider chooser.
+/// Auth middleware entry point used for protected route enforcement.
 pub fn handle_auth_protect(args: &[Value]) -> Result<Value> {
     match enforce_auth_for_request(&args[0], false) {
-        Ok(_) => Ok(Value::Unit),
+        Ok(()) => Ok(Value::Unit),
         Err(response) => Ok(response),
     }
 }
 
+/// Handle GET /auth - minimal auth landing route.
+///
+/// If exactly one provider is configured, redirect straight into that OAuth flow.
+/// If multiple providers are configured, render a small provider chooser.
 pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
     let config = get_auth_config()
         .ok_or_else(|| IntentError::runtime_error("[auth] Auth not configured".to_string()))?;
@@ -4438,10 +4470,11 @@ pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
         .providers
         .iter()
         .map(|provider| {
+            let label = escape_html(&provider.name);
             format!(
                 r#"<li><a href="/auth/{name}">Sign in with {label}</a></li>"#,
                 name = provider.name,
-                label = provider.name
+                label = label
             )
         })
         .collect::<Vec<_>>()
@@ -6849,9 +6882,13 @@ pub fn init() -> HashMap<String, Value> {
     // Protect routes with the configured auth session.
     //
     // Usage patterns:
+    //
     // - `use_middleware(require_auth())` protects every request that reaches that middleware.
+    //
     // - `require_auth("/admin/*")` registers protected path patterns for file-routed apps.
+    //
     // - `require_auth(req)` may be called directly inside custom middleware.
+    //
     // @param target Optional request object, single path pattern, or array of path patterns
     // @returns Middleware function, Unit for path registration, or a redirect/401 response when called with a request
     // @see_also enable_auth, get_user, get_session
@@ -6871,7 +6908,7 @@ pub fn init() -> HashMap<String, Value> {
                     if let Value::Map(map) = &args[0] {
                         if map.contains_key("method") && map.contains_key("path") {
                             return match enforce_auth_for_request(&args[0], true) {
-                                Ok(_) => Ok(Value::Unit),
+                                Ok(()) => Ok(Value::Unit),
                                 Err(response) => Ok(response),
                             };
                         }
@@ -6922,7 +6959,7 @@ pub fn init() -> HashMap<String, Value> {
                     max_arity: 1,
                     requires: None,
                     func: |mw_args| match enforce_auth_for_request(&mw_args[0], true) {
-                        Ok(_) => Ok(Value::Unit),
+                        Ok(()) => Ok(Value::Unit),
                         Err(response) => Ok(response),
                     },
                 })
@@ -7515,6 +7552,9 @@ pub fn init() -> HashMap<String, Value> {
 mod tests {
     use super::*;
 
+    static AUTH_TEST_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
     #[test]
     fn test_exchange_token_store_consume_memory() {
         let mut store = InMemoryStore::new();
@@ -7620,7 +7660,16 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_provider_name_rejects_unsafe_names() {
+        assert!(validate_provider_name("google").is_ok());
+        assert!(validate_provider_name("foo_bar-123").is_ok());
+        assert!(validate_provider_name("google<script>").is_err());
+        assert!(validate_provider_name("bad name").is_err());
+    }
+
+    #[test]
     fn test_enforce_auth_for_request_redirects_html_routes() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_protected_paths();
         init_auth(AuthConfig {
             providers: vec![ProviderConfig {
@@ -7652,6 +7701,7 @@ mod tests {
 
     #[test]
     fn test_enforce_auth_for_request_returns_json_for_api_routes() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_protected_paths();
         init_auth(AuthConfig {
             providers: vec![ProviderConfig {
@@ -7687,6 +7737,7 @@ mod tests {
 
     #[test]
     fn test_enforce_auth_for_request_skips_auth_routes_even_when_forced() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_protected_paths();
         init_auth(AuthConfig {
             providers: vec![ProviderConfig {

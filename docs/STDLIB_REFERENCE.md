@@ -2541,7 +2541,13 @@ require_auth(target?: Request | String | [String]) -> Function | Unit | Response
 
 Protect routes with the configured auth session.
 
-Usage patterns: - `use_middleware(require_auth())` protects every request that reaches that middleware. - `require_auth("/admin/*")` registers protected path patterns for file-routed apps. - `require_auth(req)` may be called directly inside custom middleware.
+Usage patterns:
+
+- `use_middleware(require_auth())` protects every request that reaches that middleware.
+
+- `require_auth("/admin/*")` registers protected path patterns for file-routed apps.
+
+- `require_auth(req)` may be called directly inside custom middleware.
 
 **Parameters:**
 
