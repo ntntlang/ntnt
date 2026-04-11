@@ -7263,23 +7263,7 @@ impl Interpreter {
     }
 
     fn default_auth_cookie_secure(&self) -> bool {
-        if let Ok(env) = std::env::var("NTNT_ENV") {
-            if env.eq_ignore_ascii_case("development") {
-                return false;
-            }
-        }
-
-        if let Ok(site_url) = std::env::var("SITE_URL") {
-            let lower = site_url.to_ascii_lowercase();
-            if lower.starts_with("http://localhost")
-                || lower.starts_with("http://127.0.0.1")
-                || lower.starts_with("http://0.0.0.0")
-            {
-                return false;
-            }
-        }
-
-        true
+        crate::stdlib::auth::default_auth_cookie_secure_env()
     }
 
     fn auth_option_suggestion(&self, key: &str) -> Option<String> {
@@ -7354,25 +7338,8 @@ impl Interpreter {
             },
             "session_store" => match value {
                 Value::String(s) => {
-                    config.session_store = if s == "memory" {
-                        crate::stdlib::auth::SessionStore::Memory
-                    } else if s.starts_with("sqlite:") {
-                        let path = s.strip_prefix("sqlite:").unwrap_or("./sessions.db");
-                        let path = if path.is_empty() {
-                            "./sessions.db"
-                        } else {
-                            path
-                        };
-                        crate::stdlib::auth::SessionStore::Sqlite(path.to_string())
-                    } else if s.starts_with("postgres:") || s.starts_with("postgresql:") {
-                        crate::stdlib::auth::SessionStore::Postgres(s.clone())
-                    } else if s.starts_with("redis:") || s.starts_with("valkey:") {
-                        crate::stdlib::auth::SessionStore::Redis(s.clone())
-                    } else {
-                        return Err(IntentError::type_error(format!(
-                            "enable_auth() config[\"session_store\"] must be one of: memory, sqlite:PATH, postgres://..., redis://..., valkey://..."
-                        )));
-                    };
+                    config.session_store = crate::stdlib::auth::parse_auth_session_store(s)
+                        .map_err(IntentError::type_error)?;
                 }
                 _ => return Err(self.auth_option_type_error(key, "String", value)),
             },

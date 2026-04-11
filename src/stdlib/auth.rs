@@ -1407,6 +1407,49 @@ fn initialize_session_store(store: &SessionStore) -> std::result::Result<(), Str
     }
 }
 
+pub fn default_auth_cookie_secure_env() -> bool {
+    if let Ok(env) = std::env::var("NTNT_ENV") {
+        if env.eq_ignore_ascii_case("development") || env.eq_ignore_ascii_case("dev") {
+            return false;
+        }
+    }
+
+    if let Ok(site_url) = std::env::var("SITE_URL") {
+        let lower = site_url.to_ascii_lowercase();
+        if lower.starts_with("http://localhost")
+            || lower.starts_with("http://127.0.0.1")
+            || lower.starts_with("http://0.0.0.0")
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+pub fn parse_auth_session_store(value: &str) -> std::result::Result<SessionStore, String> {
+    if value == "memory" || value.is_empty() {
+        return Ok(SessionStore::Memory);
+    }
+    if value.starts_with("sqlite:") {
+        let path = value.strip_prefix("sqlite:").unwrap_or("./sessions.db");
+        let path = if path.is_empty() {
+            "./sessions.db"
+        } else {
+            path
+        };
+        return Ok(SessionStore::Sqlite(path.to_string()));
+    }
+    if value.starts_with("postgres://") || value.starts_with("postgresql://") {
+        return Ok(SessionStore::Postgres(value.to_string()));
+    }
+    if value.starts_with("redis://") || value.starts_with("valkey://") {
+        return Ok(SessionStore::Redis(value.to_string()));
+    }
+
+    Err("session_store must be one of: memory, sqlite:PATH, postgres://..., postgresql://..., redis://..., valkey://...".to_string())
+}
+
 pub fn ensure_auth_session_store(config: &AuthConfig) -> std::result::Result<(), String> {
     initialize_session_store(&config.session_store)
 }
@@ -6208,7 +6251,7 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
     // @param providers Array of provider configs created by oauth() or oauth_discover()
-    // @param options Optional map with keys: session_secret, session_ttl, after_login, after_logout, session_store
+    // @param options Optional map with keys: session_secret, session_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, cookie_name, cookie_secure, session_store, store_tokens
     // @returns Unit
     // @see_also oauth, oauth_discover, auth_start
     // @since v0.3.11
@@ -6226,9 +6269,10 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             requires: Some(RuntimeCapability::HttpConfig),
             func: |args| {
-                if args.is_empty() {
+                if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::type_error(
-                        "[auth] enable_auth() requires a providers array".to_string(),
+                        "[auth] enable_auth() requires 1 or 2 arguments (providers, optional config)"
+                            .to_string(),
                     ));
                 }
 
@@ -6276,92 +6320,100 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 }
 
-                // Parse options
-                let session_secret = options
-                    .as_ref()
-                    .and_then(|o| o.get("session_secret"))
-                    .and_then(|v| match v {
-                        Value::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| DEFAULT_SESSION_SECRET_SENTINEL.to_string());
+                let get_option = |keys: &[&str]| {
+                    options
+                        .as_ref()
+                        .and_then(|opts| keys.iter().find_map(|key| opts.get(*key)))
+                };
 
-                let session_ttl = options
-                    .as_ref()
-                    .and_then(|o| o.get("session_ttl"))
-                    .and_then(|v| match v {
-                        Value::Int(n) => Some(*n),
-                        _ => None,
-                    })
-                    .unwrap_or(86400);
+                let session_secret = match get_option(&["session_secret"]) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"session_secret\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => DEFAULT_SESSION_SECRET_SENTINEL.to_string(),
+                };
 
-                let success_url = options
-                    .as_ref()
-                    .and_then(|o| o.get("after_login"))
-                    .and_then(|v| match v {
-                        Value::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "/".to_string());
+                let session_ttl = match get_option(&["session_ttl"]) {
+                    Some(Value::Int(n)) => *n,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"session_ttl\" must be an int, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => 86400,
+                };
 
-                let failure_url = options
-                    .as_ref()
-                    .and_then(|o| o.get("after_failure"))
-                    .and_then(|v| match v {
-                        Value::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "/".to_string());
+                let success_url = match get_option(&["success_url", "after_login"]) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"success_url\"/\"after_login\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => "/".to_string(),
+                };
 
-                let logout_url = options
-                    .as_ref()
-                    .and_then(|o| o.get("after_logout"))
-                    .and_then(|v| match v {
-                        Value::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "/".to_string());
+                let failure_url = match get_option(&["failure_url", "after_failure"]) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"failure_url\"/\"after_failure\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => "/".to_string(),
+                };
 
-                // Check if we should use secure cookies
-                // Default: true (HTTPS required) - must explicitly set NTNT_ENV=dev to allow HTTP
-                let is_dev = std::env::var("NTNT_ENV")
-                    .map(|v| v == "dev" || v == "development")
-                    .unwrap_or(false); // Default to secure (production) mode
+                let logout_url = match get_option(&["logout_url", "after_logout"]) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"logout_url\"/\"after_logout\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => "/".to_string(),
+                };
 
-                let cookie_secure = options
-                    .as_ref()
-                    .and_then(|o| o.get("cookie_secure"))
-                    .and_then(|v| match v {
-                        Value::Bool(b) => Some(*b),
-                        _ => None,
-                    })
-                    .unwrap_or(!is_dev); // Secure by default unless explicitly in dev mode
+                let cookie_name = match get_option(&["cookie_name"]) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"cookie_name\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => "ntnt_session".to_string(),
+                };
 
-                // Parse session storage backend
-                // Format: "memory" (default), "sqlite:./path.db", "postgres://...", "redis://..."
-                let session_store = options
-                    .as_ref()
-                    .and_then(|o| o.get("session_store"))
-                    .and_then(|v| match v {
-                        Value::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .map(|s| {
-                        if s == "memory" || s.is_empty() {
-                            SessionStore::Memory
-                        } else if s.starts_with("sqlite:") {
-                            let path = s.strip_prefix("sqlite:").unwrap_or("./sessions.db");
-                            SessionStore::Sqlite(path.to_string())
-                        } else if s.starts_with("postgres://") || s.starts_with("postgresql://") {
-                            SessionStore::Postgres(s)
-                        } else if s.starts_with("redis://") || s.starts_with("valkey://") {
-                            SessionStore::Redis(s)
-                        } else {
-                            eprintln!("[auth] Unknown session_store format '{}', using memory", s);
-                            SessionStore::Memory
-                        }
-                    })
-                    .unwrap_or(SessionStore::Memory);
+                let cookie_secure = match get_option(&["cookie_secure"]) {
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"cookie_secure\" must be a bool, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => default_auth_cookie_secure_env(),
+                };
+
+                let session_store = match get_option(&["session_store"]) {
+                    Some(Value::String(s)) => parse_auth_session_store(s)
+                        .map_err(IntentError::type_error)?,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"session_store\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => SessionStore::Memory,
+                };
 
                 // Initialize database/cache if needed
                 if let Err(e) = initialize_session_store(&session_store) {
@@ -6372,32 +6424,40 @@ pub fn init() -> HashMap<String, Value> {
                     )));
                 }
 
+                let store_tokens = match get_option(&["store_tokens"]) {
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"store_tokens\" must be a bool, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => false,
+                };
+
+                let refresh_ttl = match get_option(&["refresh_ttl"]) {
+                    Some(Value::Int(n)) => *n,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"refresh_ttl\" must be an int, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => 86400 * 30,
+                };
+
                 // Create auth config
                 let config = AuthConfig {
                     providers,
                     success_url,
                     failure_url,
                     logout_url,
-                    cookie_name: "ntnt_session".to_string(),
+                    cookie_name,
                     cookie_secure,
                     cookie_same_site: "Lax".to_string(),
                     session_ttl,
-                    store_tokens: options
-                        .as_ref()
-                        .and_then(|o| o.get("store_tokens"))
-                        .and_then(|v| match v {
-                            Value::Bool(b) => Some(*b),
-                            _ => None,
-                        })
-                        .unwrap_or(false),
-                    refresh_ttl: options
-                        .as_ref()
-                        .and_then(|o| o.get("refresh_ttl"))
-                        .and_then(|v| match v {
-                            Value::Int(n) => Some(*n),
-                            _ => None,
-                        })
-                        .unwrap_or(86400 * 30), // 30 days default
+                    store_tokens,
+                    refresh_ttl,
                     session_secret,
                     session_store,
                 };
