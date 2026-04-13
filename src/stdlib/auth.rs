@@ -1580,11 +1580,17 @@ fn normalize_protected_path(pattern: &str) -> String {
         return String::new();
     }
 
-    if trimmed == "/" || trimmed == "/*" {
-        return trimmed.to_string();
+    let normalized_input = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed.trim_start_matches('/'))
+    };
+
+    if normalized_input == "/" || normalized_input == "/*" {
+        return normalized_input;
     }
 
-    if let Some(base) = trimmed.strip_suffix("/*") {
+    if let Some(base) = normalized_input.strip_suffix("/*") {
         let normalized = if base.len() > 1 {
             base.trim_end_matches('/')
         } else {
@@ -1593,10 +1599,10 @@ fn normalize_protected_path(pattern: &str) -> String {
         return format!("{}/*", normalized);
     }
 
-    if trimmed.len() > 1 {
-        trimmed.trim_end_matches('/').to_string()
+    if normalized_input.len() > 1 {
+        normalized_input.trim_end_matches('/').to_string()
     } else {
-        trimmed.to_string()
+        normalized_input
     }
 }
 
@@ -1614,7 +1620,7 @@ fn is_safe_provider_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
 }
 
 fn validate_provider_name(name: &str) -> std::result::Result<(), String> {
@@ -1622,7 +1628,7 @@ fn validate_provider_name(name: &str) -> std::result::Result<(), String> {
         Ok(())
     } else {
         Err(
-            "provider name must use only ASCII letters, numbers, underscores, or hyphens"
+            "provider name must use only ASCII letters, numbers, periods, underscores, or hyphens"
                 .to_string(),
         )
     }
@@ -1656,30 +1662,35 @@ pub fn get_protected_paths() -> Vec<String> {
     AUTH_PROTECTED_PATHS.lock().unwrap().clone()
 }
 
+#[cfg(test)]
 fn path_matches_protected_pattern(path: &str, pattern: &str) -> bool {
     let normalized_path = normalize_protected_path(path);
     let normalized_pattern = normalize_protected_path(pattern);
 
-    if normalized_pattern.is_empty() {
+    path_matches_normalized_protected_pattern(&normalized_path, &normalized_pattern)
+}
+
+fn path_matches_normalized_protected_pattern(path: &str, pattern: &str) -> bool {
+    if pattern.is_empty() {
         return false;
     }
 
-    if normalized_pattern == "/*" {
+    if pattern == "/*" {
         return true;
     }
 
-    if let Some(base) = normalized_pattern.strip_suffix("/*") {
+    if let Some(base) = pattern.strip_suffix("/*") {
         if base.is_empty() || base == "/" {
             return true;
         }
-        return normalized_path == base
-            || normalized_path
+        return path == base
+            || path
                 .strip_prefix(base)
                 .map(|rest| rest.starts_with('/'))
                 .unwrap_or(false);
     }
 
-    normalized_path == normalized_pattern
+    path == pattern
 }
 
 fn is_auth_exempt_path(path: &str) -> bool {
@@ -1779,10 +1790,12 @@ fn path_requires_auth(path: &str) -> bool {
         return false;
     }
 
+    let normalized_path = normalize_protected_path(path);
+
     with_protected_paths(|patterns| {
         patterns
             .iter()
-            .any(|pattern| path_matches_protected_pattern(path, pattern))
+            .any(|pattern| path_matches_normalized_protected_pattern(&normalized_path, pattern))
     })
 }
 
@@ -4724,7 +4737,7 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
     let safe_provider: String = provider_name
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
                 c.to_string()
             } else {
                 format!("%{:02X}", c as u32)
@@ -7652,6 +7665,7 @@ mod tests {
         assert!(path_matches_protected_pattern("/admin", "/admin"));
         assert!(path_matches_protected_pattern("/admin", "/admin/*"));
         assert!(path_matches_protected_pattern("/admin/users", "/admin/*"));
+        assert!(path_matches_protected_pattern("/admin/users", "admin/*"));
         assert!(!path_matches_protected_pattern("/adminish", "/admin/*"));
         assert!(!path_matches_protected_pattern(
             "/settings/profile",
@@ -7662,9 +7676,18 @@ mod tests {
     #[test]
     fn test_validate_provider_name_rejects_unsafe_names() {
         assert!(validate_provider_name("google").is_ok());
+        assert!(validate_provider_name("google.workspace").is_ok());
         assert!(validate_provider_name("foo_bar-123").is_ok());
         assert!(validate_provider_name("google<script>").is_err());
         assert!(validate_provider_name("bad name").is_err());
+    }
+
+    #[test]
+    fn test_register_protected_paths_normalizes_missing_leading_slash() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_protected_paths();
+        register_protected_paths(&["admin/*".to_string()]);
+        assert_eq!(get_protected_paths(), vec!["/admin/*".to_string()]);
     }
 
     #[test]
