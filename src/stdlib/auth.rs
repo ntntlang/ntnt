@@ -190,6 +190,7 @@ pub struct AuthConfig {
     pub success_url: String,
     pub failure_url: String,
     pub logout_url: String,
+    pub protected_paths: Vec<String>,
     pub cookie_name: String,
     pub cookie_secure: bool,
     pub cookie_same_site: String,
@@ -207,6 +208,7 @@ impl Default for AuthConfig {
             success_url: "/".to_string(),
             failure_url: "/".to_string(),
             logout_url: "/".to_string(),
+            protected_paths: Vec::new(),
             cookie_name: "ntnt_session".to_string(),
             cookie_secure: true,
             cookie_same_site: "lax".to_string(),
@@ -1398,6 +1400,11 @@ static REDIS_URL: std::sync::LazyLock<Arc<Mutex<Option<String>>>> =
 static AUTH_CONFIG: std::sync::LazyLock<Arc<Mutex<Option<AuthConfig>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(None)));
 
+// Protected path patterns registered via enable_auth(..., map { "protected_paths": [...] })
+// and require_auth("/admin/*") helper calls.
+static AUTH_PROTECTED_PATHS: std::sync::LazyLock<Arc<Mutex<Vec<String>>>> =
+    std::sync::LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
+
 fn initialize_session_store(store: &SessionStore) -> std::result::Result<(), String> {
     match store {
         SessionStore::Sqlite(path) => init_sqlite_sessions(path),
@@ -1469,6 +1476,7 @@ fn auth_option_suggestion(key: &str) -> Option<String> {
         "cookie_secure",
         "session_store",
         "store_tokens",
+        "protected_paths",
     ];
 
     valid
@@ -1558,7 +1566,279 @@ pub fn init_auth(config: AuthConfig) {
     }
 
     let mut auth_config = AUTH_CONFIG.lock().unwrap();
-    *auth_config = Some(config);
+    *auth_config = Some(config.clone());
+
+    reset_protected_paths();
+    if !config.protected_paths.is_empty() {
+        register_protected_paths(&config.protected_paths);
+    }
+}
+
+fn normalize_protected_path(pattern: &str) -> String {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let normalized_input = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed.trim_start_matches('/'))
+    };
+
+    if normalized_input == "/" || normalized_input == "/*" {
+        return normalized_input;
+    }
+
+    if let Some(base) = normalized_input.strip_suffix("/*") {
+        let normalized = if base.len() > 1 {
+            base.trim_end_matches('/')
+        } else {
+            base
+        };
+        return format!("{}/*", normalized);
+    }
+
+    if normalized_input.len() > 1 {
+        normalized_input.trim_end_matches('/').to_string()
+    } else {
+        normalized_input
+    }
+}
+
+fn dedupe_protected_paths(paths: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+}
+
+fn with_protected_paths<T>(f: impl FnOnce(&[String]) -> T) -> T {
+    let protected = AUTH_PROTECTED_PATHS.lock().unwrap();
+    f(&protected)
+}
+
+fn is_safe_provider_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
+}
+
+fn validate_provider_name(name: &str) -> std::result::Result<(), String> {
+    if is_safe_provider_name(name) {
+        Ok(())
+    } else {
+        Err(
+            "provider name must use only ASCII letters, numbers, periods, underscores, or hyphens"
+                .to_string(),
+        )
+    }
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn encode_url_path_segment(text: &str) -> String {
+    let mut encoded = String::new();
+
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{:02X}", byte));
+        }
+    }
+
+    encoded
+}
+
+pub fn reset_protected_paths() {
+    let mut protected = AUTH_PROTECTED_PATHS.lock().unwrap();
+    protected.clear();
+}
+
+pub fn register_protected_paths(paths: &[String]) {
+    let mut protected = AUTH_PROTECTED_PATHS.lock().unwrap();
+    for path in paths {
+        let normalized = normalize_protected_path(path);
+        if !normalized.is_empty() {
+            protected.push(normalized);
+        }
+    }
+    dedupe_protected_paths(&mut protected);
+}
+
+pub fn get_protected_paths() -> Vec<String> {
+    AUTH_PROTECTED_PATHS.lock().unwrap().clone()
+}
+
+#[cfg(test)]
+fn path_matches_protected_pattern(path: &str, pattern: &str) -> bool {
+    let normalized_path = normalize_protected_path(path);
+    let normalized_pattern = normalize_protected_path(pattern);
+
+    path_matches_normalized_protected_pattern(&normalized_path, &normalized_pattern)
+}
+
+fn path_matches_normalized_protected_pattern(path: &str, pattern: &str) -> bool {
+    if pattern.is_empty() {
+        return false;
+    }
+
+    if pattern == "/*" {
+        return true;
+    }
+
+    if let Some(base) = pattern.strip_suffix("/*") {
+        if base.is_empty() || base == "/" {
+            return true;
+        }
+        return path == base
+            || path
+                .strip_prefix(base)
+                .map(|rest| rest.starts_with('/'))
+                .unwrap_or(false);
+    }
+
+    path == pattern
+}
+
+fn is_auth_exempt_path(path: &str) -> bool {
+    let normalized = normalize_protected_path(path);
+    normalized == "/auth" || normalized.starts_with("/auth/")
+}
+
+fn request_path(request: &Value) -> String {
+    if let Value::Map(req_map) = request {
+        if let Some(Value::String(path)) = req_map.get("path") {
+            return path.clone();
+        }
+    }
+    "/".to_string()
+}
+
+fn request_prefers_api(request: &Value) -> bool {
+    let path = request_path(request);
+    if path == "/api" || path.starts_with("/api/") {
+        return true;
+    }
+
+    let Value::Map(req_map) = request else {
+        return false;
+    };
+    let Some(Value::Map(headers)) = req_map.get("headers") else {
+        return false;
+    };
+
+    if headers
+        .get("accept")
+        .and_then(|v| match v {
+            Value::String(s) => Some(s.to_ascii_lowercase()),
+            _ => None,
+        })
+        .map(|accept| accept.contains("application/json"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    if headers
+        .get("content-type")
+        .and_then(|v| match v {
+            Value::String(s) => Some(s.to_ascii_lowercase()),
+            _ => None,
+        })
+        .map(|content_type| content_type.contains("application/json"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    headers
+        .get("x-requested-with")
+        .and_then(|v| match v {
+            Value::String(s) => Some(s.eq_ignore_ascii_case("xmlhttprequest")),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+fn auth_required_response(request: &Value) -> Value {
+    if request_prefers_api(request) {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Content-Type".to_string(),
+            Value::String("application/json".to_string()),
+        );
+
+        let mut response = HashMap::new();
+        response.insert("status".to_string(), Value::Int(401));
+        response.insert("headers".to_string(), Value::Map(headers));
+        response.insert(
+            "body".to_string(),
+            Value::String(
+                serde_json::json!({
+                    "error": "unauthorized",
+                    "message": "Authentication required"
+                })
+                .to_string(),
+            ),
+        );
+        return Value::Map(response);
+    }
+
+    redirect_response("/auth", None)
+}
+
+fn session_from_request(request: &Value) -> Option<Session> {
+    let session_id = get_session_id_from_request(request)?;
+    get_session_by_id(&session_id)
+}
+
+fn path_requires_auth(path: &str) -> bool {
+    if is_auth_exempt_path(path) {
+        return false;
+    }
+
+    let normalized_path = normalize_protected_path(path);
+
+    with_protected_paths(|patterns| {
+        patterns
+            .iter()
+            .any(|pattern| path_matches_normalized_protected_pattern(&normalized_path, pattern))
+    })
+}
+
+pub fn enforce_auth_for_request(
+    request: &Value,
+    force_auth: bool,
+) -> std::result::Result<(), Value> {
+    let path = request_path(request);
+
+    if is_auth_exempt_path(&path) {
+        return Ok(());
+    }
+
+    if !force_auth && !path_requires_auth(&path) {
+        return Ok(());
+    }
+
+    let Some(_config) = get_auth_config() else {
+        return Err(crate::stdlib::http_server::create_error_response(
+            500,
+            "Auth not initialized. Call enable_auth() before require_auth().",
+        ));
+    };
+
+    if session_from_request(request).is_some() {
+        return Ok(());
+    }
+
+    Err(auth_required_response(request))
 }
 
 /// Initialize SQLite session storage
@@ -4047,6 +4327,8 @@ fn value_map_to_provider(
     let token_url = get_str("token_url").ok_or("Provider must have 'token_url'")?;
     let client_id = get_str("client_id").ok_or("Provider must have 'client_id'")?;
 
+    validate_provider_name(&name)?;
+
     Ok(ProviderConfig {
         name,
         client_id,
@@ -4188,6 +4470,67 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
     );
 
     Ok(redirect_response(&auth_url, None))
+}
+
+/// Auth middleware entry point used for protected route enforcement.
+pub fn handle_auth_protect(args: &[Value]) -> Result<Value> {
+    match enforce_auth_for_request(&args[0], false) {
+        Ok(()) => Ok(Value::Unit),
+        Err(response) => Ok(response),
+    }
+}
+
+/// Handle GET /auth - minimal auth landing route.
+///
+/// If exactly one provider is configured, redirect straight into that OAuth flow.
+/// If multiple providers are configured, render a small provider chooser.
+pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
+    let config = get_auth_config()
+        .ok_or_else(|| IntentError::runtime_error("[auth] Auth not configured".to_string()))?;
+
+    if config.providers.len() == 1 {
+        let provider = &config.providers[0];
+        let safe_provider = encode_url_path_segment(&provider.name);
+        return Ok(redirect_response(&format!("/auth/{}", safe_provider), None));
+    }
+
+    let provider_links = config
+        .providers
+        .iter()
+        .map(|provider| {
+            let label = escape_html(&provider.name);
+            let safe_provider = encode_url_path_segment(&provider.name);
+            format!(
+                r#"<li><a href="/auth/{name}">Sign in with {label}</a></li>"#,
+                name = safe_provider,
+                label = label
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+
+    Ok(html_response(&format!(
+        r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in</title>
+  </head>
+  <body>
+    <main>
+      <h1>Sign in</h1>
+      <p>Choose a provider to continue.</p>
+      <ul>
+        {provider_links}
+      </ul>
+    </main>
+  </body>
+</html>"#,
+    )))
 }
 
 /// Handle GET /auth/callback - OAuth callback
@@ -4407,16 +4750,7 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
     // URL-encode provider name defensively — provider names are typically
     // alphanumeric (e.g. "google") but encoding prevents JS string breakage
     // if a name ever contains quotes or special chars. Exchange token is a UUID.
-    let safe_provider: String = provider_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c.to_string()
-            } else {
-                format!("%{:02X}", c as u32)
-            }
-        })
-        .collect();
+    let safe_provider = encode_url_path_segment(&provider_name);
     let callback_url = format!(
         "/auth/{}/callback?exchange={}",
         safe_provider, exchange_token
@@ -4534,6 +4868,7 @@ pub fn value_to_provider(value: &Value) -> Result<ProviderConfig> {
             };
 
             let name = get_str("name")?;
+            validate_provider_name(&name).map_err(IntentError::type_error)?;
             let client_id = get_str("client_id")?;
             let client_secret = get_str("client_secret")?;
             let authorize_url = get_str("authorize_url")?;
@@ -6281,7 +6616,7 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
     // @param providers Array of provider configs created by oauth() or oauth_discover()
-    // @param options Optional map with keys: session_secret, session_ttl, refresh_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, cookie_name, cookie_secure, session_store, store_tokens
+    // @param options Optional map with keys: session_secret, session_ttl, refresh_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, cookie_name, cookie_secure, session_store, store_tokens
     // @returns Unit
     // @see_also oauth, oauth_discover, auth_start
     // @since v0.3.11
@@ -6367,6 +6702,7 @@ pub fn init() -> HashMap<String, Value> {
                                 | "cookie_secure"
                                 | "session_store"
                                 | "store_tokens"
+                                | "protected_paths"
                         );
                         if !known {
                             let suggestion = auth_option_suggestion(key)
@@ -6441,6 +6777,32 @@ pub fn init() -> HashMap<String, Value> {
                     None => "/".to_string(),
                 };
 
+                let protected_paths = match get_option(&["protected_paths"]) {
+                    Some(Value::String(s)) => vec![s.clone()],
+                    Some(Value::Array(arr)) => {
+                        let mut paths = Vec::new();
+                        for value in arr {
+                            match value {
+                                Value::String(path) => paths.push(path.clone()),
+                                other => {
+                                    return Err(IntentError::type_error(format!(
+                                        "[auth] enable_auth() option \"protected_paths\" entries must be strings, got {}",
+                                        other.type_name()
+                                    )));
+                                }
+                            }
+                        }
+                        paths
+                    }
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"protected_paths\" must be a string or array of strings, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => Vec::new(),
+                };
+
                 let cookie_name = match get_option(&["cookie_name"]) {
                     Some(Value::String(s)) => s.clone(),
                     Some(other) => {
@@ -6512,6 +6874,7 @@ pub fn init() -> HashMap<String, Value> {
                     success_url,
                     failure_url,
                     logout_url,
+                    protected_paths,
                     cookie_name,
                     cookie_secure,
                     cookie_same_site: "Lax".to_string(),
@@ -6533,6 +6896,97 @@ pub fn init() -> HashMap<String, Value> {
     // ==========================================================================
     // OAuth Primitives (for manual flow control)
     // ==========================================================================
+
+    // @ntnt require_auth
+    // @module std/auth
+    // @signature require_auth(target?: Request | String | [String]) -> Function | Unit | Response
+    // Protect routes with the configured auth session.
+    //
+    // Usage patterns:
+    //
+    // - `use_middleware(require_auth())` protects every request that reaches that middleware.
+    //
+    // - `require_auth("/admin/*")` registers protected path patterns for file-routed apps.
+    //
+    // - `require_auth(req)` may be called directly inside custom middleware.
+    //
+    // @param target Optional request object, single path pattern, or array of path patterns
+    // @returns Middleware function, Unit for path registration, or a redirect/401 response when called with a request
+    // @see_also enable_auth, get_user, get_session
+    // @since v0.4.9
+    // @tags #auth, #middleware
+    // @example use_middleware(require_auth()) ~ "Protect every request"
+    // @example require_auth("/admin/*") ~ "Protect all admin file routes"
+    module.insert(
+        "require_auth".to_string(),
+        Value::NativeFunction {
+            name: "require_auth".to_string(),
+            arity: 0,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                if args.len() == 1 {
+                    if let Value::Map(map) = &args[0] {
+                        if map.contains_key("method") && map.contains_key("path") {
+                            return match enforce_auth_for_request(&args[0], true) {
+                                Ok(()) => Ok(Value::Unit),
+                                Err(response) => Ok(response),
+                            };
+                        }
+                    }
+                }
+
+                if !args.is_empty() {
+                    if get_auth_config().is_none() {
+                        return Err(IntentError::runtime_error(
+                            "[auth] require_auth(path) requires enable_auth() to be called first"
+                                .to_string(),
+                        ));
+                    }
+
+                    let mut paths = Vec::new();
+                    for arg in args {
+                        match arg {
+                            Value::String(path) => paths.push(path.clone()),
+                            Value::Array(items) => {
+                                for item in items {
+                                    match item {
+                                        Value::String(path) => paths.push(path.clone()),
+                                        other => {
+                                            return Err(IntentError::type_error(format!(
+                                                "[auth] require_auth() path entries must be strings, got {}",
+                                                other.type_name()
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+                            other => {
+                                return Err(IntentError::type_error(format!(
+                                    "[auth] require_auth() expects a request, string path, or array of string paths, got {}",
+                                    other.type_name()
+                                )));
+                            }
+                        }
+                    }
+
+                    register_protected_paths(&paths);
+                    return Ok(Value::Unit);
+                }
+
+                Ok(Value::NativeFunction {
+                    name: "require_auth_middleware".to_string(),
+                    arity: 1,
+                    max_arity: 1,
+                    requires: None,
+                    func: |mw_args| match enforce_auth_for_request(&mw_args[0], true) {
+                        Ok(()) => Ok(Value::Unit),
+                        Err(response) => Ok(response),
+                    },
+                })
+            },
+        },
+    );
 
     // @ntnt oauth_start
     // @module std/auth
@@ -7119,6 +7573,9 @@ pub fn init() -> HashMap<String, Value> {
 mod tests {
     use super::*;
 
+    static AUTH_TEST_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
     #[test]
     fn test_exchange_token_store_consume_memory() {
         let mut store = InMemoryStore::new();
@@ -7209,5 +7666,180 @@ mod tests {
         // Ensure the TTL constant is sensible (between 10s and 300s)
         assert!(EXCHANGE_TOKEN_TTL >= 10);
         assert!(EXCHANGE_TOKEN_TTL <= 300);
+    }
+
+    #[test]
+    fn test_path_matches_protected_pattern_exact_and_subtree() {
+        assert!(path_matches_protected_pattern("/admin", "/admin"));
+        assert!(path_matches_protected_pattern("/admin", "/admin/*"));
+        assert!(path_matches_protected_pattern("/admin/users", "/admin/*"));
+        assert!(path_matches_protected_pattern("/admin/users", "admin/*"));
+        assert!(!path_matches_protected_pattern("/adminish", "/admin/*"));
+        assert!(!path_matches_protected_pattern(
+            "/settings/profile",
+            "/settings"
+        ));
+    }
+
+    #[test]
+    fn test_validate_provider_name_rejects_unsafe_names() {
+        assert!(validate_provider_name("google").is_ok());
+        assert!(validate_provider_name("google.workspace").is_ok());
+        assert!(validate_provider_name("foo_bar-123").is_ok());
+        assert!(validate_provider_name("google<script>").is_err());
+        assert!(validate_provider_name("bad name").is_err());
+    }
+
+    #[test]
+    fn test_value_to_provider_rejects_unsafe_names() {
+        let provider = Value::Map(HashMap::from([
+            (
+                "name".to_string(),
+                Value::String("google<script>".to_string()),
+            ),
+            ("client_id".to_string(), Value::String("id".to_string())),
+            (
+                "client_secret".to_string(),
+                Value::String("secret".to_string()),
+            ),
+            (
+                "authorize_url".to_string(),
+                Value::String("https://example.com/auth".to_string()),
+            ),
+            (
+                "token_url".to_string(),
+                Value::String("https://example.com/token".to_string()),
+            ),
+        ]));
+
+        assert!(value_to_provider(&provider).is_err());
+    }
+
+    #[test]
+    fn test_handle_auth_index_encodes_provider_links() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        init_auth(AuthConfig {
+            providers: vec![
+                ProviderConfig {
+                    name: "good".to_string(),
+                    ..ProviderConfig::default()
+                },
+                ProviderConfig {
+                    name: "bad\" onclick=\"alert(1)".to_string(),
+                    ..ProviderConfig::default()
+                },
+            ],
+            ..AuthConfig::default()
+        });
+
+        let response = handle_auth_index(&[]).unwrap();
+        let body = match response {
+            Value::Map(map) => match map.get("body") {
+                Some(Value::String(body)) => body.clone(),
+                other => panic!("expected body string, got {:?}", other),
+            },
+            other => panic!("expected response map, got {:?}", other),
+        };
+
+        assert!(body.contains("/auth/bad%22%20onclick%3D%22alert%281%29"));
+        assert!(body.contains("Sign in with bad&quot; onclick=&quot;alert(1)"));
+        assert!(!body.contains("href=\"/auth/bad\" onclick"));
+    }
+
+    #[test]
+    fn test_register_protected_paths_normalizes_missing_leading_slash() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_protected_paths();
+        register_protected_paths(&["admin/*".to_string()]);
+        assert_eq!(get_protected_paths(), vec!["/admin/*".to_string()]);
+    }
+
+    #[test]
+    fn test_enforce_auth_for_request_redirects_html_routes() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_protected_paths();
+        init_auth(AuthConfig {
+            providers: vec![ProviderConfig {
+                name: "google".to_string(),
+                ..ProviderConfig::default()
+            }],
+            protected_paths: vec!["/admin/*".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let req = Value::Map(HashMap::from([
+            ("path".to_string(), Value::String("/admin".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "accept".to_string(),
+                    Value::String("text/html".to_string()),
+                )])),
+            ),
+        ]));
+
+        let response = enforce_auth_for_request(&req, false).unwrap_err();
+        if let Value::Map(map) = response {
+            assert!(matches!(map.get("status"), Some(Value::Int(302))));
+        } else {
+            panic!("expected response map");
+        }
+    }
+
+    #[test]
+    fn test_enforce_auth_for_request_returns_json_for_api_routes() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_protected_paths();
+        init_auth(AuthConfig {
+            providers: vec![ProviderConfig {
+                name: "google".to_string(),
+                ..ProviderConfig::default()
+            }],
+            protected_paths: vec!["/admin/*".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let req = Value::Map(HashMap::from([
+            ("path".to_string(), Value::String("/admin/data".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "accept".to_string(),
+                    Value::String("application/json".to_string()),
+                )])),
+            ),
+        ]));
+
+        let response = enforce_auth_for_request(&req, false).unwrap_err();
+        if let Value::Map(map) = response {
+            assert!(matches!(map.get("status"), Some(Value::Int(401))));
+            match map.get("body") {
+                Some(Value::String(body)) => assert!(body.contains("unauthorized")),
+                other => panic!("expected json body, got {:?}", other),
+            }
+        } else {
+            panic!("expected response map");
+        }
+    }
+
+    #[test]
+    fn test_enforce_auth_for_request_skips_auth_routes_even_when_forced() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_protected_paths();
+        init_auth(AuthConfig {
+            providers: vec![ProviderConfig {
+                name: "google".to_string(),
+                ..ProviderConfig::default()
+            }],
+            protected_paths: vec!["/admin/*".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let req = Value::Map(HashMap::from([(
+            "path".to_string(),
+            Value::String("/auth/google".to_string()),
+        )]));
+
+        assert!(enforce_auth_for_request(&req, true).is_ok());
     }
 }

@@ -1844,6 +1844,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`oauth_refresh`](#oauthrefresh) | Refresh the access token for the current session. |
 | [`oauth_start`](#oauthstart) | Generate an OAuth authorization URL for manual flow control. |
 | [`oauth_validate`](#oauthvalidate) | Validate an incoming bearer token (for APIs acting as resource servers). |
+| [`require_auth`](#requireauth) | Protect routes with the configured auth session. |
 | [`session_data`](#sessiondata) | Get custom data stored in the current session. |
 | [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions, OAuth states, and exchange tokens from the session store. |
 | [`set_session`](#setsession) | Store custom data in the current session. |
@@ -2067,7 +2068,7 @@ Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url
 **Parameters:**
 
 - `providers` — Array of provider configs created by oauth() or oauth_discover()
-- `options` — Optional map with keys: session_secret, session_ttl, refresh_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, cookie_name, cookie_secure, session_store, store_tokens
+- `options` — Optional map with keys: session_secret, session_ttl, refresh_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, cookie_name, cookie_secure, session_store, store_tokens
 
 **Returns:** Unit
 
@@ -2529,6 +2530,41 @@ oauth_validate(token, map { "issuer": "https://...", "audience": "my-api" })  //
 **See also:** `oauth_introspect`, `jwt_verify`
 
 *Since v0.3.11*
+
+---
+
+#### `require_auth`
+
+```ntnt
+require_auth(target?: Request | String | [String]) -> Function | Unit | Response
+```
+
+Protect routes with the configured auth session.
+
+Usage patterns:
+
+- `use_middleware(require_auth())` protects every request that reaches that middleware.
+
+- `require_auth("/admin/*")` registers protected path patterns for file-routed apps.
+
+- `require_auth(req)` may be called directly inside custom middleware.
+
+**Parameters:**
+
+- `target` — Optional request object, single path pattern, or array of path patterns
+
+**Returns:** Middleware function, Unit for path registration, or a redirect/401 response when called with a request
+
+**Examples:**
+
+```ntnt
+use_middleware(require_auth())  // Protect every request
+require_auth("/admin/*")  // Protect all admin file routes
+```
+
+**See also:** `enable_auth`, `get_user`, `get_session`
+
+*Since v0.4.9*
 
 ---
 

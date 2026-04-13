@@ -7287,6 +7287,7 @@ impl Interpreter {
             "store_tokens",
             "session_secret",
             "refresh_ttl",
+            "protected_paths",
         ];
 
         valid
@@ -7337,6 +7338,26 @@ impl Interpreter {
             "cookie_secure" => match value {
                 Value::Bool(b) => config.cookie_secure = *b,
                 _ => return Err(self.auth_option_type_error(key, "Bool", value)),
+            },
+            "protected_paths" => match value {
+                Value::String(s) => config.protected_paths = vec![s.clone()],
+                Value::Array(arr) => {
+                    let mut paths = Vec::new();
+                    for item in arr {
+                        match item {
+                            Value::String(path) => paths.push(path.clone()),
+                            _ => {
+                                return Err(self.auth_option_type_error(
+                                    key,
+                                    "String or [String]",
+                                    value,
+                                ))
+                            }
+                        }
+                    }
+                    config.protected_paths = paths;
+                }
+                _ => return Err(self.auth_option_type_error(key, "String or [String]", value)),
             },
             "session_ttl" => match value {
                 Value::Int(i) => config.session_ttl = *i,
@@ -7391,6 +7412,21 @@ impl Interpreter {
 
     /// Set up OAuth routes for the given auth configuration
     fn setup_auth_routes(&mut self, config: &crate::stdlib::auth::AuthConfig) -> Result<()> {
+        // Create minimal auth landing page / chooser.
+        if !self.server_state.has_route("GET", "/auth") {
+            self.server_state.add_route(
+                "GET",
+                "/auth",
+                Value::NativeFunction {
+                    name: "_auth_index".to_string(),
+                    arity: 1,
+                    max_arity: 1,
+                    requires: None,
+                    func: crate::stdlib::auth::handle_auth_index,
+                },
+            );
+        }
+
         // Create handlers for each provider - use dynamic route with provider param
         // Register a single route with {provider} parameter
         if !self.server_state.has_route("GET", "/auth/{provider}") {
@@ -7437,6 +7473,21 @@ impl Interpreter {
             );
         }
 
+        if !self.server_state.middleware.iter().any(|mw| {
+            matches!(
+                mw,
+                Value::NativeFunction { name, .. } if name == "_auth_protect"
+            )
+        }) {
+            self.server_state.add_middleware(Value::NativeFunction {
+                name: "_auth_protect".to_string(),
+                arity: 1,
+                max_arity: 1,
+                requires: None,
+                func: crate::stdlib::auth::handle_auth_protect,
+            });
+        }
+
         let providers = config
             .providers
             .iter()
@@ -7453,6 +7504,12 @@ impl Interpreter {
             "[auth] Cookie: {} (Secure={}, HttpOnly=true)",
             config.cookie_name, config.cookie_secure
         );
+        if !config.protected_paths.is_empty() {
+            eprintln!(
+                "[auth] Protected paths: {}",
+                config.protected_paths.join(", ")
+            );
+        }
 
         Ok(())
     }
@@ -15620,5 +15677,47 @@ page
             .unwrap();
 
         assert_eq!(config.refresh_ttl, 86_400 * 30);
+    }
+
+    #[test]
+    fn enable_auth_accepts_protected_paths() {
+        let interp = Interpreter::new();
+        let providers = Value::Array(vec![test_auth_provider("google")]);
+        let mut options = HashMap::new();
+        options.insert(
+            "protected_paths".to_string(),
+            Value::Array(vec![
+                Value::String("/admin/*".to_string()),
+                Value::String("/settings".to_string()),
+            ]),
+        );
+
+        let config = interp
+            .parse_auth_config(&[providers, Value::Map(options)])
+            .unwrap();
+
+        assert_eq!(
+            config.protected_paths,
+            vec!["/admin/*".to_string(), "/settings".to_string()]
+        );
+    }
+
+    #[test]
+    fn enable_auth_rejects_non_string_protected_paths() {
+        let interp = Interpreter::new();
+        let providers = Value::Array(vec![test_auth_provider("google")]);
+        let mut options = HashMap::new();
+        options.insert(
+            "protected_paths".to_string(),
+            Value::Array(vec![Value::Int(42)]),
+        );
+
+        let err = interp
+            .parse_auth_config(&[providers, Value::Map(options)])
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("config[\"protected_paths\"] must be String or [String]"));
     }
 }
