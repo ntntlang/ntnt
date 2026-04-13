@@ -1674,11 +1674,72 @@ fn default_auth_cookie_max_age(config: &AuthConfig) -> i64 {
     }
 }
 
+fn validate_cookie_name(name: &str) -> std::result::Result<String, String> {
+    if name.is_empty() {
+        return Err("[auth] cookie_name must not be empty".to_string());
+    }
+
+    if name.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                '!' | '#'
+                    | '$'
+                    | '%'
+                    | '&'
+                    | '\''
+                    | '*'
+                    | '+'
+                    | '-'
+                    | '.'
+                    | '^'
+                    | '_'
+                    | '`'
+                    | '|'
+                    | '~'
+            )
+    }) {
+        Ok(name.to_string())
+    } else {
+        Err("[auth] cookie_name contains invalid characters".to_string())
+    }
+}
+
+fn validate_cookie_path(path: &str) -> std::result::Result<String, String> {
+    if path.is_empty() {
+        return Err("[auth] cookie_path must not be empty".to_string());
+    }
+    if !path.starts_with('/') {
+        return Err("[auth] cookie_path must start with /".to_string());
+    }
+    if path.chars().any(|ch| ch.is_control() || ch == ';') {
+        return Err("[auth] cookie_path contains invalid characters".to_string());
+    }
+
+    Ok(path.to_string())
+}
+
+fn normalize_cookie_same_site(value: &str) -> std::result::Result<String, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "lax" => Ok("Lax".to_string()),
+        "strict" => Ok("Strict".to_string()),
+        "none" => Ok("None".to_string()),
+        _ => Err("[auth] cookie_same_site must be one of: Lax, Strict, None".to_string()),
+    }
+}
+
 fn auth_cookie_settings(
     config: &AuthConfig,
     max_age: i64,
     overrides: Option<&HashMap<String, Value>>,
 ) -> std::result::Result<AuthCookieSettings, String> {
+    if overrides.and_then(|m| m.get("cookie_name")).is_some() {
+        return Err(
+            "[auth] cookie_name override is not supported; configure it via enable_auth()"
+                .to_string(),
+        );
+    }
+
     let get_string = |key: &str| -> std::result::Result<Option<String>, String> {
         match overrides.and_then(|m| m.get(key)) {
             Some(Value::String(s)) => Ok(Some(s.clone())),
@@ -1715,10 +1776,11 @@ fn auth_cookie_settings(
     };
 
     Ok(AuthCookieSettings {
-        name: get_string("cookie_name")?.unwrap_or_else(|| config.cookie_name.clone()),
-        path: get_string("cookie_path")?.unwrap_or_else(|| "/".to_string()),
-        same_site: get_string("cookie_same_site")?
-            .unwrap_or_else(|| config.cookie_same_site.clone()),
+        name: validate_cookie_name(&config.cookie_name)?,
+        path: validate_cookie_path(&get_string("cookie_path")?.unwrap_or_else(|| "/".to_string()))?,
+        same_site: normalize_cookie_same_site(
+            &get_string("cookie_same_site")?.unwrap_or_else(|| config.cookie_same_site.clone()),
+        )?,
         secure: get_bool("cookie_secure")?.unwrap_or(config.cookie_secure),
         http_only: get_bool("cookie_http_only")?.unwrap_or(true),
         max_age: cookie_max_age,
@@ -1755,7 +1817,12 @@ fn build_cleared_session_cookie(
     config: &AuthConfig,
     overrides: Option<&HashMap<String, Value>>,
 ) -> std::result::Result<String, String> {
-    let settings = auth_cookie_settings(config, 0, overrides)?;
+    let sanitized_overrides = overrides.map(|map| {
+        let mut sanitized = map.clone();
+        sanitized.remove("cookie_max_age");
+        sanitized
+    });
+    let settings = auth_cookie_settings(config, 0, sanitized_overrides.as_ref())?;
     Ok(build_auth_cookie_string("", &settings))
 }
 
@@ -3783,7 +3850,6 @@ fn migrate_session(old_id: &str, new_session: &Session) -> std::result::Result<(
 
     let mut store = SESSION_STORE.lock().unwrap();
     store.delete_session(old_id);
-    store.set_session(new_session.clone());
     Ok(())
 }
 
@@ -3924,12 +3990,10 @@ fn migrate_session_redis(old_id: &str, new_session: &Session) -> std::result::Re
     Ok(())
 }
 
-fn rotate_session_id(session_id: &str) -> std::result::Result<Session, String> {
+fn build_rotated_session(session_id: &str) -> std::result::Result<Session, String> {
     let mut session = get_session_by_id(session_id).ok_or("No active session".to_string())?;
-    let old_id = session.id.clone();
     session.id = generate_session_id();
     session.csrf_token = uuid::Uuid::new_v4().to_string();
-    migrate_session(&old_id, &session)?;
     Ok(session)
 }
 
@@ -5163,11 +5227,6 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
                         e
                     ))
                 })?;
-                eprintln!(
-                    "[auth] Rotated session {}... -> {}... after successful auth callback",
-                    &existing_session_id[..8],
-                    &session.id[..8]
-                );
             } else {
                 store_session(session.clone());
             }
@@ -7818,7 +7877,7 @@ pub fn init() -> HashMap<String, Value> {
     // `email`, `name`, `picture`, `claims`, `data`, or `raw`.
     // @param response The Response map to attach the session cookie to
     // @param session Session data map, including required `subject_id`
-    // @param options Optional map with `session_ttl` and cookie override keys (`cookie_name`, `cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+    // @param options Optional map with `session_ttl` and cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
     // @returns Response with a persisted session and Set-Cookie header
     // @see_also sign_out_session, current_session, rotate_session
     // @since v0.4.9
@@ -7881,11 +7940,14 @@ pub fn init() -> HashMap<String, Value> {
                 let session = create_manual_session(&session_spec, session_ttl)
                     .map_err(IntentError::type_error)?;
                 let session_id = session.id.clone();
-                store_session(session);
 
                 let cookie = build_signed_session_cookie(&config, &session_id, options.as_ref())
                     .map_err(IntentError::type_error)?;
-                add_set_cookie_header(&args[0], &cookie).map_err(IntentError::type_error)
+                let response =
+                    add_set_cookie_header(&args[0], &cookie).map_err(IntentError::type_error)?;
+
+                store_session(session);
+                Ok(response)
             },
         },
     );
@@ -7899,7 +7961,7 @@ pub fn init() -> HashMap<String, Value> {
     // session fixation while preserving the existing session payload.
     // @param response The Response map to attach the rotated cookie to
     // @param req The current HTTP request
-    // @param options Optional cookie override keys (`cookie_name`, `cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+    // @param options Optional cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
     // @returns Response with the rotated session cookie
     // @see_also sign_in_session, sign_out_session, current_session
     // @since v0.4.9
@@ -7943,16 +8005,16 @@ pub fn init() -> HashMap<String, Value> {
                         "[auth] rotate_session() requires an active session".to_string(),
                     )
                 })?;
-                let rotated = rotate_session_id(&session_id).map_err(IntentError::runtime_error)?;
-                eprintln!(
-                    "[auth] Rotated session {}... -> {}... via rotate_session()",
-                    &session_id[..8],
-                    &rotated.id[..8]
-                );
+                let rotated =
+                    build_rotated_session(&session_id).map_err(IntentError::runtime_error)?;
 
                 let cookie = build_signed_session_cookie(&config, &rotated.id, options.as_ref())
                     .map_err(IntentError::type_error)?;
-                add_set_cookie_header(&args[0], &cookie).map_err(IntentError::type_error)
+                let response =
+                    add_set_cookie_header(&args[0], &cookie).map_err(IntentError::type_error)?;
+
+                migrate_session(&session_id, &rotated).map_err(IntentError::runtime_error)?;
+                Ok(response)
             },
         },
     );
@@ -7966,7 +8028,7 @@ pub fn init() -> HashMap<String, Value> {
     // built-in redirect handler.
     // @param response The Response map to attach the clearing cookie to
     // @param req The current HTTP request
-    // @param options Optional cookie override keys (`cookie_name`, `cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`)
+    // @param options Optional cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`)
     // @returns Response with the auth cookie cleared
     // @see_also sign_in_session, rotate_session, current_user
     // @since v0.4.9
@@ -8005,13 +8067,16 @@ pub fn init() -> HashMap<String, Value> {
                     None => None,
                 };
 
+                let cookie = build_cleared_session_cookie(&config, options.as_ref())
+                    .map_err(IntentError::type_error)?;
+                let response =
+                    add_set_cookie_header(&args[0], &cookie).map_err(IntentError::type_error)?;
+
                 if let Some(session_id) = get_session_id_from_request(&args[1]) {
                     delete_session_by_id(&session_id);
                 }
 
-                let cookie = build_cleared_session_cookie(&config, options.as_ref())
-                    .map_err(IntentError::type_error)?;
-                add_set_cookie_header(&args[0], &cookie).map_err(IntentError::type_error)
+                Ok(response)
             },
         },
     );
@@ -8555,6 +8620,60 @@ mod tests {
     }
 
     #[test]
+    fn test_sign_in_session_does_not_persist_when_response_invalid() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            session_secret: "test-secret".to_string(),
+            cookie_secure: false,
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let err = sign_in_session(&[
+            Value::String("not-a-response".to_string()),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("user-123".to_string()),
+            )])),
+        ])
+        .unwrap_err();
+
+        assert!(format!("{}", err).contains("[auth] response must be a map"));
+        assert!(SESSION_STORE.lock().unwrap().sessions.is_empty());
+    }
+
+    #[test]
+    fn test_sign_in_session_rejects_cookie_name_override() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            session_secret: "test-secret".to_string(),
+            cookie_secure: false,
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let err = sign_in_session(&[
+            redirect_response("/admin", None),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("user-123".to_string()),
+            )])),
+            Value::Map(HashMap::from([(
+                "cookie_name".to_string(),
+                Value::String("other_cookie".to_string()),
+            )])),
+        ])
+        .unwrap_err();
+
+        assert!(format!("{}", err).contains("cookie_name override is not supported"));
+        assert!(SESSION_STORE.lock().unwrap().sessions.is_empty());
+    }
+
+    #[test]
     fn test_rotate_session_changes_id_and_invalidates_old_cookie() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
@@ -8633,6 +8752,69 @@ mod tests {
     }
 
     #[test]
+    fn test_rotate_session_invalid_response_keeps_existing_session() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            session_secret: "test-secret".to_string(),
+            cookie_secure: false,
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let rotate_session = module_fn(&module, "rotate_session");
+        let current_session = module_fn(&module, "current_session");
+
+        let signed_in = sign_in_session(&[
+            redirect_response("/admin", None),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("user-123".to_string()),
+            )])),
+        ])
+        .unwrap();
+        let cookie = cookie_header_from_response(&signed_in);
+        let req = request_with_cookie(&cookie);
+        let before = current_session(&[req.clone()]).unwrap();
+
+        let err = rotate_session(&[Value::String("not-a-response".to_string()), req.clone()])
+            .unwrap_err();
+        assert!(format!("{}", err).contains("[auth] response must be a map"));
+
+        let after = current_session(&[req]).unwrap();
+        match (before, after) {
+            (
+                Value::EnumValue {
+                    values: before_values,
+                    ..
+                },
+                Value::EnumValue {
+                    values: after_values,
+                    ..
+                },
+            ) => {
+                let before_id = match before_values.first() {
+                    Some(Value::Map(map)) => match map.get("id") {
+                        Some(Value::String(id)) => id.clone(),
+                        other => panic!("expected session id, got {:?}", other),
+                    },
+                    other => panic!("expected session map, got {:?}", other),
+                };
+                let after_id = match after_values.first() {
+                    Some(Value::Map(map)) => match map.get("id") {
+                        Some(Value::String(id)) => id.clone(),
+                        other => panic!("expected session id, got {:?}", other),
+                    },
+                    other => panic!("expected session map, got {:?}", other),
+                };
+                assert_eq!(before_id, after_id);
+            }
+            other => panic!("expected session before/after, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_sign_out_session_clears_cookie_and_removes_session() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
@@ -8658,8 +8840,15 @@ mod tests {
         let cookie = cookie_header_from_response(&signed_in);
         let req = request_with_cookie(&cookie);
 
-        let signed_out =
-            sign_out_session(&[redirect_response("/login", None), req.clone()]).unwrap();
+        let signed_out = sign_out_session(&[
+            redirect_response("/login", None),
+            req.clone(),
+            Value::Map(HashMap::from([(
+                "cookie_max_age".to_string(),
+                Value::Int(3600),
+            )])),
+        ])
+        .unwrap();
         let set_cookie = match signed_out {
             Value::Map(map) => match map.get("headers") {
                 Some(Value::Map(headers)) => headers
@@ -8678,6 +8867,40 @@ mod tests {
 
         assert!(
             matches!(current_session(&[req]).unwrap(), Value::EnumValue { ref variant, .. } if variant == "None")
+        );
+    }
+
+    #[test]
+    fn test_sign_out_session_invalid_response_keeps_session_active() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            session_secret: "test-secret".to_string(),
+            cookie_secure: false,
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let sign_out_session = module_fn(&module, "sign_out_session");
+        let current_session = module_fn(&module, "current_session");
+
+        let signed_in = sign_in_session(&[
+            redirect_response("/admin", None),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("user-123".to_string()),
+            )])),
+        ])
+        .unwrap();
+        let cookie = cookie_header_from_response(&signed_in);
+        let req = request_with_cookie(&cookie);
+
+        let err = sign_out_session(&[Value::String("not-a-response".to_string()), req.clone()])
+            .unwrap_err();
+        assert!(format!("{}", err).contains("[auth] response must be a map"));
+        assert!(
+            matches!(current_session(&[req]).unwrap(), Value::EnumValue { ref variant, .. } if variant == "Some")
         );
     }
 

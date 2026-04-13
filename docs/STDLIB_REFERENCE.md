@@ -2643,7 +2643,7 @@ Use this after privilege changes or sensitive login completion to prevent sessio
 
 - `response` — The Response map to attach the rotated cookie to
 - `req` — The current HTTP request
-- `options` — Optional cookie override keys (`cookie_name`, `cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+- `options` — Optional cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
 
 **Returns:** Response with the rotated session cookie
 
@@ -2754,7 +2754,7 @@ Use this after password, magic-link, or other non-OAuth login flows. The session
 
 - `response` — The Response map to attach the session cookie to
 - `session` — Session data map, including required `subject_id`
-- `options` — Optional map with `session_ttl` and cookie override keys (`cookie_name`, `cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+- `options` — Optional map with `session_ttl` and cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
 
 **Returns:** Response with a persisted session and Set-Cookie header
 
@@ -2784,7 +2784,7 @@ Use this when your app wants logout behavior without being forced into the built
 
 - `response` — The Response map to attach the clearing cookie to
 - `req` — The current HTTP request
-- `options` — Optional cookie override keys (`cookie_name`, `cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`)
+- `options` — Optional cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`)
 
 **Returns:** Response with the auth cookie cleared
 
