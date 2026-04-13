@@ -1642,6 +1642,20 @@ fn escape_html(text: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+fn encode_url_path_segment(text: &str) -> String {
+    let mut encoded = String::new();
+
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{:02X}", byte));
+        }
+    }
+
+    encoded
+}
+
 pub fn reset_protected_paths() {
     let mut protected = AUTH_PROTECTED_PATHS.lock().unwrap();
     protected.clear();
@@ -4476,7 +4490,8 @@ pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
 
     if config.providers.len() == 1 {
         let provider = &config.providers[0];
-        return Ok(redirect_response(&format!("/auth/{}", provider.name), None));
+        let safe_provider = encode_url_path_segment(&provider.name);
+        return Ok(redirect_response(&format!("/auth/{}", safe_provider), None));
     }
 
     let provider_links = config
@@ -4484,9 +4499,10 @@ pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
         .iter()
         .map(|provider| {
             let label = escape_html(&provider.name);
+            let safe_provider = encode_url_path_segment(&provider.name);
             format!(
                 r#"<li><a href="/auth/{name}">Sign in with {label}</a></li>"#,
-                name = provider.name,
+                name = safe_provider,
                 label = label
             )
         })
@@ -4734,16 +4750,7 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
     // URL-encode provider name defensively — provider names are typically
     // alphanumeric (e.g. "google") but encoding prevents JS string breakage
     // if a name ever contains quotes or special chars. Exchange token is a UUID.
-    let safe_provider: String = provider_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c.to_string()
-            } else {
-                format!("%{:02X}", c as u32)
-            }
-        })
-        .collect();
+    let safe_provider = encode_url_path_segment(&provider_name);
     let callback_url = format!(
         "/auth/{}/callback?exchange={}",
         safe_provider, exchange_token
@@ -4861,6 +4868,7 @@ pub fn value_to_provider(value: &Value) -> Result<ProviderConfig> {
             };
 
             let name = get_str("name")?;
+            validate_provider_name(&name).map_err(IntentError::type_error)?;
             let client_id = get_str("client_id")?;
             let client_secret = get_str("client_secret")?;
             let authorize_url = get_str("authorize_url")?;
@@ -7680,6 +7688,62 @@ mod tests {
         assert!(validate_provider_name("foo_bar-123").is_ok());
         assert!(validate_provider_name("google<script>").is_err());
         assert!(validate_provider_name("bad name").is_err());
+    }
+
+    #[test]
+    fn test_value_to_provider_rejects_unsafe_names() {
+        let provider = Value::Map(HashMap::from([
+            (
+                "name".to_string(),
+                Value::String("google<script>".to_string()),
+            ),
+            ("client_id".to_string(), Value::String("id".to_string())),
+            (
+                "client_secret".to_string(),
+                Value::String("secret".to_string()),
+            ),
+            (
+                "authorize_url".to_string(),
+                Value::String("https://example.com/auth".to_string()),
+            ),
+            (
+                "token_url".to_string(),
+                Value::String("https://example.com/token".to_string()),
+            ),
+        ]));
+
+        assert!(value_to_provider(&provider).is_err());
+    }
+
+    #[test]
+    fn test_handle_auth_index_encodes_provider_links() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        init_auth(AuthConfig {
+            providers: vec![
+                ProviderConfig {
+                    name: "good".to_string(),
+                    ..ProviderConfig::default()
+                },
+                ProviderConfig {
+                    name: "bad\" onclick=\"alert(1)".to_string(),
+                    ..ProviderConfig::default()
+                },
+            ],
+            ..AuthConfig::default()
+        });
+
+        let response = handle_auth_index(&[]).unwrap();
+        let body = match response {
+            Value::Map(map) => match map.get("body") {
+                Some(Value::String(body)) => body.clone(),
+                other => panic!("expected body string, got {:?}", other),
+            },
+            other => panic!("expected response map, got {:?}", other),
+        };
+
+        assert!(body.contains("/auth/bad%22%20onclick%3D%22alert%281%29"));
+        assert!(body.contains("Sign in with bad&quot; onclick=&quot;alert(1)"));
+        assert!(!body.contains("href=\"/auth/bad\" onclick"));
     }
 
     #[test]
