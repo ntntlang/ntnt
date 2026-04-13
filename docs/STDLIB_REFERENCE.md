@@ -1828,6 +1828,8 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`create_session_from_oauth`](#createsessionfromoauth) | Create a session from OAuth user info and tokens. |
 | [`csrf_field`](#csrffield) | Get an HTML hidden input field with the CSRF token. |
 | [`csrf_token`](#csrftoken) | Get the CSRF token for the current session. |
+| [`current_session`](#currentsession) | Get the current session from the request. |
+| [`current_user`](#currentuser) | Get the current authenticated user from the request. |
 | [`enable_auth`](#enableauth) | Initialize the authentication system with OAuth providers. |
 | [`get_session`](#getsession) | Get the current session from the request. |
 | [`get_user`](#getuser) | Get the current authenticated user from the request. |
@@ -1845,9 +1847,12 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`oauth_start`](#oauthstart) | Generate an OAuth authorization URL for manual flow control. |
 | [`oauth_validate`](#oauthvalidate) | Validate an incoming bearer token (for APIs acting as resource servers). |
 | [`require_auth`](#requireauth) | Protect routes with the configured auth session. |
+| [`rotate_session`](#rotatesession) | Rotate the current session ID and attach the new auth cookie to a response. |
 | [`session_data`](#sessiondata) | Get custom data stored in the current session. |
 | [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions, OAuth states, and exchange tokens from the session store. |
 | [`set_session`](#setsession) | Store custom data in the current session. |
+| [`sign_in_session`](#signinsession) | Persist a session and attach the auth cookie to an existing response. |
+| [`sign_out_session`](#signoutsession) | Revoke the current session and attach a clearing auth cookie to a response. |
 | [`totp_secret`](#totpsecret) | Generate a new TOTP secret for MFA setup. |
 | [`totp_uri`](#totpuri) | Generate an otpauth:// URI for QR codes. |
 | [`user_sessions`](#usersessions) | Get all active sessions for the current user. |
@@ -2050,6 +2055,62 @@ csrf_token(req)  // Get token for form
 **See also:** `verify_csrf`, `csrf_field`
 
 *Since v0.3.11*
+
+---
+
+#### `current_session`
+
+```ntnt
+current_session(req: Request) -> Option<Session>
+```
+
+Get the current session from the request.
+
+Alias for `get_session(req)` with a clearer request-time name for session-driven flows.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the Session map or None
+
+**Examples:**
+
+```ntnt
+current_session(req)  // Read the current session
+```
+
+**See also:** `get_session`, `current_user`, `rotate_session`
+
+*Since v0.4.9*
+
+---
+
+#### `current_user`
+
+```ntnt
+current_user(req: Request) -> Option<User>
+```
+
+Get the current authenticated user from the request.
+
+Alias for `get_user(req)` with a clearer request-time name for login/session flows.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the User map or None
+
+**Examples:**
+
+```ntnt
+current_user(req) otherwise return redirect("/login")  // Require a current user
+```
+
+**See also:** `get_user`, `current_session`, `sign_in_session`
+
+*Since v0.4.9*
 
 ---
 
@@ -2568,6 +2629,36 @@ require_auth("/admin/*")  // Protect all admin file routes
 
 ---
 
+#### `rotate_session`
+
+```ntnt
+rotate_session(response: Response, req: Request, options?: Map) -> Response
+```
+
+Rotate the current session ID and attach the new auth cookie to a response.
+
+Use this after privilege changes or sensitive login completion to prevent session fixation while preserving the existing session payload.
+
+**Parameters:**
+
+- `response` — The Response map to attach the rotated cookie to
+- `req` — The current HTTP request
+- `options` — Optional cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+
+**Returns:** Response with the rotated session cookie
+
+**Examples:**
+
+```ntnt
+rotate_session(redirect("/admin"), req)  // Rotate session after elevated auth
+```
+
+**See also:** `sign_in_session`, `sign_out_session`, `current_session`
+
+*Since v0.4.9*
+
+---
+
 #### `session_data`
 
 ```ntnt
@@ -2646,6 +2737,66 @@ set_session(req, map { "roles": ["admin"], "theme": "dark" })  // Store user pre
 **See also:** `session_data`, `get_session`
 
 *Since v0.3.11*
+
+---
+
+#### `sign_in_session`
+
+```ntnt
+sign_in_session(response: Response, session: Map, options?: Map) -> Response
+```
+
+Persist a session and attach the auth cookie to an existing response.
+
+Use this after password, magic-link, or other non-OAuth login flows. The session map must include `subject_id`, and may optionally include `provider`, `email`, `name`, `picture`, `claims`, `data`, or `raw`.
+
+**Parameters:**
+
+- `response` — The Response map to attach the session cookie to
+- `session` — Session data map, including required `subject_id`
+- `options` — Optional map with `session_ttl` and cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+
+**Returns:** Response with a persisted session and Set-Cookie header
+
+**Examples:**
+
+```ntnt
+sign_in_session(redirect("/admin"), map { "subject_id": user.id, "claims": map { "role": "admin" } })  // Sign in and redirect
+```
+
+**See also:** `sign_out_session`, `current_session`, `rotate_session`
+
+*Since v0.4.9*
+
+---
+
+#### `sign_out_session`
+
+```ntnt
+sign_out_session(response: Response, req: Request, options?: Map) -> Response
+```
+
+Revoke the current session and attach a clearing auth cookie to a response.
+
+Use this when your app wants logout behavior without being forced into the built-in redirect handler.
+
+**Parameters:**
+
+- `response` — The Response map to attach the clearing cookie to
+- `req` — The current HTTP request
+- `options` — Optional cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`)
+
+**Returns:** Response with the auth cookie cleared
+
+**Examples:**
+
+```ntnt
+sign_out_session(redirect("/login"), req)  // Sign out and redirect
+```
+
+**See also:** `sign_in_session`, `rotate_session`, `current_user`
+
+*Since v0.4.9*
 
 ---
 
