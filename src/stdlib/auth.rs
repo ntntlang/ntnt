@@ -1656,6 +1656,167 @@ fn encode_url_path_segment(text: &str) -> String {
     encoded
 }
 
+#[derive(Debug, Clone)]
+struct AuthCookieSettings {
+    name: String,
+    path: String,
+    same_site: String,
+    secure: bool,
+    http_only: bool,
+    max_age: i64,
+}
+
+fn default_auth_cookie_max_age(config: &AuthConfig) -> i64 {
+    if config.store_tokens && config.refresh_ttl > config.session_ttl {
+        config.refresh_ttl
+    } else {
+        config.session_ttl
+    }
+}
+
+fn auth_cookie_settings(
+    config: &AuthConfig,
+    max_age: i64,
+    overrides: Option<&HashMap<String, Value>>,
+) -> std::result::Result<AuthCookieSettings, String> {
+    let get_string = |key: &str| -> std::result::Result<Option<String>, String> {
+        match overrides.and_then(|m| m.get(key)) {
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(other) => Err(format!(
+                "[auth] {} must be a string, got {}",
+                key,
+                other.type_name()
+            )),
+            None => Ok(None),
+        }
+    };
+
+    let get_bool = |key: &str| -> std::result::Result<Option<bool>, String> {
+        match overrides.and_then(|m| m.get(key)) {
+            Some(Value::Bool(b)) => Ok(Some(*b)),
+            Some(other) => Err(format!(
+                "[auth] {} must be a bool, got {}",
+                key,
+                other.type_name()
+            )),
+            None => Ok(None),
+        }
+    };
+
+    let cookie_max_age = match overrides.and_then(|m| m.get("cookie_max_age")) {
+        Some(Value::Int(i)) => *i,
+        Some(other) => {
+            return Err(format!(
+                "[auth] cookie_max_age must be an int, got {}",
+                other.type_name()
+            ))
+        }
+        None => max_age,
+    };
+
+    Ok(AuthCookieSettings {
+        name: get_string("cookie_name")?.unwrap_or_else(|| config.cookie_name.clone()),
+        path: get_string("cookie_path")?.unwrap_or_else(|| "/".to_string()),
+        same_site: get_string("cookie_same_site")?
+            .unwrap_or_else(|| config.cookie_same_site.clone()),
+        secure: get_bool("cookie_secure")?.unwrap_or(config.cookie_secure),
+        http_only: get_bool("cookie_http_only")?.unwrap_or(true),
+        max_age: cookie_max_age,
+    })
+}
+
+fn build_auth_cookie_string(value: &str, settings: &AuthCookieSettings) -> String {
+    let mut cookie = format!(
+        "{}={}; Path={}; Max-Age={}; SameSite={}",
+        settings.name, value, settings.path, settings.max_age, settings.same_site
+    );
+
+    if settings.http_only {
+        cookie.push_str("; HttpOnly");
+    }
+    if settings.secure {
+        cookie.push_str("; Secure");
+    }
+
+    cookie
+}
+
+fn build_signed_session_cookie(
+    config: &AuthConfig,
+    session_id: &str,
+    overrides: Option<&HashMap<String, Value>>,
+) -> std::result::Result<String, String> {
+    let settings = auth_cookie_settings(config, default_auth_cookie_max_age(config), overrides)?;
+    let signed_session_id = sign_session_id(session_id, &config.session_secret);
+    Ok(build_auth_cookie_string(&signed_session_id, &settings))
+}
+
+fn build_cleared_session_cookie(
+    config: &AuthConfig,
+    overrides: Option<&HashMap<String, Value>>,
+) -> std::result::Result<String, String> {
+    let settings = auth_cookie_settings(config, 0, overrides)?;
+    Ok(build_auth_cookie_string("", &settings))
+}
+
+fn add_set_cookie_header(response: &Value, cookie: &str) -> std::result::Result<Value, String> {
+    let mut response = match response {
+        Value::Map(map) => map.clone(),
+        other => {
+            return Err(format!(
+                "[auth] response must be a map, got {}",
+                other.type_name()
+            ))
+        }
+    };
+
+    let mut headers = match response.get("headers") {
+        Some(Value::Map(headers)) => headers.clone(),
+        Some(other) => {
+            return Err(format!(
+                "[auth] response headers must be a map, got {}",
+                other.type_name()
+            ))
+        }
+        None => HashMap::new(),
+    };
+
+    let set_cookie_key = headers
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case("set-cookie"))
+        .cloned()
+        .unwrap_or_else(|| "Set-Cookie".to_string());
+
+    match headers.get(&set_cookie_key) {
+        Some(Value::Array(existing)) => {
+            let mut cookies = existing.clone();
+            cookies.push(Value::String(cookie.to_string()));
+            headers.insert(set_cookie_key, Value::Array(cookies));
+        }
+        Some(Value::String(existing)) => {
+            headers.insert(
+                set_cookie_key,
+                Value::Array(vec![
+                    Value::String(existing.clone()),
+                    Value::String(cookie.to_string()),
+                ]),
+            );
+        }
+        Some(other) => {
+            return Err(format!(
+                "[auth] response Set-Cookie header must be a string or array, got {}",
+                other.type_name()
+            ))
+        }
+        None => {
+            headers.insert(set_cookie_key, Value::String(cookie.to_string()));
+        }
+    }
+
+    response.insert("headers".to_string(), Value::Map(headers));
+    Ok(Value::Map(response))
+}
+
 pub fn reset_protected_paths() {
     let mut protected = AUTH_PROTECTED_PATHS.lock().unwrap();
     protected.clear();
@@ -2665,6 +2826,106 @@ pub fn create_session(
     })
 }
 
+fn create_manual_session(
+    session_spec: &HashMap<String, Value>,
+    ttl: i64,
+) -> std::result::Result<Session, String> {
+    let subject_id = match session_spec.get("subject_id") {
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        Some(Value::String(_)) => {
+            return Err("[auth] sign_in_session() subject_id must not be empty".to_string())
+        }
+        Some(other) => {
+            return Err(format!(
+                "[auth] sign_in_session() subject_id must be a string, got {}",
+                other.type_name()
+            ))
+        }
+        None => return Err("[auth] sign_in_session() session.subject_id is required".to_string()),
+    };
+
+    let provider = match session_spec.get("provider") {
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        Some(Value::String(_)) => {
+            return Err("[auth] sign_in_session() provider must not be empty".to_string())
+        }
+        Some(other) => {
+            return Err(format!(
+                "[auth] sign_in_session() provider must be a string, got {}",
+                other.type_name()
+            ))
+        }
+        None => "local".to_string(),
+    };
+    validate_provider_name(&provider)?;
+
+    let get_optional_string = |key: &str| -> std::result::Result<Option<String>, String> {
+        match session_spec.get(key) {
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(other) => Err(format!(
+                "[auth] sign_in_session() {} must be a string, got {}",
+                key,
+                other.type_name()
+            )),
+            None => Ok(None),
+        }
+    };
+
+    let mut data_map = HashMap::new();
+    for key in ["claims", "data"] {
+        match session_spec.get(key) {
+            Some(Value::Map(map)) => data_map.extend(map.clone()),
+            Some(other) => {
+                return Err(format!(
+                    "[auth] sign_in_session() {} must be a map, got {}",
+                    key,
+                    other.type_name()
+                ))
+            }
+            None => {}
+        }
+    }
+
+    let raw_map = match session_spec.get("raw") {
+        Some(Value::Map(map)) => map.clone(),
+        Some(other) => {
+            return Err(format!(
+                "[auth] sign_in_session() raw must be a map, got {}",
+                other.type_name()
+            ))
+        }
+        None => {
+            let mut raw = HashMap::new();
+            raw.insert("subject_id".to_string(), Value::String(subject_id.clone()));
+            raw
+        }
+    };
+
+    let user_id = if subject_id.starts_with(&format!("{}:", provider)) {
+        subject_id.clone()
+    } else {
+        format!("{}:{}", provider, subject_id)
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    Ok(Session {
+        id: generate_session_id(),
+        user_id,
+        provider,
+        email: get_optional_string("email")?,
+        name: get_optional_string("name")?,
+        picture: get_optional_string("picture")?,
+        raw_json: value_map_to_json_string(&raw_map),
+        data_json: value_map_to_json_string(&data_map),
+        csrf_token: uuid::Uuid::new_v4().to_string(),
+        access_token: None,
+        refresh_token: None,
+        token_expires_at: None,
+        created_at: now,
+        expires_at: now + ttl,
+    })
+}
+
 /// Store session
 pub fn store_session(session: Session) {
     let config = get_auth_config();
@@ -3499,6 +3760,177 @@ fn delete_session_redis(id: &str) -> std::result::Result<(), String> {
         .query::<()>(&mut conn)
         .map_err(|e| format!("Redis DEL error: {}", e))?;
     Ok(())
+}
+
+fn migrate_session(old_id: &str, new_session: &Session) -> std::result::Result<(), String> {
+    let config = get_auth_config();
+    let store_type = config.as_ref().map(|c| &c.session_store);
+
+    match store_type {
+        Some(SessionStore::Sqlite(_)) => migrate_session_sqlite(old_id, new_session)?,
+        Some(SessionStore::Postgres(_)) => migrate_session_postgres(old_id, new_session)?,
+        Some(SessionStore::Redis(_)) => migrate_session_redis(old_id, new_session)?,
+        _ => {
+            let mut store = SESSION_STORE.lock().unwrap();
+            if store.get_session(old_id).is_none() {
+                return Err("Session not found".to_string());
+            }
+            store.delete_session(old_id);
+            store.set_session(new_session.clone());
+            return Ok(());
+        }
+    }
+
+    let mut store = SESSION_STORE.lock().unwrap();
+    store.delete_session(old_id);
+    store.set_session(new_session.clone());
+    Ok(())
+}
+
+fn migrate_session_sqlite(old_id: &str, new_session: &Session) -> std::result::Result<(), String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+    let updated = conn
+        .execute(
+            "UPDATE auth_sessions
+         SET id = ?1, user_id = ?2, provider = ?3, email = ?4, name = ?5, picture = ?6,
+             raw_json = ?7, data_json = ?8, csrf_token = ?9, access_token = ?10,
+             refresh_token = ?11, token_expires_at = ?12, created_at = ?13, expires_at = ?14
+         WHERE id = ?15",
+            rusqlite::params![
+                new_session.id,
+                new_session.user_id,
+                new_session.provider,
+                new_session.email,
+                new_session.name,
+                new_session.picture,
+                new_session.raw_json,
+                new_session.data_json,
+                new_session.csrf_token,
+                new_session.access_token,
+                new_session.refresh_token,
+                new_session.token_expires_at,
+                new_session.created_at,
+                new_session.expires_at,
+                old_id,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if updated == 0 {
+        return Err("Session not found".to_string());
+    }
+
+    Ok(())
+}
+
+fn migrate_session_postgres(
+    old_id: &str,
+    new_session: &Session,
+) -> std::result::Result<(), String> {
+    let url_guard = POSTGRES_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
+
+    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let updated = client
+        .execute(
+            "UPDATE auth_sessions
+             SET id = $1, user_id = $2, provider = $3, email = $4, name = $5, picture = $6,
+                 raw_json = $7, data_json = $8, csrf_token = $9, access_token = $10,
+                 refresh_token = $11, token_expires_at = $12, created_at = $13, expires_at = $14
+             WHERE id = $15",
+            &[
+                &new_session.id,
+                &new_session.user_id,
+                &new_session.provider,
+                &new_session.email,
+                &new_session.name,
+                &new_session.picture,
+                &new_session.raw_json,
+                &new_session.data_json,
+                &new_session.csrf_token,
+                &new_session.access_token,
+                &new_session.refresh_token,
+                &new_session.token_expires_at,
+                &new_session.created_at,
+                &new_session.expires_at,
+                &old_id,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if updated == 0 {
+        return Err("Session not found".to_string());
+    }
+
+    Ok(())
+}
+
+fn migrate_session_redis(old_id: &str, new_session: &Session) -> std::result::Result<(), String> {
+    let url_guard = REDIS_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
+
+    let client =
+        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
+    let mut conn = client
+        .get_connection()
+        .map_err(|e| format!("Redis connection error: {}", e))?;
+
+    let old_key = format!("ntnt:session:{}", old_id);
+    let new_key = format!("ntnt:session:{}", new_session.id);
+    let ttl = (new_session.expires_at - chrono::Utc::now().timestamp()).max(0);
+    let session_json = serde_json::json!({
+        "id": new_session.id,
+        "user_id": new_session.user_id,
+        "provider": new_session.provider,
+        "email": new_session.email,
+        "name": new_session.name,
+        "picture": new_session.picture,
+        "raw_json": new_session.raw_json,
+        "data_json": new_session.data_json,
+        "csrf_token": new_session.csrf_token,
+        "access_token": new_session.access_token,
+        "refresh_token": new_session.refresh_token,
+        "token_expires_at": new_session.token_expires_at,
+        "created_at": new_session.created_at,
+        "expires_at": new_session.expires_at,
+    })
+    .to_string();
+
+    let lua_script = r#"
+        local existing = redis.call('GET', KEYS[1])
+        if not existing then return 0 end
+        if tonumber(ARGV[1]) <= 0 then
+            redis.call('DEL', KEYS[1])
+            return 1
+        end
+        redis.call('SETEX', KEYS[2], tonumber(ARGV[1]), ARGV[2])
+        redis.call('DEL', KEYS[1])
+        return 1
+    "#;
+
+    let migrated: i32 = redis::Script::new(lua_script)
+        .key(&old_key)
+        .key(&new_key)
+        .arg(ttl)
+        .arg(&session_json)
+        .invoke(&mut conn)
+        .map_err(|e| e.to_string())?;
+
+    if migrated == 0 {
+        return Err("Session not found".to_string());
+    }
+
+    Ok(())
+}
+
+fn rotate_session_id(session_id: &str) -> std::result::Result<Session, String> {
+    let mut session = get_session_by_id(session_id).ok_or("No active session".to_string())?;
+    let old_id = session.id.clone();
+    session.id = generate_session_id();
+    session.csrf_token = uuid::Uuid::new_v4().to_string();
+    migrate_session(&old_id, &session)?;
+    Ok(session)
 }
 
 /// Cleanup expired sessions from the session store
@@ -4610,24 +5042,8 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
                         &session_id[..8]
                     );
 
-                    // Sign the session ID with HMAC for tamper protection
-                    let signed_session_id = sign_session_id(&session_id, &config.session_secret);
-
-                    // Create session cookie
-                    let cookie_max_age =
-                        if config.store_tokens && config.refresh_ttl > config.session_ttl {
-                            config.refresh_ttl
-                        } else {
-                            config.session_ttl
-                        };
-                    let cookie = format!(
-                        "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite={}{}",
-                        config.cookie_name,
-                        signed_session_id,
-                        cookie_max_age,
-                        config.cookie_same_site,
-                        if config.cookie_secure { "; Secure" } else { "" }
-                    );
+                    let cookie = build_signed_session_cookie(&config, &session_id, None)
+                        .map_err(IntentError::runtime_error)?;
 
                     return Ok(redirect_response(&config.success_url, Some(&cookie)));
                 } else {
@@ -4734,8 +5150,34 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
         config.session_ttl,
     )
     .map_err(|e| IntentError::runtime_error(format!("[auth] Failed to create session: {}", e)))?;
+    let mut session = session;
+    if let Some(existing_session_id) = get_session_id_from_request(req) {
+        if let Some(existing_session) = get_session_by_id(&existing_session_id) {
+            if existing_session_id != session.id {
+                if session.data_json == "{}" && existing_session.data_json != "{}" {
+                    session.data_json = existing_session.data_json.clone();
+                }
+                migrate_session(&existing_session_id, &session).map_err(|e| {
+                    IntentError::runtime_error(format!(
+                        "[auth] Failed to rotate session after OAuth callback: {}",
+                        e
+                    ))
+                })?;
+                eprintln!(
+                    "[auth] Rotated session {}... -> {}... after successful auth callback",
+                    &existing_session_id[..8],
+                    &session.id[..8]
+                );
+            } else {
+                store_session(session.clone());
+            }
+        } else {
+            store_session(session.clone());
+        }
+    } else {
+        store_session(session.clone());
+    }
     let session_id = session.id.clone();
-    store_session(session);
 
     // Generate exchange token and store it
     let exchange_token = generate_session_id();
@@ -4778,12 +5220,7 @@ pub fn handle_auth_logout(args: &[Value]) -> Result<Value> {
         delete_session_by_id(&session_id);
     }
 
-    let cookie = format!(
-        "{}=; Path=/; Max-Age=0; HttpOnly; SameSite={}{}",
-        config.cookie_name,
-        config.cookie_same_site,
-        if config.cookie_secure { "; Secure" } else { "" }
-    );
+    let cookie = build_cleared_session_cookie(&config, None).map_err(IntentError::runtime_error)?;
 
     Ok(redirect_response(&config.logout_url, Some(&cookie)))
 }
@@ -5716,6 +6153,82 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt current_user
+    // @module std/auth
+    // @signature current_user(req: Request) -> Option<User>
+    // Get the current authenticated user from the request.
+    //
+    // Alias for `get_user(req)` with a clearer request-time name for login/session flows.
+    // @param req The HTTP request object
+    // @returns Option containing the User map or None
+    // @see_also get_user, current_session, sign_in_session
+    // @since v0.4.9
+    // @tags #auth, #session
+    // @example current_user(req) otherwise return redirect("/login") ~ "Require a current user"
+    module.insert(
+        "current_user".to_string(),
+        Value::NativeFunction {
+            name: "current_user".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                if args.is_empty() {
+                    return Err(IntentError::type_error(
+                        "[auth] current_user() requires a request".to_string(),
+                    ));
+                }
+
+                let session_id = get_session_id_from_request(&args[0]);
+                if let Some(id) = session_id {
+                    if let Some(session) = get_session_by_id(&id) {
+                        return Ok(make_some(user_to_value(&session)));
+                    }
+                }
+
+                Ok(make_none())
+            },
+        },
+    );
+
+    // @ntnt current_session
+    // @module std/auth
+    // @signature current_session(req: Request) -> Option<Session>
+    // Get the current session from the request.
+    //
+    // Alias for `get_session(req)` with a clearer request-time name for session-driven flows.
+    // @param req The HTTP request object
+    // @returns Option containing the Session map or None
+    // @see_also get_session, current_user, rotate_session
+    // @since v0.4.9
+    // @tags #auth, #session
+    // @example current_session(req) ~ "Read the current session"
+    module.insert(
+        "current_session".to_string(),
+        Value::NativeFunction {
+            name: "current_session".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                if args.is_empty() {
+                    return Err(IntentError::type_error(
+                        "[auth] current_session() requires a request".to_string(),
+                    ));
+                }
+
+                let session_id = get_session_id_from_request(&args[0]);
+                if let Some(id) = session_id {
+                    if let Some(session) = get_session_by_id(&id) {
+                        return Ok(make_some(session_to_value(&session)));
+                    }
+                }
+
+                Ok(make_none())
+            },
+        },
+    );
+
     // @ntnt session_data
     // @module std/auth
     // @signature session_data(req: Request) -> Option<Map>
@@ -6593,12 +7106,8 @@ pub fn init() -> HashMap<String, Value> {
                     delete_session_by_id(&session_id);
                 }
 
-                let cookie = format!(
-                    "{}=; Path=/; Max-Age=0; HttpOnly; SameSite={}{}",
-                    config.cookie_name,
-                    config.cookie_same_site,
-                    if config.cookie_secure { "; Secure" } else { "" }
-                );
+                let cookie = build_cleared_session_cookie(&config, None)
+                    .map_err(IntentError::runtime_error)?;
 
                 Ok(redirect_response(&config.logout_url, Some(&cookie)))
             },
@@ -7285,21 +7794,8 @@ pub fn init() -> HashMap<String, Value> {
                 let user_id = session.user_id.clone();
                 store_session(session);
 
-                // Build cookie — use refresh_ttl for Max-Age when refresh tokens are enabled
-                let signed_session_id = sign_session_id(&session_id, &config.session_secret);
-                let cookie_max_age = if config.store_tokens && config.refresh_ttl > config.session_ttl {
-                    config.refresh_ttl
-                } else {
-                    config.session_ttl
-                };
-                let cookie = format!(
-                    "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite={}{}",
-                    config.cookie_name,
-                    signed_session_id,
-                    cookie_max_age,
-                    config.cookie_same_site,
-                    if config.cookie_secure { "; Secure" } else { "" }
-                );
+                let cookie = build_signed_session_cookie(&config, &session_id, None)
+                    .map_err(IntentError::type_error)?;
 
                 // Return result
                 let mut result = HashMap::new();
@@ -7308,6 +7804,214 @@ pub fn init() -> HashMap<String, Value> {
                 result.insert("cookie".to_string(), Value::String(cookie));
 
                 Ok(make_ok(Value::Map(result)))
+            },
+        },
+    );
+
+    // @ntnt sign_in_session
+    // @module std/auth
+    // @signature sign_in_session(response: Response, session: Map, options?: Map) -> Response
+    // Persist a session and attach the auth cookie to an existing response.
+    //
+    // Use this after password, magic-link, or other non-OAuth login flows. The
+    // session map must include `subject_id`, and may optionally include `provider`,
+    // `email`, `name`, `picture`, `claims`, `data`, or `raw`.
+    // @param response The Response map to attach the session cookie to
+    // @param session Session data map, including required `subject_id`
+    // @param options Optional map with `session_ttl` and cookie override keys (`cookie_name`, `cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+    // @returns Response with a persisted session and Set-Cookie header
+    // @see_also sign_out_session, current_session, rotate_session
+    // @since v0.4.9
+    // @tags #auth, #session
+    // @example sign_in_session(redirect("/admin"), map { "subject_id": user.id, "claims": map { "role": "admin" } }) ~ "Sign in and redirect"
+    module.insert(
+        "sign_in_session".to_string(),
+        Value::NativeFunction {
+            name: "sign_in_session".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "[auth] sign_in_session() requires response, session, and optional options"
+                            .to_string(),
+                    ));
+                }
+
+                let config = get_auth_config().ok_or_else(|| {
+                    IntentError::runtime_error(
+                        "[auth] Auth not initialized. Call enable_auth() before sign_in_session()."
+                            .to_string(),
+                    )
+                })?;
+
+                let session_spec = match &args[1] {
+                    Value::Map(map) => map.clone(),
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] sign_in_session() session must be a map, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+
+                let options = match args.get(2) {
+                    Some(Value::Map(map)) => Some(map.clone()),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] sign_in_session() options must be a map, got {}",
+                            other.type_name()
+                        )))
+                    }
+                    None => None,
+                };
+
+                let session_ttl = match options.as_ref().and_then(|m| m.get("session_ttl")) {
+                    Some(Value::Int(i)) => *i,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] sign_in_session() session_ttl must be an int, got {}",
+                            other.type_name()
+                        )))
+                    }
+                    None => config.session_ttl,
+                };
+
+                let session = create_manual_session(&session_spec, session_ttl)
+                    .map_err(IntentError::type_error)?;
+                let session_id = session.id.clone();
+                store_session(session);
+
+                let cookie = build_signed_session_cookie(&config, &session_id, options.as_ref())
+                    .map_err(IntentError::type_error)?;
+                add_set_cookie_header(&args[0], &cookie).map_err(IntentError::type_error)
+            },
+        },
+    );
+
+    // @ntnt rotate_session
+    // @module std/auth
+    // @signature rotate_session(response: Response, req: Request, options?: Map) -> Response
+    // Rotate the current session ID and attach the new auth cookie to a response.
+    //
+    // Use this after privilege changes or sensitive login completion to prevent
+    // session fixation while preserving the existing session payload.
+    // @param response The Response map to attach the rotated cookie to
+    // @param req The current HTTP request
+    // @param options Optional cookie override keys (`cookie_name`, `cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+    // @returns Response with the rotated session cookie
+    // @see_also sign_in_session, sign_out_session, current_session
+    // @since v0.4.9
+    // @tags #auth, #session, #security
+    // @example rotate_session(redirect("/admin"), req) ~ "Rotate session after elevated auth"
+    module.insert(
+        "rotate_session".to_string(),
+        Value::NativeFunction {
+            name: "rotate_session".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "[auth] rotate_session() requires response, request, and optional options"
+                            .to_string(),
+                    ));
+                }
+
+                let config = get_auth_config().ok_or_else(|| {
+                    IntentError::runtime_error(
+                        "[auth] Auth not initialized. Call enable_auth() before rotate_session()."
+                            .to_string(),
+                    )
+                })?;
+
+                let options = match args.get(2) {
+                    Some(Value::Map(map)) => Some(map.clone()),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] rotate_session() options must be a map, got {}",
+                            other.type_name()
+                        )))
+                    }
+                    None => None,
+                };
+
+                let session_id = get_session_id_from_request(&args[1]).ok_or_else(|| {
+                    IntentError::runtime_error(
+                        "[auth] rotate_session() requires an active session".to_string(),
+                    )
+                })?;
+                let rotated = rotate_session_id(&session_id).map_err(IntentError::runtime_error)?;
+                eprintln!(
+                    "[auth] Rotated session {}... -> {}... via rotate_session()",
+                    &session_id[..8],
+                    &rotated.id[..8]
+                );
+
+                let cookie = build_signed_session_cookie(&config, &rotated.id, options.as_ref())
+                    .map_err(IntentError::type_error)?;
+                add_set_cookie_header(&args[0], &cookie).map_err(IntentError::type_error)
+            },
+        },
+    );
+
+    // @ntnt sign_out_session
+    // @module std/auth
+    // @signature sign_out_session(response: Response, req: Request, options?: Map) -> Response
+    // Revoke the current session and attach a clearing auth cookie to a response.
+    //
+    // Use this when your app wants logout behavior without being forced into the
+    // built-in redirect handler.
+    // @param response The Response map to attach the clearing cookie to
+    // @param req The current HTTP request
+    // @param options Optional cookie override keys (`cookie_name`, `cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`)
+    // @returns Response with the auth cookie cleared
+    // @see_also sign_in_session, rotate_session, current_user
+    // @since v0.4.9
+    // @tags #auth, #session
+    // @example sign_out_session(redirect("/login"), req) ~ "Sign out and redirect"
+    module.insert(
+        "sign_out_session".to_string(),
+        Value::NativeFunction {
+            name: "sign_out_session".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "[auth] sign_out_session() requires response, request, and optional options"
+                            .to_string(),
+                    ));
+                }
+
+                let config = get_auth_config().ok_or_else(|| {
+                    IntentError::runtime_error(
+                        "[auth] Auth not initialized. Call enable_auth() before sign_out_session()."
+                            .to_string(),
+                    )
+                })?;
+
+                let options = match args.get(2) {
+                    Some(Value::Map(map)) => Some(map.clone()),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] sign_out_session() options must be a map, got {}",
+                            other.type_name()
+                        )))
+                    }
+                    None => None,
+                };
+
+                if let Some(session_id) = get_session_id_from_request(&args[1]) {
+                    delete_session_by_id(&session_id);
+                }
+
+                let cookie = build_cleared_session_cookie(&config, options.as_ref())
+                    .map_err(IntentError::type_error)?;
+                add_set_cookie_header(&args[0], &cookie).map_err(IntentError::type_error)
             },
         },
     );
@@ -7576,6 +8280,61 @@ mod tests {
     static AUTH_TEST_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
+    fn reset_auth_test_state() {
+        let mut store = SESSION_STORE.lock().unwrap();
+        store.sessions.clear();
+        store.oauth_states.clear();
+        store.exchange_tokens.clear();
+        drop(store);
+        *AUTH_CONFIG.lock().unwrap() = None;
+        *SQLITE_CONN.lock().unwrap() = None;
+        *POSTGRES_URL.lock().unwrap() = None;
+        *REDIS_URL.lock().unwrap() = None;
+        reset_protected_paths();
+    }
+
+    fn module_fn(module: &HashMap<String, Value>, name: &str) -> fn(&[Value]) -> Result<Value> {
+        match module.get(name) {
+            Some(Value::NativeFunction { func, .. }) => *func,
+            other => panic!("expected native function {} got {:?}", name, other),
+        }
+    }
+
+    fn cookie_header_from_response(response: &Value) -> String {
+        let headers = match response {
+            Value::Map(map) => match map.get("headers") {
+                Some(Value::Map(headers)) => headers,
+                other => panic!("expected headers map, got {:?}", other),
+            },
+            other => panic!("expected response map, got {:?}", other),
+        };
+
+        let cookie = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| panic!("missing Set-Cookie header"));
+
+        match cookie {
+            Value::String(s) => s.split(';').next().unwrap().to_string(),
+            Value::Array(values) => match values.first() {
+                Some(Value::String(s)) => s.split(';').next().unwrap().to_string(),
+                other => panic!("expected cookie string in array, got {:?}", other),
+            },
+            other => panic!("expected Set-Cookie string/array, got {:?}", other),
+        }
+    }
+
+    fn request_with_cookie(cookie: &str) -> Value {
+        Value::Map(HashMap::from([(
+            "headers".to_string(),
+            Value::Map(HashMap::from([(
+                "cookie".to_string(),
+                Value::String(cookie.to_string()),
+            )])),
+        )]))
+    }
+
     #[test]
     fn test_exchange_token_store_consume_memory() {
         let mut store = InMemoryStore::new();
@@ -7688,6 +8447,238 @@ mod tests {
         assert!(validate_provider_name("foo_bar-123").is_ok());
         assert!(validate_provider_name("google<script>").is_err());
         assert!(validate_provider_name("bad name").is_err());
+    }
+
+    #[test]
+    fn test_sign_in_session_persists_claims_and_current_helpers_read_them() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            session_secret: "test-secret".to_string(),
+            cookie_secure: false,
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let current_session = module_fn(&module, "current_session");
+        let current_user = module_fn(&module, "current_user");
+
+        let response = redirect_response("/admin", None);
+        let signed_in = sign_in_session(&[
+            response,
+            Value::Map(HashMap::from([
+                (
+                    "subject_id".to_string(),
+                    Value::String("user-123".to_string()),
+                ),
+                ("name".to_string(), Value::String("Alice".to_string())),
+                (
+                    "claims".to_string(),
+                    Value::Map(HashMap::from([(
+                        "role".to_string(),
+                        Value::String("admin".to_string()),
+                    )])),
+                ),
+            ])),
+        ])
+        .unwrap();
+
+        let cookie = cookie_header_from_response(&signed_in);
+        let req = request_with_cookie(&cookie);
+
+        let session = current_session(&[req.clone()]).unwrap();
+        let user = current_user(&[req]).unwrap();
+
+        match session {
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                assert_eq!(variant, "Some");
+                let session_map = match values.first() {
+                    Some(Value::Map(map)) => map,
+                    other => panic!("expected session map, got {:?}", other),
+                };
+                match session_map.get("data") {
+                    Some(Value::Map(data)) => match data.get("role") {
+                        Some(Value::String(role)) => assert_eq!(role, "admin"),
+                        other => panic!("expected role string, got {:?}", other),
+                    },
+                    other => panic!("expected session data map, got {:?}", other),
+                }
+            }
+            other => panic!("expected Some(session), got {:?}", other),
+        }
+
+        match user {
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                assert_eq!(variant, "Some");
+                let user_map = match values.first() {
+                    Some(Value::Map(map)) => map,
+                    other => panic!("expected user map, got {:?}", other),
+                };
+                match user_map.get("name") {
+                    Some(Value::String(name)) => assert_eq!(name, "Alice"),
+                    other => panic!("expected user name, got {:?}", other),
+                }
+            }
+            other => panic!("expected Some(user), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_sign_in_session_rejects_missing_subject_id() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            session_secret: "test-secret".to_string(),
+            cookie_secure: false,
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let err = sign_in_session(&[
+            redirect_response("/admin", None),
+            Value::Map(HashMap::from([(
+                "provider".to_string(),
+                Value::String("local".to_string()),
+            )])),
+        ])
+        .unwrap_err();
+
+        assert!(
+            format!("{}", err).contains("[auth] sign_in_session() session.subject_id is required")
+        );
+    }
+
+    #[test]
+    fn test_rotate_session_changes_id_and_invalidates_old_cookie() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            session_secret: "test-secret".to_string(),
+            cookie_secure: false,
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let rotate_session = module_fn(&module, "rotate_session");
+        let current_session = module_fn(&module, "current_session");
+
+        let signed_in = sign_in_session(&[
+            redirect_response("/admin", None),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("user-123".to_string()),
+            )])),
+        ])
+        .unwrap();
+        let old_cookie = cookie_header_from_response(&signed_in);
+        let old_req = request_with_cookie(&old_cookie);
+        let old_session = current_session(&[old_req.clone()]).unwrap();
+        let old_id = match old_session {
+            Value::EnumValue { values, .. } => match values.first() {
+                Some(Value::Map(map)) => match map.get("id") {
+                    Some(Value::String(id)) => id.clone(),
+                    other => panic!("expected session id, got {:?}", other),
+                },
+                other => panic!("expected session map, got {:?}", other),
+            },
+            other => panic!("expected Some(session), got {:?}", other),
+        };
+
+        let rotated =
+            rotate_session(&[redirect_response("/admin", None), old_req.clone()]).unwrap();
+        let new_cookie = cookie_header_from_response(&rotated);
+        let new_req = request_with_cookie(&new_cookie);
+        let new_session = current_session(&[new_req]).unwrap();
+        let new_id = match new_session {
+            Value::EnumValue { values, .. } => match values.first() {
+                Some(Value::Map(map)) => match map.get("id") {
+                    Some(Value::String(id)) => id.clone(),
+                    other => panic!("expected session id, got {:?}", other),
+                },
+                other => panic!("expected session map, got {:?}", other),
+            },
+            other => panic!("expected Some(session), got {:?}", other),
+        };
+
+        assert_ne!(old_id, new_id);
+        assert!(get_session_by_id(&old_id).is_none());
+    }
+
+    #[test]
+    fn test_rotate_session_requires_active_session() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            session_secret: "test-secret".to_string(),
+            cookie_secure: false,
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let rotate_session = module_fn(&module, "rotate_session");
+        let err = rotate_session(&[
+            redirect_response("/admin", None),
+            request_with_cookie("ntnt_session=invalid"),
+        ])
+        .unwrap_err();
+
+        assert!(format!("{}", err).contains("[auth] rotate_session() requires an active session"));
+    }
+
+    #[test]
+    fn test_sign_out_session_clears_cookie_and_removes_session() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            session_secret: "test-secret".to_string(),
+            cookie_secure: false,
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let sign_out_session = module_fn(&module, "sign_out_session");
+        let current_session = module_fn(&module, "current_session");
+
+        let signed_in = sign_in_session(&[
+            redirect_response("/admin", None),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("user-123".to_string()),
+            )])),
+        ])
+        .unwrap();
+        let cookie = cookie_header_from_response(&signed_in);
+        let req = request_with_cookie(&cookie);
+
+        let signed_out =
+            sign_out_session(&[redirect_response("/login", None), req.clone()]).unwrap();
+        let set_cookie = match signed_out {
+            Value::Map(map) => match map.get("headers") {
+                Some(Value::Map(headers)) => headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_else(|| panic!("missing Set-Cookie header")),
+                other => panic!("expected headers map, got {:?}", other),
+            },
+            other => panic!("expected response map, got {:?}", other),
+        };
+        match set_cookie {
+            Value::String(s) => assert!(s.contains("Max-Age=0")),
+            other => panic!("expected cookie string, got {:?}", other),
+        }
+
+        assert!(
+            matches!(current_session(&[req]).unwrap(), Value::EnumValue { ref variant, .. } if variant == "None")
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
 # DD-043: World-Class Auth — Making `std/auth` the Best stdlib Auth Ever
 
-**Status:** Draft  
+**Status:** In Progress  
 **Author:** Larri  
 **Date:** 2026-03-20  
-**Branch:** TBD (multi-phase)
+**Branch:** `feat/auth-session-core-v0.4.9` (Phase 2 merged via PR #77)
 
 ---
 
@@ -70,31 +70,35 @@ This is the single source of truth for how we should build `std/auth` forward. T
 ### Phase 2 — Route Protection for Real Apps
 **Goal:** Make route protection trivial, especially for file-routed apps like the template.
 
-- [ ] `require_auth()` middleware helper
-- [ ] Configurable protected path patterns
-- [ ] Accept shorthand like `require_auth("/admin/*")`
-- [ ] Support exact path + subtree matching (`/admin` and `/admin/*`)
-- [ ] Work cleanly with file-routed apps, not just hand-written route tables
-- [ ] Smart redirect vs `401`/`403` based on HTML vs API requests
-- [ ] Always exempt `/auth/*` and auth health/debug routes
-- [ ] Expose authenticated session state through helpers instead of ad hoc cookie parsing in handlers
+**Result:** Merged in PR #77 (`feat: add auth route protection helpers`) on 2026-04-12.
+
+- [x] `require_auth()` middleware helper
+- [x] Configurable protected path patterns
+- [x] Accept shorthand like `require_auth("/admin/*")`
+- [x] Support exact path + subtree matching (`/admin` and `/admin/*`)
+- [x] Work cleanly with file-routed apps, not just hand-written route tables
+- [x] Smart redirect vs `401`/`403` based on HTML vs API requests
+- [x] Always exempt `/auth/*` and auth health/debug routes
+- [x] Expose authenticated session state through helpers instead of ad hoc cookie parsing in handlers
 
 **Ships real value:** apps stop repeating auth checks in every protected page.
 
 ### Phase 3 — Session Core and Cookie Helpers
 **Goal:** Remove the most repetitive and error-prone login/logout/session code.
 
-- [ ] Rotate session ID automatically on successful auth callback/login
-- [ ] Invalidate old session ID immediately after rotation
-- [ ] Preserve intended session data across rotation
-- [ ] Session store migration implemented in Rust for Redis/Postgres/SQLite backends
-- [ ] Keep `migrate_session(old_id, new_id)` internal to Rust/session-store code
-- [ ] Public ntnt API exposes only high-level helpers (`sign_in_session`, `rotate_session`)
-- [ ] `sign_in_session()` helper that persists session + attaches cookie
-- [ ] `sign_out_session()` helper that revokes session + clears cookie
-- [ ] `current_session()` / `current_user()` helper for request-time lookups
-- [ ] Shared auth cookie defaults with per-app overrides
-- [ ] Centralize cookie posture: name, path, same-site, secure, httpOnly, expiry
+**Status:** In progress on `feat/auth-session-core-v0.4.9`.
+
+- [x] Rotate session ID automatically on successful auth callback/login
+- [x] Invalidate old session ID immediately after rotation
+- [x] Preserve intended session data across rotation
+- [x] Session store migration implemented in Rust for Redis/Postgres/SQLite backends
+- [x] Keep `migrate_session(old_id, new_id)` internal to Rust/session-store code
+- [x] Public ntnt API exposes only high-level session helpers, not low-level store migration primitives (`sign_in_session`, `rotate_session`, `sign_out_session`, `current_session`, `current_user`)
+- [x] `sign_in_session()` helper that persists session + attaches cookie
+- [x] `sign_out_session()` helper that revokes session + clears cookie
+- [x] `current_session()` / `current_user()` helper for request-time lookups
+- [x] Shared auth cookie defaults with per-app overrides
+- [x] Centralize cookie posture: name, path, same-site, secure, httpOnly, expiry
 - [ ] Log session rotation events when auth security logging is enabled
 
 **Possible public API shape:**
