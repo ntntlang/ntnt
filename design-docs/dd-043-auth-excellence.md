@@ -219,6 +219,52 @@ return complete_auth_challenge(resp, req, map {
 - [ ] Reviewers can evaluate fallback/error behavior from one documented policy instead of rediscovering it thread by thread
 - [ ] The cleaned-up structure makes Phases 5–8 safer to implement, not merely nicer to look at
 
+**Proposed internal module map:**
+- [ ] `auth/config.rs` — `AuthConfig`, defaults, option parsing, config validation, startup summary
+- [ ] `auth/cookies.rs` — cookie-name validation, shared cookie settings, signed session/challenge cookies, clear-cookie helpers
+- [ ] `auth/providers.rs` — built-in provider definitions, provider normalization, OIDC/OAuth provider plumbing inputs
+- [ ] `auth/oauth.rs` — OAuth start/exchange/refresh/discovery/introspection flow coordination
+- [ ] `auth/storage/mod.rs` — internal auth storage contract, shared semantics, backend selection, memory fallback policy
+- [ ] `auth/storage/memory.rs` — in-memory auth/session/challenge/state/token store
+- [ ] `auth/storage/sqlite.rs` — SQLite auth persistence implementation
+- [ ] `auth/storage/postgres.rs` — Postgres auth persistence implementation
+- [ ] `auth/storage/redis.rs` — Redis/Valkey auth persistence implementation and atomic consume helpers
+- [ ] `auth/session_core.rs` — create/get/rotate/sign-out/session-lifecycle domain logic independent of request/response shaping where possible
+- [ ] `auth/challenge_core.rs` — staged-auth challenge lifecycle and upgrade semantics
+- [ ] `auth/middleware.rs` — protected-path registration, route matching, HTML vs API auth enforcement behavior
+- [ ] `auth/routes.rs` — built-in `/auth/*` handlers and request/response adapters
+- [ ] `auth/jwt.rs` — JWT helpers
+- [ ] `auth/totp.rs` — TOTP helpers
+- [ ] `auth/value_maps.rs` or equivalent shared conversion helpers — `Session`/`User`/`AuthChallenge` <-> `Value` conversion and typed extraction helpers
+
+**Recommended PR slicing plan:**
+- [ ] PR 4.5A-1: add architecture notes, auth persistence/error/fallback invariants, and TODO anchors without moving behavior yet
+- [ ] PR 4.5A-2: add backend contract-test harness that can run against memory/SQLite immediately and Postgres/Redis when env-gated services are available
+- [ ] PR 4.5B-1: move config/cookie/provider/JWT/TOTP helpers into modules with behavior held constant
+- [ ] PR 4.5B-2: move middleware and built-in route glue into modules with no intentional semantic changes
+- [ ] PR 4.5C-1: introduce the internal storage contract for sessions/auth challenges/OAuth states/exchange tokens while preserving existing backend-native implementations
+- [ ] PR 4.5C-2: centralize fallback/error semantics and make each auth state type follow the same documented rules
+- [ ] PR 4.5D-1: add/finish Redis/Postgres integration coverage and cross-backend contract assertions
+- [ ] PR 4.5E-1: final audit PR for docs generation, public API parity, and cleanup of temporary compatibility shims
+
+**Highest-risk regression hotspots to guard during the refactor:**
+- [ ] Cookie naming/signing/clearing behavior for both session and auth-challenge cookies stays byte-for-byte compatible unless intentionally changed
+- [ ] HTML redirect vs API `401`/`403` behavior in `require_auth()` does not drift during middleware extraction
+- [ ] One-time consume semantics for OAuth states, exchange tokens, and auth challenges remain atomic per backend
+- [ ] Session rotation preserves intended claims/data while invalidating the old session immediately
+- [ ] Refresh-token and expired-session lookup behavior does not regress while storage semantics are being normalized
+- [ ] Memory fallback continues to behave intentionally, especially under backend errors and mixed cleanup paths
+- [ ] Generated stdlib docs and `@ntnt` signatures remain accurate after functions move files/modules
+
+**Validation matrix for phase completion:**
+- [ ] Memory backend: session sign-in/current-user/sign-out/rotation/challenge begin-complete-cancel all pass
+- [ ] SQLite backend: same core session + challenge flows pass with cleanup and consume behavior verified
+- [ ] Postgres backend: same core session + challenge flows pass in env-gated integration coverage
+- [ ] Redis/Valkey backend: same core session + challenge flows pass in env-gated integration coverage, including atomic consume paths
+- [ ] Protected-route behavior verified for HTML pages and API routes after module split
+- [ ] OAuth state and exchange-token paths still pass, including Safari/redirect-chain-related flows already covered by current behavior
+- [ ] `cargo test stdlib::auth::tests`, any relevant integration suites, `cargo build --release --locked`, and `./target/release/ntnt docs --generate` all pass at the end of each major slice
+
 **Ships real value:** this phase does not add flashy new auth features, but it is what makes the next layers of auth quality, safety, and speed possible without quietly accumulating structural debt.
 
 ### Phase 5 — Session Lifecycle and Presets
@@ -327,11 +373,12 @@ So the plan should put those cleanup-heavy features first, but still start with 
 | **1** | Route Protection | 3.7 + 3.7.1 `require_auth` plus section/file-route protection | Biggest immediate cleanup win for file-routed apps and templates |
 | **2** | Session Core | 1.1 + 3.7.2 session rotation, sign-in/sign-out/current-session helpers | Removes the most repetitive login/logout/cookie boilerplate |
 | **3** | Staged Auth | 3.7.3 challenge primitives for pending auth states | Unlocks password → TOTP, first-login setup, and step-up auth cleanly |
-| **4** | Session Lifecycle | 1.2 + 1.3 + 3.6 sliding sessions, max lifetime, presets | Hardens lifecycle rules after the core mechanics are in place |
-| **5** | OAuth Hardening + Observability | 2.1 + 3.5 refresh token rotation and auth health check | Tightens security posture and makes behavior inspectable |
-| **6** | Auto-Routes + UI Convenience | 3.2 + 3.8 auto-routes and login page generator | Helpful DX layer after the mechanics are already excellent |
-| **7** | Advanced Sessions | 4.1 + 4.2 + 4.3 + 4.4 device sessions, cascade revoke, suspicious activity, remember me | Differentiators layered onto a solid core |
-| **8** | Internal Cleanup | 5.2 module split | Do once the public API and architecture are proven |
+| **4** | Internal Architecture Cleanup | 4.5 internal module split, storage contract, fallback semantics, and backend verification matrix | Pay down auth structural debt before more lifecycle and security features stack onto the current shape |
+| **5** | Session Lifecycle | 1.2 + 1.3 + 3.6 sliding sessions, max lifetime, presets | Hardens lifecycle rules after the core mechanics and architecture are stable |
+| **6** | OAuth Hardening + Observability | 2.1 + 3.5 refresh token rotation and auth health check | Tightens security posture and makes behavior inspectable |
+| **7** | Auto-Routes + UI Convenience | 3.2 + 3.8 auto-routes and login page generator | Helpful DX layer after the mechanics are already excellent |
+| **8** | Advanced Sessions | 4.1 + 4.2 + 4.3 + 4.4 device sessions, cascade revoke, suspicious activity, remember me | Differentiators layered onto a solid core |
+| **9** | Post-Cleanup Discipline | Phase 9 module-boundary enforcement and complexity budget | Prevent the architecture cleanup from eroding over time |
 
 ### Delivery Wave Deliverables
 
@@ -372,7 +419,16 @@ So the plan should put those cleanup-heavy features first, but still start with 
 
 **Strong value:** multi-step auth becomes a normal pattern instead of ad hoc glue code.
 
-#### Wave 4 — Session Lifecycle
+#### Wave 4 — Internal Architecture Cleanup
+**Ships:**
+- module split into coherent auth internals
+- documented fallback/error semantics
+- internal storage contract across sessions/challenges/states/tokens
+- backend contract-test harness + env-gated Postgres/Redis verification
+
+**Strong value:** this is the quality wave that makes the next auth features safer to build instead of more expensive every time.
+
+#### Wave 5 — Session Lifecycle
 **Ships:**
 - sliding expiration
 - absolute max lifetime
@@ -380,21 +436,21 @@ So the plan should put those cleanup-heavy features first, but still start with 
 
 **Strong value:** apps get secure lifecycle behavior without each team inventing different timeout logic.
 
-#### Wave 5 — OAuth Hardening + Observability
+#### Wave 6 — OAuth Hardening + Observability
 **Ships:**
 - refresh token rotation
 - auth health check endpoint / diagnostics
 
 **Strong value:** security and operability improve together, which is the right trade for production auth.
 
-#### Wave 6 — Auto-Routes + UI Convenience
+#### Wave 7 — Auto-Routes + UI Convenience
 **Ships:**
 - auto-mounted auth routes
 - optional login page generator and convenience UI helpers
 
 **Strong value:** fast starts for simple apps, while custom apps can still own their UX.
 
-#### Wave 7 — Advanced Sessions
+#### Wave 8 — Advanced Sessions
 **Ships:**
 - device-aware session tracking
 - revocation cascades
@@ -403,11 +459,11 @@ So the plan should put those cleanup-heavy features first, but still start with 
 
 **Strong value:** this is where `std/auth` moves from solid to category-leading.
 
-#### Wave 8 — Internal Cleanup
+#### Wave 9 — Post-Cleanup Discipline
 **Ships:**
-- module split / internal architecture cleanup
+- ongoing enforcement of module boundaries, complexity budget, and backend contract coverage for new auth work
 
-**Strong value:** keeps the implementation maintainable without delaying user-facing wins.
+**Strong value:** protects the cleanup investment so auth does not slowly collapse back into a grab-bag implementation.
 
 ## Competitive Landscape
 
