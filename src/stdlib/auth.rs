@@ -3278,6 +3278,38 @@ fn store_auth_challenge_postgres(challenge: &AuthChallenge) -> std::result::Resu
     Ok(())
 }
 
+fn auth_challenge_redis_key(id: &str) -> String {
+    format!("ntnt:auth_challenge:{}", id)
+}
+
+fn auth_challenge_from_json_str(json_str: &str) -> std::result::Result<AuthChallenge, String> {
+    let json: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| format!("Auth challenge JSON parse error: {}", e))?;
+
+    let get_string = |field: &str| -> std::result::Result<String, String> {
+        json[field]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("Auth challenge JSON missing string field: {}", field))
+    };
+
+    let get_i64 = |field: &str| -> std::result::Result<i64, String> {
+        json[field]
+            .as_i64()
+            .ok_or_else(|| format!("Auth challenge JSON missing integer field: {}", field))
+    };
+
+    Ok(AuthChallenge {
+        id: get_string("id")?,
+        subject_id: get_string("subject_id")?,
+        provider: get_string("provider")?,
+        kind: get_string("kind")?,
+        data_json: get_string("data_json")?,
+        created_at: get_i64("created_at")?,
+        expires_at: get_i64("expires_at")?,
+    })
+}
+
 fn store_auth_challenge_redis(challenge: &AuthChallenge) -> std::result::Result<(), String> {
     let url_guard = REDIS_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("Redis not initialized")?;
@@ -3299,17 +3331,22 @@ fn store_auth_challenge_redis(challenge: &AuthChallenge) -> std::result::Result<
     })
     .to_string();
 
-    let key = format!("ntnt:auth_challenge:{}", challenge.id);
+    let key = auth_challenge_redis_key(&challenge.id);
     let ttl = challenge.expires_at - chrono::Utc::now().timestamp();
 
-    if ttl > 0 {
-        redis::cmd("SETEX")
-            .arg(&key)
-            .arg(ttl)
-            .arg(&challenge_json)
-            .query::<()>(&mut conn)
-            .map_err(|e| format!("Redis SETEX error: {}", e))?;
+    if ttl <= 0 {
+        return Err(format!(
+            "Redis auth challenge TTL already expired for {}",
+            challenge.id
+        ));
     }
+
+    redis::cmd("SETEX")
+        .arg(&key)
+        .arg(ttl)
+        .arg(&challenge_json)
+        .query::<()>(&mut conn)
+        .map_err(|e| format!("Redis SETEX error: {}", e))?;
 
     Ok(())
 }
@@ -3420,7 +3457,7 @@ fn get_auth_challenge_redis(id: &str) -> std::result::Result<Option<AuthChalleng
         .get_connection()
         .map_err(|e| format!("Redis connection error: {}", e))?;
 
-    let key = format!("ntnt:auth_challenge:{}", id);
+    let key = auth_challenge_redis_key(id);
     let result: Option<String> = redis::cmd("GET")
         .arg(&key)
         .query(&mut conn)
@@ -3430,17 +3467,7 @@ fn get_auth_challenge_redis(id: &str) -> std::result::Result<Option<AuthChalleng
         return Ok(None);
     };
 
-    let json: serde_json::Value =
-        serde_json::from_str(&json_str).map_err(|e| format!("Redis JSON parse error: {}", e))?;
-    let challenge = AuthChallenge {
-        id: json["id"].as_str().unwrap_or("").to_string(),
-        subject_id: json["subject_id"].as_str().unwrap_or("").to_string(),
-        provider: json["provider"].as_str().unwrap_or("").to_string(),
-        kind: json["kind"].as_str().unwrap_or("").to_string(),
-        data_json: json["data_json"].as_str().unwrap_or("{}").to_string(),
-        created_at: json["created_at"].as_i64().unwrap_or(0),
-        expires_at: json["expires_at"].as_i64().unwrap_or(0),
-    };
+    let challenge = auth_challenge_from_json_str(&json_str)?;
 
     if challenge.expires_at > chrono::Utc::now().timestamp() {
         Ok(Some(challenge))
@@ -3501,7 +3528,7 @@ fn delete_auth_challenge_redis(id: &str) -> std::result::Result<(), String> {
         .get_connection()
         .map_err(|e| format!("Redis connection error: {}", e))?;
 
-    let key = format!("ntnt:auth_challenge:{}", id);
+    let key = auth_challenge_redis_key(id);
     redis::cmd("DEL")
         .arg(&key)
         .query::<()>(&mut conn)
@@ -3605,16 +3632,23 @@ fn consume_auth_challenge_redis(id: &str) -> std::result::Result<Option<AuthChal
         .get_connection()
         .map_err(|e| format!("Redis connection error: {}", e))?;
 
-    let key = format!("ntnt:auth_challenge:{}", id);
+    let key = auth_challenge_redis_key(id);
+    let now = chrono::Utc::now().timestamp();
     let lua_script = r#"
         local existing = redis.call('GET', KEYS[1])
         if not existing then return nil end
+        local ok, decoded = pcall(cjson.decode, existing)
+        if not ok or not decoded then return nil end
+        local expires_at = tonumber(decoded['expires_at'])
+        local now = tonumber(ARGV[1])
+        if not expires_at or expires_at <= now then return nil end
         redis.call('DEL', KEYS[1])
         return existing
     "#;
 
     let json_str: Option<String> = redis::Script::new(lua_script)
         .key(&key)
+        .arg(now)
         .invoke(&mut conn)
         .map_err(|e| e.to_string())?;
 
@@ -3622,17 +3656,7 @@ fn consume_auth_challenge_redis(id: &str) -> std::result::Result<Option<AuthChal
         return Ok(None);
     };
 
-    let json: serde_json::Value =
-        serde_json::from_str(&json_str).map_err(|e| format!("Redis JSON parse error: {}", e))?;
-    let challenge = AuthChallenge {
-        id: json["id"].as_str().unwrap_or("").to_string(),
-        subject_id: json["subject_id"].as_str().unwrap_or("").to_string(),
-        provider: json["provider"].as_str().unwrap_or("").to_string(),
-        kind: json["kind"].as_str().unwrap_or("").to_string(),
-        data_json: json["data_json"].as_str().unwrap_or("{}").to_string(),
-        created_at: json["created_at"].as_i64().unwrap_or(0),
-        expires_at: json["expires_at"].as_i64().unwrap_or(0),
-    };
+    let challenge = auth_challenge_from_json_str(&json_str)?;
 
     if challenge.expires_at > chrono::Utc::now().timestamp() {
         Ok(Some(challenge))
@@ -4748,6 +4772,11 @@ fn cleanup_expired_sessions_redis(now: i64) -> std::result::Result<u64, String> 
 }
 
 /// Cleanup expired auth challenges from the session store
+fn cleanup_expired_auth_challenges_memory(now: i64) -> u64 {
+    let mut store = SESSION_STORE.lock().unwrap();
+    store.cleanup_expired_auth_challenges(now) as u64
+}
+
 pub fn cleanup_expired_auth_challenges() -> std::result::Result<u64, String> {
     let now = chrono::Utc::now().timestamp();
     let config = get_auth_config();
@@ -4756,12 +4785,12 @@ pub fn cleanup_expired_auth_challenges() -> std::result::Result<u64, String> {
     match store_type {
         Some(SessionStore::Sqlite(_)) => cleanup_expired_auth_challenges_sqlite(now),
         Some(SessionStore::Postgres(_)) => cleanup_expired_auth_challenges_postgres(now),
-        Some(SessionStore::Redis(_)) => Ok(0),
-        _ => {
-            let mut store = SESSION_STORE.lock().unwrap();
-            let count = store.cleanup_expired_auth_challenges(now);
-            Ok(count as u64)
+        Some(SessionStore::Redis(_)) => {
+            let redis_count = cleanup_expired_auth_challenges_redis(now)?;
+            let memory_count = cleanup_expired_auth_challenges_memory(now);
+            Ok(redis_count + memory_count)
         }
+        _ => Ok(cleanup_expired_auth_challenges_memory(now)),
     }
 }
 
@@ -4787,6 +4816,58 @@ fn cleanup_expired_auth_challenges_postgres(now: i64) -> std::result::Result<u64
     let count = client
         .execute("DELETE FROM auth_challenges WHERE expires_at < $1", &[&now])
         .map_err(|e| e.to_string())?;
+
+    Ok(count)
+}
+
+fn cleanup_expired_auth_challenges_redis(now: i64) -> std::result::Result<u64, String> {
+    let url_guard = REDIS_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
+
+    let client =
+        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
+    let mut conn = client
+        .get_connection()
+        .map_err(|e| format!("Redis connection error: {}", e))?;
+
+    let mut count = 0u64;
+    let mut cursor = 0u64;
+    loop {
+        let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg("ntnt:auth_challenge:*")
+            .arg("COUNT")
+            .arg(100)
+            .query(&mut conn)
+            .map_err(|e| format!("Redis SCAN error: {}", e))?;
+
+        for key in keys {
+            let result: Option<String> = redis::cmd("GET")
+                .arg(&key)
+                .query(&mut conn)
+                .map_err(|e| format!("Redis GET error: {}", e))?;
+
+            let Some(json_str) = result else {
+                continue;
+            };
+
+            if let Ok(challenge) = auth_challenge_from_json_str(&json_str) {
+                if challenge.expires_at < now {
+                    let _: () = redis::cmd("DEL")
+                        .arg(&key)
+                        .query(&mut conn)
+                        .map_err(|e| format!("Redis DEL error: {}", e))?;
+                    count += 1;
+                }
+            }
+        }
+
+        cursor = new_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
 
     Ok(count)
 }
@@ -7200,6 +7281,9 @@ pub fn init() -> HashMap<String, Value> {
                     )
                 })?;
 
+                // Intentionally read before consume so validation failures do not burn the
+                // staged auth challenge. A later consume can still fail if another request
+                // cancels or completes the flow first.
                 let challenge = get_auth_challenge_by_id(&challenge_id).ok_or_else(|| {
                     IntentError::runtime_error(
                         "[auth] complete_auth_challenge() requires an active auth challenge"
@@ -7279,7 +7363,7 @@ pub fn init() -> HashMap<String, Value> {
                     .map_err(IntentError::runtime_error)?;
                 if consumed.is_none() {
                     return Err(IntentError::runtime_error(
-                        "[auth] complete_auth_challenge() requires an active auth challenge"
+                        "[auth] complete_auth_challenge() auth challenge expired, was cancelled, or was already consumed"
                             .to_string(),
                     ));
                 }
@@ -9477,6 +9561,17 @@ mod tests {
         )]))
     }
 
+    fn init_test_auth(session_store: SessionStore) {
+        let config = AuthConfig {
+            session_secret: "test-secret".to_string(),
+            cookie_secure: false,
+            session_store,
+            ..AuthConfig::default()
+        };
+        ensure_auth_session_store(&config).unwrap();
+        init_auth(config);
+    }
+
     #[test]
     fn test_exchange_token_store_consume_memory() {
         let mut store = InMemoryStore::new();
@@ -9595,11 +9690,7 @@ mod tests {
     fn test_begin_auth_challenge_sets_cookie_and_current_helper_reads_it() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let begin_auth_challenge = module_fn(&module, "begin_auth_challenge");
@@ -9664,11 +9755,7 @@ mod tests {
     fn test_begin_auth_challenge_rejects_missing_kind() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let begin_auth_challenge = module_fn(&module, "begin_auth_challenge");
@@ -9691,11 +9778,7 @@ mod tests {
     fn test_complete_auth_challenge_creates_session_and_consumes_challenge() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let begin_auth_challenge = module_fn(&module, "begin_auth_challenge");
@@ -9775,11 +9858,7 @@ mod tests {
     fn test_complete_auth_challenge_invalid_response_keeps_challenge_active() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let begin_auth_challenge = module_fn(&module, "begin_auth_challenge");
@@ -9813,11 +9892,7 @@ mod tests {
     fn test_cancel_auth_challenge_clears_cookie_and_removes_challenge() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let begin_auth_challenge = module_fn(&module, "begin_auth_challenge");
@@ -9848,14 +9923,117 @@ mod tests {
     }
 
     #[test]
+    fn test_auth_challenge_sqlite_store_get_consume_and_cleanup() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let now = chrono::Utc::now().timestamp();
+        let active = AuthChallenge {
+            id: "challenge-active".to_string(),
+            subject_id: "user-123".to_string(),
+            provider: "local".to_string(),
+            kind: "mfa_pending".to_string(),
+            data_json: value_map_to_json_string(&HashMap::from([(
+                "next".to_string(),
+                Value::String("/admin".to_string()),
+            )])),
+            created_at: now,
+            expires_at: now + 60,
+        };
+
+        store_auth_challenge(active.clone());
+        let fetched =
+            get_auth_challenge_by_id(&active.id).expect("sqlite challenge should persist");
+        assert_eq!(fetched.id, active.id);
+        assert_eq!(fetched.subject_id, active.subject_id);
+        assert_eq!(fetched.kind, active.kind);
+
+        let consumed = consume_auth_challenge(&active.id)
+            .expect("sqlite consume should succeed")
+            .expect("sqlite challenge should be returned exactly once");
+        assert_eq!(consumed.id, active.id);
+        assert!(get_auth_challenge_by_id(&active.id).is_none());
+
+        let expired = AuthChallenge {
+            id: "challenge-expired".to_string(),
+            subject_id: "user-456".to_string(),
+            provider: "local".to_string(),
+            kind: "password_reset".to_string(),
+            data_json: "{}".to_string(),
+            created_at: now - 120,
+            expires_at: now - 60,
+        };
+        store_auth_challenge_sqlite(&expired).expect("sqlite expired insert should succeed");
+
+        let removed = cleanup_expired_auth_challenges().expect("sqlite cleanup should succeed");
+        assert_eq!(removed, 1);
+        assert!(get_auth_challenge_by_id(&expired.id).is_none());
+    }
+
+    #[test]
+    fn test_complete_auth_challenge_sqlite_backend_round_trip() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let module = init();
+        let begin_auth_challenge = module_fn(&module, "begin_auth_challenge");
+        let complete_auth_challenge = module_fn(&module, "complete_auth_challenge");
+        let current_auth_challenge = module_fn(&module, "current_auth_challenge");
+        let current_session = module_fn(&module, "current_session");
+
+        let started = begin_auth_challenge(&[
+            redirect_response("/admin/verify", None),
+            Value::Map(HashMap::from([
+                (
+                    "subject_id".to_string(),
+                    Value::String("user-123".to_string()),
+                ),
+                ("provider".to_string(), Value::String("local".to_string())),
+                ("kind".to_string(), Value::String("mfa_pending".to_string())),
+            ])),
+        ])
+        .unwrap();
+        let challenge_cookie = cookie_header_from_response(&started);
+        let req = request_with_cookie(&challenge_cookie);
+
+        assert!(
+            matches!(current_auth_challenge(&[req.clone()]).unwrap(), Value::EnumValue { ref variant, .. } if variant == "Some")
+        );
+
+        let completed = complete_auth_challenge(&[
+            redirect_response("/admin", None),
+            req.clone(),
+            Value::Map(HashMap::from([(
+                "claims".to_string(),
+                Value::Map(HashMap::from([(
+                    "role".to_string(),
+                    Value::String("admin".to_string()),
+                )])),
+            )])),
+        ])
+        .unwrap();
+
+        let session_cookie = cookie_headers_from_response(&completed)
+            .into_iter()
+            .find(|cookie| cookie.starts_with("ntnt_session="))
+            .expect("session cookie should be set");
+        let session_req = request_with_cookie(&session_cookie);
+
+        assert!(
+            matches!(current_auth_challenge(&[req]).unwrap(), Value::EnumValue { ref variant, .. } if variant == "None")
+        );
+        assert!(
+            matches!(current_session(&[session_req]).unwrap(), Value::EnumValue { ref variant, .. } if variant == "Some")
+        );
+    }
+
+    #[test]
     fn test_sign_in_session_persists_claims_and_current_helpers_read_them() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let sign_in_session = module_fn(&module, "sign_in_session");
@@ -9930,11 +10108,7 @@ mod tests {
     fn test_sign_in_session_rejects_missing_subject_id() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let sign_in_session = module_fn(&module, "sign_in_session");
@@ -9956,11 +10130,7 @@ mod tests {
     fn test_sign_in_session_does_not_persist_when_response_invalid() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let sign_in_session = module_fn(&module, "sign_in_session");
@@ -9981,11 +10151,7 @@ mod tests {
     fn test_sign_in_session_rejects_cookie_name_override() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let sign_in_session = module_fn(&module, "sign_in_session");
@@ -10010,11 +10176,7 @@ mod tests {
     fn test_rotate_session_changes_id_and_invalidates_old_cookie() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let sign_in_session = module_fn(&module, "sign_in_session");
@@ -10067,11 +10229,7 @@ mod tests {
     fn test_rotate_session_requires_active_session() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let rotate_session = module_fn(&module, "rotate_session");
@@ -10088,11 +10246,7 @@ mod tests {
     fn test_rotate_session_invalid_response_keeps_existing_session() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let sign_in_session = module_fn(&module, "sign_in_session");
@@ -10151,11 +10305,7 @@ mod tests {
     fn test_sign_out_session_clears_cookie_and_removes_session() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let sign_in_session = module_fn(&module, "sign_in_session");
@@ -10207,11 +10357,7 @@ mod tests {
     fn test_sign_out_session_invalid_response_keeps_session_active() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
-        init_auth(AuthConfig {
-            session_secret: "test-secret".to_string(),
-            cookie_secure: false,
-            ..AuthConfig::default()
-        });
+        init_test_auth(SessionStore::Memory);
 
         let module = init();
         let sign_in_session = module_fn(&module, "sign_in_session");
