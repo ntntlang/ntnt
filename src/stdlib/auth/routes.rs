@@ -1,0 +1,382 @@
+use super::cookies::{build_cleared_session_cookie, build_signed_session_cookie};
+use super::providers::{available_providers, suggest_provider};
+use super::*;
+
+pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
+    let req = &args[0];
+
+    let provider_name = if let Value::Map(req_map) = req {
+        req_map.get("params").and_then(|params_value| {
+            if let Value::Map(params) = params_value {
+                params.get("provider").and_then(|provider_value| {
+                    if let Value::String(provider) = provider_value {
+                        Some(provider.clone())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+
+    let provider_name = provider_name.ok_or_else(|| {
+        IntentError::runtime_error("[auth] No provider specified in /auth/{provider}".to_string())
+    })?;
+
+    let config = get_auth_config().ok_or_else(|| {
+        IntentError::runtime_error(
+            "[auth] Auth not configured - call enable_auth() first".to_string(),
+        )
+    })?;
+
+    let provider = config
+        .providers
+        .iter()
+        .find(|provider| provider.name == provider_name)
+        .ok_or_else(|| {
+            let msg = if let Some(suggestion) = suggest_provider(&provider_name) {
+                format!(
+                    "[auth] Unknown provider \"{}\"\n       Did you mean \"{}\"?\n       Available providers: {}",
+                    provider_name,
+                    suggestion,
+                    available_providers()
+                )
+            } else {
+                format!(
+                    "[auth] Unknown provider \"{}\"\n       Available providers: {}",
+                    provider_name,
+                    available_providers()
+                )
+            };
+            IntentError::runtime_error(msg)
+        })?;
+
+    let state = generate_oauth_state();
+    let nonce = if provider.supports_oidc {
+        Some(generate_nonce())
+    } else {
+        None
+    };
+
+    let (pkce_verifier, pkce_challenge) = if provider.use_pkce {
+        let verifier = generate_pkce_verifier();
+        let challenge = generate_pkce_challenge(&verifier);
+        (Some(verifier), Some(challenge))
+    } else {
+        (None, None)
+    };
+
+    let (host, proto) = get_host_and_proto(req);
+    let redirect_uri = format!("{}://{}/auth/{}/callback", proto, host, provider.name);
+
+    store_oauth_state(
+        &state,
+        &provider.name,
+        &redirect_uri,
+        nonce.as_deref(),
+        pkce_verifier.as_deref(),
+    );
+
+    let mut provider_for_url = provider.clone();
+    if config.store_tokens && !provider_for_url.extra_params.contains_key("access_type") {
+        if provider_for_url.authorize_url.contains("google") {
+            provider_for_url
+                .extra_params
+                .insert("access_type".to_string(), "offline".to_string());
+            if !provider_for_url.extra_params.contains_key("prompt") {
+                provider_for_url
+                    .extra_params
+                    .insert("prompt".to_string(), "consent".to_string());
+            }
+        }
+    }
+
+    let auth_url = generate_auth_url(
+        &provider_for_url,
+        &redirect_uri,
+        &state,
+        nonce.as_deref(),
+        pkce_challenge.as_deref(),
+    );
+
+    Ok(redirect_response(&auth_url, None))
+}
+
+pub fn handle_auth_protect(args: &[Value]) -> Result<Value> {
+    match enforce_auth_for_request(&args[0], false) {
+        Ok(()) => Ok(Value::Unit),
+        Err(response) => Ok(response),
+    }
+}
+
+pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
+    let config = get_auth_config()
+        .ok_or_else(|| IntentError::runtime_error("[auth] Auth not configured".to_string()))?;
+
+    if config.providers.len() == 1 {
+        let provider = &config.providers[0];
+        let safe_provider = encode_url_path_segment(&provider.name);
+        return Ok(redirect_response(&format!("/auth/{}", safe_provider), None));
+    }
+
+    let provider_links = config
+        .providers
+        .iter()
+        .map(|provider| {
+            let label = escape_html(&provider.name);
+            let safe_provider = encode_url_path_segment(&provider.name);
+            format!(
+                r#"<li><a href="/auth/{name}">Sign in with {label}</a></li>"#,
+                name = safe_provider,
+                label = label
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(html_response(&format!(
+        r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in</title>
+  </head>
+  <body>
+    <main>
+      <h1>Sign in</h1>
+      <p>Choose a provider to continue.</p>
+      <ul>
+        {provider_links}
+      </ul>
+    </main>
+  </body>
+</html>"#,
+    )))
+}
+
+pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
+    let req = &args[0];
+
+    let config = get_auth_config()
+        .ok_or_else(|| IntentError::runtime_error("[auth] Auth not configured".to_string()))?;
+
+    let (code, state, error, exchange) = if let Value::Map(req_map) = req {
+        if let Some(Value::Map(query)) = req_map.get("query_params") {
+            let code = query.get("code").and_then(|value| {
+                if let Value::String(string) = value {
+                    Some(string.clone())
+                } else {
+                    None
+                }
+            });
+            let state = query.get("state").and_then(|value| {
+                if let Value::String(string) = value {
+                    Some(string.clone())
+                } else {
+                    None
+                }
+            });
+            let error = query.get("error").and_then(|value| {
+                if let Value::String(string) = value {
+                    Some(string.clone())
+                } else {
+                    None
+                }
+            });
+            let exchange = query.get("exchange").and_then(|value| {
+                if let Value::String(string) = value {
+                    Some(string.clone())
+                } else {
+                    None
+                }
+            });
+            (code, state, error, exchange)
+        } else {
+            (None, None, None, None)
+        }
+    } else {
+        (None, None, None, None)
+    };
+
+    if let Some(err) = error {
+        eprintln!("[auth] OAuth error: {}", err);
+        return Ok(redirect_response(&config.failure_url, None));
+    }
+
+    if let Some(exchange_token) = exchange {
+        if code.is_some() {
+            let _ = consume_exchange_token(&exchange_token);
+            eprintln!(
+                "[auth] Ignoring exchange token — OAuth code also present (crafted request?)"
+            );
+        } else if let Some(session_id) = consume_exchange_token(&exchange_token) {
+            if get_session_by_id(&session_id).is_some() {
+                eprintln!(
+                    "[auth] Session exchange token consumed for session {}...",
+                    &session_id[..8]
+                );
+
+                let cookie = build_signed_session_cookie(&config, &session_id, None)
+                    .map_err(IntentError::runtime_error)?;
+
+                return Ok(redirect_response(&config.success_url, Some(&cookie)));
+            } else {
+                eprintln!("[auth] Exchange token valid but session not found");
+                return Ok(redirect_response(&config.failure_url, None));
+            }
+        } else {
+            eprintln!("[auth] Invalid or expired exchange token");
+            return Ok(redirect_response(&config.failure_url, None));
+        }
+    }
+
+    let oauth_state = state
+        .as_ref()
+        .and_then(|state_value| consume_oauth_state(state_value));
+
+    if oauth_state.is_none() || code.is_none() {
+        eprintln!("[auth] Invalid callback - missing code or state");
+        return Ok(redirect_response(&config.failure_url, None));
+    }
+
+    let oauth_state = oauth_state.unwrap();
+    let code = code.unwrap();
+
+    let provider = config
+        .providers
+        .iter()
+        .find(|provider| provider.name == oauth_state.provider);
+    if provider.is_none() {
+        eprintln!("[auth] Provider not found: {}", oauth_state.provider);
+        return Ok(redirect_response(&config.failure_url, None));
+    }
+    let provider = provider.unwrap();
+    let provider_name = provider.name.clone();
+
+    let tokens = match exchange_code_for_tokens(
+        provider,
+        &code,
+        &oauth_state.redirect_url,
+        oauth_state.pkce_verifier.as_deref(),
+    ) {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            eprintln!("{}", error);
+            return Ok(redirect_response(&config.failure_url, None));
+        }
+    };
+
+    let user_info = if let Some(id_token) = &tokens.id_token {
+        match decode_id_token(id_token) {
+            Ok(claims) => {
+                if let Err(error) = validate_id_token_claims(
+                    &claims,
+                    provider.issuer.as_deref(),
+                    &provider.client_id,
+                    oauth_state.nonce.as_deref(),
+                ) {
+                    eprintln!("{}", error);
+                    return Ok(redirect_response(&config.failure_url, None));
+                }
+                claims
+            }
+            Err(error) => {
+                eprintln!(
+                    "[auth] ID token decode failed, falling back to userinfo: {}",
+                    error
+                );
+                match fetch_userinfo(provider, &tokens.access_token) {
+                    Ok(user_info) => user_info,
+                    Err(error) => {
+                        eprintln!("{}", error);
+                        return Ok(redirect_response(&config.failure_url, None));
+                    }
+                }
+            }
+        }
+    } else {
+        match fetch_userinfo(provider, &tokens.access_token) {
+            Ok(user_info) => user_info,
+            Err(error) => {
+                eprintln!("{}", error);
+                return Ok(redirect_response(&config.failure_url, None));
+            }
+        }
+    };
+
+    let session = create_session(
+        &provider_name,
+        user_info,
+        if config.store_tokens {
+            Some(&tokens)
+        } else {
+            None
+        },
+        config.session_ttl,
+    )
+    .map_err(|error| {
+        IntentError::runtime_error(format!("[auth] Failed to create session: {}", error))
+    })?;
+    let mut session = session;
+    if let Some(existing_session_id) = get_session_id_from_request(req) {
+        if let Some(existing_session) = get_session_by_id(&existing_session_id) {
+            if existing_session_id != session.id {
+                if session.data_json == "{}" && existing_session.data_json != "{}" {
+                    session.data_json = existing_session.data_json.clone();
+                }
+                migrate_session(&existing_session_id, &session).map_err(|error| {
+                    IntentError::runtime_error(format!(
+                        "[auth] Failed to rotate session after OAuth callback: {}",
+                        error
+                    ))
+                })?;
+            } else {
+                store_session(session.clone());
+            }
+        } else {
+            store_session(session.clone());
+        }
+    } else {
+        store_session(session.clone());
+    }
+    let session_id = session.id.clone();
+
+    let exchange_token = generate_session_id();
+    store_exchange_token(&exchange_token, &session_id);
+
+    let safe_provider = encode_url_path_segment(&provider_name);
+    let callback_url = format!(
+        "/auth/{}/callback?exchange={}",
+        safe_provider, exchange_token
+    );
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Completing login...</title>
+<meta http-equiv="refresh" content="0;url={url}"></head>
+<body><p>Completing login...</p>
+<script>window.location.replace("{url}");</script>
+<noscript><a href="{url}">Click here to continue</a></noscript>
+</body></html>"#,
+        url = callback_url
+    );
+
+    Ok(html_response(&html))
+}
+
+pub fn handle_auth_logout(args: &[Value]) -> Result<Value> {
+    let req = &args[0];
+    let config = get_auth_config().unwrap_or_default();
+
+    if let Some(session_id) = get_session_id_from_request(req) {
+        delete_session_by_id(&session_id);
+    }
+
+    let cookie = build_cleared_session_cookie(&config, None).map_err(IntentError::runtime_error)?;
+
+    Ok(redirect_response(&config.logout_url, Some(&cookie)))
+}
