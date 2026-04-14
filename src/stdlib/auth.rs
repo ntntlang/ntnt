@@ -1335,13 +1335,6 @@ impl InMemoryStore {
         self.exchange_tokens.remove(token);
     }
 
-    fn get_auth_challenge(&self, id: &str) -> Option<&AuthChallenge> {
-        self.auth_challenges.get(id).filter(|challenge| {
-            let now = chrono::Utc::now().timestamp();
-            challenge.expires_at > now
-        })
-    }
-
     fn set_auth_challenge(&mut self, challenge: AuthChallenge) {
         self.auth_challenges.insert(challenge.id.clone(), challenge);
     }
@@ -1354,6 +1347,10 @@ impl InMemoryStore {
         let now = chrono::Utc::now().timestamp();
         match self.auth_challenges.get(id) {
             Some(challenge) if challenge.expires_at > now => self.auth_challenges.remove(id),
+            Some(_) => {
+                self.auth_challenges.remove(id);
+                None
+            }
             _ => None,
         }
     }
@@ -3351,41 +3348,41 @@ fn store_auth_challenge_redis(challenge: &AuthChallenge) -> std::result::Result<
     Ok(())
 }
 
-pub fn get_auth_challenge_by_id(id: &str) -> Option<AuthChallenge> {
+fn get_auth_challenge_memory(id: &str) -> Option<AuthChallenge> {
+    let now = chrono::Utc::now().timestamp();
+    let mut store = SESSION_STORE.lock().unwrap();
+
+    match store.auth_challenges.get(id) {
+        Some(challenge) if challenge.expires_at > now => Some(challenge.clone()),
+        Some(_) => {
+            store.auth_challenges.remove(id);
+            None
+        }
+        None => None,
+    }
+}
+
+pub fn get_auth_challenge_by_id(id: &str) -> std::result::Result<Option<AuthChallenge>, String> {
     let config = get_auth_config();
     let store_type = config.as_ref().map(|c| &c.session_store);
 
     match store_type {
-        Some(SessionStore::Sqlite(_)) => {
-            get_auth_challenge_sqlite(id).ok().flatten().or_else(|| {
-                SESSION_STORE
-                    .lock()
-                    .unwrap()
-                    .get_auth_challenge(id)
-                    .cloned()
-            })
-        }
-        Some(SessionStore::Postgres(_)) => {
-            get_auth_challenge_postgres(id).ok().flatten().or_else(|| {
-                SESSION_STORE
-                    .lock()
-                    .unwrap()
-                    .get_auth_challenge(id)
-                    .cloned()
-            })
-        }
-        Some(SessionStore::Redis(_)) => get_auth_challenge_redis(id).ok().flatten().or_else(|| {
-            SESSION_STORE
-                .lock()
-                .unwrap()
-                .get_auth_challenge(id)
-                .cloned()
-        }),
-        _ => SESSION_STORE
-            .lock()
-            .unwrap()
-            .get_auth_challenge(id)
-            .cloned(),
+        Some(SessionStore::Sqlite(_)) => match get_auth_challenge_sqlite(id) {
+            Ok(Some(challenge)) => Ok(Some(challenge)),
+            Ok(None) => Ok(get_auth_challenge_memory(id)),
+            Err(e) => get_auth_challenge_memory(id).map(Some).ok_or(e),
+        },
+        Some(SessionStore::Postgres(_)) => match get_auth_challenge_postgres(id) {
+            Ok(Some(challenge)) => Ok(Some(challenge)),
+            Ok(None) => Ok(get_auth_challenge_memory(id)),
+            Err(e) => get_auth_challenge_memory(id).map(Some).ok_or(e),
+        },
+        Some(SessionStore::Redis(_)) => match get_auth_challenge_redis(id) {
+            Ok(Some(challenge)) => Ok(Some(challenge)),
+            Ok(None) => Ok(get_auth_challenge_memory(id)),
+            Err(e) => get_auth_challenge_memory(id).map(Some).ok_or(e),
+        },
+        _ => Ok(get_auth_challenge_memory(id)),
     }
 }
 
@@ -3541,23 +3538,30 @@ fn consume_auth_challenge(id: &str) -> std::result::Result<Option<AuthChallenge>
     let store_type = config.as_ref().map(|c| &c.session_store);
 
     match store_type {
-        Some(SessionStore::Sqlite(_)) => consume_auth_challenge_sqlite(id)
-            .or_else(|_| Ok(None))
-            .map(|challenge| {
-                challenge.or_else(|| SESSION_STORE.lock().unwrap().take_auth_challenge(id))
-            }),
-        Some(SessionStore::Postgres(_)) => consume_auth_challenge_postgres(id)
-            .or_else(|_| Ok(None))
-            .map(|challenge| {
-                challenge.or_else(|| SESSION_STORE.lock().unwrap().take_auth_challenge(id))
-            }),
-        Some(SessionStore::Redis(_)) => {
-            consume_auth_challenge_redis(id)
-                .or_else(|_| Ok(None))
-                .map(|challenge| {
-                    challenge.or_else(|| SESSION_STORE.lock().unwrap().take_auth_challenge(id))
-                })
-        }
+        Some(SessionStore::Sqlite(_)) => match consume_auth_challenge_sqlite(id) {
+            Ok(Some(challenge)) => Ok(Some(challenge)),
+            Ok(None) => Ok(SESSION_STORE.lock().unwrap().take_auth_challenge(id)),
+            Err(e) => match SESSION_STORE.lock().unwrap().take_auth_challenge(id) {
+                Some(challenge) => Ok(Some(challenge)),
+                None => Err(e),
+            },
+        },
+        Some(SessionStore::Postgres(_)) => match consume_auth_challenge_postgres(id) {
+            Ok(Some(challenge)) => Ok(Some(challenge)),
+            Ok(None) => Ok(SESSION_STORE.lock().unwrap().take_auth_challenge(id)),
+            Err(e) => match SESSION_STORE.lock().unwrap().take_auth_challenge(id) {
+                Some(challenge) => Ok(Some(challenge)),
+                None => Err(e),
+            },
+        },
+        Some(SessionStore::Redis(_)) => match consume_auth_challenge_redis(id) {
+            Ok(Some(challenge)) => Ok(Some(challenge)),
+            Ok(None) => Ok(SESSION_STORE.lock().unwrap().take_auth_challenge(id)),
+            Err(e) => match SESSION_STORE.lock().unwrap().take_auth_challenge(id) {
+                Some(challenge) => Ok(Some(challenge)),
+                None => Err(e),
+            },
+        },
         _ => Ok(SESSION_STORE.lock().unwrap().take_auth_challenge(id)),
     }
 }
@@ -4781,16 +4785,22 @@ pub fn cleanup_expired_auth_challenges() -> std::result::Result<u64, String> {
     let now = chrono::Utc::now().timestamp();
     let config = get_auth_config();
     let store_type = config.as_ref().map(|c| &c.session_store);
+    let memory_count = cleanup_expired_auth_challenges_memory(now);
 
     match store_type {
-        Some(SessionStore::Sqlite(_)) => cleanup_expired_auth_challenges_sqlite(now),
-        Some(SessionStore::Postgres(_)) => cleanup_expired_auth_challenges_postgres(now),
+        Some(SessionStore::Sqlite(_)) => {
+            let sqlite_count = cleanup_expired_auth_challenges_sqlite(now)?;
+            Ok(sqlite_count + memory_count)
+        }
+        Some(SessionStore::Postgres(_)) => {
+            let postgres_count = cleanup_expired_auth_challenges_postgres(now)?;
+            Ok(postgres_count + memory_count)
+        }
         Some(SessionStore::Redis(_)) => {
             let redis_count = cleanup_expired_auth_challenges_redis(now)?;
-            let memory_count = cleanup_expired_auth_challenges_memory(now);
             Ok(redis_count + memory_count)
         }
-        _ => Ok(cleanup_expired_auth_challenges_memory(now)),
+        _ => Ok(memory_count),
     }
 }
 
@@ -7144,7 +7154,9 @@ pub fn init() -> HashMap<String, Value> {
 
                 let challenge_id = get_auth_challenge_id_from_request(&args[0]);
                 if let Some(id) = challenge_id {
-                    if let Some(challenge) = get_auth_challenge_by_id(&id) {
+                    if let Some(challenge) =
+                        get_auth_challenge_by_id(&id).map_err(IntentError::runtime_error)?
+                    {
                         return Ok(make_some(auth_challenge_to_value(&challenge)));
                     }
                 }
@@ -7284,12 +7296,14 @@ pub fn init() -> HashMap<String, Value> {
                 // Intentionally read before consume so validation failures do not burn the
                 // staged auth challenge. A later consume can still fail if another request
                 // cancels or completes the flow first.
-                let challenge = get_auth_challenge_by_id(&challenge_id).ok_or_else(|| {
-                    IntentError::runtime_error(
-                        "[auth] complete_auth_challenge() requires an active auth challenge"
-                            .to_string(),
-                    )
-                })?;
+                let challenge = get_auth_challenge_by_id(&challenge_id)
+                    .map_err(IntentError::runtime_error)?
+                    .ok_or_else(|| {
+                        IntentError::runtime_error(
+                            "[auth] complete_auth_challenge() requires an active auth challenge"
+                                .to_string(),
+                        )
+                    })?;
 
                 let mut merged_session = session_spec.clone();
                 match merged_session.get("subject_id") {
@@ -9943,8 +9957,9 @@ mod tests {
         };
 
         store_auth_challenge(active.clone());
-        let fetched =
-            get_auth_challenge_by_id(&active.id).expect("sqlite challenge should persist");
+        let fetched = get_auth_challenge_by_id(&active.id)
+            .expect("sqlite lookup should succeed")
+            .expect("sqlite challenge should persist");
         assert_eq!(fetched.id, active.id);
         assert_eq!(fetched.subject_id, active.subject_id);
         assert_eq!(fetched.kind, active.kind);
@@ -9953,7 +9968,9 @@ mod tests {
             .expect("sqlite consume should succeed")
             .expect("sqlite challenge should be returned exactly once");
         assert_eq!(consumed.id, active.id);
-        assert!(get_auth_challenge_by_id(&active.id).is_none());
+        assert!(get_auth_challenge_by_id(&active.id)
+            .expect("sqlite lookup after consume should succeed")
+            .is_none());
 
         let expired = AuthChallenge {
             id: "challenge-expired".to_string(),
@@ -9968,7 +9985,9 @@ mod tests {
 
         let removed = cleanup_expired_auth_challenges().expect("sqlite cleanup should succeed");
         assert_eq!(removed, 1);
-        assert!(get_auth_challenge_by_id(&expired.id).is_none());
+        assert!(get_auth_challenge_by_id(&expired.id)
+            .expect("sqlite lookup after cleanup should succeed")
+            .is_none());
     }
 
     #[test]
@@ -10027,6 +10046,114 @@ mod tests {
         assert!(
             matches!(current_session(&[session_req]).unwrap(), Value::EnumValue { ref variant, .. } if variant == "Some")
         );
+    }
+
+    #[test]
+    fn test_take_auth_challenge_removes_expired_entry() {
+        let now = chrono::Utc::now().timestamp();
+        let mut store = InMemoryStore::new();
+        store.set_auth_challenge(AuthChallenge {
+            id: "challenge-expired-memory".to_string(),
+            subject_id: "user-123".to_string(),
+            provider: "local".to_string(),
+            kind: "mfa_pending".to_string(),
+            data_json: "{}".to_string(),
+            created_at: now - 120,
+            expires_at: now - 60,
+        });
+
+        assert!(store
+            .take_auth_challenge("challenge-expired-memory")
+            .is_none());
+        assert!(!store
+            .auth_challenges
+            .contains_key("challenge-expired-memory"));
+    }
+
+    #[test]
+    fn test_cleanup_expired_auth_challenges_sqlite_also_cleans_memory_fallback() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let now = chrono::Utc::now().timestamp();
+        SESSION_STORE
+            .lock()
+            .unwrap()
+            .set_auth_challenge(AuthChallenge {
+                id: "challenge-memory-fallback".to_string(),
+                subject_id: "user-123".to_string(),
+                provider: "local".to_string(),
+                kind: "mfa_pending".to_string(),
+                data_json: "{}".to_string(),
+                created_at: now - 120,
+                expires_at: now - 60,
+            });
+
+        let removed = cleanup_expired_auth_challenges().expect("cleanup should succeed");
+        assert_eq!(removed, 1);
+        assert!(!SESSION_STORE
+            .lock()
+            .unwrap()
+            .auth_challenges
+            .contains_key("challenge-memory-fallback"));
+    }
+
+    #[test]
+    fn test_consume_auth_challenge_uses_memory_fallback_when_backend_unavailable() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let now = chrono::Utc::now().timestamp();
+        let challenge = AuthChallenge {
+            id: "challenge-memory-only".to_string(),
+            subject_id: "user-123".to_string(),
+            provider: "local".to_string(),
+            kind: "mfa_pending".to_string(),
+            data_json: "{}".to_string(),
+            created_at: now,
+            expires_at: now + 60,
+        };
+        SESSION_STORE
+            .lock()
+            .unwrap()
+            .set_auth_challenge(challenge.clone());
+        *SQLITE_CONN.lock().unwrap() = None;
+
+        let consumed = consume_auth_challenge(&challenge.id)
+            .expect("memory fallback consume should succeed")
+            .expect("memory fallback challenge should be returned");
+        assert_eq!(consumed.id, challenge.id);
+        assert!(!SESSION_STORE
+            .lock()
+            .unwrap()
+            .auth_challenges
+            .contains_key(&challenge.id));
+    }
+
+    #[test]
+    fn test_consume_auth_challenge_propagates_backend_error_without_memory_fallback() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+        *SQLITE_CONN.lock().unwrap() = None;
+
+        let err = consume_auth_challenge("missing-challenge")
+            .expect_err("backend failure without fallback should surface error");
+        assert!(err.contains("SQLite not initialized"));
+    }
+
+    #[test]
+    fn test_get_auth_challenge_by_id_propagates_backend_error_without_memory_fallback() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+        *SQLITE_CONN.lock().unwrap() = None;
+
+        let err = get_auth_challenge_by_id("missing-challenge")
+            .expect_err("backend lookup failure without fallback should surface error");
+        assert!(err.contains("SQLite not initialized"));
     }
 
     #[test]
