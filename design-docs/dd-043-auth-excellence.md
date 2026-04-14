@@ -221,23 +221,26 @@ return complete_auth_challenge(resp, req, map {
 - [ ] Reviewers can evaluate fallback/error behavior from one documented policy instead of rediscovering it thread by thread
 - [ ] The cleaned-up structure makes Phases 5–8 safer to implement, not merely nicer to look at
 
-**Proposed internal module map:**
-- [ ] `auth/config.rs` — `AuthConfig`, defaults, option parsing, config validation, startup summary
-- [ ] `auth/cookies.rs` — cookie-name validation, shared cookie settings, signed session/challenge cookies, clear-cookie helpers
-- [ ] `auth/providers.rs` — built-in provider definitions, provider normalization, OIDC/OAuth provider plumbing inputs
-- [ ] `auth/oauth.rs` — OAuth start/exchange/refresh/discovery/introspection flow coordination
-- [ ] `auth/storage/mod.rs` — internal auth storage contract, shared semantics, backend selection, memory fallback policy
-- [ ] `auth/storage/memory.rs` — in-memory auth/session/challenge/state/token store
-- [ ] `auth/storage/sqlite.rs` — SQLite auth persistence implementation
-- [ ] `auth/storage/postgres.rs` — Postgres auth persistence implementation
-- [ ] `auth/storage/redis.rs` — Redis/Valkey auth persistence implementation and atomic consume helpers
-- [ ] `auth/session_core.rs` — create/get/rotate/sign-out/session-lifecycle domain logic independent of request/response shaping where possible
-- [ ] `auth/challenge_core.rs` — staged-auth challenge lifecycle and upgrade semantics
-- [ ] `auth/middleware.rs` — protected-path registration, route matching, HTML vs API auth enforcement behavior
-- [ ] `auth/routes.rs` — built-in `/auth/*` handlers and request/response adapters
-- [ ] `auth/jwt.rs` — JWT helpers
-- [ ] `auth/totp.rs` — TOTP helpers
-- [ ] `auth/value_maps.rs` or equivalent shared conversion helpers — `Session`/`User`/`AuthChallenge` <-> `Value` conversion and typed extraction helpers
+**Current landed module map (after PR #81):**
+- [x] `auth/config.rs` — `AuthConfig`, defaults, option parsing, config validation, startup summary, and session-store initialization helpers
+- [x] `auth/cookies.rs` — cookie-name validation, shared cookie settings, signed session/challenge cookies, clear-cookie helpers, and `SITE_URL`-aware cookie posture helpers
+- [x] `auth/providers.rs` — built-in provider definitions, provider normalization, and provider/value conversion helpers
+- [x] `auth/oauth.rs` — OAuth start/exchange/refresh/discovery/introspection flow coordination and provider userinfo handling
+- [x] `auth/guards.rs` — protected-path registration/matching, auth enforcement behavior, and challenge-kind validation
+- [x] `auth/routes.rs` — built-in `/auth/*` handlers and request/response adapters
+- [x] `auth/request_helpers.rs` — request extraction plus `Session`/`User`/`AuthChallenge` to `Value` conversion helpers
+- [x] `auth/sessions.rs` — session lifecycle, mutation, and session-listing/revocation store coordination
+- [x] `auth/storage.rs` — auth-challenge, OAuth-state, exchange-token, and cleanup persistence logic across backends
+- [x] `auth/primitives.rs` — low-level auth primitives like IDs, nonces, HMAC signing helpers, and TOTP primitives
+- [x] `auth/utils.rs` — response builders and canonical JSON/value conversion helpers used across auth internals
+
+**Remaining target splits / normalization work:**
+- [ ] Split `auth/storage.rs` into a clearer internal storage contract plus backend-focused modules (`mod`, `memory`, `sqlite`, `postgres`, `redis`) once 4.5C starts
+- [ ] Decide whether session domain logic should stay centralized in `auth/sessions.rs` or split further into a narrower `session_core.rs` plus admin/query helpers
+- [ ] Pull staged-auth challenge lifecycle into a clearer domain boundary (`challenge_core.rs` or equivalent) if that materially improves the session/challenge split during 4.5C
+- [ ] Split JWT helpers out of `auth.rs` if they continue growing enough to deserve `auth/jwt.rs`
+- [ ] Keep TOTP primitives in `auth/primitives.rs` unless a dedicated `auth/totp.rs` becomes justified by size or clarity
+- [ ] Revisit whether `auth/request_helpers.rs` and `auth/utils.rs` should converge on a more explicit `value_maps.rs` style home for `Session`/`User`/`AuthChallenge` conversion semantics
 
 **Recommended PR slicing plan:**
 - [x] PR 4.5A-1: add architecture notes, auth persistence/error/fallback invariants, and TODO anchors without moving behavior yet
