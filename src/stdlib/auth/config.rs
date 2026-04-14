@@ -113,11 +113,18 @@ pub fn init_auth(config: AuthConfig) {
                 std::thread::sleep(std::time::Duration::from_secs(300));
                 if let Ok(mut s) = store.lock() {
                     let now = chrono::Utc::now().timestamp();
-                    let removed = s.cleanup_expired(now);
+                    let removed_sessions = s.cleanup_expired(now);
+                    let removed_challenges = s.cleanup_expired_auth_challenges(now);
                     s.cleanup_expired_oauth_states(now - 600);
                     s.cleanup_expired_exchange_tokens(now);
-                    if removed > 0 {
-                        eprintln!("[auth] Cleaned up {} expired session(s)", removed);
+                    if removed_sessions > 0 {
+                        eprintln!("[auth] Cleaned up {} expired session(s)", removed_sessions);
+                    }
+                    if removed_challenges > 0 {
+                        eprintln!(
+                            "[auth] Cleaned up {} expired auth challenge(s)",
+                            removed_challenges
+                        );
                     }
                 }
             });

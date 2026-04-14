@@ -4016,6 +4016,20 @@ mod tests {
                 assert!(
                     matches!(challenge_map.get("kind"), Some(Value::String(kind)) if kind == "mfa_pending")
                 );
+                assert!(
+                    matches!(challenge_map.get("user_id"), Some(Value::String(user_id)) if user_id == "local:user-123")
+                );
+                match challenge_map.get("user") {
+                    Some(Value::Map(user)) => {
+                        assert!(
+                            matches!(user.get("id"), Some(Value::String(id)) if id == "local:user-123")
+                        );
+                        assert!(
+                            matches!(user.get("provider"), Some(Value::String(provider)) if provider == "local")
+                        );
+                    }
+                    other => panic!("expected challenge user map, got {:?}", other),
+                }
                 match challenge_map.get("data") {
                     Some(Value::Map(data)) => {
                         assert!(

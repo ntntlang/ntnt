@@ -127,6 +127,13 @@ pub fn auth_challenge_to_value(challenge: &AuthChallenge) -> Value {
     } else {
         format!("{}:{}", challenge.provider, challenge.subject_id)
     };
+    let user = HashMap::from([
+        ("id".to_string(), Value::String(user_id.clone())),
+        (
+            "provider".to_string(),
+            Value::String(challenge.provider.clone()),
+        ),
+    ]);
 
     map.insert("id".to_string(), Value::String(challenge.id.clone()));
     map.insert(
@@ -134,6 +141,7 @@ pub fn auth_challenge_to_value(challenge: &AuthChallenge) -> Value {
         Value::String(challenge.subject_id.clone()),
     );
     map.insert("user_id".to_string(), Value::String(user_id));
+    map.insert("user".to_string(), Value::Map(user));
     map.insert(
         "provider".to_string(),
         Value::String(challenge.provider.clone()),

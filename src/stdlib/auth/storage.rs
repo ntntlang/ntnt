@@ -188,8 +188,9 @@ fn consume_oauth_state_sqlite(state: &str) -> std::result::Result<Option<OAuthSt
     let min_created = now - 600; // 10 minutes
 
     let result = conn.query_row(
-        "SELECT state, nonce, pkce_verifier, provider, redirect_url, created_at
-         FROM auth_oauth_states WHERE state = ?1 AND created_at > ?2",
+        "DELETE FROM auth_oauth_states
+         WHERE state = ?1 AND created_at > ?2
+         RETURNING state, nonce, pkce_verifier, provider, redirect_url, created_at",
         rusqlite::params![state, min_created],
         |row| {
             Ok(OAuthState {
@@ -201,12 +202,6 @@ fn consume_oauth_state_sqlite(state: &str) -> std::result::Result<Option<OAuthSt
                 created_at: row.get(5)?,
             })
         },
-    );
-
-    // Delete the state (consume it)
-    let _ = conn.execute(
-        "DELETE FROM auth_oauth_states WHERE state = ?1",
-        rusqlite::params![state],
     );
 
     match result {
@@ -226,14 +221,12 @@ fn consume_oauth_state_postgres(state: &str) -> std::result::Result<Option<OAuth
 
     let rows = client
         .query(
-            "SELECT state, nonce, pkce_verifier, provider, redirect_url, created_at
-         FROM auth_oauth_states WHERE state = $1 AND created_at > $2",
+            "DELETE FROM auth_oauth_states
+         WHERE state = $1 AND created_at > $2
+         RETURNING state, nonce, pkce_verifier, provider, redirect_url, created_at",
             &[&state, &min_created],
         )
         .map_err(|e| e.to_string())?;
-
-    // Delete the state (consume it)
-    let _ = client.execute("DELETE FROM auth_oauth_states WHERE state = $1", &[&state]);
 
     if let Some(row) = rows.first() {
         Ok(Some(OAuthState {
@@ -1261,11 +1254,8 @@ fn consume_auth_challenge_redis(id: &str) -> std::result::Result<Option<AuthChal
 
     let challenge = auth_challenge_from_json_str(&json_str)?;
 
-    if challenge.expires_at > chrono::Utc::now().timestamp() {
-        Ok(Some(challenge))
-    } else {
-        Ok(None)
-    }
+    // Expiry was already validated atomically inside the Lua script above.
+    Ok(Some(challenge))
 }
 
 /// Cleanup expired auth challenges from the session store
