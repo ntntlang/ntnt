@@ -158,6 +158,21 @@ return complete_auth_challenge(resp, req, map {
 
 **Ships real value:** the template’s password/TOTP/password-change flow gets much cleaner and more robust.
 
+### Phase 4.5 — Auth Storage + Architecture Cleanup
+**Goal:** Pay down the technical debt introduced while shipping the Phase 4 primitives, before more auth features stack on top of the current structure.
+
+**Why now:** Phase 4 delivered the right primitives, but it also increased backend-specific branching, fallback-path nuance, and pressure on the already-large `src/stdlib/auth.rs`. This cleanup phase should happen before additional auth lifecycle and observability work, so we improve the structure while the surface area is still relatively contained.
+
+- [ ] Extract auth storage operations behind a clearer internal abstraction so session, auth-challenge, OAuth-state, and exchange-token backend behavior is easier to keep consistent across SQLite/Postgres/Redis
+- [ ] Split `src/stdlib/auth.rs` into smaller focused modules without changing the public `std/auth` API surface
+- [ ] Add env-gated Redis/Postgres integration coverage for auth storage flows so backend-specific regressions are caught earlier
+- [ ] Centralize and document fallback/error semantics so auth reads, consumes, and cleanups follow one intentional policy instead of drifting per code path
+- [ ] Re-review Phase 3 and Phase 4 helpers after the refactor to ensure docs, tests, and public behavior still match exactly
+
+**Non-goal:** this phase is not for adding new end-user auth features. It is specifically for making the current auth foundation cleaner, more testable, and less likely to accumulate technical debt as we continue.
+
+**Exit criteria:** we should be able to explain auth persistence behavior in one coherent model, add a backend without copy-pasting half the file, and review future auth PRs without re-litigating fallback semantics in every thread.
+
 ### Phase 5 — Session Lifecycle and Presets
 **Goal:** Harden session lifetime behavior and make strong defaults ergonomic.
 
