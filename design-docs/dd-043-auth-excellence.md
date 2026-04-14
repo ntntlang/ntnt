@@ -158,20 +158,68 @@ return complete_auth_challenge(resp, req, map {
 
 **Ships real value:** the template’s password/TOTP/password-change flow gets much cleaner and more robust.
 
-### Phase 4.5 — Auth Storage + Architecture Cleanup
-**Goal:** Pay down the technical debt introduced while shipping the Phase 4 primitives, before more auth features stack on top of the current structure.
+### Phase 4.5 — Auth Internal Architecture Cleanup
+**Goal:** Pay down the structural debt around `std/auth` before more lifecycle, observability, and security features pile onto the current shape.
 
-**Why now:** Phase 4 delivered the right primitives, but it also increased backend-specific branching, fallback-path nuance, and pressure on the already-large `src/stdlib/auth.rs`. This cleanup phase should happen before additional auth lifecycle and observability work, so we improve the structure while the surface area is still relatively contained.
+**Why now:** Phase 4 shipped the right staged-auth primitives, but it also made a pre-existing architecture issue impossible to ignore: `src/stdlib/auth.rs` is carrying too many responsibilities at once. The risk is not just storage duplication. It is that config parsing, cookie policy, OAuth flow logic, session/challenge persistence, route protection, built-in handlers, JWT/TOTP helpers, and tests are all evolving in one giant file with partially repeated semantics. If we want auth to become world-class instead of merely feature-rich, we should clean up the internal architecture now, while the surface area is still understandable.
 
-- [ ] Extract auth storage operations behind a clearer internal abstraction so session, auth-challenge, OAuth-state, and exchange-token backend behavior is easier to keep consistent across SQLite/Postgres/Redis
+**Design principles for this phase:**
+- [ ] Keep the public `std/auth` API stable unless a change is overwhelmingly justified
+- [ ] Separate pure auth state transitions from HTTP request/response glue where practical
+- [ ] Prefer one intentional internal model over per-backend drift
+- [ ] Make backend-specific code explicit, localized, and contract-tested
+- [ ] Optimize for future auth work being easier to review, reason about, and extend
+
+**Workstream A — Internal module boundaries**
 - [ ] Split `src/stdlib/auth.rs` into smaller focused modules without changing the public `std/auth` API surface
-- [ ] Add env-gated Redis/Postgres integration coverage for auth storage flows so backend-specific regressions are caught earlier
-- [ ] Centralize and document fallback/error semantics so auth reads, consumes, and cleanups follow one intentional policy instead of drifting per code path
+- [ ] Establish a clear internal layout for config, cookies, providers, OAuth flow, storage, sessions, staged auth challenges, middleware/route protection, built-in routes, JWT helpers, and TOTP helpers
+- [ ] Move shared validation and conversion helpers to stable internal homes so they stop drifting across feature work
+- [ ] Keep module boundaries understandable enough that a new contributor can answer “where does this logic live?” quickly and confidently
+
+**Workstream B — Auth domain model and flow boundaries**
+- [ ] Identify the core auth state transitions that should be treated as domain logic rather than HTTP glue (for example: begin staged auth, consume challenge, rotate session, sign out, exchange OAuth result into session)
+- [ ] Refactor those transitions so request parsing, cookie mutation, and redirect/response shaping are thin adapters around clearer internal operations
+- [ ] Normalize the lifecycle vocabulary across sessions, auth challenges, OAuth states, and exchange tokens so store/get/consume/delete/cleanup semantics are easier to compare and reason about
+
+**Workstream C — Internal persistence contract**
+- [ ] Extract a clearer internal auth storage abstraction so session, auth-challenge, OAuth-state, and exchange-token behavior is easier to keep consistent across SQLite/Postgres/Redis and memory fallback paths
+- [ ] Define one intentional place for fallback/error semantics instead of letting each code path decide ad hoc whether backend failures should surface, degrade to memory, or return `None`
+- [ ] Reduce copy-pasted backend logic where the operation shape is truly shared, while preserving backend-native implementations where atomicity or query shape genuinely differs
+- [ ] Revisit cleanup responsibilities so memory, SQLite, Postgres, and Redis all follow the same mental model even if the implementation details differ
+
+**Workstream D — Test architecture and verification matrix**
+- [ ] Add backend contract tests that exercise the same auth storage behaviors across memory, SQLite, Postgres, and Redis where feasible
+- [ ] Add env-gated Redis/Postgres integration coverage for auth storage flows so backend-specific regressions are caught before review comments or production incidents
+- [ ] Add higher-level auth flow tests that verify staged auth, session rotation, protected-route lookup, and logout behavior against the cleaned-up internal boundaries
 - [ ] Re-review Phase 3 and Phase 4 helpers after the refactor to ensure docs, tests, and public behavior still match exactly
 
-**Non-goal:** this phase is not for adding new end-user auth features. It is specifically for making the current auth foundation cleaner, more testable, and less likely to accumulate technical debt as we continue.
+**Workstream E — Safety rails for the refactor itself**
+- [ ] Preserve behavior first, then simplify structure, rather than mixing feature changes into the cleanup branch
+- [ ] Write down the intended auth persistence/error/fallback model in the design doc and/or code comments before refactoring the trickiest paths
+- [ ] Use small, reviewable commits or PR slices when possible so architecture cleanup does not become an unreadable mega-diff
+- [ ] Regenerate docs and re-run the full auth validation gate after each meaningful slice, not just at the very end
 
-**Exit criteria:** we should be able to explain auth persistence behavior in one coherent model, add a backend without copy-pasting half the file, and review future auth PRs without re-litigating fallback semantics in every thread.
+**Recommended execution order:**
+- [ ] 4.5A: document the intended internal architecture and fallback/error model before moving code
+- [ ] 4.5B: split modules and relocate helpers with behavior held constant
+- [ ] 4.5C: introduce the internal storage contract and normalize shared semantics
+- [ ] 4.5D: add/finish backend contract tests and env-gated integration coverage
+- [ ] 4.5E: run a final API/docs behavior audit for all Phase 3 and Phase 4 helpers
+
+**Non-goals:**
+- [ ] Do not add major new end-user auth features in this phase
+- [ ] Do not redesign the public `std/auth` API unless the cleanup reveals a serious correctness issue
+- [ ] Do not force auth onto `std/kv` just for abstraction symmetry if a purpose-built internal auth store boundary is cleaner
+- [ ] Do not ship a prettier file layout while leaving core fallback and lifecycle semantics ambiguous
+
+**Exit criteria:**
+- [ ] We can explain auth internals as one coherent model instead of a set of backend-specific exceptions
+- [ ] Adding or modifying an auth backend no longer requires copy-pasting large sections of session/challenge/state logic
+- [ ] Future auth PRs can land in focused modules instead of reopening a 10k-line file every time
+- [ ] Reviewers can evaluate fallback/error behavior from one documented policy instead of rediscovering it thread by thread
+- [ ] The cleaned-up structure makes Phases 5–8 safer to implement, not merely nicer to look at
+
+**Ships real value:** this phase does not add flashy new auth features, but it is what makes the next layers of auth quality, safety, and speed possible without quietly accumulating structural debt.
 
 ### Phase 5 — Session Lifecycle and Presets
 **Goal:** Harden session lifetime behavior and make strong defaults ergonomic.
@@ -237,19 +285,16 @@ return complete_auth_challenge(resp, req, map {
 
 **Ships real value:** this is where `std/auth` becomes genuinely standout, not just competent.
 
-### Phase 9 — Internal Cleanup and Complexity Budget
-**Goal:** Keep the implementation maintainable as the feature set grows.
+### Phase 9 — Post-Cleanup Complexity Discipline
+**Goal:** Prevent `std/auth` from collapsing back into a monolith after the 4.5 cleanup lands.
 
 - [ ] Track auth code size / complexity budget as features land
-- [ ] Split internals into modules when the public API settles:
-  - [ ] `auth/config.rs`
-  - [ ] `auth/session.rs`
-  - [ ] `auth/oauth.rs`
-  - [ ] `auth/providers.rs`
-  - [ ] `auth/security.rs`
-  - [ ] `auth/handlers.rs`
+- [ ] Require new auth work to fit the post-4.5 module boundaries instead of reopening broad grab-bag files
+- [ ] Extend backend contract tests when adding new auth state types, flows, or stores
+- [ ] Treat fallback/error semantics as design-level behavior, not incidental implementation detail
+- [ ] Periodically re-audit whether new features are preserving the intended internal architecture
 
-**Ships real value:** keeps `std/auth` maintainable without delaying earlier wins.
+**Ships real value:** preserves the benefits of the cleanup so future auth work stays understandable instead of slowly regressing.
 
 ## What We Explicitly Won't Do
 
