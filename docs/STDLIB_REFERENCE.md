@@ -1825,9 +1825,13 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`auth_logout`](#authlogout) | Handle logout - clears the session and redirects. |
 | [`auth_me`](#authme) | Return current user as JSON for SPAs. |
 | [`auth_start`](#authstart) | Handle OAuth login start - redirects to the provider's authorization page. |
+| [`begin_auth_challenge`](#beginauthchallenge) | Persist a pending auth challenge and attach the challenge cookie. |
+| [`cancel_auth_challenge`](#cancelauthchallenge) | Cancel the current auth challenge and clear the challenge cookie. |
+| [`complete_auth_challenge`](#completeauthchallenge) | Upgrade the current auth challenge into a full authenticated session. |
 | [`create_session_from_oauth`](#createsessionfromoauth) | Create a session from OAuth user info and tokens. |
 | [`csrf_field`](#csrffield) | Get an HTML hidden input field with the CSRF token. |
 | [`csrf_token`](#csrftoken) | Get the CSRF token for the current session. |
+| [`current_auth_challenge`](#currentauthchallenge) | Get the current staged auth challenge from the request. |
 | [`current_session`](#currentsession) | Get the current session from the request. |
 | [`current_user`](#currentuser) | Get the current authenticated user from the request. |
 | [`enable_auth`](#enableauth) | Initialize the authentication system with OAuth providers. |
@@ -1849,7 +1853,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`require_auth`](#requireauth) | Protect routes with the configured auth session. |
 | [`rotate_session`](#rotatesession) | Rotate the current session ID and attach the new auth cookie to a response. |
 | [`session_data`](#sessiondata) | Get custom data stored in the current session. |
-| [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions, OAuth states, and exchange tokens from the session store. |
+| [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions, auth challenges, OAuth states, and exchange tokens from the session store. |
 | [`set_session`](#setsession) | Store custom data in the current session. |
 | [`sign_in_session`](#signinsession) | Persist a session and attach the auth cookie to an existing response. |
 | [`sign_out_session`](#signoutsession) | Revoke the current session and attach a clearing auth cookie to a response. |
@@ -1972,6 +1976,95 @@ get("/auth/{provider}", auth_start)  // Wire up login routes
 
 ---
 
+#### `begin_auth_challenge`
+
+```ntnt
+begin_auth_challenge(response: Response, challenge: Map) -> Response
+```
+
+Persist a pending auth challenge and attach the challenge cookie.
+
+Use this for staged auth flows like MFA verification, first-login setup, or password reset completion. Challenges are separate from full sessions.
+
+**Parameters:**
+
+- `response` — The Response map to attach the challenge cookie to
+- `challenge` — Challenge data map, including required `subject_id` and `kind`
+
+**Returns:** Response with a persisted auth challenge and Set-Cookie header
+
+**Examples:**
+
+```ntnt
+begin_auth_challenge(redirect("/admin/verify"), map { "subject_id": user.id, "kind": "mfa_pending", "ttl": 1800 })  // Begin a staged auth flow
+```
+
+**See also:** `current_auth_challenge`, `complete_auth_challenge`, `cancel_auth_challenge`
+
+*Since v0.4.9*
+
+---
+
+#### `cancel_auth_challenge`
+
+```ntnt
+cancel_auth_challenge(response: Response, req: Request) -> Response
+```
+
+Cancel the current auth challenge and clear the challenge cookie.
+
+Use this when a staged auth flow is abandoned, fails, or needs to be reset.
+
+**Parameters:**
+
+- `response` — The Response map to attach the clearing cookie to
+- `req` — The current HTTP request
+
+**Returns:** Response with the challenge cookie cleared
+
+**Examples:**
+
+```ntnt
+cancel_auth_challenge(redirect("/login"), req)  // Cancel staged auth
+```
+
+**See also:** `begin_auth_challenge`, `current_auth_challenge`, `complete_auth_challenge`
+
+*Since v0.4.9*
+
+---
+
+#### `complete_auth_challenge`
+
+```ntnt
+complete_auth_challenge(response: Response, req: Request, session?: Map, options?: Map) -> Response
+```
+
+Upgrade the current auth challenge into a full authenticated session.
+
+This consumes the active challenge, creates a real session, attaches the normal auth cookie, and clears the challenge cookie in the same response.
+
+**Parameters:**
+
+- `response` — The Response map to attach cookies to
+- `req` — The current HTTP request
+- `session` — Optional session data map merged onto the completed session
+- `options` — Optional session options like `session_ttl` and cookie overrides
+
+**Returns:** Response with the auth challenge consumed and the session cookie attached
+
+**Examples:**
+
+```ntnt
+complete_auth_challenge(redirect("/admin"), req, map { "claims": map { "role": "admin" } })  // Upgrade staged auth into a session
+```
+
+**See also:** `begin_auth_challenge`, `current_auth_challenge`, `cancel_auth_challenge`, `sign_in_session`
+
+*Since v0.4.9*
+
+---
+
 #### `create_session_from_oauth`
 
 ```ntnt
@@ -2055,6 +2148,34 @@ csrf_token(req)  // Get token for form
 **See also:** `verify_csrf`, `csrf_field`
 
 *Since v0.3.11*
+
+---
+
+#### `current_auth_challenge`
+
+```ntnt
+current_auth_challenge(req: Request) -> Option<AuthChallenge>
+```
+
+Get the current staged auth challenge from the request.
+
+Use this during multi-step auth flows like password -> TOTP or first-login setup. Challenges are distinct from authenticated sessions and do not grant protected-route access on their own.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the active auth challenge or None
+
+**Examples:**
+
+```ntnt
+current_auth_challenge(req)  // Read staged auth state
+```
+
+**See also:** `begin_auth_challenge`, `complete_auth_challenge`, `cancel_auth_challenge`
+
+*Since v0.4.9*
 
 ---
 
@@ -2693,9 +2814,9 @@ session_data(req)  // Get user roles and preferences
 sessions_cleanup() -> Result<Int, String>
 ```
 
-Clean up expired sessions, OAuth states, and exchange tokens from the session store.
+Clean up expired sessions, auth challenges, OAuth states, and exchange tokens from the session store.
 
-Call this periodically (e.g., via a cron job or scheduled task) to remove expired sessions, OAuth states, and exchange tokens from the database. For Redis, these use TTL so they expire automatically, but this will scan for any orphaned entries.
+Call this periodically (e.g., via a cron job or scheduled task) to remove expired sessions, auth challenges, OAuth states, and exchange tokens from the database. For Redis, these use TTL so they expire automatically, but this will scan for any orphaned entries.
 
 **Returns:** Result containing the number of expired entries removed, or error
 
