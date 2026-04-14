@@ -3,7 +3,7 @@
 **Status:** In Progress  
 **Author:** Larri  
 **Date:** 2026-03-20  
-**Branch:** `feat/auth-session-core-v0.4.9` (Phase 2 merged via PR #77)
+**Branch:** `feat/auth-challenges-v0.4.9` (Phase 2 merged via PR #77, Phase 3 merged via PR #78)
 
 ---
 
@@ -60,10 +60,12 @@ This is the single source of truth for how we should build `std/auth` forward. T
 ### Phase 1 — Foundation Mini-Phase
 **Goal:** Establish safe defaults and clear diagnostics without spending too long on lower-leverage convenience work.
 
-- [ ] Production-safe default auth config in `enable_auth`
-- [ ] Startup summary showing providers, routes, session settings, and cookie posture
-- [ ] Typed config validation with actionable errors and typo suggestions
-- [ ] Fatal errors for required missing config, warnings for optional config
+**Result:** Complete. This foundation pass was already shipped and should have been marked done earlier.
+
+- [x] Production-safe default auth config in `enable_auth`
+- [x] Startup summary showing providers, routes, session settings, and cookie posture
+- [x] Typed config validation with actionable errors and typo suggestions
+- [x] Fatal errors for required missing config, warnings for optional config
 
 **Ships real value:** apps get a stable auth floor and much better debugging immediately.
 
@@ -86,7 +88,7 @@ This is the single source of truth for how we should build `std/auth` forward. T
 ### Phase 3 — Session Core and Cookie Helpers
 **Goal:** Remove the most repetitive and error-prone login/logout/session code.
 
-**Status:** In progress on `feat/auth-session-core-v0.4.9`.
+**Result:** Merged in PR #78 (`feat: add auth session helpers`) on 2026-04-13.
 
 - [x] Rotate session ID automatically on successful auth callback/login
 - [x] Invalidate old session ID immediately after rotation
@@ -99,7 +101,7 @@ This is the single source of truth for how we should build `std/auth` forward. T
 - [x] `current_session()` / `current_user()` helper for request-time lookups
 - [x] Shared auth cookie defaults with per-app overrides
 - [x] Centralize cookie posture: name, path, same-site, secure, httpOnly, expiry
-- [ ] Log session rotation events when auth security logging is enabled
+- [x] Defer session rotation event logging until auth security logging exists, tracked in Phase 6
 
 **Possible public API shape:**
 
@@ -120,14 +122,18 @@ return sign_out_session(redirect("/login"), req)
 ### Phase 4 — Staged Auth Primitives
 **Goal:** Make multi-step auth flows first-class instead of hand-rolled.
 
-- [ ] Distinct pending-auth primitive separate from full authenticated sessions
-- [ ] `begin_auth_challenge()` helper
-- [ ] `current_auth_challenge()` helper
-- [ ] `complete_auth_challenge()` helper
-- [ ] `cancel_auth_challenge()` helper
-- [ ] Explicit TTL and one-time-use semantics for challenges
-- [ ] Safe place for minimal staged-auth metadata
-- [ ] No protected-route access until challenge upgrades into a real session
+**Status:** In progress on `feat/auth-challenges-v0.4.9`.
+
+**Initial implementation slice:** ship a distinct pending-auth challenge store and the four core helpers, with one-time completion semantics and session upgrade into the existing Phase 3 helpers. Keep challenge state minimal and isolated from protected-route access.
+
+- [x] Distinct pending-auth primitive separate from full authenticated sessions
+- [x] `begin_auth_challenge()` helper
+- [x] `current_auth_challenge()` helper
+- [x] `complete_auth_challenge()` helper
+- [x] `cancel_auth_challenge()` helper
+- [x] Explicit TTL and one-time-use semantics for challenges
+- [x] Safe place for minimal staged-auth metadata
+- [x] No protected-route access until challenge upgrades into a real session
 - [ ] Works for password → TOTP verification
 - [ ] Works for first login → TOTP setup → forced password change
 - [ ] Works for future MFA and step-up auth flows
