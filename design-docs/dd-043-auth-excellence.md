@@ -3,7 +3,7 @@
 **Status:** In Progress  
 **Author:** Larri  
 **Date:** 2026-03-20  
-**Branch:** `feat/auth-challenges-v0.4.9` (Phase 2 merged via PR #77, Phase 3 merged via PR #78)
+**Branch:** `main` (Phase 2 merged via PR #77, Phase 3 merged via PR #78, Phase 4 core + Phase 4.5A/4.5B refactor merged via PR #81)
 
 ---
 
@@ -122,7 +122,7 @@ return sign_out_session(redirect("/login"), req)
 ### Phase 4 — Staged Auth Primitives
 **Goal:** Make multi-step auth flows first-class instead of hand-rolled.
 
-**Status:** In progress on `feat/auth-challenges-v0.4.9`.
+**Status:** Core staged-auth primitives merged in PR #81 (`feat: add staged auth challenges and split std/auth internals`) on 2026-04-14. The primitive layer is shipped; the concrete app-flow follow-through items below are still open.
 
 **Initial implementation slice:** ship a distinct pending-auth challenge store and the four core helpers, with one-time completion semantics and session upgrade into the existing Phase 3 helpers. Keep challenge state minimal and isolated from protected-route access.
 
@@ -161,6 +161,8 @@ return complete_auth_challenge(resp, req, map {
 ### Phase 4.5 — Auth Internal Architecture Cleanup
 **Goal:** Pay down the structural debt around `std/auth` before more lifecycle, observability, and security features pile onto the current shape.
 
+**Status:** In progress. PR #81 landed the planning/docs pass plus the major module split pass. The next unfinished architecture step is the internal storage contract and shared fallback/error semantics work, followed by the backend contract-test matrix.
+
 **Why now:** Phase 4 shipped the right staged-auth primitives, but it also made a pre-existing architecture issue impossible to ignore: `src/stdlib/auth.rs` is carrying too many responsibilities at once. The risk is not just storage duplication. It is that config parsing, cookie policy, OAuth flow logic, session/challenge persistence, route protection, built-in handlers, JWT/TOTP helpers, and tests are all evolving in one giant file with partially repeated semantics. If we want auth to become world-class instead of merely feature-rich, we should clean up the internal architecture now, while the surface area is still understandable.
 
 **Design principles for this phase:**
@@ -171,10 +173,10 @@ return complete_auth_challenge(resp, req, map {
 - [ ] Optimize for future auth work being easier to review, reason about, and extend
 
 **Workstream A — Internal module boundaries**
-- [ ] Split `src/stdlib/auth.rs` into smaller focused modules without changing the public `std/auth` API surface
-- [ ] Establish a clear internal layout for config, cookies, providers, OAuth flow, storage, sessions, staged auth challenges, middleware/route protection, built-in routes, JWT helpers, and TOTP helpers
-- [ ] Move shared validation and conversion helpers to stable internal homes so they stop drifting across feature work
-- [ ] Keep module boundaries understandable enough that a new contributor can answer “where does this logic live?” quickly and confidently
+- [x] Split `src/stdlib/auth.rs` into smaller focused modules without changing the public `std/auth` API surface
+- [x] Establish a clear internal layout for config, cookies, providers, OAuth flow, storage, sessions, staged auth challenges, middleware/route protection, built-in routes, JWT helpers, and TOTP helpers
+- [x] Move shared validation and conversion helpers to stable internal homes so they stop drifting across feature work
+- [x] Keep module boundaries understandable enough that a new contributor can answer “where does this logic live?” quickly and confidently
 
 **Workstream B — Auth domain model and flow boundaries**
 - [ ] Identify the core auth state transitions that should be treated as domain logic rather than HTTP glue (for example: begin staged auth, consume challenge, rotate session, sign out, exchange OAuth result into session)
@@ -194,14 +196,14 @@ return complete_auth_challenge(resp, req, map {
 - [ ] Re-review Phase 3 and Phase 4 helpers after the refactor to ensure docs, tests, and public behavior still match exactly
 
 **Workstream E — Safety rails for the refactor itself**
-- [ ] Preserve behavior first, then simplify structure, rather than mixing feature changes into the cleanup branch
-- [ ] Write down the intended auth persistence/error/fallback model in the design doc and/or code comments before refactoring the trickiest paths
-- [ ] Use small, reviewable commits or PR slices when possible so architecture cleanup does not become an unreadable mega-diff
-- [ ] Regenerate docs and re-run the full auth validation gate after each meaningful slice, not just at the very end
+- [x] Preserve behavior first, then simplify structure, rather than mixing feature changes into the cleanup branch
+- [x] Write down the intended auth persistence/error/fallback model in the design doc and/or code comments before refactoring the trickiest paths
+- [x] Use small, reviewable commits or PR slices when possible so architecture cleanup does not become an unreadable mega-diff
+- [x] Regenerate docs and re-run the full auth validation gate after each meaningful slice, not just at the very end
 
 **Recommended execution order:**
-- [ ] 4.5A: document the intended internal architecture and fallback/error model before moving code
-- [ ] 4.5B: split modules and relocate helpers with behavior held constant
+- [x] 4.5A: document the intended internal architecture and fallback/error model before moving code
+- [x] 4.5B: split modules and relocate helpers with behavior held constant
 - [ ] 4.5C: introduce the internal storage contract and normalize shared semantics
 - [ ] 4.5D: add/finish backend contract tests and env-gated integration coverage
 - [ ] 4.5E: run a final API/docs behavior audit for all Phase 3 and Phase 4 helpers
@@ -238,10 +240,10 @@ return complete_auth_challenge(resp, req, map {
 - [ ] `auth/value_maps.rs` or equivalent shared conversion helpers — `Session`/`User`/`AuthChallenge` <-> `Value` conversion and typed extraction helpers
 
 **Recommended PR slicing plan:**
-- [ ] PR 4.5A-1: add architecture notes, auth persistence/error/fallback invariants, and TODO anchors without moving behavior yet
+- [x] PR 4.5A-1: add architecture notes, auth persistence/error/fallback invariants, and TODO anchors without moving behavior yet
 - [ ] PR 4.5A-2: add backend contract-test harness that can run against memory/SQLite immediately and Postgres/Redis when env-gated services are available
-- [ ] PR 4.5B-1: move config/cookie/provider/JWT/TOTP helpers into modules with behavior held constant
-- [ ] PR 4.5B-2: move middleware and built-in route glue into modules with no intentional semantic changes
+- [x] PR 4.5B-1: move config/cookie/provider/JWT/TOTP helpers into modules with behavior held constant
+- [x] PR 4.5B-2: move middleware and built-in route glue into modules with no intentional semantic changes
 - [ ] PR 4.5C-1: introduce the internal storage contract for sessions/auth challenges/OAuth states/exchange tokens while preserving existing backend-native implementations
 - [ ] PR 4.5C-2: centralize fallback/error semantics and make each auth state type follow the same documented rules
 - [ ] PR 4.5D-1: add/finish Redis/Postgres integration coverage and cross-backend contract assertions
