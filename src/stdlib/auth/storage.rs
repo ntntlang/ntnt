@@ -1267,3 +1267,221 @@ fn consume_auth_challenge_redis(id: &str) -> std::result::Result<Option<AuthChal
         Ok(None)
     }
 }
+
+/// Cleanup expired auth challenges from the session store
+fn cleanup_expired_auth_challenges_memory(now: i64) -> u64 {
+    let mut store = SESSION_STORE.lock().unwrap();
+    store.cleanup_expired_auth_challenges(now) as u64
+}
+
+pub fn cleanup_expired_auth_challenges() -> std::result::Result<u64, String> {
+    let now = chrono::Utc::now().timestamp();
+    let config = get_auth_config();
+    let store_type = config.as_ref().map(|c| &c.session_store);
+    let memory_count = cleanup_expired_auth_challenges_memory(now);
+
+    match store_type {
+        Some(SessionStore::Sqlite(_)) => {
+            let sqlite_count = cleanup_expired_auth_challenges_sqlite(now)?;
+            Ok(sqlite_count + memory_count)
+        }
+        Some(SessionStore::Postgres(_)) => {
+            let postgres_count = cleanup_expired_auth_challenges_postgres(now)?;
+            Ok(postgres_count + memory_count)
+        }
+        Some(SessionStore::Redis(_)) => {
+            let redis_count = cleanup_expired_auth_challenges_redis(now)?;
+            Ok(redis_count + memory_count)
+        }
+        _ => Ok(memory_count),
+    }
+}
+
+fn cleanup_expired_auth_challenges_sqlite(now: i64) -> std::result::Result<u64, String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+
+    let count = conn
+        .execute(
+            "DELETE FROM auth_challenges WHERE expires_at < ?1",
+            rusqlite::params![now],
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(count as u64)
+}
+
+fn cleanup_expired_auth_challenges_postgres(now: i64) -> std::result::Result<u64, String> {
+    let url_guard = POSTGRES_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
+
+    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let count = client
+        .execute("DELETE FROM auth_challenges WHERE expires_at < $1", &[&now])
+        .map_err(|e| e.to_string())?;
+
+    Ok(count)
+}
+
+fn cleanup_expired_auth_challenges_redis(now: i64) -> std::result::Result<u64, String> {
+    let url_guard = REDIS_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
+
+    let client =
+        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
+    let mut conn = client
+        .get_connection()
+        .map_err(|e| format!("Redis connection error: {}", e))?;
+
+    let mut count = 0u64;
+    let mut cursor = 0u64;
+    loop {
+        let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg("ntnt:auth_challenge:*")
+            .arg("COUNT")
+            .arg(100)
+            .query(&mut conn)
+            .map_err(|e| format!("Redis SCAN error: {}", e))?;
+
+        for key in keys {
+            let result: Option<String> = redis::cmd("GET")
+                .arg(&key)
+                .query(&mut conn)
+                .map_err(|e| format!("Redis GET error: {}", e))?;
+
+            let Some(json_str) = result else {
+                continue;
+            };
+
+            if let Ok(challenge) = auth_challenge_from_json_str(&json_str) {
+                if challenge.expires_at < now {
+                    let _: () = redis::cmd("DEL")
+                        .arg(&key)
+                        .query(&mut conn)
+                        .map_err(|e| format!("Redis DEL error: {}", e))?;
+                    count += 1;
+                }
+            }
+        }
+
+        cursor = new_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    Ok(count)
+}
+
+/// Cleanup expired OAuth states from the session store
+/// OAuth states expire after 10 minutes
+pub fn cleanup_expired_oauth_states() -> std::result::Result<u64, String> {
+    let now = chrono::Utc::now().timestamp();
+    let max_age = 600; // 10 minutes
+    let cutoff = now - max_age;
+
+    let config = get_auth_config();
+    let store_type = config.as_ref().map(|c| &c.session_store);
+
+    match store_type {
+        Some(SessionStore::Sqlite(_)) => cleanup_expired_oauth_states_sqlite(cutoff),
+        Some(SessionStore::Postgres(_)) => cleanup_expired_oauth_states_postgres(cutoff),
+        Some(SessionStore::Redis(_)) => {
+            // Redis OAuth states use TTL, so they expire automatically
+            Ok(0)
+        }
+        _ => {
+            // Memory backend - clean up in-memory store
+            let mut store = SESSION_STORE.lock().unwrap();
+            let count = store.cleanup_expired_oauth_states(cutoff);
+            Ok(count as u64)
+        }
+    }
+}
+
+fn cleanup_expired_oauth_states_sqlite(cutoff: i64) -> std::result::Result<u64, String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+
+    let count = conn
+        .execute(
+            "DELETE FROM auth_oauth_states WHERE created_at < ?1",
+            rusqlite::params![cutoff],
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(count as u64)
+}
+
+fn cleanup_expired_oauth_states_postgres(cutoff: i64) -> std::result::Result<u64, String> {
+    let url_guard = POSTGRES_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
+
+    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+
+    let count = client
+        .execute(
+            "DELETE FROM auth_oauth_states WHERE created_at < $1",
+            &[&cutoff],
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(count)
+}
+
+/// Clean up expired exchange tokens from all backends.
+/// Called by `sessions_cleanup` and the background cleanup thread.
+pub fn cleanup_expired_exchange_tokens() -> std::result::Result<u64, String> {
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - EXCHANGE_TOKEN_TTL;
+
+    let config = get_auth_config();
+    let store_type = config.as_ref().map(|c| &c.session_store);
+
+    match store_type {
+        Some(SessionStore::Sqlite(_)) => cleanup_expired_exchange_tokens_sqlite(cutoff),
+        Some(SessionStore::Postgres(_)) => cleanup_expired_exchange_tokens_postgres(cutoff),
+        Some(SessionStore::Redis(_)) => {
+            // Redis exchange tokens use SETEX TTL, so they expire automatically
+            Ok(0)
+        }
+        _ => {
+            // Memory backend
+            let mut store = SESSION_STORE.lock().unwrap();
+            let count = store.cleanup_expired_exchange_tokens(now);
+            Ok(count as u64)
+        }
+    }
+}
+
+fn cleanup_expired_exchange_tokens_sqlite(cutoff: i64) -> std::result::Result<u64, String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+
+    let count = conn
+        .execute(
+            "DELETE FROM auth_exchange_tokens WHERE created_at < ?1",
+            rusqlite::params![cutoff],
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(count as u64)
+}
+
+fn cleanup_expired_exchange_tokens_postgres(cutoff: i64) -> std::result::Result<u64, String> {
+    let url_guard = POSTGRES_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
+
+    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+
+    let count = client
+        .execute(
+            "DELETE FROM auth_exchange_tokens WHERE created_at < $1",
+            &[&cutoff],
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(count)
+}
