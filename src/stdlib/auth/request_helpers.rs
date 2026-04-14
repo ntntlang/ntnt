@@ -161,8 +161,59 @@ pub fn auth_challenge_to_value(challenge: &AuthChallenge) -> Value {
 // SECTION 8: Route Handlers
 // ============================================================================
 
+fn parse_canonical_site_url(site_url: &str) -> Option<(String, String)> {
+    let trimmed = site_url.trim();
+    let (proto, remainder) = if let Some(rest) = trimmed.strip_prefix("https://") {
+        ("https".to_string(), rest)
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        ("http".to_string(), rest)
+    } else {
+        return None;
+    };
+
+    let host = remainder.split('/').next()?.trim();
+    if host.is_empty()
+        || !host
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':' | '[' | ']'))
+    {
+        return None;
+    }
+
+    Some((host.to_string(), proto))
+}
+
+fn normalized_proto(proto: &str) -> Option<String> {
+    let trimmed = proto.trim();
+    if trimmed.eq_ignore_ascii_case("https") {
+        Some("https".to_string())
+    } else if trimmed.eq_ignore_ascii_case("http") {
+        Some("http".to_string())
+    } else {
+        None
+    }
+}
+
+fn normalized_host(host: &str) -> Option<String> {
+    let trimmed = host.trim();
+    if trimmed.is_empty()
+        || !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':' | '[' | ']'))
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 /// Helper to get host and protocol from request
 pub(super) fn get_host_and_proto(req: &Value) -> (String, String) {
+    if let Ok(site_url) = std::env::var("SITE_URL") {
+        if let Some((host, proto)) = parse_canonical_site_url(&site_url) {
+            return (host, proto);
+        }
+    }
+
     if let Value::Map(req_map) = req {
         let host = req_map
             .get("headers")
@@ -170,7 +221,7 @@ pub(super) fn get_host_and_proto(req: &Value) -> (String, String) {
                 if let Value::Map(headers) = h {
                     headers.get("host").and_then(|v| {
                         if let Value::String(s) = v {
-                            Some(s.clone())
+                            normalized_host(s)
                         } else {
                             None
                         }
@@ -182,19 +233,28 @@ pub(super) fn get_host_and_proto(req: &Value) -> (String, String) {
             .unwrap_or_else(|| "localhost:8080".to_string());
 
         let proto = req_map
-            .get("headers")
-            .and_then(|h| {
-                if let Value::Map(headers) = h {
-                    headers.get("x-forwarded-proto").and_then(|v| {
-                        if let Value::String(s) = v {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    })
+            .get("protocol")
+            .and_then(|v| {
+                if let Value::String(s) = v {
+                    normalized_proto(s)
                 } else {
                     None
                 }
+            })
+            .or_else(|| {
+                req_map.get("headers").and_then(|h| {
+                    if let Value::Map(headers) = h {
+                        headers.get("x-forwarded-proto").and_then(|v| {
+                            if let Value::String(s) = v {
+                                normalized_proto(s)
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                })
             })
             .unwrap_or_else(|| {
                 if host.contains("localhost") || host.starts_with("127.") {

@@ -1,14 +1,8 @@
 use super::*;
 
 pub(super) fn json_to_value_map(json: &serde_json::Value) -> Result<HashMap<String, Value>> {
-    match json {
-        serde_json::Value::Object(obj) => {
-            let mut map = HashMap::new();
-            for (key, val) in obj {
-                map.insert(key.clone(), json_to_value(val));
-            }
-            Ok(map)
-        }
+    match crate::stdlib::json::json_to_intent_value(json) {
+        Value::Map(map) => Ok(map),
         _ => Err(IntentError::type_error("Expected JSON object".to_string())),
     }
 }
@@ -24,48 +18,11 @@ pub(super) fn json_map_to_value_map(
 }
 
 fn json_to_value(json: &serde_json::Value) -> Value {
-    match json {
-        serde_json::Value::Null => make_none(),
-        serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float(f)
-            } else {
-                Value::String(n.to_string())
-            }
-        }
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(arr) => Value::Array(arr.iter().map(json_to_value).collect()),
-        serde_json::Value::Object(obj) => {
-            let mut map = HashMap::new();
-            for (key, val) in obj {
-                map.insert(key.clone(), json_to_value(val));
-            }
-            Value::Map(map)
-        }
-    }
+    crate::stdlib::json::json_to_intent_value(json)
 }
 
 pub(super) fn value_to_json(value: &Value) -> serde_json::Value {
-    match value {
-        Value::Unit => serde_json::Value::Null,
-        Value::EnumValue { variant, .. } if variant == "None" => serde_json::Value::Null,
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Int(i) => serde_json::Value::Number((*i).into()),
-        Value::Float(f) => serde_json::json!(*f),
-        Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Array(arr) => serde_json::Value::Array(arr.iter().map(value_to_json).collect()),
-        Value::Map(map) => {
-            let obj: serde_json::Map<String, serde_json::Value> = map
-                .iter()
-                .map(|(k, v)| (k.clone(), value_to_json(v)))
-                .collect();
-            serde_json::Value::Object(obj)
-        }
-        _ => serde_json::Value::Null,
-    }
+    crate::stdlib::json::intent_value_to_json(value)
 }
 
 pub(super) fn value_map_to_json_string(map: &HashMap<String, Value>) -> String {

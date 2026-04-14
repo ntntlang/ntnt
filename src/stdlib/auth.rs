@@ -4925,6 +4925,76 @@ mod tests {
     }
 
     #[test]
+    fn test_value_to_json_uses_canonical_option_and_struct_conversion() {
+        let some = Value::some(Value::String("hi".to_string()));
+        assert_eq!(
+            value_to_json(&some),
+            serde_json::Value::String("hi".to_string())
+        );
+
+        let structured = Value::Struct {
+            name: "User".to_string(),
+            fields: HashMap::from([(
+                "email".to_string(),
+                Value::String("alice@example.com".to_string()),
+            )]),
+        };
+        assert_eq!(
+            value_to_json(&structured),
+            serde_json::json!({ "email": "alice@example.com" })
+        );
+    }
+
+    #[test]
+    fn test_get_host_and_proto_prefers_request_protocol_field() {
+        let req = Value::Map(HashMap::from([
+            ("protocol".to_string(), Value::String("https".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([
+                    ("host".to_string(), Value::String("example.com".to_string())),
+                    (
+                        "x-forwarded-proto".to_string(),
+                        Value::String("http".to_string()),
+                    ),
+                ])),
+            ),
+        ]));
+
+        assert_eq!(
+            get_host_and_proto(&req),
+            ("example.com".to_string(), "https".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_host_and_proto_prefers_site_url_when_present() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let previous = std::env::var("SITE_URL").ok();
+        unsafe {
+            std::env::set_var("SITE_URL", "https://canonical.example.com/app");
+        }
+
+        let req = Value::Map(HashMap::from([(
+            "headers".to_string(),
+            Value::Map(HashMap::from([(
+                "host".to_string(),
+                Value::String("attacker.example.com".to_string()),
+            )])),
+        )]));
+
+        assert_eq!(
+            get_host_and_proto(&req),
+            ("canonical.example.com".to_string(), "https".to_string())
+        );
+
+        match previous {
+            Some(val) => unsafe { std::env::set_var("SITE_URL", val) },
+            None => unsafe { std::env::remove_var("SITE_URL") },
+        }
+    }
+
+    #[test]
     fn test_enforce_auth_for_request_skips_auth_routes_even_when_forced() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_protected_paths();

@@ -1,5 +1,7 @@
 use super::*;
 
+const NTNT_USER_AGENT: &str = concat!("NTNT/", env!("CARGO_PKG_VERSION"));
+
 /// Extract user info from provider response or ID token
 pub(super) fn extract_user_info(
     provider: &str,
@@ -320,7 +322,7 @@ pub fn exchange_code_for_tokens(
     let response = client
         .post(&provider.token_url)
         .header("Accept", "application/json")
-        .header("User-Agent", "NTNT/0.3.13") // Required by GitHub
+        .header("User-Agent", NTNT_USER_AGENT) // Required by GitHub
         .form(&params)
         .send()
         .map_err(|e| IntentError::runtime_error(format!("[auth] Token exchange failed: {}", e)))?;
@@ -670,7 +672,7 @@ pub fn fetch_userinfo(
         .get(&provider.userinfo_url)
         .header("Authorization", format!("Bearer {}", access_token))
         .header("Accept", "application/json")
-        .header("User-Agent", "NTNT/0.3.13") // Required by GitHub
+        .header("User-Agent", NTNT_USER_AGENT) // Required by GitHub
         .send()
         .map_err(|e| {
             IntentError::runtime_error(format!("[auth] Userinfo request failed: {}", e))
