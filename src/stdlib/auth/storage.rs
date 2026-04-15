@@ -163,6 +163,9 @@ pub(super) fn cleanup_expired_auth_challenge_records(now: i64) -> std::result::R
 }
 
 pub(super) fn cleanup_expired_oauth_state_records(cutoff: i64) -> std::result::Result<u64, String> {
+    // TODO(4.5C-2): when a non-memory backend falls back to SESSION_STORE during
+    // write/read errors, make cleanup semantics explicit and consistent across all
+    // record families instead of leaving oauth-state memory cleanup backend-specific.
     match active_auth_storage_backend() {
         AuthStorageBackend::Sqlite => cleanup_expired_oauth_states_sqlite(cutoff),
         AuthStorageBackend::Postgres => cleanup_expired_oauth_states_postgres(cutoff),
@@ -175,6 +178,9 @@ pub(super) fn cleanup_expired_oauth_state_records(cutoff: i64) -> std::result::R
 }
 
 pub(super) fn cleanup_expired_exchange_token_records(now: i64) -> std::result::Result<u64, String> {
+    // TODO(4.5C-2): when a non-memory backend falls back to SESSION_STORE during
+    // write/read errors, make cleanup semantics explicit and consistent across all
+    // record families instead of leaving exchange-token memory cleanup backend-specific.
     let cutoff = now - EXCHANGE_TOKEN_TTL;
     match active_auth_storage_backend() {
         AuthStorageBackend::Sqlite => cleanup_expired_exchange_tokens_sqlite(cutoff),
@@ -309,6 +315,9 @@ fn store_oauth_state_redis(state: &OAuthState) -> std::result::Result<(), String
 
 /// Retrieve and consume OAuth state
 pub fn consume_oauth_state(state: &str) -> Option<OAuthState> {
+    // TODO(4.5C-2): the memory fallback path below uses InMemoryStore lookups,
+    // which only become TTL-safe after cleanup runs. Backend-native consume paths
+    // enforce expiry atomically, so fallback semantics still need normalization.
     match active_auth_storage_backend() {
         AuthStorageBackend::Memory => consume_oauth_state_record(state).ok().flatten(),
         _ => consume_oauth_state_record(state)
@@ -536,6 +545,9 @@ fn store_exchange_token_redis(token: &str, session_id: &str) -> std::result::Res
 /// Consume an exchange token, returning the associated session ID.
 /// The token is deleted after retrieval (one-time use).
 pub(super) fn consume_exchange_token(token: &str) -> Option<String> {
+    // TODO(4.5C-2): the memory fallback path below uses InMemoryStore lookups,
+    // which only become TTL-safe after cleanup runs. Backend-native consume paths
+    // enforce expiry atomically, so fallback semantics still need normalization.
     match active_auth_storage_backend() {
         AuthStorageBackend::Memory => consume_exchange_token_record(token).ok().flatten(),
         _ => consume_exchange_token_record(token)
@@ -1684,7 +1696,19 @@ fn store_session_postgres(session: &Session) -> std::result::Result<(), String> 
           access_token, refresh_token, token_expires_at, created_at, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT (id) DO UPDATE SET
-            access_token = $10, refresh_token = $11, token_expires_at = $12",
+            user_id = EXCLUDED.user_id,
+            provider = EXCLUDED.provider,
+            email = EXCLUDED.email,
+            name = EXCLUDED.name,
+            picture = EXCLUDED.picture,
+            raw_json = EXCLUDED.raw_json,
+            data_json = EXCLUDED.data_json,
+            csrf_token = EXCLUDED.csrf_token,
+            access_token = EXCLUDED.access_token,
+            refresh_token = EXCLUDED.refresh_token,
+            token_expires_at = EXCLUDED.token_expires_at,
+            created_at = EXCLUDED.created_at,
+            expires_at = EXCLUDED.expires_at",
             &[
                 &session.id,
                 &session.user_id,
@@ -2522,7 +2546,7 @@ fn get_sessions_for_user_postgres(
         )
         .map_err(|e| e.to_string())?;
 
-    let mut sessions: Vec<SessionInfo> = rows
+    let sessions: Vec<SessionInfo> = rows
         .iter()
         .map(|row| SessionInfo {
             id: row.get(0),
@@ -2535,14 +2559,6 @@ fn get_sessions_for_user_postgres(
                 .unwrap_or(false),
         })
         .collect();
-
-    if let Some(current_id) = current_session_id {
-        for session in &mut sessions {
-            if session.id == current_id {
-                session.is_current = true;
-            }
-        }
-    }
 
     Ok(sessions)
 }

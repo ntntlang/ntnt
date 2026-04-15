@@ -4435,9 +4435,12 @@ mod tests {
     fn test_auth_storage_contract_sqlite_round_trip_all_record_types() {
         use super::storage::{
             cleanup_expired_auth_challenge_records, cleanup_expired_exchange_token_records,
-            cleanup_expired_oauth_state_records, get_auth_challenge_record, get_session_record,
-            store_auth_challenge_record, store_exchange_token_record, store_oauth_state_record,
-            store_session_record,
+            cleanup_expired_oauth_state_records, delete_all_session_records_for_user,
+            delete_session_record, extend_session_record_expiry, get_auth_challenge_record,
+            get_refreshable_session_record, get_session_record, list_session_records_for_user,
+            migrate_session_record, store_auth_challenge_record, store_exchange_token_record,
+            store_oauth_state_record, store_session_record, update_session_record_data,
+            update_session_record_tokens,
         };
 
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
@@ -4469,6 +4472,109 @@ mod tests {
                 .id,
             session.id
         );
+        update_session_record_data(&session.id, r#"{"role":"admin"}"#)
+            .expect("sqlite session data update should succeed");
+        update_session_record_tokens(
+            &session.id,
+            &TokenResponse {
+                access_token: "access-sqlite-2".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: Some(120),
+                refresh_token: Some("refresh-sqlite-2".to_string()),
+                id_token: None,
+                scope: None,
+            },
+            now,
+        )
+        .expect("sqlite session token update should succeed");
+        extend_session_record_expiry(&session.id, now + 600)
+            .expect("sqlite session expiry extension should succeed");
+        let updated_session = get_session_record(&session.id)
+            .expect("sqlite updated session lookup should succeed")
+            .expect("sqlite updated session should exist");
+        assert_eq!(updated_session.data_json, r#"{"role":"admin"}"#);
+        assert_eq!(
+            updated_session.access_token.as_deref(),
+            Some("access-sqlite-2")
+        );
+        assert_eq!(
+            updated_session.refresh_token.as_deref(),
+            Some("refresh-sqlite-2")
+        );
+        assert_eq!(updated_session.token_expires_at, Some(now + 120));
+        assert_eq!(updated_session.expires_at, now + 600);
+
+        let refreshable_session = Session {
+            id: "session-sqlite-refreshable".to_string(),
+            user_id: "user-sqlite".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-sqlite-refreshable".to_string(),
+            access_token: Some("access-refreshable".to_string()),
+            refresh_token: Some("refresh-refreshable".to_string()),
+            token_expires_at: Some(now - 30),
+            created_at: now - 30,
+            expires_at: now - 5,
+        };
+        store_session_record(&refreshable_session)
+            .expect("sqlite refreshable session store should succeed");
+        assert_eq!(
+            get_refreshable_session_record(&refreshable_session.id, 3600)
+                .expect("sqlite refreshable lookup should succeed")
+                .expect("sqlite refreshable session should exist")
+                .id,
+            refreshable_session.id
+        );
+
+        let rotated_session = Session {
+            id: "session-sqlite-rotated".to_string(),
+            csrf_token: "csrf-sqlite-rotated".to_string(),
+            ..updated_session.clone()
+        };
+        migrate_session_record(&session.id, &rotated_session)
+            .expect("sqlite session migration should succeed");
+        assert!(get_session_record(&session.id)
+            .expect("sqlite old session lookup should succeed")
+            .is_none());
+        assert_eq!(
+            get_session_record(&rotated_session.id)
+                .expect("sqlite rotated session lookup should succeed")
+                .expect("sqlite rotated session should exist")
+                .csrf_token,
+            "csrf-sqlite-rotated"
+        );
+        let listed_sessions =
+            list_session_records_for_user("user-sqlite", Some(&rotated_session.id), now)
+                .expect("sqlite session listing should succeed");
+        assert_eq!(listed_sessions.len(), 1);
+        assert_eq!(
+            listed_sessions
+                .iter()
+                .filter(|session| session.is_current)
+                .count(),
+            1
+        );
+        assert!(listed_sessions
+            .iter()
+            .any(|session| session.id == rotated_session.id && session.is_current));
+        assert_eq!(
+            delete_all_session_records_for_user("user-sqlite", Some(&rotated_session.id))
+                .expect("sqlite delete-all sessions should succeed"),
+            1
+        );
+        let remaining_sessions =
+            list_session_records_for_user("user-sqlite", Some(&rotated_session.id), now)
+                .expect("sqlite remaining session listing should succeed");
+        assert_eq!(remaining_sessions.len(), 1);
+        assert_eq!(remaining_sessions[0].id, rotated_session.id);
+        delete_session_record(&rotated_session.id).expect("sqlite session delete should succeed");
+        assert!(get_session_record(&rotated_session.id)
+            .expect("sqlite deleted session lookup should succeed")
+            .is_none());
 
         let oauth_state = OAuthState {
             state: "oauth-sqlite-active".to_string(),
