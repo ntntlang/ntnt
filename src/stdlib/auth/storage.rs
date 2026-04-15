@@ -18,6 +18,21 @@ pub(super) fn active_auth_storage_backend() -> AuthStorageBackend {
     }
 }
 
+// ============================================================================
+// Internal Auth Storage Contract (Phase 4.5C-1)
+// ============================================================================
+// These helpers are the contract boundary between auth lifecycle code and the
+// active backend's native implementation. They intentionally cover all current
+// auth record families:
+// - sessions
+// - staged auth challenges
+// - OAuth states
+// - session exchange tokens
+//
+// Higher-level helpers still own fallback/error behavior for now. This layer is
+// responsible only for routing each operation through a consistent per-record
+// contract while preserving backend-native atomicity and query shape.
+
 pub(super) fn store_oauth_state_record(state: &OAuthState) -> std::result::Result<(), String> {
     match active_auth_storage_backend() {
         AuthStorageBackend::Sqlite => store_oauth_state_sqlite(state),
@@ -1448,13 +1463,8 @@ fn cleanup_expired_exchange_tokens_postgres(cutoff: i64) -> std::result::Result<
     Ok(count)
 }
 
-// ============================================================================
-// Session Store Contract (Phase 4.5C-1)
-// ============================================================================
-// These helpers define the primary-store operations for session persistence without
-// changing higher-level fallback behavior yet. Public session APIs in `sessions.rs`
-// still decide when to degrade to the in-memory fallback; this layer only provides
-// a consistent contract for the active backend's native implementation.
+// Session-specific operations live in the same contract layer for now, even
+// though session lifecycle orchestration still lives in `sessions.rs`.
 
 pub(super) fn store_session_record(session: &Session) -> std::result::Result<(), String> {
     match active_auth_storage_backend() {

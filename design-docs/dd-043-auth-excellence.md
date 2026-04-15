@@ -161,7 +161,7 @@ return complete_auth_challenge(resp, req, map {
 ### Phase 4.5 — Auth Internal Architecture Cleanup
 **Goal:** Pay down the structural debt around `std/auth` before more lifecycle, observability, and security features pile onto the current shape.
 
-**Status:** In progress. PR #81 landed the planning/docs pass plus the major module split pass. The next unfinished architecture step is the internal storage contract and shared fallback/error semantics work, followed by the backend contract-test matrix.
+**Status:** In progress. PR #81 landed the planning/docs pass plus the major module split pass, and PR 4.5C-1 now carries the internal storage contract across sessions, staged auth challenges, OAuth states, and exchange tokens. The next unfinished architecture step is shared fallback/error semantics work, followed by the backend contract-test matrix.
 
 **Why now:** Phase 4 shipped the right staged-auth primitives, but it also made a pre-existing architecture issue impossible to ignore: `src/stdlib/auth.rs` is carrying too many responsibilities at once. The risk is not just storage duplication. It is that config parsing, cookie policy, OAuth flow logic, session/challenge persistence, route protection, built-in handlers, JWT/TOTP helpers, and tests are all evolving in one giant file with partially repeated semantics. If we want auth to become world-class instead of merely feature-rich, we should clean up the internal architecture now, while the surface area is still understandable.
 
@@ -184,7 +184,7 @@ return complete_auth_challenge(resp, req, map {
 - [ ] Normalize the lifecycle vocabulary across sessions, auth challenges, OAuth states, and exchange tokens so store/get/consume/delete/cleanup semantics are easier to compare and reason about
 
 **Workstream C — Internal persistence contract**
-- [ ] Extract a clearer internal auth storage abstraction so session, auth-challenge, OAuth-state, and exchange-token behavior is easier to keep consistent across SQLite/Postgres/Redis and memory fallback paths
+- [x] Extract a clearer internal auth storage abstraction so session, auth-challenge, OAuth-state, and exchange-token behavior is easier to keep consistent across SQLite/Postgres/Redis and memory fallback paths
 - [ ] Define one intentional place for fallback/error semantics instead of letting each code path decide ad hoc whether backend failures should surface, degrade to memory, or return `None`
 - [ ] Reduce copy-pasted backend logic where the operation shape is truly shared, while preserving backend-native implementations where atomicity or query shape genuinely differs
 - [ ] Revisit cleanup responsibilities so memory, SQLite, Postgres, and Redis all follow the same mental model even if the implementation details differ
@@ -204,7 +204,7 @@ return complete_auth_challenge(resp, req, map {
 **Recommended execution order:**
 - [x] 4.5A: document the intended internal architecture and fallback/error model before moving code
 - [x] 4.5B: split modules and relocate helpers with behavior held constant
-- [ ] 4.5C: introduce the internal storage contract and normalize shared semantics
+- [ ] 4.5C: introduce the internal storage contract and normalize shared semantics (4.5C-1 done, 4.5C-2 next)
 - [ ] 4.5D: add/finish backend contract tests and env-gated integration coverage
 - [ ] 4.5E: run a final API/docs behavior audit for all Phase 3 and Phase 4 helpers
 
@@ -247,7 +247,7 @@ return complete_auth_challenge(resp, req, map {
 - [ ] PR 4.5A-2: add backend contract-test harness that can run against memory/SQLite immediately and Postgres/Redis when env-gated services are available
 - [x] PR 4.5B-1: move config/cookie/provider/JWT/TOTP helpers into modules with behavior held constant
 - [x] PR 4.5B-2: move middleware and built-in route glue into modules with no intentional semantic changes
-- [ ] PR 4.5C-1: introduce the internal storage contract for sessions/auth challenges/OAuth states/exchange tokens while preserving existing backend-native implementations
+- [x] PR 4.5C-1: introduce the internal storage contract for sessions/auth challenges/OAuth states/exchange tokens while preserving existing backend-native implementations
 - [ ] PR 4.5C-2: centralize fallback/error semantics and make each auth state type follow the same documented rules
 - [ ] PR 4.5D-1: add/finish Redis/Postgres integration coverage and cross-backend contract assertions
 - [ ] PR 4.5E-1: final audit PR for docs generation, public API parity, and cleanup of temporary compatibility shims
