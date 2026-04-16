@@ -4219,6 +4219,125 @@ mod tests {
     }
 
     #[test]
+    fn test_oauth_state_backend_error_uses_ttl_checked_memory_fallback() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let now = chrono::Utc::now().timestamp();
+        SESSION_STORE.lock().unwrap().set_oauth_state(OAuthState {
+            state: "oauth-memory-fallback-active".to_string(),
+            nonce: None,
+            pkce_verifier: None,
+            provider: "github".to_string(),
+            redirect_url: "/auth/callback".to_string(),
+            created_at: now,
+        });
+        *SQLITE_CONN.lock().unwrap() = None;
+
+        let consumed = consume_oauth_state("oauth-memory-fallback-active")
+            .expect("memory fallback oauth state should be returned");
+        assert_eq!(consumed.state, "oauth-memory-fallback-active");
+        assert!(consume_oauth_state("oauth-memory-fallback-active").is_none());
+
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+        SESSION_STORE.lock().unwrap().set_oauth_state(OAuthState {
+            state: "oauth-memory-fallback-expired".to_string(),
+            nonce: None,
+            pkce_verifier: None,
+            provider: "github".to_string(),
+            redirect_url: "/auth/callback".to_string(),
+            created_at: now - 700,
+        });
+        *SQLITE_CONN.lock().unwrap() = None;
+
+        assert!(consume_oauth_state("oauth-memory-fallback-expired").is_none());
+    }
+
+    #[test]
+    fn test_exchange_token_backend_error_uses_ttl_checked_memory_fallback() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let now = chrono::Utc::now().timestamp();
+        SESSION_STORE.lock().unwrap().set_exchange_token(
+            "exchange-memory-fallback-active".to_string(),
+            "session-fallback-active".to_string(),
+        );
+        *SQLITE_CONN.lock().unwrap() = None;
+
+        assert_eq!(
+            consume_exchange_token("exchange-memory-fallback-active").as_deref(),
+            Some("session-fallback-active")
+        );
+        assert!(consume_exchange_token("exchange-memory-fallback-active").is_none());
+
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+        SESSION_STORE.lock().unwrap().exchange_tokens.insert(
+            "exchange-memory-fallback-expired".to_string(),
+            (
+                "session-fallback-expired".to_string(),
+                now - EXCHANGE_TOKEN_TTL - 1,
+            ),
+        );
+        *SQLITE_CONN.lock().unwrap() = None;
+
+        assert!(consume_exchange_token("exchange-memory-fallback-expired").is_none());
+    }
+
+    #[test]
+    fn test_oauth_and_exchange_cleanup_also_scrub_memory_fallback_for_non_memory_backends() {
+        use super::storage::{
+            cleanup_expired_exchange_token_records, cleanup_expired_oauth_state_records,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let now = chrono::Utc::now().timestamp();
+        let cutoff = now - 600;
+        let mut store = SESSION_STORE.lock().unwrap();
+        store.set_oauth_state(OAuthState {
+            state: "oauth-memory-cleanup".to_string(),
+            nonce: None,
+            pkce_verifier: None,
+            provider: "github".to_string(),
+            redirect_url: "/auth/callback".to_string(),
+            created_at: now - 700,
+        });
+        store.exchange_tokens.insert(
+            "exchange-memory-cleanup".to_string(),
+            ("session-cleanup".to_string(), now - EXCHANGE_TOKEN_TTL - 1),
+        );
+        drop(store);
+
+        assert_eq!(
+            cleanup_expired_oauth_state_records(cutoff)
+                .expect("oauth state cleanup should succeed"),
+            1
+        );
+        assert_eq!(
+            cleanup_expired_exchange_token_records(now)
+                .expect("exchange token cleanup should succeed"),
+            1
+        );
+        assert!(SESSION_STORE
+            .lock()
+            .unwrap()
+            .get_oauth_state("oauth-memory-cleanup")
+            .is_none());
+        assert!(SESSION_STORE
+            .lock()
+            .unwrap()
+            .get_exchange_token("exchange-memory-cleanup")
+            .is_none());
+    }
+
+    #[test]
     fn test_auth_storage_contract_memory_round_trip_all_record_types() {
         use super::storage::{
             cleanup_expired_auth_challenge_records, cleanup_expired_exchange_token_records,

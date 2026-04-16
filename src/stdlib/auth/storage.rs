@@ -18,6 +18,43 @@ pub(super) fn active_auth_storage_backend() -> AuthStorageBackend {
     }
 }
 
+fn take_oauth_state_memory(state: &str) -> Option<OAuthState> {
+    let now = chrono::Utc::now().timestamp();
+    let min_created = now - 600;
+    let mut store = SESSION_STORE.lock().unwrap();
+
+    match store.oauth_states.get(state) {
+        Some(oauth_state) if oauth_state.created_at > min_created => {
+            let oauth_state = oauth_state.clone();
+            store.delete_oauth_state(state);
+            Some(oauth_state)
+        }
+        Some(_) => {
+            store.delete_oauth_state(state);
+            None
+        }
+        None => None,
+    }
+}
+
+fn take_exchange_token_memory(token: &str) -> Option<String> {
+    let now = chrono::Utc::now().timestamp();
+    let mut store = SESSION_STORE.lock().unwrap();
+
+    match store.exchange_tokens.get(token) {
+        Some((session_id, created_at)) if *created_at > now - EXCHANGE_TOKEN_TTL => {
+            let session_id = session_id.clone();
+            store.delete_exchange_token(token);
+            Some(session_id)
+        }
+        Some(_) => {
+            store.delete_exchange_token(token);
+            None
+        }
+        None => None,
+    }
+}
+
 // ============================================================================
 // Internal Auth Storage Contract (Phase 4.5C-1)
 // ============================================================================
@@ -32,6 +69,18 @@ pub(super) fn active_auth_storage_backend() -> AuthStorageBackend {
 // Higher-level helpers still own fallback/error behavior for now. This layer is
 // responsible only for routing each operation through a consistent per-record
 // contract while preserving backend-native atomicity and query shape.
+//
+// Canonical fallback/error policy (Phase 4.5C-2):
+// - sessions: fallback to memory on store/get/list/delete-all backend failures; do not
+//   silently mask explicit mutation or migration failures
+// - auth challenges: fallback to memory on store/get/consume backend failures and always
+//   scrub memory fallback entries during cleanup
+// - OAuth states: fallback to memory on store/consume backend failures and always scrub
+//   memory fallback entries during cleanup; fallback consume must enforce the same TTL as
+//   backend-native consume paths
+// - exchange tokens: fallback to memory on store/consume backend failures and always scrub
+//   memory fallback entries during cleanup; fallback consume must enforce the same TTL as
+//   backend-native consume paths
 
 pub(super) fn store_oauth_state_record(state: &OAuthState) -> std::result::Result<(), String> {
     match active_auth_storage_backend() {
@@ -52,14 +101,7 @@ pub(super) fn consume_oauth_state_record(
         AuthStorageBackend::Sqlite => consume_oauth_state_sqlite(state),
         AuthStorageBackend::Postgres => consume_oauth_state_postgres(state),
         AuthStorageBackend::Redis => consume_oauth_state_redis(state),
-        AuthStorageBackend::Memory => {
-            let mut store = SESSION_STORE.lock().unwrap();
-            let oauth_state = store.get_oauth_state(state).cloned();
-            if oauth_state.is_some() {
-                store.delete_oauth_state(state);
-            }
-            Ok(oauth_state)
-        }
+        AuthStorageBackend::Memory => Ok(take_oauth_state_memory(state)),
     }
 }
 
@@ -88,14 +130,7 @@ pub(super) fn consume_exchange_token_record(
         AuthStorageBackend::Sqlite => consume_exchange_token_sqlite(token),
         AuthStorageBackend::Postgres => consume_exchange_token_postgres(token),
         AuthStorageBackend::Redis => consume_exchange_token_redis(token),
-        AuthStorageBackend::Memory => {
-            let mut store = SESSION_STORE.lock().unwrap();
-            let session_id = store.get_exchange_token(token).cloned();
-            if session_id.is_some() {
-                store.delete_exchange_token(token);
-            }
-            Ok(session_id)
-        }
+        AuthStorageBackend::Memory => Ok(take_exchange_token_memory(token)),
     }
 }
 
@@ -163,14 +198,24 @@ pub(super) fn cleanup_expired_auth_challenge_records(now: i64) -> std::result::R
 }
 
 pub(super) fn cleanup_expired_oauth_state_records(cutoff: i64) -> std::result::Result<u64, String> {
-    // TODO(4.5C-2): when a non-memory backend falls back to SESSION_STORE during
-    // write/read errors, make cleanup semantics explicit and consistent across all
-    // record families instead of leaving oauth-state memory cleanup backend-specific.
     match active_auth_storage_backend() {
-        AuthStorageBackend::Sqlite => cleanup_expired_oauth_states_sqlite(cutoff),
-        AuthStorageBackend::Postgres => cleanup_expired_oauth_states_postgres(cutoff),
-        AuthStorageBackend::Redis => Ok(0),
         AuthStorageBackend::Memory => {
+            let mut store = SESSION_STORE.lock().unwrap();
+            Ok(store.cleanup_expired_oauth_states(cutoff) as u64)
+        }
+        AuthStorageBackend::Sqlite => {
+            let backend_count = cleanup_expired_oauth_states_sqlite(cutoff)?;
+            let mut store = SESSION_STORE.lock().unwrap();
+            let memory_count = store.cleanup_expired_oauth_states(cutoff) as u64;
+            Ok(backend_count + memory_count)
+        }
+        AuthStorageBackend::Postgres => {
+            let backend_count = cleanup_expired_oauth_states_postgres(cutoff)?;
+            let mut store = SESSION_STORE.lock().unwrap();
+            let memory_count = store.cleanup_expired_oauth_states(cutoff) as u64;
+            Ok(backend_count + memory_count)
+        }
+        AuthStorageBackend::Redis => {
             let mut store = SESSION_STORE.lock().unwrap();
             Ok(store.cleanup_expired_oauth_states(cutoff) as u64)
         }
@@ -178,15 +223,25 @@ pub(super) fn cleanup_expired_oauth_state_records(cutoff: i64) -> std::result::R
 }
 
 pub(super) fn cleanup_expired_exchange_token_records(now: i64) -> std::result::Result<u64, String> {
-    // TODO(4.5C-2): when a non-memory backend falls back to SESSION_STORE during
-    // write/read errors, make cleanup semantics explicit and consistent across all
-    // record families instead of leaving exchange-token memory cleanup backend-specific.
     let cutoff = now - EXCHANGE_TOKEN_TTL;
     match active_auth_storage_backend() {
-        AuthStorageBackend::Sqlite => cleanup_expired_exchange_tokens_sqlite(cutoff),
-        AuthStorageBackend::Postgres => cleanup_expired_exchange_tokens_postgres(cutoff),
-        AuthStorageBackend::Redis => Ok(0),
         AuthStorageBackend::Memory => {
+            let mut store = SESSION_STORE.lock().unwrap();
+            Ok(store.cleanup_expired_exchange_tokens(now) as u64)
+        }
+        AuthStorageBackend::Sqlite => {
+            let backend_count = cleanup_expired_exchange_tokens_sqlite(cutoff)?;
+            let mut store = SESSION_STORE.lock().unwrap();
+            let memory_count = store.cleanup_expired_exchange_tokens(now) as u64;
+            Ok(backend_count + memory_count)
+        }
+        AuthStorageBackend::Postgres => {
+            let backend_count = cleanup_expired_exchange_tokens_postgres(cutoff)?;
+            let mut store = SESSION_STORE.lock().unwrap();
+            let memory_count = store.cleanup_expired_exchange_tokens(now) as u64;
+            Ok(backend_count + memory_count)
+        }
+        AuthStorageBackend::Redis => {
             let mut store = SESSION_STORE.lock().unwrap();
             Ok(store.cleanup_expired_exchange_tokens(now) as u64)
         }
@@ -315,22 +370,13 @@ fn store_oauth_state_redis(state: &OAuthState) -> std::result::Result<(), String
 
 /// Retrieve and consume OAuth state
 pub fn consume_oauth_state(state: &str) -> Option<OAuthState> {
-    // TODO(4.5C-2): the memory fallback path below uses InMemoryStore lookups,
-    // which only become TTL-safe after cleanup runs. Backend-native consume paths
-    // enforce expiry atomically, so fallback semantics still need normalization.
     match active_auth_storage_backend() {
         AuthStorageBackend::Memory => consume_oauth_state_record(state).ok().flatten(),
-        _ => consume_oauth_state_record(state)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                let mut store = SESSION_STORE.lock().unwrap();
-                let oauth_state = store.get_oauth_state(state).cloned();
-                if oauth_state.is_some() {
-                    store.delete_oauth_state(state);
-                }
-                oauth_state
-            }),
+        _ => match consume_oauth_state_record(state) {
+            Ok(Some(oauth_state)) => Some(oauth_state),
+            Ok(None) => take_oauth_state_memory(state),
+            Err(_) => take_oauth_state_memory(state),
+        },
     }
 }
 
@@ -545,22 +591,13 @@ fn store_exchange_token_redis(token: &str, session_id: &str) -> std::result::Res
 /// Consume an exchange token, returning the associated session ID.
 /// The token is deleted after retrieval (one-time use).
 pub(super) fn consume_exchange_token(token: &str) -> Option<String> {
-    // TODO(4.5C-2): the memory fallback path below uses InMemoryStore lookups,
-    // which only become TTL-safe after cleanup runs. Backend-native consume paths
-    // enforce expiry atomically, so fallback semantics still need normalization.
     match active_auth_storage_backend() {
         AuthStorageBackend::Memory => consume_exchange_token_record(token).ok().flatten(),
-        _ => consume_exchange_token_record(token)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                let mut store = SESSION_STORE.lock().unwrap();
-                let session_id = store.get_exchange_token(token).cloned();
-                if session_id.is_some() {
-                    store.delete_exchange_token(token);
-                }
-                session_id
-            }),
+        _ => match consume_exchange_token_record(token) {
+            Ok(Some(session_id)) => Some(session_id),
+            Ok(None) => take_exchange_token_memory(token),
+            Err(_) => take_exchange_token_memory(token),
+        },
     }
 }
 

@@ -38,10 +38,11 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
 
     let session = match backend {
         AuthStorageBackend::Memory => get_session_record(id).ok().flatten(),
-        _ => get_session_record(id)
-            .ok()
-            .flatten()
-            .or_else(|| SESSION_STORE.lock().unwrap().get_session(id).cloned()),
+        _ => match get_session_record(id) {
+            Ok(Some(session)) => Some(session),
+            Ok(None) => SESSION_STORE.lock().unwrap().get_session(id).cloned(),
+            Err(_) => SESSION_STORE.lock().unwrap().get_session(id).cloned(),
+        },
     };
 
     if session.is_some() {
