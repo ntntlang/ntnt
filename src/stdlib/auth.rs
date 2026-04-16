@@ -4219,6 +4219,468 @@ mod tests {
     }
 
     #[test]
+    fn test_auth_storage_contract_memory_round_trip_all_record_types() {
+        use super::storage::{
+            cleanup_expired_auth_challenge_records, cleanup_expired_exchange_token_records,
+            cleanup_expired_oauth_state_records, delete_auth_challenge_record,
+            delete_session_record, get_auth_challenge_record, get_refreshable_session_record,
+            get_session_record, list_session_records_for_user, migrate_session_record,
+            store_auth_challenge_record, store_exchange_token_record, store_oauth_state_record,
+            store_session_record, update_session_record_data, update_session_record_tokens,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-memory-1".to_string(),
+            user_id: "user-memory".to_string(),
+            provider: "local".to_string(),
+            email: Some("memory@example.com".to_string()),
+            name: Some("Memory User".to_string()),
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-memory-1".to_string(),
+            access_token: Some("access-memory-1".to_string()),
+            refresh_token: Some("refresh-memory-1".to_string()),
+            token_expires_at: Some(now + 60),
+            created_at: now,
+            expires_at: now + 300,
+        };
+
+        store_session_record(&session).expect("memory session store should succeed");
+        let fetched = get_session_record(&session.id)
+            .expect("memory session fetch should succeed")
+            .expect("memory session should exist");
+        assert_eq!(fetched.user_id, session.user_id);
+
+        update_session_record_data(&session.id, r#"{"role":"admin"}"#)
+            .expect("memory session data update should succeed");
+        update_session_record_tokens(
+            &session.id,
+            &TokenResponse {
+                access_token: "access-memory-2".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: Some(120),
+                refresh_token: Some("refresh-memory-2".to_string()),
+                id_token: None,
+                scope: None,
+            },
+            now,
+        )
+        .expect("memory session token update should succeed");
+
+        let updated = get_session_record(&session.id)
+            .expect("memory updated session fetch should succeed")
+            .expect("memory updated session should exist");
+        assert_eq!(updated.data_json, r#"{"role":"admin"}"#);
+        assert_eq!(updated.access_token.as_deref(), Some("access-memory-2"));
+        assert_eq!(updated.refresh_token.as_deref(), Some("refresh-memory-2"));
+        assert_eq!(updated.token_expires_at, Some(now + 120));
+        assert!(get_refreshable_session_record(&session.id, 3600)
+            .expect("memory refreshable lookup should succeed")
+            .is_none());
+
+        let rotated = Session {
+            id: "session-memory-2".to_string(),
+            csrf_token: "csrf-memory-2".to_string(),
+            ..updated.clone()
+        };
+        migrate_session_record(&session.id, &rotated)
+            .expect("memory session migration should succeed");
+        assert!(get_session_record(&session.id)
+            .expect("old memory session lookup should succeed")
+            .is_none());
+        assert_eq!(
+            get_session_record(&rotated.id)
+                .expect("rotated memory session lookup should succeed")
+                .expect("rotated memory session should exist")
+                .csrf_token,
+            "csrf-memory-2"
+        );
+        assert_eq!(
+            list_session_records_for_user("user-memory", Some(&rotated.id), now)
+                .expect("memory session listing should succeed")
+                .len(),
+            1
+        );
+        delete_session_record(&rotated.id).expect("memory session delete should succeed");
+        assert!(get_session_record(&rotated.id)
+            .expect("deleted memory session lookup should succeed")
+            .is_none());
+
+        let oauth_state = OAuthState {
+            state: "oauth-memory-active".to_string(),
+            nonce: Some("nonce-memory".to_string()),
+            pkce_verifier: Some("pkce-memory".to_string()),
+            provider: "github".to_string(),
+            redirect_url: "/auth/callback".to_string(),
+            created_at: now,
+        };
+        store_oauth_state_record(&oauth_state).expect("memory oauth state store should succeed");
+        let consumed_oauth = super::storage::consume_oauth_state_record(&oauth_state.state)
+            .expect("memory oauth state consume should succeed")
+            .expect("memory oauth state should exist");
+        assert_eq!(consumed_oauth.state, oauth_state.state);
+        assert!(
+            super::storage::consume_oauth_state_record(&oauth_state.state)
+                .expect("memory oauth state second consume should succeed")
+                .is_none()
+        );
+
+        let expired_oauth_state = OAuthState {
+            state: "oauth-memory-expired".to_string(),
+            nonce: None,
+            pkce_verifier: None,
+            provider: "github".to_string(),
+            redirect_url: "/auth/callback".to_string(),
+            created_at: now - 700,
+        };
+        store_oauth_state_record(&expired_oauth_state)
+            .expect("expired memory oauth state store should succeed");
+        assert_eq!(
+            cleanup_expired_oauth_state_records(now - 600)
+                .expect("memory oauth cleanup should succeed"),
+            1
+        );
+
+        store_exchange_token_record("exchange-memory-active", "session-memory-final")
+            .expect("memory exchange token store should succeed");
+        assert_eq!(
+            super::storage::consume_exchange_token_record("exchange-memory-active")
+                .expect("memory exchange token consume should succeed")
+                .as_deref(),
+            Some("session-memory-final")
+        );
+        assert!(
+            super::storage::consume_exchange_token_record("exchange-memory-active")
+                .expect("memory exchange token second consume should succeed")
+                .is_none()
+        );
+        SESSION_STORE.lock().unwrap().exchange_tokens.insert(
+            "exchange-memory-expired".to_string(),
+            (
+                "session-memory-stale".to_string(),
+                now - EXCHANGE_TOKEN_TTL - 1,
+            ),
+        );
+        assert_eq!(
+            cleanup_expired_exchange_token_records(now)
+                .expect("memory exchange token cleanup should succeed"),
+            1
+        );
+
+        let active_challenge = AuthChallenge {
+            id: "challenge-memory-active".to_string(),
+            subject_id: "user-memory".to_string(),
+            provider: "local".to_string(),
+            kind: "mfa_pending".to_string(),
+            data_json: "{}".to_string(),
+            created_at: now,
+            expires_at: now + 60,
+        };
+        store_auth_challenge_record(&active_challenge)
+            .expect("memory auth challenge store should succeed");
+        let fetched_challenge = get_auth_challenge_record(&active_challenge.id)
+            .expect("memory auth challenge fetch should succeed")
+            .expect("memory auth challenge should exist");
+        assert_eq!(fetched_challenge.id, active_challenge.id);
+        delete_auth_challenge_record(&active_challenge.id)
+            .expect("memory auth challenge delete should succeed");
+        assert!(get_auth_challenge_record(&active_challenge.id)
+            .expect("deleted memory auth challenge lookup should succeed")
+            .is_none());
+
+        let consumable_challenge = AuthChallenge {
+            id: "challenge-memory-consume".to_string(),
+            subject_id: "user-memory".to_string(),
+            provider: "local".to_string(),
+            kind: "mfa_pending".to_string(),
+            data_json: "{}".to_string(),
+            created_at: now,
+            expires_at: now + 60,
+        };
+        store_auth_challenge_record(&consumable_challenge)
+            .expect("memory consumable auth challenge store should succeed");
+        assert_eq!(
+            super::storage::consume_auth_challenge_record(&consumable_challenge.id)
+                .expect("memory auth challenge consume should succeed")
+                .expect("memory auth challenge should be consumable")
+                .id,
+            consumable_challenge.id
+        );
+
+        let expired_challenge = AuthChallenge {
+            id: "challenge-memory-expired".to_string(),
+            subject_id: "user-memory".to_string(),
+            provider: "local".to_string(),
+            kind: "password_reset".to_string(),
+            data_json: "{}".to_string(),
+            created_at: now - 120,
+            expires_at: now - 60,
+        };
+        store_auth_challenge_record(&expired_challenge)
+            .expect("expired memory auth challenge store should succeed");
+        assert_eq!(
+            cleanup_expired_auth_challenge_records(now)
+                .expect("memory auth challenge cleanup should succeed"),
+            1
+        );
+    }
+
+    #[test]
+    fn test_auth_storage_contract_sqlite_round_trip_all_record_types() {
+        use super::storage::{
+            cleanup_expired_auth_challenge_records, cleanup_expired_exchange_token_records,
+            cleanup_expired_oauth_state_records, delete_all_session_records_for_user,
+            delete_session_record, extend_session_record_expiry, get_auth_challenge_record,
+            get_refreshable_session_record, get_session_record, list_session_records_for_user,
+            migrate_session_record, store_auth_challenge_record, store_exchange_token_record,
+            store_oauth_state_record, store_session_record, update_session_record_data,
+            update_session_record_tokens,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-sqlite-1".to_string(),
+            user_id: "user-sqlite".to_string(),
+            provider: "local".to_string(),
+            email: Some("sqlite@example.com".to_string()),
+            name: Some("SQLite User".to_string()),
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-sqlite-1".to_string(),
+            access_token: Some("access-sqlite-1".to_string()),
+            refresh_token: Some("refresh-sqlite-1".to_string()),
+            token_expires_at: Some(now + 60),
+            created_at: now,
+            expires_at: now + 300,
+        };
+        store_session_record(&session).expect("sqlite session store should succeed");
+        assert_eq!(
+            get_session_record(&session.id)
+                .expect("sqlite session lookup should succeed")
+                .expect("sqlite session should exist")
+                .id,
+            session.id
+        );
+        update_session_record_data(&session.id, r#"{"role":"admin"}"#)
+            .expect("sqlite session data update should succeed");
+        update_session_record_tokens(
+            &session.id,
+            &TokenResponse {
+                access_token: "access-sqlite-2".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: Some(120),
+                refresh_token: Some("refresh-sqlite-2".to_string()),
+                id_token: None,
+                scope: None,
+            },
+            now,
+        )
+        .expect("sqlite session token update should succeed");
+        extend_session_record_expiry(&session.id, now + 600)
+            .expect("sqlite session expiry extension should succeed");
+        let updated_session = get_session_record(&session.id)
+            .expect("sqlite updated session lookup should succeed")
+            .expect("sqlite updated session should exist");
+        assert_eq!(updated_session.data_json, r#"{"role":"admin"}"#);
+        assert_eq!(
+            updated_session.access_token.as_deref(),
+            Some("access-sqlite-2")
+        );
+        assert_eq!(
+            updated_session.refresh_token.as_deref(),
+            Some("refresh-sqlite-2")
+        );
+        assert_eq!(updated_session.token_expires_at, Some(now + 120));
+        assert_eq!(updated_session.expires_at, now + 600);
+
+        let refreshable_session = Session {
+            id: "session-sqlite-refreshable".to_string(),
+            user_id: "user-sqlite".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-sqlite-refreshable".to_string(),
+            access_token: Some("access-refreshable".to_string()),
+            refresh_token: Some("refresh-refreshable".to_string()),
+            token_expires_at: Some(now - 30),
+            created_at: now - 30,
+            expires_at: now - 5,
+        };
+        store_session_record(&refreshable_session)
+            .expect("sqlite refreshable session store should succeed");
+        assert_eq!(
+            get_refreshable_session_record(&refreshable_session.id, 3600)
+                .expect("sqlite refreshable lookup should succeed")
+                .expect("sqlite refreshable session should exist")
+                .id,
+            refreshable_session.id
+        );
+
+        let rotated_session = Session {
+            id: "session-sqlite-rotated".to_string(),
+            csrf_token: "csrf-sqlite-rotated".to_string(),
+            ..updated_session.clone()
+        };
+        migrate_session_record(&session.id, &rotated_session)
+            .expect("sqlite session migration should succeed");
+        assert!(get_session_record(&session.id)
+            .expect("sqlite old session lookup should succeed")
+            .is_none());
+        assert_eq!(
+            get_session_record(&rotated_session.id)
+                .expect("sqlite rotated session lookup should succeed")
+                .expect("sqlite rotated session should exist")
+                .csrf_token,
+            "csrf-sqlite-rotated"
+        );
+        let listed_sessions =
+            list_session_records_for_user("user-sqlite", Some(&rotated_session.id), now)
+                .expect("sqlite session listing should succeed");
+        assert_eq!(listed_sessions.len(), 1);
+        assert_eq!(
+            listed_sessions
+                .iter()
+                .filter(|session| session.is_current)
+                .count(),
+            1
+        );
+        assert!(listed_sessions
+            .iter()
+            .any(|session| session.id == rotated_session.id && session.is_current));
+        assert_eq!(
+            delete_all_session_records_for_user("user-sqlite", Some(&rotated_session.id))
+                .expect("sqlite delete-all sessions should succeed"),
+            1
+        );
+        let remaining_sessions =
+            list_session_records_for_user("user-sqlite", Some(&rotated_session.id), now)
+                .expect("sqlite remaining session listing should succeed");
+        assert_eq!(remaining_sessions.len(), 1);
+        assert_eq!(remaining_sessions[0].id, rotated_session.id);
+        delete_session_record(&rotated_session.id).expect("sqlite session delete should succeed");
+        assert!(get_session_record(&rotated_session.id)
+            .expect("sqlite deleted session lookup should succeed")
+            .is_none());
+
+        let oauth_state = OAuthState {
+            state: "oauth-sqlite-active".to_string(),
+            nonce: Some("nonce-sqlite".to_string()),
+            pkce_verifier: Some("pkce-sqlite".to_string()),
+            provider: "github".to_string(),
+            redirect_url: "/auth/callback".to_string(),
+            created_at: now,
+        };
+        store_oauth_state_record(&oauth_state).expect("sqlite oauth state store should succeed");
+        assert_eq!(
+            super::storage::consume_oauth_state_record(&oauth_state.state)
+                .expect("sqlite oauth state consume should succeed")
+                .expect("sqlite oauth state should exist")
+                .state,
+            oauth_state.state
+        );
+        let expired_oauth_state = OAuthState {
+            state: "oauth-sqlite-expired".to_string(),
+            nonce: None,
+            pkce_verifier: None,
+            provider: "github".to_string(),
+            redirect_url: "/auth/callback".to_string(),
+            created_at: now - 700,
+        };
+        store_oauth_state_record(&expired_oauth_state)
+            .expect("expired sqlite oauth state store should succeed");
+        assert_eq!(
+            cleanup_expired_oauth_state_records(now - 600)
+                .expect("sqlite oauth cleanup should succeed"),
+            1
+        );
+
+        store_exchange_token_record("exchange-sqlite-active", &session.id)
+            .expect("sqlite exchange token store should succeed");
+        assert_eq!(
+            super::storage::consume_exchange_token_record("exchange-sqlite-active")
+                .expect("sqlite exchange token consume should succeed")
+                .as_deref(),
+            Some(session.id.as_str())
+        );
+        let stale_exchange_created_at = now - EXCHANGE_TOKEN_TTL - 1;
+        SQLITE_CONN
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("sqlite connection should be initialized")
+            .execute(
+                "INSERT INTO auth_exchange_tokens (token, session_id, created_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "exchange-sqlite-expired",
+                    "session-sqlite-stale",
+                    stale_exchange_created_at,
+                ],
+            )
+            .expect("sqlite expired exchange token insert should succeed");
+        assert_eq!(
+            cleanup_expired_exchange_token_records(now)
+                .expect("sqlite exchange cleanup should succeed"),
+            1
+        );
+
+        let challenge = AuthChallenge {
+            id: "challenge-sqlite-active".to_string(),
+            subject_id: "user-sqlite".to_string(),
+            provider: "local".to_string(),
+            kind: "mfa_pending".to_string(),
+            data_json: "{}".to_string(),
+            created_at: now,
+            expires_at: now + 60,
+        };
+        store_auth_challenge_record(&challenge)
+            .expect("sqlite auth challenge store should succeed");
+        assert_eq!(
+            get_auth_challenge_record(&challenge.id)
+                .expect("sqlite auth challenge lookup should succeed")
+                .expect("sqlite auth challenge should exist")
+                .id,
+            challenge.id
+        );
+        assert_eq!(
+            super::storage::consume_auth_challenge_record(&challenge.id)
+                .expect("sqlite auth challenge consume should succeed")
+                .expect("sqlite auth challenge should exist")
+                .id,
+            challenge.id
+        );
+        let expired_challenge = AuthChallenge {
+            id: "challenge-sqlite-expired".to_string(),
+            subject_id: "user-sqlite".to_string(),
+            provider: "local".to_string(),
+            kind: "password_reset".to_string(),
+            data_json: "{}".to_string(),
+            created_at: now - 120,
+            expires_at: now - 60,
+        };
+        store_auth_challenge_sqlite(&expired_challenge)
+            .expect("sqlite expired challenge insert should succeed");
+        assert_eq!(
+            cleanup_expired_auth_challenge_records(now)
+                .expect("sqlite auth challenge cleanup should succeed"),
+            1
+        );
+    }
+
+    #[test]
     fn test_auth_challenge_sqlite_store_get_consume_and_cleanup() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
