@@ -1761,16 +1761,16 @@ fn store_session_redis(session: &Session) -> std::result::Result<(), String> {
     let key = format!("ntnt:session:{}", session.id);
     let ttl = session.expires_at - chrono::Utc::now().timestamp();
 
-    if ttl > 0 {
-        redis::cmd("SETEX")
-            .arg(&key)
-            .arg(ttl)
-            .arg(&session_json)
-            .query::<()>(&mut conn)
-            .map_err(|e| format!("Redis SETEX error: {}", e))?;
-    } else {
-        return Ok(());
+    if ttl <= 0 {
+        return Err("Session already expired before Redis store".to_string());
     }
+
+    redis::cmd("SETEX")
+        .arg(&key)
+        .arg(ttl)
+        .arg(&session_json)
+        .query::<()>(&mut conn)
+        .map_err(|e| format!("Redis SETEX error: {}", e))?;
 
     Ok(())
 }
@@ -2381,13 +2381,13 @@ fn migrate_session_redis(old_id: &str, new_session: &Session) -> std::result::Re
     })
     .to_string();
 
+    if ttl <= 0 {
+        return Err("Session already expired before Redis migration".to_string());
+    }
+
     let lua_script = r#"
         local existing = redis.call('GET', KEYS[1])
         if not existing then return 0 end
-        if tonumber(ARGV[1]) <= 0 then
-            redis.call('DEL', KEYS[1])
-            return 1
-        end
         redis.call('SETEX', KEYS[2], tonumber(ARGV[1]), ARGV[2])
         redis.call('DEL', KEYS[1])
         return 1
