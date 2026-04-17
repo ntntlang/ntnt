@@ -71,8 +71,8 @@ fn take_exchange_token_memory(token: &str) -> Option<String> {
 // contract while preserving backend-native atomicity and query shape.
 //
 // Canonical fallback/error policy (Phase 4.5C-2):
-// - sessions: fallback to memory on store/get/list/delete-all backend failures; do not
-//   silently mask explicit mutation or migration failures
+// - sessions: fallback to memory on store/get backend failures; list/delete-all propagate
+//   backend errors; do not silently mask explicit mutation or migration failures
 // - auth challenges: fallback to memory on store/get/consume backend failures and always
 //   scrub memory fallback entries during cleanup
 // - OAuth states: fallback to memory on store/consume backend failures and always scrub
@@ -187,12 +187,27 @@ pub(super) fn consume_auth_challenge_record(
 
 pub(super) fn cleanup_expired_auth_challenge_records(now: i64) -> std::result::Result<u64, String> {
     match active_auth_storage_backend() {
-        AuthStorageBackend::Sqlite => cleanup_expired_auth_challenges_sqlite(now),
-        AuthStorageBackend::Postgres => cleanup_expired_auth_challenges_postgres(now),
-        AuthStorageBackend::Redis => cleanup_expired_auth_challenges_redis(now),
         AuthStorageBackend::Memory => {
             let mut store = SESSION_STORE.lock().unwrap();
             Ok(store.cleanup_expired_auth_challenges(now) as u64)
+        }
+        AuthStorageBackend::Sqlite => {
+            let backend_count = cleanup_expired_auth_challenges_sqlite(now)?;
+            let mut store = SESSION_STORE.lock().unwrap();
+            let memory_count = store.cleanup_expired_auth_challenges(now) as u64;
+            Ok(backend_count + memory_count)
+        }
+        AuthStorageBackend::Postgres => {
+            let backend_count = cleanup_expired_auth_challenges_postgres(now)?;
+            let mut store = SESSION_STORE.lock().unwrap();
+            let memory_count = store.cleanup_expired_auth_challenges(now) as u64;
+            Ok(backend_count + memory_count)
+        }
+        AuthStorageBackend::Redis => {
+            let backend_count = cleanup_expired_auth_challenges_redis(now)?;
+            let mut store = SESSION_STORE.lock().unwrap();
+            let memory_count = store.cleanup_expired_auth_challenges(now) as u64;
+            Ok(backend_count + memory_count)
         }
     }
 }
