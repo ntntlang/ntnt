@@ -4337,7 +4337,6 @@ mod tests {
             .is_none());
     }
 
-    #[test]
     fn test_auth_storage_contract_memory_round_trip_all_record_types() {
         use super::storage::{
             cleanup_expired_auth_challenge_records, cleanup_expired_exchange_token_records,
