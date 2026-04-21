@@ -4054,11 +4054,44 @@ mod tests {
         store_oauth_state_record(&expired_oauth_state).unwrap_or_else(|e| {
             panic!("{} expired oauth state store should succeed: {}", label, e)
         });
-        assert_eq!(
-            cleanup_expired_oauth_state_records(now - OAUTH_STATE_TTL)
-                .unwrap_or_else(|e| panic!("{} oauth cleanup should succeed: {}", label, e)),
-            1
-        );
+        let cleaned_oauth_states = cleanup_expired_oauth_state_records(now - OAUTH_STATE_TTL)
+            .unwrap_or_else(|e| panic!("{} oauth cleanup should succeed: {}", label, e));
+        match store_kind {
+            SessionStore::Redis(_) => {
+                assert_eq!(
+                    cleaned_oauth_states, 0,
+                    "{} redis oauth cleanup should only scrub memory fallback entries",
+                    label
+                );
+                assert!(
+                    consume_oauth_state_record(&expired_oauth_state.state)
+                        .unwrap_or_else(|e| panic!(
+                            "{} expired oauth state consume should succeed: {}",
+                            label, e
+                        ))
+                        .is_some(),
+                    "{} redis oauth state should remain consumable until Redis TTL expires",
+                    label
+                );
+            }
+            _ => {
+                assert!(
+                    cleaned_oauth_states >= 1,
+                    "{} oauth cleanup should remove at least the expired state",
+                    label
+                );
+                assert!(
+                    consume_oauth_state_record(&expired_oauth_state.state)
+                        .unwrap_or_else(|e| panic!(
+                            "{} expired oauth state consume after cleanup should succeed: {}",
+                            label, e
+                        ))
+                        .is_none(),
+                    "{} expired oauth state should not be consumable after cleanup",
+                    label
+                );
+            }
+        }
 
         store_exchange_token_record(&format!("exchange-{}-active", label), &session.id)
             .unwrap_or_else(|e| panic!("{} exchange token store should succeed: {}", label, e));
