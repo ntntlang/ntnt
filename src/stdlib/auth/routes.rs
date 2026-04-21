@@ -309,6 +309,9 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
         }
     };
 
+    let effective_session_ttl = config
+        .session_ttl
+        .min(config.max_session_ttl.unwrap_or(config.session_ttl));
     let session = create_session(
         &provider_name,
         user_info,
@@ -317,7 +320,7 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
         } else {
             None
         },
-        config.session_ttl,
+        effective_session_ttl,
     )
     .map_err(|error| {
         IntentError::runtime_error(format!("[auth] Failed to create session: {}", error))

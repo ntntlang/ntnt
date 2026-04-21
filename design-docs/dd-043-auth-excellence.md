@@ -281,10 +281,10 @@ return complete_auth_challenge(resp, req, map {
 ### Phase 5 — Session Lifecycle and Presets
 **Goal:** Harden session lifetime behavior and make strong defaults ergonomic.
 
-- [ ] Add sliding session expiry support
-- [ ] Throttle refreshes so stores are not updated on every request
+- [x] Add sliding session expiry support
+- [x] Throttle refreshes so stores are not updated on every request
 - [ ] Refresh cookie Max-Age/Expires along with sliding sessions
-- [ ] Add absolute maximum session lifetime support
+- [x] Add absolute maximum session lifetime support
 - [ ] Store session creation time separately from idle expiry
 - [ ] Clear log/error path when max lifetime forces re-auth
 - [ ] Define preset configurations (`consumer`, `admin`, `internal`, `strict`)
@@ -444,6 +444,8 @@ So the plan should put those cleanup-heavy features first, but still start with 
 - sliding expiration
 - absolute max lifetime
 - ergonomic presets (`strict`, `balanced`, `relaxed`, etc.)
+
+**Current status:** Wave 5A landed the lifecycle core: sliding session expiry, refresh throttling, and absolute max lifetime controls. Cookie refresh alignment and presets remain for the next slice.
 
 **Strong value:** apps get secure lifecycle behavior without each team inventing different timeout logic.
 

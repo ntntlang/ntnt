@@ -287,7 +287,10 @@ pub struct AuthConfig {
     pub cookie_same_site: String,
     pub session_ttl: i64,
     pub refresh_ttl: i64, // How long refresh tokens can extend sessions (default: 30 days)
-    pub store_tokens: bool, // Store access/refresh tokens in session
+    pub sliding_sessions: bool, // Extend active sessions on authenticated reads
+    pub refresh_throttle: i64, // Only extend sliding sessions when remaining TTL is at or below this many seconds
+    pub max_session_ttl: Option<i64>, // Absolute max lifetime from session creation
+    pub store_tokens: bool,    // Store access/refresh tokens in session
     pub session_secret: String, // Secret for session signing
     pub session_store: SessionStore, // Session storage backend
 }
@@ -305,6 +308,9 @@ impl Default for AuthConfig {
             cookie_same_site: "lax".to_string(),
             session_ttl: 86400 * 7,  // 7 days
             refresh_ttl: 86400 * 30, // 30 days — how long refresh tokens can extend sessions
+            sliding_sessions: false,
+            refresh_throttle: 300,
+            max_session_ttl: None,
             store_tokens: false,
             session_secret: DEFAULT_SESSION_SECRET_SENTINEL.to_string(),
             session_store: SessionStore::Memory,
@@ -1631,8 +1637,10 @@ pub fn init() -> HashMap<String, Value> {
                     None => config.session_ttl,
                 };
 
-                let session =
-                    create_manual_session(&merged_session, session_ttl).map_err(IntentError::type_error)?;
+                let effective_session_ttl = session_ttl
+                    .min(config.max_session_ttl.unwrap_or(session_ttl));
+                let session = create_manual_session(&merged_session, effective_session_ttl)
+                    .map_err(IntentError::type_error)?;
                 let session_cookie =
                     build_signed_session_cookie(&config, &session.id, options.as_ref())
                         .map_err(IntentError::type_error)?;
@@ -2689,6 +2697,9 @@ pub fn init() -> HashMap<String, Value> {
                             "session_secret"
                                 | "session_ttl"
                                 | "refresh_ttl"
+                                | "sliding_sessions"
+                                | "refresh_throttle"
+                                | "max_session_ttl"
                                 | "success_url"
                                 | "after_login"
                                 | "failure_url"
@@ -2865,6 +2876,60 @@ pub fn init() -> HashMap<String, Value> {
                     None => 86400 * 30,
                 };
 
+                let sliding_sessions = match get_option(&["sliding_sessions"]) {
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"sliding_sessions\" must be a bool, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => false,
+                };
+
+                let refresh_throttle = match get_option(&["refresh_throttle"]) {
+                    Some(Value::Int(n)) => *n,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"refresh_throttle\" must be an int, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => 300,
+                };
+
+                if refresh_throttle < 0 {
+                    return Err(IntentError::type_error(
+                        "[auth] enable_auth() option \"refresh_throttle\" must be >= 0"
+                            .to_string(),
+                    ));
+                }
+
+                let max_session_ttl = match get_option(&["max_session_ttl"]) {
+                    Some(Value::Int(n)) => Some(*n),
+                    Some(Value::EnumValue {
+                        enum_name,
+                        variant,
+                        ..
+                    }) if enum_name == "Option" && variant == "None" => None,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"max_session_ttl\" must be an int or None, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => None,
+                };
+
+                if let Some(max_session_ttl) = max_session_ttl {
+                    if max_session_ttl <= 0 {
+                        return Err(IntentError::type_error(
+                            "[auth] enable_auth() option \"max_session_ttl\" must be > 0"
+                                .to_string(),
+                        ));
+                    }
+                }
+
                 // Create auth config
                 let config = AuthConfig {
                     providers,
@@ -2876,8 +2941,11 @@ pub fn init() -> HashMap<String, Value> {
                     cookie_secure,
                     cookie_same_site: "Lax".to_string(),
                     session_ttl,
-                    store_tokens,
                     refresh_ttl,
+                    sliding_sessions,
+                    refresh_throttle,
+                    max_session_ttl,
+                    store_tokens,
                     session_secret,
                     session_store,
                 };
@@ -3272,7 +3340,12 @@ pub fn init() -> HashMap<String, Value> {
                 };
 
                 // Create session
-                let session = match create_session(&provider_name, user_info, tokens.as_ref(), config.session_ttl) {
+                let session = match create_session(
+                    &provider_name,
+                    user_info,
+                    tokens.as_ref(),
+                    config.session_ttl.min(config.max_session_ttl.unwrap_or(config.session_ttl)),
+                ) {
                     Ok(s) => s,
                     Err(e) => return Ok(make_err(Value::String(e))),
                 };
@@ -3366,7 +3439,9 @@ pub fn init() -> HashMap<String, Value> {
                     None => config.session_ttl,
                 };
 
-                let session = create_manual_session(&session_spec, session_ttl)
+                let effective_session_ttl =
+                    session_ttl.min(config.max_session_ttl.unwrap_or(session_ttl));
+                let session = create_manual_session(&session_spec, effective_session_ttl)
                     .map_err(IntentError::type_error)?;
                 let session_id = session.id.clone();
 
@@ -5202,6 +5277,440 @@ mod tests {
         let err = get_auth_challenge_by_id("missing-challenge")
             .expect_err("backend lookup failure without fallback should surface error");
         assert!(err.contains("SQLite not initialized"));
+    }
+
+    fn github_test_provider_value() -> Value {
+        Value::Map(HashMap::from([
+            ("name".to_string(), Value::String("github".to_string())),
+            (
+                "client_id".to_string(),
+                Value::String("test-client".to_string()),
+            ),
+            (
+                "client_secret".to_string(),
+                Value::String("test-secret".to_string()),
+            ),
+            (
+                "authorize_url".to_string(),
+                Value::String("https://github.com/login/oauth/authorize".to_string()),
+            ),
+            (
+                "token_url".to_string(),
+                Value::String("https://github.com/login/oauth/access_token".to_string()),
+            ),
+            (
+                "userinfo_url".to_string(),
+                Value::String("https://api.github.com/user".to_string()),
+            ),
+        ]))
+    }
+
+    #[test]
+    fn test_enable_auth_accepts_session_lifecycle_options() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::Map(HashMap::from([
+                ("sliding_sessions".to_string(), Value::Bool(true)),
+                ("refresh_throttle".to_string(), Value::Int(120)),
+                ("max_session_ttl".to_string(), Value::Int(3600)),
+            ])),
+        ])
+        .expect("enable_auth should accept session lifecycle options");
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        assert!(config.sliding_sessions);
+        assert_eq!(config.refresh_throttle, 120);
+        assert_eq!(config.max_session_ttl, Some(3600));
+    }
+
+    #[test]
+    fn test_enable_auth_rejects_invalid_session_lifecycle_option_types() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        let err = enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::Map(HashMap::from([(
+                "sliding_sessions".to_string(),
+                Value::String("yes".to_string()),
+            )])),
+        ])
+        .expect_err("enable_auth should reject invalid sliding_sessions type");
+        assert!(format!("{}", err).contains("option \"sliding_sessions\" must be a bool"));
+    }
+
+    #[test]
+    fn test_enable_auth_rejects_negative_refresh_throttle() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        let err = enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::Map(HashMap::from([(
+                "refresh_throttle".to_string(),
+                Value::Int(-1),
+            )])),
+        ])
+        .expect_err("enable_auth should reject negative refresh_throttle");
+        assert!(format!("{}", err).contains("option \"refresh_throttle\" must be >= 0"));
+    }
+
+    #[test]
+    fn test_enable_auth_rejects_non_positive_max_session_ttl() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        let err = enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::Map(HashMap::from([(
+                "max_session_ttl".to_string(),
+                Value::Int(0),
+            )])),
+        ])
+        .expect_err("enable_auth should reject non-positive max_session_ttl");
+        assert!(format!("{}", err).contains("option \"max_session_ttl\" must be > 0"));
+    }
+
+    #[test]
+    fn test_enable_auth_accepts_none_for_max_session_ttl() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::Map(HashMap::from([(
+                "max_session_ttl".to_string(),
+                Value::EnumValue {
+                    enum_name: "Option".to_string(),
+                    variant: "None".to_string(),
+                    values: vec![],
+                },
+            )])),
+        ])
+        .expect("enable_auth should accept None for max_session_ttl");
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        assert_eq!(config.max_session_ttl, None);
+    }
+
+    #[test]
+    fn test_sign_in_session_caps_initial_expiry_to_max_session_ttl() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            session_ttl: 86400,
+            max_session_ttl: Some(1800),
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let current_session = module_fn(&module, "current_session");
+        let before = chrono::Utc::now().timestamp();
+
+        let signed_in = sign_in_session(&[
+            redirect_response("/admin", None),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("user-123".to_string()),
+            )])),
+        ])
+        .unwrap();
+        let cookie = cookie_header_from_response(&signed_in);
+        let req = request_with_cookie(&cookie);
+        let after = chrono::Utc::now().timestamp();
+
+        let session = current_session(&[req]).unwrap();
+        match session {
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                assert_eq!(variant, "Some");
+                let session_map = match values.first() {
+                    Some(Value::Map(map)) => map,
+                    other => panic!("expected session map, got {:?}", other),
+                };
+                match session_map.get("expires_at") {
+                    Some(Value::Int(expires_at)) => {
+                        assert!(*expires_at >= before + 1800);
+                        assert!(*expires_at <= after + 1800);
+                    }
+                    other => panic!("expected expires_at int, got {:?}", other),
+                }
+            }
+            other => panic!("expected Some(session), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_get_session_by_id_slides_active_session_expiry() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            max_session_ttl: Some(7200),
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-sliding-active".to_string(),
+            user_id: "user-sliding".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-sliding-active".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 600,
+            expires_at: now + 60,
+        };
+        SESSION_STORE.lock().unwrap().set_session(session.clone());
+
+        let fetched = get_session_by_id(&session.id).expect("session should exist");
+        assert!(fetched.expires_at > session.expires_at);
+        assert_eq!(
+            SESSION_STORE
+                .lock()
+                .unwrap()
+                .get_session(&session.id)
+                .expect("session should remain stored")
+                .expires_at,
+            fetched.expires_at
+        );
+    }
+
+    #[test]
+    fn test_get_session_by_id_respects_max_session_ttl_when_sliding() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            max_session_ttl: Some(1800),
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-sliding-capped".to_string(),
+            user_id: "user-sliding-cap".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-sliding-capped".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 1200,
+            expires_at: now + 30,
+        };
+        SESSION_STORE.lock().unwrap().set_session(session.clone());
+
+        let fetched = get_session_by_id(&session.id).expect("session should exist");
+        assert_eq!(fetched.expires_at, session.created_at + 1800);
+    }
+
+    #[test]
+    fn test_get_session_by_id_clamps_existing_session_to_absolute_cap() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: false,
+            max_session_ttl: Some(1800),
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-cap-clamp".to_string(),
+            user_id: "user-cap-clamp".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-cap-clamp".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 1200,
+            expires_at: now + 7200,
+        };
+        SESSION_STORE.lock().unwrap().set_session(session.clone());
+
+        let fetched = get_session_by_id(&session.id).expect("session should exist");
+        assert_eq!(fetched.expires_at, session.created_at + 1800);
+    }
+
+    #[test]
+    fn test_get_session_by_id_invalidates_session_past_absolute_cap() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: false,
+            max_session_ttl: Some(1800),
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-cap-expired".to_string(),
+            user_id: "user-cap-expired".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-cap-expired".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 3600,
+            expires_at: now + 60,
+        };
+        SESSION_STORE.lock().unwrap().set_session(session.clone());
+
+        assert!(get_session_by_id(&session.id).is_none());
+        assert!(SESSION_STORE
+            .lock()
+            .unwrap()
+            .get_session(&session.id)
+            .is_none());
+    }
+
+    #[test]
+    fn test_complete_auth_challenge_caps_initial_expiry_to_max_session_ttl() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            max_session_ttl: Some(1800),
+            session_ttl: 86400,
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let begin_auth_challenge = module_fn(&module, "begin_auth_challenge");
+        let complete_auth_challenge = module_fn(&module, "complete_auth_challenge");
+        let current_session = module_fn(&module, "current_session");
+        let before = chrono::Utc::now().timestamp();
+
+        let started = begin_auth_challenge(&[
+            redirect_response("/admin/verify", None),
+            Value::Map(HashMap::from([
+                (
+                    "subject_id".to_string(),
+                    Value::String("user-123".to_string()),
+                ),
+                ("kind".to_string(), Value::String("mfa_pending".to_string())),
+            ])),
+        ])
+        .unwrap();
+        let challenge_cookie = cookie_header_from_response(&started);
+        let req = request_with_cookie(&challenge_cookie);
+
+        let completed = complete_auth_challenge(&[
+            redirect_response("/admin", None),
+            req,
+            Value::Map(HashMap::new()),
+        ])
+        .unwrap();
+        let session_cookie = cookie_headers_from_response(&completed)
+            .into_iter()
+            .find(|cookie| cookie.starts_with("ntnt_session="))
+            .expect("missing session cookie");
+        let session_req = request_with_cookie(&session_cookie);
+        let after = chrono::Utc::now().timestamp();
+
+        let session = current_session(&[session_req]).unwrap();
+        match session {
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                assert_eq!(variant, "Some");
+                let session_map = match values.first() {
+                    Some(Value::Map(map)) => map,
+                    other => panic!("expected session map, got {:?}", other),
+                };
+                match session_map.get("expires_at") {
+                    Some(Value::Int(expires_at)) => {
+                        assert!(*expires_at >= before + 1800);
+                        assert!(*expires_at <= after + 1800);
+                    }
+                    other => panic!("expected expires_at int, got {:?}", other),
+                }
+            }
+            other => panic!("expected Some(session), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_get_session_by_id_skips_sliding_refresh_when_throttle_not_met() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-sliding-throttle".to_string(),
+            user_id: "user-sliding-throttle".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-sliding-throttle".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 60,
+            expires_at: now + 1200,
+        };
+        SESSION_STORE.lock().unwrap().set_session(session.clone());
+
+        let fetched = get_session_by_id(&session.id).expect("session should exist");
+        assert_eq!(fetched.expires_at, session.expires_at);
     }
 
     #[test]
