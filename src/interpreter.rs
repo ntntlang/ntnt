@@ -3004,21 +3004,20 @@ impl Interpreter {
 
         // @ntnt is_some
         // @signature is_some(val: Any) -> Bool
-        // Checks if a value is "present" (not None).
+        // Checks if a value is Option::Some.
         //
-        // Returns true for Option::Some, and true for any non-Option value
-        // (Map, String, Int, etc.). Returns false only for Option::None.
-        // This makes it safe to use after query_one() or any function that
-        // returns a value that might be None.
+        // Returns true only for Option::Some. Returns false for Option::None
+        // and for all non-Option values. This is a strict Option check; for
+        // `Result` values, use `is_ok` or `is_err` instead.
         // @param val The value to check
-        // @returns true if the value is not None, false if None
+        // @returns true if the value is Option::Some, false otherwise
         // @tags #pure, #deterministic
         // @see_also is_none, Some, unwrap, unwrap_or
         // @since v0.1.0
         // @example is_some(Some(42)) => true ~ "Some is some"
         // @example is_some(None) => false ~ "None is not some"
-        // @example is_some("hello") => true ~ "Non-Option values are considered present"
-        // @example is_some(map { "a": 1 }) => true ~ "Maps are considered present"
+        // @example is_some("hello") => false ~ "Non-Option values are not Some"
+        // @example is_some(map { "a": 1 }) => false ~ "Maps are not Some"
         self.environment.borrow_mut().define(
             "is_some".to_string(),
             Value::NativeFunction {
@@ -3030,29 +3029,26 @@ impl Interpreter {
                     Value::EnumValue {
                         enum_name, variant, ..
                     } if enum_name == "Option" => Ok(Value::Bool(variant == "Some")),
-                    // Any non-Option value is considered "present" (not None)
-                    _ => Ok(Value::Bool(true)),
+                    _ => Ok(Value::Bool(false)),
                 },
             },
         );
 
         // @ntnt is_none
         // @signature is_none(val: Any) -> Bool
-        // Checks if a value is None.
+        // Checks if a value is Option::None.
         //
-        // Returns true for Option::None, false for Option::Some and any
-        // non-Option value (Map, String, Int, etc.). This makes it safe
-        // to use after query_one() or any function that returns a value
-        // that might be None without wrapping in Option.
+        // Returns true only for Option::None. Returns false for Option::Some
+        // and for all non-Option values.
         // @param val The value to check
-        // @returns true if None, false otherwise
+        // @returns true if Option::None, false otherwise
         // @tags #pure, #deterministic
         // @see_also is_some, Some, unwrap, unwrap_or
         // @since v0.1.0
         // @example is_none(None) => true ~ "None is none"
         // @example is_none(Some(42)) => false ~ "Some is not none"
-        // @example is_none("hello") => false ~ "Non-Option values are not none"
-        // @example is_none(map { "a": 1 }) => false ~ "Maps are not none"
+        // @example is_none("hello") => false ~ "Non-Option values are not None"
+        // @example is_none(map { "a": 1 }) => false ~ "Maps are not None"
         self.environment.borrow_mut().define(
             "is_none".to_string(),
             Value::NativeFunction {
@@ -3064,7 +3060,6 @@ impl Interpreter {
                     Value::EnumValue {
                         enum_name, variant, ..
                     } if enum_name == "Option" => Ok(Value::Bool(variant == "None")),
-                    // Any non-Option value is considered "present" (not None)
                     _ => Ok(Value::Bool(false)),
                 },
             },
@@ -10908,6 +10903,34 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_is_some_is_strict_for_non_option_values() {
+        let result = eval("is_some(map { \"a\": 1 })").unwrap();
+        assert!(matches!(result, Value::Bool(false)));
+
+        let result = eval("is_some([1, 2, 3])").unwrap();
+        assert!(matches!(result, Value::Bool(false)));
+
+        let result = eval("is_some(\"hello\")").unwrap();
+        assert!(matches!(result, Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_is_some_does_not_make_unwrap_safe_for_raw_values() {
+        let result = eval(
+            r#"
+            let x = map { "a": 1 }
+            if is_some(x) {
+                unwrap(x)
+            } else {
+                "safe"
+            }
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(s) if s == "safe"));
     }
 
     #[test]
