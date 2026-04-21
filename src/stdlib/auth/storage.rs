@@ -20,7 +20,7 @@ pub(super) fn active_auth_storage_backend() -> AuthStorageBackend {
 
 fn take_oauth_state_memory(state: &str) -> Option<OAuthState> {
     let now = chrono::Utc::now().timestamp();
-    let min_created = now - 600;
+    let min_created = now - OAUTH_STATE_TTL;
     let mut store = SESSION_STORE.lock().unwrap();
 
     match store.oauth_states.get(state) {
@@ -192,22 +192,31 @@ pub(super) fn cleanup_expired_auth_challenge_records(now: i64) -> std::result::R
             Ok(store.cleanup_expired_auth_challenges(now) as u64)
         }
         AuthStorageBackend::Sqlite => {
-            let backend_count = cleanup_expired_auth_challenges_sqlite(now)?;
+            let backend_result = cleanup_expired_auth_challenges_sqlite(now);
             let mut store = SESSION_STORE.lock().unwrap();
             let memory_count = store.cleanup_expired_auth_challenges(now) as u64;
-            Ok(backend_count + memory_count)
+            match backend_result {
+                Ok(backend_count) => Ok(backend_count + memory_count),
+                Err(err) => Err(err),
+            }
         }
         AuthStorageBackend::Postgres => {
-            let backend_count = cleanup_expired_auth_challenges_postgres(now)?;
+            let backend_result = cleanup_expired_auth_challenges_postgres(now);
             let mut store = SESSION_STORE.lock().unwrap();
             let memory_count = store.cleanup_expired_auth_challenges(now) as u64;
-            Ok(backend_count + memory_count)
+            match backend_result {
+                Ok(backend_count) => Ok(backend_count + memory_count),
+                Err(err) => Err(err),
+            }
         }
         AuthStorageBackend::Redis => {
-            let backend_count = cleanup_expired_auth_challenges_redis(now)?;
+            let backend_result = cleanup_expired_auth_challenges_redis(now);
             let mut store = SESSION_STORE.lock().unwrap();
             let memory_count = store.cleanup_expired_auth_challenges(now) as u64;
-            Ok(backend_count + memory_count)
+            match backend_result {
+                Ok(backend_count) => Ok(backend_count + memory_count),
+                Err(err) => Err(err),
+            }
         }
     }
 }
@@ -372,10 +381,9 @@ fn store_oauth_state_redis(state: &OAuthState) -> std::result::Result<(), String
     .to_string();
 
     let key = format!("ntnt:oauth_state:{}", state.state);
-    // OAuth state expires in 10 minutes
     redis::cmd("SETEX")
         .arg(&key)
-        .arg(600)
+        .arg(OAUTH_STATE_TTL)
         .arg(&state_json)
         .query::<()>(&mut conn)
         .map_err(|e| format!("Redis SETEX error: {}", e))?;
@@ -399,7 +407,7 @@ fn consume_oauth_state_sqlite(state: &str) -> std::result::Result<Option<OAuthSt
     let conn_guard = SQLITE_CONN.lock().unwrap();
     let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
     let now = chrono::Utc::now().timestamp();
-    let min_created = now - 600; // 10 minutes
+    let min_created = now - OAUTH_STATE_TTL;
 
     let result = conn.query_row(
         "DELETE FROM auth_oauth_states
@@ -429,7 +437,7 @@ fn consume_oauth_state_postgres(state: &str) -> std::result::Result<Option<OAuth
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
     let now = chrono::Utc::now().timestamp();
-    let min_created = now - 600; // 10 minutes
+    let min_created = now - OAUTH_STATE_TTL;
 
     let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
 
@@ -514,6 +522,7 @@ fn consume_oauth_state_redis(state: &str) -> std::result::Result<Option<OAuthSta
 
 /// Maximum lifetime of an exchange token in seconds.
 /// Tokens older than this are considered expired and will not be consumed.
+pub(super) const OAUTH_STATE_TTL: i64 = 600;
 pub(super) const EXCHANGE_TOKEN_TTL: i64 = 60;
 pub(super) const AUTH_CHALLENGE_TTL: i64 = 1800;
 
@@ -1356,22 +1365,9 @@ fn consume_auth_challenge_redis(id: &str) -> std::result::Result<Option<AuthChal
     Ok(Some(challenge))
 }
 
-/// Cleanup expired auth challenges from the session store
-fn cleanup_expired_auth_challenges_memory(now: i64) -> u64 {
-    let mut store = SESSION_STORE.lock().unwrap();
-    store.cleanup_expired_auth_challenges(now) as u64
-}
-
 pub fn cleanup_expired_auth_challenges() -> std::result::Result<u64, String> {
     let now = chrono::Utc::now().timestamp();
-    match active_auth_storage_backend() {
-        AuthStorageBackend::Memory => cleanup_expired_auth_challenge_records(now),
-        _ => {
-            let backend_count = cleanup_expired_auth_challenge_records(now)?;
-            let memory_count = cleanup_expired_auth_challenges_memory(now);
-            Ok(backend_count + memory_count)
-        }
-    }
+    cleanup_expired_auth_challenge_records(now)
 }
 
 fn cleanup_expired_auth_challenges_sqlite(now: i64) -> std::result::Result<u64, String> {
@@ -1456,7 +1452,7 @@ fn cleanup_expired_auth_challenges_redis(now: i64) -> std::result::Result<u64, S
 /// OAuth states expire after 10 minutes
 pub fn cleanup_expired_oauth_states() -> std::result::Result<u64, String> {
     let now = chrono::Utc::now().timestamp();
-    let cutoff = now - 600;
+    let cutoff = now - OAUTH_STATE_TTL;
     cleanup_expired_oauth_state_records(cutoff)
 }
 

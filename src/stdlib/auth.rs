@@ -395,6 +395,7 @@ impl InMemoryStore {
         self.sessions.remove(id);
     }
 
+    #[allow(dead_code)]
     fn get_oauth_state(&self, state: &str) -> Option<&OAuthState> {
         self.oauth_states.get(state).filter(|s| {
             let now = chrono::Utc::now().timestamp();
@@ -415,6 +416,7 @@ impl InMemoryStore {
         self.exchange_tokens.insert(token, (session_id, now));
     }
 
+    #[allow(dead_code)]
     fn get_exchange_token(&self, token: &str) -> Option<&String> {
         self.exchange_tokens
             .get(token)
@@ -4337,6 +4339,7 @@ mod tests {
             .is_none());
     }
 
+    #[test]
     fn test_auth_storage_contract_memory_round_trip_all_record_types() {
         use super::storage::{
             cleanup_expired_auth_challenge_records, cleanup_expired_exchange_token_records,

@@ -131,8 +131,9 @@ pub(super) fn migrate_session(
     migrate_session_record(old_id, new_session)?;
 
     let mut store = SESSION_STORE.lock().unwrap();
+    let had_fallback_session = store.get_session(old_id).is_some();
     store.delete_session(old_id);
-    if active_auth_storage_backend() != AuthStorageBackend::Memory {
+    if had_fallback_session && active_auth_storage_backend() != AuthStorageBackend::Memory {
         store.set_session(new_session.clone());
     }
     Ok(())
