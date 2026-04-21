@@ -3098,7 +3098,7 @@ pub fn init() -> HashMap<String, Value> {
                             return match enforce_auth_for_request(&args[0], true) {
                                 Ok(Some(cookie)) => {
                                     let mut response = match redirect_response(
-                                        &guards::request_path(&args[0]),
+                                        &guards::request_target(&args[0]),
                                         Some(&cookie),
                                     ) {
                                         Value::Map(map) => map,
@@ -3160,7 +3160,7 @@ pub fn init() -> HashMap<String, Value> {
                     func: |mw_args| match enforce_auth_for_request(&mw_args[0], true) {
                         Ok(Some(cookie)) => {
                             let mut response = match redirect_response(
-                                &guards::request_path(&mw_args[0]),
+                                &guards::request_target(&mw_args[0]),
                                 Some(&cookie),
                             ) {
                                 Value::Map(map) => map,
@@ -6562,6 +6562,69 @@ mod tests {
 
         let response = handle_auth_protect(&[req]).expect("auth protect should succeed");
         assert!(matches!(response, Value::Unit));
+    }
+
+    #[test]
+    fn test_handle_auth_protect_preserves_query_string_on_cookie_refresh_redirect() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            protected_paths: vec!["/admin".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        SESSION_STORE.lock().unwrap().set_session(Session {
+            id: "session-protect-query-refresh".to_string(),
+            user_id: "user-protect-query-refresh".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-protect-query-refresh".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 600,
+            expires_at: now + 60,
+        });
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        let cookie = build_signed_session_cookie(&config, "session-protect-query-refresh", None)
+            .expect("cookie should build");
+        let req = Value::Map(HashMap::from([
+            ("method".to_string(), Value::String("GET".to_string())),
+            ("path".to_string(), Value::String("/admin".to_string())),
+            (
+                "query".to_string(),
+                Value::String("page=2&sort=asc".to_string()),
+            ),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "cookie".to_string(),
+                    Value::String(cookie),
+                )])),
+            ),
+        ]));
+
+        let response = handle_auth_protect(&[req]).expect("auth protect should succeed");
+        match response {
+            Value::Map(map) => match map.get("headers") {
+                Some(Value::Map(headers)) => {
+                    assert!(
+                        matches!(headers.get("Location"), Some(Value::String(loc)) if loc == "/admin?page=2&sort=asc")
+                    );
+                }
+                other => panic!("expected headers map, got {:?}", other),
+            },
+            other => panic!("expected response map, got {:?}", other),
+        }
     }
 
     #[test]

@@ -143,6 +143,43 @@ pub(super) fn request_path(request: &Value) -> String {
     "/".to_string()
 }
 
+pub(super) fn request_target(request: &Value) -> String {
+    let path = request_path(request);
+    let Value::Map(req_map) = request else {
+        return path;
+    };
+
+    match req_map.get("query") {
+        Some(Value::String(query)) if !query.is_empty() => {
+            if query.starts_with('?') {
+                format!("{}{}", path, query)
+            } else {
+                format!("{}?{}", path, query)
+            }
+        }
+        Some(Value::Map(map)) if !map.is_empty() => {
+            let mut pairs = Vec::new();
+            for (key, value) in map {
+                let encoded_key = encode_url_path_segment(key);
+                let encoded_value = match value {
+                    Value::String(s) => encode_url_path_segment(s),
+                    Value::Int(i) => encode_url_path_segment(&i.to_string()),
+                    Value::Float(f) => encode_url_path_segment(&f.to_string()),
+                    Value::Bool(b) => encode_url_path_segment(&b.to_string()),
+                    _ => continue,
+                };
+                pairs.push(format!("{}={}", encoded_key, encoded_value));
+            }
+            if pairs.is_empty() {
+                path
+            } else {
+                format!("{}?{}", path, pairs.join("&"))
+            }
+        }
+        _ => path,
+    }
+}
+
 fn request_prefers_api(request: &Value) -> bool {
     let path = request_path(request);
     if path == "/api" || path.starts_with("/api/") {
