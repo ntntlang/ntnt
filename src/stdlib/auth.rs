@@ -3930,6 +3930,14 @@ mod tests {
             .unwrap_or_else(|e| panic!("{} updated session lookup should succeed: {}", label, e))
             .unwrap_or_else(|| panic!("{} updated session should exist", label));
         assert_eq!(updated_session.data_json, r#"{"role":"admin"}"#);
+        assert_eq!(
+            updated_session.access_token.as_deref(),
+            Some(format!("access-{}-2", label).as_str())
+        );
+        assert_eq!(
+            updated_session.refresh_token.as_deref(),
+            Some(format!("refresh-{}-2", label).as_str())
+        );
         assert_eq!(updated_session.token_expires_at, Some(now + 120));
         assert_eq!(updated_session.expires_at, now + 600);
 
