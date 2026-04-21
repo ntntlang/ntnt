@@ -1,9 +1,9 @@
 use super::storage::{
     active_auth_storage_backend, cleanup_expired_session_records,
     delete_all_session_records_for_user, delete_session_record, extend_session_record_expiry,
-    get_refreshable_session_record, get_session_record, list_session_records_for_user,
-    migrate_session_record, store_session_record, update_session_record_data,
-    update_session_record_tokens, AuthStorageBackend,
+    get_refreshable_session_record_without_fallback, get_session_record_with_fallback,
+    list_session_records_for_user, migrate_session_record, store_session_record,
+    update_session_record_data, update_session_record_tokens, AuthStorageBackend,
 };
 use super::*;
 
@@ -34,16 +34,7 @@ pub fn store_session(session: Session) {
 /// Get session by ID
 pub fn get_session_by_id(id: &str) -> Option<Session> {
     let config = get_auth_config();
-    let backend = active_auth_storage_backend();
-
-    let session = match backend {
-        AuthStorageBackend::Memory => get_session_record(id).ok().flatten(),
-        _ => match get_session_record(id) {
-            Ok(Some(session)) => Some(session),
-            Ok(None) => SESSION_STORE.lock().unwrap().get_session(id).cloned(),
-            Err(_) => SESSION_STORE.lock().unwrap().get_session(id).cloned(),
-        },
-    };
+    let session = get_session_record_with_fallback(id);
 
     if session.is_some() {
         return session;
@@ -51,12 +42,8 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
 
     if let Some(config) = &config {
         if config.store_tokens {
-            let expired_session = match backend {
-                AuthStorageBackend::Memory => None,
-                _ => get_refreshable_session_record(id, config.refresh_ttl)
-                    .ok()
-                    .flatten(),
-            };
+            let expired_session =
+                get_refreshable_session_record_without_fallback(id, config.refresh_ttl);
 
             if let Some(expired) = expired_session {
                 if let Some(ref refresh_token) = expired.refresh_token {
