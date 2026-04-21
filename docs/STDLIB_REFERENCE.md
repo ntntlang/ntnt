@@ -2238,29 +2238,31 @@ current_user(req) otherwise return redirect("/login")  // Require a current user
 #### `enable_auth`
 
 ```ntnt
-enable_auth(providers: [Provider], options?: Map) -> Unit
+enable_auth(providers: [Provider], preset_or_options?: String | Map, overrides?: Map) -> Unit
 ```
 
 Initialize the authentication system with OAuth providers.
 
 Stores provider configurations for use by auth handlers. After calling this, you can use auth_start, auth_callback, and auth_logout with routes to enable OAuth login.
 
-Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
+Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url". Built-in presets: "consumer", "admin", "internal", "strict".
 
 **Parameters:**
 
 - `providers` — Array of provider configs created by oauth() or oauth_discover()
-- `options` — Optional map with keys: session_secret, session_ttl, refresh_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, cookie_name, cookie_secure, session_store, store_tokens
+- `preset_or_options` — Optional preset string or options map
+- `overrides` — Optional overrides map applied on top of a preset
 
 **Returns:** Unit
 
 **Examples:**
 
 ```ntnt
-// Initialize auth with GitHub
+// Initialize auth with GitHub and explicit options
 let github = oauth("github", get_env("GITHUB_ID"), get_env("GITHUB_SECRET"))
 enable_auth([github], map { "session_secret": "my-secret" })
-enable_auth([github], map { "session_store": "sqlite:./sessions.db" })  // SQLite sessions
+enable_auth([github], "admin")  // Admin preset
+enable_auth([github], "consumer", map { "session_store": "sqlite:./sessions.db" })  // Preset plus overrides
 enable_auth([github], map { "session_store": "redis://localhost:6379" })  // Redis sessions
 ```
 

@@ -2663,7 +2663,7 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt enable_auth
     // @module std/auth
-    // @signature enable_auth(providers: [Provider], options?: Map) -> Unit
+    // @signature enable_auth(providers: [Provider], preset_or_options?: String | Map, overrides?: Map) -> Unit
     // Initialize the authentication system with OAuth providers.
     //
     // Stores provider configurations for use by auth handlers. After calling this,
@@ -2671,16 +2671,19 @@ pub fn init() -> HashMap<String, Value> {
     // with routes to enable OAuth login.
     //
     // Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
+    // Built-in presets: "consumer", "admin", "internal", "strict".
     // @param providers Array of provider configs created by oauth() or oauth_discover()
-    // @param options Optional map with keys: session_secret, session_ttl, refresh_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, cookie_name, cookie_secure, session_store, store_tokens
+    // @param preset_or_options Optional preset string or options map
+    // @param overrides Optional overrides map applied on top of a preset
     // @returns Unit
     // @see_also oauth, oauth_discover, auth_start
     // @since v0.3.11
     // @tags #auth, #oauth
-    // @example ~ "Initialize auth with GitHub"
+    // @example ~ "Initialize auth with GitHub and explicit options"
     //   let github = oauth("github", get_env("GITHUB_ID"), get_env("GITHUB_SECRET"))
     //   enable_auth([github], map { "session_secret": "my-secret" })
-    // @example enable_auth([github], map { "session_store": "sqlite:./sessions.db" }) ~ "SQLite sessions"
+    // @example enable_auth([github], "admin") ~ "Admin preset"
+    // @example enable_auth([github], "consumer", map { "session_store": "sqlite:./sessions.db" }) ~ "Preset plus overrides"
     // @example enable_auth([github], map { "session_store": "redis://localhost:6379" }) ~ "Redis sessions"
     module.insert(
         "enable_auth".to_string(),
