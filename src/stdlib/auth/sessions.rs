@@ -34,9 +34,10 @@ pub fn store_session(session: Session) {
 /// Get session by ID
 pub fn get_session_by_id(id: &str) -> Option<Session> {
     let config = get_auth_config();
-    let session = get_session_record_with_fallback(id);
+    let mut session = get_session_record_with_fallback(id);
 
-    if session.is_some() {
+    if let (Some(config), Some(active_session)) = (&config, session.as_mut()) {
+        maybe_slide_session(active_session, config);
         return session;
     }
 
@@ -53,7 +54,8 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
                         match refresh_access_token(provider, refresh_token) {
                             Ok(tokens) => {
                                 let now = chrono::Utc::now().timestamp();
-                                let new_expires_at = now + config.session_ttl;
+                                let new_expires_at =
+                                    capped_session_expiry(now, expired.created_at, config);
 
                                 update_session_tokens(&expired.id, &tokens);
                                 extend_session_expiry(&expired.id, new_expires_at);
@@ -87,6 +89,35 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
     }
 
     None
+}
+
+fn capped_session_expiry(now: i64, created_at: i64, config: &AuthConfig) -> i64 {
+    let sliding_target = now + config.session_ttl;
+    match config.max_session_ttl {
+        Some(max_session_ttl) => sliding_target.min(created_at + max_session_ttl),
+        None => sliding_target,
+    }
+}
+
+fn maybe_slide_session(session: &mut Session, config: &AuthConfig) {
+    if !config.sliding_sessions {
+        return;
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let target_expires_at = capped_session_expiry(now, session.created_at, config);
+    if target_expires_at <= session.expires_at {
+        return;
+    }
+
+    let remaining = session.expires_at - now;
+    if remaining > config.refresh_throttle {
+        return;
+    }
+
+    if extend_session_record_expiry(&session.id, target_expires_at).is_ok() {
+        session.expires_at = target_expires_at;
+    }
 }
 
 /// Extend a session's expires_at timestamp (used after successful refresh)

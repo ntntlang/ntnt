@@ -287,6 +287,9 @@ pub struct AuthConfig {
     pub cookie_same_site: String,
     pub session_ttl: i64,
     pub refresh_ttl: i64, // How long refresh tokens can extend sessions (default: 30 days)
+    pub sliding_sessions: bool, // Extend active sessions on authenticated reads
+    pub refresh_throttle: i64, // Minimum seconds between sliding expiry extensions
+    pub max_session_ttl: Option<i64>, // Absolute max lifetime from session creation
     pub store_tokens: bool, // Store access/refresh tokens in session
     pub session_secret: String, // Secret for session signing
     pub session_store: SessionStore, // Session storage backend
@@ -305,6 +308,9 @@ impl Default for AuthConfig {
             cookie_same_site: "lax".to_string(),
             session_ttl: 86400 * 7,  // 7 days
             refresh_ttl: 86400 * 30, // 30 days — how long refresh tokens can extend sessions
+            sliding_sessions: false,
+            refresh_throttle: 300,
+            max_session_ttl: None,
             store_tokens: false,
             session_secret: DEFAULT_SESSION_SECRET_SENTINEL.to_string(),
             session_store: SessionStore::Memory,
@@ -2689,6 +2695,9 @@ pub fn init() -> HashMap<String, Value> {
                             "session_secret"
                                 | "session_ttl"
                                 | "refresh_ttl"
+                                | "sliding_sessions"
+                                | "refresh_throttle"
+                                | "max_session_ttl"
                                 | "success_url"
                                 | "after_login"
                                 | "failure_url"
@@ -2865,6 +2874,55 @@ pub fn init() -> HashMap<String, Value> {
                     None => 86400 * 30,
                 };
 
+                let sliding_sessions = match get_option(&["sliding_sessions"]) {
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"sliding_sessions\" must be a bool, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => false,
+                };
+
+                let refresh_throttle = match get_option(&["refresh_throttle"]) {
+                    Some(Value::Int(n)) => *n,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"refresh_throttle\" must be an int, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => 300,
+                };
+
+                if refresh_throttle < 0 {
+                    return Err(IntentError::type_error(
+                        "[auth] enable_auth() option \"refresh_throttle\" must be >= 0"
+                            .to_string(),
+                    ));
+                }
+
+                let max_session_ttl = match get_option(&["max_session_ttl"]) {
+                    Some(Value::Int(n)) => Some(*n),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"max_session_ttl\" must be an int, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => None,
+                };
+
+                if let Some(max_session_ttl) = max_session_ttl {
+                    if max_session_ttl <= 0 {
+                        return Err(IntentError::type_error(
+                            "[auth] enable_auth() option \"max_session_ttl\" must be > 0"
+                                .to_string(),
+                        ));
+                    }
+                }
+
                 // Create auth config
                 let config = AuthConfig {
                     providers,
@@ -2876,8 +2934,11 @@ pub fn init() -> HashMap<String, Value> {
                     cookie_secure,
                     cookie_same_site: "Lax".to_string(),
                     session_ttl,
-                    store_tokens,
                     refresh_ttl,
+                    sliding_sessions,
+                    refresh_throttle,
+                    max_session_ttl,
+                    store_tokens,
                     session_secret,
                     session_store,
                 };
@@ -5202,6 +5263,230 @@ mod tests {
         let err = get_auth_challenge_by_id("missing-challenge")
             .expect_err("backend lookup failure without fallback should surface error");
         assert!(err.contains("SQLite not initialized"));
+    }
+
+    fn github_test_provider_value() -> Value {
+        Value::Map(HashMap::from([
+            ("name".to_string(), Value::String("github".to_string())),
+            (
+                "client_id".to_string(),
+                Value::String("test-client".to_string()),
+            ),
+            (
+                "client_secret".to_string(),
+                Value::String("test-secret".to_string()),
+            ),
+            (
+                "authorize_url".to_string(),
+                Value::String("https://github.com/login/oauth/authorize".to_string()),
+            ),
+            (
+                "token_url".to_string(),
+                Value::String("https://github.com/login/oauth/access_token".to_string()),
+            ),
+            (
+                "userinfo_url".to_string(),
+                Value::String("https://api.github.com/user".to_string()),
+            ),
+        ]))
+    }
+
+    #[test]
+    fn test_enable_auth_accepts_session_lifecycle_options() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::Map(HashMap::from([
+                ("sliding_sessions".to_string(), Value::Bool(true)),
+                ("refresh_throttle".to_string(), Value::Int(120)),
+                ("max_session_ttl".to_string(), Value::Int(3600)),
+            ])),
+        ])
+        .expect("enable_auth should accept session lifecycle options");
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        assert!(config.sliding_sessions);
+        assert_eq!(config.refresh_throttle, 120);
+        assert_eq!(config.max_session_ttl, Some(3600));
+    }
+
+    #[test]
+    fn test_enable_auth_rejects_invalid_session_lifecycle_option_types() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        let err = enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::Map(HashMap::from([(
+                "sliding_sessions".to_string(),
+                Value::String("yes".to_string()),
+            )])),
+        ])
+        .expect_err("enable_auth should reject invalid sliding_sessions type");
+        assert!(format!("{}", err).contains("option \"sliding_sessions\" must be a bool"));
+    }
+
+    #[test]
+    fn test_enable_auth_rejects_negative_refresh_throttle() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        let err = enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::Map(HashMap::from([(
+                "refresh_throttle".to_string(),
+                Value::Int(-1),
+            )])),
+        ])
+        .expect_err("enable_auth should reject negative refresh_throttle");
+        assert!(format!("{}", err).contains("option \"refresh_throttle\" must be >= 0"));
+    }
+
+    #[test]
+    fn test_enable_auth_rejects_non_positive_max_session_ttl() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        let err = enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::Map(HashMap::from([(
+                "max_session_ttl".to_string(),
+                Value::Int(0),
+            )])),
+        ])
+        .expect_err("enable_auth should reject non-positive max_session_ttl");
+        assert!(format!("{}", err).contains("option \"max_session_ttl\" must be > 0"));
+    }
+
+    #[test]
+    fn test_get_session_by_id_slides_active_session_expiry() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            max_session_ttl: Some(7200),
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-sliding-active".to_string(),
+            user_id: "user-sliding".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-sliding-active".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 600,
+            expires_at: now + 60,
+        };
+        SESSION_STORE.lock().unwrap().set_session(session.clone());
+
+        let fetched = get_session_by_id(&session.id).expect("session should exist");
+        assert!(fetched.expires_at > session.expires_at);
+        assert_eq!(
+            SESSION_STORE
+                .lock()
+                .unwrap()
+                .get_session(&session.id)
+                .expect("session should remain stored")
+                .expires_at,
+            fetched.expires_at
+        );
+    }
+
+    #[test]
+    fn test_get_session_by_id_respects_max_session_ttl_when_sliding() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            max_session_ttl: Some(1800),
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-sliding-capped".to_string(),
+            user_id: "user-sliding-cap".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-sliding-capped".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 1200,
+            expires_at: now + 30,
+        };
+        SESSION_STORE.lock().unwrap().set_session(session.clone());
+
+        let fetched = get_session_by_id(&session.id).expect("session should exist");
+        assert_eq!(fetched.expires_at, session.created_at + 1800);
+    }
+
+    #[test]
+    fn test_get_session_by_id_skips_sliding_refresh_when_throttle_not_met() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-sliding-throttle".to_string(),
+            user_id: "user-sliding-throttle".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-sliding-throttle".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 60,
+            expires_at: now + 1200,
+        };
+        SESSION_STORE.lock().unwrap().set_session(session.clone());
+
+        let fetched = get_session_by_id(&session.id).expect("session should exist");
+        assert_eq!(fetched.expires_at, session.expires_at);
     }
 
     #[test]
