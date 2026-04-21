@@ -109,7 +109,14 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
 
 pub fn handle_auth_protect(args: &[Value]) -> Result<Value> {
     match enforce_auth_for_request(&args[0], false) {
-        Ok(Some(cookie)) => Ok(redirect_response(&request_path(&args[0]), Some(&cookie))),
+        Ok(Some(cookie)) => {
+            let mut response = match redirect_response(&request_path(&args[0]), Some(&cookie)) {
+                Value::Map(map) => map,
+                other => return Ok(other),
+            };
+            response.insert("status".to_string(), Value::Int(307));
+            Ok(Value::Map(response))
+        }
         Ok(None) => Ok(Value::Unit),
         Err(response) => Ok(response),
     }

@@ -34,7 +34,7 @@ pub fn store_session(session: Session) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SessionAccessEffect {
     Unchanged,
-    ExpiryUpdated,
+    ExpiryUpdated { expires_at: i64 },
 }
 
 pub(super) fn get_session_for_request(id: &str) -> (Option<Session>, SessionAccessEffect) {
@@ -91,7 +91,12 @@ pub(super) fn get_session_for_request(id: &str) -> (Option<Session>, SessionAcce
                                 }
                                 refreshed.token_expires_at = tokens.expires_in.map(|e| now + e);
                                 refreshed.expires_at = new_expires_at;
-                                return (Some(refreshed), SessionAccessEffect::ExpiryUpdated);
+                                return (
+                                    Some(refreshed),
+                                    SessionAccessEffect::ExpiryUpdated {
+                                        expires_at: new_expires_at,
+                                    },
+                                );
                             }
                             Err(e) => {
                                 eprintln!(
@@ -130,7 +135,9 @@ fn maybe_slide_session(session: &mut Session, config: &AuthConfig) -> SessionAcc
     if session.expires_at > target_expires_at {
         if extend_session_record_expiry(&session.id, target_expires_at).is_ok() {
             session.expires_at = target_expires_at;
-            return SessionAccessEffect::ExpiryUpdated;
+            return SessionAccessEffect::ExpiryUpdated {
+                expires_at: target_expires_at,
+            };
         }
         return SessionAccessEffect::Unchanged;
     }
@@ -150,7 +157,9 @@ fn maybe_slide_session(session: &mut Session, config: &AuthConfig) -> SessionAcc
 
     if extend_session_record_expiry(&session.id, target_expires_at).is_ok() {
         session.expires_at = target_expires_at;
-        SessionAccessEffect::ExpiryUpdated
+        SessionAccessEffect::ExpiryUpdated {
+            expires_at: target_expires_at,
+        }
     } else {
         SessionAccessEffect::Unchanged
     }

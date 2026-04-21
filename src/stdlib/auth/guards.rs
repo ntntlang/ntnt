@@ -1,3 +1,4 @@
+use super::cookies::build_signed_session_cookie_with_max_age;
 use super::sessions::{get_session_for_request, SessionAccessEffect};
 use super::*;
 
@@ -253,11 +254,20 @@ pub fn enforce_auth_for_request(
     if let Some(session_id) = get_session_id_from_request(request) {
         let (session, effect) = get_session_for_request(&session_id);
         if session.is_some() {
-            let refreshed_cookie = if effect == SessionAccessEffect::ExpiryUpdated {
-                get_auth_config()
-                    .and_then(|config| build_signed_session_cookie(&config, &session_id, None).ok())
-            } else {
-                None
+            let refreshed_cookie = match effect {
+                SessionAccessEffect::ExpiryUpdated { expires_at } => {
+                    let now = chrono::Utc::now().timestamp();
+                    get_auth_config().and_then(|config| {
+                        build_signed_session_cookie_with_max_age(
+                            &config,
+                            &session_id,
+                            expires_at - now,
+                            None,
+                        )
+                        .ok()
+                    })
+                }
+                SessionAccessEffect::Unchanged => None,
             };
             return Ok(refreshed_cookie);
         }
