@@ -2673,6 +2673,11 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
     // Built-in presets: "consumer", "admin", "internal", "strict".
+    // Supported option keys: session_secret, session_ttl, refresh_ttl, sliding_sessions,
+    // refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure,
+    // logout_url/after_logout, protected_paths, cookie_name, cookie_secure, cookie_same_site,
+    // session_store, store_tokens.
+    // When a preset string is used, the overrides map is applied on top of the preset.
     // @param providers Array of provider configs created by oauth() or oauth_discover()
     // @param preset_or_options Optional preset string or options map
     // @param overrides Optional overrides map applied on top of a preset
@@ -2915,13 +2920,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => {
-                        if preset_name.is_some() {
-                            base_config.cookie_secure
-                        } else {
-                            default_auth_cookie_secure_env()
-                        }
-                    }
+                    None => default_auth_cookie_secure_env()
                 };
 
                 let cookie_same_site = match get_option(&["cookie_same_site"]) {
