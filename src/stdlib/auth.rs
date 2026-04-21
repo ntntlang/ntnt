@@ -2915,7 +2915,13 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => base_config.cookie_secure,
+                    None => {
+                        if preset_name.is_some() {
+                            base_config.cookie_secure
+                        } else {
+                            default_auth_cookie_secure_env()
+                        }
+                    }
                 };
 
                 let cookie_same_site = match get_option(&["cookie_same_site"]) {
