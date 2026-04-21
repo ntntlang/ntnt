@@ -4529,6 +4529,65 @@ mod tests {
     }
 
     #[test]
+    fn test_session_backend_error_uses_memory_fallback() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-memory-fallback-active".to_string(),
+            user_id: "user-memory-fallback".to_string(),
+            provider: "local".to_string(),
+            email: Some("fallback@example.com".to_string()),
+            name: Some("Fallback User".to_string()),
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-memory-fallback".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now,
+            expires_at: now + 300,
+        };
+        SESSION_STORE.lock().unwrap().set_session(session.clone());
+        *SQLITE_CONN.lock().unwrap() = None;
+
+        let fetched = get_session_by_id(&session.id).expect("memory fallback session should be returned");
+        assert_eq!(fetched.id, session.id);
+        assert_eq!(fetched.user_id, session.user_id);
+    }
+
+    #[test]
+    fn test_refreshable_session_lookup_does_not_fallback_to_memory() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let now = chrono::Utc::now().timestamp();
+        SESSION_STORE.lock().unwrap().set_session(Session {
+            id: "session-memory-refresh-fallback".to_string(),
+            user_id: "user-memory-refresh".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-memory-refresh".to_string(),
+            access_token: Some("access-memory-refresh".to_string()),
+            refresh_token: Some("refresh-memory-refresh".to_string()),
+            token_expires_at: Some(now - 30),
+            created_at: now - 30,
+            expires_at: now - 5,
+        });
+        *SQLITE_CONN.lock().unwrap() = None;
+
+        assert!(get_session_by_id("session-memory-refresh-fallback").is_none());
+    }
+
+    #[test]
     fn test_oauth_state_backend_error_uses_ttl_checked_memory_fallback() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
