@@ -834,7 +834,7 @@ is_some(val: Any) -> Bool
 
 Checks if a value is Option::Some.
 
-Returns true only for Option::Some. Returns false for Option::None and for all non-Option values. This keeps `is_some(x)` aligned with `unwrap(x)`, which only accepts real Option/Result values.
+Returns true only for Option::Some. Returns false for Option::None and for all non-Option values. This is a strict Option check; for `Result` values, use `is_ok` or `is_err` instead.
 
 **Parameters:**
 

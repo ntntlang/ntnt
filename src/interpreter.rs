@@ -3007,8 +3007,8 @@ impl Interpreter {
         // Checks if a value is Option::Some.
         //
         // Returns true only for Option::Some. Returns false for Option::None
-        // and for all non-Option values. This keeps `is_some(x)` aligned with
-        // `unwrap(x)`, which only accepts real Option/Result values.
+        // and for all non-Option values. This is a strict Option check; for
+        // `Result` values, use `is_ok` or `is_err` instead.
         // @param val The value to check
         // @returns true if the value is Option::Some, false otherwise
         // @tags #pure, #deterministic
@@ -3060,7 +3060,6 @@ impl Interpreter {
                     Value::EnumValue {
                         enum_name, variant, ..
                     } if enum_name == "Option" => Ok(Value::Bool(variant == "None")),
-                    // Any non-Option value is considered "present" (not None)
                     _ => Ok(Value::Bool(false)),
                 },
             },
