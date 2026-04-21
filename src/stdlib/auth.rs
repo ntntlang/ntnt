@@ -3769,6 +3769,15 @@ pub fn init() -> HashMap<String, Value> {
 
 #[cfg(test)]
 mod tests {
+    use super::storage::{
+        cleanup_expired_oauth_state_records, consume_auth_challenge_record,
+        consume_exchange_token_record, consume_oauth_state_record,
+        delete_all_session_records_for_user, delete_session_record, extend_session_record_expiry,
+        get_auth_challenge_record, get_refreshable_session_record, get_session_record,
+        list_session_records_for_user, migrate_session_record, store_auth_challenge_record,
+        store_exchange_token_record, store_oauth_state_record, store_session_record,
+        update_session_record_data, update_session_record_tokens, OAUTH_STATE_TTL,
+    };
     use super::*;
 
     static AUTH_TEST_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
@@ -3854,6 +3863,305 @@ mod tests {
         };
         ensure_auth_session_store(&config).unwrap();
         init_auth(config);
+    }
+
+    fn auth_test_postgres_store() -> Option<SessionStore> {
+        std::env::var("NTNT_AUTH_TEST_POSTGRES_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(SessionStore::Postgres)
+    }
+
+    fn auth_test_redis_store() -> Option<SessionStore> {
+        std::env::var("NTNT_AUTH_TEST_REDIS_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(SessionStore::Redis)
+    }
+
+    fn run_auth_storage_contract_round_trip(store_kind: SessionStore, label: &str) {
+        reset_auth_test_state();
+        init_test_auth(store_kind.clone());
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: format!("session-{}-1", label),
+            user_id: format!("user-{}", label),
+            provider: "local".to_string(),
+            email: Some(format!("{}@example.com", label)),
+            name: Some(format!("{} User", label)),
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: format!("csrf-{}-1", label),
+            access_token: Some(format!("access-{}-1", label)),
+            refresh_token: Some(format!("refresh-{}-1", label)),
+            token_expires_at: Some(now + 60),
+            created_at: now,
+            expires_at: now + 300,
+        };
+        store_session_record(&session)
+            .unwrap_or_else(|e| panic!("{} session store should succeed: {}", label, e));
+        assert_eq!(
+            get_session_record(&session.id)
+                .unwrap_or_else(|e| panic!("{} session lookup should succeed: {}", label, e))
+                .unwrap_or_else(|| panic!("{} session should exist", label))
+                .id,
+            session.id
+        );
+        update_session_record_data(&session.id, r#"{"role":"admin"}"#)
+            .unwrap_or_else(|e| panic!("{} session data update should succeed: {}", label, e));
+        update_session_record_tokens(
+            &session.id,
+            &TokenResponse {
+                access_token: format!("access-{}-2", label),
+                token_type: "Bearer".to_string(),
+                expires_in: Some(120),
+                refresh_token: Some(format!("refresh-{}-2", label)),
+                id_token: None,
+                scope: None,
+            },
+            now,
+        )
+        .unwrap_or_else(|e| panic!("{} session token update should succeed: {}", label, e));
+        extend_session_record_expiry(&session.id, now + 600)
+            .unwrap_or_else(|e| panic!("{} session expiry extension should succeed: {}", label, e));
+        let updated_session = get_session_record(&session.id)
+            .unwrap_or_else(|e| panic!("{} updated session lookup should succeed: {}", label, e))
+            .unwrap_or_else(|| panic!("{} updated session should exist", label));
+        assert_eq!(updated_session.data_json, r#"{"role":"admin"}"#);
+        assert_eq!(
+            updated_session.access_token.as_deref(),
+            Some(format!("access-{}-2", label).as_str())
+        );
+        assert_eq!(
+            updated_session.refresh_token.as_deref(),
+            Some(format!("refresh-{}-2", label).as_str())
+        );
+        assert_eq!(updated_session.token_expires_at, Some(now + 120));
+        assert_eq!(updated_session.expires_at, now + 600);
+
+        let refreshable_session = Session {
+            id: format!("session-{}-refreshable", label),
+            user_id: format!("user-{}", label),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: format!("csrf-{}-refreshable", label),
+            access_token: Some(format!("access-{}-refreshable", label)),
+            refresh_token: Some(format!("refresh-{}-refreshable", label)),
+            token_expires_at: Some(now - 30),
+            created_at: now - 30,
+            expires_at: now - 5,
+        };
+        store_session_record(&refreshable_session).unwrap_or_else(|e| {
+            panic!("{} refreshable session store should succeed: {}", label, e)
+        });
+        let refreshable = get_refreshable_session_record(&refreshable_session.id, 3600)
+            .unwrap_or_else(|e| panic!("{} refreshable lookup should succeed: {}", label, e));
+        match store_kind {
+            SessionStore::Memory => {
+                assert!(
+                    refreshable.is_none(),
+                    "{} memory store should not surface expired sessions as refreshable",
+                    label
+                );
+            }
+            _ => {
+                assert_eq!(
+                    refreshable
+                        .unwrap_or_else(|| panic!("{} refreshable session should exist", label))
+                        .id,
+                    refreshable_session.id
+                );
+            }
+        }
+
+        let rotated_session = Session {
+            id: format!("session-{}-rotated", label),
+            csrf_token: format!("csrf-{}-rotated", label),
+            ..updated_session.clone()
+        };
+        migrate_session_record(&session.id, &rotated_session)
+            .unwrap_or_else(|e| panic!("{} session migration should succeed: {}", label, e));
+        assert!(get_session_record(&session.id)
+            .unwrap_or_else(|e| panic!("{} old session lookup should succeed: {}", label, e))
+            .is_none());
+        assert_eq!(
+            get_session_record(&rotated_session.id)
+                .unwrap_or_else(|e| panic!(
+                    "{} rotated session lookup should succeed: {}",
+                    label, e
+                ))
+                .unwrap_or_else(|| panic!("{} rotated session should exist", label))
+                .csrf_token,
+            format!("csrf-{}-rotated", label)
+        );
+        let listed_sessions = list_session_records_for_user(
+            &format!("user-{}", label),
+            Some(&rotated_session.id),
+            now,
+        )
+        .unwrap_or_else(|e| panic!("{} session listing should succeed: {}", label, e));
+        assert_eq!(listed_sessions.len(), 1);
+        assert!(listed_sessions
+            .iter()
+            .any(|session| session.id == rotated_session.id && session.is_current));
+        assert_eq!(
+            delete_all_session_records_for_user(
+                &format!("user-{}", label),
+                Some(&rotated_session.id),
+            )
+            .unwrap_or_else(|e| panic!("{} delete-all sessions should succeed: {}", label, e)),
+            1
+        );
+        delete_session_record(&rotated_session.id)
+            .unwrap_or_else(|e| panic!("{} session delete should succeed: {}", label, e));
+        assert!(get_session_record(&rotated_session.id)
+            .unwrap_or_else(|e| panic!("{} deleted session lookup should succeed: {}", label, e))
+            .is_none());
+
+        let oauth_state = OAuthState {
+            state: format!("oauth-{}-active", label),
+            nonce: Some(format!("nonce-{}", label)),
+            pkce_verifier: Some(format!("pkce-{}", label)),
+            provider: "github".to_string(),
+            redirect_url: "/auth/callback".to_string(),
+            created_at: now,
+        };
+        store_oauth_state_record(&oauth_state)
+            .unwrap_or_else(|e| panic!("{} oauth state store should succeed: {}", label, e));
+        assert_eq!(
+            consume_oauth_state_record(&oauth_state.state)
+                .unwrap_or_else(|e| panic!("{} oauth state consume should succeed: {}", label, e))
+                .unwrap_or_else(|| panic!("{} oauth state should exist", label))
+                .state,
+            oauth_state.state
+        );
+        assert!(
+            consume_oauth_state_record(&oauth_state.state)
+                .unwrap_or_else(|e| panic!(
+                    "{} oauth state second consume should succeed: {}",
+                    label, e
+                ))
+                .is_none(),
+            "{} oauth state should be one-time use",
+            label
+        );
+        let expired_oauth_state = OAuthState {
+            state: format!("oauth-{}-expired", label),
+            nonce: None,
+            pkce_verifier: None,
+            provider: "github".to_string(),
+            redirect_url: "/auth/callback".to_string(),
+            created_at: now - OAUTH_STATE_TTL - 100,
+        };
+        store_oauth_state_record(&expired_oauth_state).unwrap_or_else(|e| {
+            panic!("{} expired oauth state store should succeed: {}", label, e)
+        });
+        let cleaned_oauth_states = cleanup_expired_oauth_state_records(now - OAUTH_STATE_TTL)
+            .unwrap_or_else(|e| panic!("{} oauth cleanup should succeed: {}", label, e));
+        match store_kind {
+            SessionStore::Redis(_) => {
+                assert_eq!(
+                    cleaned_oauth_states, 0,
+                    "{} redis oauth cleanup should only scrub memory fallback entries",
+                    label
+                );
+                assert!(
+                    consume_oauth_state_record(&expired_oauth_state.state)
+                        .unwrap_or_else(|e| panic!(
+                            "{} expired oauth state consume should succeed: {}",
+                            label, e
+                        ))
+                        .is_some(),
+                    "{} redis oauth state should remain consumable until Redis TTL expires",
+                    label
+                );
+            }
+            _ => {
+                assert!(
+                    cleaned_oauth_states >= 1,
+                    "{} oauth cleanup should remove at least the expired state",
+                    label
+                );
+                assert!(
+                    consume_oauth_state_record(&expired_oauth_state.state)
+                        .unwrap_or_else(|e| panic!(
+                            "{} expired oauth state consume after cleanup should succeed: {}",
+                            label, e
+                        ))
+                        .is_none(),
+                    "{} expired oauth state should not be consumable after cleanup",
+                    label
+                );
+            }
+        }
+
+        store_exchange_token_record(&format!("exchange-{}-active", label), &session.id)
+            .unwrap_or_else(|e| panic!("{} exchange token store should succeed: {}", label, e));
+        let active_exchange_token = format!("exchange-{}-active", label);
+        assert_eq!(
+            consume_exchange_token_record(&active_exchange_token)
+                .unwrap_or_else(|e| panic!(
+                    "{} exchange token consume should succeed: {}",
+                    label, e
+                ))
+                .as_deref(),
+            Some(session.id.as_str())
+        );
+        assert!(
+            consume_exchange_token_record(&active_exchange_token)
+                .unwrap_or_else(|e| panic!(
+                    "{} exchange token second consume should succeed: {}",
+                    label, e
+                ))
+                .is_none(),
+            "{} exchange token should be one-time use",
+            label
+        );
+
+        let challenge = AuthChallenge {
+            id: format!("challenge-{}-active", label),
+            subject_id: format!("user-{}", label),
+            provider: "local".to_string(),
+            kind: "mfa_pending".to_string(),
+            data_json: "{}".to_string(),
+            created_at: now,
+            expires_at: now + 60,
+        };
+        store_auth_challenge_record(&challenge)
+            .unwrap_or_else(|e| panic!("{} auth challenge store should succeed: {}", label, e));
+        assert_eq!(
+            get_auth_challenge_record(&challenge.id)
+                .unwrap_or_else(|e| panic!("{} auth challenge lookup should succeed: {}", label, e))
+                .unwrap_or_else(|| panic!("{} auth challenge should exist", label))
+                .id,
+            challenge.id
+        );
+        assert_eq!(
+            consume_auth_challenge_record(&challenge.id)
+                .unwrap_or_else(|e| panic!(
+                    "{} auth challenge consume should succeed: {}",
+                    label, e
+                ))
+                .unwrap_or_else(|| panic!("{} auth challenge should exist", label))
+                .id,
+            challenge.id
+        );
+        assert!(
+            consume_auth_challenge_record(&challenge.id)
+                .unwrap_or_else(|e| panic!(
+                    "{} auth challenge second consume should succeed: {}",
+                    label, e
+                ))
+                .is_none(),
+            "{} auth challenge should be one-time use",
+            label
+        );
     }
 
     #[test]
@@ -4341,215 +4649,30 @@ mod tests {
 
     #[test]
     fn test_auth_storage_contract_memory_round_trip_all_record_types() {
-        use super::storage::{
-            cleanup_expired_auth_challenge_records, cleanup_expired_exchange_token_records,
-            cleanup_expired_oauth_state_records, delete_auth_challenge_record,
-            delete_session_record, get_auth_challenge_record, get_refreshable_session_record,
-            get_session_record, list_session_records_for_user, migrate_session_record,
-            store_auth_challenge_record, store_exchange_token_record, store_oauth_state_record,
-            store_session_record, update_session_record_data, update_session_record_tokens,
-        };
-
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
-        reset_auth_test_state();
-        init_test_auth(SessionStore::Memory);
+        run_auth_storage_contract_round_trip(SessionStore::Memory, "memory");
+    }
 
-        let now = chrono::Utc::now().timestamp();
-        let session = Session {
-            id: "session-memory-1".to_string(),
-            user_id: "user-memory".to_string(),
-            provider: "local".to_string(),
-            email: Some("memory@example.com".to_string()),
-            name: Some("Memory User".to_string()),
-            picture: None,
-            raw_json: "{}".to_string(),
-            data_json: "{}".to_string(),
-            csrf_token: "csrf-memory-1".to_string(),
-            access_token: Some("access-memory-1".to_string()),
-            refresh_token: Some("refresh-memory-1".to_string()),
-            token_expires_at: Some(now + 60),
-            created_at: now,
-            expires_at: now + 300,
+    #[test]
+    fn test_auth_storage_contract_postgres_round_trip_all_record_types() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(store) = auth_test_postgres_store() else {
+            eprintln!("[auth-test] skipping Postgres auth contract test — set NTNT_AUTH_TEST_POSTGRES_URL");
+            return;
         };
+        run_auth_storage_contract_round_trip(store, "postgres");
+    }
 
-        store_session_record(&session).expect("memory session store should succeed");
-        let fetched = get_session_record(&session.id)
-            .expect("memory session fetch should succeed")
-            .expect("memory session should exist");
-        assert_eq!(fetched.user_id, session.user_id);
-
-        update_session_record_data(&session.id, r#"{"role":"admin"}"#)
-            .expect("memory session data update should succeed");
-        update_session_record_tokens(
-            &session.id,
-            &TokenResponse {
-                access_token: "access-memory-2".to_string(),
-                token_type: "Bearer".to_string(),
-                expires_in: Some(120),
-                refresh_token: Some("refresh-memory-2".to_string()),
-                id_token: None,
-                scope: None,
-            },
-            now,
-        )
-        .expect("memory session token update should succeed");
-
-        let updated = get_session_record(&session.id)
-            .expect("memory updated session fetch should succeed")
-            .expect("memory updated session should exist");
-        assert_eq!(updated.data_json, r#"{"role":"admin"}"#);
-        assert_eq!(updated.access_token.as_deref(), Some("access-memory-2"));
-        assert_eq!(updated.refresh_token.as_deref(), Some("refresh-memory-2"));
-        assert_eq!(updated.token_expires_at, Some(now + 120));
-        assert!(get_refreshable_session_record(&session.id, 3600)
-            .expect("memory refreshable lookup should succeed")
-            .is_none());
-
-        let rotated = Session {
-            id: "session-memory-2".to_string(),
-            csrf_token: "csrf-memory-2".to_string(),
-            ..updated.clone()
+    #[test]
+    fn test_auth_storage_contract_redis_round_trip_all_record_types() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(store) = auth_test_redis_store() else {
+            eprintln!(
+                "[auth-test] skipping Redis auth contract test — set NTNT_AUTH_TEST_REDIS_URL"
+            );
+            return;
         };
-        migrate_session_record(&session.id, &rotated)
-            .expect("memory session migration should succeed");
-        assert!(get_session_record(&session.id)
-            .expect("old memory session lookup should succeed")
-            .is_none());
-        assert_eq!(
-            get_session_record(&rotated.id)
-                .expect("rotated memory session lookup should succeed")
-                .expect("rotated memory session should exist")
-                .csrf_token,
-            "csrf-memory-2"
-        );
-        assert_eq!(
-            list_session_records_for_user("user-memory", Some(&rotated.id), now)
-                .expect("memory session listing should succeed")
-                .len(),
-            1
-        );
-        delete_session_record(&rotated.id).expect("memory session delete should succeed");
-        assert!(get_session_record(&rotated.id)
-            .expect("deleted memory session lookup should succeed")
-            .is_none());
-
-        let oauth_state = OAuthState {
-            state: "oauth-memory-active".to_string(),
-            nonce: Some("nonce-memory".to_string()),
-            pkce_verifier: Some("pkce-memory".to_string()),
-            provider: "github".to_string(),
-            redirect_url: "/auth/callback".to_string(),
-            created_at: now,
-        };
-        store_oauth_state_record(&oauth_state).expect("memory oauth state store should succeed");
-        let consumed_oauth = super::storage::consume_oauth_state_record(&oauth_state.state)
-            .expect("memory oauth state consume should succeed")
-            .expect("memory oauth state should exist");
-        assert_eq!(consumed_oauth.state, oauth_state.state);
-        assert!(
-            super::storage::consume_oauth_state_record(&oauth_state.state)
-                .expect("memory oauth state second consume should succeed")
-                .is_none()
-        );
-
-        let expired_oauth_state = OAuthState {
-            state: "oauth-memory-expired".to_string(),
-            nonce: None,
-            pkce_verifier: None,
-            provider: "github".to_string(),
-            redirect_url: "/auth/callback".to_string(),
-            created_at: now - 700,
-        };
-        store_oauth_state_record(&expired_oauth_state)
-            .expect("expired memory oauth state store should succeed");
-        assert_eq!(
-            cleanup_expired_oauth_state_records(now - 600)
-                .expect("memory oauth cleanup should succeed"),
-            1
-        );
-
-        store_exchange_token_record("exchange-memory-active", "session-memory-final")
-            .expect("memory exchange token store should succeed");
-        assert_eq!(
-            super::storage::consume_exchange_token_record("exchange-memory-active")
-                .expect("memory exchange token consume should succeed")
-                .as_deref(),
-            Some("session-memory-final")
-        );
-        assert!(
-            super::storage::consume_exchange_token_record("exchange-memory-active")
-                .expect("memory exchange token second consume should succeed")
-                .is_none()
-        );
-        SESSION_STORE.lock().unwrap().exchange_tokens.insert(
-            "exchange-memory-expired".to_string(),
-            (
-                "session-memory-stale".to_string(),
-                now - EXCHANGE_TOKEN_TTL - 1,
-            ),
-        );
-        assert_eq!(
-            cleanup_expired_exchange_token_records(now)
-                .expect("memory exchange token cleanup should succeed"),
-            1
-        );
-
-        let active_challenge = AuthChallenge {
-            id: "challenge-memory-active".to_string(),
-            subject_id: "user-memory".to_string(),
-            provider: "local".to_string(),
-            kind: "mfa_pending".to_string(),
-            data_json: "{}".to_string(),
-            created_at: now,
-            expires_at: now + 60,
-        };
-        store_auth_challenge_record(&active_challenge)
-            .expect("memory auth challenge store should succeed");
-        let fetched_challenge = get_auth_challenge_record(&active_challenge.id)
-            .expect("memory auth challenge fetch should succeed")
-            .expect("memory auth challenge should exist");
-        assert_eq!(fetched_challenge.id, active_challenge.id);
-        delete_auth_challenge_record(&active_challenge.id)
-            .expect("memory auth challenge delete should succeed");
-        assert!(get_auth_challenge_record(&active_challenge.id)
-            .expect("deleted memory auth challenge lookup should succeed")
-            .is_none());
-
-        let consumable_challenge = AuthChallenge {
-            id: "challenge-memory-consume".to_string(),
-            subject_id: "user-memory".to_string(),
-            provider: "local".to_string(),
-            kind: "mfa_pending".to_string(),
-            data_json: "{}".to_string(),
-            created_at: now,
-            expires_at: now + 60,
-        };
-        store_auth_challenge_record(&consumable_challenge)
-            .expect("memory consumable auth challenge store should succeed");
-        assert_eq!(
-            super::storage::consume_auth_challenge_record(&consumable_challenge.id)
-                .expect("memory auth challenge consume should succeed")
-                .expect("memory auth challenge should be consumable")
-                .id,
-            consumable_challenge.id
-        );
-
-        let expired_challenge = AuthChallenge {
-            id: "challenge-memory-expired".to_string(),
-            subject_id: "user-memory".to_string(),
-            provider: "local".to_string(),
-            kind: "password_reset".to_string(),
-            data_json: "{}".to_string(),
-            created_at: now - 120,
-            expires_at: now - 60,
-        };
-        store_auth_challenge_record(&expired_challenge)
-            .expect("expired memory auth challenge store should succeed");
-        assert_eq!(
-            cleanup_expired_auth_challenge_records(now)
-                .expect("memory auth challenge cleanup should succeed"),
-            1
-        );
+        run_auth_storage_contract_round_trip(store, "redis");
     }
 
     #[test]

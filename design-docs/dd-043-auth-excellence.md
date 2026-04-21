@@ -191,7 +191,7 @@ return complete_auth_challenge(resp, req, map {
 
 **Workstream D — Test architecture and verification matrix**
 - [x] Add backend contract tests that exercise the same auth storage behaviors across memory and SQLite for the current contract helpers
-- [ ] Add env-gated Redis/Postgres integration coverage for auth storage flows so backend-specific regressions are caught before review comments or production incidents
+- [x] Add env-gated Redis/Postgres integration coverage for auth storage flows so backend-specific regressions are caught before review comments or production incidents
 - [x] Add higher-level auth flow tests that verify staged auth, session rotation, protected-route lookup, and logout behavior against the cleaned-up internal boundaries
 - [ ] Re-review Phase 3 and Phase 4 helpers after the refactor to ensure docs, tests, and public behavior still match exactly
 
@@ -205,7 +205,7 @@ return complete_auth_challenge(resp, req, map {
 - [x] 4.5A: document the intended internal architecture and fallback/error model before moving code
 - [x] 4.5B: split modules and relocate helpers with behavior held constant
 - [ ] 4.5C: introduce the internal storage contract and normalize shared semantics (4.5C-1 done, 4.5C-2 next)
-- [ ] 4.5D: add/finish backend contract tests and env-gated integration coverage
+- [x] 4.5D: add/finish backend contract tests and env-gated integration coverage
 - [ ] 4.5E: run a final API/docs behavior audit for all Phase 3 and Phase 4 helpers
 
 **Current recommendation:** move directly into **4.5C-2** next. The storage contract is in place, the memory/SQLite contract coverage exists, and the biggest remaining architectural debt is still the inconsistent fallback/error policy spread across sessions, auth challenges, OAuth states, and exchange tokens.
@@ -246,7 +246,7 @@ return complete_auth_challenge(resp, req, map {
 
 **Recommended PR slicing plan:**
 - [x] PR 4.5A-1: add architecture notes, auth persistence/error/fallback invariants, and TODO anchors without moving behavior yet
-- [ ] PR 4.5A-2: add backend contract-test harness that can run against memory/SQLite immediately and Postgres/Redis when env-gated services are available
+- [x] PR 4.5A-2: add backend contract-test harness that can run against memory/SQLite immediately and Postgres/Redis when env-gated services are available
 - [x] PR 4.5B-1: move config/cookie/provider/JWT/TOTP helpers into modules with behavior held constant
 - [x] PR 4.5B-2: move middleware and built-in route glue into modules with no intentional semantic changes
 - [x] PR 4.5C-1: introduce the internal storage contract for sessions/auth challenges/OAuth states/exchange tokens while preserving existing backend-native implementations
@@ -255,7 +255,7 @@ return complete_auth_challenge(resp, req, map {
   - [ ] Make store/get/consume/delete/cleanup semantics follow that policy consistently across memory, SQLite, Postgres, and Redis
   - [ ] Normalize TTL/expiry behavior for memory fallback paths so they do not silently diverge from backend-native semantics
   - [ ] Add focused tests that prove the chosen fallback/error behavior instead of relying on comments and TODOs
-- [ ] PR 4.5D-1: add/finish Redis/Postgres integration coverage and cross-backend contract assertions
+- [x] PR 4.5D-1: add/finish Redis/Postgres integration coverage and cross-backend contract assertions
 - [ ] PR 4.5E-1: final audit PR for docs generation, public API parity, and cleanup of temporary compatibility shims
 
 **Highest-risk regression hotspots to guard during the refactor:**
@@ -270,8 +270,8 @@ return complete_auth_challenge(resp, req, map {
 **Validation matrix for phase completion:**
 - [x] Memory backend: session sign-in/current-user/sign-out/rotation/challenge begin-complete-cancel all pass
 - [x] SQLite backend: same core session + challenge flows pass with cleanup and consume behavior verified
-- [ ] Postgres backend: same core session + challenge flows pass in env-gated integration coverage
-- [ ] Redis/Valkey backend: same core session + challenge flows pass in env-gated integration coverage, including atomic consume paths
+- [x] Postgres backend: same core session + challenge flows pass in env-gated integration coverage
+- [x] Redis/Valkey backend: same core session + challenge flows pass in env-gated integration coverage, including atomic consume paths
 - [x] Protected-route behavior verified for HTML pages and API routes after module split
 - [x] OAuth state and exchange-token paths still pass, including Safari/redirect-chain-related flows already covered by current behavior
 - [x] `cargo test stdlib::auth::tests`, any relevant integration suites, `cargo build --release --locked`, and `./target/release/ntnt docs --generate` all pass at the end of each major slice
