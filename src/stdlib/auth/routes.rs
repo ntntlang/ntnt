@@ -1,4 +1,5 @@
 use super::cookies::{build_cleared_session_cookie, build_signed_session_cookie};
+use super::guards::request_path;
 use super::providers::{available_providers, suggest_provider};
 use super::*;
 
@@ -108,7 +109,8 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
 
 pub fn handle_auth_protect(args: &[Value]) -> Result<Value> {
     match enforce_auth_for_request(&args[0], false) {
-        Ok(()) => Ok(Value::Unit),
+        Ok(Some(cookie)) => Ok(redirect_response(&request_path(&args[0]), Some(&cookie))),
+        Ok(None) => Ok(Value::Unit),
         Err(response) => Ok(response),
     }
 }

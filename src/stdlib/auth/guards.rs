@@ -1,3 +1,4 @@
+use super::sessions::{get_session_for_request, SessionAccessEffect};
 use super::*;
 
 fn normalize_protected_path(pattern: &str) -> String {
@@ -132,7 +133,7 @@ fn is_auth_exempt_path(path: &str) -> bool {
     normalized == "/auth" || normalized.starts_with("/auth/")
 }
 
-fn request_path(request: &Value) -> String {
+pub(super) fn request_path(request: &Value) -> String {
     if let Value::Map(req_map) = request {
         if let Some(Value::String(path)) = req_map.get("path") {
             return path.clone();
@@ -214,11 +215,6 @@ fn auth_required_response(request: &Value) -> Value {
     redirect_response("/auth", None)
 }
 
-fn session_from_request(request: &Value) -> Option<Session> {
-    let session_id = get_session_id_from_request(request)?;
-    get_session_by_id(&session_id)
-}
-
 fn path_requires_auth(path: &str) -> bool {
     if is_auth_exempt_path(path) {
         return false;
@@ -236,15 +232,15 @@ fn path_requires_auth(path: &str) -> bool {
 pub fn enforce_auth_for_request(
     request: &Value,
     force_auth: bool,
-) -> std::result::Result<(), Value> {
+) -> std::result::Result<Option<String>, Value> {
     let path = request_path(request);
 
     if is_auth_exempt_path(&path) {
-        return Ok(());
+        return Ok(None);
     }
 
     if !force_auth && !path_requires_auth(&path) {
-        return Ok(());
+        return Ok(None);
     }
 
     let Some(_config) = get_auth_config() else {
@@ -254,8 +250,17 @@ pub fn enforce_auth_for_request(
         ));
     };
 
-    if session_from_request(request).is_some() {
-        return Ok(());
+    if let Some(session_id) = get_session_id_from_request(request) {
+        let (session, effect) = get_session_for_request(&session_id);
+        if session.is_some() {
+            let refreshed_cookie = if effect == SessionAccessEffect::ExpiryUpdated {
+                get_auth_config()
+                    .and_then(|config| build_signed_session_cookie(&config, &session_id, None).ok())
+            } else {
+                None
+            };
+            return Ok(refreshed_cookie);
+        }
     }
 
     Err(auth_required_response(request))

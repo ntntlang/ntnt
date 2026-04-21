@@ -31,22 +31,28 @@ pub fn store_session(session: Session) {
     }
 }
 
-/// Get session by ID
-pub fn get_session_by_id(id: &str) -> Option<Session> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionAccessEffect {
+    Unchanged,
+    ExpiryUpdated,
+}
+
+pub(super) fn get_session_for_request(id: &str) -> (Option<Session>, SessionAccessEffect) {
     let config = get_auth_config();
     let mut session = get_session_record_with_fallback(id);
 
     if let Some(active_session) = session.as_mut() {
+        let mut effect = SessionAccessEffect::Unchanged;
         if let Some(config) = &config {
             let now = chrono::Utc::now().timestamp();
             let capped_expires_at = capped_session_expiry(now, active_session.created_at, config);
             if capped_expires_at <= now {
                 delete_session_by_id(&active_session.id);
-                return None;
+                return (None, SessionAccessEffect::Unchanged);
             }
-            maybe_slide_session(active_session, config);
+            effect = maybe_slide_session(active_session, config);
         }
-        return session;
+        return (session, effect);
     }
 
     if let Some(config) = &config {
@@ -67,7 +73,7 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
 
                                 if new_expires_at <= now {
                                     delete_session_by_id(&expired.id);
-                                    return None;
+                                    return (None, SessionAccessEffect::Unchanged);
                                 }
 
                                 update_session_tokens(&expired.id, &tokens);
@@ -85,7 +91,7 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
                                 }
                                 refreshed.token_expires_at = tokens.expires_in.map(|e| now + e);
                                 refreshed.expires_at = new_expires_at;
-                                return Some(refreshed);
+                                return (Some(refreshed), SessionAccessEffect::ExpiryUpdated);
                             }
                             Err(e) => {
                                 eprintln!(
@@ -101,7 +107,12 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
         }
     }
 
-    None
+    (None, SessionAccessEffect::Unchanged)
+}
+
+/// Get session by ID
+pub fn get_session_by_id(id: &str) -> Option<Session> {
+    get_session_for_request(id).0
 }
 
 pub(super) fn capped_session_expiry(now: i64, created_at: i64, config: &AuthConfig) -> i64 {
@@ -112,32 +123,36 @@ pub(super) fn capped_session_expiry(now: i64, created_at: i64, config: &AuthConf
     }
 }
 
-fn maybe_slide_session(session: &mut Session, config: &AuthConfig) {
+fn maybe_slide_session(session: &mut Session, config: &AuthConfig) -> SessionAccessEffect {
     let now = chrono::Utc::now().timestamp();
     let target_expires_at = capped_session_expiry(now, session.created_at, config);
 
     if session.expires_at > target_expires_at {
         if extend_session_record_expiry(&session.id, target_expires_at).is_ok() {
             session.expires_at = target_expires_at;
+            return SessionAccessEffect::ExpiryUpdated;
         }
-        return;
+        return SessionAccessEffect::Unchanged;
     }
 
     if !config.sliding_sessions {
-        return;
+        return SessionAccessEffect::Unchanged;
     }
 
     if target_expires_at <= session.expires_at {
-        return;
+        return SessionAccessEffect::Unchanged;
     }
 
     let remaining = session.expires_at - now;
     if remaining > config.refresh_throttle {
-        return;
+        return SessionAccessEffect::Unchanged;
     }
 
     if extend_session_record_expiry(&session.id, target_expires_at).is_ok() {
         session.expires_at = target_expires_at;
+        SessionAccessEffect::ExpiryUpdated
+    } else {
+        SessionAccessEffect::Unchanged
     }
 }
 
