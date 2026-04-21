@@ -59,6 +59,11 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
                                 let new_expires_at =
                                     capped_session_expiry(now, expired.created_at, config);
 
+                                if new_expires_at <= now {
+                                    delete_session_by_id(&expired.id);
+                                    return None;
+                                }
+
                                 update_session_tokens(&expired.id, &tokens);
                                 extend_session_expiry(&expired.id, new_expires_at);
 
