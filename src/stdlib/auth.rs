@@ -4554,7 +4554,8 @@ mod tests {
         SESSION_STORE.lock().unwrap().set_session(session.clone());
         *SQLITE_CONN.lock().unwrap() = None;
 
-        let fetched = get_session_by_id(&session.id).expect("memory fallback session should be returned");
+        let fetched =
+            get_session_by_id(&session.id).expect("memory fallback session should be returned");
         assert_eq!(fetched.id, session.id);
         assert_eq!(fetched.user_id, session.user_id);
     }

@@ -1575,7 +1575,9 @@ pub(super) fn get_refreshable_session_record_without_fallback(
 ) -> Option<Session> {
     match active_auth_storage_backend() {
         AuthStorageBackend::Memory => None,
-        _ => get_refreshable_session_record(id, refresh_ttl).ok().flatten(),
+        _ => get_refreshable_session_record(id, refresh_ttl)
+            .ok()
+            .flatten(),
     }
 }
 
