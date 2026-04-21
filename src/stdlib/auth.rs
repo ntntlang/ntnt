@@ -1637,8 +1637,10 @@ pub fn init() -> HashMap<String, Value> {
                     None => config.session_ttl,
                 };
 
-                let session =
-                    create_manual_session(&merged_session, session_ttl).map_err(IntentError::type_error)?;
+                let effective_session_ttl = session_ttl
+                    .min(config.max_session_ttl.unwrap_or(session_ttl));
+                let session = create_manual_session(&merged_session, effective_session_ttl)
+                    .map_err(IntentError::type_error)?;
                 let session_cookie =
                     build_signed_session_cookie(&config, &session.id, options.as_ref())
                         .map_err(IntentError::type_error)?;
@@ -5540,6 +5542,141 @@ mod tests {
 
         let fetched = get_session_by_id(&session.id).expect("session should exist");
         assert_eq!(fetched.expires_at, session.created_at + 1800);
+    }
+
+    #[test]
+    fn test_get_session_by_id_clamps_existing_session_to_absolute_cap() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: false,
+            max_session_ttl: Some(1800),
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-cap-clamp".to_string(),
+            user_id: "user-cap-clamp".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-cap-clamp".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 1200,
+            expires_at: now + 7200,
+        };
+        SESSION_STORE.lock().unwrap().set_session(session.clone());
+
+        let fetched = get_session_by_id(&session.id).expect("session should exist");
+        assert_eq!(fetched.expires_at, session.created_at + 1800);
+    }
+
+    #[test]
+    fn test_get_session_by_id_invalidates_session_past_absolute_cap() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: false,
+            max_session_ttl: Some(1800),
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-cap-expired".to_string(),
+            user_id: "user-cap-expired".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-cap-expired".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 3600,
+            expires_at: now + 60,
+        };
+        SESSION_STORE.lock().unwrap().set_session(session.clone());
+
+        assert!(get_session_by_id(&session.id).is_none());
+        assert!(SESSION_STORE
+            .lock()
+            .unwrap()
+            .get_session(&session.id)
+            .is_none());
+    }
+
+    #[test]
+    fn test_complete_auth_challenge_caps_initial_expiry_to_max_session_ttl() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            max_session_ttl: Some(1800),
+            session_ttl: 86400,
+            ..AuthConfig::default()
+        });
+
+        let module = init();
+        let begin_auth_challenge = module_fn(&module, "begin_auth_challenge");
+        let complete_auth_challenge = module_fn(&module, "complete_auth_challenge");
+        let current_session = module_fn(&module, "current_session");
+        let before = chrono::Utc::now().timestamp();
+
+        let started = begin_auth_challenge(&[
+            redirect_response("/admin/verify", None),
+            Value::Map(HashMap::from([
+                (
+                    "subject_id".to_string(),
+                    Value::String("user-123".to_string()),
+                ),
+                ("kind".to_string(), Value::String("mfa_pending".to_string())),
+            ])),
+        ])
+        .unwrap();
+        let challenge_cookie = cookie_header_from_response(&started);
+        let req = request_with_cookie(&challenge_cookie);
+
+        let completed = complete_auth_challenge(&[
+            redirect_response("/admin", None),
+            req,
+            Value::Map(HashMap::new()),
+        ])
+        .unwrap();
+        let session_cookie = cookie_headers_from_response(&completed)
+            .into_iter()
+            .find(|cookie| cookie.starts_with("ntnt_session="))
+            .expect("missing session cookie");
+        let session_req = request_with_cookie(&session_cookie);
+        let after = chrono::Utc::now().timestamp();
+
+        let session = current_session(&[session_req]).unwrap();
+        match session {
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                assert_eq!(variant, "Some");
+                let session_map = match values.first() {
+                    Some(Value::Map(map)) => map,
+                    other => panic!("expected session map, got {:?}", other),
+                };
+                match session_map.get("expires_at") {
+                    Some(Value::Int(expires_at)) => {
+                        assert!(*expires_at >= before + 1800);
+                        assert!(*expires_at <= after + 1800);
+                    }
+                    other => panic!("expected expires_at int, got {:?}", other),
+                }
+            }
+            other => panic!("expected Some(session), got {:?}", other),
+        }
     }
 
     #[test]

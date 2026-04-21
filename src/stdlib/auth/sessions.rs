@@ -38,6 +38,12 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
 
     if let Some(active_session) = session.as_mut() {
         if let Some(config) = &config {
+            let now = chrono::Utc::now().timestamp();
+            let capped_expires_at = capped_session_expiry(now, active_session.created_at, config);
+            if capped_expires_at <= now {
+                delete_session_by_id(&active_session.id);
+                return None;
+            }
             maybe_slide_session(active_session, config);
         }
         return session;
@@ -107,12 +113,20 @@ pub(super) fn capped_session_expiry(now: i64, created_at: i64, config: &AuthConf
 }
 
 fn maybe_slide_session(session: &mut Session, config: &AuthConfig) {
+    let now = chrono::Utc::now().timestamp();
+    let target_expires_at = capped_session_expiry(now, session.created_at, config);
+
+    if session.expires_at > target_expires_at {
+        if extend_session_record_expiry(&session.id, target_expires_at).is_ok() {
+            session.expires_at = target_expires_at;
+        }
+        return;
+    }
+
     if !config.sliding_sessions {
         return;
     }
 
-    let now = chrono::Utc::now().timestamp();
-    let target_expires_at = capped_session_expiry(now, session.created_at, config);
     if target_expires_at <= session.expires_at {
         return;
     }
