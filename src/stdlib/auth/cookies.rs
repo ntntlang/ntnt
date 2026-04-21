@@ -91,7 +91,7 @@ fn validate_cookie_path(path: &str) -> std::result::Result<String, String> {
     Ok(path.to_string())
 }
 
-fn normalize_cookie_same_site(value: &str) -> std::result::Result<String, String> {
+pub(super) fn normalize_cookie_same_site(value: &str) -> std::result::Result<String, String> {
     match value.to_ascii_lowercase().as_str() {
         "lax" => Ok("Lax".to_string()),
         "strict" => Ok("Strict".to_string()),
@@ -175,14 +175,28 @@ fn build_auth_cookie_string(value: &str, settings: &AuthCookieSettings) -> Strin
     cookie
 }
 
+pub(super) fn build_signed_session_cookie_with_max_age(
+    config: &AuthConfig,
+    session_id: &str,
+    max_age: i64,
+    overrides: Option<&HashMap<String, Value>>,
+) -> std::result::Result<String, String> {
+    let settings = auth_cookie_settings(config, max_age.max(0), overrides)?;
+    let signed_session_id = sign_session_id(session_id, &config.session_secret);
+    Ok(build_auth_cookie_string(&signed_session_id, &settings))
+}
+
 pub(super) fn build_signed_session_cookie(
     config: &AuthConfig,
     session_id: &str,
     overrides: Option<&HashMap<String, Value>>,
 ) -> std::result::Result<String, String> {
-    let settings = auth_cookie_settings(config, default_auth_cookie_max_age(config), overrides)?;
-    let signed_session_id = sign_session_id(session_id, &config.session_secret);
-    Ok(build_auth_cookie_string(&signed_session_id, &settings))
+    build_signed_session_cookie_with_max_age(
+        config,
+        session_id,
+        default_auth_cookie_max_age(config),
+        overrides,
+    )
 }
 
 pub(super) fn build_cleared_session_cookie(

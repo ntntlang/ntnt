@@ -256,16 +256,33 @@ pub fn enforce_auth_for_request(
         if session.is_some() {
             let refreshed_cookie = match effect {
                 SessionAccessEffect::ExpiryUpdated { expires_at } => {
-                    let now = chrono::Utc::now().timestamp();
-                    get_auth_config().and_then(|config| {
-                        build_signed_session_cookie_with_max_age(
-                            &config,
-                            &session_id,
-                            expires_at - now,
-                            None,
-                        )
-                        .ok()
-                    })
+                    let method = if let Value::Map(req_map) = request {
+                        req_map.get("method").and_then(|v| match v {
+                            Value::String(s) => Some(s.to_ascii_uppercase()),
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| "GET".to_string());
+
+                    let safe_navigation =
+                        (method == "GET" || method == "HEAD") && !request_prefers_api(request);
+
+                    if !safe_navigation {
+                        None
+                    } else {
+                        let now = chrono::Utc::now().timestamp();
+                        get_auth_config().and_then(|config| {
+                            build_signed_session_cookie_with_max_age(
+                                &config,
+                                &session_id,
+                                expires_at - now,
+                                None,
+                            )
+                            .ok()
+                        })
+                    }
                 }
                 SessionAccessEffect::Unchanged => None,
             };

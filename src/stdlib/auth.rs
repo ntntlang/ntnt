@@ -61,6 +61,7 @@ pub use cookies::default_auth_cookie_secure_env;
 use cookies::{
     add_set_cookie_header, auth_challenge_cookie_name, build_cleared_auth_challenge_cookie,
     build_cleared_session_cookie, build_signed_auth_challenge_cookie, build_signed_session_cookie,
+    normalize_cookie_same_site,
 };
 #[cfg(test)]
 use guards::path_matches_protected_pattern;
@@ -2786,6 +2787,7 @@ pub fn init() -> HashMap<String, Value> {
                                 | "after_logout"
                                 | "cookie_name"
                                 | "cookie_secure"
+                                | "cookie_same_site"
                                 | "session_store"
                                 | "store_tokens"
                                 | "protected_paths"
@@ -2916,6 +2918,18 @@ pub fn init() -> HashMap<String, Value> {
                     None => base_config.cookie_secure,
                 };
 
+                let cookie_same_site = match get_option(&["cookie_same_site"]) {
+                    Some(Value::String(s)) => normalize_cookie_same_site(s)
+                        .map_err(IntentError::type_error)?,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"cookie_same_site\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => base_config.cookie_same_site.clone(),
+                };
+
                 let session_store = match get_option(&["session_store"]) {
                     Some(Value::String(s)) => {
                         parse_auth_session_store(s).map_err(IntentError::type_error)?
@@ -3021,6 +3035,7 @@ pub fn init() -> HashMap<String, Value> {
                 base_config.protected_paths = protected_paths;
                 base_config.cookie_name = cookie_name;
                 base_config.cookie_secure = cookie_secure;
+                base_config.cookie_same_site = cookie_same_site;
                 base_config.session_ttl = session_ttl;
                 base_config.refresh_ttl = refresh_ttl;
                 base_config.sliding_sessions = sliding_sessions;
@@ -5445,6 +5460,10 @@ mod tests {
             Value::Map(HashMap::from([
                 ("session_ttl".to_string(), Value::Int(7200)),
                 ("cookie_secure".to_string(), Value::Bool(false)),
+                (
+                    "cookie_same_site".to_string(),
+                    Value::String("Strict".to_string()),
+                ),
             ])),
         ])
         .expect("enable_auth should accept preset plus overrides");
@@ -5453,6 +5472,7 @@ mod tests {
         assert_eq!(config.auth_preset.as_deref(), Some("consumer"));
         assert_eq!(config.session_ttl, 7200);
         assert!(!config.cookie_secure);
+        assert_eq!(config.cookie_same_site, "Strict");
         assert!(config.sliding_sessions);
     }
 
@@ -6438,6 +6458,58 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_auth_protect_skips_cookie_refresh_redirect_for_api_post() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            protected_paths: vec!["/admin".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        SESSION_STORE.lock().unwrap().set_session(Session {
+            id: "session-api-refresh".to_string(),
+            user_id: "user-api-refresh".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-api-refresh".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 600,
+            expires_at: now + 60,
+        });
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        let cookie = build_signed_session_cookie(&config, "session-api-refresh", None)
+            .expect("cookie should build");
+        let req = Value::Map(HashMap::from([
+            ("method".to_string(), Value::String("POST".to_string())),
+            ("path".to_string(), Value::String("/admin".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([
+                    ("cookie".to_string(), Value::String(cookie)),
+                    (
+                        "accept".to_string(),
+                        Value::String("application/json".to_string()),
+                    ),
+                ])),
+            ),
+        ]));
+
+        let response = handle_auth_protect(&[req]).expect("auth protect should succeed");
+        assert!(matches!(response, Value::Unit));
+    }
+
+    #[test]
     fn test_handle_auth_protect_uses_307_for_cookie_refresh_redirect() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
@@ -6472,6 +6544,55 @@ mod tests {
             .expect("cookie should build");
         let req = Value::Map(HashMap::from([
             ("method".to_string(), Value::String("POST".to_string())),
+            ("path".to_string(), Value::String("/admin".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "cookie".to_string(),
+                    Value::String(cookie),
+                )])),
+            ),
+        ]));
+
+        let response = handle_auth_protect(&[req]).expect("auth protect should succeed");
+        assert!(matches!(response, Value::Unit));
+    }
+
+    #[test]
+    fn test_handle_auth_protect_uses_307_for_cookie_refresh_redirect_on_browser_get() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            protected_paths: vec!["/admin".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        SESSION_STORE.lock().unwrap().set_session(Session {
+            id: "session-protect-browser-refresh".to_string(),
+            user_id: "user-protect-browser-refresh".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-protect-browser-refresh".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 600,
+            expires_at: now + 60,
+        });
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        let cookie = build_signed_session_cookie(&config, "session-protect-browser-refresh", None)
+            .expect("cookie should build");
+        let req = Value::Map(HashMap::from([
+            ("method".to_string(), Value::String("GET".to_string())),
             ("path".to_string(), Value::String("/admin".to_string())),
             (
                 "headers".to_string(),
