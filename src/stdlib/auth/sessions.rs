@@ -36,8 +36,10 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
     let config = get_auth_config();
     let mut session = get_session_record_with_fallback(id);
 
-    if let (Some(config), Some(active_session)) = (&config, session.as_mut()) {
-        maybe_slide_session(active_session, config);
+    if let Some(active_session) = session.as_mut() {
+        if let Some(config) = &config {
+            maybe_slide_session(active_session, config);
+        }
         return session;
     }
 
@@ -91,7 +93,7 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
     None
 }
 
-fn capped_session_expiry(now: i64, created_at: i64, config: &AuthConfig) -> i64 {
+pub(super) fn capped_session_expiry(now: i64, created_at: i64, config: &AuthConfig) -> i64 {
     let sliding_target = now + config.session_ttl;
     match config.max_session_ttl {
         Some(max_session_ttl) => sliding_target.min(created_at + max_session_ttl),
