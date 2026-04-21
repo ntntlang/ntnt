@@ -66,21 +66,32 @@ fn take_exchange_token_memory(token: &str) -> Option<String> {
 // - OAuth states
 // - session exchange tokens
 //
-// Higher-level helpers still own fallback/error behavior for now. This layer is
-// responsible only for routing each operation through a consistent per-record
-// contract while preserving backend-native atomicity and query shape.
+// This layer owns the canonical fallback/error contract for auth persistence.
+// Backend-native helpers preserve atomicity/query shape, while these public-ish
+// storage entrypoints decide whether failures should degrade to memory, return
+// None, or propagate.
 //
 // Canonical fallback/error policy (Phase 4.5C-2):
-// - sessions: fallback to memory on store/get backend failures; list/delete-all propagate
-//   backend errors; do not silently mask explicit mutation or migration failures
-// - auth challenges: fallback to memory on store/get/consume backend failures and always
-//   scrub memory fallback entries during cleanup
-// - OAuth states: fallback to memory on store/consume backend failures and always scrub
-//   memory fallback entries during cleanup; fallback consume must enforce the same TTL as
-//   backend-native consume paths
-// - exchange tokens: fallback to memory on store/consume backend failures and always scrub
-//   memory fallback entries during cleanup; fallback consume must enforce the same TTL as
-//   backend-native consume paths
+// - sessions:
+//   - store/get may fall back to the in-memory store
+//   - refreshable lookup never falls back to memory because memory does not keep
+//     expired sessions available for token refresh
+//   - update/migrate/list/delete-all propagate backend errors
+//   - cleanup is backend-native only (memory backend cleans its own store)
+// - auth challenges:
+//   - store/get/consume may fall back to the in-memory store
+//   - delete ignores missing backend state but still scrubs memory fallback
+//   - cleanup always scrubs memory fallback entries in addition to any backend cleanup
+// - OAuth states:
+//   - store/consume may fall back to the in-memory store
+//   - fallback consume enforces the same TTL window as backend-native consume paths
+//   - cleanup always scrubs memory fallback entries; Redis backend cleanup only affects
+//     fallback memory because Redis native expiry is TTL-driven
+// - exchange tokens:
+//   - store/consume may fall back to the in-memory store
+//   - fallback consume enforces the same TTL window as backend-native consume paths
+//   - cleanup always scrubs memory fallback entries; Redis backend cleanup only affects
+//     fallback memory because Redis native expiry is TTL-driven
 
 pub(super) fn store_oauth_state_record(state: &OAuthState) -> std::result::Result<(), String> {
     match active_auth_storage_backend() {
@@ -1544,6 +1555,29 @@ pub(super) fn get_session_record(id: &str) -> std::result::Result<Option<Session
         AuthStorageBackend::Postgres => get_session_postgres(id),
         AuthStorageBackend::Redis => get_session_redis(id),
         AuthStorageBackend::Memory => Ok(SESSION_STORE.lock().unwrap().get_session(id).cloned()),
+    }
+}
+
+pub(super) fn get_session_record_with_fallback(id: &str) -> Option<Session> {
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => get_session_record(id).ok().flatten(),
+        _ => match get_session_record(id) {
+            Ok(Some(session)) => Some(session),
+            Ok(None) => SESSION_STORE.lock().unwrap().get_session(id).cloned(),
+            Err(_) => SESSION_STORE.lock().unwrap().get_session(id).cloned(),
+        },
+    }
+}
+
+pub(super) fn get_refreshable_session_record_without_fallback(
+    id: &str,
+    refresh_ttl: i64,
+) -> Option<Session> {
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => None,
+        _ => get_refreshable_session_record(id, refresh_ttl)
+            .ok()
+            .flatten(),
     }
 }
 

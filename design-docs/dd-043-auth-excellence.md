@@ -193,7 +193,7 @@ return complete_auth_challenge(resp, req, map {
 - [x] Add backend contract tests that exercise the same auth storage behaviors across memory and SQLite for the current contract helpers
 - [x] Add env-gated Redis/Postgres integration coverage for auth storage flows so backend-specific regressions are caught before review comments or production incidents
 - [x] Add higher-level auth flow tests that verify staged auth, session rotation, protected-route lookup, and logout behavior against the cleaned-up internal boundaries
-- [ ] Re-review Phase 3 and Phase 4 helpers after the refactor to ensure docs, tests, and public behavior still match exactly
+- [x] Re-review Phase 3 and Phase 4 helpers after the refactor to ensure docs, tests, and public behavior still match exactly
 
 **Workstream E — Safety rails for the refactor itself**
 - [x] Preserve behavior first, then simplify structure, rather than mixing feature changes into the cleanup branch
@@ -204,11 +204,11 @@ return complete_auth_challenge(resp, req, map {
 **Recommended execution order:**
 - [x] 4.5A: document the intended internal architecture and fallback/error model before moving code
 - [x] 4.5B: split modules and relocate helpers with behavior held constant
-- [ ] 4.5C: introduce the internal storage contract and normalize shared semantics (4.5C-1 done, 4.5C-2 next)
+- [x] 4.5C: introduce the internal storage contract and normalize shared semantics (4.5C-1 and 4.5C-2 complete)
 - [x] 4.5D: add/finish backend contract tests and env-gated integration coverage
-- [ ] 4.5E: run a final API/docs behavior audit for all Phase 3 and Phase 4 helpers
+- [x] 4.5E: run a final API/docs behavior audit for all Phase 3 and Phase 4 helpers
 
-**Current recommendation:** move directly into **4.5C-2** next. The storage contract is in place, the memory/SQLite contract coverage exists, and the biggest remaining architectural debt is still the inconsistent fallback/error policy spread across sessions, auth challenges, OAuth states, and exchange tokens.
+**Current recommendation:** Phase 4.5 is complete. The storage contract is in place, the fallback/error policy is now explicit and test-covered across sessions, auth challenges, OAuth states, and exchange tokens, and the final Phase 3/4 API/docs behavior pass is done. Move next into Phase 5 session lifecycle work.
 
 **Non-goals:**
 - [ ] Do not add major new end-user auth features in this phase
@@ -250,13 +250,13 @@ return complete_auth_challenge(resp, req, map {
 - [x] PR 4.5B-1: move config/cookie/provider/JWT/TOTP helpers into modules with behavior held constant
 - [x] PR 4.5B-2: move middleware and built-in route glue into modules with no intentional semantic changes
 - [x] PR 4.5C-1: introduce the internal storage contract for sessions/auth challenges/OAuth states/exchange tokens while preserving existing backend-native implementations
-- [ ] PR 4.5C-2: centralize fallback/error semantics and make each auth state type follow the same documented rules
-  - [ ] Define the canonical fallback/error policy table for sessions, auth challenges, OAuth states, and exchange tokens
-  - [ ] Make store/get/consume/delete/cleanup semantics follow that policy consistently across memory, SQLite, Postgres, and Redis
-  - [ ] Normalize TTL/expiry behavior for memory fallback paths so they do not silently diverge from backend-native semantics
-  - [ ] Add focused tests that prove the chosen fallback/error behavior instead of relying on comments and TODOs
+- [x] PR 4.5C-2: centralize fallback/error semantics and make each auth state type follow the same documented rules
+  - [x] Define the canonical fallback/error policy table for sessions, auth challenges, OAuth states, and exchange tokens
+  - [x] Make store/get/consume/delete/cleanup semantics follow that policy consistently across memory, SQLite, Postgres, and Redis
+  - [x] Normalize TTL/expiry behavior for memory fallback paths so they do not silently diverge from backend-native semantics
+  - [x] Add focused tests that prove the chosen fallback/error behavior instead of relying on comments and TODOs
 - [x] PR 4.5D-1: add/finish Redis/Postgres integration coverage and cross-backend contract assertions
-- [ ] PR 4.5E-1: final audit PR for docs generation, public API parity, and cleanup of temporary compatibility shims
+- [x] PR 4.5E-1: final audit PR for docs generation, public API parity, and cleanup of temporary compatibility shims
 
 **Highest-risk regression hotspots to guard during the refactor:**
 - [ ] Cookie naming/signing/clearing behavior for both session and auth-challenge cookies stays byte-for-byte compatible unless intentionally changed
@@ -264,8 +264,8 @@ return complete_auth_challenge(resp, req, map {
 - [ ] One-time consume semantics for OAuth states, exchange tokens, and auth challenges remain atomic per backend
 - [ ] Session rotation preserves intended claims/data while invalidating the old session immediately
 - [ ] Refresh-token and expired-session lookup behavior does not regress while storage semantics are being normalized
-- [ ] Memory fallback continues to behave intentionally, especially under backend errors and mixed cleanup paths
-- [ ] Generated stdlib docs and `@ntnt` signatures remain accurate after functions move files/modules
+- [x] Memory fallback continues to behave intentionally, especially under backend errors and mixed cleanup paths
+- [x] Generated stdlib docs and `@ntnt` signatures remain accurate after functions move files/modules
 
 **Validation matrix for phase completion:**
 - [x] Memory backend: session sign-in/current-user/sign-out/rotation/challenge begin-complete-cancel all pass
