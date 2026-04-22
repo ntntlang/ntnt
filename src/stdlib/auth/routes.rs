@@ -25,6 +25,12 @@ fn normalize_auth_route_prefix(prefix: &str) -> std::result::Result<String, Stri
         return Err("[auth] route_prefix must start with /".to_string());
     }
 
+    if normalized == "/" {
+        return Err(
+            "[auth] route_prefix must include at least one non-root path segment".to_string(),
+        );
+    }
+
     if normalized.chars().any(|ch| {
         ch.is_control()
             || ch.is_whitespace()
