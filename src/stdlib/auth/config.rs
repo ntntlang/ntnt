@@ -58,6 +58,7 @@ pub(super) fn auth_option_suggestion(key: &str) -> Option<String> {
         "login_page_copy",
         "cookie_name",
         "cookie_secure",
+        "cookie_same_site",
         "session_store",
         "store_tokens",
         "health_endpoint",

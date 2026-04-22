@@ -2924,10 +2924,8 @@ pub fn init() -> HashMap<String, Value> {
                 };
 
                 let route_prefix = match get_option(&["route_prefix"]) {
-                    Some(Value::String(s)) => routes::auth_route_prefix(&AuthConfig {
-                        route_prefix: s.clone(),
-                        ..AuthConfig::default()
-                    }),
+                    Some(Value::String(s)) => routes::normalize_auth_route_prefix_option(s)
+                        .map_err(IntentError::type_error)?,
                     Some(other) => {
                         return Err(IntentError::type_error(format!(
                             "[auth] enable_auth() option \"route_prefix\" must be a string, got {}",
@@ -3176,7 +3174,7 @@ pub fn init() -> HashMap<String, Value> {
                 init_auth(config.clone());
 
                 eprintln!(
-                    "[auth] Registered built-in auth routes: {}",
+                    "[auth] Built-in auth route manifest: {}",
                     routes::auth_route_manifest(&config).join(", ")
                 );
                 for warning in routes::auth_route_collision_warnings(&config) {

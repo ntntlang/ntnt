@@ -253,7 +253,10 @@ fn auth_required_response(request: &Value) -> Value {
         return Value::Map(response);
     }
 
-    redirect_response("/auth", None)
+    let login_path = get_auth_config()
+        .map(|config| super::routes::auth_route_path(&config, ""))
+        .unwrap_or_else(|| "/auth".to_string());
+    redirect_response(&login_path, None)
 }
 
 fn path_requires_auth(path: &str) -> bool {
