@@ -12,18 +12,23 @@ fn request_header(request: &Value, name: &str) -> Option<String> {
     None
 }
 
-pub(super) fn sha256_hex(input: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
+pub(super) fn security_signal_hash(input: &str) -> String {
+    let secret = get_auth_config()
+        .map(|config| config.session_secret)
+        .filter(|secret| !secret.is_empty())
+        .unwrap_or_else(|| DEFAULT_SESSION_SECRET_SENTINEL.to_string());
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC-SHA256 accepts arbitrary key lengths");
+    mac.update(input.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 pub(super) fn request_user_agent_hash(request: &Value) -> Option<String> {
     request_header(request, "user-agent")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .map(|value| sha256_hex(&value))
+        .map(|value| security_signal_hash(&value))
 }
 
 pub(super) fn request_ip_hash(request: &Value) -> Option<String> {
@@ -45,7 +50,7 @@ pub(super) fn request_ip_hash(request: &Value) -> Option<String> {
     forwarded
         .or(direct)
         .or(request_ip)
-        .map(|value| sha256_hex(&value))
+        .map(|value| security_signal_hash(&value))
 }
 
 pub(super) fn request_device_name(request: &Value) -> Option<String> {
