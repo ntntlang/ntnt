@@ -49,7 +49,9 @@ pub(super) fn request_ip_hash(request: &Value) -> Option<String> {
 }
 
 pub(super) fn request_device_name(request: &Value) -> Option<String> {
-    let ua = request_header(request, "user-agent")?;
+    let ua = request_header(request, "user-agent")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
     let lower = ua.to_ascii_lowercase();
     let device = if lower.contains("iphone") {
         "iPhone"
