@@ -330,32 +330,83 @@ return complete_auth_challenge(resp, req, map {
 ### Phase 8 — Advanced Sessions and Security Signals
 **Goal:** Add higher-end capabilities once the core mechanics are excellent.
 
-- [ ] Store user agent hash / device name on session creation
-- [ ] `list_sessions(user_id)` API
-- [ ] `revoke_session(session_id)` API
+**Status:** Phase 8A (session metadata + security-signal plumbing) is now implemented on branch `feat/auth-phase-8-advanced-sessions-complete` / PR #96. This slice focused on carrying richer session/security metadata cleanly through the existing auth system, plus the review-driven hardening needed to make that plumbing trustworthy across backends.
+
+**What landed in this slice:**
+- [x] Store user agent hash / device name on session creation
+- [x] Pass remember-me flag through OAuth state
+- [x] Persist OAuth-state security metadata (`remember_me`, `device_name`, `user_agent_hash`, `last_ip_hash`) across SQLite/Postgres/Redis + memory fallback
+- [x] Persist session security metadata (`device_name`, `user_agent_hash`, `last_ip_hash`) across SQLite/Postgres/Redis + memory fallback
+- [x] Copy captured OAuth-state metadata onto the real session at callback time before store/rotation
+- [x] Track IP signal material on sessions via `last_ip_hash`
+- [x] Fall back to request `ip` when proxy headers are absent for direct connections
+- [x] Use keyed HMAC-SHA256 for stored security-signal hashes instead of plain SHA-256
+- [x] Harden SQLite/Postgres migration behavior so schema updates stop swallowing real failures
+- [x] Extend auth storage contract tests and auth flow tests for the new metadata paths
+
+**What this slice did _not_ finish yet:**
+- [ ] `list_sessions(user_id)` API *(already partially represented by existing `user_sessions(req)` current-user helper, but no dedicated arbitrary-user/admin-facing API landed in this slice)*
+- [ ] `revoke_session(session_id)` API *(existing revocation helpers remain current-user/request-oriented)*
 - [ ] `revoke_all_sessions(user_id)` API
 - [ ] Password change hook support for revocation
 - [ ] Account disable hook support for revocation
 - [ ] Optional `revoke_on_password_change: true` config
 - [ ] Add `security_events` storage for auth events
-- [ ] Track IP changes per session
 - [ ] Configurable suspicious-activity actions: `warn`, `challenge`, `revoke`
 - [ ] Expose `auth_events(user_id, limit?)` for admin dashboards
 - [ ] Rate limit failed OAuth callbacks
-- [ ] Add `remember_me` and `remember_ttl`
-- [ ] Pass remember-me flag through OAuth state
-- [ ] Set appropriate TTL/persistence on session creation
+- [ ] Add `remember_ttl`
+- [ ] Set distinct remember-me TTL/persistence behavior on session creation
 
-**Ships real value:** this is where `std/auth` becomes genuinely standout, not just competent.
+**Assessment of the current Phase 8 outcome:** this slice successfully delivered the underlying metadata/security-signal plumbing that Phase 8 needed before higher-level features like suspicious-activity policies or auth event streams can be layered on safely. The main work was not just adding columns — it was making the metadata survive the real auth path, align across backends, survive review scrutiny, and avoid silent migration failures. That makes this a real Phase 8 foundation slice rather than cosmetic schema churn.
+
+**Ships real value:** this is where `std/auth` starts becoming genuinely standout, not just competent.
 
 ### Phase 9 — Post-Cleanup Complexity Discipline
 **Goal:** Prevent `std/auth` from collapsing back into a monolith after the 4.5 cleanup lands.
 
-- [ ] Track auth code size / complexity budget as features land
+**Assessment after the Phase 8 branch review (compared against the v0.4.8 release baseline):** the 4.5 cleanup largely achieved its intended effect, but only partially solved the long-term maintainability problem. The internal module split is real and materially improves clarity: config, cookies, guards, OAuth flow, providers, request helpers, routes, sessions, storage, and small utility layers now exist as distinct homes instead of one giant undifferentiated file. The storage contract is also much more coherent than before, and recent review feedback mostly hit end-to-end plumbing gaps and edge-case semantics rather than “where does this logic even belong?” confusion. That is a meaningful architectural win.
+
+**However:** `src/stdlib/auth.rs` is still very large and still acts as a gravity well for the public surface, native-function registration, shared types, and the main auth test module. So the cleanup should be viewed as **successful but incomplete**. `std/auth` is no longer a pure junk drawer, but it is also not yet structurally self-protecting. It is maintainable **if** future work is forced through the module boundaries and contract tests established in 4.5. If contributors drift back into broad `auth.rs` edits for convenience, the monolith will regrow quickly.
+
+**Bottom line:** the DD intent was mostly achieved for the cleanup wave — enough to justify continuing from this shape — but Phase 9 must turn the current structure into enforceable discipline rather than assuming the cleanup alone solved the problem.
+
+## Recommended implementation shape for Phase 9
+
+Phase 9 should be a **discipline phase, not a feature phase**. The goal is to make the architecture we now have more self-enforcing, so future auth work naturally lands in the right places and gets the right verification by default.
+
+### Phase 9A — Architecture Guardrails
+- [ ] Write explicit contributor guidance for what belongs in `auth.rs` vs internal auth modules
+- [ ] Document the allowed responsibilities of `auth.rs`: public surface, shared types, registration glue, and only the minimum unavoidable coordination logic
+- [ ] Document when a new auth change must extend an existing module versus when it merits a new focused module
+- [ ] Add an auth-specific review checklist covering the regressions exposed in Phase 8 (captured-but-not-persisted state, schema/query name drift, swallowed migration errors, backend mismatch paths, fallback ambiguity)
+
+### Phase 9B — Contract-Test Ratchet
+- [ ] Require new auth persistence/state shapes to extend the backend contract harness
+- [ ] Add missing contract coverage for any auth persistence paths still validated only indirectly
+- [ ] Require new fallback/error semantics to be tested in primary, fallback, and failure modes
+- [ ] Treat auth storage behavior as a compatibility surface, not just an implementation detail
+
+### Phase 9C — `auth.rs` Pressure Relief
+- [ ] Audit what still lives in `auth.rs` only because of historical gravity rather than good ownership
+- [ ] Move obvious non-surface helpers and test-heavy logic into module-local ownership where it improves clarity without destabilizing the public API
+- [ ] Reassess whether the main auth test concentration should be partially redistributed into focused module tests over time
+- [ ] Track `auth.rs` growth relative to the internal modules so “easy broad edits” become visible early
+
+### Phase 9D — Periodic Architecture Audit
+- [ ] Re-review new auth work periodically against the intended module boundaries
+- [ ] Check whether recent auth changes increased clarity or merely moved complexity around
+- [ ] Reconfirm that fallback semantics remain deliberate and documented as auth work expands
+- [ ] Update DD-043 / REVIEW guidance when review incidents reveal new recurring patterns
+
+- [ ] Track auth code size / complexity budget as features land, especially `auth.rs` vs the internal modules
 - [ ] Require new auth work to fit the post-4.5 module boundaries instead of reopening broad grab-bag files
+- [ ] Keep `auth.rs` focused on public surface, shared types, registration glue, and only the minimum unavoidable coordination logic
 - [ ] Extend backend contract tests when adding new auth state types, flows, or stores
 - [ ] Treat fallback/error semantics as design-level behavior, not incidental implementation detail
+- [ ] Add review guidance/checklists for common auth regressions: captured-but-not-persisted state, schema/name drift, swallowed migration errors, and backend mismatch paths
 - [ ] Periodically re-audit whether new features are preserving the intended internal architecture
+- [ ] Revisit whether large test concentrations inside `auth.rs` should migrate toward module-local test ownership as the structure stabilizes
 
 **Ships real value:** preserves the benefits of the cleanup so future auth work stays understandable instead of slowly regressing.
 
