@@ -369,7 +369,7 @@ fn store_oauth_state_postgres(state: &OAuthState) -> std::result::Result<(), Str
          (state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, last_ip_hash, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (state) DO UPDATE SET
-            nonce = $2, pkce_verifier = $3, provider = $4, redirect_url = $5, remember_me = $6, device_name = $7, user_agent_hash = $8, ip_hash = $9, created_at = $10",
+            nonce = $2, pkce_verifier = $3, provider = $4, redirect_url = $5, remember_me = $6, device_name = $7, user_agent_hash = $8, last_ip_hash = $9, created_at = $10",
             &[
                 &state.state,
                 &state.nonce,
