@@ -393,7 +393,7 @@ fn auth_health_enabled(config: &AuthConfig) -> bool {
 fn sanitize_session_store_label(store: &SessionStore) -> String {
     match store {
         SessionStore::Memory => "memory".to_string(),
-        SessionStore::Sqlite(path) => format!("sqlite:{}", path),
+        SessionStore::Sqlite(_) => "sqlite".to_string(),
         SessionStore::Postgres(_) => "postgres".to_string(),
         SessionStore::Redis(url) => {
             if url.starts_with("valkey://") {
@@ -423,6 +423,14 @@ fn auth_health_warnings(config: &AuthConfig, request: Option<&Value>) -> Vec<Str
         warnings.push("No OAuth providers configured.".to_string());
     }
 
+    let site_url_missing = std::env::var("SITE_URL").is_err();
+    let callback_example = request.map(get_host_and_proto).and_then(|(host, proto)| {
+        config
+            .providers
+            .first()
+            .map(|provider| format!("{}://{}/auth/{}/callback", proto, host, provider.name))
+    });
+
     for provider in &config.providers {
         if provider.client_id.trim().is_empty() {
             warnings.push(format!(
@@ -436,18 +444,14 @@ fn auth_health_warnings(config: &AuthConfig, request: Option<&Value>) -> Vec<Str
                 provider.name
             ));
         }
+    }
 
-        let callback_host = request
-            .map(get_host_and_proto)
-            .map(|(host, proto)| format!("{}://{}/auth/{}/callback", proto, host, provider.name));
-        if std::env::var("SITE_URL").is_err() {
-            if let Some(callback) = callback_host {
-                warnings.push(format!(
-                    "SITE_URL is not set; OAuth callback URLs currently depend on request host headers (example callback: {}).",
-                    callback
-                ));
-                break;
-            }
+    if site_url_missing {
+        if let Some(callback) = callback_example {
+            warnings.push(format!(
+                "SITE_URL is not set; OAuth callback URLs currently depend on request host headers (example callback: {}).",
+                callback
+            ));
         }
     }
 
