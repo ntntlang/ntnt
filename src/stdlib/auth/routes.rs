@@ -245,6 +245,29 @@ pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
     let config = get_auth_config()
         .ok_or_else(|| IntentError::runtime_error("[auth] Auth not configured".to_string()))?;
 
+    if !config.login_page_enabled {
+        return Ok(json_response(
+            Value::Map(HashMap::from([
+                (
+                    "error".to_string(),
+                    Value::String(
+                        "Built-in auth login page is disabled. Mount a custom route or enable login_page.".to_string(),
+                    ),
+                ),
+                (
+                    "routes".to_string(),
+                    Value::Array(
+                        auth_route_manifest(&config)
+                            .into_iter()
+                            .map(Value::String)
+                            .collect(),
+                    ),
+                ),
+            ])),
+            404,
+        ));
+    }
+
     if config.providers.len() == 1 {
         let provider = &config.providers[0];
         let safe_provider = encode_url_path_segment(&provider.name);
@@ -268,29 +291,6 @@ pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-
-    if !config.login_page_enabled {
-        return Ok(json_response(
-            Value::Map(HashMap::from([
-                (
-                    "error".to_string(),
-                    Value::String(
-                        "Built-in auth login page is disabled. Mount a custom route or enable login_page.".to_string(),
-                    ),
-                ),
-                (
-                    "routes".to_string(),
-                    Value::Array(
-                        auth_route_manifest(&config)
-                            .into_iter()
-                            .map(Value::String)
-                            .collect(),
-                    ),
-                ),
-            ])),
-            404,
-        ));
-    }
 
     let title = escape_html(&config.login_page_title);
     let heading = escape_html(&config.login_page_heading);
