@@ -1822,6 +1822,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | Function | Description |
 |----------|-------------|
 | [`auth_callback`](#authcallback) | Handle OAuth callback - exchanges code for tokens, creates session. |
+| [`auth_health`](#authhealth) | Return auth diagnostics for the built-in `/auth/health` route. |
 | [`auth_logout`](#authlogout) | Handle logout - clears the session and redirects. |
 | [`auth_me`](#authme) | Return current user as JSON for SPAs. |
 | [`auth_start`](#authstart) | Handle OAuth login start - redirects to the provider's authorization page. |
@@ -1889,6 +1890,34 @@ get("/auth/{provider}/callback", auth_callback)  // Wire up callback route
 **See also:** `enable_auth`, `auth_start`
 
 *Since v0.3.11*
+
+---
+
+#### `auth_health`
+
+```ntnt
+auth_health(req: Request) -> Response
+```
+
+Return auth diagnostics for the built-in `/auth/health` route.
+
+The response includes safe config state, provider posture, cookie/session settings, and warnings for common auth misconfigurations without leaking secrets. In production, this route is disabled unless `health_endpoint: true` is set.
+
+**Parameters:**
+
+- `req` — The current HTTP request object
+
+**Returns:** JSON response with auth diagnostics
+
+**Examples:**
+
+```ntnt
+get("/auth/health", auth_health)  // Wire up auth diagnostics
+```
+
+**See also:** `enable_auth`, `auth_start`, `auth_callback`
+
+*Since v0.4.9*
 
 ---
 

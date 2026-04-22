@@ -90,8 +90,8 @@ pub use request_helpers::{
 };
 use request_helpers::{get_host_and_proto, get_user_from_request};
 pub use routes::{
-    handle_auth_callback, handle_auth_index, handle_auth_logout, handle_auth_protect,
-    handle_auth_start,
+    handle_auth_callback, handle_auth_health, handle_auth_index, handle_auth_logout,
+    handle_auth_protect, handle_auth_start,
 };
 use sessions::{
     build_rotated_session, get_session_by_id, migrate_session, update_session_data,
@@ -293,6 +293,7 @@ pub struct AuthConfig {
     pub max_session_ttl: Option<i64>, // Absolute max lifetime from session creation
     pub auth_preset: Option<String>, // Lifecycle/security preset name, if selected
     pub store_tokens: bool,    // Store access/refresh tokens in session
+    pub health_endpoint: bool, // Expose /auth/health diagnostics (dev-only default unless explicitly enabled)
     pub session_secret: String, // Secret for session signing
     pub session_store: SessionStore, // Session storage backend
 }
@@ -315,6 +316,7 @@ impl Default for AuthConfig {
             max_session_ttl: None,
             auth_preset: None,
             store_tokens: false,
+            health_endpoint: false,
             session_secret: DEFAULT_SESSION_SECRET_SENTINEL.to_string(),
             session_store: SessionStore::Memory,
         }
@@ -3736,6 +3738,31 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt auth_health
+    // @module std/auth
+    // @signature auth_health(req: Request) -> Response
+    // Return auth diagnostics for the built-in `/auth/health` route.
+    //
+    // The response includes safe config state, provider posture, cookie/session settings,
+    // and warnings for common auth misconfigurations without leaking secrets.
+    // In production, this route is disabled unless `health_endpoint: true` is set.
+    // @param req The current HTTP request object
+    // @returns JSON response with auth diagnostics
+    // @see_also enable_auth, auth_start, auth_callback
+    // @since v0.4.9
+    // @tags #auth, #observability
+    // @example get("/auth/health", auth_health) ~ "Wire up auth diagnostics"
+    module.insert(
+        "auth_health".to_string(),
+        Value::NativeFunction {
+            name: "auth_health".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| handle_auth_health(args),
+        },
+    );
+
     // @ntnt auth_callback
     // @module std/auth
     // @signature auth_callback(req: Request) -> Response
@@ -6258,6 +6285,198 @@ mod tests {
         assert!(
             matches!(current_session(&[req]).unwrap(), Value::EnumValue { ref variant, .. } if variant == "Some")
         );
+    }
+
+    #[test]
+    fn test_refresh_access_token_does_not_force_old_refresh_token_into_response() {
+        let parsed = serde_json::json!({
+            "access_token": "new-access",
+            "token_type": "Bearer",
+            "expires_in": 3600
+        });
+
+        let tokens = TokenResponse {
+            access_token: parsed["access_token"].as_str().unwrap().to_string(),
+            token_type: parsed["token_type"].as_str().unwrap().to_string(),
+            expires_in: parsed["expires_in"].as_i64(),
+            refresh_token: parsed
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            id_token: None,
+            scope: None,
+        };
+
+        assert_eq!(tokens.refresh_token, None);
+    }
+
+    #[test]
+    fn test_update_session_record_tokens_preserves_refresh_token_when_provider_omits_one() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-refresh-preserve".to_string(),
+            user_id: "user-refresh-preserve".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-refresh-preserve".to_string(),
+            access_token: Some("access-old".to_string()),
+            refresh_token: Some("refresh-old".to_string()),
+            token_expires_at: Some(now + 60),
+            created_at: now,
+            expires_at: now + 600,
+        };
+        store_session_record(&session).expect("session should store");
+
+        update_session_record_tokens(
+            &session.id,
+            &TokenResponse {
+                access_token: "access-new".to_string(),
+                token_type: "Bearer".to_string(),
+                expires_in: Some(120),
+                refresh_token: None,
+                id_token: None,
+                scope: None,
+            },
+            now,
+        )
+        .expect("token update should succeed");
+
+        let updated = get_session_record(&session.id)
+            .expect("lookup should succeed")
+            .expect("session should exist");
+        assert_eq!(updated.access_token.as_deref(), Some("access-new"));
+        assert_eq!(updated.refresh_token.as_deref(), Some("refresh-old"));
+    }
+
+    #[test]
+    fn test_handle_auth_health_reports_safe_diagnostics_in_dev() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        let previous_env = std::env::var("NTNT_ENV").ok();
+        let previous_site = std::env::var("SITE_URL").ok();
+        unsafe {
+            std::env::remove_var("SITE_URL");
+            std::env::set_var("NTNT_ENV", "development");
+        }
+
+        init_auth(AuthConfig {
+            providers: vec![ProviderConfig {
+                name: "google".to_string(),
+                client_id: "client-id".to_string(),
+                client_secret: "super-secret".to_string(),
+                authorize_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                token_url: "https://oauth2.googleapis.com/token".to_string(),
+                userinfo_url: "https://openidconnect.googleapis.com/v1/userinfo".to_string(),
+                supports_oidc: true,
+                use_pkce: true,
+                ..ProviderConfig::default()
+            }],
+            protected_paths: vec!["/admin/*".to_string()],
+            store_tokens: true,
+            session_secret: "dev-secret-value".to_string(),
+            ..AuthConfig::default()
+        });
+
+        let req = Value::Map(HashMap::from([(
+            "headers".to_string(),
+            Value::Map(HashMap::from([(
+                "host".to_string(),
+                Value::String("example.com".to_string()),
+            )])),
+        )]));
+
+        let response = handle_auth_health(&[req]).expect("health should succeed");
+        let body = match response {
+            Value::Map(map) => match map.get("body") {
+                Some(Value::String(body)) => body.clone(),
+                other => panic!("expected body string, got {:?}", other),
+            },
+            other => panic!("expected response map, got {:?}", other),
+        };
+
+        assert!(body.contains("\"providers\""));
+        assert!(body.contains("\"google\""));
+        assert!(body.contains("\"warnings\""));
+        assert!(body.contains("SITE_URL is not set"));
+        assert!(!body.contains("super-secret"));
+        assert!(!body.contains("dev-secret-value"));
+
+        match previous_env {
+            Some(val) => unsafe { std::env::set_var("NTNT_ENV", val) },
+            None => unsafe { std::env::remove_var("NTNT_ENV") },
+        }
+        match previous_site {
+            Some(val) => unsafe { std::env::set_var("SITE_URL", val) },
+            None => unsafe { std::env::remove_var("SITE_URL") },
+        }
+    }
+
+    #[test]
+    fn test_handle_auth_health_disabled_in_production_without_opt_in() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        let previous_env = std::env::var("NTNT_ENV").ok();
+        unsafe {
+            std::env::set_var("NTNT_ENV", "production");
+        }
+
+        init_auth(AuthConfig {
+            session_secret: "prod-secret-value".to_string(),
+            ..AuthConfig::default()
+        });
+
+        let response = handle_auth_health(&[]).expect("health should return response");
+        match response {
+            Value::Map(map) => {
+                assert!(matches!(map.get("status"), Some(Value::Int(404))));
+            }
+            other => panic!("expected response map, got {:?}", other),
+        }
+
+        match previous_env {
+            Some(val) => unsafe { std::env::set_var("NTNT_ENV", val) },
+            None => unsafe { std::env::remove_var("NTNT_ENV") },
+        }
+    }
+
+    #[test]
+    fn test_handle_auth_health_enabled_in_production_with_opt_in() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        let previous_env = std::env::var("NTNT_ENV").ok();
+        unsafe {
+            std::env::set_var("NTNT_ENV", "production");
+        }
+
+        init_auth(AuthConfig {
+            health_endpoint: true,
+            session_secret: "prod-secret-value".to_string(),
+            session_store: SessionStore::Memory,
+            ..AuthConfig::default()
+        });
+
+        let response = handle_auth_health(&[]).expect("health should succeed");
+        let body = match response {
+            Value::Map(map) => match map.get("body") {
+                Some(Value::String(body)) => body.clone(),
+                other => panic!("expected body string, got {:?}", other),
+            },
+            other => panic!("expected response map, got {:?}", other),
+        };
+        assert!(body.contains("Production is using in-memory session storage"));
+
+        match previous_env {
+            Some(val) => unsafe { std::env::set_var("NTNT_ENV", val) },
+            None => unsafe { std::env::remove_var("NTNT_ENV") },
+        }
     }
 
     #[test]

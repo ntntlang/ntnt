@@ -321,6 +321,47 @@ pub fn enforce_auth_for_request(
                         })
                     }
                 }
+                SessionAccessEffect::TokensRefreshed {
+                    expires_at,
+                    refresh_rotated,
+                } => {
+                    let method = if let Value::Map(req_map) = request {
+                        req_map.get("method").and_then(|v| match v {
+                            Value::String(s) => Some(s.to_ascii_uppercase()),
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| "GET".to_string());
+
+                    let safe_navigation =
+                        (method == "GET" || method == "HEAD") && !request_prefers_api(request);
+
+                    if !safe_navigation {
+                        None
+                    } else {
+                        let now = chrono::Utc::now().timestamp();
+                        let cookie = get_auth_config().and_then(|config| {
+                            build_signed_session_cookie_with_max_age(
+                                &config,
+                                &session_id,
+                                expires_at - now,
+                                None,
+                            )
+                            .ok()
+                        });
+
+                        if refresh_rotated {
+                            eprintln!(
+                                "[auth] Refreshed session cookie after refresh-token rotation for session {}",
+                                &session_id[..8]
+                            );
+                        }
+
+                        cookie
+                    }
+                }
                 SessionAccessEffect::Unchanged => None,
             };
             return Ok(refreshed_cookie);
