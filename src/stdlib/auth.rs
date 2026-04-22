@@ -61,6 +61,7 @@ pub use cookies::default_auth_cookie_secure_env;
 use cookies::{
     add_set_cookie_header, auth_challenge_cookie_name, build_cleared_auth_challenge_cookie,
     build_cleared_session_cookie, build_signed_auth_challenge_cookie, build_signed_session_cookie,
+    normalize_cookie_same_site,
 };
 #[cfg(test)]
 use guards::path_matches_protected_pattern;
@@ -290,6 +291,7 @@ pub struct AuthConfig {
     pub sliding_sessions: bool, // Extend active sessions on authenticated reads
     pub refresh_throttle: i64, // Only extend sliding sessions when remaining TTL is at or below this many seconds
     pub max_session_ttl: Option<i64>, // Absolute max lifetime from session creation
+    pub auth_preset: Option<String>, // Lifecycle/security preset name, if selected
     pub store_tokens: bool,    // Store access/refresh tokens in session
     pub session_secret: String, // Secret for session signing
     pub session_store: SessionStore, // Session storage backend
@@ -311,11 +313,61 @@ impl Default for AuthConfig {
             sliding_sessions: false,
             refresh_throttle: 300,
             max_session_ttl: None,
+            auth_preset: None,
             store_tokens: false,
             session_secret: DEFAULT_SESSION_SECRET_SENTINEL.to_string(),
             session_store: SessionStore::Memory,
         }
     }
+}
+
+fn auth_preset_config(name: &str) -> std::result::Result<AuthConfig, String> {
+    let preset = name.trim().to_ascii_lowercase();
+    let mut config = AuthConfig::default();
+    config.auth_preset = Some(preset.clone());
+
+    match preset.as_str() {
+        "consumer" => {
+            config.session_ttl = 86400 * 14;
+            config.refresh_ttl = 86400 * 30;
+            config.sliding_sessions = true;
+            config.refresh_throttle = 1800;
+            config.max_session_ttl = Some(86400 * 30);
+            config.cookie_same_site = "Lax".to_string();
+        }
+        "admin" => {
+            config.session_ttl = 3600;
+            config.refresh_ttl = 86400;
+            config.sliding_sessions = true;
+            config.refresh_throttle = 300;
+            config.max_session_ttl = Some(86400);
+            config.cookie_same_site = "Strict".to_string();
+        }
+        "internal" => {
+            config.session_ttl = 86400;
+            config.refresh_ttl = 86400 * 7;
+            config.sliding_sessions = true;
+            config.refresh_throttle = 900;
+            config.max_session_ttl = Some(86400 * 7);
+            config.cookie_same_site = "Lax".to_string();
+        }
+        "strict" => {
+            config.session_ttl = 1800;
+            config.refresh_ttl = 1800;
+            config.sliding_sessions = false;
+            config.refresh_throttle = 0;
+            config.max_session_ttl = Some(1800);
+            config.cookie_same_site = "Strict".to_string();
+        }
+        _ => {
+            return Err(format!(
+                "[auth] unknown preset \"{}\". Expected one of: consumer, admin, internal, strict",
+                name
+            ))
+        }
+    }
+
+    Ok(config)
 }
 
 /// Sentinel value used to detect when user hasn't set a session secret.
@@ -2612,7 +2664,7 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt enable_auth
     // @module std/auth
-    // @signature enable_auth(providers: [Provider], options?: Map) -> Unit
+    // @signature enable_auth(providers: [Provider], preset_or_options?: String | Map, overrides?: Map) -> Unit
     // Initialize the authentication system with OAuth providers.
     //
     // Stores provider configurations for use by auth handlers. After calling this,
@@ -2620,16 +2672,24 @@ pub fn init() -> HashMap<String, Value> {
     // with routes to enable OAuth login.
     //
     // Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
+    // Built-in presets: "consumer", "admin", "internal", "strict".
+    // Supported option keys: session_secret, session_ttl, refresh_ttl, sliding_sessions,
+    // refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure,
+    // logout_url/after_logout, protected_paths, cookie_name, cookie_secure, cookie_same_site,
+    // session_store, store_tokens.
+    // When a preset string is used, the overrides map is applied on top of the preset.
     // @param providers Array of provider configs created by oauth() or oauth_discover()
-    // @param options Optional map with keys: session_secret, session_ttl, refresh_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, cookie_name, cookie_secure, session_store, store_tokens
+    // @param preset_or_options Optional preset string or options map
+    // @param overrides Optional overrides map applied on top of a preset
     // @returns Unit
     // @see_also oauth, oauth_discover, auth_start
     // @since v0.3.11
     // @tags #auth, #oauth
-    // @example ~ "Initialize auth with GitHub"
+    // @example ~ "Initialize auth with GitHub and explicit options"
     //   let github = oauth("github", get_env("GITHUB_ID"), get_env("GITHUB_SECRET"))
     //   enable_auth([github], map { "session_secret": "my-secret" })
-    // @example enable_auth([github], map { "session_store": "sqlite:./sessions.db" }) ~ "SQLite sessions"
+    // @example enable_auth([github], "admin") ~ "Admin preset"
+    // @example enable_auth([github], "consumer", map { "session_store": "sqlite:./sessions.db" }) ~ "Preset plus overrides"
     // @example enable_auth([github], map { "session_store": "redis://localhost:6379" }) ~ "Redis sessions"
     module.insert(
         "enable_auth".to_string(),
@@ -2639,9 +2699,9 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             requires: Some(RuntimeCapability::HttpConfig),
             func: |args| {
-                if args.is_empty() || args.len() > 2 {
+                if args.is_empty() || args.len() > 3 {
                     return Err(IntentError::type_error(
-                        "[auth] enable_auth() requires 1 or 2 arguments (providers, optional config)"
+                        "[auth] enable_auth() requires 1 to 3 arguments (providers, optional preset/options, optional overrides)"
                             .to_string(),
                     ));
                 }
@@ -2657,16 +2717,40 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                let options = match args.get(1) {
-                    Some(Value::Map(m)) => Some(m.clone()),
-                    Some(_) => {
-                        return Err(IntentError::type_error(
-                            "[auth] enable_auth() second argument must be an options map"
-                                .to_string(),
-                        ))
+                let mut preset_name: Option<String> = None;
+                let mut options: Option<HashMap<String, Value>> = None;
+
+                match args.get(1) {
+                    Some(Value::Map(m)) => options = Some(m.clone()),
+                    Some(Value::String(s)) => preset_name = Some(s.clone()),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() second argument must be a preset string or options map, got {}",
+                            other.type_name()
+                        )))
                     }
-                    None => None,
-                };
+                    None => {}
+                }
+
+                if let Some(arg3) = args.get(2) {
+                    match arg3 {
+                        Value::Map(m) => {
+                            if options.is_some() {
+                                return Err(IntentError::type_error(
+                                    "[auth] enable_auth() accepts at most one options/overrides map"
+                                        .to_string(),
+                                ));
+                            }
+                            options = Some(m.clone());
+                        }
+                        other => {
+                            return Err(IntentError::type_error(format!(
+                                "[auth] enable_auth() third argument must be an overrides map, got {}",
+                                other.type_name()
+                            )))
+                        }
+                    }
+                }
 
                 // Parse providers
                 let mut providers = Vec::new();
@@ -2708,6 +2792,7 @@ pub fn init() -> HashMap<String, Value> {
                                 | "after_logout"
                                 | "cookie_name"
                                 | "cookie_secure"
+                                | "cookie_same_site"
                                 | "session_store"
                                 | "store_tokens"
                                 | "protected_paths"
@@ -2724,6 +2809,11 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 }
 
+                let mut base_config = match preset_name.as_ref() {
+                    Some(name) => auth_preset_config(name).map_err(IntentError::type_error)?,
+                    None => AuthConfig::default(),
+                };
+
                 let get_option = |keys: &[&str]| {
                     options
                         .as_ref()
@@ -2738,7 +2828,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => DEFAULT_SESSION_SECRET_SENTINEL.to_string(),
+                    None => base_config.session_secret.clone(),
                 };
 
                 let session_ttl = match get_option(&["session_ttl"]) {
@@ -2749,7 +2839,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => 86400,
+                    None => base_config.session_ttl,
                 };
 
                 let success_url = match get_option(&["success_url", "after_login"]) {
@@ -2760,7 +2850,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => "/".to_string(),
+                    None => base_config.success_url.clone(),
                 };
 
                 let failure_url = match get_option(&["failure_url", "after_failure"]) {
@@ -2771,7 +2861,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => "/".to_string(),
+                    None => base_config.failure_url.clone(),
                 };
 
                 let logout_url = match get_option(&["logout_url", "after_logout"]) {
@@ -2782,7 +2872,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => "/".to_string(),
+                    None => base_config.logout_url.clone(),
                 };
 
                 let protected_paths = match get_option(&["protected_paths"]) {
@@ -2808,7 +2898,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => Vec::new(),
+                    None => base_config.protected_paths.clone(),
                 };
 
                 let cookie_name = match get_option(&["cookie_name"]) {
@@ -2819,7 +2909,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => "ntnt_session".to_string(),
+                    None => base_config.cookie_name.clone(),
                 };
 
                 let cookie_secure = match get_option(&["cookie_secure"]) {
@@ -2830,19 +2920,32 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => default_auth_cookie_secure_env(),
+                    None => default_auth_cookie_secure_env()
+                };
+
+                let cookie_same_site = match get_option(&["cookie_same_site"]) {
+                    Some(Value::String(s)) => normalize_cookie_same_site(s)
+                        .map_err(IntentError::type_error)?,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"cookie_same_site\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => base_config.cookie_same_site.clone(),
                 };
 
                 let session_store = match get_option(&["session_store"]) {
-                    Some(Value::String(s)) => parse_auth_session_store(s)
-                        .map_err(IntentError::type_error)?,
+                    Some(Value::String(s)) => {
+                        parse_auth_session_store(s).map_err(IntentError::type_error)?
+                    }
                     Some(other) => {
                         return Err(IntentError::type_error(format!(
                             "[auth] enable_auth() option \"session_store\" must be a string, got {}",
                             other.type_name()
                         )));
                     }
-                    None => SessionStore::Memory,
+                    None => base_config.session_store.clone(),
                 };
 
                 // Initialize database/cache if needed
@@ -2862,7 +2965,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => false,
+                    None => base_config.store_tokens,
                 };
 
                 let refresh_ttl = match get_option(&["refresh_ttl"]) {
@@ -2873,7 +2976,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => 86400 * 30,
+                    None => base_config.refresh_ttl,
                 };
 
                 let sliding_sessions = match get_option(&["sliding_sessions"]) {
@@ -2884,7 +2987,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => false,
+                    None => base_config.sliding_sessions,
                 };
 
                 let refresh_throttle = match get_option(&["refresh_throttle"]) {
@@ -2895,7 +2998,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => 300,
+                    None => base_config.refresh_throttle,
                 };
 
                 if refresh_throttle < 0 {
@@ -2918,7 +3021,7 @@ pub fn init() -> HashMap<String, Value> {
                             other.type_name()
                         )));
                     }
-                    None => None,
+                    None => base_config.max_session_ttl,
                 };
 
                 if let Some(max_session_ttl) = max_session_ttl {
@@ -2930,25 +3033,23 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 }
 
-                // Create auth config
-                let config = AuthConfig {
-                    providers,
-                    success_url,
-                    failure_url,
-                    logout_url,
-                    protected_paths,
-                    cookie_name,
-                    cookie_secure,
-                    cookie_same_site: "Lax".to_string(),
-                    session_ttl,
-                    refresh_ttl,
-                    sliding_sessions,
-                    refresh_throttle,
-                    max_session_ttl,
-                    store_tokens,
-                    session_secret,
-                    session_store,
-                };
+                base_config.providers = providers;
+                base_config.success_url = success_url;
+                base_config.failure_url = failure_url;
+                base_config.logout_url = logout_url;
+                base_config.protected_paths = protected_paths;
+                base_config.cookie_name = cookie_name;
+                base_config.cookie_secure = cookie_secure;
+                base_config.cookie_same_site = cookie_same_site;
+                base_config.session_ttl = session_ttl;
+                base_config.refresh_ttl = refresh_ttl;
+                base_config.sliding_sessions = sliding_sessions;
+                base_config.refresh_throttle = refresh_throttle;
+                base_config.max_session_ttl = max_session_ttl;
+                base_config.store_tokens = store_tokens;
+                base_config.session_secret = session_secret;
+                base_config.session_store = session_store;
+                let config = base_config;
 
                 // Initialize auth
                 init_auth(config);
@@ -2994,7 +3095,18 @@ pub fn init() -> HashMap<String, Value> {
                     if let Value::Map(map) = &args[0] {
                         if map.contains_key("method") && map.contains_key("path") {
                             return match enforce_auth_for_request(&args[0], true) {
-                                Ok(()) => Ok(Value::Unit),
+                                Ok(Some(cookie)) => {
+                                    let mut response = match redirect_response(
+                                        &guards::request_target(&args[0]),
+                                        Some(&cookie),
+                                    ) {
+                                        Value::Map(map) => map,
+                                        other => return Ok(other),
+                                    };
+                                    response.insert("status".to_string(), Value::Int(307));
+                                    Ok(Value::Map(response))
+                                },
+                                Ok(None) => Ok(Value::Unit),
                                 Err(response) => Ok(response),
                             };
                         }
@@ -3045,7 +3157,18 @@ pub fn init() -> HashMap<String, Value> {
                     max_arity: 1,
                     requires: None,
                     func: |mw_args| match enforce_auth_for_request(&mw_args[0], true) {
-                        Ok(()) => Ok(Value::Unit),
+                        Ok(Some(cookie)) => {
+                            let mut response = match redirect_response(
+                                &guards::request_target(&mw_args[0]),
+                                Some(&cookie),
+                            ) {
+                                Value::Map(map) => map,
+                                other => return Ok(other),
+                            };
+                            response.insert("status".to_string(), Value::Int(307));
+                            Ok(Value::Map(response))
+                        },
+                        Ok(None) => Ok(Value::Unit),
                         Err(response) => Ok(response),
                     },
                 })
@@ -5306,6 +5429,76 @@ mod tests {
     }
 
     #[test]
+    fn test_enable_auth_accepts_preset_string() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::String("admin".to_string()),
+        ])
+        .expect("enable_auth should accept preset string");
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        assert_eq!(config.auth_preset.as_deref(), Some("admin"));
+        assert_eq!(config.session_ttl, 3600);
+        assert_eq!(config.max_session_ttl, Some(86400));
+        assert_eq!(config.cookie_same_site, "Strict");
+    }
+
+    #[test]
+    fn test_enable_auth_accepts_preset_plus_overrides() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::String("consumer".to_string()),
+            Value::Map(HashMap::from([
+                ("session_ttl".to_string(), Value::Int(7200)),
+                ("cookie_secure".to_string(), Value::Bool(false)),
+                (
+                    "cookie_same_site".to_string(),
+                    Value::String("Strict".to_string()),
+                ),
+            ])),
+        ])
+        .expect("enable_auth should accept preset plus overrides");
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        assert_eq!(config.auth_preset.as_deref(), Some("consumer"));
+        assert_eq!(config.session_ttl, 7200);
+        assert!(!config.cookie_secure);
+        assert_eq!(config.cookie_same_site, "Strict");
+        assert!(config.sliding_sessions);
+    }
+
+    #[test]
+    fn test_enable_auth_rejects_unknown_preset() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let enable_auth = module_fn(&module, "enable_auth");
+        let provider = github_test_provider_value();
+
+        let err = enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::String("wizard-mode".to_string()),
+        ])
+        .expect_err("enable_auth should reject unknown preset");
+        assert!(format!("{}", err).contains("unknown preset"));
+    }
+
+    #[test]
     fn test_enable_auth_accepts_session_lifecycle_options() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
@@ -6266,6 +6459,224 @@ mod tests {
         match previous {
             Some(val) => unsafe { std::env::set_var("SITE_URL", val) },
             None => unsafe { std::env::remove_var("SITE_URL") },
+        }
+    }
+
+    #[test]
+    fn test_handle_auth_protect_skips_cookie_refresh_redirect_for_api_post() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            protected_paths: vec!["/admin".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        SESSION_STORE.lock().unwrap().set_session(Session {
+            id: "session-api-refresh".to_string(),
+            user_id: "user-api-refresh".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-api-refresh".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 600,
+            expires_at: now + 60,
+        });
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        let cookie = build_signed_session_cookie(&config, "session-api-refresh", None)
+            .expect("cookie should build");
+        let req = Value::Map(HashMap::from([
+            ("method".to_string(), Value::String("POST".to_string())),
+            ("path".to_string(), Value::String("/admin".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([
+                    ("cookie".to_string(), Value::String(cookie)),
+                    (
+                        "accept".to_string(),
+                        Value::String("application/json".to_string()),
+                    ),
+                ])),
+            ),
+        ]));
+
+        let response = handle_auth_protect(&[req]).expect("auth protect should succeed");
+        assert!(matches!(response, Value::Unit));
+    }
+
+    #[test]
+    fn test_handle_auth_protect_uses_307_for_cookie_refresh_redirect() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            protected_paths: vec!["/admin".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        SESSION_STORE.lock().unwrap().set_session(Session {
+            id: "session-protect-refresh".to_string(),
+            user_id: "user-protect-refresh".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-protect-refresh".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 600,
+            expires_at: now + 60,
+        });
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        let cookie = build_signed_session_cookie(&config, "session-protect-refresh", None)
+            .expect("cookie should build");
+        let req = Value::Map(HashMap::from([
+            ("method".to_string(), Value::String("POST".to_string())),
+            ("path".to_string(), Value::String("/admin".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "cookie".to_string(),
+                    Value::String(cookie),
+                )])),
+            ),
+        ]));
+
+        let response = handle_auth_protect(&[req]).expect("auth protect should succeed");
+        assert!(matches!(response, Value::Unit));
+    }
+
+    #[test]
+    fn test_handle_auth_protect_preserves_query_string_on_cookie_refresh_redirect() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            protected_paths: vec!["/admin".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        SESSION_STORE.lock().unwrap().set_session(Session {
+            id: "session-protect-query-refresh".to_string(),
+            user_id: "user-protect-query-refresh".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-protect-query-refresh".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 600,
+            expires_at: now + 60,
+        });
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        let cookie = build_signed_session_cookie(&config, "session-protect-query-refresh", None)
+            .expect("cookie should build");
+        let req = Value::Map(HashMap::from([
+            ("method".to_string(), Value::String("GET".to_string())),
+            ("path".to_string(), Value::String("/admin".to_string())),
+            (
+                "query".to_string(),
+                Value::String("page=2&sort=asc".to_string()),
+            ),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "cookie".to_string(),
+                    Value::String(cookie),
+                )])),
+            ),
+        ]));
+
+        let response = handle_auth_protect(&[req]).expect("auth protect should succeed");
+        match response {
+            Value::Map(map) => match map.get("headers") {
+                Some(Value::Map(headers)) => {
+                    assert!(
+                        matches!(headers.get("Location"), Some(Value::String(loc)) if loc == "/admin?page=2&sort=asc")
+                    );
+                }
+                other => panic!("expected headers map, got {:?}", other),
+            },
+            other => panic!("expected response map, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_auth_protect_uses_307_for_cookie_refresh_redirect_on_browser_get() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            sliding_sessions: true,
+            refresh_throttle: 300,
+            session_ttl: 3600,
+            protected_paths: vec!["/admin".to_string()],
+            ..AuthConfig::default()
+        });
+
+        let now = chrono::Utc::now().timestamp();
+        SESSION_STORE.lock().unwrap().set_session(Session {
+            id: "session-protect-browser-refresh".to_string(),
+            user_id: "user-protect-browser-refresh".to_string(),
+            provider: "local".to_string(),
+            email: None,
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-protect-browser-refresh".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            created_at: now - 600,
+            expires_at: now + 60,
+        });
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        let cookie = build_signed_session_cookie(&config, "session-protect-browser-refresh", None)
+            .expect("cookie should build");
+        let req = Value::Map(HashMap::from([
+            ("method".to_string(), Value::String("GET".to_string())),
+            ("path".to_string(), Value::String("/admin".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "cookie".to_string(),
+                    Value::String(cookie),
+                )])),
+            ),
+        ]));
+
+        let response = handle_auth_protect(&[req]).expect("auth protect should succeed");
+        match response {
+            Value::Map(map) => {
+                assert!(matches!(map.get("status"), Some(Value::Int(307))));
+            }
+            other => panic!("expected response map, got {:?}", other),
         }
     }
 

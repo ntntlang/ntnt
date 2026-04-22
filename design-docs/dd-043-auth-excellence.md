@@ -283,14 +283,14 @@ return complete_auth_challenge(resp, req, map {
 
 - [x] Add sliding session expiry support
 - [x] Throttle refreshes so stores are not updated on every request
-- [ ] Refresh cookie Max-Age/Expires along with sliding sessions
+- [x] Refresh cookie Max-Age/Expires along with sliding sessions (for built-in/auth-enforced response paths)
 - [x] Add absolute maximum session lifetime support
-- [ ] Store session creation time separately from idle expiry
-- [ ] Clear log/error path when max lifetime forces re-auth
-- [ ] Define preset configurations (`consumer`, `admin`, `internal`, `strict`)
-- [ ] Accept String or Map as second arg to `enable_auth`
-- [ ] Allow preset + override merge
-- [ ] Document preset guidance clearly
+- [x] Store session creation time separately from idle expiry (use immutable `created_at` as the max-lifetime anchor)
+- [x] Clear log/error path when max lifetime forces re-auth
+- [x] Define preset configurations (`consumer`, `admin`, `internal`, `strict`)
+- [x] Accept String or Map as second arg to `enable_auth`
+- [x] Allow preset + override merge
+- [x] Document preset guidance clearly
 
 **Ships real value:** apps get secure, reusable lifecycle behavior without inventing timeout policy from scratch.
 
@@ -445,7 +445,7 @@ So the plan should put those cleanup-heavy features first, but still start with 
 - absolute max lifetime
 - ergonomic presets (`strict`, `balanced`, `relaxed`, etc.)
 
-**Current status:** Wave 5A landed the lifecycle core: sliding session expiry, refresh throttling, and absolute max lifetime controls. Cookie refresh alignment and presets remain for the next slice.
+**Current status:** Wave 5B added lifecycle presets (`consumer`, `admin`, `internal`, `strict`), preset+override merge, preset-string `enable_auth(...)` input support, and cookie refresh alignment for the built-in/auth-enforced response paths. Phase 5 is complete.
 
 **Strong value:** apps get secure lifecycle behavior without each team inventing different timeout logic.
 
