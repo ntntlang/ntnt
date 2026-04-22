@@ -131,7 +131,10 @@ fn path_matches_normalized_protected_pattern(path: &str, pattern: &str) -> bool 
 
 fn is_auth_exempt_path(path: &str) -> bool {
     let normalized = normalize_protected_path(path);
-    normalized == "/auth" || normalized.starts_with("/auth/")
+    let prefix = get_auth_config()
+        .map(|config| super::routes::auth_route_prefix(&config))
+        .unwrap_or_else(|| "/auth".to_string());
+    normalized == prefix || normalized.starts_with(&format!("{}/", prefix))
 }
 
 pub(super) fn request_path(request: &Value) -> String {

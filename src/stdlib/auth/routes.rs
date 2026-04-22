@@ -1,7 +1,97 @@
 use super::cookies::{build_cleared_session_cookie, build_signed_session_cookie};
-use super::guards::request_target;
+use super::guards::{encode_url_path_segment, escape_html, request_target};
 use super::providers::{available_providers, suggest_provider};
 use super::*;
+
+fn normalize_auth_route_prefix(prefix: &str) -> std::result::Result<String, String> {
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        return Err("[auth] route_prefix must not be empty".to_string());
+    }
+
+    let with_leading = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed.trim_start_matches('/'))
+    };
+
+    let normalized = if with_leading.len() > 1 {
+        with_leading.trim_end_matches('/').to_string()
+    } else {
+        with_leading
+    };
+
+    if normalized.is_empty() || !normalized.starts_with('/') {
+        return Err("[auth] route_prefix must start with /".to_string());
+    }
+
+    if normalized
+        .chars()
+        .any(|ch| ch.is_control() || matches!(ch, ' ' | '?' | '#' | ';'))
+    {
+        return Err("[auth] route_prefix contains invalid characters".to_string());
+    }
+
+    Ok(normalized)
+}
+
+pub(super) fn auth_route_prefix(config: &AuthConfig) -> String {
+    normalize_auth_route_prefix(&config.route_prefix).unwrap_or_else(|_| "/auth".to_string())
+}
+
+pub(super) fn auth_route_path(config: &AuthConfig, suffix: &str) -> String {
+    let prefix = auth_route_prefix(config);
+    let trimmed = suffix.trim_start_matches('/');
+    if trimmed.is_empty() {
+        prefix
+    } else {
+        format!("{}/{}", prefix, trimmed)
+    }
+}
+
+pub(super) fn auth_route_manifest(config: &AuthConfig) -> Vec<String> {
+    vec![
+        auth_route_path(config, ""),
+        auth_route_path(config, "{provider}"),
+        auth_route_path(config, "{provider}/callback"),
+        auth_route_path(config, "logout"),
+        auth_route_path(config, "health"),
+    ]
+}
+
+pub(super) fn auth_route_collision_warnings(config: &AuthConfig) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let manifest = auth_route_manifest(config);
+    let prefix = auth_route_prefix(config);
+
+    for protected in get_protected_paths() {
+        let normalized = protected.trim();
+        if normalized == "/*" || normalized == "/" {
+            warnings.push(format!(
+                "Protected path '{}' overlaps built-in auth routes under '{}'; auth routes remain exempt, but this catch-all may surprise app authors.",
+                protected, prefix
+            ));
+            continue;
+        }
+
+        if let Some(base) = normalized.strip_suffix("/*") {
+            let base = base.trim_end_matches('/');
+            if prefix == base || prefix.starts_with(&format!("{}/", base)) {
+                warnings.push(format!(
+                    "Protected path '{}' overlaps built-in auth route prefix '{}'; auth routes stay exempt, but review middleware order and custom route wiring.",
+                    protected, prefix
+                ));
+            }
+        } else if manifest.iter().any(|route| route == normalized) {
+            warnings.push(format!(
+                "Protected path '{}' exactly matches a built-in auth route; auth routes stay exempt, but this pattern is likely accidental.",
+                protected
+            ));
+        }
+    }
+
+    warnings
+}
 
 pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
     let req = &args[0];
@@ -72,7 +162,12 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
     };
 
     let (host, proto) = get_host_and_proto(req);
-    let redirect_uri = format!("{}://{}/auth/{}/callback", proto, host, provider.name);
+    let redirect_uri = format!(
+        "{}://{}{}",
+        proto,
+        host,
+        auth_route_path(&config, &format!("{}/callback", provider.name))
+    );
 
     store_oauth_state(
         &state,
@@ -129,7 +224,10 @@ pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
     if config.providers.len() == 1 {
         let provider = &config.providers[0];
         let safe_provider = encode_url_path_segment(&provider.name);
-        return Ok(redirect_response(&format!("/auth/{}", safe_provider), None));
+        return Ok(redirect_response(
+            &auth_route_path(&config, &safe_provider),
+            None,
+        ));
     }
 
     let provider_links = config
@@ -139,13 +237,53 @@ pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
             let label = escape_html(&provider.name);
             let safe_provider = encode_url_path_segment(&provider.name);
             format!(
-                r#"<li><a href="/auth/{name}">Sign in with {label}</a></li>"#,
-                name = safe_provider,
+                r#"<li><a class="ntnt-auth-provider" href="{href}">Sign in with {label}</a></li>"#,
+                href = auth_route_path(&config, &safe_provider),
                 label = label
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
+
+    if !config.login_page_enabled {
+        return Ok(json_response(
+            Value::Map(HashMap::from([
+                (
+                    "error".to_string(),
+                    Value::String(
+                        "Built-in auth login page is disabled. Mount a custom route or enable login_page.".to_string(),
+                    ),
+                ),
+                (
+                    "routes".to_string(),
+                    Value::Array(
+                        auth_route_manifest(&config)
+                            .into_iter()
+                            .map(Value::String)
+                            .collect(),
+                    ),
+                ),
+            ])),
+            404,
+        ));
+    }
+
+    let title = escape_html(&config.login_page_title);
+    let heading = escape_html(&config.login_page_heading);
+    let copy = escape_html(&config.login_page_copy);
+    let logo_html = config
+        .login_page_logo_url
+        .as_ref()
+        .map(|logo| logo.trim())
+        .filter(|logo| !logo.is_empty())
+        .map(|logo| {
+            format!(
+                r#"<img class="ntnt-auth-logo" src="{}" alt="{} logo">"#,
+                escape_html(logo),
+                title
+            )
+        })
+        .unwrap_or_default();
 
     Ok(html_response(&format!(
         r#"<!doctype html>
@@ -153,18 +291,34 @@ pub fn handle_auth_index(_args: &[Value]) -> Result<Value> {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sign in</title>
+    <title>{title}</title>
+    <style>
+      :root {{ color-scheme: light dark; }}
+      body {{ font-family: system-ui, sans-serif; margin: 0; background: #0b1020; color: #f5f7fb; }}
+      main {{ max-width: 28rem; margin: 4rem auto; padding: 2rem; background: rgba(15, 23, 42, 0.92); border-radius: 1rem; box-shadow: 0 20px 40px rgba(0,0,0,0.25); }}
+      h1 {{ margin-bottom: 0.5rem; }}
+      p {{ color: #cbd5e1; line-height: 1.5; }}
+      ul {{ list-style: none; padding: 0; margin: 1.5rem 0 0; display: grid; gap: 0.75rem; }}
+      a.ntnt-auth-provider {{ display: block; padding: 0.85rem 1rem; border-radius: 0.75rem; text-decoration: none; background: #2563eb; color: white; font-weight: 600; text-align: center; }}
+      .ntnt-auth-logo {{ max-width: 72px; max-height: 72px; display: block; margin-bottom: 1rem; border-radius: 0.75rem; }}
+    </style>
   </head>
   <body>
     <main>
-      <h1>Sign in</h1>
-      <p>Choose a provider to continue.</p>
+      {logo_html}
+      <h1>{heading}</h1>
+      <p>{copy}</p>
       <ul>
         {provider_links}
       </ul>
     </main>
   </body>
 </html>"#,
+        title = title,
+        heading = heading,
+        copy = copy,
+        logo_html = logo_html,
+        provider_links = provider_links,
     )))
 }
 
@@ -363,8 +517,9 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
 
     let safe_provider = encode_url_path_segment(&provider_name);
     let callback_url = format!(
-        "/auth/{}/callback?exchange={}",
-        safe_provider, exchange_token
+        "{}?exchange={}",
+        auth_route_path(&config, &format!("{}/callback", safe_provider)),
+        exchange_token
     );
     let html = format!(
         r#"<!DOCTYPE html>
@@ -425,10 +580,14 @@ fn auth_health_warnings(config: &AuthConfig, request: Option<&Value>) -> Vec<Str
 
     let site_url_missing = std::env::var("SITE_URL").is_err();
     let callback_example = request.map(get_host_and_proto).and_then(|(host, proto)| {
-        config
-            .providers
-            .first()
-            .map(|provider| format!("{}://{}/auth/{}/callback", proto, host, provider.name))
+        config.providers.first().map(|provider| {
+            format!(
+                "{}://{}{}",
+                proto,
+                host,
+                auth_route_path(config, &format!("{}/callback", provider.name))
+            )
+        })
     });
 
     for provider in &config.providers {
@@ -505,11 +664,12 @@ pub fn handle_auth_health(args: &[Value]) -> Result<Value> {
     response.insert(
         "routes".to_string(),
         serde_json::json!({
-            "index": "/auth",
-            "start": "/auth/{provider}",
-            "callback": "/auth/{provider}/callback",
-            "logout": "/auth/logout",
-            "health": "/auth/health",
+            "prefix": auth_route_prefix(&config),
+            "index": auth_route_path(&config, ""),
+            "start": auth_route_path(&config, "{provider}"),
+            "callback": auth_route_path(&config, "{provider}/callback"),
+            "logout": auth_route_path(&config, "logout"),
+            "health": auth_route_path(&config, "health"),
             "success_url": config.success_url,
             "failure_url": config.failure_url,
             "logout_url": config.logout_url,
@@ -536,6 +696,15 @@ pub fn handle_auth_health(args: &[Value]) -> Result<Value> {
             "max_session_ttl": config.max_session_ttl,
             "preset": config.auth_preset,
         }),
+    );
+    response.insert(
+        "route_collision_warnings".to_string(),
+        serde_json::Value::Array(
+            auth_route_collision_warnings(&config)
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
     );
     response.insert(
         "protected_paths".to_string(),

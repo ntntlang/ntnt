@@ -314,13 +314,15 @@ return complete_auth_challenge(resp, req, map {
 ### Phase 7 — Auto-Routes and Convenience UI
 **Goal:** Make the easy path extremely easy without forcing apps into one UI.
 
+**Status:** Phase 7A implemented in PR #94 (pending) on 2026-04-21. This slice ships configurable built-in auth route prefixes, startup route logging, truthful collision warnings for built-in auth routes vs protected-path config, and a configurable built-in login page with auto-generated provider buttons. Full auto-mount/override integration with app-owned route tables remains open.
+
 - [ ] Auto-generate standard auth routes if not overridden
-- [ ] Configurable path prefixes (`/auth/*` by default)
-- [ ] Clear startup log showing registered routes
-- [ ] Path collision detection with app-defined routes
-- [ ] Built-in login page template
-- [ ] Configurable title/logo/copy
-- [ ] Provider buttons generated automatically
+- [x] Configurable path prefixes (`/auth/*` by default)
+- [x] Clear startup log showing registered routes
+- [x] Path collision detection with app-defined routes
+- [x] Built-in login page template
+- [x] Configurable title/logo/copy
+- [x] Provider buttons generated automatically
 - [ ] Support custom HTML override if needed
 
 **Ships real value:** simple apps get auth with almost no wiring, while custom apps still own their design.
