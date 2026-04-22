@@ -33,7 +33,19 @@ pub(super) fn request_ip_hash(request: &Value) -> Option<String> {
     let direct = request_header(request, "x-real-ip")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    forwarded.or(direct).map(|value| sha256_hex(&value))
+    let request_ip = if let Value::Map(req_map) = request {
+        req_map.get("ip").and_then(|value| match value {
+            Value::String(s) => Some(s.trim().to_string()),
+            _ => None,
+        })
+    } else {
+        None
+    }
+    .filter(|value| !value.is_empty() && value != "unknown");
+    forwarded
+        .or(direct)
+        .or(request_ip)
+        .map(|value| sha256_hex(&value))
 }
 
 pub(super) fn request_device_name(request: &Value) -> Option<String> {

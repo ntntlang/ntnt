@@ -524,6 +524,9 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
         IntentError::runtime_error(format!("[auth] Failed to create session: {}", error))
     })?;
     let mut session = session;
+    session.device_name = oauth_state.device_name.clone();
+    session.user_agent_hash = oauth_state.user_agent_hash.clone();
+    session.last_ip_hash = oauth_state.last_ip_hash.clone();
     if let Some(existing_session_id) = get_session_id_from_request(req) {
         if let Some(existing_session) = get_session_by_id(&existing_session_id) {
             if existing_session_id != session.id {

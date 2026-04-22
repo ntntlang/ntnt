@@ -167,7 +167,35 @@ pub fn init_auth(config: AuthConfig) {
     }
 }
 
-/// Initialize SQLite session storage
+fn ignore_duplicate_column_sqlite(
+    result: rusqlite::Result<usize>,
+) -> std::result::Result<(), String> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(err, msg))
+            if err.extended_code == rusqlite::ffi::SQLITE_ERROR
+                && msg
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn run_postgres_migration(
+    client: &mut postgres::Client,
+    sql: &str,
+) -> std::result::Result<(), String> {
+    client
+        .execute(sql, &[])
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+// Initialize SQLite session storage
 fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
     let conn =
         rusqlite::Connection::open(path).map_err(|e| format!("Failed to open SQLite: {}", e))?;
@@ -196,12 +224,16 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
     )
     .map_err(|e| format!("Failed to create sessions table: {}", e))?;
 
-    let _ = conn.execute("ALTER TABLE auth_sessions ADD COLUMN device_name TEXT", []);
-    let _ = conn.execute(
+    ignore_duplicate_column_sqlite(
+        conn.execute("ALTER TABLE auth_sessions ADD COLUMN device_name TEXT", []),
+    )?;
+    ignore_duplicate_column_sqlite(conn.execute(
         "ALTER TABLE auth_sessions ADD COLUMN user_agent_hash TEXT",
         [],
-    );
-    let _ = conn.execute("ALTER TABLE auth_sessions ADD COLUMN last_ip_hash TEXT", []);
+    ))?;
+    ignore_duplicate_column_sqlite(
+        conn.execute("ALTER TABLE auth_sessions ADD COLUMN last_ip_hash TEXT", []),
+    )?;
 
     // Index for cleanup queries
     conn.execute(
@@ -228,22 +260,22 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
     )
     .map_err(|e| format!("Failed to create oauth_states table: {}", e))?;
 
-    let _ = conn.execute(
+    ignore_duplicate_column_sqlite(conn.execute(
         "ALTER TABLE auth_oauth_states ADD COLUMN remember_me INTEGER NOT NULL DEFAULT 0",
         [],
-    );
-    let _ = conn.execute(
+    ))?;
+    ignore_duplicate_column_sqlite(conn.execute(
         "ALTER TABLE auth_oauth_states ADD COLUMN device_name TEXT",
         [],
-    );
-    let _ = conn.execute(
+    ))?;
+    ignore_duplicate_column_sqlite(conn.execute(
         "ALTER TABLE auth_oauth_states ADD COLUMN user_agent_hash TEXT",
         [],
-    );
-    let _ = conn.execute(
+    ))?;
+    ignore_duplicate_column_sqlite(conn.execute(
         "ALTER TABLE auth_oauth_states ADD COLUMN last_ip_hash TEXT",
         [],
-    );
+    ))?;
 
     // Exchange token table for Safari ITP cookie workaround
     conn.execute(
@@ -312,24 +344,18 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
         )
         .map_err(|e| format!("Failed to create sessions table: {}", e))?;
 
-    client
-        .execute(
-            "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS device_name TEXT",
-            &[],
-        )
-        .ok();
-    client
-        .execute(
-            "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS user_agent_hash TEXT",
-            &[],
-        )
-        .ok();
-    client
-        .execute(
-            "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS last_ip_hash TEXT",
-            &[],
-        )
-        .ok();
+    run_postgres_migration(
+        &mut client,
+        "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS device_name TEXT",
+    )?;
+    run_postgres_migration(
+        &mut client,
+        "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS user_agent_hash TEXT",
+    )?;
+    run_postgres_migration(
+        &mut client,
+        "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS last_ip_hash TEXT",
+    )?;
 
     // Index for cleanup queries
     client
@@ -358,30 +384,22 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
         )
         .map_err(|e| format!("Failed to create oauth_states table: {}", e))?;
 
-    client
-        .execute(
-            "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS remember_me BOOLEAN NOT NULL DEFAULT FALSE",
-            &[],
-        )
-        .ok();
-    client
-        .execute(
-            "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS device_name TEXT",
-            &[],
-        )
-        .ok();
-    client
-        .execute(
-            "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS user_agent_hash TEXT",
-            &[],
-        )
-        .ok();
-    client
-        .execute(
-            "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS last_ip_hash TEXT",
-            &[],
-        )
-        .ok();
+    run_postgres_migration(
+        &mut client,
+        "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS remember_me BOOLEAN NOT NULL DEFAULT FALSE",
+    )?;
+    run_postgres_migration(
+        &mut client,
+        "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS device_name TEXT",
+    )?;
+    run_postgres_migration(
+        &mut client,
+        "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS user_agent_hash TEXT",
+    )?;
+    run_postgres_migration(
+        &mut client,
+        "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS last_ip_hash TEXT",
+    )?;
 
     // Exchange token table for Safari ITP cookie workaround
     client
