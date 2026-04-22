@@ -290,6 +290,10 @@ pub fn store_oauth_state(
     redirect_url: &str,
     nonce: Option<&str>,
     pkce_verifier: Option<&str>,
+    remember_me: bool,
+    device_name: Option<&str>,
+    user_agent_hash: Option<&str>,
+    last_ip_hash: Option<&str>,
 ) {
     let oauth_state = OAuthState {
         state: state.to_string(),
@@ -297,6 +301,10 @@ pub fn store_oauth_state(
         pkce_verifier: pkce_verifier.map(|s| s.to_string()),
         provider: provider.to_string(),
         redirect_url: redirect_url.to_string(),
+        remember_me,
+        device_name: device_name.map(|s| s.to_string()),
+        user_agent_hash: user_agent_hash.map(|s| s.to_string()),
+        last_ip_hash: last_ip_hash.map(|s| s.to_string()),
         created_at: chrono::Utc::now().timestamp(),
     };
 
@@ -330,14 +338,18 @@ fn store_oauth_state_sqlite(state: &OAuthState) -> std::result::Result<(), Strin
 
     conn.execute(
         "INSERT OR REPLACE INTO auth_oauth_states
-         (state, nonce, pkce_verifier, provider, redirect_url, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         (state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, last_ip_hash, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             state.state,
             state.nonce,
             state.pkce_verifier,
             state.provider,
             state.redirect_url,
+            state.remember_me,
+            state.device_name,
+            state.user_agent_hash,
+            state.last_ip_hash,
             state.created_at,
         ],
     )
@@ -354,16 +366,20 @@ fn store_oauth_state_postgres(state: &OAuthState) -> std::result::Result<(), Str
     client
         .execute(
             "INSERT INTO auth_oauth_states
-         (state, nonce, pkce_verifier, provider, redirect_url, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
+         (state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, last_ip_hash, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (state) DO UPDATE SET
-            nonce = $2, pkce_verifier = $3, provider = $4, redirect_url = $5, created_at = $6",
+            nonce = $2, pkce_verifier = $3, provider = $4, redirect_url = $5, remember_me = $6, device_name = $7, user_agent_hash = $8, last_ip_hash = $9, created_at = $10",
             &[
                 &state.state,
                 &state.nonce,
                 &state.pkce_verifier,
                 &state.provider,
                 &state.redirect_url,
+                &state.remember_me,
+                &state.device_name,
+                &state.user_agent_hash,
+                &state.last_ip_hash,
                 &state.created_at,
             ],
         )
@@ -387,6 +403,10 @@ fn store_oauth_state_redis(state: &OAuthState) -> std::result::Result<(), String
         "pkce_verifier": state.pkce_verifier,
         "provider": state.provider,
         "redirect_url": state.redirect_url,
+        "remember_me": state.remember_me,
+        "device_name": state.device_name,
+        "user_agent_hash": state.user_agent_hash,
+        "last_ip_hash": state.last_ip_hash,
         "created_at": state.created_at,
     })
     .to_string();
@@ -423,7 +443,7 @@ fn consume_oauth_state_sqlite(state: &str) -> std::result::Result<Option<OAuthSt
     let result = conn.query_row(
         "DELETE FROM auth_oauth_states
          WHERE state = ?1 AND created_at > ?2
-         RETURNING state, nonce, pkce_verifier, provider, redirect_url, created_at",
+         RETURNING state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, last_ip_hash, created_at",
         rusqlite::params![state, min_created],
         |row| {
             Ok(OAuthState {
@@ -432,7 +452,11 @@ fn consume_oauth_state_sqlite(state: &str) -> std::result::Result<Option<OAuthSt
                 pkce_verifier: row.get(2)?,
                 provider: row.get(3)?,
                 redirect_url: row.get(4)?,
-                created_at: row.get(5)?,
+                remember_me: row.get(5)?,
+                device_name: row.get(6)?,
+                user_agent_hash: row.get(7)?,
+                last_ip_hash: row.get(8)?,
+                created_at: row.get(9)?,
             })
         },
     );
@@ -456,7 +480,7 @@ fn consume_oauth_state_postgres(state: &str) -> std::result::Result<Option<OAuth
         .query(
             "DELETE FROM auth_oauth_states
          WHERE state = $1 AND created_at > $2
-         RETURNING state, nonce, pkce_verifier, provider, redirect_url, created_at",
+         RETURNING state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, last_ip_hash, created_at",
             &[&state, &min_created],
         )
         .map_err(|e| e.to_string())?;
@@ -468,7 +492,11 @@ fn consume_oauth_state_postgres(state: &str) -> std::result::Result<Option<OAuth
             pkce_verifier: row.get(2),
             provider: row.get(3),
             redirect_url: row.get(4),
-            created_at: row.get(5),
+            remember_me: row.get(5),
+            device_name: row.get(6),
+            user_agent_hash: row.get(7),
+            last_ip_hash: row.get(8),
+            created_at: row.get(9),
         }))
     } else {
         Ok(None)
@@ -520,6 +548,10 @@ fn consume_oauth_state_redis(state: &str) -> std::result::Result<Option<OAuthSta
                 pkce_verifier: json["pkce_verifier"].as_str().map(|s| s.to_string()),
                 provider: json["provider"].as_str().unwrap_or("").to_string(),
                 redirect_url: json["redirect_url"].as_str().unwrap_or("").to_string(),
+                remember_me: json["remember_me"].as_bool().unwrap_or(false),
+                device_name: json["device_name"].as_str().map(|s| s.to_string()),
+                user_agent_hash: json["user_agent_hash"].as_str().map(|s| s.to_string()),
+                last_ip_hash: json["last_ip_hash"].as_str().map(|s| s.to_string()),
                 created_at: json["created_at"].as_i64().unwrap_or(0),
             }))
         }
@@ -766,6 +798,9 @@ pub(super) fn create_session(
         access_token,
         refresh_token,
         token_expires_at,
+        device_name: None,
+        user_agent_hash: None,
+        last_ip_hash: None,
         created_at: now,
         expires_at: now + ttl,
     })
@@ -951,6 +986,9 @@ pub(super) fn create_manual_session(
         access_token: None,
         refresh_token: None,
         token_expires_at: None,
+        device_name: None,
+        user_agent_hash: None,
+        last_ip_hash: None,
         created_at: now,
         expires_at: now + ttl,
     })
@@ -1742,8 +1780,8 @@ fn store_session_sqlite(session: &Session) -> std::result::Result<(), String> {
     conn.execute(
         "INSERT OR REPLACE INTO auth_sessions
          (id, user_id, provider, email, name, picture, raw_json, data_json, csrf_token,
-          access_token, refresh_token, token_expires_at, created_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+          access_token, refresh_token, token_expires_at, device_name, user_agent_hash, last_ip_hash, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         rusqlite::params![
             session.id,
             session.user_id,
@@ -1757,6 +1795,9 @@ fn store_session_sqlite(session: &Session) -> std::result::Result<(), String> {
             session.access_token,
             session.refresh_token,
             session.token_expires_at,
+            session.device_name,
+            session.user_agent_hash,
+            session.last_ip_hash,
             session.created_at,
             session.expires_at,
         ],
@@ -1775,8 +1816,8 @@ fn store_session_postgres(session: &Session) -> std::result::Result<(), String> 
         .execute(
             "INSERT INTO auth_sessions
          (id, user_id, provider, email, name, picture, raw_json, data_json, csrf_token,
-          access_token, refresh_token, token_expires_at, created_at, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          access_token, refresh_token, token_expires_at, device_name, user_agent_hash, last_ip_hash, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
          ON CONFLICT (id) DO UPDATE SET
             user_id = EXCLUDED.user_id,
             provider = EXCLUDED.provider,
@@ -1789,6 +1830,9 @@ fn store_session_postgres(session: &Session) -> std::result::Result<(), String> 
             access_token = EXCLUDED.access_token,
             refresh_token = EXCLUDED.refresh_token,
             token_expires_at = EXCLUDED.token_expires_at,
+            device_name = EXCLUDED.device_name,
+            user_agent_hash = EXCLUDED.user_agent_hash,
+            last_ip_hash = EXCLUDED.last_ip_hash,
             created_at = EXCLUDED.created_at,
             expires_at = EXCLUDED.expires_at",
             &[
@@ -1804,6 +1848,9 @@ fn store_session_postgres(session: &Session) -> std::result::Result<(), String> 
                 &session.access_token,
                 &session.refresh_token,
                 &session.token_expires_at,
+                &session.device_name,
+                &session.user_agent_hash,
+                &session.last_ip_hash,
                 &session.created_at,
                 &session.expires_at,
             ],
@@ -1835,6 +1882,9 @@ fn store_session_redis(session: &Session) -> std::result::Result<(), String> {
         "access_token": session.access_token,
         "refresh_token": session.refresh_token,
         "token_expires_at": session.token_expires_at,
+        "device_name": session.device_name,
+        "user_agent_hash": session.user_agent_hash,
+        "last_ip_hash": session.last_ip_hash,
         "created_at": session.created_at,
         "expires_at": session.expires_at,
     })
@@ -1921,7 +1971,7 @@ fn get_session_sqlite(id: &str) -> std::result::Result<Option<Session>, String> 
 
     let result = conn.query_row(
         "SELECT id, user_id, provider, email, name, picture, raw_json, data_json, csrf_token,
-                access_token, refresh_token, token_expires_at, created_at, expires_at
+                access_token, refresh_token, token_expires_at, device_name, user_agent_hash, last_ip_hash, created_at, expires_at
          FROM auth_sessions WHERE id = ?1 AND expires_at > ?2",
         rusqlite::params![id, now],
         |row| {
@@ -1938,8 +1988,11 @@ fn get_session_sqlite(id: &str) -> std::result::Result<Option<Session>, String> 
                 access_token: row.get(9)?,
                 refresh_token: row.get(10)?,
                 token_expires_at: row.get(11)?,
-                created_at: row.get(12)?,
-                expires_at: row.get(13)?,
+                device_name: row.get(12)?,
+                user_agent_hash: row.get(13)?,
+                last_ip_hash: row.get(14)?,
+                created_at: row.get(15)?,
+                expires_at: row.get(16)?,
             })
         },
     );
@@ -1962,7 +2015,7 @@ fn get_expired_session_sqlite(
 
     let result = conn.query_row(
         "SELECT id, user_id, provider, email, name, picture, raw_json, data_json, csrf_token,
-                access_token, refresh_token, token_expires_at, created_at, expires_at
+                access_token, refresh_token, token_expires_at, device_name, user_agent_hash, last_ip_hash, created_at, expires_at
          FROM auth_sessions WHERE id = ?1 AND expires_at <= ?2 AND created_at > ?3 AND refresh_token IS NOT NULL",
         rusqlite::params![id, now, refresh_cutoff],
         |row| {
@@ -1972,7 +2025,11 @@ fn get_expired_session_sqlite(
                 raw_json: row.get(6)?, data_json: row.get(7)?,
                 csrf_token: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
                 access_token: row.get(9)?, refresh_token: row.get(10)?,
-                token_expires_at: row.get(11)?, created_at: row.get(12)?, expires_at: row.get(13)?,
+                token_expires_at: row.get(11)?,
+                device_name: row.get(12)?,
+                user_agent_hash: row.get(13)?,
+                last_ip_hash: row.get(14)?,
+                created_at: row.get(15)?, expires_at: row.get(16)?,
             })
         },
     );
@@ -1995,7 +2052,7 @@ fn get_expired_session_postgres(
     let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
     let rows = client.query(
         "SELECT id, user_id, provider, email, name, picture, raw_json, data_json, csrf_token,
-                access_token, refresh_token, token_expires_at, created_at, expires_at
+                access_token, refresh_token, token_expires_at, device_name, user_agent_hash, last_ip_hash, created_at, expires_at
          FROM auth_sessions WHERE id = $1 AND expires_at <= $2 AND created_at > $3 AND refresh_token IS NOT NULL",
         &[&id, &now, &refresh_cutoff],
     ).map_err(|e| e.to_string())?;
@@ -2014,8 +2071,11 @@ fn get_expired_session_postgres(
             access_token: row.get(9),
             refresh_token: row.get(10),
             token_expires_at: row.get(11),
-            created_at: row.get(12),
-            expires_at: row.get(13),
+            device_name: row.get(12),
+            user_agent_hash: row.get(13),
+            last_ip_hash: row.get(14),
+            created_at: row.get(15),
+            expires_at: row.get(16),
         }))
     } else {
         Ok(None)
@@ -2040,7 +2100,7 @@ fn get_session_postgres(id: &str) -> std::result::Result<Option<Session>, String
     let rows = client
         .query(
             "SELECT id, user_id, provider, email, name, picture, raw_json, data_json, csrf_token,
-                access_token, refresh_token, token_expires_at, created_at, expires_at
+                access_token, refresh_token, token_expires_at, device_name, user_agent_hash, last_ip_hash, created_at, expires_at
          FROM auth_sessions WHERE id = $1 AND expires_at > $2",
             &[&id, &now],
         )
@@ -2060,8 +2120,11 @@ fn get_session_postgres(id: &str) -> std::result::Result<Option<Session>, String
             access_token: row.get(9),
             refresh_token: row.get(10),
             token_expires_at: row.get(11),
-            created_at: row.get(12),
-            expires_at: row.get(13),
+            device_name: row.get(12),
+            user_agent_hash: row.get(13),
+            last_ip_hash: row.get(14),
+            created_at: row.get(15),
+            expires_at: row.get(16),
         }))
     } else {
         Ok(None)
@@ -2125,6 +2188,9 @@ fn get_session_redis(id: &str) -> std::result::Result<Option<Session>, String> {
                 access_token: json["access_token"].as_str().map(|s| s.to_string()),
                 refresh_token: json["refresh_token"].as_str().map(|s| s.to_string()),
                 token_expires_at: json["token_expires_at"].as_i64(),
+                device_name: json["device_name"].as_str().map(|s| s.to_string()),
+                user_agent_hash: json["user_agent_hash"].as_str().map(|s| s.to_string()),
+                last_ip_hash: json["last_ip_hash"].as_str().map(|s| s.to_string()),
                 created_at,
                 expires_at,
             }))
@@ -2361,8 +2427,8 @@ fn migrate_session_sqlite(old_id: &str, new_session: &Session) -> std::result::R
             "UPDATE auth_sessions
          SET id = ?1, user_id = ?2, provider = ?3, email = ?4, name = ?5, picture = ?6,
              raw_json = ?7, data_json = ?8, csrf_token = ?9, access_token = ?10,
-             refresh_token = ?11, token_expires_at = ?12, created_at = ?13, expires_at = ?14
-         WHERE id = ?15",
+             refresh_token = ?11, token_expires_at = ?12, device_name = ?13, user_agent_hash = ?14, last_ip_hash = ?15, created_at = ?16, expires_at = ?17
+         WHERE id = ?18",
             rusqlite::params![
                 new_session.id,
                 new_session.user_id,
@@ -2376,6 +2442,9 @@ fn migrate_session_sqlite(old_id: &str, new_session: &Session) -> std::result::R
                 new_session.access_token,
                 new_session.refresh_token,
                 new_session.token_expires_at,
+                new_session.device_name,
+                new_session.user_agent_hash,
+                new_session.last_ip_hash,
                 new_session.created_at,
                 new_session.expires_at,
                 old_id,
@@ -2403,8 +2472,8 @@ fn migrate_session_postgres(
             "UPDATE auth_sessions
              SET id = $1, user_id = $2, provider = $3, email = $4, name = $5, picture = $6,
                  raw_json = $7, data_json = $8, csrf_token = $9, access_token = $10,
-                 refresh_token = $11, token_expires_at = $12, created_at = $13, expires_at = $14
-             WHERE id = $15",
+                 refresh_token = $11, token_expires_at = $12, device_name = $13, user_agent_hash = $14, last_ip_hash = $15, created_at = $16, expires_at = $17
+             WHERE id = $18",
             &[
                 &new_session.id,
                 &new_session.user_id,
@@ -2418,6 +2487,9 @@ fn migrate_session_postgres(
                 &new_session.access_token,
                 &new_session.refresh_token,
                 &new_session.token_expires_at,
+                &new_session.device_name,
+                &new_session.user_agent_hash,
+                &new_session.last_ip_hash,
                 &new_session.created_at,
                 &new_session.expires_at,
                 &old_id,
@@ -2458,6 +2530,9 @@ fn migrate_session_redis(old_id: &str, new_session: &Session) -> std::result::Re
         "access_token": new_session.access_token,
         "refresh_token": new_session.refresh_token,
         "token_expires_at": new_session.token_expires_at,
+        "device_name": new_session.device_name,
+        "user_agent_hash": new_session.user_agent_hash,
+        "last_ip_hash": new_session.last_ip_hash,
         "created_at": new_session.created_at,
         "expires_at": new_session.expires_at,
     })
@@ -2579,7 +2654,7 @@ fn get_sessions_for_user_sqlite(
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, user_id, provider, created_at, expires_at FROM auth_sessions
+            "SELECT id, user_id, provider, device_name, created_at, expires_at FROM auth_sessions
          WHERE user_id = ?1 AND expires_at > ?2 ORDER BY created_at DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -2590,8 +2665,9 @@ fn get_sessions_for_user_sqlite(
                 id: row.get(0)?,
                 user_id: row.get(1)?,
                 provider: row.get(2)?,
-                created_at: row.get(3)?,
-                expires_at: row.get(4)?,
+                device_name: row.get(3)?,
+                created_at: row.get(4)?,
+                expires_at: row.get(5)?,
                 is_current: false,
             })
         })
@@ -2622,7 +2698,7 @@ fn get_sessions_for_user_postgres(
 
     let rows = client
         .query(
-            "SELECT id, user_id, provider, created_at, expires_at FROM auth_sessions
+            "SELECT id, user_id, provider, device_name, created_at, expires_at FROM auth_sessions
          WHERE user_id = $1 AND expires_at > $2 ORDER BY created_at DESC",
             &[&user_id, &now],
         )
@@ -2634,8 +2710,9 @@ fn get_sessions_for_user_postgres(
             id: row.get(0),
             user_id: row.get(1),
             provider: row.get(2),
-            created_at: row.get(3),
-            expires_at: row.get(4),
+            device_name: row.get(3),
+            created_at: row.get(4),
+            expires_at: row.get(5),
             is_current: current_session_id
                 .map(|c| c == row.get::<_, String>(0))
                 .unwrap_or(false),
@@ -2689,6 +2766,7 @@ fn get_sessions_for_user_redis(
                             id: session_id.clone(),
                             user_id: session_user_id.to_string(),
                             provider: json["provider"].as_str().unwrap_or("").to_string(),
+                            device_name: json["device_name"].as_str().map(|s| s.to_string()),
                             created_at: json["created_at"].as_i64().unwrap_or(0),
                             expires_at,
                             is_current: current_session_id

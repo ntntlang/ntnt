@@ -1,6 +1,7 @@
 use super::cookies::{build_cleared_session_cookie, build_signed_session_cookie};
 use super::guards::{encode_url_path_segment, escape_html, request_target};
 use super::providers::{available_providers, suggest_provider};
+use super::request_helpers::{request_device_name, request_ip_hash, request_user_agent_hash};
 use super::*;
 
 fn normalize_auth_route_prefix(prefix: &str) -> std::result::Result<String, String> {
@@ -205,6 +206,10 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
         &redirect_uri,
         nonce.as_deref(),
         pkce_verifier.as_deref(),
+        false,
+        request_device_name(req).as_deref(),
+        request_user_agent_hash(req).as_deref(),
+        request_ip_hash(req).as_deref(),
     );
 
     let mut provider_for_url = provider.clone();
@@ -519,6 +524,9 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
         IntentError::runtime_error(format!("[auth] Failed to create session: {}", error))
     })?;
     let mut session = session;
+    session.device_name = oauth_state.device_name.clone();
+    session.user_agent_hash = oauth_state.user_agent_hash.clone();
+    session.last_ip_hash = oauth_state.last_ip_hash.clone();
     if let Some(existing_session_id) = get_session_id_from_request(req) {
         if let Some(existing_session) = get_session_by_id(&existing_session_id) {
             if existing_session_id != session.id {
