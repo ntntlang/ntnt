@@ -25,14 +25,32 @@ fn normalize_auth_route_prefix(prefix: &str) -> std::result::Result<String, Stri
         return Err("[auth] route_prefix must start with /".to_string());
     }
 
-    if normalized
-        .chars()
-        .any(|ch| ch.is_control() || matches!(ch, ' ' | '?' | '#' | ';'))
-    {
-        return Err("[auth] route_prefix contains invalid characters".to_string());
+    if normalized.chars().any(|ch| {
+        ch.is_control()
+            || ch.is_whitespace()
+            || !matches!(ch,
+                '/' | '-'
+                    | '_'
+                    | '~'
+                    | '.'
+                    | '0'..='9'
+                    | 'A'..='Z'
+                    | 'a'..='z'
+            )
+    }) {
+        return Err(
+            "[auth] route_prefix contains invalid characters; use URL-safe path segments only"
+                .to_string(),
+        );
     }
 
     Ok(normalized)
+}
+
+pub(super) fn normalize_auth_route_prefix_option(
+    prefix: &str,
+) -> std::result::Result<String, String> {
+    normalize_auth_route_prefix(prefix)
 }
 
 pub(super) fn auth_route_prefix(config: &AuthConfig) -> String {
@@ -61,7 +79,6 @@ pub(super) fn auth_route_manifest(config: &AuthConfig) -> Vec<String> {
 
 pub(super) fn auth_route_collision_warnings(config: &AuthConfig) -> Vec<String> {
     let mut warnings = Vec::new();
-    let manifest = auth_route_manifest(config);
     let prefix = auth_route_prefix(config);
 
     for protected in get_protected_paths() {
@@ -82,11 +99,18 @@ pub(super) fn auth_route_collision_warnings(config: &AuthConfig) -> Vec<String> 
                     protected, prefix
                 ));
             }
-        } else if manifest.iter().any(|route| route == normalized) {
-            warnings.push(format!(
-                "Protected path '{}' exactly matches a built-in auth route; auth routes stay exempt, but this pattern is likely accidental.",
-                protected
-            ));
+        } else {
+            let static_routes = [
+                auth_route_path(config, ""),
+                auth_route_path(config, "logout"),
+                auth_route_path(config, "health"),
+            ];
+            if static_routes.iter().any(|route| route == normalized) {
+                warnings.push(format!(
+                    "Protected path '{}' exactly matches a built-in static auth route; auth routes stay exempt, but this pattern is likely accidental.",
+                    protected
+                ));
+            }
         }
     }
 
