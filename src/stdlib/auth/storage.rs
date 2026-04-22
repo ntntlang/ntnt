@@ -293,7 +293,7 @@ pub fn store_oauth_state(
     remember_me: bool,
     device_name: Option<&str>,
     user_agent_hash: Option<&str>,
-    ip_hash: Option<&str>,
+    last_ip_hash: Option<&str>,
 ) {
     let oauth_state = OAuthState {
         state: state.to_string(),
@@ -304,7 +304,7 @@ pub fn store_oauth_state(
         remember_me,
         device_name: device_name.map(|s| s.to_string()),
         user_agent_hash: user_agent_hash.map(|s| s.to_string()),
-        ip_hash: ip_hash.map(|s| s.to_string()),
+        last_ip_hash: last_ip_hash.map(|s| s.to_string()),
         created_at: chrono::Utc::now().timestamp(),
     };
 
@@ -338,7 +338,7 @@ fn store_oauth_state_sqlite(state: &OAuthState) -> std::result::Result<(), Strin
 
     conn.execute(
         "INSERT OR REPLACE INTO auth_oauth_states
-         (state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, ip_hash, created_at)
+         (state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, last_ip_hash, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             state.state,
@@ -349,7 +349,7 @@ fn store_oauth_state_sqlite(state: &OAuthState) -> std::result::Result<(), Strin
             state.remember_me,
             state.device_name,
             state.user_agent_hash,
-            state.ip_hash,
+            state.last_ip_hash,
             state.created_at,
         ],
     )
@@ -366,7 +366,7 @@ fn store_oauth_state_postgres(state: &OAuthState) -> std::result::Result<(), Str
     client
         .execute(
             "INSERT INTO auth_oauth_states
-         (state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, ip_hash, created_at)
+         (state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, last_ip_hash, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (state) DO UPDATE SET
             nonce = $2, pkce_verifier = $3, provider = $4, redirect_url = $5, remember_me = $6, device_name = $7, user_agent_hash = $8, ip_hash = $9, created_at = $10",
@@ -379,7 +379,7 @@ fn store_oauth_state_postgres(state: &OAuthState) -> std::result::Result<(), Str
                 &state.remember_me,
                 &state.device_name,
                 &state.user_agent_hash,
-                &state.ip_hash,
+                &state.last_ip_hash,
                 &state.created_at,
             ],
         )
@@ -406,7 +406,7 @@ fn store_oauth_state_redis(state: &OAuthState) -> std::result::Result<(), String
         "remember_me": state.remember_me,
         "device_name": state.device_name,
         "user_agent_hash": state.user_agent_hash,
-        "ip_hash": state.ip_hash,
+        "last_ip_hash": state.last_ip_hash,
         "created_at": state.created_at,
     })
     .to_string();
@@ -443,7 +443,7 @@ fn consume_oauth_state_sqlite(state: &str) -> std::result::Result<Option<OAuthSt
     let result = conn.query_row(
         "DELETE FROM auth_oauth_states
          WHERE state = ?1 AND created_at > ?2
-         RETURNING state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, ip_hash, created_at",
+         RETURNING state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, last_ip_hash, created_at",
         rusqlite::params![state, min_created],
         |row| {
             Ok(OAuthState {
@@ -455,7 +455,7 @@ fn consume_oauth_state_sqlite(state: &str) -> std::result::Result<Option<OAuthSt
                 remember_me: row.get(5)?,
                 device_name: row.get(6)?,
                 user_agent_hash: row.get(7)?,
-                ip_hash: row.get(8)?,
+                last_ip_hash: row.get(8)?,
                 created_at: row.get(9)?,
             })
         },
@@ -480,7 +480,7 @@ fn consume_oauth_state_postgres(state: &str) -> std::result::Result<Option<OAuth
         .query(
             "DELETE FROM auth_oauth_states
          WHERE state = $1 AND created_at > $2
-         RETURNING state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, ip_hash, created_at",
+         RETURNING state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, last_ip_hash, created_at",
             &[&state, &min_created],
         )
         .map_err(|e| e.to_string())?;
@@ -495,7 +495,7 @@ fn consume_oauth_state_postgres(state: &str) -> std::result::Result<Option<OAuth
             remember_me: row.get(5),
             device_name: row.get(6),
             user_agent_hash: row.get(7),
-            ip_hash: row.get(8),
+            last_ip_hash: row.get(8),
             created_at: row.get(9),
         }))
     } else {
@@ -551,7 +551,7 @@ fn consume_oauth_state_redis(state: &str) -> std::result::Result<Option<OAuthSta
                 remember_me: json["remember_me"].as_bool().unwrap_or(false),
                 device_name: json["device_name"].as_str().map(|s| s.to_string()),
                 user_agent_hash: json["user_agent_hash"].as_str().map(|s| s.to_string()),
-                ip_hash: json["ip_hash"].as_str().map(|s| s.to_string()),
+                last_ip_hash: json["last_ip_hash"].as_str().map(|s| s.to_string()),
                 created_at: json["created_at"].as_i64().unwrap_or(0),
             }))
         }

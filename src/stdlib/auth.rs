@@ -263,7 +263,7 @@ pub struct OAuthState {
     pub remember_me: bool,
     pub device_name: Option<String>,
     pub user_agent_hash: Option<String>,
-    pub ip_hash: Option<String>,
+    pub last_ip_hash: Option<String>,
     pub created_at: i64,
 }
 
@@ -4402,7 +4402,7 @@ mod tests {
             remember_me: false,
             device_name: Some(format!("{} Browser", label)),
             user_agent_hash: Some(format!("ua-{}-oauth", label)),
-            ip_hash: Some(format!("ip-{}-oauth", label)),
+            last_ip_hash: Some(format!("ip-{}-oauth", label)),
             created_at: now,
         };
         store_oauth_state_record(&oauth_state)
@@ -4433,7 +4433,7 @@ mod tests {
             remember_me: false,
             device_name: None,
             user_agent_hash: None,
-            ip_hash: None,
+            last_ip_hash: None,
             created_at: now - OAUTH_STATE_TTL - 100,
         };
         store_oauth_state_record(&expired_oauth_state).unwrap_or_else(|e| {
@@ -4987,7 +4987,7 @@ mod tests {
             remember_me: false,
             device_name: None,
             user_agent_hash: None,
-            ip_hash: None,
+            last_ip_hash: None,
             created_at: now,
         });
         *SQLITE_CONN.lock().unwrap() = None;
@@ -5008,7 +5008,7 @@ mod tests {
             remember_me: false,
             device_name: None,
             user_agent_hash: None,
-            ip_hash: None,
+            last_ip_hash: None,
             created_at: now - 700,
         });
         *SQLITE_CONN.lock().unwrap() = None;
@@ -5071,7 +5071,7 @@ mod tests {
             remember_me: false,
             device_name: None,
             user_agent_hash: None,
-            ip_hash: None,
+            last_ip_hash: None,
             created_at: now - 700,
         });
         store.exchange_tokens.insert(
@@ -5290,7 +5290,7 @@ mod tests {
             remember_me: true,
             device_name: Some("SQLite Browser".to_string()),
             user_agent_hash: Some("ua-sqlite-oauth".to_string()),
-            ip_hash: Some("ip-sqlite-oauth".to_string()),
+            last_ip_hash: Some("ip-sqlite-oauth".to_string()),
             created_at: now,
         };
         store_oauth_state_record(&oauth_state).expect("sqlite oauth state store should succeed");
@@ -5310,7 +5310,7 @@ mod tests {
             remember_me: false,
             device_name: None,
             user_agent_hash: None,
-            ip_hash: None,
+            last_ip_hash: None,
             created_at: now - 700,
         };
         store_oauth_state_record(&expired_oauth_state)

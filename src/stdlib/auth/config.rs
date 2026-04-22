@@ -221,7 +221,7 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
             remember_me INTEGER NOT NULL DEFAULT 0,
             device_name TEXT,
             user_agent_hash TEXT,
-            ip_hash TEXT,
+            last_ip_hash TEXT,
             created_at INTEGER NOT NULL
         )",
         [],
@@ -240,7 +240,10 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
         "ALTER TABLE auth_oauth_states ADD COLUMN user_agent_hash TEXT",
         [],
     );
-    let _ = conn.execute("ALTER TABLE auth_oauth_states ADD COLUMN ip_hash TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE auth_oauth_states ADD COLUMN last_ip_hash TEXT",
+        [],
+    );
 
     // Exchange token table for Safari ITP cookie workaround
     conn.execute(
@@ -348,7 +351,7 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             remember_me BOOLEAN NOT NULL DEFAULT FALSE,
             device_name TEXT,
             user_agent_hash TEXT,
-            ip_hash TEXT,
+            last_ip_hash TEXT,
             created_at BIGINT NOT NULL
         )",
             &[],
@@ -375,7 +378,7 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
         .ok();
     client
         .execute(
-            "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS ip_hash TEXT",
+            "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS last_ip_hash TEXT",
             &[],
         )
         .ok();
