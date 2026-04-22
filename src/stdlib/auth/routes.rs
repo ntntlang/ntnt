@@ -380,6 +380,196 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
     Ok(html_response(&html))
 }
 
+fn auth_health_enabled(config: &AuthConfig) -> bool {
+    if config.health_endpoint {
+        return true;
+    }
+
+    std::env::var("NTNT_ENV")
+        .map(|v| v != "production" && v != "prod")
+        .unwrap_or(true)
+}
+
+fn sanitize_session_store_label(store: &SessionStore) -> String {
+    match store {
+        SessionStore::Memory => "memory".to_string(),
+        SessionStore::Sqlite(_) => "sqlite".to_string(),
+        SessionStore::Postgres(_) => "postgres".to_string(),
+        SessionStore::Redis(url) => {
+            if url.starts_with("valkey://") {
+                "valkey".to_string()
+            } else {
+                "redis".to_string()
+            }
+        }
+    }
+}
+
+fn auth_health_warnings(config: &AuthConfig, request: Option<&Value>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let is_prod = std::env::var("NTNT_ENV")
+        .map(|v| v == "production" || v == "prod")
+        .unwrap_or(false);
+
+    if matches!(config.session_store, SessionStore::Memory) && is_prod {
+        warnings.push("Production is using in-memory session storage; sessions will be lost on restart and are not shared across instances.".to_string());
+    }
+
+    if is_prod && config.session_secret == DEFAULT_SESSION_SECRET_SENTINEL {
+        warnings.push("Production is using the default session secret sentinel; auth should fail closed before this is reachable.".to_string());
+    }
+
+    if config.providers.is_empty() {
+        warnings.push("No OAuth providers configured.".to_string());
+    }
+
+    let site_url_missing = std::env::var("SITE_URL").is_err();
+    let callback_example = request.map(get_host_and_proto).and_then(|(host, proto)| {
+        config
+            .providers
+            .first()
+            .map(|provider| format!("{}://{}/auth/{}/callback", proto, host, provider.name))
+    });
+
+    for provider in &config.providers {
+        if provider.client_id.trim().is_empty() {
+            warnings.push(format!(
+                "Provider '{}' is missing client_id.",
+                provider.name
+            ));
+        }
+        if provider.client_secret.trim().is_empty() {
+            warnings.push(format!(
+                "Provider '{}' is missing client_secret.",
+                provider.name
+            ));
+        }
+    }
+
+    if site_url_missing {
+        if let Some(callback) = callback_example {
+            warnings.push(format!(
+                "SITE_URL is not set; OAuth callback URLs currently depend on request host headers (example callback: {}).",
+                callback
+            ));
+        }
+    }
+
+    warnings
+}
+
+pub fn handle_auth_health(args: &[Value]) -> Result<Value> {
+    let config = get_auth_config()
+        .ok_or_else(|| IntentError::runtime_error("[auth] Auth not configured".to_string()))?;
+
+    if !auth_health_enabled(&config) {
+        return Ok(crate::stdlib::http_server::create_error_response(
+            404,
+            "Auth health endpoint is disabled in production.",
+        ));
+    }
+
+    let request = args.first();
+    let mut response = HashMap::new();
+    response.insert("ok".to_string(), serde_json::Value::Bool(true));
+    response.insert(
+        "environment".to_string(),
+        serde_json::Value::String(
+            std::env::var("NTNT_ENV").unwrap_or_else(|_| "development".to_string()),
+        ),
+    );
+    response.insert(
+        "health_endpoint".to_string(),
+        serde_json::Value::Bool(config.health_endpoint),
+    );
+    response.insert(
+        "providers".to_string(),
+        serde_json::Value::Array(
+            config
+                .providers
+                .iter()
+                .map(|provider| {
+                    serde_json::json!({
+                        "name": provider.name,
+                        "supports_oidc": provider.supports_oidc,
+                        "use_pkce": provider.use_pkce,
+                        "has_client_id": !provider.client_id.trim().is_empty(),
+                        "has_client_secret": !provider.client_secret.trim().is_empty(),
+                        "authorize_url": provider.authorize_url,
+                        "token_url": provider.token_url,
+                    })
+                })
+                .collect(),
+        ),
+    );
+    response.insert(
+        "routes".to_string(),
+        serde_json::json!({
+            "index": "/auth",
+            "start": "/auth/{provider}",
+            "callback": "/auth/{provider}/callback",
+            "logout": "/auth/logout",
+            "health": "/auth/health",
+            "success_url": config.success_url,
+            "failure_url": config.failure_url,
+            "logout_url": config.logout_url,
+        }),
+    );
+    response.insert(
+        "cookie".to_string(),
+        serde_json::json!({
+            "name": config.cookie_name,
+            "secure": config.cookie_secure,
+            "same_site": config.cookie_same_site,
+            "http_only": true,
+        }),
+    );
+    response.insert(
+        "session".to_string(),
+        serde_json::json!({
+            "store": sanitize_session_store_label(&config.session_store),
+            "store_tokens": config.store_tokens,
+            "session_ttl": config.session_ttl,
+            "refresh_ttl": config.refresh_ttl,
+            "sliding_sessions": config.sliding_sessions,
+            "refresh_throttle": config.refresh_throttle,
+            "max_session_ttl": config.max_session_ttl,
+            "preset": config.auth_preset,
+        }),
+    );
+    response.insert(
+        "protected_paths".to_string(),
+        serde_json::Value::Array(
+            get_protected_paths()
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+    if let Some(req) = request {
+        let (host, proto) = get_host_and_proto(req);
+        response.insert(
+            "request_context".to_string(),
+            serde_json::json!({
+                "host": host,
+                "proto": proto,
+            }),
+        );
+    }
+    response.insert(
+        "warnings".to_string(),
+        serde_json::Value::Array(
+            auth_health_warnings(&config, request)
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+
+    let value_map = json_map_to_value_map(&response.into_iter().collect());
+    Ok(json_response(Value::Map(value_map), 200))
+}
+
 pub fn handle_auth_logout(args: &[Value]) -> Result<Value> {
     let req = &args[0];
     let config = get_auth_config().unwrap_or_default();

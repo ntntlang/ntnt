@@ -31,10 +31,16 @@ pub fn store_session(session: Session) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SessionAccessEffect {
     Unchanged,
-    ExpiryUpdated { expires_at: i64 },
+    ExpiryUpdated {
+        expires_at: i64,
+    },
+    TokensRefreshed {
+        expires_at: i64,
+        refresh_rotated: bool,
+    },
 }
 
 pub(super) fn get_session_for_request(id: &str) -> (Option<Session>, SessionAccessEffect) {
@@ -76,25 +82,39 @@ pub(super) fn get_session_for_request(id: &str) -> (Option<Session>, SessionAcce
                                     return (None, SessionAccessEffect::Unchanged);
                                 }
 
+                                let rotated_refresh_token =
+                                    tokens.refresh_token.as_ref().is_some_and(|new_rt| {
+                                        expired.refresh_token.as_deref() != Some(new_rt.as_str())
+                                    });
+
                                 update_session_tokens(&expired.id, &tokens);
                                 extend_session_expiry(&expired.id, new_expires_at);
 
-                                eprintln!(
-                                    "[auth] Session {} auto-refreshed via refresh token",
-                                    &expired.id[..8]
-                                );
+                                if rotated_refresh_token {
+                                    eprintln!(
+                                        "[auth] Session {} auto-refreshed and rotated refresh token",
+                                        &expired.id[..8]
+                                    );
+                                } else {
+                                    eprintln!(
+                                        "[auth] Session {} auto-refreshed via refresh token",
+                                        &expired.id[..8]
+                                    );
+                                }
 
                                 let mut refreshed = expired;
                                 refreshed.access_token = Some(tokens.access_token);
-                                if let Some(rt) = tokens.refresh_token {
-                                    refreshed.refresh_token = Some(rt);
-                                }
+                                refreshed.refresh_token = tokens
+                                    .refresh_token
+                                    .clone()
+                                    .or_else(|| refreshed.refresh_token.clone());
                                 refreshed.token_expires_at = tokens.expires_in.map(|e| now + e);
                                 refreshed.expires_at = new_expires_at;
                                 return (
                                     Some(refreshed),
-                                    SessionAccessEffect::ExpiryUpdated {
+                                    SessionAccessEffect::TokensRefreshed {
                                         expires_at: new_expires_at,
+                                        refresh_rotated: rotated_refresh_token,
                                     },
                                 );
                             }

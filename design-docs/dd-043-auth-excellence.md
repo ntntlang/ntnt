@@ -297,13 +297,17 @@ return complete_auth_challenge(resp, req, map {
 ### Phase 6 — OAuth Hardening and Observability
 **Goal:** Improve security posture and make auth easier to inspect in production.
 
-- [ ] Refresh token rotation when providers issue a new refresh token
-- [ ] Invalidate old refresh token references where feasible
-- [ ] Log refresh token rotation events
-- [ ] Document provider differences clearly
-- [ ] `/auth/health` endpoint (dev-only by default)
-- [ ] Health output shows config state without leaking secrets
-- [ ] Diagnose common issues like redirect mismatch, missing env, wrong store
+- [x] Refresh token rotation when providers issue a new refresh token
+- [x] Invalidate old refresh token references where feasible
+- [x] Log refresh token rotation events
+- [x] Document provider differences clearly
+- [x] `/auth/health` endpoint (dev-only by default)
+- [x] Health output shows config state without leaking secrets
+- [x] Diagnose common issues like redirect mismatch, missing env, wrong store
+
+**Implementation note (2026-04-21 / PR pending):** Phase 6 now preserves provider-specific refresh-token behavior correctly (including rotation only when a provider actually returns a new refresh token), logs rotation events without exposing token material, and adds a built-in `/auth/health` diagnostics route that is dev-only by default and can be explicitly enabled in production.
+
+**Provider differences:** some providers return a fresh refresh token on every refresh, while others omit `refresh_token` unless rotation occurs. `std/auth` now preserves the stored token when providers omit it, replaces the stored token when they rotate it, and surfaces the distinction through safe auth logs and diagnostics rather than pretending all providers behave the same.
 
 **Ships real value:** better production safety and far easier troubleshooting.
 

@@ -454,8 +454,7 @@ pub fn refresh_access_token(
         refresh_token: json
             .get("refresh_token")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| Some(refresh_token.to_string())), // Keep old refresh token if not returned
+            .map(|s| s.to_string()),
         id_token: json
             .get("id_token")
             .and_then(|v| v.as_str())

@@ -54,6 +54,7 @@ pub(super) fn auth_option_suggestion(key: &str) -> Option<String> {
         "cookie_secure",
         "session_store",
         "store_tokens",
+        "health_endpoint",
         "protected_paths",
     ];
 
