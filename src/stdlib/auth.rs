@@ -4260,6 +4260,9 @@ mod tests {
             access_token: Some(format!("access-{}-1", label)),
             refresh_token: Some(format!("refresh-{}-1", label)),
             token_expires_at: Some(now + 60),
+            device_name: Some("SQLite Mac".to_string()),
+            user_agent_hash: Some("ua-sqlite-1".to_string()),
+            last_ip_hash: Some("ip-sqlite-1".to_string()),
             created_at: now,
             expires_at: now + 300,
         };
@@ -4317,6 +4320,9 @@ mod tests {
             access_token: Some(format!("access-{}-refreshable", label)),
             refresh_token: Some(format!("refresh-{}-refreshable", label)),
             token_expires_at: Some(now - 30),
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 30,
             expires_at: now - 5,
         };
@@ -4393,6 +4399,10 @@ mod tests {
             pkce_verifier: Some(format!("pkce-{}", label)),
             provider: "github".to_string(),
             redirect_url: "/auth/callback".to_string(),
+            remember_me: false,
+            device_name: Some(format!("{} Browser", label)),
+            user_agent_hash: Some(format!("ua-{}-oauth", label)),
+            ip_hash: Some(format!("ip-{}-oauth", label)),
             created_at: now,
         };
         store_oauth_state_record(&oauth_state)
@@ -4420,6 +4430,10 @@ mod tests {
             pkce_verifier: None,
             provider: "github".to_string(),
             redirect_url: "/auth/callback".to_string(),
+            remember_me: false,
+            device_name: None,
+            user_agent_hash: None,
+            ip_hash: None,
             created_at: now - OAUTH_STATE_TTL - 100,
         };
         store_oauth_state_record(&expired_oauth_state).unwrap_or_else(|e| {
@@ -4911,6 +4925,9 @@ mod tests {
             access_token: None,
             refresh_token: None,
             token_expires_at: None,
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now,
             expires_at: now + 300,
         };
@@ -4943,6 +4960,9 @@ mod tests {
             access_token: Some("access-memory-refresh".to_string()),
             refresh_token: Some("refresh-memory-refresh".to_string()),
             token_expires_at: Some(now - 30),
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 30,
             expires_at: now - 5,
         });
@@ -4964,6 +4984,10 @@ mod tests {
             pkce_verifier: None,
             provider: "github".to_string(),
             redirect_url: "/auth/callback".to_string(),
+            remember_me: false,
+            device_name: None,
+            user_agent_hash: None,
+            ip_hash: None,
             created_at: now,
         });
         *SQLITE_CONN.lock().unwrap() = None;
@@ -4981,6 +5005,10 @@ mod tests {
             pkce_verifier: None,
             provider: "github".to_string(),
             redirect_url: "/auth/callback".to_string(),
+            remember_me: false,
+            device_name: None,
+            user_agent_hash: None,
+            ip_hash: None,
             created_at: now - 700,
         });
         *SQLITE_CONN.lock().unwrap() = None;
@@ -5040,6 +5068,10 @@ mod tests {
             pkce_verifier: None,
             provider: "github".to_string(),
             redirect_url: "/auth/callback".to_string(),
+            remember_me: false,
+            device_name: None,
+            user_agent_hash: None,
+            ip_hash: None,
             created_at: now - 700,
         });
         store.exchange_tokens.insert(
@@ -5128,6 +5160,9 @@ mod tests {
             access_token: Some("access-sqlite-1".to_string()),
             refresh_token: Some("refresh-sqlite-1".to_string()),
             token_expires_at: Some(now + 60),
+            device_name: Some("SQLite Mac".to_string()),
+            user_agent_hash: Some("ua-sqlite-1".to_string()),
+            last_ip_hash: Some("ip-sqlite-1".to_string()),
             created_at: now,
             expires_at: now + 300,
         };
@@ -5184,6 +5219,9 @@ mod tests {
             access_token: Some("access-refreshable".to_string()),
             refresh_token: Some("refresh-refreshable".to_string()),
             token_expires_at: Some(now - 30),
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 30,
             expires_at: now - 5,
         };
@@ -5249,6 +5287,10 @@ mod tests {
             pkce_verifier: Some("pkce-sqlite".to_string()),
             provider: "github".to_string(),
             redirect_url: "/auth/callback".to_string(),
+            remember_me: true,
+            device_name: Some("SQLite Browser".to_string()),
+            user_agent_hash: Some("ua-sqlite-oauth".to_string()),
+            ip_hash: Some("ip-sqlite-oauth".to_string()),
             created_at: now,
         };
         store_oauth_state_record(&oauth_state).expect("sqlite oauth state store should succeed");
@@ -5265,6 +5307,10 @@ mod tests {
             pkce_verifier: None,
             provider: "github".to_string(),
             redirect_url: "/auth/callback".to_string(),
+            remember_me: false,
+            device_name: None,
+            user_agent_hash: None,
+            ip_hash: None,
             created_at: now - 700,
         };
         store_oauth_state_record(&expired_oauth_state)
@@ -5849,6 +5895,9 @@ mod tests {
             access_token: None,
             refresh_token: None,
             token_expires_at: None,
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 600,
             expires_at: now + 60,
         };
@@ -5893,6 +5942,9 @@ mod tests {
             access_token: None,
             refresh_token: None,
             token_expires_at: None,
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 1200,
             expires_at: now + 30,
         };
@@ -5926,6 +5978,9 @@ mod tests {
             access_token: None,
             refresh_token: None,
             token_expires_at: None,
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 1200,
             expires_at: now + 7200,
         };
@@ -5959,6 +6014,9 @@ mod tests {
             access_token: None,
             refresh_token: None,
             token_expires_at: None,
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 3600,
             expires_at: now + 60,
         };
@@ -6062,6 +6120,9 @@ mod tests {
             access_token: None,
             refresh_token: None,
             token_expires_at: None,
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 60,
             expires_at: now + 1200,
         };
@@ -6468,6 +6529,9 @@ mod tests {
             access_token: Some("access-old".to_string()),
             refresh_token: Some("refresh-old".to_string()),
             token_expires_at: Some(now + 60),
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now,
             expires_at: now + 600,
         };
@@ -6946,6 +7010,9 @@ mod tests {
             access_token: None,
             refresh_token: None,
             token_expires_at: None,
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 600,
             expires_at: now + 60,
         });
@@ -6998,6 +7065,9 @@ mod tests {
             access_token: None,
             refresh_token: None,
             token_expires_at: None,
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 600,
             expires_at: now + 60,
         });
@@ -7047,6 +7117,9 @@ mod tests {
             access_token: None,
             refresh_token: None,
             token_expires_at: None,
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 600,
             expires_at: now + 60,
         });
@@ -7110,6 +7183,9 @@ mod tests {
             access_token: None,
             refresh_token: None,
             token_expires_at: None,
+            device_name: None,
+            user_agent_hash: None,
+            last_ip_hash: None,
             created_at: now - 600,
             expires_at: now + 60,
         });

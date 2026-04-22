@@ -218,11 +218,29 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
             pkce_verifier TEXT,
             provider TEXT NOT NULL,
             redirect_url TEXT NOT NULL,
+            remember_me INTEGER NOT NULL DEFAULT 0,
+            device_name TEXT,
+            user_agent_hash TEXT,
+            ip_hash TEXT,
             created_at INTEGER NOT NULL
         )",
         [],
     )
     .map_err(|e| format!("Failed to create oauth_states table: {}", e))?;
+
+    let _ = conn.execute(
+        "ALTER TABLE auth_oauth_states ADD COLUMN remember_me INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE auth_oauth_states ADD COLUMN device_name TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE auth_oauth_states ADD COLUMN user_agent_hash TEXT",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE auth_oauth_states ADD COLUMN ip_hash TEXT", []);
 
     // Exchange token table for Safari ITP cookie workaround
     conn.execute(
@@ -327,11 +345,40 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             pkce_verifier TEXT,
             provider TEXT NOT NULL,
             redirect_url TEXT NOT NULL,
+            remember_me BOOLEAN NOT NULL DEFAULT FALSE,
+            device_name TEXT,
+            user_agent_hash TEXT,
+            ip_hash TEXT,
             created_at BIGINT NOT NULL
         )",
             &[],
         )
         .map_err(|e| format!("Failed to create oauth_states table: {}", e))?;
+
+    client
+        .execute(
+            "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS remember_me BOOLEAN NOT NULL DEFAULT FALSE",
+            &[],
+        )
+        .ok();
+    client
+        .execute(
+            "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS device_name TEXT",
+            &[],
+        )
+        .ok();
+    client
+        .execute(
+            "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS user_agent_hash TEXT",
+            &[],
+        )
+        .ok();
+    client
+        .execute(
+            "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS ip_hash TEXT",
+            &[],
+        )
+        .ok();
 
     // Exchange token table for Safari ITP cookie workaround
     client

@@ -338,14 +338,18 @@ fn store_oauth_state_sqlite(state: &OAuthState) -> std::result::Result<(), Strin
 
     conn.execute(
         "INSERT OR REPLACE INTO auth_oauth_states
-         (state, nonce, pkce_verifier, provider, redirect_url, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         (state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, ip_hash, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             state.state,
             state.nonce,
             state.pkce_verifier,
             state.provider,
             state.redirect_url,
+            state.remember_me,
+            state.device_name,
+            state.user_agent_hash,
+            state.ip_hash,
             state.created_at,
         ],
     )
@@ -362,16 +366,20 @@ fn store_oauth_state_postgres(state: &OAuthState) -> std::result::Result<(), Str
     client
         .execute(
             "INSERT INTO auth_oauth_states
-         (state, nonce, pkce_verifier, provider, redirect_url, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
+         (state, nonce, pkce_verifier, provider, redirect_url, remember_me, device_name, user_agent_hash, ip_hash, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (state) DO UPDATE SET
-            nonce = $2, pkce_verifier = $3, provider = $4, redirect_url = $5, created_at = $6",
+            nonce = $2, pkce_verifier = $3, provider = $4, redirect_url = $5, remember_me = $6, device_name = $7, user_agent_hash = $8, ip_hash = $9, created_at = $10",
             &[
                 &state.state,
                 &state.nonce,
                 &state.pkce_verifier,
                 &state.provider,
                 &state.redirect_url,
+                &state.remember_me,
+                &state.device_name,
+                &state.user_agent_hash,
+                &state.ip_hash,
                 &state.created_at,
             ],
         )
@@ -395,6 +403,10 @@ fn store_oauth_state_redis(state: &OAuthState) -> std::result::Result<(), String
         "pkce_verifier": state.pkce_verifier,
         "provider": state.provider,
         "redirect_url": state.redirect_url,
+        "remember_me": state.remember_me,
+        "device_name": state.device_name,
+        "user_agent_hash": state.user_agent_hash,
+        "ip_hash": state.ip_hash,
         "created_at": state.created_at,
     })
     .to_string();
@@ -1769,7 +1781,7 @@ fn store_session_sqlite(session: &Session) -> std::result::Result<(), String> {
         "INSERT OR REPLACE INTO auth_sessions
          (id, user_id, provider, email, name, picture, raw_json, data_json, csrf_token,
           access_token, refresh_token, token_expires_at, device_name, user_agent_hash, last_ip_hash, created_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         rusqlite::params![
             session.id,
             session.user_id,
@@ -1805,7 +1817,7 @@ fn store_session_postgres(session: &Session) -> std::result::Result<(), String> 
             "INSERT INTO auth_sessions
          (id, user_id, provider, email, name, picture, raw_json, data_json, csrf_token,
           access_token, refresh_token, token_expires_at, device_name, user_agent_hash, last_ip_hash, created_at, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
          ON CONFLICT (id) DO UPDATE SET
             user_id = EXCLUDED.user_id,
             provider = EXCLUDED.provider,
@@ -1818,6 +1830,9 @@ fn store_session_postgres(session: &Session) -> std::result::Result<(), String> 
             access_token = EXCLUDED.access_token,
             refresh_token = EXCLUDED.refresh_token,
             token_expires_at = EXCLUDED.token_expires_at,
+            device_name = EXCLUDED.device_name,
+            user_agent_hash = EXCLUDED.user_agent_hash,
+            last_ip_hash = EXCLUDED.last_ip_hash,
             created_at = EXCLUDED.created_at,
             expires_at = EXCLUDED.expires_at",
             &[
@@ -1867,6 +1882,9 @@ fn store_session_redis(session: &Session) -> std::result::Result<(), String> {
         "access_token": session.access_token,
         "refresh_token": session.refresh_token,
         "token_expires_at": session.token_expires_at,
+        "device_name": session.device_name,
+        "user_agent_hash": session.user_agent_hash,
+        "last_ip_hash": session.last_ip_hash,
         "created_at": session.created_at,
         "expires_at": session.expires_at,
     })
@@ -2409,8 +2427,8 @@ fn migrate_session_sqlite(old_id: &str, new_session: &Session) -> std::result::R
             "UPDATE auth_sessions
          SET id = ?1, user_id = ?2, provider = ?3, email = ?4, name = ?5, picture = ?6,
              raw_json = ?7, data_json = ?8, csrf_token = ?9, access_token = ?10,
-             refresh_token = ?11, token_expires_at = ?12, created_at = ?13, expires_at = ?14
-         WHERE id = ?15",
+             refresh_token = ?11, token_expires_at = ?12, device_name = ?13, user_agent_hash = ?14, last_ip_hash = ?15, created_at = ?16, expires_at = ?17
+         WHERE id = ?18",
             rusqlite::params![
                 new_session.id,
                 new_session.user_id,
@@ -2424,6 +2442,9 @@ fn migrate_session_sqlite(old_id: &str, new_session: &Session) -> std::result::R
                 new_session.access_token,
                 new_session.refresh_token,
                 new_session.token_expires_at,
+                new_session.device_name,
+                new_session.user_agent_hash,
+                new_session.last_ip_hash,
                 new_session.created_at,
                 new_session.expires_at,
                 old_id,
@@ -2451,8 +2472,8 @@ fn migrate_session_postgres(
             "UPDATE auth_sessions
              SET id = $1, user_id = $2, provider = $3, email = $4, name = $5, picture = $6,
                  raw_json = $7, data_json = $8, csrf_token = $9, access_token = $10,
-                 refresh_token = $11, token_expires_at = $12, created_at = $13, expires_at = $14
-             WHERE id = $15",
+                 refresh_token = $11, token_expires_at = $12, device_name = $13, user_agent_hash = $14, last_ip_hash = $15, created_at = $16, expires_at = $17
+             WHERE id = $18",
             &[
                 &new_session.id,
                 &new_session.user_id,
@@ -2466,6 +2487,9 @@ fn migrate_session_postgres(
                 &new_session.access_token,
                 &new_session.refresh_token,
                 &new_session.token_expires_at,
+                &new_session.device_name,
+                &new_session.user_agent_hash,
+                &new_session.last_ip_hash,
                 &new_session.created_at,
                 &new_session.expires_at,
                 &old_id,
@@ -2506,6 +2530,9 @@ fn migrate_session_redis(old_id: &str, new_session: &Session) -> std::result::Re
         "access_token": new_session.access_token,
         "refresh_token": new_session.refresh_token,
         "token_expires_at": new_session.token_expires_at,
+        "device_name": new_session.device_name,
+        "user_agent_hash": new_session.user_agent_hash,
+        "last_ip_hash": new_session.last_ip_hash,
         "created_at": new_session.created_at,
         "expires_at": new_session.expires_at,
     })
