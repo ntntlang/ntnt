@@ -779,41 +779,59 @@ impl ServerState {
     pub fn find_route_typed(&self, method: &str, path: &str) -> RouteMatchResult {
         // Count path segments to narrow down candidates
         let segment_count = path.split('/').filter(|s| !s.is_empty()).count();
-        let key = (method.to_string(), segment_count);
 
-        // Look up candidate routes by (method, segment_count)
-        let candidate_indices = match self.route_index.get(&key) {
-            Some(indices) => indices,
-            None => return RouteMatchResult::NotFound,
-        };
+        let try_match = |lookup_method: &str| -> RouteMatchResult {
+            let key = (lookup_method.to_string(), segment_count);
 
-        // Search only the candidates (typically 1-5 routes vs all routes)
-        for &index in candidate_indices {
-            let (route, handler, _source) = &self.routes[index];
-            match match_route_typed(path, route) {
-                MatchResult::Matched(params) => {
-                    return RouteMatchResult::Matched {
-                        handler: handler.clone(),
-                        params,
-                        route_index: index,
-                    };
-                }
-                MatchResult::TypeMismatch {
-                    param_name,
-                    expected,
-                    got,
-                } => {
-                    return RouteMatchResult::TypeMismatch {
+            // Look up candidate routes by (method, segment_count)
+            let candidate_indices = match self.route_index.get(&key) {
+                Some(indices) => indices,
+                None => return RouteMatchResult::NotFound,
+            };
+
+            // Search only the candidates (typically 1-5 routes vs all routes)
+            for &index in candidate_indices {
+                let (route, handler, _source) = &self.routes[index];
+                match match_route_typed(path, route) {
+                    MatchResult::Matched(params) => {
+                        return RouteMatchResult::Matched {
+                            handler: handler.clone(),
+                            params,
+                            route_index: index,
+                        };
+                    }
+                    MatchResult::TypeMismatch {
                         param_name,
                         expected,
                         got,
-                    };
-                }
-                MatchResult::NoMatch => {
-                    // Continue looking for a match
+                    } => {
+                        return RouteMatchResult::TypeMismatch {
+                            param_name,
+                            expected,
+                            got,
+                        };
+                    }
+                    MatchResult::NoMatch => {
+                        // Continue looking for a match
+                    }
                 }
             }
+
+            RouteMatchResult::NotFound
+        };
+
+        // Prefer explicit HEAD routes, but fall back to GET per RFC 9110 §9.3.2 only
+        // when there is no HEAD route match at all. If an explicit HEAD route matches the
+        // path but returns TypeMismatch, preserve that 400-producing result rather than
+        // silently bypassing it via GET fallback.
+        let direct_match = try_match(method);
+        if !matches!(direct_match, RouteMatchResult::NotFound) {
+            return direct_match;
         }
+        if method == "HEAD" {
+            return try_match("GET");
+        }
+
         RouteMatchResult::NotFound
     }
 
@@ -3642,6 +3660,89 @@ mod tests {
 
         let result = state.find_route("POST", "/users");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_server_state_head_falls_back_to_get_route() {
+        let mut state = ServerState::new();
+        state.add_route("GET", "/users/{id}", Value::String("handler".to_string()));
+
+        let result = state.find_route("HEAD", "/users/123");
+        assert!(result.is_some(), "HEAD should fall back to GET route");
+        let (handler, params, _index) = result.unwrap();
+        assert_value_string(&handler, "handler");
+        assert_eq!(params.get("id"), Some(&"123".to_string()));
+    }
+
+    #[test]
+    fn test_server_state_head_prefers_explicit_head_route() {
+        let mut state = ServerState::new();
+        state.add_route("HEAD", "/health", Value::String("head_handler".to_string()));
+        state.add_route("GET", "/health", Value::String("get_handler".to_string()));
+
+        let result = state.find_route("HEAD", "/health");
+        assert!(result.is_some());
+        let (handler, _params, _index) = result.unwrap();
+        assert_value_string(&handler, "head_handler");
+    }
+
+    #[test]
+    fn test_server_state_head_fallback_preserves_type_mismatch() {
+        let mut state = ServerState::new();
+        state.add_route(
+            "GET",
+            "/users/{id:Int}",
+            Value::String("handler".to_string()),
+        );
+
+        let result = state.find_route_typed("HEAD", "/users/not-a-number");
+        match result {
+            RouteMatchResult::TypeMismatch {
+                param_name,
+                expected,
+                got,
+            } => {
+                assert_eq!(param_name, "id");
+                assert_eq!(expected, "Int");
+                assert_eq!(got, "not-a-number");
+            }
+            other => panic!(
+                "expected TypeMismatch from HEAD->GET fallback, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_server_state_explicit_head_type_mismatch_blocks_get_fallback() {
+        let mut state = ServerState::new();
+        state.add_route(
+            "HEAD",
+            "/users/{id:Int}",
+            Value::String("head_handler".to_string()),
+        );
+        state.add_route(
+            "GET",
+            "/users/{name}",
+            Value::String("get_handler".to_string()),
+        );
+
+        let result = state.find_route_typed("HEAD", "/users/foo");
+        match result {
+            RouteMatchResult::TypeMismatch {
+                param_name,
+                expected,
+                got,
+            } => {
+                assert_eq!(param_name, "id");
+                assert_eq!(expected, "Int");
+                assert_eq!(got, "foo");
+            }
+            other => panic!(
+                "expected explicit HEAD TypeMismatch to block GET fallback, got {:?}",
+                other
+            ),
+        }
     }
 
     #[test]
