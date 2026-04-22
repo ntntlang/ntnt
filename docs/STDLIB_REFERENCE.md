@@ -2274,7 +2274,7 @@ Initialize the authentication system with OAuth providers.
 
 Stores provider configurations for use by auth handlers. After calling this, you can use auth_start, auth_callback, and auth_logout with routes to enable OAuth login.
 
-Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url". Built-in presets: "consumer", "admin", "internal", "strict". Supported option keys: session_secret, session_ttl, refresh_ttl, sliding_sessions, refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, cookie_name, cookie_secure, cookie_same_site, session_store, store_tokens. When a preset string is used, the overrides map is applied on top of the preset.
+Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url". Built-in presets: "consumer", "admin", "internal", "strict". Supported option keys: session_secret, session_ttl, refresh_ttl, sliding_sessions, refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, route_prefix, login_page, login_page_title, login_page_logo_url, login_page_heading, login_page_copy, cookie_name, cookie_secure, cookie_same_site, session_store, store_tokens, health_endpoint. When a preset string is used, the overrides map is applied on top of the preset.
 
 **Parameters:**
 

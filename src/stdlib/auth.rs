@@ -65,7 +65,7 @@ use cookies::{
 };
 #[cfg(test)]
 use guards::path_matches_protected_pattern;
-use guards::{encode_url_path_segment, escape_html, validate_auth_challenge_kind};
+use guards::validate_auth_challenge_kind;
 pub use guards::{
     enforce_auth_for_request, get_protected_paths, register_protected_paths, reset_protected_paths,
 };
@@ -283,6 +283,12 @@ pub struct AuthConfig {
     pub failure_url: String,
     pub logout_url: String,
     pub protected_paths: Vec<String>,
+    pub route_prefix: String,
+    pub login_page_enabled: bool,
+    pub login_page_title: String,
+    pub login_page_logo_url: Option<String>,
+    pub login_page_heading: String,
+    pub login_page_copy: String,
     pub cookie_name: String,
     pub cookie_secure: bool,
     pub cookie_same_site: String,
@@ -306,6 +312,12 @@ impl Default for AuthConfig {
             failure_url: "/".to_string(),
             logout_url: "/".to_string(),
             protected_paths: Vec::new(),
+            route_prefix: "/auth".to_string(),
+            login_page_enabled: true,
+            login_page_title: "Sign in".to_string(),
+            login_page_logo_url: None,
+            login_page_heading: "Sign in".to_string(),
+            login_page_copy: "Choose a provider to continue.".to_string(),
             cookie_name: "ntnt_session".to_string(),
             cookie_secure: true,
             cookie_same_site: "lax".to_string(),
@@ -2677,8 +2689,9 @@ pub fn init() -> HashMap<String, Value> {
     // Built-in presets: "consumer", "admin", "internal", "strict".
     // Supported option keys: session_secret, session_ttl, refresh_ttl, sliding_sessions,
     // refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure,
-    // logout_url/after_logout, protected_paths, cookie_name, cookie_secure, cookie_same_site,
-    // session_store, store_tokens.
+    // logout_url/after_logout, protected_paths, route_prefix, login_page, login_page_title,
+    // login_page_logo_url, login_page_heading, login_page_copy, cookie_name, cookie_secure,
+    // cookie_same_site, session_store, store_tokens, health_endpoint.
     // When a preset string is used, the overrides map is applied on top of the preset.
     // @param providers Array of provider configs created by oauth() or oauth_discover()
     // @param preset_or_options Optional preset string or options map
@@ -2792,11 +2805,18 @@ pub fn init() -> HashMap<String, Value> {
                                 | "after_failure"
                                 | "logout_url"
                                 | "after_logout"
+                                | "route_prefix"
+                                | "login_page"
+                                | "login_page_title"
+                                | "login_page_logo_url"
+                                | "login_page_heading"
+                                | "login_page_copy"
                                 | "cookie_name"
                                 | "cookie_secure"
                                 | "cookie_same_site"
                                 | "session_store"
                                 | "store_tokens"
+                                | "health_endpoint"
                                 | "protected_paths"
                         );
                         if !known {
@@ -2903,6 +2923,85 @@ pub fn init() -> HashMap<String, Value> {
                     None => base_config.protected_paths.clone(),
                 };
 
+                let route_prefix = match get_option(&["route_prefix"]) {
+                    Some(Value::String(s)) => routes::normalize_auth_route_prefix_option(s)
+                        .map_err(IntentError::type_error)?,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"route_prefix\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => base_config.route_prefix.clone(),
+                };
+
+                let login_page_enabled = match get_option(&["login_page"]) {
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"login_page\" must be a bool, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => base_config.login_page_enabled,
+                };
+
+                let login_page_title = match get_option(&["login_page_title"]) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"login_page_title\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => base_config.login_page_title.clone(),
+                };
+
+                let login_page_logo_url = match get_option(&["login_page_logo_url"]) {
+                    Some(Value::String(s)) => {
+                        let trimmed = s.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        }
+                    }
+                    Some(Value::EnumValue {
+                        enum_name,
+                        variant,
+                        ..
+                    }) if enum_name == "Option" && variant == "None" => None,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"login_page_logo_url\" must be a string or None, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => base_config.login_page_logo_url.clone(),
+                };
+
+                let login_page_heading = match get_option(&["login_page_heading"]) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"login_page_heading\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => base_config.login_page_heading.clone(),
+                };
+
+                let login_page_copy = match get_option(&["login_page_copy"]) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"login_page_copy\" must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => base_config.login_page_copy.clone(),
+                };
+
                 let cookie_name = match get_option(&["cookie_name"]) {
                     Some(Value::String(s)) => s.clone(),
                     Some(other) => {
@@ -2958,6 +3057,17 @@ pub fn init() -> HashMap<String, Value> {
                         e
                     )));
                 }
+
+                let health_endpoint = match get_option(&["health_endpoint"]) {
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"health_endpoint\" must be a bool, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => base_config.health_endpoint,
+                };
 
                 let store_tokens = match get_option(&["store_tokens"]) {
                     Some(Value::Bool(b)) => *b,
@@ -3040,6 +3150,12 @@ pub fn init() -> HashMap<String, Value> {
                 base_config.failure_url = failure_url;
                 base_config.logout_url = logout_url;
                 base_config.protected_paths = protected_paths;
+                base_config.route_prefix = route_prefix;
+                base_config.login_page_enabled = login_page_enabled;
+                base_config.login_page_title = login_page_title;
+                base_config.login_page_logo_url = login_page_logo_url;
+                base_config.login_page_heading = login_page_heading;
+                base_config.login_page_copy = login_page_copy;
                 base_config.cookie_name = cookie_name;
                 base_config.cookie_secure = cookie_secure;
                 base_config.cookie_same_site = cookie_same_site;
@@ -3049,12 +3165,21 @@ pub fn init() -> HashMap<String, Value> {
                 base_config.refresh_throttle = refresh_throttle;
                 base_config.max_session_ttl = max_session_ttl;
                 base_config.store_tokens = store_tokens;
+                base_config.health_endpoint = health_endpoint;
                 base_config.session_secret = session_secret;
                 base_config.session_store = session_store;
                 let config = base_config;
 
                 // Initialize auth
-                init_auth(config);
+                init_auth(config.clone());
+
+                eprintln!(
+                    "[auth] Built-in auth route manifest: {}",
+                    routes::auth_route_manifest(&config).join(", ")
+                );
+                for warning in routes::auth_route_collision_warnings(&config) {
+                    eprintln!("[auth] Warning: {}", warning);
+                }
 
                 Ok(Value::Unit)
             },
@@ -6533,6 +6658,107 @@ mod tests {
         assert!(body.contains("/auth/bad%22%20onclick%3D%22alert%281%29"));
         assert!(body.contains("Sign in with bad&quot; onclick=&quot;alert(1)"));
         assert!(!body.contains("href=\"/auth/bad\" onclick"));
+    }
+
+    #[test]
+    fn test_handle_auth_index_uses_custom_route_prefix_and_login_copy() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        init_auth(AuthConfig {
+            providers: vec![
+                ProviderConfig {
+                    name: "github".to_string(),
+                    ..ProviderConfig::default()
+                },
+                ProviderConfig {
+                    name: "google".to_string(),
+                    ..ProviderConfig::default()
+                },
+            ],
+            route_prefix: "/signin".to_string(),
+            login_page_title: "Welcome back".to_string(),
+            login_page_heading: "Continue to dashboard".to_string(),
+            login_page_copy: "Pick a provider to keep going.".to_string(),
+            ..AuthConfig::default()
+        });
+
+        let response = handle_auth_index(&[]).unwrap();
+        let body = match response {
+            Value::Map(map) => match map.get("body") {
+                Some(Value::String(body)) => body.clone(),
+                other => panic!("expected body string, got {:?}", other),
+            },
+            other => panic!("expected response map, got {:?}", other),
+        };
+        assert!(body.contains("Welcome back"));
+        assert!(body.contains("Continue to dashboard"));
+        assert!(body.contains("Pick a provider to keep going."));
+        assert!(body.contains("/signin/github"));
+        assert!(body.contains("/signin/google"));
+    }
+
+    #[test]
+    fn test_handle_auth_index_returns_json_when_login_page_disabled() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        init_auth(AuthConfig {
+            providers: vec![
+                ProviderConfig {
+                    name: "google".to_string(),
+                    ..ProviderConfig::default()
+                },
+                ProviderConfig {
+                    name: "github".to_string(),
+                    ..ProviderConfig::default()
+                },
+            ],
+            login_page_enabled: false,
+            route_prefix: "/signin".to_string(),
+            ..AuthConfig::default()
+        });
+
+        let response = handle_auth_index(&[]).unwrap();
+        let map = match response {
+            Value::Map(map) => map,
+            other => panic!("expected response map, got {:?}", other),
+        };
+        assert!(matches!(map.get("status"), Some(Value::Int(404))));
+        match map.get("body") {
+            Some(Value::String(body)) => {
+                assert!(body.contains("Built-in auth login page is disabled"));
+                assert!(body.contains("/signin/{provider}"));
+            }
+            other => panic!("expected body string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_handle_auth_health_reports_custom_prefix_and_collision_warning() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_auth(AuthConfig {
+            providers: vec![ProviderConfig {
+                name: "google".to_string(),
+                ..ProviderConfig::default()
+            }],
+            route_prefix: "/signin".to_string(),
+            protected_paths: vec!["/signin/*".to_string()],
+            health_endpoint: true,
+            session_secret: "dev-secret-value".to_string(),
+            ..AuthConfig::default()
+        });
+
+        let response = handle_auth_health(&[]).expect("health should succeed");
+        let body = match response {
+            Value::Map(map) => match map.get("body") {
+                Some(Value::String(body)) => body.clone(),
+                other => panic!("expected body string, got {:?}", other),
+            },
+            other => panic!("expected response map, got {:?}", other),
+        };
+
+        assert!(body.contains("\"prefix\":\"/signin\""));
+        assert!(body.contains("/signin/{provider}/callback"));
+        assert!(body.contains("route_collision_warnings"));
+        assert!(body.contains("overlaps built-in auth route prefix"));
     }
 
     #[test]
