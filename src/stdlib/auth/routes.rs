@@ -1,6 +1,7 @@
 use super::cookies::{build_cleared_session_cookie, build_signed_session_cookie};
 use super::guards::{encode_url_path_segment, escape_html, request_target};
 use super::providers::{available_providers, suggest_provider};
+use super::request_helpers::{request_device_name, request_ip_hash, request_user_agent_hash};
 use super::*;
 
 fn normalize_auth_route_prefix(prefix: &str) -> std::result::Result<String, String> {
@@ -205,6 +206,10 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
         &redirect_uri,
         nonce.as_deref(),
         pkce_verifier.as_deref(),
+        false,
+        request_device_name(req).as_deref(),
+        request_user_agent_hash(req).as_deref(),
+        request_ip_hash(req).as_deref(),
     );
 
     let mut provider_for_url = provider.clone();

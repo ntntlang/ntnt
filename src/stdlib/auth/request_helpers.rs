@@ -1,5 +1,77 @@
 use super::*;
 
+fn request_header(request: &Value, name: &str) -> Option<String> {
+    if let Value::Map(req_map) = request {
+        if let Some(Value::Map(headers)) = req_map.get("headers") {
+            return headers.get(name).and_then(|value| match value {
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            });
+        }
+    }
+    None
+}
+
+pub(super) fn sha256_hex(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+pub(super) fn request_user_agent_hash(request: &Value) -> Option<String> {
+    request_header(request, "user-agent")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| sha256_hex(&value))
+}
+
+pub(super) fn request_ip_hash(request: &Value) -> Option<String> {
+    let forwarded = request_header(request, "x-forwarded-for")
+        .and_then(|value| value.split(',').next().map(|part| part.trim().to_string()))
+        .filter(|value| !value.is_empty());
+    let direct = request_header(request, "x-real-ip")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    forwarded.or(direct).map(|value| sha256_hex(&value))
+}
+
+pub(super) fn request_device_name(request: &Value) -> Option<String> {
+    let ua = request_header(request, "user-agent")?;
+    let lower = ua.to_ascii_lowercase();
+    let device = if lower.contains("iphone") {
+        "iPhone"
+    } else if lower.contains("ipad") {
+        "iPad"
+    } else if lower.contains("android") && lower.contains("mobile") {
+        "Android phone"
+    } else if lower.contains("android") {
+        "Android device"
+    } else if lower.contains("macintosh") || lower.contains("mac os") {
+        "Mac"
+    } else if lower.contains("windows") {
+        "Windows PC"
+    } else if lower.contains("linux") {
+        "Linux device"
+    } else {
+        "Unknown device"
+    };
+
+    let browser = if lower.contains("edg/") {
+        "Edge"
+    } else if lower.contains("chrome/") && !lower.contains("edg/") {
+        "Chrome"
+    } else if lower.contains("safari/") && !lower.contains("chrome/") {
+        "Safari"
+    } else if lower.contains("firefox/") {
+        "Firefox"
+    } else {
+        "browser"
+    };
+
+    Some(format!("{} · {}", device, browser))
+}
+
 /// Get session ID from request cookies
 pub fn get_session_id_from_request(request: &Value) -> Option<String> {
     let config = get_auth_config()?;

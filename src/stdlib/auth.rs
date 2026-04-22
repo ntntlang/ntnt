@@ -233,6 +233,9 @@ pub struct Session {
     pub access_token: Option<String>,
     pub refresh_token: Option<String>,
     pub token_expires_at: Option<i64>,
+    pub device_name: Option<String>,
+    pub user_agent_hash: Option<String>,
+    pub last_ip_hash: Option<String>,
     pub created_at: i64,
     pub expires_at: i64,
 }
@@ -257,6 +260,10 @@ pub struct OAuthState {
     pub pkce_verifier: Option<String>, // PKCE code verifier
     pub provider: String,
     pub redirect_url: String,
+    pub remember_me: bool,
+    pub device_name: Option<String>,
+    pub user_agent_hash: Option<String>,
+    pub ip_hash: Option<String>,
     pub created_at: i64,
 }
 
@@ -423,6 +430,7 @@ pub struct SessionInfo {
     pub id: String,
     pub user_id: String,
     pub provider: String,
+    pub device_name: Option<String>,
     pub created_at: i64,
     pub expires_at: i64,
     pub is_current: bool,
@@ -567,6 +575,7 @@ impl InMemoryStore {
                 id: s.id.clone(),
                 user_id: s.user_id.clone(),
                 provider: s.provider.clone(),
+                device_name: s.device_name.clone(),
                 created_at: s.created_at,
                 expires_at: s.expires_at,
                 is_current: current_session_id.map(|c| c == s.id).unwrap_or(false),
@@ -3375,6 +3384,10 @@ pub fn init() -> HashMap<String, Value> {
                     &redirect_uri,
                     nonce.as_deref(),
                     pkce_verifier.as_deref(),
+                    false,
+                    None,
+                    None,
+                    None,
                 );
 
                 // Generate the authorization URL

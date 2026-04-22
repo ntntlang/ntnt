@@ -186,12 +186,22 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
             access_token TEXT,
             refresh_token TEXT,
             token_expires_at INTEGER,
+            device_name TEXT,
+            user_agent_hash TEXT,
+            last_ip_hash TEXT,
             created_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL
         )",
         [],
     )
     .map_err(|e| format!("Failed to create sessions table: {}", e))?;
+
+    let _ = conn.execute("ALTER TABLE auth_sessions ADD COLUMN device_name TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE auth_sessions ADD COLUMN user_agent_hash TEXT",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE auth_sessions ADD COLUMN last_ip_hash TEXT", []);
 
     // Index for cleanup queries
     conn.execute(
@@ -271,12 +281,34 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             access_token TEXT,
             refresh_token TEXT,
             token_expires_at BIGINT,
+            device_name TEXT,
+            user_agent_hash TEXT,
+            last_ip_hash TEXT,
             created_at BIGINT NOT NULL,
             expires_at BIGINT NOT NULL
         )",
             &[],
         )
         .map_err(|e| format!("Failed to create sessions table: {}", e))?;
+
+    client
+        .execute(
+            "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS device_name TEXT",
+            &[],
+        )
+        .ok();
+    client
+        .execute(
+            "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS user_agent_hash TEXT",
+            &[],
+        )
+        .ok();
+    client
+        .execute(
+            "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS last_ip_hash TEXT",
+            &[],
+        )
+        .ok();
 
     // Index for cleanup queries
     client
