@@ -820,7 +820,10 @@ impl ServerState {
             RouteMatchResult::NotFound
         };
 
-        // Prefer explicit HEAD routes, but fall back to GET per RFC 9110 §9.3.2.
+        // Prefer explicit HEAD routes, but fall back to GET per RFC 9110 §9.3.2 only
+        // when there is no HEAD route match at all. If an explicit HEAD route matches the
+        // path but returns TypeMismatch, preserve that 400-producing result rather than
+        // silently bypassing it via GET fallback.
         let direct_match = try_match(method);
         if !matches!(direct_match, RouteMatchResult::NotFound) {
             return direct_match;
@@ -3705,6 +3708,38 @@ mod tests {
             }
             other => panic!(
                 "expected TypeMismatch from HEAD->GET fallback, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_server_state_explicit_head_type_mismatch_blocks_get_fallback() {
+        let mut state = ServerState::new();
+        state.add_route(
+            "HEAD",
+            "/users/{id:Int}",
+            Value::String("head_handler".to_string()),
+        );
+        state.add_route(
+            "GET",
+            "/users/{name}",
+            Value::String("get_handler".to_string()),
+        );
+
+        let result = state.find_route_typed("HEAD", "/users/foo");
+        match result {
+            RouteMatchResult::TypeMismatch {
+                param_name,
+                expected,
+                got,
+            } => {
+                assert_eq!(param_name, "id");
+                assert_eq!(expected, "Int");
+                assert_eq!(got, "foo");
+            }
+            other => panic!(
+                "expected explicit HEAD TypeMismatch to block GET fallback, got {:?}",
                 other
             ),
         }
