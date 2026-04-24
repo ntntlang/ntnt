@@ -362,38 +362,118 @@ return complete_auth_challenge(resp, req, map {
 
 **Ships real value:** this is where `std/auth` starts becoming genuinely standout, not just competent.
 
-### Phase 9 — Post-Cleanup Complexity Discipline
+### Phase 9 — First-Class Local Auth
+**Goal:** Make `std/auth` world-class not only for OAuth/session plumbing, but also for the extremely common app shape of **local email + password + TOTP auth**.
+
+**Why this must exist:** the current `std/auth` surface is already strong at sessions, cookies, staged auth challenges, OAuth/OIDC, TOTP primitives, sign-in/sign-out helpers, and protected-route handling. But for a very normal local admin/app flow, developers still have to build and own a mini auth system beside it:
+
+- local user table
+- password-hash storage
+- password verification
+- password reset token storage
+- first-login / forced-password-change flow
+- persisted TOTP enrollment state
+- bootstrap admin account creation
+
+That is the current local-auth subsystem gap.
+
+`std/auth` can already manage authenticated state beautifully. What it still cannot fully own is the **local credential lifecycle end-to-end**. As long as that remains true, templates and apps will keep carrying custom auth code that should really belong to the language.
+
+**Architectural standard:** a template app should not need a custom `lib/admin_db.tnt` mini-auth subsystem to get excellent email/password/TOTP auth. The template should mostly configure `std/auth`, wire a few views if it wants custom UX, and move on.
+
+**Success test:** if a developer wants a local admin panel with email/password login, TOTP verification, password resets, first-login activation, and forced password changes, the path should feel as native and obvious as OAuth already does.
+
+## Recommended implementation shape for Phase 9
+
+Phase 9 should be a **feature architecture phase**, not just a helper phase. The key is not to bolt on scattered primitives, but to let `std/auth` own one coherent local-auth model.
+
+### Phase 9A — Local Identity Store
+- [ ] Add a first-class local credential store owned by `std/auth`
+- [ ] Make **email** the canonical local identifier
+- [ ] Store password hashes in auth-owned tables rather than pushing that responsibility to apps
+- [ ] Support bootstrap account creation from config/env for the common admin-panel case
+- [ ] Define the minimum durable local-user shape intentionally instead of letting templates invent their own schemas
+- [ ] Keep the model lean: identity + auth state first, not a giant profile system
+
+### Phase 9B — Local Sign-In Flow
+- [ ] Add built-in email/password verification through `std/auth`
+- [ ] Reuse the existing staged-auth challenge primitives for local login continuation
+- [ ] Support straightforward local sign-in that upgrades into a real auth session with configured claims/data
+- [ ] Ensure local sign-in uses the same cookie/session lifecycle semantics as OAuth-backed sign-in
+- [ ] Keep local auth and OAuth auth aligned at the session layer so apps do not feel two different auth systems
+
+### Phase 9C — First-Login Activation and TOTP Enrollment
+- [ ] Support first-login setup as a first-class local-auth flow
+- [ ] Support staged TOTP enrollment using the existing auth challenge model
+- [ ] Support forced password change before final session completion
+- [ ] Support completion into a normal signed-in session only after setup requirements are satisfied
+- [ ] Keep staged local flows expressed in the same lifecycle vocabulary as the rest of `std/auth`
+
+### Phase 9D — Password Reset Lifecycle
+- [ ] Add auth-owned password-reset token storage and lifecycle helpers
+- [ ] Support reset token issue + consume flows through `std/auth`
+- [ ] Support optional TOTP reset / re-enrollment semantics after password reset
+- [ ] Support reset flows that intentionally force fresh staged setup when security posture demands it
+- [ ] Keep reset semantics coherent with the session/challenge model instead of inventing another separate sub-system
+
+### Phase 9E — Template-Grade Integration
+- [ ] Make the Larri site template use the built-in local auth path instead of custom auth persistence code
+- [ ] Delete template-owned local-auth state machines and tables once parity exists
+- [ ] Leave the template with mostly config + views + app-specific copy, not a bespoke auth backend
+- [ ] Use the template migration as the proof that the local-auth architecture is actually simpler, not just theoretically cleaner
+
+### Phase 9F — Architecture Discipline for Local Auth
+- [ ] Keep local auth inside the post-4.5 module boundaries rather than re-growing a monolith in `auth.rs`
+- [ ] Extend the backend contract harness for every new local-auth persistence shape
+- [ ] Treat local auth storage semantics as a compatibility surface, not incidental implementation detail
+- [ ] Add explicit review guidance for local-auth regressions: captured-but-not-persisted staged state, reset-token lifecycle drift, backend mismatch, and “half-owned by app / half-owned by std/auth” ambiguity
+- [ ] Re-review the resulting structure periodically so local auth becomes a coherent subsystem, not a second pile of special cases
+
+**Non-goals for this phase:**
+- [ ] Do not turn `std/auth` into a giant full-profile identity platform in one shot
+- [ ] Do not block local auth on solving every RBAC / organizations / account-management use case
+- [ ] Do not make templates keep custom persistence “just for flexibility” if `std/auth` can own the common case cleanly
+- [ ] Do not ship disconnected helper functions without a coherent local-auth architecture behind them
+
+**Design standard for this phase:**
+- [ ] Local auth should feel like one intentional subsystem, not “some templates plus some helpers plus some tables”
+- [ ] Email/password/TOTP should be a primary path in `std/auth`, not a second-class example
+- [ ] If a normal local admin/auth flow still requires custom app tables after this phase, the phase is incomplete
+
+**Ships real value:** closes the biggest remaining gap between “great auth primitives” and “great auth architecture,” so apps can rely on `std/auth` for the full local email/password/TOTP lifecycle instead of rebuilding it.
+
+### Phase 10 — Post-Cleanup Complexity Discipline
 **Goal:** Prevent `std/auth` from collapsing back into a monolith after the 4.5 cleanup lands.
 
 **Assessment after the Phase 8 branch review (compared against the v0.4.8 release baseline):** the 4.5 cleanup largely achieved its intended effect, but only partially solved the long-term maintainability problem. The internal module split is real and materially improves clarity: config, cookies, guards, OAuth flow, providers, request helpers, routes, sessions, storage, and small utility layers now exist as distinct homes instead of one giant undifferentiated file. The storage contract is also much more coherent than before, and recent review feedback mostly hit end-to-end plumbing gaps and edge-case semantics rather than “where does this logic even belong?” confusion. That is a meaningful architectural win.
 
 **However:** `src/stdlib/auth.rs` is still very large and still acts as a gravity well for the public surface, native-function registration, shared types, and the main auth test module. So the cleanup should be viewed as **successful but incomplete**. `std/auth` is no longer a pure junk drawer, but it is also not yet structurally self-protecting. It is maintainable **if** future work is forced through the module boundaries and contract tests established in 4.5. If contributors drift back into broad `auth.rs` edits for convenience, the monolith will regrow quickly.
 
-**Bottom line:** the DD intent was mostly achieved for the cleanup wave — enough to justify continuing from this shape — but Phase 9 must turn the current structure into enforceable discipline rather than assuming the cleanup alone solved the problem.
+**Bottom line:** the DD intent was mostly achieved for the cleanup wave — enough to justify continuing from this shape — but Phase 10 must turn the current structure into enforceable discipline rather than assuming the cleanup alone solved the problem.
 
-## Recommended implementation shape for Phase 9
+## Recommended implementation shape for Phase 10
 
-Phase 9 should be a **discipline phase, not a feature phase**. The goal is to make the architecture we now have more self-enforcing, so future auth work naturally lands in the right places and gets the right verification by default.
+Phase 10 should be a **discipline phase, not a feature phase**. The goal is to make the architecture we now have more self-enforcing, so future auth work naturally lands in the right places and gets the right verification by default.
 
-### Phase 9A — Architecture Guardrails
+### Phase 10A — Architecture Guardrails
 - [ ] Write explicit contributor guidance for what belongs in `auth.rs` vs internal auth modules
 - [ ] Document the allowed responsibilities of `auth.rs`: public surface, shared types, registration glue, and only the minimum unavoidable coordination logic
 - [ ] Document when a new auth change must extend an existing module versus when it merits a new focused module
-- [ ] Add an auth-specific review checklist covering the regressions exposed in Phase 8 (captured-but-not-persisted state, schema/query name drift, swallowed migration errors, backend mismatch paths, fallback ambiguity)
+- [ ] Add an auth-specific review checklist covering the regressions exposed in Phase 8 and Phase 9 (captured-but-not-persisted state, schema/query name drift, swallowed migration errors, backend mismatch paths, fallback ambiguity, reset lifecycle drift, and app/std ownership confusion)
 
-### Phase 9B — Contract-Test Ratchet
+### Phase 10B — Contract-Test Ratchet
 - [ ] Require new auth persistence/state shapes to extend the backend contract harness
 - [ ] Add missing contract coverage for any auth persistence paths still validated only indirectly
 - [ ] Require new fallback/error semantics to be tested in primary, fallback, and failure modes
 - [ ] Treat auth storage behavior as a compatibility surface, not just an implementation detail
 
-### Phase 9C — `auth.rs` Pressure Relief
+### Phase 10C — `auth.rs` Pressure Relief
 - [ ] Audit what still lives in `auth.rs` only because of historical gravity rather than good ownership
 - [ ] Move obvious non-surface helpers and test-heavy logic into module-local ownership where it improves clarity without destabilizing the public API
 - [ ] Reassess whether the main auth test concentration should be partially redistributed into focused module tests over time
 - [ ] Track `auth.rs` growth relative to the internal modules so “easy broad edits” become visible early
 
-### Phase 9D — Periodic Architecture Audit
+### Phase 10D — Periodic Architecture Audit
 - [ ] Re-review new auth work periodically against the intended module boundaries
 - [ ] Check whether recent auth changes increased clarity or merely moved complexity around
 - [ ] Reconfirm that fallback semantics remain deliberate and documented as auth work expands
@@ -404,11 +484,11 @@ Phase 9 should be a **discipline phase, not a feature phase**. The goal is to ma
 - [ ] Keep `auth.rs` focused on public surface, shared types, registration glue, and only the minimum unavoidable coordination logic
 - [ ] Extend backend contract tests when adding new auth state types, flows, or stores
 - [ ] Treat fallback/error semantics as design-level behavior, not incidental implementation detail
-- [ ] Add review guidance/checklists for common auth regressions: captured-but-not-persisted state, schema/name drift, swallowed migration errors, and backend mismatch paths
+- [ ] Add review guidance/checklists for common auth regressions: captured-but-not-persisted state, schema/name drift, swallowed migration errors, backend mismatch paths, reset lifecycle drift, and ownership ambiguity between app code and `std/auth`
 - [ ] Periodically re-audit whether new features are preserving the intended internal architecture
 - [ ] Revisit whether large test concentrations inside `auth.rs` should migrate toward module-local test ownership as the structure stabilizes
 
-**Ships real value:** preserves the benefits of the cleanup so future auth work stays understandable instead of slowly regressing.
+**Ships real value:** preserves the benefits of the cleanup and the local-auth work so future auth work stays understandable instead of slowly regressing.
 
 ## What We Explicitly Won't Do
 
