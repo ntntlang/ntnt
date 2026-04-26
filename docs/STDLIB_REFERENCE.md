@@ -3111,7 +3111,7 @@ verify_local_password(identifier: String, password: String, options?: Map) -> Re
 
 Verify a local credential record and return a safe auth user payload.
 
-The helper normalizes the identifier (email by default), loads the auth-owned local identity and credential secret, verifies the password hash, and returns a map suitable for app-specific session claim derivation and `sign_in_session(...)`. It never exposes password hashes or hash parameters. Disabled and locked accounts are rejected after password verification.
+The helper normalizes the identifier (email by default), loads the auth-owned local identity and credential secret, verifies the password hash, and returns a map suitable for app-specific session claim derivation and `sign_in_session(...)`. It never exposes password hashes or hash parameters. Missing identities, missing credential secrets, bad passwords, disabled accounts, and locked accounts all return the same invalid-credentials error to avoid account-state or identity enumeration. Corrupted or unsupported stored hashes return a generic operational auth error without backend parser details.
 
 **Parameters:**
 
@@ -3119,12 +3119,12 @@ The helper normalizes the identifier (email by default), loads the auth-owned lo
 - `password` — The plaintext password from the login form
 - `options` — Optional map with `identifier_kind` (default `"email"`)
 
-**Returns:** Ok(map) with `subject_id`, `provider`, identifier fields, account `state`, and password-change metadata; Err(message) on invalid credentials or account rejection
+**Returns:** Ok(map) with `subject_id`, `provider`, identifier fields, account `state`, and password-change metadata; Err(message) on invalid credentials or operational credential errors
 
 **Examples:**
 
 ```ntnt
-verify_local_password(form["email"] ?? "", form["password"] ?? "")?  // Verify email/password credentials
+let verified = verify_local_password(form["email"] ?? "", form["password"] ?? "")?  // Verify email/password credentials
 sign_in_session(redirect("/admin"), req, map { "subject_id": verified["subject_id"], "email": verified["email"] })  // Complete request-aware local sign-in after verification
 ```
 

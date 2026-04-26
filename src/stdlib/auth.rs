@@ -3747,17 +3747,20 @@ pub fn init() -> HashMap<String, Value> {
     // local identity and credential secret, verifies the password hash, and returns
     // a map suitable for app-specific session claim derivation and
     // `sign_in_session(...)`. It never exposes password hashes or hash parameters.
-    // Disabled and locked accounts are rejected after password verification.
+    // Missing identities, missing credential secrets, bad passwords, disabled accounts,
+    // and locked accounts all return the same invalid-credentials error to avoid
+    // account-state or identity enumeration. Corrupted or unsupported stored hashes
+    // return a generic operational auth error without backend parser details.
     // @param identifier The local login identifier. Email is the default identifier kind.
     // @param password The plaintext password from the login form
     // @param options Optional map with `identifier_kind` (default `"email"`)
-    // @returns Ok(map) with `subject_id`, `provider`, identifier fields, account `state`, and password-change metadata; Err(message) on invalid credentials or account rejection
+    // @returns Ok(map) with `subject_id`, `provider`, identifier fields, account `state`, and password-change metadata; Err(message) on invalid credentials or operational credential errors
     // @error RuntimeError ~ "Auth not initialized" fix: "Call enable_auth(...) during app startup before verifying local credentials"
     // @error TypeError ~ "identifier must be a string" fix: "Pass the submitted email/identifier as a string"
     // @see_also sign_in_session, current_session
     // @since v0.4.9
     // @tags #auth, #local-auth, #security
-    // @example verify_local_password(form["email"] ?? "", form["password"] ?? "")? ~ "Verify email/password credentials"
+    // @example let verified = verify_local_password(form["email"] ?? "", form["password"] ?? "")? ~ "Verify email/password credentials"
     // @example sign_in_session(redirect("/admin"), req, map { "subject_id": verified["subject_id"], "email": verified["email"] }) ~ "Complete request-aware local sign-in after verification"
     module.insert(
         "verify_local_password".to_string(),
@@ -4359,6 +4362,7 @@ mod tests {
         store.oauth_states.clear();
         store.exchange_tokens.clear();
         store.auth_challenges.clear();
+        store.local_auth = storage::LocalAuthMemoryStore::default();
         drop(store);
         *AUTH_CONFIG.lock().unwrap() = None;
         *SQLITE_CONN.lock().unwrap() = None;
@@ -4371,6 +4375,23 @@ mod tests {
         match module.get(name) {
             Some(Value::NativeFunction { func, .. }) => *func,
             other => panic!("expected native function {} got {:?}", name, other),
+        }
+    }
+
+    fn result_err_string(value: Value) -> String {
+        let Value::EnumValue {
+            enum_name,
+            variant,
+            values,
+        } = value
+        else {
+            panic!("expected Result::Err, got {value:?}");
+        };
+        assert_eq!(enum_name, "Result");
+        assert_eq!(variant, "Err");
+        match values.first() {
+            Some(Value::String(message)) => message.clone(),
+            other => panic!("unexpected Result::Err payload: {other:?}"),
         }
     }
 
@@ -5479,6 +5500,42 @@ mod tests {
     }
 
     #[test]
+    fn test_local_identity_store_normalizes_lookup_fields_on_write_memory_and_sqlite() {
+        use super::storage::{
+            get_local_identity_by_identifier_record, store_local_identity_record,
+            LocalAccountState, LocalIdentity,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            store_local_identity_record(&LocalIdentity {
+                id: "local-user-normalized-write".to_string(),
+                identifier_kind: " Email ".to_string(),
+                identifier: "Admin@Example.COM".to_string(),
+                identifier_normalized: " Admin@Example.COM ".to_string(),
+                created_at: 100,
+                updated_at: 100,
+                state: LocalAccountState::Active,
+                metadata_json: "{}".to_string(),
+            })
+            .unwrap();
+
+            let fetched = get_local_identity_by_identifier_record("email", "admin@example.com")
+                .unwrap()
+                .expect("stored local identity should be queryable by canonical lookup");
+            assert_eq!(fetched.identifier_kind, "email");
+            assert_eq!(fetched.identifier_normalized, "admin@example.com");
+        }
+    }
+
+    #[test]
     fn test_verify_local_password_native_helper_returns_auth_safe_user() {
         use super::storage::{
             store_local_credential_secret_record, store_local_identity_record, LocalAccountState,
@@ -5571,6 +5628,153 @@ mod tests {
             match values.first() {
                 Some(Value::String(message)) => assert_eq!(message, "Invalid local credentials"),
                 other => panic!("unexpected wrong-password error payload: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_verify_local_password_rejects_enumeration_states_with_generic_error() {
+        use super::storage::{
+            store_local_credential_secret_record, store_local_identity_record, LocalAccountState,
+            LocalCredentialSecret, LocalIdentity,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            let password_hash = bcrypt::hash("valid local password", 4).unwrap();
+            for (id, email, state, with_credential) in [
+                (
+                    "local-user-active",
+                    "active@example.com",
+                    LocalAccountState::Active,
+                    true,
+                ),
+                (
+                    "local-user-disabled",
+                    "disabled@example.com",
+                    LocalAccountState::Disabled,
+                    true,
+                ),
+                (
+                    "local-user-locked",
+                    "locked@example.com",
+                    LocalAccountState::Locked,
+                    true,
+                ),
+                (
+                    "local-user-no-credential",
+                    "no-credential@example.com",
+                    LocalAccountState::Active,
+                    false,
+                ),
+            ] {
+                store_local_identity_record(&LocalIdentity {
+                    id: id.to_string(),
+                    identifier_kind: "email".to_string(),
+                    identifier: email.to_string(),
+                    identifier_normalized: email.to_string(),
+                    created_at: 100,
+                    updated_at: 100,
+                    state,
+                    metadata_json: "{}".to_string(),
+                })
+                .unwrap();
+                if with_credential {
+                    store_local_credential_secret_record(&LocalCredentialSecret {
+                        local_user_id: id.to_string(),
+                        password_hash: password_hash.clone(),
+                        password_hash_algorithm: "bcrypt".to_string(),
+                        password_hash_params_json: "{}".to_string(),
+                        password_changed_at: 101,
+                        must_change_password: false,
+                    })
+                    .unwrap();
+                }
+            }
+
+            let module = init();
+            let verify_local_password = module_fn(&module, "verify_local_password");
+            for (email, password) in [
+                ("active@example.com", "wrong local password"),
+                ("missing@example.com", "valid local password"),
+                ("no-credential@example.com", "valid local password"),
+                ("disabled@example.com", "valid local password"),
+                ("locked@example.com", "valid local password"),
+            ] {
+                let message = result_err_string(
+                    verify_local_password(&[
+                        Value::String(email.to_string()),
+                        Value::String(password.to_string()),
+                    ])
+                    .unwrap(),
+                );
+                assert_eq!(message, "Invalid local credentials");
+            }
+        }
+    }
+
+    #[test]
+    fn test_verify_local_password_reports_corrupted_hashes_as_safe_operational_errors() {
+        use super::storage::{
+            store_local_credential_secret_record, store_local_identity_record, LocalAccountState,
+            LocalCredentialSecret, LocalIdentity,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+            store_local_identity_record(&LocalIdentity {
+                id: "local-user-corrupted-hash".to_string(),
+                identifier_kind: "email".to_string(),
+                identifier: "corrupt@example.com".to_string(),
+                identifier_normalized: "corrupt@example.com".to_string(),
+                created_at: 100,
+                updated_at: 100,
+                state: LocalAccountState::Active,
+                metadata_json: "{}".to_string(),
+            })
+            .unwrap();
+
+            let module = init();
+            let verify_local_password = module_fn(&module, "verify_local_password");
+            for (password_hash, algorithm) in [
+                ("not-a-valid-password-hash", "bcrypt"),
+                ("not-a-valid-password-hash", "argon2id"),
+                ("not-a-valid-password-hash", "scrypt"),
+            ] {
+                store_local_credential_secret_record(&LocalCredentialSecret {
+                    local_user_id: "local-user-corrupted-hash".to_string(),
+                    password_hash: password_hash.to_string(),
+                    password_hash_algorithm: algorithm.to_string(),
+                    password_hash_params_json: "{}".to_string(),
+                    password_changed_at: 101,
+                    must_change_password: false,
+                })
+                .unwrap();
+
+                let message = result_err_string(
+                    verify_local_password(&[
+                        Value::String("corrupt@example.com".to_string()),
+                        Value::String("valid local password".to_string()),
+                    ])
+                    .unwrap(),
+                );
+                assert_eq!(
+                    message,
+                    "[auth] local credential hash is invalid or unsupported"
+                );
+                assert!(!message.contains(algorithm));
+                assert!(!message.contains("password hash"));
             }
         }
     }

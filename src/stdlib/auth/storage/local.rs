@@ -145,6 +145,7 @@ impl LocalAuthMemoryStore {
         &mut self,
         identity: LocalIdentity,
     ) -> std::result::Result<(), String> {
+        let identity = normalize_local_identity_for_storage(identity)?;
         if identity.id.trim().is_empty() {
             return Err("[auth] local identity id must not be empty".to_string());
         }
@@ -246,6 +247,16 @@ fn local_identity_lookup_key(
     Ok(format!("{}:{}", kind, normalized))
 }
 
+fn normalize_local_identity_for_storage(
+    mut identity: LocalIdentity,
+) -> std::result::Result<LocalIdentity, String> {
+    let kind = identity.identifier_kind.trim().to_ascii_lowercase();
+    let normalized = normalize_local_identifier(&kind, &identity.identifier)?;
+    identity.identifier_kind = kind;
+    identity.identifier_normalized = normalized;
+    Ok(identity)
+}
+
 pub(in crate::stdlib::auth) fn store_local_identity_record(
     identity: &LocalIdentity,
 ) -> std::result::Result<(), String> {
@@ -345,6 +356,7 @@ pub(in crate::stdlib::auth) fn get_local_credential_secret_record(
 }
 
 fn store_local_identity_sqlite(identity: &LocalIdentity) -> std::result::Result<(), String> {
+    let identity = normalize_local_identity_for_storage(identity.clone())?;
     let conn_guard = SQLITE_CONN.lock().unwrap();
     let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
     conn.execute(
