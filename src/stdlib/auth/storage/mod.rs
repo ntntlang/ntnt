@@ -3,6 +3,9 @@ use super::*;
 #[cfg(test)]
 mod local;
 
+// The local-auth storage policy scaffold is test-only until production local-auth
+// records land. Real credential/reset/TOTP/bootstrap storage must move this
+// policy into production code and remove these cfg(test) gates in the same PR.
 #[cfg(test)]
 pub(super) use local::{local_auth_record_fallback_policy, LocalAuthRecordKind};
 
