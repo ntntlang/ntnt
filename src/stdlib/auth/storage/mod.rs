@@ -1875,7 +1875,26 @@ fn store_session_redis(session: &Session) -> std::result::Result<(), String> {
         .get_connection()
         .map_err(|e| format!("Redis connection error: {}", e))?;
 
-    let session_json = serde_json::json!({
+    let session_json = session_to_redis_json(session);
+    let key = format!("ntnt:session:{}", session.id);
+    let ttl = redis_session_retention_ttl(session, chrono::Utc::now().timestamp());
+
+    if ttl <= 0 {
+        return Err("Session already expired before Redis retention window".to_string());
+    }
+
+    redis::cmd("SETEX")
+        .arg(&key)
+        .arg(ttl)
+        .arg(&session_json)
+        .query::<()>(&mut conn)
+        .map_err(|e| format!("Redis SETEX error: {}", e))?;
+
+    Ok(())
+}
+
+fn session_to_redis_json(session: &Session) -> String {
+    serde_json::json!({
         "id": session.id,
         "user_id": session.user_id,
         "provider": session.provider,
@@ -1894,23 +1913,72 @@ fn store_session_redis(session: &Session) -> std::result::Result<(), String> {
         "created_at": session.created_at,
         "expires_at": session.expires_at,
     })
-    .to_string();
+    .to_string()
+}
 
-    let key = format!("ntnt:session:{}", session.id);
-    let ttl = session.expires_at - chrono::Utc::now().timestamp();
+fn redis_refresh_retention_ttl() -> i64 {
+    get_auth_config()
+        .map(|config| config.refresh_ttl)
+        .unwrap_or_else(|| AuthConfig::default().refresh_ttl)
+}
 
-    if ttl <= 0 {
-        return Err("Session already expired before Redis store".to_string());
-    }
+fn redis_session_retention_ttl(session: &Session, now: i64) -> i64 {
+    let active_ttl = session.expires_at - now;
+    let refresh_retention_ttl = session
+        .refresh_token
+        .as_ref()
+        .map(|_| session.created_at + redis_refresh_retention_ttl() - now)
+        .unwrap_or(i64::MIN);
 
-    redis::cmd("SETEX")
-        .arg(&key)
-        .arg(ttl)
-        .arg(&session_json)
-        .query::<()>(&mut conn)
-        .map_err(|e| format!("Redis SETEX error: {}", e))?;
+    active_ttl.max(refresh_retention_ttl)
+}
 
-    Ok(())
+fn parse_redis_session_json(json_str: &str) -> std::result::Result<Session, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
+
+    let id = json["id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Session missing or empty 'id' field".to_string())?;
+    let user_id = json["user_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Session missing or empty 'user_id' field".to_string())?;
+    let provider = json["provider"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Session missing or empty 'provider' field".to_string())?;
+    let csrf_token = json["csrf_token"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Session missing or empty 'csrf_token' field".to_string())?;
+    let expires_at = json["expires_at"]
+        .as_i64()
+        .ok_or_else(|| "Session missing 'expires_at' field".to_string())?;
+    let created_at = json["created_at"]
+        .as_i64()
+        .ok_or_else(|| "Session missing 'created_at' field".to_string())?;
+
+    Ok(Session {
+        id: id.to_string(),
+        user_id: user_id.to_string(),
+        provider: provider.to_string(),
+        email: json["email"].as_str().map(|s| s.to_string()),
+        name: json["name"].as_str().map(|s| s.to_string()),
+        picture: json["picture"].as_str().map(|s| s.to_string()),
+        raw_json: json["raw_json"].as_str().unwrap_or("{}").to_string(),
+        data_json: json["data_json"].as_str().unwrap_or("{}").to_string(),
+        csrf_token: csrf_token.to_string(),
+        access_token: json["access_token"].as_str().map(|s| s.to_string()),
+        refresh_token: json["refresh_token"].as_str().map(|s| s.to_string()),
+        token_expires_at: json["token_expires_at"].as_i64(),
+        device_name: json["device_name"].as_str().map(|s| s.to_string()),
+        user_agent_hash: json["user_agent_hash"].as_str().map(|s| s.to_string()),
+        last_ip_hash: json["last_ip_hash"].as_str().map(|s| s.to_string()),
+        created_at,
+        expires_at,
+    })
 }
 
 fn extend_session_expiry_sqlite(id: &str, new_expires_at: i64) -> std::result::Result<(), String> {
@@ -1957,13 +2025,24 @@ fn extend_session_expiry_redis(id: &str, new_expires_at: i64) -> std::result::Re
             if not session then return nil end
             local data = cjson.decode(session)
             data.expires_at = tonumber(ARGV[1])
-            redis.call('SETEX', KEYS[1], tonumber(ARGV[2]), cjson.encode(data))
+            local ttl = tonumber(ARGV[2])
+            if data.refresh_token ~= nil and data.refresh_token ~= cjson.null then
+                local refresh_ttl = (tonumber(data.created_at) + tonumber(ARGV[3])) - tonumber(ARGV[4])
+                if refresh_ttl > ttl then ttl = refresh_ttl end
+            end
+            if ttl > 0 then
+                redis.call('SETEX', KEYS[1], ttl, cjson.encode(data))
+            else
+                redis.call('DEL', KEYS[1])
+            end
             return 1
         "#;
         let _: Option<i32> = redis::Script::new(lua_script)
             .key(&key)
             .arg(new_expires_at)
             .arg(new_ttl)
+            .arg(redis_refresh_retention_ttl())
+            .arg(now)
             .invoke(&mut conn)
             .map_err(|e| e.to_string())?;
     }
@@ -2092,8 +2171,36 @@ fn get_expired_session_redis(
     id: &str,
     refresh_ttl: i64,
 ) -> std::result::Result<Option<Session>, String> {
-    let _ = (id, refresh_ttl);
-    Ok(None)
+    let url_guard = REDIS_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
+    let now = chrono::Utc::now().timestamp();
+    let refresh_cutoff = now - refresh_ttl;
+
+    let client =
+        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
+    let mut conn = client
+        .get_connection()
+        .map_err(|e| format!("Redis connection error: {}", e))?;
+
+    let key = format!("ntnt:session:{}", id);
+    let result: Option<String> = redis::cmd("GET")
+        .arg(&key)
+        .query(&mut conn)
+        .map_err(|e| format!("Redis GET error: {}", e))?;
+
+    if let Some(json_str) = result {
+        let session = parse_redis_session_json(&json_str)?;
+        if session.expires_at <= now
+            && session.created_at > refresh_cutoff
+            && session.refresh_token.is_some()
+        {
+            Ok(Some(session))
+        } else {
+            Ok(None)
+        }
+    } else {
+        Ok(None)
+    }
 }
 
 fn get_session_postgres(id: &str) -> std::result::Result<Option<Session>, String> {
@@ -2155,51 +2262,12 @@ fn get_session_redis(id: &str) -> std::result::Result<Option<Session>, String> {
 
     match result {
         Some(json_str) => {
-            let json: serde_json::Value =
-                serde_json::from_str(&json_str).map_err(|e| format!("JSON parse error: {}", e))?;
-
-            let id = json["id"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| "Session missing or empty 'id' field".to_string())?;
-            let user_id = json["user_id"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| "Session missing or empty 'user_id' field".to_string())?;
-            let provider = json["provider"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| "Session missing or empty 'provider' field".to_string())?;
-            let csrf_token = json["csrf_token"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| "Session missing or empty 'csrf_token' field".to_string())?;
-            let expires_at = json["expires_at"]
-                .as_i64()
-                .ok_or_else(|| "Session missing 'expires_at' field".to_string())?;
-            let created_at = json["created_at"]
-                .as_i64()
-                .ok_or_else(|| "Session missing 'created_at' field".to_string())?;
-
-            Ok(Some(Session {
-                id: id.to_string(),
-                user_id: user_id.to_string(),
-                provider: provider.to_string(),
-                email: json["email"].as_str().map(|s| s.to_string()),
-                name: json["name"].as_str().map(|s| s.to_string()),
-                picture: json["picture"].as_str().map(|s| s.to_string()),
-                raw_json: json["raw_json"].as_str().unwrap_or("{}").to_string(),
-                data_json: json["data_json"].as_str().unwrap_or("{}").to_string(),
-                csrf_token: csrf_token.to_string(),
-                access_token: json["access_token"].as_str().map(|s| s.to_string()),
-                refresh_token: json["refresh_token"].as_str().map(|s| s.to_string()),
-                token_expires_at: json["token_expires_at"].as_i64(),
-                device_name: json["device_name"].as_str().map(|s| s.to_string()),
-                user_agent_hash: json["user_agent_hash"].as_str().map(|s| s.to_string()),
-                last_ip_hash: json["last_ip_hash"].as_str().map(|s| s.to_string()),
-                created_at,
-                expires_at,
-            }))
+            let session = parse_redis_session_json(&json_str)?;
+            if session.expires_at <= chrono::Utc::now().timestamp() {
+                Ok(None)
+            } else {
+                Ok(Some(session))
+            }
         }
         None => Ok(None),
     }
@@ -2275,13 +2343,18 @@ fn update_session_tokens_redis(
             data.token_expires_at = nil
         end
         local new_session = cjson.encode(data)
-        local ttl = redis.call('TTL', KEYS[1])
+        local ttl = tonumber(data.expires_at) - tonumber(ARGV[4])
+        if data.refresh_token ~= nil and data.refresh_token ~= cjson.null then
+            local refresh_ttl = (tonumber(data.created_at) + tonumber(ARGV[5])) - tonumber(ARGV[4])
+            if refresh_ttl > ttl then ttl = refresh_ttl end
+        end
         if ttl > 0 then
             redis.call('SETEX', KEYS[1], ttl, new_session)
+            return 'OK'
         else
-            redis.call('SET', KEYS[1], new_session)
+            redis.call('DEL', KEYS[1])
+            return nil
         end
-        return 'OK'
     "#;
 
     let refresh_token = tokens.refresh_token.as_deref().unwrap_or("");
@@ -2294,6 +2367,8 @@ fn update_session_tokens_redis(
         .arg(&tokens.access_token)
         .arg(refresh_token)
         .arg(&expires_at_str)
+        .arg(now)
+        .arg(redis_refresh_retention_ttl())
         .query(&mut conn)
         .map_err(|e| format!("Redis EVAL error: {}", e))?;
 
@@ -2361,20 +2436,28 @@ fn update_session_data_redis(id: &str, data_json: &str) -> std::result::Result<(
         local data = cjson.decode(session)
         data.data_json = ARGV[1]
         local new_session = cjson.encode(data)
-        local ttl = redis.call('TTL', KEYS[1])
+        local ttl = tonumber(data.expires_at) - tonumber(ARGV[2])
+        if data.refresh_token ~= nil and data.refresh_token ~= cjson.null then
+            local refresh_ttl = (tonumber(data.created_at) + tonumber(ARGV[3])) - tonumber(ARGV[2])
+            if refresh_ttl > ttl then ttl = refresh_ttl end
+        end
         if ttl > 0 then
             redis.call('SETEX', KEYS[1], ttl, new_session)
+            return 'OK'
         else
-            redis.call('SET', KEYS[1], new_session)
+            redis.call('DEL', KEYS[1])
+            return nil
         end
-        return 'OK'
     "#;
 
+    let now = chrono::Utc::now().timestamp();
     let result: Option<String> = redis::cmd("EVAL")
         .arg(lua_script)
         .arg(1)
         .arg(&key)
         .arg(data_json)
+        .arg(now)
+        .arg(redis_refresh_retention_ttl())
         .query(&mut conn)
         .map_err(|e| format!("Redis EVAL error: {}", e))?;
 
@@ -2522,30 +2605,11 @@ fn migrate_session_redis(old_id: &str, new_session: &Session) -> std::result::Re
 
     let old_key = format!("ntnt:session:{}", old_id);
     let new_key = format!("ntnt:session:{}", new_session.id);
-    let ttl = (new_session.expires_at - chrono::Utc::now().timestamp()).max(0);
-    let session_json = serde_json::json!({
-        "id": new_session.id,
-        "user_id": new_session.user_id,
-        "provider": new_session.provider,
-        "email": new_session.email,
-        "name": new_session.name,
-        "picture": new_session.picture,
-        "raw_json": new_session.raw_json,
-        "data_json": new_session.data_json,
-        "csrf_token": new_session.csrf_token,
-        "access_token": new_session.access_token,
-        "refresh_token": new_session.refresh_token,
-        "token_expires_at": new_session.token_expires_at,
-        "device_name": new_session.device_name,
-        "user_agent_hash": new_session.user_agent_hash,
-        "last_ip_hash": new_session.last_ip_hash,
-        "created_at": new_session.created_at,
-        "expires_at": new_session.expires_at,
-    })
-    .to_string();
+    let ttl = redis_session_retention_ttl(new_session, chrono::Utc::now().timestamp());
+    let session_json = session_to_redis_json(new_session);
 
     if ttl <= 0 {
-        return Err("Session already expired before Redis migration".to_string());
+        return Err("Session already expired before Redis migration retention window".to_string());
     }
 
     let lua_script = r#"
@@ -2608,6 +2672,7 @@ fn cleanup_expired_sessions_redis(now: i64) -> std::result::Result<u64, String> 
         .get_connection()
         .map_err(|e| format!("Redis connection error: {}", e))?;
 
+    let refresh_cutoff = now - redis_refresh_retention_ttl();
     let mut count = 0u64;
     let mut cursor = 0u64;
     loop {
@@ -2627,15 +2692,16 @@ fn cleanup_expired_sessions_redis(now: i64) -> std::result::Result<u64, String> 
                 .map_err(|e| format!("Redis GET error: {}", e))?;
 
             if let Some(json_str) = result {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                    if let Some(expires_at) = json["expires_at"].as_i64() {
-                        if expires_at < now {
-                            let _: () = redis::cmd("DEL")
-                                .arg(&key)
-                                .query(&mut conn)
-                                .map_err(|e| format!("Redis DEL error: {}", e))?;
-                            count += 1;
-                        }
+                if let Ok(session) = parse_redis_session_json(&json_str) {
+                    let refreshable_within_window = session.expires_at < now
+                        && session.refresh_token.is_some()
+                        && session.created_at > refresh_cutoff;
+                    if session.expires_at < now && !refreshable_within_window {
+                        let _: () = redis::cmd("DEL")
+                            .arg(&key)
+                            .query(&mut conn)
+                            .map_err(|e| format!("Redis DEL error: {}", e))?;
+                        count += 1;
                     }
                 }
             }
