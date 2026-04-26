@@ -334,13 +334,13 @@ This table should become implementation comments and contract tests, not just do
 
 **Purpose:** add durable local users/credentials owned by `std/auth`.
 
-- [ ] Create the local identity/account model
-- [ ] Create credential-secret storage and verification helpers
-- [ ] Normalize email lookup rules and document them
-- [ ] Add account states: bootstrap, pending setup, active, disabled, locked, password-change-required
+- [x] Create the local identity/account model
+- [x] Create credential-secret storage and verification helpers
+- [x] Normalize email lookup rules and document them
+- [x] Add account states: bootstrap, pending setup, active, disabled, locked, password-change-required
 - [ ] Support bootstrap account creation from config/env
 - [ ] Force bootstrap credential rotation/setup completion according to config
-- [ ] Add memory/SQLite contract tests by default
+- [x] Add memory/SQLite contract tests by default
 - [ ] Add Postgres/Redis contract coverage in backend CI
 - [ ] Add migration tests for existing SQLite/Postgres stores
 
@@ -350,7 +350,7 @@ This table should become implementation comments and contract tests, not just do
 
 **Baseline:** request-aware manual session completion already exists in 0.4.9 branch work. This phase should wire local credential verification into that primitive, not design a new cookie/session attachment path.
 
-- [ ] Add local password verification through `std/auth`
+- [x] Add local password verification through `std/auth`
 - [ ] Add local sign-in domain operation that delegates to `sign_in_session(response, req, session, options?)` or the same internal primitive
 - [ ] Rotate/migrate existing sessions on successful local login
 - [ ] Capture `device_name`, `user_agent_hash`, and `last_ip_hash` from request metadata

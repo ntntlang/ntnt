@@ -3805,6 +3805,30 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("stringify", ["data" => Type::Array(Box::new(Type::Any))], Type::String);
             sig!("stringify_with_headers", ["data" => Type::Array(Box::new(Type::Any)), "headers" => Type::Array(Box::new(Type::String))], Type::String);
         }
+        "std/auth" => {
+            sig!(
+                "verify_local_password",
+                [
+                    "identifier" => Type::String,
+                    "password" => Type::String,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(2)
+            );
+        }
         "std/crypto" => {
             sig!("sha256", ["data" => Type::String], Type::String);
             sig!("sha256_bytes", ["data" => Type::String], Type::Array(Box::new(Type::Int)));
@@ -4171,6 +4195,19 @@ mod tests {
             r#"
             import { split } from "std/string"
             split(42, ",")
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("expected String"));
+        assert!(errs[0].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_auth_verify_local_password_signature_checks_args() {
+        let errs = check_errors(
+            r#"
+            import { verify_local_password } from "std/auth"
+            verify_local_password(42, "pw")
             "#,
         );
         assert_eq!(errs.len(), 1);

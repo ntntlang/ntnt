@@ -200,6 +200,9 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
     let conn =
         rusqlite::Connection::open(path).map_err(|e| format!("Failed to open SQLite: {}", e))?;
 
+    conn.execute("PRAGMA foreign_keys = ON", [])
+        .map_err(|e| format!("Failed to enable SQLite foreign key enforcement: {}", e))?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS auth_sessions (
             id TEXT PRIMARY KEY,
@@ -307,6 +310,36 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
         [],
     )
     .map_err(|e| format!("Failed to create auth_challenges index: {}", e))?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS auth_local_identities (
+            id TEXT PRIMARY KEY,
+            identifier_kind TEXT NOT NULL,
+            identifier TEXT NOT NULL,
+            identifier_normalized TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            UNIQUE(identifier_kind, identifier_normalized)
+        )",
+        [],
+    )
+    .map_err(|e| format!("Failed to create auth_local_identities table: {}", e))?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS auth_local_credentials (
+            local_user_id TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            password_hash_algorithm TEXT NOT NULL,
+            password_hash_params_json TEXT NOT NULL,
+            password_changed_at INTEGER NOT NULL,
+            must_change_password INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(local_user_id) REFERENCES auth_local_identities(id) ON DELETE CASCADE
+        )",
+        [],
+    )
+    .map_err(|e| format!("Failed to create auth_local_credentials table: {}", e))?;
 
     let mut sqlite_conn = SQLITE_CONN.lock().unwrap();
     *sqlite_conn = Some(conn);

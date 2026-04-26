@@ -1863,6 +1863,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`user_sessions`](#usersessions) | Get all active sessions for the current user. |
 | [`validate_csrf`](#validatecsrf) | Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH). |
 | [`verify_csrf`](#verifycsrf) | Verify a CSRF token against the session's token. |
+| [`verify_local_password`](#verifylocalpassword) | Verify a local credential record and return a safe auth user payload. |
 | [`verify_totp`](#verifytotp) | Verify a TOTP code against a secret. |
 
 #### `auth_callback`
@@ -3099,6 +3100,42 @@ verify_csrf(req, form["_csrf"])  // Validate form submission
 **See also:** `csrf_token`, `csrf_field`
 
 *Since v0.3.11*
+
+---
+
+#### `verify_local_password`
+
+```ntnt
+verify_local_password(identifier: String, password: String, options?: Map) -> Result<Map, String>
+```
+
+Verify a local credential record and return a safe auth user payload.
+
+The helper normalizes the identifier (email by default), loads the auth-owned local identity and credential secret, verifies the password hash, and returns a map suitable for app-specific session claim derivation and `sign_in_session(...)`. It never exposes password hashes or hash parameters. Missing identities, missing credential secrets, bad passwords, disabled accounts, and locked accounts all return the same invalid-credentials error to avoid account-state or identity enumeration. Corrupted or unsupported stored hashes return a generic operational auth error without backend parser details after running the same dummy verification work used for absent credentials. Bootstrap, pending-setup, and password-change-required identities can verify credentials, but the returned payload forces `must_change_password: true` so callers do not accidentally treat setup-required accounts as fully active sessions.
+
+**Parameters:**
+
+- `identifier` — The local login identifier. Email is the default identifier kind.
+- `password` — The plaintext password from the login form
+- `options` — Optional map with `identifier_kind` (default `"email"`)
+
+**Returns:** Ok(map) with `subject_id`, `provider`, identifier fields, account `state`, and password-change metadata; Err(message) on invalid credentials or operational credential errors
+
+**Examples:**
+
+```ntnt
+let verified = verify_local_password(form["email"] ?? "", form["password"] ?? "")?  // Verify email/password credentials
+sign_in_session(redirect("/admin"), req, map { "subject_id": verified["subject_id"], "email": verified["email"] })  // Complete request-aware local sign-in after verification
+```
+
+**Errors:**
+
+- **RuntimeError**: Auth not initialized — *Fix: Call enable_auth(...) during app startup before verifying local credentials*
+- **TypeError**: identifier must be a string — *Fix: Pass the submitted email/identifier as a string*
+
+**See also:** `sign_in_session`, `current_session`
+
+*Since v0.4.9*
 
 ---
 
