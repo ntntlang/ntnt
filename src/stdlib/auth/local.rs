@@ -46,7 +46,13 @@ pub(in crate::stdlib::auth) fn verify_local_password_record(
         return Err(INVALID_LOCAL_CREDENTIALS.to_string());
     };
 
-    let password_matches = verify_credential_password(&credential, password)?;
+    let password_matches = match verify_credential_password(&credential, password) {
+        Ok(password_matches) => password_matches,
+        Err(err) => {
+            let _ = verify_dummy_local_password(password);
+            return Err(err);
+        }
+    };
     let state_allows_password_login = !matches!(
         identity.state,
         LocalAccountState::Disabled | LocalAccountState::Locked
@@ -136,7 +142,12 @@ pub(in crate::stdlib::auth) fn verified_local_password_to_value(
             "must_change_password".to_string(),
             Value::Bool(
                 verified.credential.must_change_password
-                    || verified.identity.state == LocalAccountState::PasswordChangeRequired,
+                    || matches!(
+                        verified.identity.state,
+                        LocalAccountState::Bootstrap
+                            | LocalAccountState::PendingSetup
+                            | LocalAccountState::PasswordChangeRequired
+                    ),
             ),
         ),
         (

@@ -3750,7 +3750,11 @@ pub fn init() -> HashMap<String, Value> {
     // Missing identities, missing credential secrets, bad passwords, disabled accounts,
     // and locked accounts all return the same invalid-credentials error to avoid
     // account-state or identity enumeration. Corrupted or unsupported stored hashes
-    // return a generic operational auth error without backend parser details.
+    // return a generic operational auth error without backend parser details after
+    // running the same dummy verification work used for absent credentials. Bootstrap,
+    // pending-setup, and password-change-required identities can verify credentials,
+    // but the returned payload forces `must_change_password: true` so callers do not
+    // accidentally treat setup-required accounts as fully active sessions.
     // @param identifier The local login identifier. Email is the default identifier kind.
     // @param password The plaintext password from the login form
     // @param options Optional map with `identifier_kind` (default `"email"`)
@@ -5628,6 +5632,78 @@ mod tests {
             match values.first() {
                 Some(Value::String(message)) => assert_eq!(message, "Invalid local credentials"),
                 other => panic!("unexpected wrong-password error payload: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_verify_local_password_marks_setup_states_must_change_password() {
+        use super::storage::{
+            store_local_credential_secret_record, store_local_identity_record, LocalAccountState,
+            LocalCredentialSecret, LocalIdentity,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            let module = init();
+            let verify_local_password = module_fn(&module, "verify_local_password");
+            for (state, must_change_password) in [
+                (LocalAccountState::Bootstrap, true),
+                (LocalAccountState::PendingSetup, true),
+                (LocalAccountState::PasswordChangeRequired, true),
+                (LocalAccountState::Active, false),
+            ] {
+                let email = format!("{}@example.com", state.as_str());
+                let local_user_id = format!("local-user-{}", state.as_str());
+                store_local_identity_record(&LocalIdentity {
+                    id: local_user_id.clone(),
+                    identifier_kind: "email".to_string(),
+                    identifier: email.clone(),
+                    identifier_normalized: email.clone(),
+                    created_at: 100,
+                    updated_at: 100,
+                    state,
+                    metadata_json: "{}".to_string(),
+                })
+                .unwrap();
+                store_local_credential_secret_record(&LocalCredentialSecret {
+                    local_user_id,
+                    password_hash: bcrypt::hash("state setup password", 4).unwrap(),
+                    password_hash_algorithm: "bcrypt".to_string(),
+                    password_hash_params_json: "{}".to_string(),
+                    password_changed_at: 101,
+                    must_change_password: false,
+                })
+                .unwrap();
+
+                let verified = verify_local_password(&[
+                    Value::String(email),
+                    Value::String("state setup password".to_string()),
+                ])
+                .unwrap();
+                let Value::EnumValue {
+                    enum_name,
+                    variant,
+                    values,
+                } = verified
+                else {
+                    panic!("verify_local_password should return Result");
+                };
+                assert_eq!(enum_name, "Result");
+                assert_eq!(variant, "Ok");
+                let Value::Map(user) = &values[0] else {
+                    panic!("verify_local_password Ok payload should be a map");
+                };
+                match user.get("must_change_password") {
+                    Some(Value::Bool(value)) => assert_eq!(*value, must_change_password),
+                    other => panic!("unexpected must_change_password payload: {other:?}"),
+                }
             }
         }
     }

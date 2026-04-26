@@ -3111,7 +3111,7 @@ verify_local_password(identifier: String, password: String, options?: Map) -> Re
 
 Verify a local credential record and return a safe auth user payload.
 
-The helper normalizes the identifier (email by default), loads the auth-owned local identity and credential secret, verifies the password hash, and returns a map suitable for app-specific session claim derivation and `sign_in_session(...)`. It never exposes password hashes or hash parameters. Missing identities, missing credential secrets, bad passwords, disabled accounts, and locked accounts all return the same invalid-credentials error to avoid account-state or identity enumeration. Corrupted or unsupported stored hashes return a generic operational auth error without backend parser details.
+The helper normalizes the identifier (email by default), loads the auth-owned local identity and credential secret, verifies the password hash, and returns a map suitable for app-specific session claim derivation and `sign_in_session(...)`. It never exposes password hashes or hash parameters. Missing identities, missing credential secrets, bad passwords, disabled accounts, and locked accounts all return the same invalid-credentials error to avoid account-state or identity enumeration. Corrupted or unsupported stored hashes return a generic operational auth error without backend parser details after running the same dummy verification work used for absent credentials. Bootstrap, pending-setup, and password-change-required identities can verify credentials, but the returned payload forces `must_change_password: true` so callers do not accidentally treat setup-required accounts as fully active sessions.
 
 **Parameters:**
 
