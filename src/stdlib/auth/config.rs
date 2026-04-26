@@ -335,7 +335,7 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
             password_hash_params_json TEXT NOT NULL,
             password_changed_at INTEGER NOT NULL,
             must_change_password INTEGER NOT NULL DEFAULT 0,
-            FOREIGN KEY(local_user_id) REFERENCES auth_local_identities(id)
+            FOREIGN KEY(local_user_id) REFERENCES auth_local_identities(id) ON DELETE CASCADE
         )",
         [],
     )

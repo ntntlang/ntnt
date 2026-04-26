@@ -21,6 +21,29 @@ pub(in crate::stdlib::auth) struct VerifiedLocalPassword {
     credential: LocalCredentialSecret,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialPasswordAlgorithm {
+    Bcrypt,
+    Argon2,
+}
+
+impl CredentialPasswordAlgorithm {
+    fn parse(algorithm: &str) -> std::result::Result<Self, String> {
+        match algorithm.trim().to_ascii_lowercase().as_str() {
+            "bcrypt" | "bcrypt2" => Ok(Self::Bcrypt),
+            "argon2" | "argon2id" => Ok(Self::Argon2),
+            _ => Err(INVALID_OR_UNSUPPORTED_LOCAL_CREDENTIAL_HASH.to_string()),
+        }
+    }
+
+    fn storage_name(self) -> &'static str {
+        match self {
+            Self::Bcrypt => "bcrypt",
+            Self::Argon2 => "argon2id",
+        }
+    }
+}
+
 pub(in crate::stdlib::auth) fn verify_local_password_record(
     identifier_kind: &str,
     identifier: &str,
@@ -57,18 +80,16 @@ pub(in crate::stdlib::auth) fn verify_local_password_record(
         }
     };
 
-    let credential_algorithm = credential
-        .password_hash_algorithm
-        .trim()
-        .to_ascii_lowercase();
     let password_matches = match verify_credential_password(&credential, password) {
-        Ok(password_matches) => password_matches,
+        Ok((password_matches, algorithm)) => {
+            verify_complementary_dummy_local_password(password, algorithm)?;
+            password_matches
+        }
         Err(err) => {
             let _ = verify_all_dummy_local_passwords(password);
             return Err(err);
         }
     };
-    verify_complementary_dummy_local_password(password, &credential_algorithm)?;
     let state_allows_password_login = !matches!(
         identity.state,
         LocalAccountState::Disabled | LocalAccountState::Locked
@@ -84,32 +105,37 @@ pub(in crate::stdlib::auth) fn verify_local_password_record(
 }
 
 fn verify_all_dummy_local_passwords(password: &str) -> std::result::Result<(), String> {
-    verify_dummy_local_password(password, "bcrypt")?;
-    verify_dummy_local_password(password, "argon2id")?;
+    verify_dummy_local_password(password, CredentialPasswordAlgorithm::Bcrypt)?;
+    verify_dummy_local_password(password, CredentialPasswordAlgorithm::Argon2)?;
     Ok(())
 }
 
 fn verify_complementary_dummy_local_password(
     password: &str,
-    algorithm: &str,
+    algorithm: CredentialPasswordAlgorithm,
 ) -> std::result::Result<(), String> {
     match algorithm {
-        "bcrypt" | "bcrypt2" => verify_dummy_local_password(password, "argon2id"),
-        "argon2" | "argon2id" => verify_dummy_local_password(password, "bcrypt"),
-        _ => verify_all_dummy_local_passwords(password),
+        CredentialPasswordAlgorithm::Bcrypt => {
+            verify_dummy_local_password(password, CredentialPasswordAlgorithm::Argon2)
+        }
+        CredentialPasswordAlgorithm::Argon2 => {
+            verify_dummy_local_password(password, CredentialPasswordAlgorithm::Bcrypt)
+        }
     }
 }
 
-fn verify_dummy_local_password(password: &str, algorithm: &str) -> std::result::Result<(), String> {
+fn verify_dummy_local_password(
+    password: &str,
+    algorithm: CredentialPasswordAlgorithm,
+) -> std::result::Result<(), String> {
     let password_hash = match algorithm {
-        "bcrypt" | "bcrypt2" => DUMMY_LOCAL_BCRYPT_PASSWORD_HASH,
-        "argon2" | "argon2id" => DUMMY_LOCAL_ARGON2_PASSWORD_HASH,
-        _ => return Err(INVALID_OR_UNSUPPORTED_LOCAL_CREDENTIAL_HASH.to_string()),
+        CredentialPasswordAlgorithm::Bcrypt => DUMMY_LOCAL_BCRYPT_PASSWORD_HASH,
+        CredentialPasswordAlgorithm::Argon2 => DUMMY_LOCAL_ARGON2_PASSWORD_HASH,
     };
     let credential = LocalCredentialSecret {
         local_user_id: "__dummy__".to_string(),
         password_hash: password_hash.to_string(),
-        password_hash_algorithm: algorithm.to_string(),
+        password_hash_algorithm: algorithm.storage_name().to_string(),
         password_hash_params_json: "{}".to_string(),
         password_changed_at: 0,
         must_change_password: false,
@@ -121,17 +147,16 @@ fn verify_dummy_local_password(password: &str, algorithm: &str) -> std::result::
 fn verify_credential_password(
     credential: &LocalCredentialSecret,
     password: &str,
-) -> std::result::Result<bool, String> {
-    let algorithm = credential
-        .password_hash_algorithm
-        .trim()
-        .to_ascii_lowercase();
-    match algorithm.as_str() {
-        "bcrypt" | "bcrypt2" => bcrypt::verify(password, &credential.password_hash)
-            .map_err(|_| INVALID_OR_UNSUPPORTED_LOCAL_CREDENTIAL_HASH.to_string()),
-        "argon2" | "argon2id" => verify_argon2_password(password, &credential.password_hash),
-        _ => Err(INVALID_OR_UNSUPPORTED_LOCAL_CREDENTIAL_HASH.to_string()),
-    }
+) -> std::result::Result<(bool, CredentialPasswordAlgorithm), String> {
+    let algorithm = CredentialPasswordAlgorithm::parse(&credential.password_hash_algorithm)?;
+    let password_matches = match algorithm {
+        CredentialPasswordAlgorithm::Bcrypt => bcrypt::verify(password, &credential.password_hash)
+            .map_err(|_| INVALID_OR_UNSUPPORTED_LOCAL_CREDENTIAL_HASH.to_string())?,
+        CredentialPasswordAlgorithm::Argon2 => {
+            verify_argon2_password(password, &credential.password_hash)?
+        }
+    };
+    Ok((password_matches, algorithm))
 }
 
 fn verify_argon2_password(

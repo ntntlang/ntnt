@@ -5504,6 +5504,54 @@ mod tests {
     }
 
     #[test]
+    fn test_sqlite_local_credentials_cascade_when_identity_deleted() {
+        use super::storage::{
+            get_local_credential_secret_record, store_local_credential_secret_record,
+            store_local_identity_record, LocalAccountState, LocalCredentialSecret, LocalIdentity,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        store_local_identity_record(&LocalIdentity {
+            id: "local-user-delete-cascade".to_string(),
+            identifier_kind: "email".to_string(),
+            identifier: "delete@example.com".to_string(),
+            identifier_normalized: "delete@example.com".to_string(),
+            created_at: 100,
+            updated_at: 100,
+            state: LocalAccountState::Active,
+            metadata_json: "{}".to_string(),
+        })
+        .unwrap();
+        store_local_credential_secret_record(&LocalCredentialSecret {
+            local_user_id: "local-user-delete-cascade".to_string(),
+            password_hash: "argon2$hash".to_string(),
+            password_hash_algorithm: "argon2id".to_string(),
+            password_hash_params_json: "{}".to_string(),
+            password_changed_at: 101,
+            must_change_password: false,
+        })
+        .unwrap();
+
+        {
+            let conn_guard = SQLITE_CONN.lock().unwrap();
+            let conn = conn_guard.as_ref().expect("SQLite should be initialized");
+            conn.execute(
+                "DELETE FROM auth_local_identities WHERE id = ?1",
+                rusqlite::params!["local-user-delete-cascade"],
+            )
+            .expect("deleting a local identity should cascade credential cleanup");
+        }
+
+        assert_eq!(
+            get_local_credential_secret_record("local-user-delete-cascade").unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn test_local_identity_store_normalizes_lookup_fields_on_write_memory_and_sqlite() {
         use super::storage::{
             get_local_identity_by_identifier_record, store_local_identity_record,
