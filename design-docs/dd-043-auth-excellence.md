@@ -54,7 +54,7 @@ If a capability is security-sensitive lifecycle state that every app otherwise r
 ### What's Still Missing (the gap to "best ever")
 - [ ] First-class local email/password/TOTP credential lifecycle owned by `std/auth`
 - [ ] Auth-owned local credential/reset/TOTP enrollment stores with fail-closed fallback semantics
-- [ ] Request-aware local sign-in that uses the same rotation, metadata, cookie, and lifecycle semantics as OAuth sign-in
+- [ ] First-class local credential sign-in helper that feeds verified local credentials into the existing request-aware session-completion path
 - [ ] Admin/arbitrary-user session APIs (`list_sessions(user_id)`, `revoke_session(session_id)`, `revoke_all_sessions(user_id)`) distinct from current-user helpers
 - [ ] Security event storage and suspicious-activity policy actions (`warn`, `challenge`, `revoke`)
 - [ ] Fully behavioral remember-me support (`remember_ttl`, request capture, cookie/session TTL selection)
@@ -108,12 +108,12 @@ This is the single source of truth for how we should build `std/auth` forward. T
 ### Phase 3 — Session Core and Cookie Helpers
 **Goal:** Remove the most repetitive and error-prone login/logout/session code.
 
-**Result:** Merged in PR #78 (`feat: add auth session helpers`) on 2026-04-13.
+**Result:** Merged in PR #78 (`feat: add auth session helpers`) on 2026-04-13, then tightened on `feat/local-auth-blueprint` so manual/staged session completion is request-aware before first-class local auth builds on it.
 
 - [x] Rotate session ID automatically on successful OAuth callback/session upgrade paths
 - [x] Invalidate old session ID immediately after rotation
 - [x] Preserve intended session data across rotation
-- [ ] Add request-aware local/manual sign-in rotation and metadata capture before first-class local auth ships (tracked in Phase 9C)
+- [x] Add request-aware manual/staged session completion rotation and metadata capture before first-class local auth ships
 - [x] Session store migration implemented in Rust for Redis/Postgres/SQLite backends
 - [x] Keep `migrate_session(old_id, new_id)` internal to Rust/session-store code
 - [x] Public ntnt API exposes only high-level session helpers, not low-level store migration primitives (`sign_in_session`, `rotate_session`, `sign_out_session`, `current_session`, `current_user`)
@@ -310,7 +310,7 @@ Current pressure points:
 - persisted TOTP enrollment state
 - first-login / forced-password-change flow
 - bootstrap admin account creation
-- claims/role glue between local accounts and sessions
+- ad hoc session-claim handoff from custom local auth into `std/auth` sessions
 
 That is the current local-auth subsystem gap.
 
@@ -372,11 +372,14 @@ A later `enable_local_auth(...)` convenience wrapper is acceptable only if it de
 - [ ] Add memory/SQLite contract tests by default and Postgres/Redis contract tests in required backend CI
 
 #### Phase 9C — Request-Aware Local Sign-In Flow
+
+**Dependency already satisfied:** the shared manual/staged completion primitive is now request-aware via `sign_in_session(response, req, session, options?)` and `complete_auth_challenge(response, req, session?, options?)`. This phase should not invent a second session-completion path; it should build local credential verification and any higher-level local sign-in helper on that existing primitive.
+
 - [ ] Add built-in email/password verification through `std/auth`
-- [ ] Use a request-aware local sign-in path that receives `req` so it can rotate/migrate existing sessions and capture request metadata
+- [ ] Use the existing request-aware session-completion primitive from the local sign-in path so it can rotate/migrate existing sessions and capture request metadata
 - [ ] Reuse the same session cookie, session TTL, sliding/max-lifetime, metadata, and revocation semantics as OAuth-backed sign-in
 - [ ] Reuse staged auth challenge primitives for local login continuation instead of inventing a second pending-auth model
-- [ ] Support straightforward local sign-in that upgrades into a real auth session with configured claims/data
+- [ ] Support straightforward local sign-in that upgrades into a real auth session with app-supplied claims/session data
 - [ ] Ensure local sessions receive `device_name`, `user_agent_hash`, and `last_ip_hash` just like OAuth sessions
 
 #### Phase 9D — First-Login Activation, Forced Password Change, and TOTP Enrollment
@@ -527,7 +530,7 @@ Those are now shipped. The next big win is local email/password/TOTP auth, but o
 #### Wave 2 — Session Core
 **Shipped:**
 - session ID rotation on successful OAuth callback/session upgrade
-- `sign_in_session()`
+- request-aware `sign_in_session(response, req, session, options?)`
 - `sign_out_session()`
 - `current_session()` / `current_user()`
 - shared cookie defaults and overrides

@@ -30,7 +30,7 @@ But for a very common real app shape — a local admin area using **email + pass
 - bootstrap admin account creation
 - first-login / forced-password-change flows
 - local login route handlers
-- admin-role / claims glue
+- ad hoc admin/session claim handoff from custom local auth into `std/auth` sessions
 
 That is exactly the wrong level of abstraction.
 
@@ -64,6 +64,8 @@ This DD is not about turning `std/auth` into a hosted identity product or a univ
 ## Relationship to DD-043
 
 DD-062 is the detailed child plan for DD-043 Phase 9.
+
+Current 0.4.9 baseline: the shared manual/staged session completion path is already request-aware. `sign_in_session(response, req, session, options?)` and `complete_auth_challenge(response, req, session?, options?)` rotate/migrate existing sessions and capture request-derived metadata. Local auth should consume that path rather than introduce its own session creation semantics.
 
 | DD-043 Phase | DD-062 Section | Purpose |
 |---|---|---|
@@ -191,7 +193,7 @@ It should return either:
 - a staged-auth continuation response for TOTP/setup/password-change, or
 - a safe auth error result
 
-It must delegate to request-aware `sign_in_session(response, req, session, options?)` or the same internal session-completion primitive so local login receives OAuth-equivalent rotation, metadata capture, cookie, TTL, and lifecycle behavior.
+It must delegate to request-aware `sign_in_session(response, req, session, options?)` or the same internal session-completion primitive so local login receives OAuth-equivalent rotation, metadata capture, cookie, TTL, and lifecycle behavior. It should not directly create sessions, attach cookies, or bypass the shared completion path.
 
 ### Password reset helpers
 
@@ -244,8 +246,9 @@ Minimum durable shape:
 - `created_at`
 - `updated_at`
 - `state` — `bootstrap`, `pending_setup`, `active`, `disabled`, `locked`, `password_change_required`
-- `claims_json` — optional configured/default claims for session creation
-- `metadata_json` — small auth-owned metadata only; not app profile data
+- `metadata_json` — small auth-owned metadata needed for auth lifecycle only; not app profile data, roles, permissions, organizations, or session claims
+
+Do **not** store app authorization claims/roles on the local identity as part of the primitive data model. Claims for sessions should come from an app-owned hook/helper at session completion, e.g. `app_claims_for_local_user(verified)`, so `std/auth` owns credential lifecycle without becoming the app's authorization database.
 
 ### Credential secret
 
@@ -343,8 +346,10 @@ This table should become implementation comments and contract tests, not just do
 
 **Purpose:** let email/password login produce sessions with the same safety posture as OAuth login.
 
+**Baseline:** request-aware manual session completion already exists in 0.4.9 branch work. This phase should wire local credential verification into that primitive, not design a new cookie/session attachment path.
+
 - [ ] Add local password verification through `std/auth`
-- [ ] Add request-aware local sign-in domain operation
+- [ ] Add local sign-in domain operation that delegates to `sign_in_session(response, req, session, options?)` or the same internal primitive
 - [ ] Rotate/migrate existing sessions on successful local login
 - [ ] Capture `device_name`, `user_agent_hash`, and `last_ip_hash` from request metadata
 - [ ] Apply configured session TTL, max lifetime, sliding expiry, cookie policy, and remember-me behavior
