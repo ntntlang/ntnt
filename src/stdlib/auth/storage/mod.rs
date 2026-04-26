@@ -1,14 +1,17 @@
 use super::*;
 
-#[cfg(test)]
 mod local;
 
-// The local-auth storage policy scaffold is test-only until production local-auth
-// records land. Do not add production credential/reset/TOTP/bootstrap storage
-// until this policy is moved into production code and both cfg(test) gates are
-// removed in the same PR.
+pub(super) use local::{
+    get_local_credential_secret_record, get_local_identity_by_identifier_record,
+    normalize_local_identifier, LocalAccountState, LocalAuthMemoryStore, LocalCredentialSecret,
+    LocalIdentity,
+};
 #[cfg(test)]
-pub(super) use local::{local_auth_record_fallback_policy, LocalAuthRecordKind};
+pub(super) use local::{
+    get_local_identity_by_id_record, local_auth_record_fallback_policy,
+    store_local_credential_secret_record, store_local_identity_record, LocalAuthRecordKind,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AuthStorageBackend {

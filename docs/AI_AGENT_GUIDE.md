@@ -1699,7 +1699,29 @@ fn get(req) {
 
 Boundary rule: use `std/auth` for auth flows, sessions, CSRF, current-user helpers, and TOTP. Use `std/crypto` for generic crypto helpers like `uuid`, `hash_password`, and `verify_password`.
 
-Full OAuth, session management, CSRF, JWT, and TOTP support — 34 functions.
+Full OAuth, session management, CSRF, JWT, TOTP, and local credential verification support.
+
+### Local Credential Verification
+
+`std/auth` owns the local credential verification path; `std/crypto` remains the place for generic password hash helpers. After a local identity/credential has been provisioned by auth-owned setup/bootstrap flows, custom login UI should verify credentials, derive app-owned claims, then complete the session through the shared request-aware session primitive.
+
+```ntnt
+import { verify_local_password, sign_in_session } from "std/auth"
+import { parse_form, redirect } from "std/http/server"
+
+fn login(req) {
+    let form = parse_form(req)
+    let verified = verify_local_password(form["email"] ?? "", form["password"] ?? "")?
+
+    return sign_in_session(redirect("/admin"), req, map {
+        "subject_id": verified["subject_id"],
+        "email": verified["email"],
+        "claims": app_claims_for_local_user(verified)
+    })
+}
+```
+
+Session claims, roles, profiles, and organization membership stay app-owned; local auth only owns credential lifecycle state and safe verification results.
 
 ### Basic OAuth Setup
 
