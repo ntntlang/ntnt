@@ -1,9 +1,9 @@
 # DD-043: World-Class Auth — Making `std/auth` the Best stdlib Auth Ever
 
-**Status:** In Progress  
-**Author:** Larri  
-**Date:** 2026-03-20  
-**Branch:** `main` (Phase 2 merged via PR #77, Phase 3 merged via PR #78, Phase 4 core + Phase 4.5A/4.5B refactor merged via PR #81)
+**Status:** In Progress
+**Author:** Larri
+**Date:** 2026-03-20
+**Branch:** `main` through v0.4.9; `feat/local-auth-blueprint` carries the next planning pass for first-class local auth and architecture discipline
 
 ---
 
@@ -15,31 +15,39 @@
 
 ---
 
-## Current State (v0.4.6)
+## Current State (v0.4.9)
 
-### What We Have (and it's solid)
+### What We Have (and it is solid)
 - [x] OAuth 2.0 + OIDC (Google, GitHub, Discord, Apple, Microsoft, generic)
 - [x] PKCE for all OAuth flows
 - [x] Server-side sessions (Redis, PostgreSQL, SQLite, memory)
 - [x] HMAC-signed session cookies (tamper-proof)
 - [x] CSRF protection (per-session tokens, automatic validation on state-changing requests)
-- [x] Automatic token refresh (access tokens refreshed via refresh tokens transparently)
+- [x] Automatic token refresh with provider-aware refresh-token rotation/preservation
 - [x] `HttpOnly`, `Secure`, `SameSite=Lax` cookies by default
-- [x] Configurable session/refresh TTLs
-- [x] Safari ITP workaround (two-phase exchange token flow)
-- [x] Session listing (`user_sessions`) and revocation (`revoke_session`)
-- [x] Periodic cleanup of expired sessions/tokens
-- [x] Password hashing (bcrypt, argon2 via `std/crypto`)
-- [x] TOTP/MFA support (`totp_secret`, `totp_verify`, `totp_uri`)
-- [x] API key validation
-- [x] Turnstile CAPTCHA verification
-- [x] OAuth token introspection
-- [x] Client credentials grant (M2M)
-- [x] OIDC discovery (`.well-known/openid-configuration`)
+- [x] Configurable session/refresh TTLs, sliding expiry, absolute max lifetime, and session presets
+- [x] Safari ITP workaround (two-phase exchange token flow), retained after validation
+- [x] Current-user session listing (`user_sessions(req)`) and current-user bulk revocation (`logout_all(req, keep_current)`)
+- [x] Session rotation/migration helpers and sign-in/sign-out/current-session helpers
+- [x] Staged auth challenge primitives for MFA/setup/step-up flows
+- [x] Internal auth module split for config, cookies, providers, OAuth, guards, routes, request helpers, sessions, storage, primitives, and utilities
+- [x] Explicit fallback/error policy for existing session, challenge, OAuth-state, and exchange-token storage
+- [x] Backend contract coverage for memory/SQLite by default and Postgres/Redis when env-gated services are available
+- [x] Configurable route prefixes, built-in auth route logging, auth health diagnostics, and a configurable built-in login page
+- [x] Session metadata/security-signal plumbing (`device_name`, `user_agent_hash`, `last_ip_hash`, `remember_me`) across the OAuth path and existing storage backends
+- [x] Password hashing and generic crypto helpers in `std/crypto`
+- [x] TOTP/MFA primitives (`totp_secret`, `totp_verify`, `totp_uri`) in `std/auth`
+- [x] API key validation, Turnstile CAPTCHA verification, OAuth token introspection, client credentials grant, and OIDC discovery
 
-### What's Missing (the gap to "best ever")
-
----
+### What's Still Missing (the gap to "best ever")
+- [ ] First-class local email/password/TOTP credential lifecycle owned by `std/auth`
+- [ ] Auth-owned local credential/reset/TOTP enrollment stores with fail-closed fallback semantics
+- [ ] Request-aware local sign-in that uses the same rotation, metadata, cookie, and lifecycle semantics as OAuth sign-in
+- [ ] Admin/arbitrary-user session APIs (`list_sessions(user_id)`, `revoke_session(session_id)`, `revoke_all_sessions(user_id)`) distinct from current-user helpers
+- [ ] Security event storage and suspicious-activity policy actions (`warn`, `challenge`, `revoke`)
+- [ ] Fully behavioral remember-me support (`remember_ttl`, request capture, cookie/session TTL selection)
+- [ ] Stronger test ratchets for session metadata round-trips, route-protection end-to-end flows, and Postgres/Redis CI coverage
+- [ ] Architecture guardrails that keep new auth work inside the post-4.5 module boundaries instead of re-growing `auth.rs` or `auth/storage.rs`
 
 ## Unified Phased Implementation Plan
 
@@ -90,9 +98,10 @@ This is the single source of truth for how we should build `std/auth` forward. T
 
 **Result:** Merged in PR #78 (`feat: add auth session helpers`) on 2026-04-13.
 
-- [x] Rotate session ID automatically on successful auth callback/login
+- [x] Rotate session ID automatically on successful OAuth callback/session upgrade paths
 - [x] Invalidate old session ID immediately after rotation
 - [x] Preserve intended session data across rotation
+- [ ] Add request-aware local/manual sign-in rotation and metadata capture before first-class local auth ships (tracked in Phase 9C)
 - [x] Session store migration implemented in Rust for Redis/Postgres/SQLite backends
 - [x] Keep `migrate_session(old_id, new_id)` internal to Rust/session-store code
 - [x] Public ntnt API exposes only high-level session helpers, not low-level store migration primitives (`sign_in_session`, `rotate_session`, `sign_out_session`, `current_session`, `current_user`)
@@ -159,124 +168,36 @@ return complete_auth_challenge(resp, req, map {
 **Ships real value:** the template’s password/TOTP/password-change flow gets much cleaner and more robust.
 
 ### Phase 4.5 — Auth Internal Architecture Cleanup
-**Goal:** Pay down the structural debt around `std/auth` before more lifecycle, observability, and security features pile onto the current shape.
+**Goal:** Pay down the structural debt around `std/auth` before more lifecycle, observability, local-auth, and security features pile onto the old shape.
 
-**Status:** In progress. PR #81 landed the planning/docs pass plus the major module split pass, and PR 4.5C-1 now carries the internal storage contract across sessions, staged auth challenges, OAuth states, and exchange tokens. The next unfinished architecture step is shared fallback/error semantics work, followed by the backend contract-test matrix.
+**Status:** Complete enough to proceed, but intentionally not declared "done forever." The major cleanup wave landed: auth is no longer one undifferentiated file, storage semantics are documented, backend contracts exist, and the later Phase 5–8 work proved the structure is usable. The follow-up work is now tracked explicitly in Phase 9A and Phase 10 instead of pretending the first cleanup pass solved every future pressure point.
 
-**Why now:** Phase 4 shipped the right staged-auth primitives, but it also made a pre-existing architecture issue impossible to ignore: `src/stdlib/auth.rs` is carrying too many responsibilities at once. The risk is not just storage duplication. It is that config parsing, cookie policy, OAuth flow logic, session/challenge persistence, route protection, built-in handlers, JWT/TOTP helpers, and tests are all evolving in one giant file with partially repeated semantics. If we want auth to become world-class instead of merely feature-rich, we should clean up the internal architecture now, while the surface area is still understandable.
+**What landed:**
+- [x] Split `src/stdlib/auth.rs` into focused internal modules for config, cookies, providers, OAuth flow, guards/route protection, built-in routes, request helpers, sessions, storage, primitives, and utilities
+- [x] Established a shared internal auth storage boundary for sessions, staged auth challenges, OAuth states, and exchange tokens
+- [x] Documented the fallback/error contract for existing auth record families
+- [x] Added backend contract coverage for memory/SQLite and env-gated Postgres/Redis paths
+- [x] Preserved the public `std/auth` API while moving behavior behind clearer internal boundaries
+- [x] Re-ran docs generation and auth validation gates during the implementation slices
 
-**Design principles for this phase:**
-- [ ] Keep the public `std/auth` API stable unless a change is overwhelmingly justified
-- [ ] Separate pure auth state transitions from HTTP request/response glue where practical
-- [ ] Prefer one intentional internal model over per-backend drift
-- [ ] Make backend-specific code explicit, localized, and contract-tested
-- [ ] Optimize for future auth work being easier to review, reason about, and extend
+**Important reality check:** the cleanup improved the architecture, but it did not make the architecture self-enforcing yet.
 
-**Workstream A — Internal module boundaries**
-- [x] Split `src/stdlib/auth.rs` into smaller focused modules without changing the public `std/auth` API surface
-- [x] Establish a clear internal layout for config, cookies, providers, OAuth flow, storage, sessions, staged auth challenges, middleware/route protection, built-in routes, JWT helpers, and TOTP helpers
-- [x] Move shared validation and conversion helpers to stable internal homes so they stop drifting across feature work
-- [x] Keep module boundaries understandable enough that a new contributor can answer “where does this logic live?” quickly and confidently
+Current pressure points:
+- `src/stdlib/auth.rs` is still large and remains the gravity well for public types, native-function registration, global memory state, JWT/TOTP wrappers, and most auth tests
+- `src/stdlib/auth/storage.rs` is now the second gravity well: it owns the storage contract plus backend-native logic for every existing auth record family
+- Backend contract tests are useful but concentrated in `auth.rs`, making them harder to extend as new auth state families arrive
+- The existing fallback policy is appropriate for mostly-transient session/challenge/OAuth state, but it must not be blindly reused for durable local credentials
 
-**Workstream B — Auth domain model and flow boundaries**
-- [ ] Identify the core auth state transitions that should be treated as domain logic rather than HTTP glue (for example: begin staged auth, consume challenge, rotate session, sign out, exchange OAuth result into session)
-- [ ] Refactor those transitions so request parsing, cookie mutation, and redirect/response shaping are thin adapters around clearer internal operations
-- [ ] Normalize the lifecycle vocabulary across sessions, auth challenges, OAuth states, and exchange tokens so store/get/consume/delete/cleanup semantics are easier to compare and reason about
+**Architecture standard after this phase:** every new auth feature must answer three questions before implementation:
+1. Which internal module owns the domain behavior?
+2. Which storage contract owns persistence semantics, and how are fallback/error paths tested?
+3. Which public API, docs, generated stdlib reference, and typechecker signatures need to agree?
 
-**Workstream C — Internal persistence contract**
-- [x] Extract a clearer internal auth storage abstraction so session, auth-challenge, OAuth-state, and exchange-token behavior is easier to keep consistent across SQLite/Postgres/Redis and memory fallback paths
-- [ ] Define one intentional place for fallback/error semantics instead of letting each code path decide ad hoc whether backend failures should surface, degrade to memory, or return `None`
-- [ ] Reduce copy-pasted backend logic where the operation shape is truly shared, while preserving backend-native implementations where atomicity or query shape genuinely differs
-- [ ] Revisit cleanup responsibilities so memory, SQLite, Postgres, and Redis all follow the same mental model even if the implementation details differ
+**Follow-up ownership:**
+- Phase 9A owns the preflight cleanup required before first-class local auth lands
+- Phase 10 owns ongoing guardrails, complexity budgets, and periodic architecture audits
 
-**Workstream D — Test architecture and verification matrix**
-- [x] Add backend contract tests that exercise the same auth storage behaviors across memory and SQLite for the current contract helpers
-- [x] Add env-gated Redis/Postgres integration coverage for auth storage flows so backend-specific regressions are caught before review comments or production incidents
-- [x] Add higher-level auth flow tests that verify staged auth, session rotation, protected-route lookup, and logout behavior against the cleaned-up internal boundaries
-- [x] Re-review Phase 3 and Phase 4 helpers after the refactor to ensure docs, tests, and public behavior still match exactly
-
-**Workstream E — Safety rails for the refactor itself**
-- [x] Preserve behavior first, then simplify structure, rather than mixing feature changes into the cleanup branch
-- [x] Write down the intended auth persistence/error/fallback model in the design doc and/or code comments before refactoring the trickiest paths
-- [x] Use small, reviewable commits or PR slices when possible so architecture cleanup does not become an unreadable mega-diff
-- [x] Regenerate docs and re-run the full auth validation gate after each meaningful slice, not just at the very end
-
-**Recommended execution order:**
-- [x] 4.5A: document the intended internal architecture and fallback/error model before moving code
-- [x] 4.5B: split modules and relocate helpers with behavior held constant
-- [x] 4.5C: introduce the internal storage contract and normalize shared semantics (4.5C-1 and 4.5C-2 complete)
-- [x] 4.5D: add/finish backend contract tests and env-gated integration coverage
-- [x] 4.5E: run a final API/docs behavior audit for all Phase 3 and Phase 4 helpers
-
-**Current recommendation:** Phase 4.5 is complete. The storage contract is in place, the fallback/error policy is now explicit and test-covered across sessions, auth challenges, OAuth states, and exchange tokens, and the final Phase 3/4 API/docs behavior pass is done. Move next into Phase 5 session lifecycle work.
-
-**Non-goals:**
-- [ ] Do not add major new end-user auth features in this phase
-- [ ] Do not redesign the public `std/auth` API unless the cleanup reveals a serious correctness issue
-- [ ] Do not force auth onto `std/kv` just for abstraction symmetry if a purpose-built internal auth store boundary is cleaner
-- [ ] Do not ship a prettier file layout while leaving core fallback and lifecycle semantics ambiguous
-
-**Exit criteria:**
-- [ ] We can explain auth internals as one coherent model instead of a set of backend-specific exceptions
-- [ ] Adding or modifying an auth backend no longer requires copy-pasting large sections of session/challenge/state logic
-- [ ] Future auth PRs can land in focused modules instead of reopening a 10k-line file every time
-- [ ] Reviewers can evaluate fallback/error behavior from one documented policy instead of rediscovering it thread by thread
-- [ ] The cleaned-up structure makes Phases 5–8 safer to implement, not merely nicer to look at
-
-**Current landed module map (after PR #81):**
-- [x] `auth/config.rs` — `AuthConfig`, defaults, option parsing, config validation, startup summary, and session-store initialization helpers
-- [x] `auth/cookies.rs` — cookie-name validation, shared cookie settings, signed session/challenge cookies, clear-cookie helpers, and `SITE_URL`-aware cookie posture helpers
-- [x] `auth/providers.rs` — built-in provider definitions, provider normalization, and provider/value conversion helpers
-- [x] `auth/oauth.rs` — OAuth start/exchange/refresh/discovery/introspection flow coordination and provider userinfo handling
-- [x] `auth/guards.rs` — protected-path registration/matching, auth enforcement behavior, and challenge-kind validation
-- [x] `auth/routes.rs` — built-in `/auth/*` handlers and request/response adapters
-- [x] `auth/request_helpers.rs` — request extraction plus `Session`/`User`/`AuthChallenge` to `Value` conversion helpers
-- [x] `auth/sessions.rs` — session lifecycle, mutation, and session-listing/revocation store coordination
-- [x] `auth/storage.rs` — auth-challenge, OAuth-state, exchange-token, and cleanup persistence logic across backends
-- [x] `auth/primitives.rs` — low-level auth primitives like IDs, nonces, HMAC signing helpers, and TOTP primitives
-- [x] `auth/utils.rs` — response builders and canonical JSON/value conversion helpers used across auth internals
-
-**Remaining target splits / normalization work:**
-- [ ] Split `auth/storage.rs` into a clearer internal storage contract plus backend-focused modules (`mod`, `memory`, `sqlite`, `postgres`, `redis`) once 4.5C starts
-- [ ] Decide whether session domain logic should stay centralized in `auth/sessions.rs` or split further into a narrower `session_core.rs` plus admin/query helpers
-- [ ] Pull staged-auth challenge lifecycle into a clearer domain boundary (`challenge_core.rs` or equivalent) if that materially improves the session/challenge split during 4.5C
-- [ ] Split JWT helpers out of `auth.rs` if they continue growing enough to deserve `auth/jwt.rs`
-- [ ] Keep TOTP primitives in `auth/primitives.rs` unless a dedicated `auth/totp.rs` becomes justified by size or clarity
-- [ ] Revisit whether `auth/request_helpers.rs` and `auth/utils.rs` should converge on a more explicit `value_maps.rs` style home for `Session`/`User`/`AuthChallenge` conversion semantics
-
-**Recommended PR slicing plan:**
-- [x] PR 4.5A-1: add architecture notes, auth persistence/error/fallback invariants, and TODO anchors without moving behavior yet
-- [x] PR 4.5A-2: add backend contract-test harness that can run against memory/SQLite immediately and Postgres/Redis when env-gated services are available
-- [x] PR 4.5B-1: move config/cookie/provider/JWT/TOTP helpers into modules with behavior held constant
-- [x] PR 4.5B-2: move middleware and built-in route glue into modules with no intentional semantic changes
-- [x] PR 4.5C-1: introduce the internal storage contract for sessions/auth challenges/OAuth states/exchange tokens while preserving existing backend-native implementations
-- [x] PR 4.5C-2: centralize fallback/error semantics and make each auth state type follow the same documented rules
-  - [x] Define the canonical fallback/error policy table for sessions, auth challenges, OAuth states, and exchange tokens
-  - [x] Make store/get/consume/delete/cleanup semantics follow that policy consistently across memory, SQLite, Postgres, and Redis
-  - [x] Normalize TTL/expiry behavior for memory fallback paths so they do not silently diverge from backend-native semantics
-  - [x] Add focused tests that prove the chosen fallback/error behavior instead of relying on comments and TODOs
-- [x] PR 4.5D-1: add/finish Redis/Postgres integration coverage and cross-backend contract assertions
-- [x] PR 4.5E-1: final audit PR for docs generation, public API parity, and cleanup of temporary compatibility shims
-
-**Highest-risk regression hotspots to guard during the refactor:**
-- [ ] Cookie naming/signing/clearing behavior for both session and auth-challenge cookies stays byte-for-byte compatible unless intentionally changed
-- [ ] HTML redirect vs API `401`/`403` behavior in `require_auth()` does not drift during middleware extraction
-- [ ] One-time consume semantics for OAuth states, exchange tokens, and auth challenges remain atomic per backend
-- [ ] Session rotation preserves intended claims/data while invalidating the old session immediately
-- [ ] Refresh-token and expired-session lookup behavior does not regress while storage semantics are being normalized
-- [x] Memory fallback continues to behave intentionally, especially under backend errors and mixed cleanup paths
-- [x] Generated stdlib docs and `@ntnt` signatures remain accurate after functions move files/modules
-
-**Validation matrix for phase completion:**
-- [x] Memory backend: session sign-in/current-user/sign-out/rotation/challenge begin-complete-cancel all pass
-- [x] SQLite backend: same core session + challenge flows pass with cleanup and consume behavior verified
-- [x] Postgres backend: same core session + challenge flows pass in env-gated integration coverage
-- [x] Redis/Valkey backend: same core session + challenge flows pass in env-gated integration coverage, including atomic consume paths
-- [x] Protected-route behavior verified for HTML pages and API routes after module split
-- [x] OAuth state and exchange-token paths still pass, including Safari/redirect-chain-related flows already covered by current behavior
-- [x] `cargo test stdlib::auth::tests`, any relevant integration suites, `cargo build --release --locked`, and `./target/release/ntnt docs --generate` all pass at the end of each major slice
-
-**Ships real value:** this phase does not add flashy new auth features, but it is what makes the next layers of auth quality, safety, and speed possible without quietly accumulating structural debt.
+**Ships real value:** this phase made the auth system understandable enough to keep improving. The next job is making that structure harder to accidentally bypass.
 
 ### Phase 5 — Session Lifecycle and Presets
 **Goal:** Harden session lifetime behavior and make strong defaults ergonomic.
@@ -305,7 +226,7 @@ return complete_auth_challenge(resp, req, map {
 - [x] Health output shows config state without leaking secrets
 - [x] Diagnose common issues like redirect mismatch, missing env, wrong store
 
-**Implementation note (2026-04-21 / PR pending):** Phase 6 now preserves provider-specific refresh-token behavior correctly (including rotation only when a provider actually returns a new refresh token), logs rotation events without exposing token material, and adds a built-in `/auth/health` diagnostics route that is dev-only by default and can be explicitly enabled in production.
+**Implementation note:** Phase 6 preserves provider-specific refresh-token behavior correctly (including rotation only when a provider actually returns a new refresh token), logs rotation events without exposing token material, and adds a built-in `/auth/health` diagnostics route that is dev-only by default and can be explicitly enabled in production.
 
 **Provider differences:** some providers return a fresh refresh token on every refresh, while others omit `refresh_token` unless rotation occurs. `std/auth` now preserves the stored token when providers omit it, replaces the stored token when they rotate it, and surfaces the distinction through safe auth logs and diagnostics rather than pretending all providers behave the same.
 
@@ -314,27 +235,28 @@ return complete_auth_challenge(resp, req, map {
 ### Phase 7 — Auto-Routes and Convenience UI
 **Goal:** Make the easy path extremely easy without forcing apps into one UI.
 
-**Status:** Phase 7A implemented in PR #94 (pending) on 2026-04-21. This slice ships configurable built-in auth route prefixes, startup route logging, truthful collision warnings for built-in auth routes vs protected-path config, and a configurable built-in login page with auto-generated provider buttons. Full auto-mount/override integration with app-owned route tables remains open.
+**Status:** Core Phase 7A landed in PR #94 and is on `main` in v0.4.9.
 
-- [ ] Auto-generate standard auth routes if not overridden
+- [ ] Auto-generate every standard auth route when not overridden
 - [x] Configurable path prefixes (`/auth/*` by default)
-- [x] Clear startup log showing registered routes
-- [x] Path collision detection with app-defined routes
+- [x] Clear startup log showing registered auth routes
+- [x] Path collision diagnostics for built-in auth routes and protected-path config
 - [x] Built-in login page template
 - [x] Configurable title/logo/copy
 - [x] Provider buttons generated automatically
 - [ ] Support custom HTML override if needed
+- [ ] Add end-to-end route-dispatch tests proving route protection works through actual ntnt server/file-route setup, not only helper-level matching
 
 **Ships real value:** simple apps get auth with almost no wiring, while custom apps still own their design.
 
 ### Phase 8 — Advanced Sessions and Security Signals
 **Goal:** Add higher-end capabilities once the core mechanics are excellent.
 
-**Status:** Phase 8A (session metadata + security-signal plumbing) is now implemented on branch `feat/auth-phase-8-advanced-sessions-complete` / PR #96. This slice focused on carrying richer session/security metadata cleanly through the existing auth system, plus the review-driven hardening needed to make that plumbing trustworthy across backends.
+**Status:** Phase 8A landed in PR #96 and is on `main` in v0.4.9. This slice delivered metadata/security-signal plumbing, not the full suspicious-activity product layer.
 
-**What landed in this slice:**
-- [x] Store user agent hash / device name on session creation
-- [x] Pass remember-me flag through OAuth state
+**What landed:**
+- [x] Store user agent hash / device name fields on session records
+- [x] Pass remember-me flag through OAuth state storage
 - [x] Persist OAuth-state security metadata (`remember_me`, `device_name`, `user_agent_hash`, `last_ip_hash`) across SQLite/Postgres/Redis + memory fallback
 - [x] Persist session security metadata (`device_name`, `user_agent_hash`, `last_ip_hash`) across SQLite/Postgres/Redis + memory fallback
 - [x] Copy captured OAuth-state metadata onto the real session at callback time before store/rotation
@@ -344,9 +266,10 @@ return complete_auth_challenge(resp, req, map {
 - [x] Harden SQLite/Postgres migration behavior so schema updates stop swallowing real failures
 - [x] Extend auth storage contract tests and auth flow tests for the new metadata paths
 
-**What this slice did _not_ finish yet:**
-- [ ] `list_sessions(user_id)` API *(already partially represented by existing `user_sessions(req)` current-user helper, but no dedicated arbitrary-user/admin-facing API landed in this slice)*
-- [ ] `revoke_session(session_id)` API *(existing revocation helpers remain current-user/request-oriented)*
+**Still open before Phase 8 is product-complete:**
+- [ ] Expose appropriate device metadata through session-management APIs (`device_name` yes; raw hashes no)
+- [ ] `list_sessions(user_id)` API for admin/arbitrary-user session lookup
+- [ ] `revoke_session(session_id)` API
 - [ ] `revoke_all_sessions(user_id)` API
 - [ ] Password change hook support for revocation
 - [ ] Account disable hook support for revocation
@@ -354,80 +277,115 @@ return complete_auth_challenge(resp, req, map {
 - [ ] Add `security_events` storage for auth events
 - [ ] Configurable suspicious-activity actions: `warn`, `challenge`, `revoke`
 - [ ] Expose `auth_events(user_id, limit?)` for admin dashboards
-- [ ] Rate limit failed OAuth callbacks
+- [ ] Rate limit failed OAuth callbacks and future local-auth login/reset attempts
 - [ ] Add `remember_ttl`
-- [ ] Set distinct remember-me TTL/persistence behavior on session creation
+- [ ] Capture remember-me intent from request/config instead of hard-coding false on auth start
+- [ ] Set distinct remember-me TTL/persistence behavior on session and cookie creation
+- [ ] Strengthen contract tests to assert metadata round-trips across store/get, migrate/rotate, session listing, refresh lookup, and OAuth-state consume
 
-**Assessment of the current Phase 8 outcome:** this slice successfully delivered the underlying metadata/security-signal plumbing that Phase 8 needed before higher-level features like suspicious-activity policies or auth event streams can be layered on safely. The main work was not just adding columns — it was making the metadata survive the real auth path, align across backends, survive review scrutiny, and avoid silent migration failures. That makes this a real Phase 8 foundation slice rather than cosmetic schema churn.
+**Assessment:** Phase 8A was the right foundation slice. It made the metadata survive real OAuth/session paths and existing backends. The next slices should turn that plumbing into visible session-management, remember-me, eventing, and suspicious-activity behavior.
 
 **Ships real value:** this is where `std/auth` starts becoming genuinely standout, not just competent.
 
 ### Phase 9 — First-Class Local Auth
 **Goal:** Make `std/auth` world-class not only for OAuth/session plumbing, but also for the extremely common app shape of **local email + password + TOTP auth**.
 
-**Why this must exist:** the current `std/auth` surface is already strong at sessions, cookies, staged auth challenges, OAuth/OIDC, TOTP primitives, sign-in/sign-out helpers, and protected-route handling. But for a very normal local admin/app flow, developers still have to build and own a mini auth system beside it:
+**Why this must exist:** the current `std/auth` surface is strong at sessions, cookies, staged auth challenges, OAuth/OIDC, TOTP primitives, sign-in/sign-out helpers, and protected-route handling. But a normal local admin/app flow still requires developers to build and own a mini auth system beside it:
 
-- local user table
-- password-hash storage
-- password verification
+- local user/credential table
+- password-hash storage and verification
 - password reset token storage
-- first-login / forced-password-change flow
 - persisted TOTP enrollment state
+- first-login / forced-password-change flow
 - bootstrap admin account creation
+- claims/role glue between local accounts and sessions
 
 That is the current local-auth subsystem gap.
 
-`std/auth` can already manage authenticated state beautifully. What it still cannot fully own is the **local credential lifecycle end-to-end**. As long as that remains true, templates and apps will keep carrying custom auth code that should really belong to the language.
+**Architectural standard:** a template app should not need a custom `lib/admin_db.tnt` mini-auth subsystem to get excellent email/password/TOTP auth. The template should mostly configure `std/auth`, provide custom views/copy if it wants them, and move on.
 
-**Architectural standard:** a template app should not need a custom `lib/admin_db.tnt` mini-auth subsystem to get excellent email/password/TOTP auth. The template should mostly configure `std/auth`, wire a few views if it wants custom UX, and move on.
+**Preferred public API direction:** local auth should be a first-class provider variant consumed by the existing `enable_auth(...)` entrypoint, not a separate parallel auth system.
 
-**Success test:** if a developer wants a local admin panel with email/password login, TOTP verification, password resets, first-login activation, and forced password changes, the path should feel as native and obvious as OAuth already does.
+```ntnt
+import { enable_auth, local_auth } from "std/auth"
+import { get_env } from "std/env"
 
-## Recommended implementation shape for Phase 9
+enable_auth([
+    local_auth(map {
+        "email_password": true,
+        "totp": true,
+        "password_reset": true,
+        "bootstrap_email": get_env("ADMIN_BOOTSTRAP_EMAIL"),
+        "bootstrap_password": get_env("ADMIN_BOOTSTRAP_PASSWORD"),
+        "claims": map { "role": "admin" }
+    })
+], "admin", map {
+    "login_page": false,
+    "success_url": "/admin",
+    "failure_url": "/admin/login"
+})
+```
 
-Phase 9 should be a **feature architecture phase**, not just a helper phase. The key is not to bolt on scattered primitives, but to let `std/auth` own one coherent local-auth model.
+A later `enable_local_auth(...)` convenience wrapper is acceptable if it simply delegates into the same underlying provider/config path. The implementation must not become two auth systems.
 
-### Phase 9A — Local Identity Store
-- [ ] Add a first-class local credential store owned by `std/auth`
-- [ ] Make **email** the canonical local identifier
+#### Phase 9A — Architecture Preflight and Storage Boundary
+- [ ] Split or carve `auth/storage.rs` enough that new local-auth state does not get buried in the existing storage monolith
+- [ ] Define explicit local-auth record families before code lands: local identity, credential secret, password reset token, TOTP enrollment/setup state, and bootstrap state
+- [ ] Define local-auth fallback/error policy before implementation; durable credential/TOTP/reset state should fail closed rather than silently fall back to process memory in production
+- [ ] Move the backend contract harness toward reusable storage-module ownership so every new local-auth record can extend it immediately
+- [ ] Document which parts of `auth.rs` are allowed to grow for local auth and which must live in focused modules
+- [ ] Add review checklist items for local-auth regressions: captured-but-not-persisted state, reset-token replay, backend mismatch, swallowed migration errors, and app/std ownership ambiguity
+
+**Exit criterion:** the storage and module homes for local auth are obvious before the first credential table/helper is implemented.
+
+#### Phase 9B — Local Identity and Credential Store
+- [ ] Add first-class local credential storage owned by `std/auth`
+- [ ] Make **email** the canonical local identifier, with documented normalization rules
 - [ ] Store password hashes in auth-owned tables rather than pushing that responsibility to apps
+- [ ] Define a lean durable local-user/account shape: identity + auth state first, not a full profile platform
+- [ ] Support account states needed by real flows: bootstrap/pending setup/active/disabled/locked/password-change-required
 - [ ] Support bootstrap account creation from config/env for the common admin-panel case
-- [ ] Define the minimum durable local-user shape intentionally instead of letting templates invent their own schemas
-- [ ] Keep the model lean: identity + auth state first, not a giant profile system
+- [ ] Ensure bootstrap credentials force rotation/setup instead of becoming a permanent production secret path
+- [ ] Add memory/SQLite contract tests by default and Postgres/Redis contract tests in required backend CI
 
-### Phase 9B — Local Sign-In Flow
+#### Phase 9C — Request-Aware Local Sign-In Flow
 - [ ] Add built-in email/password verification through `std/auth`
-- [ ] Reuse the existing staged-auth challenge primitives for local login continuation
+- [ ] Use a request-aware local sign-in path that receives `req` so it can rotate/migrate existing sessions and capture request metadata
+- [ ] Reuse the same session cookie, session TTL, sliding/max-lifetime, metadata, and revocation semantics as OAuth-backed sign-in
+- [ ] Reuse staged auth challenge primitives for local login continuation instead of inventing a second pending-auth model
 - [ ] Support straightforward local sign-in that upgrades into a real auth session with configured claims/data
-- [ ] Ensure local sign-in uses the same cookie/session lifecycle semantics as OAuth-backed sign-in
-- [ ] Keep local auth and OAuth auth aligned at the session layer so apps do not feel two different auth systems
+- [ ] Ensure local sessions receive `device_name`, `user_agent_hash`, and `last_ip_hash` just like OAuth sessions
 
-### Phase 9C — First-Login Activation and TOTP Enrollment
+#### Phase 9D — First-Login Activation, Forced Password Change, and TOTP Enrollment
 - [ ] Support first-login setup as a first-class local-auth flow
 - [ ] Support staged TOTP enrollment using the existing auth challenge model
 - [ ] Support forced password change before final session completion
-- [ ] Support completion into a normal signed-in session only after setup requirements are satisfied
-- [ ] Keep staged local flows expressed in the same lifecycle vocabulary as the rest of `std/auth`
+- [ ] Support completion into a normal signed-in session only after required setup steps are satisfied
+- [ ] Persist TOTP enrollment/setup state explicitly; do not hide durable enrollment state inside generic challenge `data_json`
+- [ ] Define TOTP reset/re-enrollment behavior after password reset or admin intervention
 
-### Phase 9D — Password Reset Lifecycle
+#### Phase 9E — Password Reset Lifecycle
 - [ ] Add auth-owned password-reset token storage and lifecycle helpers
 - [ ] Support reset token issue + consume flows through `std/auth`
+- [ ] Make reset tokens one-time-use, TTL-bound, and atomically consumed across every backend
 - [ ] Support optional TOTP reset / re-enrollment semantics after password reset
 - [ ] Support reset flows that intentionally force fresh staged setup when security posture demands it
-- [ ] Keep reset semantics coherent with the session/challenge model instead of inventing another separate sub-system
+- [ ] Define the email-delivery boundary: `std/auth` issues/validates tokens and builds safe URLs; apps/plugins send email
+- [ ] Rate-limit failed local login and password-reset attempts
 
-### Phase 9E — Template-Grade Integration
+#### Phase 9F — Template-Grade Integration and Deletion of App-Owned Mini-Auth
 - [ ] Make the Larri site template use the built-in local auth path instead of custom auth persistence code
 - [ ] Delete template-owned local-auth state machines and tables once parity exists
 - [ ] Leave the template with mostly config + views + app-specific copy, not a bespoke auth backend
 - [ ] Use the template migration as the proof that the local-auth architecture is actually simpler, not just theoretically cleaner
+- [ ] Keep custom UI possible without requiring custom credential/session/reset persistence
 
-### Phase 9F — Architecture Discipline for Local Auth
-- [ ] Keep local auth inside the post-4.5 module boundaries rather than re-growing a monolith in `auth.rs`
-- [ ] Extend the backend contract harness for every new local-auth persistence shape
-- [ ] Treat local auth storage semantics as a compatibility surface, not incidental implementation detail
-- [ ] Add explicit review guidance for local-auth regressions: captured-but-not-persisted staged state, reset-token lifecycle drift, backend mismatch, and “half-owned by app / half-owned by std/auth” ambiguity
-- [ ] Re-review the resulting structure periodically so local auth becomes a coherent subsystem, not a second pile of special cases
+#### Phase 9G — Local Auth Verification Matrix
+- [ ] Add contract tests for every local-auth record family across memory and SQLite by default
+- [ ] Add required CI coverage for Postgres and Redis/Valkey local-auth contracts
+- [ ] Add migration tests for existing DBs missing new local-auth columns/tables
+- [ ] Add end-to-end ntnt tests for bootstrap login, password change, TOTP setup, normal login, reset token issue/consume, reset replay rejection, disabled account rejection, and session revocation after credential changes
+- [ ] Add docs/reference examples that are runnable, lintable, and intentionally clear about app-owned UI/email boundaries
 
 **Non-goals for this phase:**
 - [ ] Do not turn `std/auth` into a giant full-profile identity platform in one shot
@@ -442,182 +400,214 @@ Phase 9 should be a **feature architecture phase**, not just a helper phase. The
 
 **Ships real value:** closes the biggest remaining gap between “great auth primitives” and “great auth architecture,” so apps can rely on `std/auth` for the full local email/password/TOTP lifecycle instead of rebuilding it.
 
-### Phase 10 — Post-Cleanup Complexity Discipline
-**Goal:** Prevent `std/auth` from collapsing back into a monolith after the 4.5 cleanup lands.
+### Phase 10 — Architecture Discipline and Complexity Budget
+**Goal:** Prevent `std/auth` from collapsing back into a monolith as local auth, session management, security events, and future auth features land.
 
-**Assessment after the Phase 8 branch review (compared against the v0.4.8 release baseline):** the 4.5 cleanup largely achieved its intended effect, but only partially solved the long-term maintainability problem. The internal module split is real and materially improves clarity: config, cookies, guards, OAuth flow, providers, request helpers, routes, sessions, storage, and small utility layers now exist as distinct homes instead of one giant undifferentiated file. The storage contract is also much more coherent than before, and recent review feedback mostly hit end-to-end plumbing gaps and edge-case semantics rather than “where does this logic even belong?” confusion. That is a meaningful architectural win.
+**Status:** Starts immediately. This phase is numbered after local auth because it is ongoing discipline, but its first guardrails must land before Phase 9 implementation begins.
 
-**However:** `src/stdlib/auth.rs` is still very large and still acts as a gravity well for the public surface, native-function registration, shared types, and the main auth test module. So the cleanup should be viewed as **successful but incomplete**. `std/auth` is no longer a pure junk drawer, but it is also not yet structurally self-protecting. It is maintainable **if** future work is forced through the module boundaries and contract tests established in 4.5. If contributors drift back into broad `auth.rs` edits for convenience, the monolith will regrow quickly.
+**Assessment after the Phase 8 branch review:** the 4.5 cleanup largely achieved its intended effect, but only partially solved the long-term maintainability problem. The module split is real and materially improves clarity. The storage contract is also much more coherent than before. Recent review feedback mostly hit end-to-end plumbing gaps and edge-case semantics rather than “where does this logic even belong?” confusion. That is a meaningful architectural win.
 
-**Bottom line:** the DD intent was mostly achieved for the cleanup wave — enough to justify continuing from this shape — but Phase 10 must turn the current structure into enforceable discipline rather than assuming the cleanup alone solved the problem.
+**However:** `src/stdlib/auth.rs` is still very large and still acts as a gravity well for public surface, native-function registration, shared types, global memory state, JWT/TOTP wrappers, and the main auth test module. `src/stdlib/auth/storage.rs` is also large enough that adding local credentials/reset/TOTP records there without further structure would create a second monolith.
 
-## Recommended implementation shape for Phase 10
+**Bottom line:** the DD intent was mostly achieved for the cleanup wave — enough to justify continuing from this shape — but future auth work must be forced through explicit module/storage/test boundaries. Cleanup alone is not a force field. Annoying, but here we are.
 
-Phase 10 should be a **discipline phase, not a feature phase**. The goal is to make the architecture we now have more self-enforcing, so future auth work naturally lands in the right places and gets the right verification by default.
-
-### Phase 10A — Architecture Guardrails
+#### Phase 10A — Contributor and Review Guardrails
 - [ ] Write explicit contributor guidance for what belongs in `auth.rs` vs internal auth modules
 - [ ] Document the allowed responsibilities of `auth.rs`: public surface, shared types, registration glue, and only the minimum unavoidable coordination logic
 - [ ] Document when a new auth change must extend an existing module versus when it merits a new focused module
-- [ ] Add an auth-specific review checklist covering the regressions exposed in Phase 8 and Phase 9 (captured-but-not-persisted state, schema/query name drift, swallowed migration errors, backend mismatch paths, fallback ambiguity, reset lifecycle drift, and app/std ownership confusion)
+- [ ] Add an auth-specific review checklist covering: captured-but-not-persisted state, schema/query name drift, swallowed migration errors, backend mismatch paths, fallback ambiguity, reset lifecycle drift, session metadata loss, remember-me behavior drift, and app/std ownership confusion
 
-### Phase 10B — Contract-Test Ratchet
-- [ ] Require new auth persistence/state shapes to extend the backend contract harness
-- [ ] Add missing contract coverage for any auth persistence paths still validated only indirectly
+#### Phase 10B — Contract-Test Ratchet
+- [ ] Require new auth persistence/state shapes to extend the backend contract harness in the same PR that introduces them
+- [ ] Add missing contract coverage for metadata round-trips across session store/get, migrate/rotate, list sessions, refresh lookup, and OAuth-state consume
 - [ ] Require new fallback/error semantics to be tested in primary, fallback, and failure modes
+- [ ] Make Postgres/Redis auth contract coverage visible in CI instead of silently green when env vars are absent
 - [ ] Treat auth storage behavior as a compatibility surface, not just an implementation detail
 
-### Phase 10C — `auth.rs` Pressure Relief
-- [ ] Audit what still lives in `auth.rs` only because of historical gravity rather than good ownership
-- [ ] Move obvious non-surface helpers and test-heavy logic into module-local ownership where it improves clarity without destabilizing the public API
-- [ ] Reassess whether the main auth test concentration should be partially redistributed into focused module tests over time
-- [ ] Track `auth.rs` growth relative to the internal modules so “easy broad edits” become visible early
+#### Phase 10C — `auth.rs` and `storage.rs` Pressure Relief
+- [ ] Move obvious non-surface types/helpers out of `auth.rs` when doing so improves ownership without destabilizing the public API
+- [ ] Extract JWT and TOTP wrappers if they continue to grow or distract from the public auth surface
+- [ ] Move memory-store/global-state code toward focused module ownership
+- [ ] Split storage by record family and/or backend before adding durable local-auth records
+- [ ] Reassess whether the main auth test concentration should move toward module-local test ownership over time
+- [ ] Track `auth.rs` and `auth/storage.rs` growth relative to internal modules so broad edits become visible early
 
-### Phase 10D — Periodic Architecture Audit
+#### Phase 10D — Periodic Architecture Audit
 - [ ] Re-review new auth work periodically against the intended module boundaries
 - [ ] Check whether recent auth changes increased clarity or merely moved complexity around
 - [ ] Reconfirm that fallback semantics remain deliberate and documented as auth work expands
-- [ ] Update DD-043 / REVIEW guidance when review incidents reveal new recurring patterns
+- [ ] Update DD-043, DD-062, and REVIEW guidance when review incidents reveal new recurring patterns
+- [ ] Revisit whether large tests inside `auth.rs` should migrate toward module-local test ownership as the structure stabilizes
 
-- [ ] Track auth code size / complexity budget as features land, especially `auth.rs` vs the internal modules
-- [ ] Require new auth work to fit the post-4.5 module boundaries instead of reopening broad grab-bag files
-- [ ] Keep `auth.rs` focused on public surface, shared types, registration glue, and only the minimum unavoidable coordination logic
-- [ ] Extend backend contract tests when adding new auth state types, flows, or stores
-- [ ] Treat fallback/error semantics as design-level behavior, not incidental implementation detail
-- [ ] Add review guidance/checklists for common auth regressions: captured-but-not-persisted state, schema/name drift, swallowed migration errors, backend mismatch paths, reset lifecycle drift, and ownership ambiguity between app code and `std/auth`
-- [ ] Periodically re-audit whether new features are preserving the intended internal architecture
-- [ ] Revisit whether large test concentrations inside `auth.rs` should migrate toward module-local test ownership as the structure stabilizes
-
-**Ships real value:** preserves the benefits of the cleanup and the local-auth work so future auth work stays understandable instead of slowly regressing.
+**Ships real value:** preserves the benefits of the cleanup and local-auth work so future auth development stays understandable instead of slowly regressing into a suspiciously feature-rich junk drawer.
 
 ## What We Explicitly Won't Do
 
-These are features that other auth systems offer but don't belong in a language stdlib:
+These boundaries keep `std/auth` focused as a language stdlib auth system rather than drifting into a hosted identity product.
 
-- **User management UI** — That's the app's job, not the language's
-- **Email/password signup flows** — We provide `hash_password`/`verify_password` + session management; the signup form and email verification is app logic
-- **Social login buttons/UI** — We handle the OAuth protocol; the "Sign in with Google" button is app HTML
-- **Multi-tenancy** — Session isolation between tenants is app-level routing
-- **Billing/subscription gating** — Not auth, not our problem
-- **SMS/email OTP delivery** — We provide TOTP verification; delivery channels are app-specific
+- **User management UI** — account-management pages, admin dashboards, visual design, and product-specific workflows are app-owned
+- **Public self-service signup product flows** — `std/auth` may own local credential storage and verification, but the decision to allow public signup, invite-only signup, approval workflows, email copy, and onboarding UX belongs to the app
+- **Email/SMS delivery** — `std/auth` should issue and validate reset/setup tokens and produce safe URLs; apps/plugins own the delivery channel
+- **Arbitrary profile systems** — names, avatars, preferences, organizations, billing fields, and app-specific profile data belong in app tables
+- **Full RBAC/ABAC/organization modeling** — `std/auth` can carry claims and expose hooks, but it should not solve every authorization model before shipping excellent auth
+- **Billing/subscription gating** — not auth, not our problem
+- **Vendor-hosted identity service semantics** — no pricing tiers, tenant dashboards, or hosted control planes inside the language runtime
 
----
+Clarification: **local email/password/TOTP credential lifecycle is in scope** for Phase 9. The non-goal is owning every product/business workflow around accounts, not the core credential/session/reset/setup mechanics that every app currently has to rebuild.
 
 ## Delivery Order
 
-The best delivery order is not just "security first" or "DX first". It should deliver a complete slice each time, where every wave leaves `std/auth` materially more useful in real apps.
+The best delivery order is not just "security first" or "DX first". Each wave should leave `std/auth` materially more useful in real apps while reducing, not increasing, long-term architectural drag.
 
-For template cleanup specifically, the biggest wins are:
+For template cleanup specifically, the biggest early wins were:
 1. section-wide route protection
 2. session/cookie helpers
 3. staged-auth challenge primitives
 
-So the plan should put those cleanup-heavy features first, but still start with a very thin foundation pass so the rest of the work lands on stable defaults and validation.
+Those are now shipped. The next big win is local email/password/TOTP auth, but only if it lands as a coherent subsystem with storage/test discipline rather than another layer of helpers.
 
 | Order | Delivery Wave | Feature Bundle | Why This Order |
 |-------|---------------|----------------|----------------|
-| **0** | Validation | 5.1 Safari ITP A/B test | Validate the constraint before optimizing around it |
-| **0.5** | Foundation Mini-Wave | 3.1 + 3.3 + 3.4 zero-config defaults, startup summary, typed config validation | Thin safety pass before the cleanup-heavy auth primitives |
-| **1** | Route Protection | 3.7 + 3.7.1 `require_auth` plus section/file-route protection | Biggest immediate cleanup win for file-routed apps and templates |
-| **2** | Session Core | 1.1 + 3.7.2 session rotation, sign-in/sign-out/current-session helpers | Removes the most repetitive login/logout/cookie boilerplate |
-| **3** | Staged Auth | 3.7.3 challenge primitives for pending auth states | Unlocks password → TOTP, first-login setup, and step-up auth cleanly |
-| **4** | Internal Architecture Cleanup | 4.5 internal module split, storage contract, fallback semantics, and backend verification matrix | Pay down auth structural debt before more lifecycle and security features stack onto the current shape |
-| **5** | Session Lifecycle | 1.2 + 1.3 + 3.6 sliding sessions, max lifetime, presets | Hardens lifecycle rules after the core mechanics and architecture are stable |
-| **6** | OAuth Hardening + Observability | 2.1 + 3.5 refresh token rotation and auth health check | Tightens security posture and makes behavior inspectable |
-| **7** | Auto-Routes + UI Convenience | 3.2 + 3.8 auto-routes and login page generator | Helpful DX layer after the mechanics are already excellent |
-| **8** | Advanced Sessions | 4.1 + 4.2 + 4.3 + 4.4 device sessions, cascade revoke, suspicious activity, remember me | Differentiators layered onto a solid core |
-| **9** | Post-Cleanup Discipline | Phase 9 module-boundary enforcement and complexity budget | Prevent the architecture cleanup from eroding over time |
+| **0** | Validation | Safari ITP A/B validation | Validate the constraint before optimizing around it |
+| **0.5** | Foundation Mini-Wave | zero-config defaults, startup summary, typed config validation | Thin safety pass before cleanup-heavy auth primitives |
+| **1** | Route Protection | `require_auth` plus section/file-route protection | Biggest immediate cleanup win for file-routed apps and templates |
+| **2** | Session Core | session rotation, sign-in/sign-out/current-session helpers | Removes repetitive login/logout/cookie boilerplate |
+| **3** | Staged Auth | pending auth challenge primitives | Unlocks password → TOTP, first-login setup, and step-up auth cleanly |
+| **4** | Internal Architecture Cleanup | module split, storage contract, fallback semantics, backend contract matrix | Makes later auth features safer to build and review |
+| **5** | Session Lifecycle | sliding expiration, max lifetime, presets | Hardens lifecycle rules after core mechanics are stable |
+| **6** | OAuth Hardening + Observability | refresh token rotation and auth health diagnostics | Tightens security posture and production debuggability |
+| **7** | Auto-Routes + UI Convenience | configurable auth routes and login page generator | Improves DX without compromising app-owned UX |
+| **8** | Advanced Sessions Foundation | metadata/security-signal plumbing, remember-me plumbing | Establishes the data path for device sessions and security events |
+| **8.5** | Architecture Guardrails Preflight | Phase 10A/10B minimum guardrails before local-auth code | Prevents Phase 9 from re-growing the monolith |
+| **9** | First-Class Local Auth | local identity store, request-aware login, TOTP setup, password reset, template migration | Closes the biggest remaining real-app auth gap |
+| **10** | Ongoing Architecture Discipline | complexity budget, contract-test ratchet, periodic audits | Keeps `std/auth` excellent as features continue landing |
 
 ### Delivery Wave Deliverables
 
 #### Wave 0.5 — Foundation Mini-Wave
-**Ships:**
+**Shipped:**
 - production-safe default auth config
 - startup summary showing active auth config
 - typed config validation with actionable errors
 
-**Strong value:** creates a stable floor for the cleanup-heavy phases without spending a whole early phase on lower-leverage convenience work.
+**Value:** creates a stable floor for the cleanup-heavy phases without spending a whole early phase on lower-leverage convenience work.
 
 #### Wave 1 — Route Protection
-**Ships:**
+**Shipped:**
 - `require_auth()` middleware
 - path/subtree protection for file-routed apps
 - HTML redirect vs API `401` behavior
 - section-wide protection for things like `routes/admin/*`
 
-**Strong value:** apps stop re-implementing auth checks in every page handler.
+**Value:** apps stop re-implementing auth checks in every page handler.
 
 #### Wave 2 — Session Core
-**Ships:**
-- session ID rotation on successful auth
+**Shipped:**
+- session ID rotation on successful OAuth callback/session upgrade
 - `sign_in_session()`
 - `sign_out_session()`
 - `current_session()` / `current_user()`
 - shared cookie defaults and overrides
 
-**Strong value:** the most repetitive and mistake-prone login/logout/cookie code disappears.
+**Follow-up:** local auth should use a request-aware sign-in path rather than relying on the existing request-less `sign_in_session()` semantics.
+
+**Value:** the most repetitive and mistake-prone login/logout/cookie code disappears.
 
 #### Wave 3 — Staged Auth
-**Ships:**
+**Shipped:**
 - `begin_auth_challenge()`
 - `current_auth_challenge()`
 - `complete_auth_challenge()`
 - `cancel_auth_challenge()`
 - one-time, TTL-bound pending auth state distinct from real sessions
 
-**Strong value:** multi-step auth becomes a normal pattern instead of ad hoc glue code.
+**Value:** multi-step auth becomes a normal pattern instead of ad hoc glue code.
 
 #### Wave 4 — Internal Architecture Cleanup
-**Ships:**
+**Shipped:**
 - module split into coherent auth internals
-- documented fallback/error semantics
+- documented fallback/error semantics for existing state families
 - internal storage contract across sessions/challenges/states/tokens
 - backend contract-test harness + env-gated Postgres/Redis verification
 
-**Strong value:** this is the quality wave that makes the next auth features safer to build instead of more expensive every time.
+**Follow-up:** split storage further before adding local-auth durable record families.
+
+**Value:** makes the next auth features safer to build instead of more expensive every time.
 
 #### Wave 5 — Session Lifecycle
-**Ships:**
+**Shipped:**
 - sliding expiration
 - absolute max lifetime
-- ergonomic presets (`strict`, `balanced`, `relaxed`, etc.)
+- lifecycle presets (`consumer`, `admin`, `internal`, `strict`)
+- preset + override merge
+- cookie refresh alignment for built-in/auth-enforced response paths
 
-**Current status:** Wave 5B added lifecycle presets (`consumer`, `admin`, `internal`, `strict`), preset+override merge, preset-string `enable_auth(...)` input support, and cookie refresh alignment for the built-in/auth-enforced response paths. Phase 5 is complete.
-
-**Strong value:** apps get secure lifecycle behavior without each team inventing different timeout logic.
+**Value:** apps get secure lifecycle behavior without each team inventing different timeout logic.
 
 #### Wave 6 — OAuth Hardening + Observability
-**Ships:**
-- refresh token rotation
+**Shipped:**
+- refresh token rotation/preservation semantics
+- safe refresh-token rotation logging
 - auth health check endpoint / diagnostics
 
-**Strong value:** security and operability improve together, which is the right trade for production auth.
+**Value:** security and operability improve together, which is the right trade for production auth.
 
 #### Wave 7 — Auto-Routes + UI Convenience
+**Shipped:**
+- configurable auth route prefixes
+- startup route logging
+- collision diagnostics
+- built-in login page generator
+
+**Remaining:** full auto-mount/override behavior and custom HTML override support.
+
+**Value:** fast starts for simple apps, while custom apps can still own their UX.
+
+#### Wave 8 — Advanced Sessions Foundation
+**Shipped:**
+- device/session metadata plumbing
+- keyed hashes for user-agent/IP security signals
+- remember-me flag storage plumbing
+- backend migration hardening for metadata fields
+
+**Remaining:** visible session-management APIs, behavioral remember-me TTLs, security event storage, suspicious-activity policy, and admin revocation APIs.
+
+**Value:** moves `std/auth` from solid to category-leading, provided the plumbing is turned into product behavior in later slices.
+
+#### Wave 8.5 — Architecture Guardrails Preflight
+**Ships before Phase 9 implementation:**
+- auth contributor/review guidance
+- storage/module ownership decision for local auth
+- contract-test ratchet for new auth record families
+- local-auth fallback/error policy
+
+**Value:** prevents the local-auth wave from undoing the architecture cleanup.
+
+#### Wave 9 — First-Class Local Auth
 **Ships:**
-- auto-mounted auth routes
-- optional login page generator and convenience UI helpers
+- local identity and credential store
+- request-aware email/password sign-in
+- staged first-login / forced-password-change / TOTP enrollment
+- password reset token lifecycle
+- local-auth backend contract tests
+- template migration away from custom local auth persistence
 
-**Strong value:** fast starts for simple apps, while custom apps can still own their UX.
+**Value:** closes the gap between great auth primitives and great auth architecture.
 
-#### Wave 8 — Advanced Sessions
-**Ships:**
-- device-aware session tracking
-- revocation cascades
-- suspicious activity signals
-- remember-me semantics built on the hardened lifecycle model
+#### Wave 10 — Ongoing Architecture Discipline
+**Ships continuously:**
+- module-boundary enforcement
+- complexity budgets for `auth.rs` and `auth/storage.rs`
+- backend contract coverage for every new auth state type
+- periodic architecture audits and review-guidance updates
 
-**Strong value:** this is where `std/auth` moves from solid to category-leading.
-
-#### Wave 9 — Post-Cleanup Discipline
-**Ships:**
-- ongoing enforcement of module boundaries, complexity budget, and backend contract coverage for new auth work
-
-**Strong value:** protects the cleanup investment so auth does not slowly collapse back into a grab-bag implementation.
+**Value:** protects the cleanup/local-auth investment so `std/auth` stays understandable instead of becoming a heroic pile of security-sensitive features.
 
 ## Competitive Landscape
 
-| Feature | ntnt (today) | ntnt (this DD) | Auth.js v5 | Lucia v3 | Laravel Sanctum | Django Auth |
+This table tracks the intended competitive posture after the v0.4.9 auth work and the DD-043/062 roadmap. "ntnt today" means current `main` behavior; "roadmap" means the target state after the remaining DD-043 waves.
+
+| Feature | ntnt today (v0.4.9) | ntnt roadmap | Auth.js v5 | Lucia v3 | Laravel Sanctum | Django Auth |
 |---------|:---:|:---:|:---:|:---:|:---:|:---:|
 | OAuth/OIDC | ✅ | ✅ | ✅ | ❌¹ | ❌² | ❌² |
 | PKCE | ✅ | ✅ | ✅ | ❌¹ | ❌ | ❌ |
@@ -625,30 +615,35 @@ So the plan should put those cleanup-heavy features first, but still start with 
 | Signed cookies | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
 | CSRF auto-protection | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
 | Token auto-refresh | ✅ | ✅ | ✅ | ❌¹ | ❌ | ❌ |
-| Session rotation | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ |
-| Sliding sessions | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Refresh token rotation | ❌ | ✅ | ✅ | ❌¹ | ❌ | ❌ |
-| Device-aware sessions | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Config presets | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Health check endpoint | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Suspicious activity | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| TOTP/MFA | ✅ | ✅ | ❌ | ❌¹ | ❌ | ❌³ |
-| ITP workaround | ✅ | ✅⁴ | ❌ | ❌ | ❌ | ❌ |
-| **Zero-config setup** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Auto route registration** | ❌ | ✅ | ✅⁵ | ❌ | ❌ | ✅ |
-| **Startup config summary** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Config validation** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Built-in route protection** | ❌ | ✅ | ✅⁶ | ❌ | ✅ | ✅ |
-| **Built-in login page** | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
-| **0 boilerplate files** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Session rotation | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ |
+| Sliding sessions | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Absolute max session lifetime | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Refresh token rotation/preservation | ✅ | ✅ | ✅ | ❌¹ | ❌ | ❌ |
+| Device/session metadata plumbing | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Device-session management APIs | ◐ | ✅ | ❌ | ❌ | ❌ | ◐ |
+| Config presets | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Health check endpoint | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Suspicious activity policy | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Behavioral remember-me TTL | ❌ | ✅ | ✅ | ◐ | ✅ | ✅ |
+| TOTP/MFA primitives | ✅ | ✅ | ❌ | ❌¹ | ❌ | ❌³ |
+| First-class local email/password/TOTP lifecycle | ❌ | ✅ | ❌ | ❌ | ◐ | ✅ |
+| Auth-owned password reset tokens | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Bootstrap admin local auth | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Safari ITP workaround | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Zero-config setup | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Auto route registration / auth route prefixing | ◐ | ✅ | ✅⁴ | ❌ | ❌ | ✅ |
+| Startup config summary | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Config validation | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Built-in route protection | ✅ | ✅ | ✅⁵ | ❌ | ✅ | ✅ |
+| Built-in login page | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| 0 boilerplate files for common local admin auth | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | One-line setup | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
 
-¹ Lucia is sessions-only — OAuth/tokens/MFA are app-level  
-² Requires additional packages (Socialite, django-allauth)  
-³ Requires django-otp  
-⁴ Pending A/B validation — may be removed if unnecessary  
-⁵ Auth.js uses file-system convention (`[...nextauth]/route.ts`) — auto but requires specific file structure  
-⁶ Auth.js middleware.ts works but is a separate file with its own config — not integrated into the auth call  
+¹ Lucia is sessions-only — OAuth/tokens/MFA are app-level
+² Requires additional packages (Socialite, django-allauth)
+³ Requires django-otp
+⁴ Auth.js uses file-system convention (`[...nextauth]/route.ts`) — auto but requires specific file structure
+⁵ Auth.js middleware.ts works but is a separate file with its own config — not integrated into the auth call
 
 ---
 
@@ -656,13 +651,18 @@ So the plan should put those cleanup-heavy features first, but still start with 
 
 We'll know this is "the best auth system ever made for any language" when:
 
-1. **Zero-config security:** `enable_auth([google])` with no options map is already production-safe
-2. **No CVE surface:** Every OWASP session management recommendation is implemented by default
-3. **RFC 9700 compliant:** Full OAuth security BCP compliance
-4. **Observable:** Developers can see exactly what auth is doing and whether it's configured correctly
-5. **Competitive table is all green:** Every feature other systems offer, plus device sessions, presets, health checks, and suspicious activity that nobody else has in a stdlib
-6. **< 30 seconds to auth:** From `ntnt new` to authenticated app in under 30 seconds of developer time
+1. **Zero-config security:** `enable_auth([google])` with no options map is already production-safe.
+2. **Common local auth is first-class:** a local admin/app flow with email/password, TOTP setup, password reset, bootstrap account creation, forced password change, and session creation does not require custom app-owned credential tables.
+3. **One auth system, not two:** OAuth, local credentials, staged setup, password reset, and future step-up flows all converge on the same session/cookie/lifecycle/security-event model.
+4. **Fail-closed durable credentials:** local credential, reset, and TOTP enrollment state never silently degrades to process memory in production when the configured durable backend fails.
+5. **OWASP session-management posture by default:** session rotation, idle timeout, absolute lifetime, secure cookies, CSRF posture, revocation, and fixation defenses are built in and hard to misconfigure.
+6. **OAuth security BCP alignment:** OAuth/OIDC flows use PKCE, state, nonce where appropriate, refresh-token rotation/preservation, safe diagnostics, and no token leakage in logs or health endpoints.
+7. **Observable without leaking secrets:** developers can see exactly what auth is doing and whether it is configured correctly, while diagnostics never expose token/secret material.
+8. **Backend behavior is contractual:** every auth state family has contract tests for memory/SQLite plus required Postgres/Redis coverage when relevant, including fallback/error behavior.
+9. **Architecture resists entropy:** new auth features have obvious module homes, storage contracts, generated docs, typechecker signatures, and review checklist coverage.
+10. **< 30 seconds to auth:** from `ntnt new` to authenticated app in under 30 seconds of developer time for OAuth or common local admin auth.
+11. **Competitive table is mostly green:** ntnt matches the mainstream auth systems on core capability and beats them on stdlib cohesion, observability, local-auth ergonomics, and boilerplate.
 
 ---
 
-*This is a living document. Update checkboxes as implementation progresses.*
+*This is a living document. Update checkboxes, roadmap status, and review guidance as implementation progresses.*
