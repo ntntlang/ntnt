@@ -67,6 +67,8 @@ DD-062 is the detailed child plan for DD-043 Phase 9.
 
 Current 0.4.9 baseline: the shared manual/staged session completion path is already request-aware. `sign_in_session(response, req, session, options?)` and `complete_auth_challenge(response, req, session?, options?)` rotate/migrate existing sessions and capture request-derived metadata. Local auth should consume that path rather than introduce its own session creation semantics.
 
+This is an intentional 0.4.9 pre-release API correction, not a compatibility surface to preserve. The migration path is explicit: insert the current route `req` as the second argument wherever old branch code called `sign_in_session(response, session, options?)`.
+
 | DD-043 Phase | DD-062 Section | Purpose |
 |---|---|---|
 | 9A — Architecture Preflight and Storage Boundary | Phase 0 | Prepare module/storage/test boundaries before adding durable local-auth state |

@@ -375,6 +375,8 @@ A later `enable_local_auth(...)` convenience wrapper is acceptable only if it de
 
 **Dependency already satisfied:** the shared manual/staged completion primitive is now request-aware via `sign_in_session(response, req, session, options?)` and `complete_auth_challenge(response, req, session?, options?)`. This phase should not invent a second session-completion path; it should build local credential verification and any higher-level local sign-in helper on that existing primitive.
 
+Because this lands before 0.4.9 is released, the old pre-release `sign_in_session(response, session, options?)` shape should not be kept as a compatibility shim. Callers must migrate by passing the route `req` as the second argument; otherwise local/manual auth would silently miss rotation, existing-session migration, and request metadata capture.
+
 - [ ] Add built-in email/password verification through `std/auth`
 - [ ] Use the existing request-aware session-completion primitive from the local sign-in path so it can rotate/migrate existing sessions and capture request metadata
 - [ ] Reuse the same session cookie, session TTL, sliding/max-lifetime, metadata, and revocation semantics as OAuth-backed sign-in

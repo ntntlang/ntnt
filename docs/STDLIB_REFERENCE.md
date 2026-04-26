@@ -2900,7 +2900,7 @@ sign_in_session(response: Response, req: Request, session: Map, options?: Map) -
 
 Persist a request-aware session and attach the auth cookie to an existing response.
 
-Use this after password, magic-link, or other non-OAuth login flows. The request argument lets `std/auth` rotate/migrate any existing session and capture the same device/IP/user-agent metadata used by OAuth callbacks. The session map must include `subject_id`, and may optionally include `provider`, `email`, `name`, `picture`, `claims`, `data`, or `raw`.
+Use this after password, magic-link, or other non-OAuth login flows. The request argument lets `std/auth` rotate/migrate any existing session and capture the same device/IP/user-agent metadata used by OAuth callbacks. If an existing session for the same user is rotated and the new session has no explicit `claims`/`data`, its session data is preserved. Cross-user sign-in always starts with only the provided session data. Migration note for 0.4.9 pre-release callers: the old `sign_in_session(response, session, options?)` shape is intentionally not supported; pass the current request as the second argument so metadata and session rotation are not silently skipped. The session map must include `subject_id`, and may optionally include `provider`, `email`, `name`, `picture`, `claims`, `data`, or `raw`.
 
 **Parameters:**
 
@@ -2916,6 +2916,10 @@ Use this after password, magic-link, or other non-OAuth login flows. The request
 ```ntnt
 sign_in_session(redirect("/admin"), req, map { "subject_id": user.id, "claims": app_claims_for_user(user) })  // Sign in and redirect
 ```
+
+**Errors:**
+
+- **TypeError**: request must be an HTTP request map — *Fix: Call sign_in_session(response, req, session, options?) from a route handler and pass the current req*
 
 **See also:** `sign_out_session`, `current_session`, `rotate_session`
 

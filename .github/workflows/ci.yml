@@ -87,6 +87,7 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_DB: ntnt_auth_test
+          POSTGRES_USER: postgres
           POSTGRES_PASSWORD: ntnt
         ports:
           - 5432:5432
@@ -124,8 +125,8 @@ jobs:
 
       - name: Run auth storage contract tests against Postgres and Redis
         run: |
-          cargo test --locked test_auth_storage_contract_postgres_round_trip_all_record_types -- --test-threads=1 --nocapture
-          cargo test --locked test_auth_storage_contract_redis_round_trip_all_record_types -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_auth_storage_contract_postgres_round_trip_all_record_types -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_auth_storage_contract_redis_round_trip_all_record_types -- --test-threads=1 --nocapture
         env:
           RUST_MIN_STACK: 8388608
           NTNT_AUTH_TEST_POSTGRES_URL: postgres://postgres:ntnt@localhost:5432/ntnt_auth_test
