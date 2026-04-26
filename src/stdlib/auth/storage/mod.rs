@@ -1,5 +1,11 @@
 use super::*;
 
+#[cfg(test)]
+mod local;
+
+#[cfg(test)]
+pub(super) use local::{local_auth_record_fallback_policy, LocalAuthRecordKind};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AuthStorageBackend {
     Memory,

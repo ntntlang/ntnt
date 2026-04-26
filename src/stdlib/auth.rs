@@ -5137,6 +5137,37 @@ mod tests {
     }
 
     #[test]
+    fn test_local_auth_durable_record_families_fail_closed_by_policy() {
+        use super::storage::{local_auth_record_fallback_policy, LocalAuthRecordKind};
+
+        for record_kind in [
+            LocalAuthRecordKind::Identity,
+            LocalAuthRecordKind::CredentialSecret,
+            LocalAuthRecordKind::TotpEnrollment,
+            LocalAuthRecordKind::PasswordResetToken,
+            LocalAuthRecordKind::BootstrapState,
+        ] {
+            let policy = local_auth_record_fallback_policy(record_kind);
+            assert!(
+                policy.store_failure_fails_closed,
+                "{record_kind:?} store failures must fail closed"
+            );
+            assert!(
+                policy.lookup_failure_fails_closed,
+                "{record_kind:?} lookup failures must fail closed"
+            );
+            assert!(
+                policy.update_failure_fails_closed,
+                "{record_kind:?} update/consume failures must fail closed"
+            );
+            assert!(
+                !policy.production_memory_fallback_allowed,
+                "{record_kind:?} must not allow production memory fallback"
+            );
+        }
+    }
+
+    #[test]
     fn test_auth_storage_contract_postgres_round_trip_all_record_types() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         let Some(store) = auth_test_postgres_store() else {
