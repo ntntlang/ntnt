@@ -3014,7 +3014,7 @@ user_sessions(req: Request) -> Result<Array<SessionInfo>, String>
 
 Get all active sessions for the current user.
 
-Returns an array of session info objects, each containing id, provider, created_at, expires_at, and is_current (boolean indicating if it's the current session). Useful for "manage your sessions" UI.
+Returns an array of session info objects, each containing id, provider, device_name (when captured), created_at, expires_at, and is_current (boolean indicating if it's the current session). Sensitive raw hashes are never exposed. Useful for "manage your sessions" UI.
 
 **Parameters:**
 
