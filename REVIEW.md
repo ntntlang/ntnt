@@ -51,6 +51,44 @@ Full skill with workflow, examples, and deep review techniques: see ntnt-code-re
 - `ntnt docs --generate` must be run after any stdlib change
 - Rustdoc comments must be updated when function behavior changes — stale docs mislead callers
 
+## Auth-Specific Guardrails
+
+Apply this section to any change touching `src/stdlib/auth.rs`, `src/stdlib/auth/**`, auth docs, auth generated docs, auth typechecker signatures, or auth tests. DD-043 and DD-062 are the current roadmap for the auth architecture.
+
+### Module Ownership
+- `src/stdlib/auth.rs` should stay focused on public API registration, shared surface types that cannot move yet, and minimal coordination glue. Do not add new domain logic there just because it is convenient.
+- Prefer focused internal modules for domain behavior: config, cookies, providers, OAuth, guards, routes, request helpers, sessions, storage, primitives, local auth, password reset, and TOTP enrollment.
+- If a new auth feature needs durable state, define the record family and storage owner before implementing helpers or routes.
+- Avoid hiding durable behavior in generic `data_json` payloads. Challenge `data_json` is acceptable for pending flow metadata, not long-lived credential/reset/TOTP enrollment state.
+
+### Storage and Fallback Semantics
+- Treat auth storage behavior as a compatibility surface. Every new auth record family needs explicit store/get/consume/update/delete/cleanup semantics.
+- Existing transient auth state may use documented memory fallback paths. Do not copy those semantics to durable credential state by default.
+- Durable local-auth state must fail closed in production: local identities, password hashes, password-reset tokens, TOTP enrollment state, bootstrap state, and account-state changes must not silently fall back to process memory when the configured backend fails.
+- One-time records (`OAuthState`, exchange tokens, auth challenges, future reset tokens) need atomic consume semantics per backend. Verify replay rejection.
+- Schema/migration code must surface real failures. Do not swallow migration errors that leave metadata/credential columns missing.
+
+### Session and Metadata Plumbing
+- Request-derived session metadata (`device_name`, `user_agent_hash`, `last_ip_hash`) must be captured, persisted, and round-tripped deliberately. If it is intentionally hidden from public APIs, document why.
+- Local/manual sign-in flows must not be weaker than OAuth callback flows. Successful local auth should rotate/migrate existing sessions, attach cookies through the shared cookie policy, and preserve request metadata.
+- Remember-me changes must cover the full path: request/config capture → OAuth/local pending state → session TTL selection → cookie Max-Age/Expires → tests.
+- Current-user helpers (`user_sessions(req)`, `logout_all(req, ...)`) are not the same as future admin/arbitrary-user APIs (`list_sessions(user_id)`, `revoke_session(session_id)`, `revoke_all_sessions(user_id)`). Keep docs and API names precise.
+
+### Auth Contract Tests
+- New auth persistence/state shapes must extend the backend contract harness in the same PR that introduces them.
+- Contract tests should assert every field that matters, not only IDs. For session metadata, assert `device_name`, `user_agent_hash`, `last_ip_hash`, and `remember_me` where applicable.
+- Cover memory and SQLite by default. Postgres/Redis tests may be env-gated locally, but CI must make skipped backend coverage visible rather than silently green.
+- For route protection, prefer at least one end-to-end ntnt/server test in addition to helper-level path matching.
+
+### Local Auth Review Checklist
+- Is local auth implemented as one subsystem under `std/auth`, not as disconnected helpers plus template-owned tables?
+- Are local credential/reset/TOTP stores auth-owned and fail-closed on backend errors?
+- Does local login use request-aware session completion instead of request-less `sign_in_session()` semantics?
+- Are reset tokens hash-stored, TTL-bound, one-time-use, and replay-tested?
+- Is TOTP enrollment durable account state, not only pending challenge metadata?
+- Is the email/SMS delivery boundary explicit (`std/auth` issues/validates tokens and URLs; apps/plugins deliver messages)?
+- Does the template integration delete custom auth persistence instead of wrapping it?
+
 ## Skip
 - Formatting and whitespace (cargo fmt enforces this)
 - Test file organization
