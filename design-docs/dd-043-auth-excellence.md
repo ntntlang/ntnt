@@ -9,9 +9,21 @@
 
 ## Vision
 
-`std/auth` should be the auth system that makes developers say "I don't need a third-party auth service." One import, one function call, and you get security that matches or exceeds Auth0, Firebase Auth, Clerk, and Lucia — without the vendor lock-in, pricing tiers, or complexity.
+`std/auth` should be the auth layer that makes app developers stop rebuilding security-sensitive auth plumbing. Its job is not to become a hosted identity product, a profile system, or an opinionated app-auth framework. It should provide standards-based primitives, safe defaults, durable storage contracts, request-aware session completion, and thin reference flows that apps can compose without losing the secure path.
 
-**Design principle:** Secure by default, simple to use, hard to misconfigure. Every feature should either be automatic (the developer never thinks about it) or one line of config (the developer opts in explicitly). No feature should require the developer to understand the security implications — the safe path should be the easy path.
+**Design principle:** language-level auth should make the secure primitive the obvious primitive. OAuth callbacks, local credentials, staged setup, password reset, and future step-up flows should all converge on the same session/cookie/lifecycle/storage semantics. Optional reference routes/pages may exist, but business policy remains app-owned.
+
+### Ownership Boundary
+
+Draw this line before adding auth surface area:
+
+| Layer | Owned by `std/auth` | Not owned by `std/auth` |
+|---|---|---|
+| **Core primitives** | OAuth/OIDC, signed cookies, server-side sessions, CSRF, route protection, staged auth challenges, TOTP verification/enrollment primitives, local credential/reset/TOTP storage contracts, request-aware session completion, diagnostics, backend contract tests | App-specific onboarding, invite/approval rules, profile fields, orgs, permissions models, copy/design decisions |
+| **Reference flows** | Optional built-in login/reset/setup/bootstrap routes and minimal default pages that compose the primitives | Mandatory UI structure, product-specific account-management screens, hosted-dashboard semantics |
+| **App policy** | Explicit hooks/options that feed claims/session data into the shared session completion path | Static universal roles/claims baked into provider config, hidden suspicious-activity policy engines, email/SMS delivery choices |
+
+If a capability is security-sensitive lifecycle state that every app otherwise reimplements badly, it belongs in `std/auth` primitives. If it is product/business behavior, `std/auth` should expose a hook or reference flow and get out of the way.
 
 ---
 
@@ -105,7 +117,7 @@ This is the single source of truth for how we should build `std/auth` forward. T
 - [x] Session store migration implemented in Rust for Redis/Postgres/SQLite backends
 - [x] Keep `migrate_session(old_id, new_id)` internal to Rust/session-store code
 - [x] Public ntnt API exposes only high-level session helpers, not low-level store migration primitives (`sign_in_session`, `rotate_session`, `sign_out_session`, `current_session`, `current_user`)
-- [x] `sign_in_session()` helper that persists session + attaches cookie
+- [x] Request-aware `sign_in_session(response, req, session, options?)` helper that persists session + attaches cookie while rotating/migrating existing sessions and capturing request metadata
 - [x] `sign_out_session()` helper that revokes session + clears cookie
 - [x] `current_session()` / `current_user()` helper for request-time lookups
 - [x] Shared auth cookie defaults with per-app overrides
@@ -116,9 +128,9 @@ This is the single source of truth for how we should build `std/auth` forward. T
 
 ```ntnt
 let resp = redirect("/admin")
-return sign_in_session(resp, map {
+return sign_in_session(resp, req, map {
     "subject_id": user["id"],
-    "claims": map { "role": "admin" }
+    "claims": app_claims_for_user(user)
 })
 
 let session = current_session(req)
@@ -161,7 +173,7 @@ return begin_auth_challenge(resp, map {
 let challenge = current_auth_challenge(req)
 let resp = redirect("/admin")
 return complete_auth_challenge(resp, req, map {
-    "claims": map { "role": "admin" }
+    "claims": app_claims_for_user(user)
 })
 ```
 
@@ -304,29 +316,40 @@ That is the current local-auth subsystem gap.
 
 **Architectural standard:** a template app should not need a custom `lib/admin_db.tnt` mini-auth subsystem to get excellent email/password/TOTP auth. The template should mostly configure `std/auth`, provide custom views/copy if it wants them, and move on.
 
-**Preferred public API direction:** local auth should be a first-class provider variant consumed by the existing `enable_auth(...)` entrypoint, not a separate parallel auth system.
+**Preferred public API direction:** local auth should be a first-class primitive family that feeds the existing `enable_auth(...)` and request-aware session-completion path, not a bundled app-auth product. Config may enable reference routes, but core local credential behavior should remain decomposed enough that custom UI does not require custom persistence.
 
 ```ntnt
-import { enable_auth, local_auth } from "std/auth"
-import { get_env } from "std/env"
+import {
+    enable_auth,
+    local_credentials,
+    verify_local_password,
+    sign_in_session,
+} from "std/auth"
+import { parse_form, redirect } from "std/http/server"
 
-enable_auth([
-    local_auth(map {
-        "email_password": true,
+enable_auth([], "admin", map {
+    "local_credentials": local_credentials(map {
+        "identifier": "email",
         "totp": true,
-        "password_reset": true,
-        "bootstrap_email": get_env("ADMIN_BOOTSTRAP_EMAIL"),
-        "bootstrap_password": get_env("ADMIN_BOOTSTRAP_PASSWORD"),
-        "claims": map { "role": "admin" }
-    })
-], "admin", map {
+        "password_reset": true
+    }),
     "login_page": false,
     "success_url": "/admin",
     "failure_url": "/admin/login"
 })
+
+fn login(req) {
+    let form = parse_form(req)
+    let verified = verify_local_password(form["email"] ?? "", form["password"] ?? "")?
+    return sign_in_session(redirect("/admin"), req, map {
+        "subject_id": verified["subject_id"],
+        "email": verified["email"],
+        "claims": app_claims_for_local_user(verified)
+    })
+}
 ```
 
-A later `enable_local_auth(...)` convenience wrapper is acceptable if it simply delegates into the same underlying provider/config path. The implementation must not become two auth systems.
+A later `enable_local_auth(...)` convenience wrapper is acceptable only if it delegates into the same primitive provider/config path and keeps policy hooks explicit. It must not become two auth systems or bake roles, onboarding, email delivery, or account UI into `std/auth`.
 
 #### Phase 9A — Architecture Preflight and Storage Boundary
 - [ ] Split or carve `auth/storage.rs` enough that new local-auth state does not get buried in the existing storage monolith
@@ -340,7 +363,7 @@ A later `enable_local_auth(...)` convenience wrapper is acceptable if it simply 
 
 #### Phase 9B — Local Identity and Credential Store
 - [ ] Add first-class local credential storage owned by `std/auth`
-- [ ] Make **email** the canonical local identifier, with documented normalization rules
+- [ ] Support a generic local subject + identifier model; ship email as the first documented identifier preset with normalization rules, not as the only possible local-auth identity shape
 - [ ] Store password hashes in auth-owned tables rather than pushing that responsibility to apps
 - [ ] Define a lean durable local-user/account shape: identity + auth state first, not a full profile platform
 - [ ] Support account states needed by real flows: bootstrap/pending setup/active/disabled/locked/password-change-required
@@ -509,7 +532,7 @@ Those are now shipped. The next big win is local email/password/TOTP auth, but o
 - `current_session()` / `current_user()`
 - shared cookie defaults and overrides
 
-**Follow-up:** local auth should use a request-aware sign-in path rather than relying on the existing request-less `sign_in_session()` semantics.
+**Follow-up:** local auth should use the request-aware `sign_in_session(response, req, session, options?)` path or a higher-level primitive that delegates to it, not create a second session-completion model.
 
 **Value:** the most repetitive and mistake-prone login/logout/cookie code disappears.
 

@@ -83,7 +83,7 @@ Apply this section to any change touching `src/stdlib/auth.rs`, `src/stdlib/auth
 ### Local Auth Review Checklist
 - Is local auth implemented as one subsystem under `std/auth`, not as disconnected helpers plus template-owned tables?
 - Are local credential/reset/TOTP stores auth-owned and fail-closed on backend errors?
-- Does local login use request-aware session completion instead of request-less `sign_in_session()` semantics?
+- Does local login use request-aware `sign_in_session(response, req, session, options?)` or the same internal completion primitive instead of creating a weaker parallel session path?
 - Are reset tokens hash-stored, TTL-bound, one-time-use, and replay-tested?
 - Is TOTP enrollment durable account state, not only pending challenge metadata?
 - Is the email/SMS delivery boundary explicit (`std/auth` issues/validates tokens and URLs; apps/plugins deliver messages)?

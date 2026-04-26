@@ -40,7 +40,7 @@ A template app should not need a custom `lib/admin_db.tnt` auth subsystem just t
 
 ## Goal
 
-Make **local email/password/TOTP auth** a first-class `std/auth` path so apps configure it instead of rebuilding it.
+Make **local email/password/TOTP auth** a first-class `std/auth` path so apps configure or call primitives instead of rebuilding security-sensitive lifecycle state.
 
 Target outcome:
 
@@ -51,7 +51,13 @@ Target outcome:
 - no request-less local sign-in path that misses session rotation or request metadata
 - template becomes mostly auth config + views/copy + app-specific authorization policy
 
-This DD is not about turning `std/auth` into a hosted identity product. It is about making the boring, security-sensitive local credential lifecycle native, coherent, and hard to misuse.
+This DD is not about turning `std/auth` into a hosted identity product or a universal app-account framework. It draws a hard boundary:
+
+| Layer | Belongs in `std/auth` | Belongs in the app/plugin |
+|---|---|---|
+| **Primitives** | local credential records, password verification orchestration, reset-token issue/consume, TOTP enrollment state, staged auth continuations, request-aware session completion, backend contracts | profile fields, org membership, billing/account management, invite/approval policy |
+| **Reference flows** | optional bootstrap/login/reset/setup routes and minimal pages built from the primitives | custom UI, copy, email/SMS delivery, onboarding decisions |
+| **Policy hooks** | explicit hooks/options for deriving session data/claims and choosing reset/setup consequences | static universal roles/claims embedded in local-auth config, hidden risk-policy engines |
 
 ---
 
@@ -85,45 +91,59 @@ DD-062 is the detailed child plan for DD-043 Phase 9.
 
 ## Preferred Developer Experience
 
-Primary shape: local auth is a first-class provider variant consumed by `enable_auth(...)`.
+Primary shape: local auth is a primitive family used by `enable_auth(...)` for shared config/diagnostics and by request-aware helpers for custom UI. Reference routes can be generated from the same primitives, but the primitives must remain usable without accepting built-in UI or app policy.
 
 ```ntnt
-import { enable_auth, local_auth } from "std/auth"
-import { get_env } from "std/env"
+import {
+    enable_auth,
+    local_credentials,
+    verify_local_password,
+    sign_in_session,
+} from "std/auth"
+import { parse_form, redirect } from "std/http/server"
 
-enable_auth([
-    local_auth(map {
-        "email_password": true,
+enable_auth([], "admin", map {
+    "local_credentials": local_credentials(map {
+        "identifier": "email",
         "totp": true,
-        "password_reset": true,
-        "bootstrap_email": get_env("ADMIN_BOOTSTRAP_EMAIL"),
-        "bootstrap_password": get_env("ADMIN_BOOTSTRAP_PASSWORD"),
-        "claims": map { "role": "admin" }
-    })
-], "admin", map {
+        "password_reset": true
+    }),
     "login_page": false,
     "success_url": "/admin",
     "failure_url": "/admin/login"
 })
+
+fn login(req) {
+    let form = parse_form(req)
+    let verified = verify_local_password(form["email"] ?? "", form["password"] ?? "")?
+    return sign_in_session(redirect("/admin"), req, map {
+        "subject_id": verified["subject_id"],
+        "email": verified["email"],
+        "claims": app_claims_for_local_user(verified)
+    })
+}
 ```
 
 Rationale:
 
-- Developers should still have one obvious auth entrypoint: `enable_auth(...)`.
-- Local auth should share route prefixes, cookies, sessions, lifecycle presets, protected paths, health diagnostics, and startup summaries.
-- Internally, local auth should be a distinct provider/config variant, not a fake OAuth provider.
+- Developers should still have one obvious auth configuration entrypoint: `enable_auth(...)`.
+- Local credentials should share route prefixes, cookies, sessions, lifecycle presets, protected paths, health diagnostics, startup summaries, and backend contract tests.
+- `sign_in_session(response, req, session, options?)` is intentionally request-aware so local/manual auth gets OAuth-equivalent session rotation and request metadata capture.
+- Claims/session data should come from app hooks or explicit session-completion data, not static authorization policy buried in credential config.
+- Email is the first identifier preset, not the universal identity model.
 
 Acceptable later convenience:
 
 ```ntnt
 enable_local_auth(map {
     "preset": "admin",
+    "identifier": "email",
     "totp": true,
     "password_reset": true
 })
 ```
 
-If added, this must delegate to the same underlying local-auth provider/config path. It must not become a parallel auth subsystem.
+If added, this must delegate to the same underlying primitive/config path. It must not become a parallel auth subsystem or quietly own signup policy, onboarding, email delivery, profile data, roles/orgs, or account-management UI.
 
 ---
 
@@ -133,8 +153,9 @@ Names are still draft, but the capability shape should be stable.
 
 ### Configuration
 
-- `local_auth(config: Map) -> AuthProvider`
-- local provider accepted inside `enable_auth([providers...], preset_or_options?, options?)`
+- `local_credentials(config: Map) -> LocalCredentialConfig` (or equivalent final name)
+- local credential config accepted through `enable_auth(..., options)` so it shares auth diagnostics, stores, route prefixes, protected-path behavior, and lifecycle presets
+- optional reference route/page generation can wrap the same primitive config, but custom UI must call the same verification/session-completion helpers
 - startup summary includes local-auth status without exposing secrets
 - `/auth/health` reports local-auth configuration posture without exposing hashes, reset tokens, TOTP secrets, or bootstrap password material
 
@@ -142,13 +163,13 @@ Names are still draft, but the capability shape should be stable.
 
 Possible helpers; exact names can change during implementation:
 
-- `local_user(email) -> Result<LocalUser?, String>`
-- `create_local_user(email, options) -> Result<LocalUser, String>`
-- `disable_local_user(email_or_id) -> Result<Unit, String>`
-- `require_password_change(email_or_id) -> Result<Unit, String>`
-- `set_local_password(email_or_id, new_password, options?) -> Result<Unit, String>`
+- `local_user(identifier) -> Result<LocalUser?, String>`
+- `create_local_user(identifier, options) -> Result<LocalUser, String>`
+- `disable_local_user(identifier_or_id) -> Result<Unit, String>`
+- `require_password_change(identifier_or_id) -> Result<Unit, String>`
+- `set_local_password(identifier_or_id, new_password, options?) -> Result<Unit, String>`
 
-These should be intentionally small. App profile and authorization data should remain app-owned unless it is needed to produce session claims.
+These should be intentionally small. App profile and authorization data should remain app-owned. Session claims should be supplied through explicit hooks/session-completion data, not static universal `claims` config on the credential provider.
 
 ### Local sign-in/session helpers
 
@@ -170,7 +191,7 @@ It should return either:
 - a staged-auth continuation response for TOTP/setup/password-change, or
 - a safe auth error result
 
-It must not be a thin wrapper around the current request-less `sign_in_session(response, session, options?)` path unless that path grows request-aware rotation/metadata behavior.
+It must delegate to request-aware `sign_in_session(response, req, session, options?)` or the same internal session-completion primitive so local login receives OAuth-equivalent rotation, metadata capture, cookie, TTL, and lifecycle behavior.
 
 ### Password reset helpers
 
@@ -216,9 +237,10 @@ Keep this lean. The goal is auth state, not profiles.
 
 Minimum durable shape:
 
-- `id` — stable internal local user id
-- `email` — canonical local identifier
-- `email_normalized` — normalized lookup key
+- `id` — stable internal local subject id
+- `identifier_kind` — e.g. `email`; extensible beyond the first preset
+- `identifier` — canonical display/source identifier for the chosen kind
+- `identifier_normalized` — normalized lookup key for the chosen kind
 - `created_at`
 - `updated_at`
 - `state` — `bootstrap`, `pending_setup`, `active`, `disabled`, `locked`, `password_change_required`
