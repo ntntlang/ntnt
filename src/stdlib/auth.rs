@@ -88,7 +88,10 @@ pub use request_helpers::{
     auth_challenge_to_value, get_auth_challenge_id_from_request, get_session_id_from_request,
     session_to_value, user_to_value,
 };
-use request_helpers::{get_host_and_proto, get_user_from_request};
+use request_helpers::{
+    get_host_and_proto, get_user_from_request, request_device_name, request_ip_hash,
+    request_user_agent_hash,
+};
 pub use routes::{
     handle_auth_callback, handle_auth_health, handle_auth_index, handle_auth_logout,
     handle_auth_protect, handle_auth_start,
@@ -628,6 +631,95 @@ static AUTH_PROTECTED_PATHS: std::sync::LazyLock<Arc<Mutex<Vec<String>>>> =
 
 pub fn get_auth_config() -> Option<AuthConfig> {
     AUTH_CONFIG.lock().unwrap().clone()
+}
+
+fn validate_http_request_arg(function_name: &str, req: &Value) -> Result<()> {
+    let req_map = match req {
+        Value::Map(map) => map,
+        other => {
+            return Err(IntentError::type_error(format!(
+                "[auth] {}() request must be an HTTP request map, got {}",
+                function_name,
+                other.type_name()
+            )))
+        }
+    };
+
+    for key in ["method", "path"] {
+        match req_map.get(key) {
+            Some(Value::String(_)) => {}
+            Some(other) => {
+                return Err(IntentError::type_error(format!(
+                    "[auth] {}() request.{} must be a string, got {}",
+                    function_name,
+                    key,
+                    other.type_name()
+                )))
+            }
+            None => {
+                return Err(IntentError::type_error(format!(
+                    "[auth] {}() request must include {}",
+                    function_name, key
+                )))
+            }
+        }
+    }
+
+    match req_map.get("headers") {
+        Some(Value::Map(_)) | None => Ok(()),
+        Some(other) => Err(IntentError::type_error(format!(
+            "[auth] {}() request.headers must be a map, got {}",
+            function_name,
+            other.type_name()
+        ))),
+    }
+}
+
+fn prepare_request_aware_manual_session(req: &Value, mut session: Session) -> Session {
+    session.device_name = request_device_name(req);
+    session.user_agent_hash = request_user_agent_hash(req);
+    session.last_ip_hash = request_ip_hash(req);
+    session
+}
+
+fn persist_manual_session_record(req: &Value, mut session: Session) -> Result<()> {
+    if let Some(existing_session_id) = get_session_id_from_request(req) {
+        if let Some(existing_session) = get_session_by_id(&existing_session_id) {
+            if existing_session_id != session.id {
+                if existing_session.user_id == session.user_id
+                    && session.data_json == "{}"
+                    && existing_session.data_json != "{}"
+                {
+                    session.data_json = existing_session.data_json.clone();
+                }
+                migrate_session(&existing_session_id, &session)
+                    .map_err(IntentError::runtime_error)?;
+            } else {
+                store_session(session);
+            }
+        } else {
+            store_session(session);
+        }
+    } else {
+        store_session(session);
+    }
+
+    Ok(())
+}
+
+fn persist_request_aware_manual_session(
+    response: &Value,
+    req: &Value,
+    session: Session,
+    options: Option<&HashMap<String, Value>>,
+    config: &AuthConfig,
+) -> Result<Value> {
+    let session = prepare_request_aware_manual_session(req, session);
+    let cookie = build_signed_session_cookie(config, &session.id, options)
+        .map_err(IntentError::type_error)?;
+    let response = add_set_cookie_header(response, &cookie).map_err(IntentError::type_error)?;
+    persist_manual_session_record(req, session)?;
+    Ok(response)
 }
 
 pub fn init() -> HashMap<String, Value> {
@@ -1592,7 +1684,7 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also begin_auth_challenge, current_auth_challenge, cancel_auth_challenge, sign_in_session
     // @since v0.4.9
     // @tags #auth, #session, #mfa
-    // @example complete_auth_challenge(redirect("/admin"), req, map { "claims": map { "role": "admin" } }) ~ "Upgrade staged auth into a session"
+    // @example complete_auth_challenge(redirect("/admin"), req, map { "claims": app_claims_for_user(user) }) ~ "Upgrade staged auth into a session"
     module.insert(
         "complete_auth_challenge".to_string(),
         Value::NativeFunction {
@@ -1614,6 +1706,8 @@ pub fn init() -> HashMap<String, Value> {
                             .to_string(),
                     )
                 })?;
+
+                validate_http_request_arg("complete_auth_challenge", &args[1])?;
 
                 let session_spec = match args.get(2) {
                     Some(Value::Map(map)) => map.clone(),
@@ -1716,6 +1810,7 @@ pub fn init() -> HashMap<String, Value> {
                     .min(config.max_session_ttl.unwrap_or(session_ttl));
                 let session = create_manual_session(&merged_session, effective_session_ttl)
                     .map_err(IntentError::type_error)?;
+                let session = prepare_request_aware_manual_session(&args[1], session);
                 let session_cookie =
                     build_signed_session_cookie(&config, &session.id, options.as_ref())
                         .map_err(IntentError::type_error)?;
@@ -1735,7 +1830,7 @@ pub fn init() -> HashMap<String, Value> {
                     ));
                 }
 
-                store_session(session);
+                persist_manual_session_record(&args[1], session)?;
                 Ok(response)
             },
         },
@@ -2117,8 +2212,9 @@ pub fn init() -> HashMap<String, Value> {
     // Get all active sessions for the current user.
     //
     // Returns an array of session info objects, each containing id, provider,
-    // created_at, expires_at, and is_current (boolean indicating if it's the
-    // current session). Useful for "manage your sessions" UI.
+    // device_name (when captured), created_at, expires_at, and is_current
+    // (boolean indicating if it's the current session). Sensitive raw hashes are
+    // never exposed. Useful for "manage your sessions" UI.
     // @param req The HTTP request object
     // @returns Result containing array of session info, or error
     // @see_also logout_all, get_session
@@ -2154,6 +2250,12 @@ pub fn init() -> HashMap<String, Value> {
                                         "provider".to_string(),
                                         Value::String(si.provider.clone()),
                                     );
+                                    if let Some(device_name) = &si.device_name {
+                                        map.insert(
+                                            "device_name".to_string(),
+                                            Value::String(device_name.clone()),
+                                        );
+                                    }
                                     map.insert("created_at".to_string(), Value::Int(si.created_at));
                                     map.insert("expires_at".to_string(), Value::Int(si.expires_at));
                                     map.insert(
@@ -3634,31 +3736,42 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt sign_in_session
     // @module std/auth
-    // @signature sign_in_session(response: Response, session: Map, options?: Map) -> Response
-    // Persist a session and attach the auth cookie to an existing response.
+    // @signature sign_in_session(response: Response, req: Request, session: Map, options?: Map) -> Response
+    // Persist a request-aware session and attach the auth cookie to an existing response.
     //
     // Use this after password, magic-link, or other non-OAuth login flows. The
-    // session map must include `subject_id`, and may optionally include `provider`,
-    // `email`, `name`, `picture`, `claims`, `data`, or `raw`.
+    // request argument lets `std/auth` rotate/migrate any existing session and
+    // capture the same device/IP/user-agent metadata used by OAuth callbacks.
+    // If an existing session for the same user is rotated and the new session
+    // has no explicit `claims`/`data`, its session data is preserved. Cross-user
+    // sign-in always starts with only the provided session data.
+    // Migration note for 0.4.9 pre-release callers: the old
+    // `sign_in_session(response, session, options?)` shape is intentionally not
+    // supported; pass the current request as the second argument so metadata and
+    // session rotation are not silently skipped.
+    // The session map must include `subject_id`, and may optionally include
+    // `provider`, `email`, `name`, `picture`, `claims`, `data`, or `raw`.
     // @param response The Response map to attach the session cookie to
+    // @param req The current HTTP request
     // @param session Session data map, including required `subject_id`
     // @param options Optional map with `session_ttl` and cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
     // @returns Response with a persisted session and Set-Cookie header
+    // @error TypeError ~ "request must be an HTTP request map" fix: "Call sign_in_session(response, req, session, options?) from a route handler and pass the current req"
     // @see_also sign_out_session, current_session, rotate_session
     // @since v0.4.9
     // @tags #auth, #session
-    // @example sign_in_session(redirect("/admin"), map { "subject_id": user.id, "claims": map { "role": "admin" } }) ~ "Sign in and redirect"
+    // @example sign_in_session(redirect("/admin"), req, map { "subject_id": user.id, "claims": app_claims_for_user(user) }) ~ "Sign in and redirect"
     module.insert(
         "sign_in_session".to_string(),
         Value::NativeFunction {
             name: "sign_in_session".to_string(),
-            arity: 2,
-            max_arity: 3,
+            arity: 3,
+            max_arity: 4,
             requires: None,
             func: |args| {
-                if args.len() < 2 || args.len() > 3 {
+                if args.len() < 3 || args.len() > 4 {
                     return Err(IntentError::type_error(
-                        "[auth] sign_in_session() requires response, session, and optional options"
+                        "[auth] sign_in_session() requires response, request, session, and optional options"
                             .to_string(),
                     ));
                 }
@@ -3670,7 +3783,9 @@ pub fn init() -> HashMap<String, Value> {
                     )
                 })?;
 
-                let session_spec = match &args[1] {
+                validate_http_request_arg("sign_in_session", &args[1])?;
+
+                let session_spec = match &args[2] {
                     Value::Map(map) => map.clone(),
                     other => {
                         return Err(IntentError::type_error(format!(
@@ -3680,7 +3795,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                let options = match args.get(2) {
+                let options = match args.get(3) {
                     Some(Value::Map(map)) => Some(map.clone()),
                     Some(other) => {
                         return Err(IntentError::type_error(format!(
@@ -3706,15 +3821,14 @@ pub fn init() -> HashMap<String, Value> {
                     session_ttl.min(config.max_session_ttl.unwrap_or(session_ttl));
                 let session = create_manual_session(&session_spec, effective_session_ttl)
                     .map_err(IntentError::type_error)?;
-                let session_id = session.id.clone();
 
-                let cookie = build_signed_session_cookie(&config, &session_id, options.as_ref())
-                    .map_err(IntentError::type_error)?;
-                let response =
-                    add_set_cookie_header(&args[0], &cookie).map_err(IntentError::type_error)?;
-
-                store_session(session);
-                Ok(response)
+                persist_request_aware_manual_session(
+                    &args[0],
+                    &args[1],
+                    session,
+                    options.as_ref(),
+                    &config,
+                )
             },
         },
     );
@@ -4208,13 +4322,39 @@ mod tests {
     }
 
     fn request_with_cookies(cookies: &[&str]) -> Value {
-        Value::Map(HashMap::from([(
-            "headers".to_string(),
-            Value::Map(HashMap::from([(
-                "cookie".to_string(),
-                Value::String(cookies.join("; ")),
-            )])),
-        )]))
+        Value::Map(HashMap::from([
+            ("method".to_string(), Value::String("GET".to_string())),
+            ("path".to_string(), Value::String("/admin".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "cookie".to_string(),
+                    Value::String(cookies.join("; ")),
+                )])),
+            ),
+        ]))
+    }
+
+    fn request_with_cookie_and_security_headers(cookie: &str) -> Value {
+        Value::Map(HashMap::from([
+            ("method".to_string(), Value::String("GET".to_string())),
+            ("path".to_string(), Value::String("/admin".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([
+                    ("cookie".to_string(), Value::String(cookie.to_string())),
+                    (
+                        "user-agent".to_string(),
+                        Value::String("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15".to_string()),
+                    ),
+                    (
+                        "x-forwarded-for".to_string(),
+                        Value::String("203.0.113.10".to_string()),
+                    ),
+                ])),
+            ),
+            ("ip".to_string(), Value::String("198.51.100.20".to_string())),
+        ]))
     }
 
     fn init_test_auth(session_store: SessionStore) {
@@ -4268,13 +4408,16 @@ mod tests {
         };
         store_session_record(&session)
             .unwrap_or_else(|e| panic!("{} session store should succeed: {}", label, e));
+        let stored_session = get_session_record(&session.id)
+            .unwrap_or_else(|e| panic!("{} session lookup should succeed: {}", label, e))
+            .unwrap_or_else(|| panic!("{} session should exist", label));
+        assert_eq!(stored_session.id, session.id);
+        assert_eq!(stored_session.device_name.as_deref(), Some("SQLite Mac"));
         assert_eq!(
-            get_session_record(&session.id)
-                .unwrap_or_else(|e| panic!("{} session lookup should succeed: {}", label, e))
-                .unwrap_or_else(|| panic!("{} session should exist", label))
-                .id,
-            session.id
+            stored_session.user_agent_hash.as_deref(),
+            Some("ua-sqlite-1")
         );
+        assert_eq!(stored_session.last_ip_hash.as_deref(), Some("ip-sqlite-1"));
         update_session_record_data(&session.id, r#"{"role":"admin"}"#)
             .unwrap_or_else(|e| panic!("{} session data update should succeed: {}", label, e));
         update_session_record_tokens(
@@ -4306,6 +4449,12 @@ mod tests {
         );
         assert_eq!(updated_session.token_expires_at, Some(now + 120));
         assert_eq!(updated_session.expires_at, now + 600);
+        assert_eq!(updated_session.device_name.as_deref(), Some("SQLite Mac"));
+        assert_eq!(
+            updated_session.user_agent_hash.as_deref(),
+            Some("ua-sqlite-1")
+        );
+        assert_eq!(updated_session.last_ip_hash.as_deref(), Some("ip-sqlite-1"));
 
         let refreshable_session = Session {
             id: format!("session-{}-refreshable", label),
@@ -4359,16 +4508,16 @@ mod tests {
         assert!(get_session_record(&session.id)
             .unwrap_or_else(|e| panic!("{} old session lookup should succeed: {}", label, e))
             .is_none());
+        let rotated_lookup = get_session_record(&rotated_session.id)
+            .unwrap_or_else(|e| panic!("{} rotated session lookup should succeed: {}", label, e))
+            .unwrap_or_else(|| panic!("{} rotated session should exist", label));
+        assert_eq!(rotated_lookup.csrf_token, format!("csrf-{}-rotated", label));
+        assert_eq!(rotated_lookup.device_name.as_deref(), Some("SQLite Mac"));
         assert_eq!(
-            get_session_record(&rotated_session.id)
-                .unwrap_or_else(|e| panic!(
-                    "{} rotated session lookup should succeed: {}",
-                    label, e
-                ))
-                .unwrap_or_else(|| panic!("{} rotated session should exist", label))
-                .csrf_token,
-            format!("csrf-{}-rotated", label)
+            rotated_lookup.user_agent_hash.as_deref(),
+            Some("ua-sqlite-1")
         );
+        assert_eq!(rotated_lookup.last_ip_hash.as_deref(), Some("ip-sqlite-1"));
         let listed_sessions = list_session_records_for_user(
             &format!("user-{}", label),
             Some(&rotated_session.id),
@@ -4376,9 +4525,11 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{} session listing should succeed: {}", label, e));
         assert_eq!(listed_sessions.len(), 1);
-        assert!(listed_sessions
+        let listed_current = listed_sessions
             .iter()
-            .any(|session| session.id == rotated_session.id && session.is_current));
+            .find(|session| session.id == rotated_session.id && session.is_current)
+            .unwrap_or_else(|| panic!("{} current session should be listed", label));
+        assert_eq!(listed_current.device_name.as_deref(), Some("SQLite Mac"));
         assert_eq!(
             delete_all_session_records_for_user(
                 &format!("user-{}", label),
@@ -4399,7 +4550,7 @@ mod tests {
             pkce_verifier: Some(format!("pkce-{}", label)),
             provider: "github".to_string(),
             redirect_url: "/auth/callback".to_string(),
-            remember_me: false,
+            remember_me: true,
             device_name: Some(format!("{} Browser", label)),
             user_agent_hash: Some(format!("ua-{}-oauth", label)),
             last_ip_hash: Some(format!("ip-{}-oauth", label)),
@@ -4407,12 +4558,22 @@ mod tests {
         };
         store_oauth_state_record(&oauth_state)
             .unwrap_or_else(|e| panic!("{} oauth state store should succeed: {}", label, e));
+        let consumed_oauth_state = consume_oauth_state_record(&oauth_state.state)
+            .unwrap_or_else(|e| panic!("{} oauth state consume should succeed: {}", label, e))
+            .unwrap_or_else(|| panic!("{} oauth state should exist", label));
+        assert_eq!(consumed_oauth_state.state, oauth_state.state);
+        assert!(consumed_oauth_state.remember_me);
         assert_eq!(
-            consume_oauth_state_record(&oauth_state.state)
-                .unwrap_or_else(|e| panic!("{} oauth state consume should succeed: {}", label, e))
-                .unwrap_or_else(|| panic!("{} oauth state should exist", label))
-                .state,
-            oauth_state.state
+            consumed_oauth_state.device_name.as_deref(),
+            Some(format!("{} Browser", label).as_str())
+        );
+        assert_eq!(
+            consumed_oauth_state.user_agent_hash.as_deref(),
+            Some(format!("ua-{}-oauth", label).as_str())
+        );
+        assert_eq!(
+            consumed_oauth_state.last_ip_hash.as_deref(),
+            Some(format!("ip-{}-oauth", label).as_str())
         );
         assert!(
             consume_oauth_state_record(&oauth_state.state)
@@ -5106,6 +5267,37 @@ mod tests {
     fn test_auth_storage_contract_memory_round_trip_all_record_types() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         run_auth_storage_contract_round_trip(SessionStore::Memory, "memory");
+    }
+
+    #[test]
+    fn test_local_auth_durable_record_families_fail_closed_by_policy() {
+        use super::storage::{local_auth_record_fallback_policy, LocalAuthRecordKind};
+
+        for record_kind in [
+            LocalAuthRecordKind::Identity,
+            LocalAuthRecordKind::CredentialSecret,
+            LocalAuthRecordKind::TotpEnrollment,
+            LocalAuthRecordKind::PasswordResetToken,
+            LocalAuthRecordKind::BootstrapState,
+        ] {
+            let policy = local_auth_record_fallback_policy(record_kind);
+            assert!(
+                policy.store_failure_fails_closed,
+                "{record_kind:?} store failures must fail closed"
+            );
+            assert!(
+                policy.lookup_failure_fails_closed,
+                "{record_kind:?} lookup failures must fail closed"
+            );
+            assert!(
+                policy.update_failure_fails_closed,
+                "{record_kind:?} update/consume failures must fail closed"
+            );
+            assert!(
+                !policy.production_memory_fallback_allowed,
+                "{record_kind:?} must not allow production memory fallback"
+            );
+        }
     }
 
     #[test]
@@ -5837,6 +6029,7 @@ mod tests {
 
         let signed_in = sign_in_session(&[
             redirect_response("/admin", None),
+            request_with_cookie(""),
             Value::Map(HashMap::from([(
                 "subject_id".to_string(),
                 Value::String("user-123".to_string()),
@@ -6146,6 +6339,7 @@ mod tests {
         let response = redirect_response("/admin", None);
         let signed_in = sign_in_session(&[
             response,
+            request_with_cookie(""),
             Value::Map(HashMap::from([
                 (
                     "subject_id".to_string(),
@@ -6208,6 +6402,294 @@ mod tests {
     }
 
     #[test]
+    fn test_sign_in_session_captures_request_metadata() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let request = request_with_cookie_and_security_headers("");
+
+        let signed_in = sign_in_session(&[
+            redirect_response("/admin", None),
+            request.clone(),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("user-123".to_string()),
+            )])),
+        ])
+        .unwrap();
+
+        let cookie = cookie_header_from_response(&signed_in);
+        let session_id = get_session_id_from_request(&request_with_cookie(&cookie))
+            .expect("session cookie should verify");
+        let session = get_session_by_id(&session_id).expect("session should be persisted");
+        assert_eq!(session.device_name.as_deref(), Some("Mac · Safari"));
+        assert!(session.user_agent_hash.is_some());
+        assert!(session.last_ip_hash.is_some());
+    }
+
+    #[test]
+    fn test_sign_in_session_rotates_existing_session() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+
+        let first = sign_in_session(&[
+            redirect_response("/admin", None),
+            request_with_cookie(""),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("first-user".to_string()),
+            )])),
+        ])
+        .unwrap();
+        let old_cookie = cookie_header_from_response(&first);
+        let old_id = get_session_id_from_request(&request_with_cookie(&old_cookie))
+            .expect("old session cookie should verify");
+
+        let second_req = request_with_cookie_and_security_headers(&old_cookie);
+        let second = sign_in_session(&[
+            redirect_response("/admin", None),
+            second_req,
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("second-user".to_string()),
+            )])),
+        ])
+        .unwrap();
+        let new_cookie = cookie_header_from_response(&second);
+        let new_id = get_session_id_from_request(&request_with_cookie(&new_cookie))
+            .expect("new session cookie should verify");
+
+        assert_ne!(old_id, new_id);
+        assert!(get_session_by_id(&old_id).is_none());
+        let new_session = get_session_by_id(&new_id).expect("new session should be persisted");
+        assert_eq!(new_session.user_id, "local:second-user");
+        assert_eq!(new_session.device_name.as_deref(), Some("Mac · Safari"));
+    }
+
+    #[test]
+    fn test_sign_in_session_preserves_existing_data_only_for_same_user() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+
+        let first = sign_in_session(&[
+            redirect_response("/admin", None),
+            request_with_cookie(""),
+            Value::Map(HashMap::from([
+                (
+                    "subject_id".to_string(),
+                    Value::String("same-user".to_string()),
+                ),
+                (
+                    "claims".to_string(),
+                    Value::Map(HashMap::from([(
+                        "role".to_string(),
+                        Value::String("admin".to_string()),
+                    )])),
+                ),
+            ])),
+        ])
+        .unwrap();
+        let first_cookie = cookie_header_from_response(&first);
+
+        let same_user = sign_in_session(&[
+            redirect_response("/admin", None),
+            request_with_cookie(&first_cookie),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("same-user".to_string()),
+            )])),
+        ])
+        .unwrap();
+        let same_user_cookie = cookie_header_from_response(&same_user);
+        let same_user_id = get_session_id_from_request(&request_with_cookie(&same_user_cookie))
+            .expect("same-user session cookie should verify");
+        let same_user_session = get_session_by_id(&same_user_id).expect("session should exist");
+        assert_eq!(same_user_session.data_json, r#"{"role":"admin"}"#);
+
+        let different_user = sign_in_session(&[
+            redirect_response("/admin", None),
+            request_with_cookie(&same_user_cookie),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("different-user".to_string()),
+            )])),
+        ])
+        .unwrap();
+        let different_user_cookie = cookie_header_from_response(&different_user);
+        let different_user_id =
+            get_session_id_from_request(&request_with_cookie(&different_user_cookie))
+                .expect("different-user session cookie should verify");
+        let different_user_session =
+            get_session_by_id(&different_user_id).expect("session should exist");
+        assert_eq!(different_user_session.user_id, "local:different-user");
+        assert_eq!(different_user_session.data_json, "{}");
+    }
+
+    #[test]
+    fn test_sign_in_session_rejects_invalid_request_argument() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let err = sign_in_session(&[
+            redirect_response("/admin", None),
+            Value::String("not-a-request".to_string()),
+            Value::Map(HashMap::from([(
+                "subject_id".to_string(),
+                Value::String("user-123".to_string()),
+            )])),
+        ])
+        .unwrap_err();
+
+        assert!(format!("{}", err)
+            .contains("[auth] sign_in_session() request must be an HTTP request map"));
+    }
+
+    #[test]
+    fn test_complete_auth_challenge_rejects_invalid_request_argument() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let complete_auth_challenge = module_fn(&module, "complete_auth_challenge");
+        let err = complete_auth_challenge(&[
+            redirect_response("/admin", None),
+            Value::String("not-a-request".to_string()),
+        ])
+        .unwrap_err();
+
+        assert!(format!("{}", err)
+            .contains("[auth] complete_auth_challenge() request must be an HTTP request map"));
+    }
+
+    #[test]
+    fn test_complete_auth_challenge_captures_request_metadata() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let begin_auth_challenge = module_fn(&module, "begin_auth_challenge");
+        let complete_auth_challenge = module_fn(&module, "complete_auth_challenge");
+
+        let started = begin_auth_challenge(&[
+            redirect_response("/admin/verify", None),
+            Value::Map(HashMap::from([
+                (
+                    "subject_id".to_string(),
+                    Value::String("user-123".to_string()),
+                ),
+                ("kind".to_string(), Value::String("mfa_pending".to_string())),
+            ])),
+        ])
+        .unwrap();
+        let challenge_cookie = cookie_header_from_response(&started);
+        let req = request_with_cookie_and_security_headers(&challenge_cookie);
+
+        let completed = complete_auth_challenge(&[
+            redirect_response("/admin", None),
+            req,
+            Value::Map(HashMap::new()),
+        ])
+        .unwrap();
+        let session_cookie = cookie_headers_from_response(&completed)
+            .into_iter()
+            .find(|cookie| cookie.starts_with("ntnt_session="))
+            .expect("missing session cookie");
+        let session_id = get_session_id_from_request(&request_with_cookie(&session_cookie))
+            .expect("session cookie should verify");
+        let session = get_session_by_id(&session_id).expect("session should be persisted");
+        assert_eq!(session.device_name.as_deref(), Some("Mac · Safari"));
+        assert!(session.user_agent_hash.is_some());
+        assert!(session.last_ip_hash.is_some());
+    }
+
+    #[test]
+    fn test_user_sessions_exposes_safe_device_name_metadata() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let now = chrono::Utc::now().timestamp();
+        let session = Session {
+            id: "session-device-name".to_string(),
+            user_id: "local:user-123".to_string(),
+            provider: "local".to_string(),
+            email: Some("alice@example.com".to_string()),
+            name: Some("Alice".to_string()),
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: "{}".to_string(),
+            csrf_token: "csrf-device-name".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            device_name: Some("Mac · Safari".to_string()),
+            user_agent_hash: Some("ua-hash-must-stay-private".to_string()),
+            last_ip_hash: Some("ip-hash-must-stay-private".to_string()),
+            created_at: now,
+            expires_at: now + 300,
+        };
+        store_session_record(&session).expect("session store should succeed");
+
+        let config = get_auth_config().expect("auth config should be initialized");
+        let cookie = build_signed_session_cookie(&config, &session.id, None)
+            .expect("session cookie should build");
+        let req = request_with_cookie(cookie.split(';').next().unwrap());
+
+        let module = init();
+        let user_sessions = module_fn(&module, "user_sessions");
+        let listed = user_sessions(&[req]).expect("user_sessions should run");
+
+        let sessions = match listed {
+            Value::EnumValue {
+                enum_name,
+                variant,
+                values,
+            } => {
+                assert_eq!(enum_name, "Result");
+                assert_eq!(variant, "Ok");
+                match values.into_iter().next() {
+                    Some(Value::Array(sessions)) => sessions,
+                    other => panic!("expected Ok(Array), got {:?}", other),
+                }
+            }
+            other => panic!("expected Result::Ok, got {:?}", other),
+        };
+        assert_eq!(sessions.len(), 1);
+        let session_info = match sessions.first() {
+            Some(Value::Map(map)) => map,
+            other => panic!("expected session info map, got {:?}", other),
+        };
+        match session_info.get("device_name") {
+            Some(Value::String(device_name)) => assert_eq!(device_name, "Mac · Safari"),
+            other => panic!("expected public device_name string, got {:?}", other),
+        }
+        assert!(
+            !session_info.contains_key("user_agent_hash"),
+            "user_sessions() must not expose raw user-agent hash"
+        );
+        assert!(
+            !session_info.contains_key("last_ip_hash"),
+            "user_sessions() must not expose raw IP hash"
+        );
+    }
+
+    #[test]
     fn test_sign_in_session_rejects_missing_subject_id() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
@@ -6217,6 +6699,7 @@ mod tests {
         let sign_in_session = module_fn(&module, "sign_in_session");
         let err = sign_in_session(&[
             redirect_response("/admin", None),
+            request_with_cookie(""),
             Value::Map(HashMap::from([(
                 "provider".to_string(),
                 Value::String("local".to_string()),
@@ -6239,6 +6722,7 @@ mod tests {
         let sign_in_session = module_fn(&module, "sign_in_session");
         let err = sign_in_session(&[
             Value::String("not-a-response".to_string()),
+            request_with_cookie(""),
             Value::Map(HashMap::from([(
                 "subject_id".to_string(),
                 Value::String("user-123".to_string()),
@@ -6260,6 +6744,7 @@ mod tests {
         let sign_in_session = module_fn(&module, "sign_in_session");
         let err = sign_in_session(&[
             redirect_response("/admin", None),
+            request_with_cookie(""),
             Value::Map(HashMap::from([(
                 "subject_id".to_string(),
                 Value::String("user-123".to_string()),
@@ -6288,6 +6773,7 @@ mod tests {
 
         let signed_in = sign_in_session(&[
             redirect_response("/admin", None),
+            request_with_cookie(""),
             Value::Map(HashMap::from([(
                 "subject_id".to_string(),
                 Value::String("user-123".to_string()),
@@ -6358,6 +6844,7 @@ mod tests {
 
         let signed_in = sign_in_session(&[
             redirect_response("/admin", None),
+            request_with_cookie(""),
             Value::Map(HashMap::from([(
                 "subject_id".to_string(),
                 Value::String("user-123".to_string()),
@@ -6417,6 +6904,7 @@ mod tests {
 
         let signed_in = sign_in_session(&[
             redirect_response("/admin", None),
+            request_with_cookie(""),
             Value::Map(HashMap::from([(
                 "subject_id".to_string(),
                 Value::String("user-123".to_string()),
@@ -6469,6 +6957,7 @@ mod tests {
 
         let signed_in = sign_in_session(&[
             redirect_response("/admin", None),
+            request_with_cookie(""),
             Value::Map(HashMap::from([(
                 "subject_id".to_string(),
                 Value::String("user-123".to_string()),

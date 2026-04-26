@@ -77,6 +77,61 @@ jobs:
         env:
           RUST_MIN_STACK: 8388608
 
+  auth-backends:
+    name: Auth Backend Contracts
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ntnt_auth_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ntnt
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-auth-backends-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-auth-backends-cargo-
+
+      - name: Run auth storage contract tests against Postgres and Redis
+        run: |
+          cargo test --locked --lib test_auth_storage_contract_postgres_round_trip_all_record_types -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_auth_storage_contract_redis_round_trip_all_record_types -- --test-threads=1 --nocapture
+        env:
+          RUST_MIN_STACK: 8388608
+          NTNT_AUTH_TEST_POSTGRES_URL: postgres://postgres:ntnt@localhost:5432/ntnt_auth_test
+          NTNT_AUTH_TEST_REDIS_URL: redis://127.0.0.1:6379/0
+
   lint:
     name: Lint
     needs: changes
@@ -171,12 +226,12 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [test, lint, examples, docs]
+    needs: [test, auth-backends, lint, examples, docs]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI results
         run: |
-          results=("${{ needs.test.result }}" "${{ needs.lint.result }}" "${{ needs.examples.result }}" "${{ needs.docs.result }}")
+          results=("${{ needs.test.result }}" "${{ needs['auth-backends'].result }}" "${{ needs.lint.result }}" "${{ needs.examples.result }}" "${{ needs.docs.result }}")
           for result in "${results[@]}"; do
             if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
               echo "::error::CI job failed or was cancelled: $result"

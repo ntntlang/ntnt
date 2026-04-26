@@ -530,7 +530,10 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
     if let Some(existing_session_id) = get_session_id_from_request(req) {
         if let Some(existing_session) = get_session_by_id(&existing_session_id) {
             if existing_session_id != session.id {
-                if session.data_json == "{}" && existing_session.data_json != "{}" {
+                if existing_session.user_id == session.user_id
+                    && session.data_json == "{}"
+                    && existing_session.data_json != "{}"
+                {
                     session.data_json = existing_session.data_json.clone();
                 }
                 migrate_session(&existing_session_id, &session).map_err(|error| {

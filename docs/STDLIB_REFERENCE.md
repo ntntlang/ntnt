@@ -1856,7 +1856,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`session_data`](#sessiondata) | Get custom data stored in the current session. |
 | [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions, auth challenges, OAuth states, and exchange tokens from the session store. |
 | [`set_session`](#setsession) | Store custom data in the current session. |
-| [`sign_in_session`](#signinsession) | Persist a session and attach the auth cookie to an existing response. |
+| [`sign_in_session`](#signinsession) | Persist a request-aware session and attach the auth cookie to an existing response. |
 | [`sign_out_session`](#signoutsession) | Revoke the current session and attach a clearing auth cookie to a response. |
 | [`totp_secret`](#totpsecret) | Generate a new TOTP secret for MFA setup. |
 | [`totp_uri`](#totpuri) | Generate an otpauth:// URI for QR codes. |
@@ -2085,7 +2085,7 @@ This consumes the active challenge, creates a real session, attaches the normal 
 **Examples:**
 
 ```ntnt
-complete_auth_challenge(redirect("/admin"), req, map { "claims": map { "role": "admin" } })  // Upgrade staged auth into a session
+complete_auth_challenge(redirect("/admin"), req, map { "claims": app_claims_for_user(user) })  // Upgrade staged auth into a session
 ```
 
 **See also:** `begin_auth_challenge`, `current_auth_challenge`, `cancel_auth_challenge`, `sign_in_session`
@@ -2895,16 +2895,17 @@ set_session(req, map { "roles": ["admin"], "theme": "dark" })  // Store user pre
 #### `sign_in_session`
 
 ```ntnt
-sign_in_session(response: Response, session: Map, options?: Map) -> Response
+sign_in_session(response: Response, req: Request, session: Map, options?: Map) -> Response
 ```
 
-Persist a session and attach the auth cookie to an existing response.
+Persist a request-aware session and attach the auth cookie to an existing response.
 
-Use this after password, magic-link, or other non-OAuth login flows. The session map must include `subject_id`, and may optionally include `provider`, `email`, `name`, `picture`, `claims`, `data`, or `raw`.
+Use this after password, magic-link, or other non-OAuth login flows. The request argument lets `std/auth` rotate/migrate any existing session and capture the same device/IP/user-agent metadata used by OAuth callbacks. If an existing session for the same user is rotated and the new session has no explicit `claims`/`data`, its session data is preserved. Cross-user sign-in always starts with only the provided session data. Migration note for 0.4.9 pre-release callers: the old `sign_in_session(response, session, options?)` shape is intentionally not supported; pass the current request as the second argument so metadata and session rotation are not silently skipped. The session map must include `subject_id`, and may optionally include `provider`, `email`, `name`, `picture`, `claims`, `data`, or `raw`.
 
 **Parameters:**
 
 - `response` — The Response map to attach the session cookie to
+- `req` — The current HTTP request
 - `session` — Session data map, including required `subject_id`
 - `options` — Optional map with `session_ttl` and cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
 
@@ -2913,8 +2914,12 @@ Use this after password, magic-link, or other non-OAuth login flows. The session
 **Examples:**
 
 ```ntnt
-sign_in_session(redirect("/admin"), map { "subject_id": user.id, "claims": map { "role": "admin" } })  // Sign in and redirect
+sign_in_session(redirect("/admin"), req, map { "subject_id": user.id, "claims": app_claims_for_user(user) })  // Sign in and redirect
 ```
+
+**Errors:**
+
+- **TypeError**: request must be an HTTP request map — *Fix: Call sign_in_session(response, req, session, options?) from a route handler and pass the current req*
 
 **See also:** `sign_out_session`, `current_session`, `rotate_session`
 
@@ -3014,7 +3019,7 @@ user_sessions(req: Request) -> Result<Array<SessionInfo>, String>
 
 Get all active sessions for the current user.
 
-Returns an array of session info objects, each containing id, provider, created_at, expires_at, and is_current (boolean indicating if it's the current session). Useful for "manage your sessions" UI.
+Returns an array of session info objects, each containing id, provider, device_name (when captured), created_at, expires_at, and is_current (boolean indicating if it's the current session). Sensitive raw hashes are never exposed. Useful for "manage your sessions" UI.
 
 **Parameters:**
 
