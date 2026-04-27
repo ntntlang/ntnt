@@ -69,7 +69,7 @@ Current 0.4.9 baseline: the shared manual/staged session completion path is alre
 
 This is an intentional 0.4.9 pre-release API correction, not a compatibility surface to preserve. The migration path is explicit: insert the current route `req` as the second argument wherever old branch code called `sign_in_session(response, session, options?)`.
 
-Current local-auth baseline after PR #100: local identity/credential records, password-secret verification, email normalization, account states, safe `verify_local_password(...)` payloads, `bootstrap_local_user(...)` provisioning, atomic memory/SQLite bootstrap identity+credential writes, generated docs, typechecker signatures, and memory/SQLite coverage exist. Setup completion, TOTP enrollment storage, password reset, config/env bootstrap seeding, Postgres/Redis local-auth contracts, and template migration remain open.
+Current local-auth baseline after PR #100 plus the setup-completion follow-up slice: local identity/credential records, password-secret verification, email normalization, account states, safe `verify_local_password(...)` payloads, `bootstrap_local_user(...)` provisioning, explicit setup-completion/password rotation through `set_local_password(...)`, atomic memory/SQLite identity+credential writes, generated docs, typechecker signatures, and memory/SQLite coverage exist. Staged setup/TOTP enrollment, password reset, config/env bootstrap seeding, Postgres/Redis local-auth contracts, and template migration remain open.
 
 PR #100 is intentionally the small replacement slice after PR #99 was scrapped: it adds bootstrap provisioning only and does not carry forward the broad `local_sign_in(...)` wrapper, cookie/challenge changes, or new session semantics from that spike. Future work should continue composing the existing primitives explicitly until a higher-level helper is proven necessary.
 
@@ -175,7 +175,7 @@ Possible helpers; exact names can change during implementation:
 - `create_local_user(identifier, options) -> Result<LocalUser, String>`
 - `disable_local_user(identifier_or_id) -> Result<Unit, String>`
 - `require_password_change(identifier_or_id) -> Result<Unit, String>`
-- `set_local_password(identifier_or_id, new_password, options?) -> Result<Unit, String>`
+- `set_local_password(identifier, new_password, options?) -> Result<LocalUser, String>` — shipped as the narrow setup-completion/password-rotation primitive; returns the same safe local user payload shape as credential verification
 
 These should be intentionally small. App profile and authorization data should remain app-owned. Session claims should be supplied through explicit hooks/session-completion data, not static universal `claims` config on the credential provider.
 
@@ -192,7 +192,7 @@ return sign_in_session(response, req, map {
 })
 ```
 
-That is the current direction after PR #100. A public `local_sign_in(...)` helper is intentionally **not** part of this slice; PR #99 showed that adding it too early duplicates session/challenge semantics and bloats the change. If a later helper is added, it must be request-aware and delegate to `sign_in_session(response, req, session, options?)` or the same internal session-completion primitive so local login receives OAuth-equivalent rotation, metadata capture, cookie, TTL, and lifecycle behavior. It must not directly create sessions, attach cookies, or bypass the shared completion path.
+That remains the current direction after PR #100 and the follow-up `set_local_password(...)` slice. A public `local_sign_in(...)` helper is intentionally **not** part of either slice; PR #99 showed that adding it too early duplicates session/challenge semantics and bloats the change. If a later helper is added, it must be request-aware and delegate to `sign_in_session(response, req, session, options?)` or the same internal session-completion primitive so local login receives OAuth-equivalent rotation, metadata capture, cookie, TTL, and lifecycle behavior. It must not directly create sessions, attach cookies, or bypass the shared completion path.
 
 ### Password reset helpers
 
@@ -338,7 +338,8 @@ This table should become implementation comments and contract tests, not just do
 - [x] Add public bootstrap provisioning through `bootstrap_local_user(...)` with safe bootstrap user payloads
 - [x] Store bootstrap identity + credential atomically for memory/SQLite
 - [ ] Support config/env-driven bootstrap seeding for the common admin-panel deployment case
-- [ ] Force bootstrap credential rotation/setup completion according to config
+- [x] Add explicit credential rotation/setup completion through `set_local_password(...)`
+- [ ] Force bootstrap credential rotation/setup completion automatically according to config/staged setup policy
 - [x] Add memory/SQLite contract tests by default
 - [ ] Add Postgres/Redis contract coverage in backend CI
 - [ ] Add migration tests for existing SQLite/Postgres stores
@@ -363,8 +364,9 @@ This table should become implementation comments and contract tests, not just do
 
 **Purpose:** make setup and MFA enrollment native rather than app-owned state machines.
 
+- [x] Add the narrow password-rotation/setup-completion primitive through `set_local_password(...)`
 - [ ] Add staged first-login setup flow
-- [ ] Add forced-password-change flow before final session completion
+- [x] Add forced-password-rotation support before final session completion through explicit primitive composition
 - [ ] Add TOTP enrollment challenge flow
 - [ ] Persist TOTP enrollment state explicitly after verification
 - [ ] Define TOTP reset/re-enrollment semantics
@@ -465,7 +467,7 @@ The right implementation order is:
 1. architecture/storage/test preflight
 2. local identity and credential store — baseline shipped on `main`
 3. bootstrap/setup provisioning — PR #100 adds `bootstrap_local_user(...)` as the narrow runtime slice
-4. first-login/setup completion and forced password rotation
+4. first-login/setup completion and forced password rotation — follow-up slice adds `set_local_password(...)`
 5. request-aware local sign-in/reference flow only if explicit composition remains too repetitive
 6. staged setup/TOTP
 7. password reset

@@ -1856,6 +1856,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`rotate_session`](#rotatesession) | Rotate the current session ID and attach the new auth cookie to a response. |
 | [`session_data`](#sessiondata) | Get custom data stored in the current session. |
 | [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions, auth challenges, OAuth states, and exchange tokens from the session store. |
+| [`set_local_password`](#setlocalpassword) | Rotate a local user's password and clear setup-required local account state. |
 | [`set_session`](#setsession) | Store custom data in the current session. |
 | [`sign_in_session`](#signinsession) | Persist a request-aware session and attach the auth cookie to an existing response. |
 | [`sign_out_session`](#signoutsession) | Revoke the current session and attach a clearing auth cookie to a response. |
@@ -2898,6 +2899,43 @@ sessions_cleanup()  // Remove expired sessions
 **See also:** `enable_auth`
 
 *Since v0.3.11*
+
+---
+
+#### `set_local_password`
+
+```ntnt
+set_local_password(identifier: String, new_password: String, options?: Map) -> Result<Map, String>
+```
+
+Rotate a local user's password and clear setup-required local account state.
+
+The helper normalizes the identifier (email by default), loads the auth-owned local identity, writes a replacement password credential, transitions the identity to `active`, clears `must_change_password`, and returns the same safe local user payload shape as `verify_local_password(...)`. Use it only after verifying the current setup/forced-change credential or from a trusted admin recovery path, then compose the resulting user through request-aware `sign_in_session(...)`. It never exposes passwords, password hashes, hash parameters, credentials, secrets, or tokens.
+
+**Parameters:**
+
+- `identifier` — The local user identifier. Email is the default identifier kind.
+- `new_password` — The replacement plaintext password to hash and store
+- `options` — Optional map with `identifier_kind` (default `"email"`)
+
+**Returns:** Ok(map) with safe local user fields; Err(message) on invalid credentials, invalid input, or unsupported storage backend
+
+**Examples:**
+
+```ntnt
+let setup_user = verify_local_password(form["email"] ?? "", form["setup_password"] ?? "")?  // Verify the current setup or forced-change credential before rotation
+let user = set_local_password(setup_user["identifier_normalized"], form["new_password"] ?? "")?  // Complete local setup by rotating the bootstrap password
+sign_in_session(redirect("/admin"), req, map { "subject_id": user["subject_id"], "email": user["email"] })  // Sign in after setup completion with request-aware session handling
+```
+
+**Errors:**
+
+- **RuntimeError**: Auth not initialized — *Fix: Call enable_auth(...) during app startup before rotating local credentials*
+- **TypeError**: identifier must be a string — *Fix: Pass the setup email/identifier as a string*
+
+**See also:** `bootstrap_local_user`, `verify_local_password`, `sign_in_session`
+
+*Since v0.4.9*
 
 ---
 

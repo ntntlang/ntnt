@@ -70,6 +70,56 @@ pub(in crate::stdlib::auth) fn bootstrap_local_user_record(
     })
 }
 
+pub(in crate::stdlib::auth) fn set_local_password_record(
+    identifier_kind: &str,
+    identifier: &str,
+    new_password: &str,
+) -> std::result::Result<VerifiedLocalPassword, String> {
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier_normalized = match normalize_local_identifier(&kind, identifier) {
+        Ok(identifier_normalized) => identifier_normalized,
+        Err(_) => return Err(INVALID_LOCAL_CREDENTIALS.to_string()),
+    };
+
+    if new_password.trim().is_empty() {
+        return Err("[auth] local password must not be empty".to_string());
+    }
+
+    let existing_identity = get_local_identity_by_identifier_record(&kind, &identifier_normalized)?
+        .ok_or_else(|| INVALID_LOCAL_CREDENTIALS.to_string())?;
+    if matches!(
+        existing_identity.state,
+        LocalAccountState::Disabled | LocalAccountState::Locked
+    ) {
+        return Err(INVALID_LOCAL_CREDENTIALS.to_string());
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let identity = LocalIdentity {
+        updated_at: now,
+        state: LocalAccountState::Active,
+        ..existing_identity
+    };
+    let credential = LocalCredentialSecret {
+        local_user_id: identity.id.clone(),
+        password_hash: bcrypt::hash(new_password, bcrypt::DEFAULT_COST)
+            .map_err(|_| "[auth] failed to hash local password".to_string())?,
+        password_hash_algorithm: CredentialPasswordAlgorithm::Bcrypt
+            .storage_name()
+            .to_string(),
+        password_hash_params_json: "{}".to_string(),
+        password_changed_at: now,
+        must_change_password: false,
+    };
+
+    store_local_identity_and_credential_record(&identity, &credential)?;
+
+    Ok(VerifiedLocalPassword {
+        identity,
+        credential,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CredentialPasswordAlgorithm {
     Bcrypt,

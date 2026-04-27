@@ -1699,7 +1699,32 @@ fn get(req) {
 
 Boundary rule: use `std/auth` for auth flows, sessions, CSRF, current-user helpers, and TOTP. Use `std/crypto` for generic crypto helpers like `uuid`, `hash_password`, and `verify_password`.
 
-Full OAuth, session management, CSRF, JWT, TOTP, and local credential verification support.
+Full OAuth, session management, CSRF, JWT, TOTP, and local credential bootstrap, setup completion, and verification support.
+
+### Local Credential Bootstrap and Setup Completion
+
+`std/auth` owns local identity/credential lifecycle state. Use `bootstrap_local_user(...)` to provision a setup credential, verify that current setup/forced-change credential, then call `set_local_password(...)` to rotate it and clear setup-required state before granting regular access. Both helpers return only safe local-user metadata; they never expose passwords, password hashes, hash parameters, tokens, or raw credential records.
+
+```ntnt
+import { bootstrap_local_user, set_local_password, sign_in_session, verify_local_password } from "std/auth"
+import { parse_form, redirect } from "std/http/server"
+
+fn provision_first_admin(email, setup_password) {
+    return bootstrap_local_user(email, setup_password)?
+}
+
+fn complete_setup(req) {
+    let form = parse_form(req)
+    let setup_user = verify_local_password(form["email"] ?? "", form["setup_password"] ?? "")?
+    let user = set_local_password(setup_user["identifier_normalized"], form["new_password"] ?? "")?
+
+    return sign_in_session(redirect("/admin"), req, map {
+        "subject_id": user["subject_id"],
+        "email": user["email"],
+        "claims": app_claims_for_local_user(user)
+    })
+}
+```
 
 ### Local Credential Verification
 
@@ -1721,7 +1746,7 @@ fn login(req) {
 }
 ```
 
-Session claims, roles, profiles, and organization membership stay app-owned; local auth only owns credential lifecycle state and safe verification results.
+Session claims, roles, profiles, and organization membership stay app-owned; local auth only owns credential lifecycle state and safe verification/setup results.
 
 ### Basic OAuth Setup
 

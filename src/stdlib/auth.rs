@@ -71,7 +71,8 @@ pub use guards::{
     enforce_auth_for_request, get_protected_paths, register_protected_paths, reset_protected_paths,
 };
 use local::{
-    bootstrap_local_user_record, verified_local_password_to_value, verify_local_password_record,
+    bootstrap_local_user_record, set_local_password_record, verified_local_password_to_value,
+    verify_local_password_record,
 };
 use oauth::extract_user_info;
 pub use oauth::{
@@ -3832,6 +3833,99 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt set_local_password
+    // @module std/auth
+    // @signature set_local_password(identifier: String, new_password: String, options?: Map) -> Result<Map, String>
+    // Rotate a local user's password and clear setup-required local account state.
+    //
+    // The helper normalizes the identifier (email by default), loads the auth-owned
+    // local identity, writes a replacement password credential, transitions the
+    // identity to `active`, clears `must_change_password`, and returns the same
+    // safe local user payload shape as `verify_local_password(...)`. Use it only
+    // after verifying the current setup/forced-change credential or from a trusted
+    // admin recovery path, then compose the resulting user through request-aware
+    // `sign_in_session(...)`. It never exposes passwords, password hashes, hash
+    // parameters, credentials, secrets, or tokens.
+    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param new_password The replacement plaintext password to hash and store
+    // @param options Optional map with `identifier_kind` (default `"email"`)
+    // @returns Ok(map) with safe local user fields; Err(message) on invalid credentials, invalid input, or unsupported storage backend
+    // @error RuntimeError ~ "Auth not initialized" fix: "Call enable_auth(...) during app startup before rotating local credentials"
+    // @error TypeError ~ "identifier must be a string" fix: "Pass the setup email/identifier as a string"
+    // @see_also bootstrap_local_user, verify_local_password, sign_in_session
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #security
+    // @example let setup_user = verify_local_password(form["email"] ?? "", form["setup_password"] ?? "")? ~ "Verify the current setup or forced-change credential before rotation"
+    // @example let user = set_local_password(setup_user["identifier_normalized"], form["new_password"] ?? "")? ~ "Complete local setup by rotating the bootstrap password"
+    // @example sign_in_session(redirect("/admin"), req, map { "subject_id": user["subject_id"], "email": user["email"] }) ~ "Sign in after setup completion with request-aware session handling"
+    module.insert(
+        "set_local_password".to_string(),
+        Value::NativeFunction {
+            name: "set_local_password".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "[auth] set_local_password() requires identifier, new_password, and optional options"
+                            .to_string(),
+                    ));
+                }
+
+                let _config = get_auth_config().ok_or_else(|| {
+                    IntentError::runtime_error(
+                        "[auth] Auth not initialized. Call enable_auth() before set_local_password()."
+                            .to_string(),
+                    )
+                })?;
+
+                let identifier = match &args[0] {
+                    Value::String(s) => s.as_str(),
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] set_local_password() identifier must be a string, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let new_password = match &args[1] {
+                    Value::String(s) => s.as_str(),
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] set_local_password() new_password must be a string, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let identifier_kind = match args.get(2) {
+                    Some(Value::Map(map)) => match map.get("identifier_kind") {
+                        Some(Value::String(kind)) => kind.as_str(),
+                        Some(other) => {
+                            return Err(IntentError::type_error(format!(
+                                "[auth] set_local_password() identifier_kind must be a string, got {}",
+                                other.type_name()
+                            )))
+                        }
+                        None => "email",
+                    },
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] set_local_password() options must be a map, got {}",
+                            other.type_name()
+                        )))
+                    }
+                    None => "email",
+                };
+
+                match set_local_password_record(identifier_kind, identifier, new_password) {
+                    Ok(verified) => Ok(Value::ok(verified_local_password_to_value(verified))),
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
     // @ntnt verify_local_password
     // @module std/auth
     // @signature verify_local_password(identifier: String, password: String, options?: Map) -> Result<Map, String>
@@ -6220,6 +6314,111 @@ mod tests {
             match verified.get("local_user_id") {
                 Some(Value::String(id)) => assert_eq!(id, &stored_identity.id),
                 other => panic!("unexpected verified local_user_id payload: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_set_local_password_native_helper_completes_setup_and_rotates_secret() {
+        use super::storage::{
+            get_local_credential_secret_record, get_local_identity_by_identifier_record,
+            LocalAccountState,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            let module = init();
+            let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+            let set_local_password = module_fn(&module, "set_local_password");
+            let verify_local_password = module_fn(&module, "verify_local_password");
+
+            let bootstrapped = result_ok_map(
+                bootstrap_local_user(&[
+                    Value::String(" Rotate@Example.COM ".to_string()),
+                    Value::String("temporary setup password".to_string()),
+                ])
+                .unwrap(),
+            );
+            match bootstrapped.get("must_change_password") {
+                Some(Value::Bool(value)) => assert!(*value),
+                other => panic!("unexpected bootstrap must_change_password payload: {other:?}"),
+            }
+
+            let updated = result_ok_map(
+                set_local_password(&[
+                    Value::String(" rotate@example.com ".to_string()),
+                    Value::String("rotated local password".to_string()),
+                ])
+                .unwrap(),
+            );
+            let local_user_id = match updated.get("local_user_id") {
+                Some(Value::String(id)) => id.clone(),
+                other => panic!("unexpected local_user_id payload: {other:?}"),
+            };
+            match updated.get("state") {
+                Some(Value::String(state)) => assert_eq!(state, "active"),
+                other => panic!("unexpected state payload: {other:?}"),
+            }
+            match updated.get("must_change_password") {
+                Some(Value::Bool(value)) => assert!(!*value),
+                other => panic!("unexpected must_change_password payload: {other:?}"),
+            }
+            for secret_key in [
+                "password",
+                "password_hash",
+                "password_hash_algorithm",
+                "password_hash_params_json",
+                "credential",
+                "secret",
+                "token",
+            ] {
+                assert!(
+                    !updated.contains_key(secret_key),
+                    "set_local_password payload must not expose {secret_key}"
+                );
+            }
+
+            let stored_identity =
+                get_local_identity_by_identifier_record("email", "rotate@example.com")
+                    .unwrap()
+                    .expect("rotated local identity should be stored");
+            assert_eq!(stored_identity.id, local_user_id);
+            assert_eq!(stored_identity.state, LocalAccountState::Active);
+            let credential = get_local_credential_secret_record(&stored_identity.id)
+                .unwrap()
+                .expect("rotated local credential should be stored");
+            assert!(!credential.must_change_password);
+            assert_ne!(credential.password_hash, "rotated local password");
+
+            let old_password = result_err_string(
+                verify_local_password(&[
+                    Value::String("rotate@example.com".to_string()),
+                    Value::String("temporary setup password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(old_password, "Invalid local credentials");
+
+            let verified = result_ok_map(
+                verify_local_password(&[
+                    Value::String("rotate@example.com".to_string()),
+                    Value::String("rotated local password".to_string()),
+                ])
+                .unwrap(),
+            );
+            match verified.get("state") {
+                Some(Value::String(state)) => assert_eq!(state, "active"),
+                other => panic!("unexpected verified state payload: {other:?}"),
+            }
+            match verified.get("must_change_password") {
+                Some(Value::Bool(value)) => assert!(!*value),
+                other => panic!("unexpected verified must_change_password payload: {other:?}"),
             }
         }
     }
