@@ -1,6 +1,6 @@
 # DD-062: First-Class Local Email/Password/TOTP Auth in `std/auth`
 
-**Status:** Draft / implementation blueprint
+**Status:** In progress / implementation blueprint
 **Parent:** DD-043 Phase 9 — First-Class Local Auth
 **Target:** v0.4.x auth roadmap after the v0.4.9 DD-043 foundation
 
@@ -68,6 +68,10 @@ DD-062 is the detailed child plan for DD-043 Phase 9.
 Current 0.4.9 baseline: the shared manual/staged session completion path is already request-aware. `sign_in_session(response, req, session, options?)` and `complete_auth_challenge(response, req, session?, options?)` rotate/migrate existing sessions and capture request-derived metadata. Local auth should consume that path rather than introduce its own session creation semantics.
 
 This is an intentional 0.4.9 pre-release API correction, not a compatibility surface to preserve. The migration path is explicit: insert the current route `req` as the second argument wherever old branch code called `sign_in_session(response, session, options?)`.
+
+Current local-auth baseline on `main`: local identity/credential records, password-secret verification, email normalization, account states, safe `verify_local_password(...)` payloads, and memory/SQLite coverage already exist. Bootstrap provisioning, setup completion, TOTP enrollment storage, password reset, Postgres/Redis local-auth contracts, and template migration remain open.
+
+PR #99 proved that combining bootstrap plus a broad `local_sign_in(...)` wrapper creates too much code and too many duplicated session/challenge semantics for one slice. The immediate replacement should be small: update docs/status first, then add bootstrap/setup provisioning as a narrow runtime PR that composes the existing primitives.
 
 | DD-043 Phase | DD-062 Section | Purpose |
 |---|---|---|
@@ -350,12 +354,14 @@ This table should become implementation comments and contract tests, not just do
 
 **Baseline:** request-aware manual session completion already exists in 0.4.9 branch work. This phase should wire local credential verification into that primitive, not design a new cookie/session attachment path.
 
+**Lean path after PR #99:** do not add a public `local_sign_in(...)` helper until the explicit composition path is insufficient. For now, custom login handlers should call `verify_local_password(...)` and then `sign_in_session(response, req, session, options?)` with app-owned claims/session data. Setup-required flows should use the staged-auth primitives directly until the setup/TOTP flow shape is small and stable.
+
 - [x] Add local password verification through `std/auth`
-- [ ] Add local sign-in domain operation that delegates to `sign_in_session(response, req, session, options?)` or the same internal primitive
-- [ ] Rotate/migrate existing sessions on successful local login
-- [ ] Capture `device_name`, `user_agent_hash`, and `last_ip_hash` from request metadata
-- [ ] Apply configured session TTL, max lifetime, sliding expiry, cookie policy, and remember-me behavior
-- [ ] Return staged continuation when TOTP/setup/password-change is required
+- [ ] Decide whether a public local sign-in domain operation is still needed after explicit composition and bootstrap/setup primitives land
+- [x] Rotate/migrate existing sessions on successful local login when composed through `sign_in_session(...)`
+- [x] Capture `device_name`, `user_agent_hash`, and `last_ip_hash` from request metadata when composed through `sign_in_session(...)`
+- [x] Apply configured session TTL, max lifetime, sliding expiry, and cookie policy when composed through `sign_in_session(...)`
+- [ ] Add remember-me behavior and staged continuation once setup/TOTP flows are implemented
 - [ ] Add tests proving local login does not lose session metadata compared with OAuth login
 
 ### Phase 3 — First Login, Forced Password Change, and TOTP Enrollment
@@ -462,11 +468,12 @@ Treat local auth as the next practical `std/auth` simplification step, but do no
 The right implementation order is:
 
 1. architecture/storage/test preflight
-2. local identity and credential store
-3. request-aware local sign-in
-4. staged setup/TOTP
-5. password reset
-6. template migration
-7. contract/docs/CI ratchet
+2. local identity and credential store — baseline shipped on `main`
+3. bootstrap/setup provisioning — next small runtime slice
+4. request-aware local sign-in/reference flow only if explicit composition remains too repetitive
+5. staged setup/TOTP
+6. password reset
+7. template migration
+8. contract/docs/CI ratchet
 
 If `std/auth` can own OAuth well but still cannot cleanly own a normal local admin login, the library remains incomplete in a way users feel immediately. If it owns local auth with the same discipline as OAuth/session/challenge state, it becomes genuinely hard to beat.
