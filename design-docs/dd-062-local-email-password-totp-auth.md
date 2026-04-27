@@ -69,9 +69,9 @@ Current 0.4.9 baseline: the shared manual/staged session completion path is alre
 
 This is an intentional 0.4.9 pre-release API correction, not a compatibility surface to preserve. The migration path is explicit: insert the current route `req` as the second argument wherever old branch code called `sign_in_session(response, session, options?)`.
 
-Current local-auth baseline on `main`: local identity/credential records, password-secret verification, email normalization, account states, safe `verify_local_password(...)` payloads, and memory/SQLite coverage already exist. Bootstrap provisioning, setup completion, TOTP enrollment storage, password reset, Postgres/Redis local-auth contracts, and template migration remain open.
+Current local-auth baseline after PR #100: local identity/credential records, password-secret verification, email normalization, account states, safe `verify_local_password(...)` payloads, `bootstrap_local_user(...)` provisioning, atomic memory/SQLite bootstrap identity+credential writes, generated docs, typechecker signatures, and memory/SQLite coverage exist. Setup completion, TOTP enrollment storage, password reset, config/env bootstrap seeding, Postgres/Redis local-auth contracts, and template migration remain open.
 
-PR #99 proved that combining bootstrap plus a broad `local_sign_in(...)` wrapper creates too much code and too many duplicated session/challenge semantics for one slice. The immediate replacement should be small: update docs/status first, then add bootstrap/setup provisioning as a narrow runtime PR that composes the existing primitives.
+PR #100 is intentionally the small replacement slice after PR #99 was scrapped: it adds bootstrap provisioning only and does not carry forward the broad `local_sign_in(...)` wrapper, cookie/challenge changes, or new session semantics from that spike. Future work should continue composing the existing primitives explicitly until a higher-level helper is proven necessary.
 
 | DD-043 Phase | DD-062 Section | Purpose |
 |---|---|---|
@@ -181,25 +181,18 @@ These should be intentionally small. App profile and authorization data should r
 
 ### Local sign-in/session helpers
 
-The built-in local sign-in route can be enough for simple apps, but custom login forms need a safe lower-level helper.
-
-The helper must be request-aware. A shape in this family is acceptable:
+Custom login forms should first use the explicit composition path:
 
 ```ntnt
-local_sign_in(req, response, map {
-    "email": email,
-    "password": password,
-    "remember_me": remember_me
+let verified = verify_local_password(email, password)?
+return sign_in_session(response, req, map {
+    "subject_id": verified["subject_id"],
+    "email": verified["email"],
+    "claims": app_claims_for_local_user(verified)
 })
 ```
 
-It should return either:
-
-- a completed signed-in response, or
-- a staged-auth continuation response for TOTP/setup/password-change, or
-- a safe auth error result
-
-It must delegate to request-aware `sign_in_session(response, req, session, options?)` or the same internal session-completion primitive so local login receives OAuth-equivalent rotation, metadata capture, cookie, TTL, and lifecycle behavior. It should not directly create sessions, attach cookies, or bypass the shared completion path.
+That is the current direction after PR #100. A public `local_sign_in(...)` helper is intentionally **not** part of this slice; PR #99 showed that adding it too early duplicates session/challenge semantics and bloats the change. If a later helper is added, it must be request-aware and delegate to `sign_in_session(response, req, session, options?)` or the same internal session-completion primitive so local login receives OAuth-equivalent rotation, metadata capture, cookie, TTL, and lifecycle behavior. It must not directly create sessions, attach cookies, or bypass the shared completion path.
 
 ### Password reset helpers
 
@@ -342,7 +335,9 @@ This table should become implementation comments and contract tests, not just do
 - [x] Create credential-secret storage and verification helpers
 - [x] Normalize email lookup rules and document them
 - [x] Add account states: bootstrap, pending setup, active, disabled, locked, password-change-required
-- [ ] Support bootstrap account creation from config/env
+- [x] Add public bootstrap provisioning through `bootstrap_local_user(...)` with safe bootstrap user payloads
+- [x] Store bootstrap identity + credential atomically for memory/SQLite
+- [ ] Support config/env-driven bootstrap seeding for the common admin-panel deployment case
 - [ ] Force bootstrap credential rotation/setup completion according to config
 - [x] Add memory/SQLite contract tests by default
 - [ ] Add Postgres/Redis contract coverage in backend CI
@@ -354,7 +349,7 @@ This table should become implementation comments and contract tests, not just do
 
 **Baseline:** request-aware manual session completion already exists in 0.4.9 branch work. This phase should wire local credential verification into that primitive, not design a new cookie/session attachment path.
 
-**Lean path after PR #99:** do not add a public `local_sign_in(...)` helper until the explicit composition path is insufficient. For now, custom login handlers should call `verify_local_password(...)` and then `sign_in_session(response, req, session, options?)` with app-owned claims/session data. Setup-required flows should use the staged-auth primitives directly until the setup/TOTP flow shape is small and stable.
+**Post-PR100 lean path:** do not add a public `local_sign_in(...)` helper until the explicit composition path is insufficient. For now, custom login handlers should call `verify_local_password(...)` and then `sign_in_session(response, req, session, options?)` with app-owned claims/session data. Setup-required flows should use the staged-auth primitives directly until the setup/TOTP flow shape is small and stable.
 
 - [x] Add local password verification through `std/auth`
 - [ ] Decide whether a public local sign-in domain operation is still needed after explicit composition and bootstrap/setup primitives land
@@ -469,11 +464,12 @@ The right implementation order is:
 
 1. architecture/storage/test preflight
 2. local identity and credential store — baseline shipped on `main`
-3. bootstrap/setup provisioning — next small runtime slice
-4. request-aware local sign-in/reference flow only if explicit composition remains too repetitive
-5. staged setup/TOTP
-6. password reset
-7. template migration
-8. contract/docs/CI ratchet
+3. bootstrap/setup provisioning — PR #100 adds `bootstrap_local_user(...)` as the narrow runtime slice
+4. first-login/setup completion and forced password rotation
+5. request-aware local sign-in/reference flow only if explicit composition remains too repetitive
+6. staged setup/TOTP
+7. password reset
+8. template migration
+9. contract/docs/CI ratchet
 
 If `std/auth` can own OAuth well but still cannot cleanly own a normal local admin login, the library remains incomplete in a way users feel immediately. If it owns local auth with the same discipline as OAuth/session/challenge state, it becomes genuinely hard to beat.
