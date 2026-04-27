@@ -70,7 +70,9 @@ use guards::validate_auth_challenge_kind;
 pub use guards::{
     enforce_auth_for_request, get_protected_paths, register_protected_paths, reset_protected_paths,
 };
-use local::{verified_local_password_to_value, verify_local_password_record};
+use local::{
+    bootstrap_local_user_record, verified_local_password_to_value, verify_local_password_record,
+};
 use oauth::extract_user_info;
 pub use oauth::{
     client_credentials_grant, decode_id_token, exchange_code_for_tokens, fetch_oidc_discovery,
@@ -3738,6 +3740,98 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt bootstrap_local_user
+    // @module std/auth
+    // @signature bootstrap_local_user(identifier: String, password: String, options?: Map) -> Result<Map, String>
+    // Provision an initial local credential record for app setup flows.
+    //
+    // The helper normalizes the identifier (email by default), rejects an existing
+    // local identity with the same normalized identifier, stores an auth-owned
+    // local identity plus password credential, and returns the same safe local
+    // user payload shape as `verify_local_password(...)`. The bootstrapped
+    // account starts in `bootstrap` state with `must_change_password: true` so
+    // app-owned setup code can force rotation before granting regular access.
+    // It never exposes passwords, password hashes, hash parameters, credentials,
+    // secrets, or tokens.
+    // @param identifier The local setup identifier. Email is the default identifier kind.
+    // @param password The temporary plaintext password to hash and store
+    // @param options Optional map with `identifier_kind` (default `"email"`)
+    // @returns Ok(map) with safe local user fields; Err(message) on duplicate, invalid input, or unsupported storage backend
+    // @error RuntimeError ~ "Auth not initialized" fix: "Call enable_auth(...) during app startup before bootstrapping local credentials"
+    // @error TypeError ~ "identifier must be a string" fix: "Pass the setup email/identifier as a string"
+    // @see_also verify_local_password, sign_in_session
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #security
+    // @example let user = bootstrap_local_user("admin@example.com", setup_password)? ~ "Provision a first setup user"
+    // @example sign_in_session(redirect("/setup"), req, map { "subject_id": user["subject_id"], "email": user["email"] }) ~ "Sign in the setup user with request-aware session handling"
+    module.insert(
+        "bootstrap_local_user".to_string(),
+        Value::NativeFunction {
+            name: "bootstrap_local_user".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "[auth] bootstrap_local_user() requires identifier, password, and optional options"
+                            .to_string(),
+                    ));
+                }
+
+                let _config = get_auth_config().ok_or_else(|| {
+                    IntentError::runtime_error(
+                        "[auth] Auth not initialized. Call enable_auth() before bootstrap_local_user()."
+                            .to_string(),
+                    )
+                })?;
+
+                let identifier = match &args[0] {
+                    Value::String(s) => s.as_str(),
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] bootstrap_local_user() identifier must be a string, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let password = match &args[1] {
+                    Value::String(s) => s.as_str(),
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] bootstrap_local_user() password must be a string, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let identifier_kind = match args.get(2) {
+                    Some(Value::Map(map)) => match map.get("identifier_kind") {
+                        Some(Value::String(kind)) => kind.as_str(),
+                        Some(other) => {
+                            return Err(IntentError::type_error(format!(
+                                "[auth] bootstrap_local_user() identifier_kind must be a string, got {}",
+                                other.type_name()
+                            )))
+                        }
+                        None => "email",
+                    },
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] bootstrap_local_user() options must be a map, got {}",
+                            other.type_name()
+                        )))
+                    }
+                    None => "email",
+                };
+
+                match bootstrap_local_user_record(identifier_kind, identifier, password) {
+                    Ok(verified) => Ok(Value::ok(verified_local_password_to_value(verified))),
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
     // @ntnt verify_local_password
     // @module std/auth
     // @signature verify_local_password(identifier: String, password: String, options?: Map) -> Result<Map, String>
@@ -4396,6 +4490,23 @@ mod tests {
         match values.first() {
             Some(Value::String(message)) => message.clone(),
             other => panic!("unexpected Result::Err payload: {other:?}"),
+        }
+    }
+
+    fn result_ok_map(value: Value) -> HashMap<String, Value> {
+        let Value::EnumValue {
+            enum_name,
+            variant,
+            values,
+        } = value
+        else {
+            panic!("expected Result::Ok, got {value:?}");
+        };
+        assert_eq!(enum_name, "Result");
+        assert_eq!(variant, "Ok");
+        match values.first() {
+            Some(Value::Map(map)) => map.clone(),
+            other => panic!("unexpected Result::Ok payload: {other:?}"),
         }
     }
 
@@ -5901,6 +6012,171 @@ mod tests {
                 assert!(!message.contains("password hash"));
             }
         }
+    }
+
+    #[test]
+    fn test_bootstrap_local_user_native_helper_provisions_safe_setup_user() {
+        use super::storage::{
+            get_local_credential_secret_record, get_local_identity_by_identifier_record,
+            LocalAccountState,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            let module = init();
+            let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+            let bootstrapped = result_ok_map(
+                bootstrap_local_user(&[
+                    Value::String(" Bootstrap@Example.COM ".to_string()),
+                    Value::String("temporary bootstrap password".to_string()),
+                ])
+                .unwrap(),
+            );
+
+            let local_user_id = match bootstrapped.get("local_user_id") {
+                Some(Value::String(id)) => id.clone(),
+                other => panic!("unexpected local_user_id payload: {other:?}"),
+            };
+            match bootstrapped.get("subject_id") {
+                Some(Value::String(subject_id)) => assert_eq!(subject_id, &local_user_id),
+                other => panic!("unexpected subject_id payload: {other:?}"),
+            }
+            match bootstrapped.get("provider") {
+                Some(Value::String(provider)) => assert_eq!(provider, "local"),
+                other => panic!("unexpected provider payload: {other:?}"),
+            }
+            match bootstrapped.get("email") {
+                Some(Value::String(email)) => assert_eq!(email, "Bootstrap@Example.COM"),
+                other => panic!("unexpected email payload: {other:?}"),
+            }
+            match bootstrapped.get("identifier_normalized") {
+                Some(Value::String(identifier)) => assert_eq!(identifier, "bootstrap@example.com"),
+                other => panic!("unexpected identifier_normalized payload: {other:?}"),
+            }
+            match bootstrapped.get("state") {
+                Some(Value::String(state)) => assert_eq!(state, "bootstrap"),
+                other => panic!("unexpected state payload: {other:?}"),
+            }
+            match bootstrapped.get("must_change_password") {
+                Some(Value::Bool(value)) => assert!(*value),
+                other => panic!("unexpected must_change_password payload: {other:?}"),
+            }
+            for secret_key in [
+                "password",
+                "password_hash",
+                "password_hash_algorithm",
+                "password_hash_params_json",
+                "credential",
+                "secret",
+                "token",
+            ] {
+                assert!(
+                    !bootstrapped.contains_key(secret_key),
+                    "bootstrap payload must not expose {secret_key}"
+                );
+            }
+
+            let stored_identity =
+                get_local_identity_by_identifier_record("email", "bootstrap@example.com")
+                    .unwrap()
+                    .expect("bootstrap should store a local identity");
+            assert_eq!(stored_identity.id, local_user_id);
+            assert_eq!(stored_identity.state, LocalAccountState::Bootstrap);
+            let credential = get_local_credential_secret_record(&stored_identity.id)
+                .unwrap()
+                .expect("bootstrap should store a local credential secret");
+            assert_ne!(credential.password_hash, "temporary bootstrap password");
+            assert!(!credential.password_hash.trim().is_empty());
+            assert!(credential.must_change_password);
+
+            let verify_local_password = module_fn(&module, "verify_local_password");
+            let verified = result_ok_map(
+                verify_local_password(&[
+                    Value::String("bootstrap@example.com".to_string()),
+                    Value::String("temporary bootstrap password".to_string()),
+                ])
+                .unwrap(),
+            );
+            match verified.get("local_user_id") {
+                Some(Value::String(id)) => assert_eq!(id, &stored_identity.id),
+                other => panic!("unexpected verified local_user_id payload: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_local_user_rejects_duplicate_and_invalid_inputs() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+        bootstrap_local_user(&[
+            Value::String("admin@example.com".to_string()),
+            Value::String("temporary bootstrap password".to_string()),
+        ])
+        .unwrap();
+
+        let duplicate = result_err_string(
+            bootstrap_local_user(&[
+                Value::String(" Admin@Example.com ".to_string()),
+                Value::String("temporary bootstrap password".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert!(
+            duplicate.contains("already exists"),
+            "unexpected duplicate error: {duplicate}"
+        );
+
+        let invalid_email = result_err_string(
+            bootstrap_local_user(&[
+                Value::String("not-an-email".to_string()),
+                Value::String("temporary bootstrap password".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert!(
+            invalid_email.contains("must contain @"),
+            "unexpected invalid-email error: {invalid_email}"
+        );
+
+        let empty_password = result_err_string(
+            bootstrap_local_user(&[
+                Value::String("new@example.com".to_string()),
+                Value::String("   ".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert!(
+            empty_password.contains("password must not be empty"),
+            "unexpected empty-password error: {empty_password}"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_local_user_requires_auth_initialization() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let module = init();
+        let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+        let err = bootstrap_local_user(&[
+            Value::String("admin@example.com".to_string()),
+            Value::String("password".to_string()),
+        ])
+        .expect_err("bootstrap_local_user should require initialized auth");
+        assert!(
+            err.to_string().contains("enable_auth"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

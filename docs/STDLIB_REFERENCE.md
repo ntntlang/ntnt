@@ -1827,6 +1827,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`auth_me`](#authme) | Return current user as JSON for SPAs. |
 | [`auth_start`](#authstart) | Handle OAuth login start - redirects to the provider's authorization page. |
 | [`begin_auth_challenge`](#beginauthchallenge) | Persist a pending auth challenge and attach the challenge cookie. |
+| [`bootstrap_local_user`](#bootstraplocaluser) | Provision an initial local credential record for app setup flows. |
 | [`cancel_auth_challenge`](#cancelauthchallenge) | Cancel the current auth challenge and clear the challenge cookie. |
 | [`complete_auth_challenge`](#completeauthchallenge) | Upgrade the current auth challenge into a full authenticated session. |
 | [`create_session_from_oauth`](#createsessionfromoauth) | Create a session from OAuth user info and tokens. |
@@ -2030,6 +2031,42 @@ begin_auth_challenge(redirect("/admin/verify"), map { "subject_id": user.id, "ki
 ```
 
 **See also:** `current_auth_challenge`, `complete_auth_challenge`, `cancel_auth_challenge`
+
+*Since v0.4.9*
+
+---
+
+#### `bootstrap_local_user`
+
+```ntnt
+bootstrap_local_user(identifier: String, password: String, options?: Map) -> Result<Map, String>
+```
+
+Provision an initial local credential record for app setup flows.
+
+The helper normalizes the identifier (email by default), rejects an existing local identity with the same normalized identifier, stores an auth-owned local identity plus password credential, and returns the same safe local user payload shape as `verify_local_password(...)`. The bootstrapped account starts in `bootstrap` state with `must_change_password: true` so app-owned setup code can force rotation before granting regular access. It never exposes passwords, password hashes, hash parameters, credentials, secrets, or tokens.
+
+**Parameters:**
+
+- `identifier` — The local setup identifier. Email is the default identifier kind.
+- `password` — The temporary plaintext password to hash and store
+- `options` — Optional map with `identifier_kind` (default `"email"`)
+
+**Returns:** Ok(map) with safe local user fields; Err(message) on duplicate, invalid input, or unsupported storage backend
+
+**Examples:**
+
+```ntnt
+let user = bootstrap_local_user("admin@example.com", setup_password)?  // Provision a first setup user
+sign_in_session(redirect("/setup"), req, map { "subject_id": user["subject_id"], "email": user["email"] })  // Sign in the setup user with request-aware session handling
+```
+
+**Errors:**
+
+- **RuntimeError**: Auth not initialized — *Fix: Call enable_auth(...) during app startup before bootstrapping local credentials*
+- **TypeError**: identifier must be a string — *Fix: Pass the setup email/identifier as a string*
+
+**See also:** `verify_local_password`, `sign_in_session`
 
 *Since v0.4.9*
 
