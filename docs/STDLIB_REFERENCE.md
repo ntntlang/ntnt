@@ -2916,7 +2916,7 @@ The helper normalizes the identifier (email by default), loads the auth-owned lo
 
 - `identifier` — The local user identifier. Email is the default identifier kind.
 - `current_password` — The current setup, forced-change, or active local password to verify before rotation
-- `new_password` — The replacement plaintext password to hash and store
+- `new_password` — The replacement plaintext password to hash and store; it must differ from the current password
 - `options` — Optional map with `identifier_kind` (default `"email"`)
 
 **Returns:** Ok(map) with safe local user fields; Err(message) on invalid credentials, invalid input, or unsupported storage backend

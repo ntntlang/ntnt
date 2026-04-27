@@ -1703,7 +1703,7 @@ Full OAuth, session management, CSRF, JWT, TOTP, and local credential bootstrap,
 
 ### Local Credential Bootstrap and Setup Completion
 
-`std/auth` owns local identity/credential lifecycle state. Use `bootstrap_local_user(...)` to provision a setup credential, then call `set_local_password(...)` with that current setup/forced-change credential plus the replacement password to rotate it and clear setup-required state before granting regular access. Both helpers return only safe local-user metadata; they never expose passwords, password hashes, hash parameters, tokens, or raw credential records.
+`std/auth` owns local identity/credential lifecycle state. Use `bootstrap_local_user(...)` to provision a setup credential, then call `set_local_password(...)` with that current setup/forced-change credential plus a different replacement password to rotate it and clear setup-required state before granting regular access. Both helpers return only safe local-user metadata; they never expose passwords, password hashes, hash parameters, tokens, or raw credential records.
 
 ```ntnt
 import { bootstrap_local_user, set_local_password, sign_in_session } from "std/auth"

@@ -84,6 +84,9 @@ pub(in crate::stdlib::auth) fn set_local_password_record(
     }
 
     let verified = verify_local_password_record(&kind, identifier, current_password)?;
+    if current_password == new_password {
+        return Err("[auth] local password must differ from current password".to_string());
+    }
 
     let now = chrono::Utc::now().timestamp();
     let identity = LocalIdentity {

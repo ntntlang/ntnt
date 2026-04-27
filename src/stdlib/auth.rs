@@ -3848,7 +3848,7 @@ pub fn init() -> HashMap<String, Value> {
     // secrets, or tokens.
     // @param identifier The local user identifier. Email is the default identifier kind.
     // @param current_password The current setup, forced-change, or active local password to verify before rotation
-    // @param new_password The replacement plaintext password to hash and store
+    // @param new_password The replacement plaintext password to hash and store; it must differ from the current password
     // @param options Optional map with `identifier_kind` (default `"email"`)
     // @returns Ok(map) with safe local user fields; Err(message) on invalid credentials, invalid input, or unsupported storage backend
     // @error RuntimeError ~ "Auth not initialized" fix: "Call enable_auth(...) during app startup before rotating local credentials"
@@ -6385,6 +6385,28 @@ mod tests {
                 .unwrap(),
             );
             assert_eq!(wrong_current_password, "Invalid local credentials");
+
+            let same_password = result_err_string(
+                set_local_password(&[
+                    Value::String(" rotate@example.com ".to_string()),
+                    Value::String("temporary setup password".to_string()),
+                    Value::String("temporary setup password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert!(
+                same_password.contains("must differ from current password"),
+                "unexpected same-password error: {same_password}"
+            );
+            let setup_identity =
+                get_local_identity_by_identifier_record("email", "rotate@example.com")
+                    .unwrap()
+                    .expect("setup local identity should still be stored");
+            assert_eq!(setup_identity.state, LocalAccountState::Bootstrap);
+            let setup_credential = get_local_credential_secret_record(&setup_identity.id)
+                .unwrap()
+                .expect("setup local credential should still be stored");
+            assert!(setup_credential.must_change_password);
 
             let updated = result_ok_map(
                 set_local_password(&[
