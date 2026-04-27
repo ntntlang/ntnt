@@ -6,6 +6,7 @@ use std::collections::HashMap;
 pub(super) struct AuthCookieSettings {
     pub(super) name: String,
     pub(super) path: String,
+    pub(super) domain: Option<String>,
     pub(super) same_site: String,
     pub(super) secure: bool,
     pub(super) http_only: bool,
@@ -91,6 +92,36 @@ fn validate_cookie_path(path: &str) -> std::result::Result<String, String> {
     Ok(path.to_string())
 }
 
+fn validate_cookie_domain(domain: &str) -> std::result::Result<String, String> {
+    let domain = domain.trim();
+    if domain.is_empty() {
+        return Err("[auth] cookie_domain must not be empty".to_string());
+    }
+    if domain.chars().any(|ch| {
+        ch.is_control() || ch.is_whitespace() || matches!(ch, ';' | ',' | '/' | ':' | '=')
+    }) {
+        return Err("[auth] cookie_domain contains invalid characters".to_string());
+    }
+
+    let host = domain.trim_start_matches('.');
+    if host.is_empty() || !host.chars().any(|ch| ch.is_ascii_alphanumeric()) {
+        return Err("[auth] cookie_domain must contain a host name".to_string());
+    }
+    for label in host.split('.') {
+        if label.is_empty()
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            return Err("[auth] cookie_domain must be a valid host name".to_string());
+        }
+    }
+
+    Ok(domain.to_ascii_lowercase())
+}
+
 pub(super) fn normalize_cookie_same_site(value: &str) -> std::result::Result<String, String> {
     match value.to_ascii_lowercase().as_str() {
         "lax" => Ok("Lax".to_string()),
@@ -150,6 +181,10 @@ fn auth_cookie_settings(
     Ok(AuthCookieSettings {
         name: validate_cookie_name(&config.cookie_name)?,
         path: validate_cookie_path(&get_string("cookie_path")?.unwrap_or_else(|| "/".to_string()))?,
+        domain: get_string("cookie_domain")?
+            .as_deref()
+            .map(validate_cookie_domain)
+            .transpose()?,
         same_site: normalize_cookie_same_site(
             &get_string("cookie_same_site")?.unwrap_or_else(|| config.cookie_same_site.clone()),
         )?,
@@ -170,6 +205,10 @@ fn build_auth_cookie_string(value: &str, settings: &AuthCookieSettings) -> Strin
     }
     if settings.secure {
         cookie.push_str("; Secure");
+    }
+    if let Some(domain) = &settings.domain {
+        cookie.push_str("; Domain=");
+        cookie.push_str(domain);
     }
 
     cookie
@@ -216,8 +255,9 @@ pub(super) fn build_signed_auth_challenge_cookie(
     config: &AuthConfig,
     challenge_id: &str,
     ttl: i64,
+    overrides: Option<&HashMap<String, Value>>,
 ) -> std::result::Result<String, String> {
-    let mut settings = auth_cookie_settings(config, ttl.max(0), None)?;
+    let mut settings = auth_cookie_settings(config, ttl.max(0), overrides)?;
     settings.name = auth_challenge_cookie_name(config)?;
     let signed_challenge_id = sign_session_id(challenge_id, &config.session_secret);
     Ok(build_auth_cookie_string(&signed_challenge_id, &settings))
@@ -225,8 +265,14 @@ pub(super) fn build_signed_auth_challenge_cookie(
 
 pub(super) fn build_cleared_auth_challenge_cookie(
     config: &AuthConfig,
+    overrides: Option<&HashMap<String, Value>>,
 ) -> std::result::Result<String, String> {
-    let mut settings = auth_cookie_settings(config, 0, None)?;
+    let sanitized_overrides = overrides.map(|map| {
+        let mut sanitized = map.clone();
+        sanitized.remove("cookie_max_age");
+        sanitized
+    });
+    let mut settings = auth_cookie_settings(config, 0, sanitized_overrides.as_ref())?;
     settings.name = auth_challenge_cookie_name(config)?;
     Ok(build_auth_cookie_string("", &settings))
 }

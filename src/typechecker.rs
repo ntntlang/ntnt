@@ -3807,6 +3807,48 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
         }
         "std/auth" => {
             sig!(
+                "create_local_user",
+                [
+                    "identifier" => Type::String,
+                    "password" => Type::String,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(2)
+            );
+            sig!(
+                "bootstrap_local_user",
+                [
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(0)
+            );
+            sig!(
                 "verify_local_password",
                 [
                     "identifier" => Type::String,
@@ -3827,6 +3869,116 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     ],
                 },
                 required(2)
+            );
+            sig!(
+                "sign_in_session",
+                [
+                    "response" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "req" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "session" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Map {
+                    key_type: Box::new(Type::String),
+                    value_type: Box::new(Type::Any),
+                },
+                required(3)
+            );
+            sig!(
+                "complete_auth_challenge",
+                [
+                    "response" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "req" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "session" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Map {
+                    key_type: Box::new(Type::String),
+                    value_type: Box::new(Type::Any),
+                },
+                required(2)
+            );
+            sig!(
+                "cancel_auth_challenge",
+                [
+                    "response" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "req" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Map {
+                    key_type: Box::new(Type::String),
+                    value_type: Box::new(Type::Any),
+                },
+                required(2)
+            );
+            sig!(
+                "local_sign_in",
+                [
+                    "response" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "req" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "credentials" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "session" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(3)
             );
         }
         "std/crypto" => {
@@ -4213,6 +4365,90 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("expected String"));
         assert!(errs[0].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_auth_local_user_creation_signatures_check_args() {
+        let errs = check_errors(
+            r#"
+            import { create_local_user, bootstrap_local_user } from "std/auth"
+            create_local_user(42, "pw")
+            bootstrap_local_user(42)
+            "#,
+        );
+        assert_eq!(errs.len(), 2);
+        assert!(errs[0].message.contains("expected String"));
+        assert!(errs[0].message.contains("got Int"));
+        assert!(errs[1].message.contains("expected Map"));
+        assert!(errs[1].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_auth_sign_in_session_signature_requires_request_aware_shape() {
+        let errs = check_errors(
+            r#"
+            import { sign_in_session } from "std/auth"
+            sign_in_session(map {}, 42, map { "subject_id": "user-1" })
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("expected Map"));
+        assert!(errs[0].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_auth_sign_in_session_rejects_old_pre_request_shape() {
+        let errs = check_errors(
+            r#"
+            import { sign_in_session } from "std/auth"
+            sign_in_session(map {}, map { "subject_id": "user-1" })
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("sign_in_session"));
+        assert!(errs[0].message.contains("expects 3"));
+    }
+
+    #[test]
+    fn test_std_auth_auth_challenge_signatures_check_args() {
+        let errs = check_errors(
+            r#"
+            import { complete_auth_challenge, cancel_auth_challenge } from "std/auth"
+            complete_auth_challenge(map {}, 42)
+            cancel_auth_challenge(map {}, map {}, 42)
+            "#,
+        );
+        assert_eq!(errs.len(), 2);
+        assert!(errs[0].message.contains("expected Map"));
+        assert!(errs[0].message.contains("got Int"));
+        assert!(errs[1].message.contains("expected Map"));
+        assert!(errs[1].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_auth_local_sign_in_signature_checks_request_aware_shape() {
+        let errs = check_errors(
+            r#"
+            import { local_sign_in } from "std/auth"
+            local_sign_in(map {}, 42, map { "identifier": "admin@example.com", "password": "pw" })
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("expected Map"));
+        assert!(errs[0].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_auth_local_sign_in_signature_requires_credentials() {
+        let errs = check_errors(
+            r#"
+            import { local_sign_in } from "std/auth"
+            local_sign_in(map {}, map {})
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("local_sign_in"));
+        assert!(errs[0].message.contains("expects 3"));
     }
 
     // ── Scope nesting ───────────────────────────────────────────

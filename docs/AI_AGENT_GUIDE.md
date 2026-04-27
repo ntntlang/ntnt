@@ -1699,29 +1699,47 @@ fn get(req) {
 
 Boundary rule: use `std/auth` for auth flows, sessions, CSRF, current-user helpers, and TOTP. Use `std/crypto` for generic crypto helpers like `uuid`, `hash_password`, and `verify_password`.
 
-Full OAuth, session management, CSRF, JWT, TOTP, and local credential verification support.
+Full OAuth, session management, CSRF, JWT, TOTP, local credential provisioning, local sign-in, and password verification support.
 
-### Local Credential Verification
+### Local Email/Password Auth
 
-`std/auth` owns the local credential verification path; `std/crypto` remains the place for generic password hash helpers. After a local identity/credential has been provisioned by auth-owned setup/bootstrap flows, custom login UI should verify credentials, derive app-owned claims, then complete the session through the shared request-aware session primitive.
+`std/auth` owns local credential storage, bootstrap provisioning, password verification, staged setup continuations, and request-aware session completion. The current local identity/credential implementation supports the memory and SQLite auth stores; PostgreSQL and Redis fail closed until their local-auth record families are implemented. `std/crypto` remains the place for generic password hash helpers. App code owns UI, profiles, roles, organization membership, and the policy that turns a verified local identity into app-specific session claims.
+
+Use `bootstrap_local_user(...)` for the one-time admin/bootstrap account path, or `create_local_user(...)` for explicit provisioning. These helpers return safe local-auth metadata only; they never expose password hashes.
 
 ```ntnt
-import { verify_local_password, sign_in_session } from "std/auth"
+import { bootstrap_local_user, create_local_user, local_sign_in } from "std/auth"
 import { parse_form, redirect } from "std/http/server"
+import { get_env } from "std/env"
+
+fn ensure_bootstrap_admin() {
+    return bootstrap_local_user(map {
+        "email": get_env("ADMIN_EMAIL") ?? "",
+        "password": get_env("ADMIN_INITIAL_PASSWORD") ?? ""
+    })
+}
+
+fn provision_admin(email, temporary_password) {
+    return create_local_user(email, temporary_password, map {
+        "state": "password_change_required"
+    })
+}
 
 fn login(req) {
     let form = parse_form(req)
-    let verified = verify_local_password(form["email"] ?? "", form["password"] ?? "")?
 
-    return sign_in_session(redirect("/admin"), req, map {
-        "subject_id": verified["subject_id"],
-        "email": verified["email"],
-        "claims": app_claims_for_local_user(verified)
+    return local_sign_in(redirect("/admin"), req, map {
+        "email": form["email"] ?? "",
+        "password": form["password"] ?? ""
+    }, map {
+        "claims": app_claims_for_local_email(form["email"] ?? "")
     })
 }
 ```
 
-Session claims, roles, profiles, and organization membership stay app-owned; local auth only owns credential lifecycle state and safe verification results.
+`local_sign_in(response, req, credentials, session?, options?)` verifies the local credential and then uses the same request-aware session-completion path as OAuth/manual sign-in, including session rotation/migration, session TTL/cookie policy, and request-derived metadata such as `device_name`, `user_agent_hash`, and `last_ip_hash`. If the local account is in a setup state such as `bootstrap`, `pending_setup`, or `password_change_required`, it returns a staged auth challenge cookie instead of issuing a full session.
+
+Session claims, roles, profiles, and organization membership stay app-owned; local auth only owns credential lifecycle state and safe verification/sign-in results.
 
 ### Basic OAuth Setup
 

@@ -1827,8 +1827,10 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`auth_me`](#authme) | Return current user as JSON for SPAs. |
 | [`auth_start`](#authstart) | Handle OAuth login start - redirects to the provider's authorization page. |
 | [`begin_auth_challenge`](#beginauthchallenge) | Persist a pending auth challenge and attach the challenge cookie. |
+| [`bootstrap_local_user`](#bootstraplocaluser) | Create the initial bootstrap local account exactly once. |
 | [`cancel_auth_challenge`](#cancelauthchallenge) | Cancel the current auth challenge and clear the challenge cookie. |
 | [`complete_auth_challenge`](#completeauthchallenge) | Upgrade the current auth challenge into a full authenticated session. |
+| [`create_local_user`](#createlocaluser) | Create an auth-owned local identity and password credential. |
 | [`create_session_from_oauth`](#createsessionfromoauth) | Create a session from OAuth user info and tokens. |
 | [`csrf_field`](#csrffield) | Get an HTML hidden input field with the CSRF token. |
 | [`csrf_token`](#csrftoken) | Get the CSRF token for the current session. |
@@ -1841,6 +1843,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`jwt_decode`](#jwtdecode) | Decode a JWT token WITHOUT verifying the signature. |
 | [`jwt_sign`](#jwtsign) | Create a signed JWT token from claims. |
 | [`jwt_verify`](#jwtverify) | Verify a JWT token and return its claims. |
+| [`local_sign_in`](#localsignin) | Verify local credentials and complete or stage local sign-in. |
 | [`logout_all`](#logoutall) | Log out all sessions for the current user. |
 | [`logout_user`](#logoutuser) | Log out the current user and return a redirect response. |
 | [`oauth`](#oauth) | Create an OAuth provider configuration. |
@@ -2035,10 +2038,42 @@ begin_auth_challenge(redirect("/admin/verify"), map { "subject_id": user.id, "ki
 
 ---
 
+#### `bootstrap_local_user`
+
+```ntnt
+bootstrap_local_user(options?: Map) -> Result<Map, String>
+```
+
+Create the initial bootstrap local account exactly once.
+
+Reads `email`/`identifier` and `password` from the options map, or from `NTNT_AUTH_BOOTSTRAP_EMAIL` and `NTNT_AUTH_BOOTSTRAP_PASSWORD` by default. If the identity already exists, it returns `created: false` and does not replace the stored credential, preventing env-configured bootstrap passwords from becoming a recurring password-reset path on restart. Local bootstrap state currently supports the memory and SQLite auth stores; PostgreSQL and Redis fail closed until their local-auth record families are implemented.
+
+**Parameters:**
+
+- `options` — Optional map with `email` or `identifier`, `password`, `identifier_kind`, `identifier_env`, and `password_env`
+
+**Returns:** Ok(map) with safe local user metadata and `created`, or Err(message)
+
+**Examples:**
+
+```ntnt
+bootstrap_local_user(map { "email": get_env("ADMIN_EMAIL")?, "password": get_env("ADMIN_PASSWORD")? })  // Create first admin credential
+```
+
+**Errors:**
+
+- **RuntimeError**: requires email/password — *Fix: Pass options or set bootstrap env vars*
+
+**See also:** `create_local_user`, `verify_local_password`, `local_sign_in`
+
+*Since v0.4.9*
+
+---
+
 #### `cancel_auth_challenge`
 
 ```ntnt
-cancel_auth_challenge(response: Response, req: Request) -> Response
+cancel_auth_challenge(response: Response, req: Request, options?: Map) -> Response
 ```
 
 Cancel the current auth challenge and clear the challenge cookie.
@@ -2049,6 +2084,7 @@ Use this when a staged auth flow is abandoned, fails, or needs to be reset.
 
 - `response` — The Response map to attach the clearing cookie to
 - `req` — The current HTTP request
+- `options` — Optional cookie overrides matching the challenge cookie path/settings
 
 **Returns:** Response with the challenge cookie cleared
 
@@ -2079,7 +2115,7 @@ This consumes the active challenge, creates a real session, attaches the normal 
 - `response` — The Response map to attach cookies to
 - `req` — The current HTTP request
 - `session` — Optional session data map merged onto the completed session
-- `options` — Optional session options like `session_ttl` and cookie overrides
+- `options` — Optional `session_ttl` and challenge-cookie clearing overrides
 
 **Returns:** Response with the auth challenge consumed and the session cookie attached
 
@@ -2090,6 +2126,40 @@ complete_auth_challenge(redirect("/admin"), req, map { "claims": app_claims_for_
 ```
 
 **See also:** `begin_auth_challenge`, `current_auth_challenge`, `cancel_auth_challenge`, `sign_in_session`
+
+*Since v0.4.9*
+
+---
+
+#### `create_local_user`
+
+```ntnt
+create_local_user(identifier: String, password: String, options?: Map) -> Result<Map, String>
+```
+
+Create an auth-owned local identity and password credential.
+
+This is a primitive for provisioning local accounts without app-owned credential tables. Email is the default identifier kind. Options may include `identifier_kind`, `state`, `must_change_password`, `metadata`, and `id`. App profile fields, roles, orgs, and session claims remain app-owned. Local identity/credential provisioning currently supports the memory and SQLite auth stores; PostgreSQL and Redis fail closed until their local-auth record families are implemented.
+
+**Parameters:**
+
+- `identifier` — Local login identifier; email by default
+- `password` — Plaintext initial password to hash and store
+- `options` — Optional map with identifier/account-state settings
+
+**Returns:** Ok(map) with safe local user metadata, or Err(message)
+
+**Examples:**
+
+```ntnt
+create_local_user("admin@example.com", password, map { "state": "password_change_required" })  // Provision a local user
+```
+
+**Errors:**
+
+- **RuntimeError**: Auth not initialized — *Fix: Call enable_auth(...) before creating local users*
+
+**See also:** `bootstrap_local_user`, `verify_local_password`, `local_sign_in`
 
 *Since v0.4.9*
 
@@ -2446,6 +2516,42 @@ jwt_verify(token, secret)  // Verify and get claims
 
 ---
 
+#### `local_sign_in`
+
+```ntnt
+local_sign_in(response: Response, req: Request, credentials: Map, session?: Map, options?: Map) -> Result<Response, String>
+```
+
+Verify local credentials and complete or stage local sign-in.
+
+Active users are signed in through the same request-aware session completion path as `sign_in_session(...)`, including session rotation and request-derived metadata capture. Setup-required users (bootstrap, pending setup, or password change required) receive an auth challenge cookie instead of a full session. Invalid credentials return `Err("Invalid local credentials")` without setting cookies. Local identity/credential lookup currently supports the memory and SQLite auth stores; PostgreSQL and Redis fail closed until their local-auth record families are implemented.
+
+**Parameters:**
+
+- `response` — Response to attach the session or challenge cookie to
+- `req` — Current HTTP request
+- `credentials` — Map with `email` or `identifier`, `password`, and optional `identifier_kind`
+- `session` — Optional app-owned session data such as `claims`, `data`, `name`, or `picture`
+- `options` — Optional map with `session_ttl`, `challenge_kind`, `challenge_ttl`, and cookie overrides (`cookie_path`, `cookie_domain`, `cookie_secure`, `cookie_http_only`, `cookie_same_site`, `cookie_max_age`)
+
+**Returns:** Ok(Response) with a session/challenge cookie, or Err(message)
+
+**Examples:**
+
+```ntnt
+local_sign_in(redirect("/admin"), req, map { "email": email, "password": password }, map { "claims": app_claims })  // Verify and sign in local user
+```
+
+**Errors:**
+
+- **TypeError**: request must be an HTTP request map — *Fix: Pass the current route request as the second argument*
+
+**See also:** `create_local_user`, `bootstrap_local_user`, `verify_local_password`, `sign_in_session`
+
+*Since v0.4.9*
+
+---
+
 #### `logout_all`
 
 ```ntnt
@@ -2796,7 +2902,7 @@ Use this after privilege changes or sensitive login completion to prevent sessio
 
 - `response` — The Response map to attach the rotated cookie to
 - `req` — The current HTTP request
-- `options` — Optional cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+- `options` — Optional cookie override keys (`cookie_path`, `cookie_domain`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
 
 **Returns:** Response with the rotated session cookie
 
@@ -2908,7 +3014,7 @@ Use this after password, magic-link, or other non-OAuth login flows. The request
 - `response` — The Response map to attach the session cookie to
 - `req` — The current HTTP request
 - `session` — Session data map, including required `subject_id`
-- `options` — Optional map with `session_ttl` and cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+- `options` — Optional map with `session_ttl` and cookie override keys (`cookie_path`, `cookie_domain`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
 
 **Returns:** Response with a persisted session and Set-Cookie header
 
@@ -2942,7 +3048,7 @@ Use this when your app wants logout behavior without being forced into the built
 
 - `response` — The Response map to attach the clearing cookie to
 - `req` — The current HTTP request
-- `options` — Optional cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`)
+- `options` — Optional cookie override keys (`cookie_path`, `cookie_domain`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`)
 
 **Returns:** Response with the auth cookie cleared
 
@@ -3111,7 +3217,7 @@ verify_local_password(identifier: String, password: String, options?: Map) -> Re
 
 Verify a local credential record and return a safe auth user payload.
 
-The helper normalizes the identifier (email by default), loads the auth-owned local identity and credential secret, verifies the password hash, and returns a map suitable for app-specific session claim derivation and `sign_in_session(...)`. It never exposes password hashes or hash parameters. Missing identities, missing credential secrets, bad passwords, disabled accounts, and locked accounts all return the same invalid-credentials error to avoid account-state or identity enumeration. Corrupted or unsupported stored hashes return a generic operational auth error without backend parser details after running the same dummy verification work used for absent credentials. Bootstrap, pending-setup, and password-change-required identities can verify credentials, but the returned payload forces `must_change_password: true` so callers do not accidentally treat setup-required accounts as fully active sessions.
+The helper normalizes the identifier (email by default), loads the auth-owned local identity and credential secret, verifies the password hash, and returns a map suitable for app-specific session claim derivation and `sign_in_session(...)`. It never exposes password hashes or hash parameters. Missing identities, missing credential secrets, bad passwords, disabled accounts, and locked accounts all return the same invalid-credentials error to avoid account-state or identity enumeration. Corrupted or unsupported stored hashes return a generic operational auth error without backend parser details after running the same dummy verification work used for absent credentials. Local identity/credential lookup currently supports the memory and SQLite auth stores; PostgreSQL and Redis fail closed until their local-auth record families are implemented. Bootstrap, pending-setup, and password-change-required identities can verify credentials, but the returned payload forces `must_change_password: true` so callers do not accidentally treat setup-required accounts as fully active sessions.
 
 **Parameters:**
 

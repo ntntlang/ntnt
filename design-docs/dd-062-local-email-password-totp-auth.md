@@ -1,6 +1,6 @@
 # DD-062: First-Class Local Email/Password/TOTP Auth in `std/auth`
 
-**Status:** Draft / implementation blueprint
+**Status:** In Progress — PR #98 merged the Phase 1 credential/storage foundation; `feat/local-auth-sign-in-bootstrap` adds bootstrap provisioning plus request-aware local sign-in
 **Parent:** DD-043 Phase 9 — First-Class Local Auth
 **Target:** v0.4.x auth roadmap after the v0.4.9 DD-043 foundation
 
@@ -21,7 +21,7 @@
 - TOTP primitives
 - sign-in/sign-out/current-session helpers
 
-But for a very common real app shape — a local admin area using **email + password + TOTP** — developers still have to build and maintain their own mini auth system around those primitives:
+For a very common real app shape — a local admin area using **email + password + TOTP** — the historical gap was that developers had to build and maintain their own mini auth system around those primitives:
 
 - local user/credential table
 - password-hash storage and verification
@@ -32,7 +32,7 @@ But for a very common real app shape — a local admin area using **email + pass
 - local login route handlers
 - ad hoc admin/session claim handoff from custom local auth into `std/auth` sessions
 
-That is exactly the wrong level of abstraction.
+PR #98 closed the first slice of that gap by giving `std/auth` an auth-owned local identity/credential storage home and public password-verification helper. The `feat/local-auth-sign-in-bootstrap` slice closes the next practical gap with bootstrap/user provisioning and request-aware `local_sign_in(...)` orchestration. The remaining wrong-level-of-abstraction problem is the lifecycle after that: setup completion, TOTP enrollment, password reset, backend CI, and template migration.
 
 A template app should not need a custom `lib/admin_db.tnt` auth subsystem just to get a normal local admin login. If the language already owns sessions, cookies, staged challenges, TOTP primitives, and protected-route enforcement, it should also own the common local credential lifecycle that feeds those mechanisms.
 
@@ -63,7 +63,7 @@ This DD is not about turning `std/auth` into a hosted identity product or a univ
 
 ## Relationship to DD-043
 
-DD-062 is the detailed child plan for DD-043 Phase 9.
+DD-062 is the detailed child plan for DD-043 Phase 9. PR #98 landed the first implementation slice: local identity/account-state records, auth-owned credential-secret storage for memory and SQLite, public `verify_local_password(...)`, and generated docs/examples. The `feat/local-auth-sign-in-bootstrap` slice adds `create_local_user(...)`, `bootstrap_local_user(...)`, request-aware `local_sign_in(...)`, and local-auth docs/examples. The remaining phases turn that into complete setup/TOTP/reset lifecycle behavior.
 
 Current 0.4.9 baseline: the shared manual/staged session completion path is already request-aware. `sign_in_session(response, req, session, options?)` and `complete_auth_challenge(response, req, session?, options?)` rotate/migrate existing sessions and capture request-derived metadata. Local auth should consume that path rather than introduce its own session creation semantics.
 
@@ -101,10 +101,12 @@ Primary shape: local auth is a primitive family used by `enable_auth(...)` for s
 import {
     enable_auth,
     local_credentials,
-    verify_local_password,
-    sign_in_session,
+    bootstrap_local_user,
+    create_local_user,
+    local_sign_in,
 } from "std/auth"
 import { parse_form, redirect } from "std/http/server"
+import { get_env } from "std/env"
 
 enable_auth([], "admin", map {
     "local_credentials": local_credentials(map {
@@ -117,13 +119,25 @@ enable_auth([], "admin", map {
     "failure_url": "/admin/login"
 })
 
+// Bootstrap/provisioning stays in std/auth credential state, while app profile
+// and authorization policy remain app-owned.
+bootstrap_local_user(map {
+    "email": get_env("ADMIN_EMAIL") ?? "",
+    "password": get_env("ADMIN_BOOTSTRAP_PASSWORD") ?? ""
+})
+
+create_local_user("operator@example.com", get_env("OPERATOR_PASSWORD") ?? "", map {
+    "state": "active"
+})
+
 fn login(req) {
     let form = parse_form(req)
-    let verified = verify_local_password(form["email"] ?? "", form["password"] ?? "")?
-    return sign_in_session(redirect("/admin"), req, map {
-        "subject_id": verified["subject_id"],
-        "email": verified["email"],
-        "claims": app_claims_for_local_user(verified)
+    return local_sign_in(redirect("/admin"), req, map {
+        "identifier": form["email"] ?? "",
+        "password": form["password"] ?? "",
+        "remember_me": form["remember_me"] == "on"
+    }, map {
+        "claims": app_claims_for_identifier(form["email"] ?? "")
     })
 }
 ```
@@ -132,7 +146,7 @@ Rationale:
 
 - Developers should still have one obvious auth configuration entrypoint: `enable_auth(...)`.
 - Local credentials should share route prefixes, cookies, sessions, lifecycle presets, protected paths, health diagnostics, startup summaries, and backend contract tests.
-- `sign_in_session(response, req, session, options?)` is intentionally request-aware so local/manual auth gets OAuth-equivalent session rotation and request metadata capture.
+- `local_sign_in(response, req, credentials, session?, options?)` is intentionally request-aware and delegates to the same session-completion primitive as manual/OAuth flows, so local auth gets OAuth-equivalent session rotation and request metadata capture without every app composing that glue by hand.
 - Claims/session data should come from app hooks or explicit session-completion data, not static authorization policy buried in credential config.
 - Email is the first identifier preset, not the universal identity model.
 
@@ -182,11 +196,11 @@ The built-in local sign-in route can be enough for simple apps, but custom login
 The helper must be request-aware. A shape in this family is acceptable:
 
 ```ntnt
-local_sign_in(req, response, map {
+local_sign_in(response, req, map {
     "email": email,
     "password": password,
     "remember_me": remember_me
-})
+}, session, options)
 ```
 
 It should return either:
@@ -322,13 +336,13 @@ This table should become implementation comments and contract tests, not just do
 
 **Purpose:** make the local-auth implementation path obvious before adding durable credential state.
 
-- [ ] Split or carve `auth/storage.rs` enough to give local-auth storage a focused home
+- [x] Split or carve `auth/storage.rs` enough to give local-auth storage a focused home (`auth/storage/local.rs`)
 - [ ] Move or isolate the auth storage contract harness so local-auth record families can reuse it cleanly
-- [ ] Add local-auth fallback/error policy comments near the storage contract boundary
+- [x] Add local-auth fallback/error policy comments near the storage contract boundary
 - [ ] Add auth review checklist entries for local-auth-specific regressions
-- [ ] Decide exact module names and public API names before implementation starts
+- [x] Decide exact module names and public API names for the first credential-storage slice
 
-**Exit criteria:** no one has to guess where local identity, password reset, TOTP enrollment, or bootstrap state belongs.
+**Status after PR #98:** local identity and credential state now have an obvious storage/domain home. The remaining preflight work is the reusable contract-harness and review-guidance ratchet for reset, TOTP, bootstrap, and backend failure semantics.
 
 ### Phase 1 — Local Identity and Credential Store
 
@@ -338,8 +352,8 @@ This table should become implementation comments and contract tests, not just do
 - [x] Create credential-secret storage and verification helpers
 - [x] Normalize email lookup rules and document them
 - [x] Add account states: bootstrap, pending setup, active, disabled, locked, password-change-required
-- [ ] Support bootstrap account creation from config/env
-- [ ] Force bootstrap credential rotation/setup completion according to config
+- [x] Support bootstrap account creation from config/env
+- [x] Force bootstrap credential rotation/setup completion according to config
 - [x] Add memory/SQLite contract tests by default
 - [ ] Add Postgres/Redis contract coverage in backend CI
 - [ ] Add migration tests for existing SQLite/Postgres stores
@@ -351,12 +365,13 @@ This table should become implementation comments and contract tests, not just do
 **Baseline:** request-aware manual session completion already exists in 0.4.9 branch work. This phase should wire local credential verification into that primitive, not design a new cookie/session attachment path.
 
 - [x] Add local password verification through `std/auth`
-- [ ] Add local sign-in domain operation that delegates to `sign_in_session(response, req, session, options?)` or the same internal primitive
-- [ ] Rotate/migrate existing sessions on successful local login
-- [ ] Capture `device_name`, `user_agent_hash`, and `last_ip_hash` from request metadata
-- [ ] Apply configured session TTL, max lifetime, sliding expiry, cookie policy, and remember-me behavior
-- [ ] Return staged continuation when TOTP/setup/password-change is required
-- [ ] Add tests proving local login does not lose session metadata compared with OAuth login
+- [x] Add local sign-in domain operation that delegates to `sign_in_session(response, req, session, options?)` or the same internal primitive
+- [x] Rotate/migrate existing sessions on successful local login
+- [x] Capture `device_name`, `user_agent_hash`, and `last_ip_hash` from request metadata
+- [x] Apply configured session TTL/cookie policy through the shared session helper
+- [ ] Finish full remember-me behavior (`remember_ttl`, option capture, and policy tests) end-to-end
+- [x] Return staged continuation when setup/password-change is required
+- [x] Add tests proving local login keeps request-aware session metadata and rejects bad credentials without cookies
 
 ### Phase 3 — First Login, Forced Password Change, and TOTP Enrollment
 
@@ -400,9 +415,11 @@ This table should become implementation comments and contract tests, not just do
 - [ ] Contract tests for every local-auth record family across memory and SQLite by default
 - [ ] Required Postgres/Redis backend contract CI job or explicit non-silent skip reporting
 - [ ] End-to-end ntnt tests for bootstrap, normal login, TOTP setup, forced password change, reset issue/consume, reset replay, disabled account rejection, and session revocation
-- [ ] Generated stdlib docs for every public helper
-- [ ] `docs/AI_AGENT_GUIDE.md` examples for local auth
-- [ ] DD-043 status/checklist updates after each implementation slice
+- [x] Generated stdlib docs for every public helper in the credential/bootstrap/sign-in slices
+- [x] `docs/AI_AGENT_GUIDE.md` examples for local auth
+- [x] DD-043 status/checklist updates after the PR #98 credential slice
+- [x] DD-043 status/checklist updates after the bootstrap/request-aware sign-in slice
+- [ ] DD-043 status/checklist updates after setup-completion, TOTP, reset, and backend-CI slices
 - [ ] Review checklist updates for any bug class discovered during implementation
 
 ---

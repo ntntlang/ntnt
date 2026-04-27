@@ -1,11 +1,13 @@
 use crate::interpreter::Value;
-use argon2::password_hash::Error as PasswordHashError;
+use argon2::password_hash::{Error as PasswordHashError, PasswordHasher, SaltString};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use std::collections::HashMap;
 
 use super::storage::{
-    get_local_credential_secret_record, get_local_identity_by_identifier_record,
-    normalize_local_identifier, LocalAccountState, LocalCredentialSecret, LocalIdentity,
+    get_bootstrap_local_user_id_record, get_local_credential_secret_record,
+    get_local_identity_by_id_record, get_local_identity_by_identifier_record,
+    normalize_local_identifier, provision_local_user_record, store_bootstrap_local_user_id_record,
+    LocalAccountState, LocalCredentialSecret, LocalIdentity,
 };
 
 const INVALID_LOCAL_CREDENTIALS: &str = "Invalid local credentials";
@@ -19,6 +21,12 @@ const DUMMY_LOCAL_ARGON2_PASSWORD_HASH: &str =
 pub(in crate::stdlib::auth) struct VerifiedLocalPassword {
     identity: LocalIdentity,
     credential: LocalCredentialSecret,
+}
+
+pub(in crate::stdlib::auth) struct LocalUserCreation {
+    identity: LocalIdentity,
+    must_change_password: bool,
+    created: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +50,146 @@ impl CredentialPasswordAlgorithm {
             Self::Argon2 => "argon2id",
         }
     }
+}
+
+pub(in crate::stdlib::auth) fn create_local_user_record(
+    identifier_kind: &str,
+    identifier: &str,
+    password: &str,
+    state: LocalAccountState,
+    must_change_password: bool,
+    metadata_json: String,
+    id: Option<String>,
+) -> std::result::Result<LocalUserCreation, String> {
+    if password.is_empty() {
+        return Err("[auth] local password must not be empty".to_string());
+    }
+
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier_normalized = normalize_local_identifier(&kind, identifier)?;
+
+    let local_user_id = match id {
+        Some(id) => {
+            let id = id.trim().to_string();
+            if id.is_empty() {
+                return Err("[auth] local identity id must not be empty".to_string());
+            }
+            id
+        }
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let identity = LocalIdentity {
+        id: local_user_id,
+        identifier_kind: kind,
+        identifier: identifier.to_string(),
+        identifier_normalized,
+        created_at: now,
+        updated_at: now,
+        state,
+        metadata_json,
+    };
+    let credential =
+        hash_local_password_for_identity(&identity.id, password, must_change_password, now)?;
+
+    provision_local_user_record(&identity, &credential, false)?;
+
+    Ok(LocalUserCreation {
+        identity,
+        must_change_password,
+        created: true,
+    })
+}
+
+pub(in crate::stdlib::auth) fn bootstrap_local_user_record(
+    identifier_kind: &str,
+    identifier: &str,
+    password: &str,
+) -> std::result::Result<LocalUserCreation, String> {
+    if password.is_empty() {
+        return Err("[auth] local password must not be empty".to_string());
+    }
+
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier_normalized = normalize_local_identifier(&kind, identifier)?;
+
+    if let Some(bootstrap_id) = get_bootstrap_local_user_id_record()? {
+        if let Some(identity) = get_local_identity_by_id_record(&bootstrap_id)? {
+            if identity.identifier_kind == kind
+                && identity.identifier_normalized == identifier_normalized
+            {
+                return Ok(LocalUserCreation {
+                    must_change_password: matches!(
+                        identity.state,
+                        LocalAccountState::Bootstrap
+                            | LocalAccountState::PendingSetup
+                            | LocalAccountState::PasswordChangeRequired
+                    ),
+                    identity,
+                    created: false,
+                });
+            }
+        }
+        return Err("[auth] bootstrap local user already exists".to_string());
+    }
+
+    if let Some(identity) = get_local_identity_by_identifier_record(&kind, &identifier_normalized)?
+    {
+        store_bootstrap_local_user_id_record(&identity.id)?;
+        return Ok(LocalUserCreation {
+            must_change_password: matches!(
+                identity.state,
+                LocalAccountState::Bootstrap
+                    | LocalAccountState::PendingSetup
+                    | LocalAccountState::PasswordChangeRequired
+            ),
+            identity,
+            created: false,
+        });
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let identity = LocalIdentity {
+        id: uuid::Uuid::new_v4().to_string(),
+        identifier_kind: kind,
+        identifier: identifier.to_string(),
+        identifier_normalized,
+        created_at: now,
+        updated_at: now,
+        state: LocalAccountState::Bootstrap,
+        metadata_json: "{}".to_string(),
+    };
+    let credential = hash_local_password_for_identity(&identity.id, password, true, now)?;
+    provision_local_user_record(&identity, &credential, true)?;
+
+    Ok(LocalUserCreation {
+        identity,
+        must_change_password: true,
+        created: true,
+    })
+}
+
+fn hash_local_password_for_identity(
+    local_user_id: &str,
+    password: &str,
+    must_change_password: bool,
+    now: i64,
+) -> std::result::Result<LocalCredentialSecret, String> {
+    let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+    let password_hash = Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|_| "[auth] failed to hash local password".to_string())?
+        .to_string();
+
+    Ok(LocalCredentialSecret {
+        local_user_id: local_user_id.to_string(),
+        password_hash,
+        password_hash_algorithm: "argon2id".to_string(),
+        password_hash_params_json: "{}".to_string(),
+        password_changed_at: now,
+        must_change_password,
+    })
 }
 
 pub(in crate::stdlib::auth) fn verify_local_password_record(
@@ -86,7 +234,9 @@ pub(in crate::stdlib::auth) fn verify_local_password_record(
             password_matches
         }
         Err(err) => {
-            let _ = verify_all_dummy_local_passwords(password);
+            if let Err(dummy_err) = verify_all_dummy_local_passwords(password) {
+                return Err(dummy_err);
+            }
             return Err(err);
         }
     };
@@ -140,7 +290,7 @@ fn verify_dummy_local_password(
         password_changed_at: 0,
         must_change_password: false,
     };
-    let _ = verify_credential_password(&credential, password)?;
+    let (_password_matches, _algorithm) = verify_credential_password(&credential, password)?;
     Ok(())
 }
 
@@ -170,6 +320,50 @@ fn verify_argon2_password(
         Err(PasswordHashError::Password) => Ok(false),
         Err(_) => Err(INVALID_OR_UNSUPPORTED_LOCAL_CREDENTIAL_HASH.to_string()),
     }
+}
+
+pub(in crate::stdlib::auth) fn local_user_creation_to_value(creation: LocalUserCreation) -> Value {
+    let mut map = HashMap::from([
+        (
+            "subject_id".to_string(),
+            Value::String(creation.identity.id.clone()),
+        ),
+        (
+            "id".to_string(),
+            Value::String(creation.identity.id.clone()),
+        ),
+        ("provider".to_string(), Value::String("local".to_string())),
+        (
+            "identifier_kind".to_string(),
+            Value::String(creation.identity.identifier_kind.clone()),
+        ),
+        (
+            "identifier".to_string(),
+            Value::String(creation.identity.identifier.clone()),
+        ),
+        (
+            "identifier_normalized".to_string(),
+            Value::String(creation.identity.identifier_normalized.clone()),
+        ),
+        (
+            "state".to_string(),
+            Value::String(creation.identity.state.as_str().to_string()),
+        ),
+        (
+            "must_change_password".to_string(),
+            Value::Bool(creation.must_change_password),
+        ),
+        ("created".to_string(), Value::Bool(creation.created)),
+    ]);
+
+    if creation.identity.identifier_kind == "email" {
+        map.insert(
+            "email".to_string(),
+            Value::String(creation.identity.identifier.clone()),
+        );
+    }
+
+    Value::Map(map)
 }
 
 pub(in crate::stdlib::auth) fn verified_local_password_to_value(

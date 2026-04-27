@@ -70,7 +70,10 @@ use guards::validate_auth_challenge_kind;
 pub use guards::{
     enforce_auth_for_request, get_protected_paths, register_protected_paths, reset_protected_paths,
 };
-use local::{verified_local_password_to_value, verify_local_password_record};
+use local::{
+    bootstrap_local_user_record, create_local_user_record, local_user_creation_to_value,
+    verified_local_password_to_value, verify_local_password_record,
+};
 use oauth::extract_user_info;
 pub use oauth::{
     client_credentials_grant, decode_id_token, exchange_code_for_tokens, fetch_oidc_discovery,
@@ -723,6 +726,417 @@ fn persist_request_aware_manual_session(
         .map_err(IntentError::type_error)?;
     let response = add_set_cookie_header(response, &cookie).map_err(IntentError::type_error)?;
     persist_manual_session_record(req, session)?;
+    Ok(response)
+}
+
+fn local_setup_state_requires_password_change(state: storage::LocalAccountState) -> bool {
+    matches!(
+        state,
+        storage::LocalAccountState::Bootstrap
+            | storage::LocalAccountState::PendingSetup
+            | storage::LocalAccountState::PasswordChangeRequired
+    )
+}
+
+fn local_options_identifier_kind<'a>(
+    options: Option<&'a HashMap<String, Value>>,
+    function_name: &str,
+) -> Result<&'a str> {
+    match options.and_then(|m| m.get("identifier_kind")) {
+        Some(Value::String(kind)) => Ok(kind.as_str()),
+        Some(other) => Err(IntentError::type_error(format!(
+            "[auth] {}() identifier_kind must be a string, got {}",
+            function_name,
+            other.type_name()
+        ))),
+        None => Ok("email"),
+    }
+}
+
+fn local_creation_options(
+    options: Option<&HashMap<String, Value>>,
+) -> Result<(storage::LocalAccountState, bool, String, Option<String>)> {
+    let state = match options.and_then(|m| m.get("state")) {
+        Some(Value::String(state)) => {
+            storage::LocalAccountState::from_str(state).map_err(IntentError::type_error)?
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] create_local_user() state must be a string, got {}",
+                other.type_name()
+            )))
+        }
+        None => storage::LocalAccountState::Active,
+    };
+
+    let must_change_password = match options.and_then(|m| m.get("must_change_password")) {
+        Some(Value::Bool(value)) => *value,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] create_local_user() must_change_password must be a bool, got {}",
+                other.type_name()
+            )))
+        }
+        None => local_setup_state_requires_password_change(state),
+    };
+
+    let metadata_json = match options.and_then(|m| m.get("metadata")) {
+        Some(Value::Map(metadata)) => value_map_to_json_string(metadata),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] create_local_user() metadata must be a map, got {}",
+                other.type_name()
+            )))
+        }
+        None => "{}".to_string(),
+    };
+
+    let id = match options.and_then(|m| m.get("id")) {
+        Some(Value::String(id)) if !id.trim().is_empty() => Some(id.clone()),
+        Some(Value::String(_)) => {
+            return Err(IntentError::type_error(
+                "[auth] create_local_user() id must not be empty".to_string(),
+            ))
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] create_local_user() id must be a string, got {}",
+                other.type_name()
+            )))
+        }
+        None => None,
+    };
+
+    Ok((state, must_change_password, metadata_json, id))
+}
+
+fn bootstrap_option_string(
+    options: &HashMap<String, Value>,
+    direct_keys: &[&str],
+    env_key_name: &str,
+    default_env_key: &str,
+    label: &str,
+) -> Result<String> {
+    for key in direct_keys {
+        match options.get(*key) {
+            Some(Value::String(value)) if !value.is_empty() => return Ok(value.clone()),
+            Some(Value::String(_)) => {
+                return Err(IntentError::type_error(format!(
+                    "[auth] bootstrap_local_user() {} must not be empty",
+                    key
+                )))
+            }
+            Some(other) => {
+                return Err(IntentError::type_error(format!(
+                    "[auth] bootstrap_local_user() {} must be a string, got {}",
+                    key,
+                    other.type_name()
+                )))
+            }
+            None => {}
+        }
+    }
+
+    let env_key = match options.get(env_key_name) {
+        Some(Value::String(key)) if !key.is_empty() => key.as_str(),
+        Some(Value::String(_)) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] bootstrap_local_user() {} must not be empty",
+                env_key_name
+            )))
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] bootstrap_local_user() {} must be a string, got {}",
+                env_key_name,
+                other.type_name()
+            )))
+        }
+        None => default_env_key,
+    };
+
+    match std::env::var(env_key) {
+        Ok(value) if !value.is_empty() => Ok(value),
+        Ok(_) => Err(IntentError::runtime_error(format!(
+            "[auth] bootstrap_local_user() {} env var must not be empty",
+            env_key
+        ))),
+        Err(_) => Err(IntentError::runtime_error(format!(
+            "[auth] bootstrap_local_user() requires {} or {} env var",
+            label, env_key
+        ))),
+    }
+}
+
+fn local_sign_in_credentials(
+    credentials: &HashMap<String, Value>,
+) -> Result<(String, String, String)> {
+    let identifier_kind = match credentials.get("identifier_kind") {
+        Some(Value::String(kind)) => kind.trim().to_ascii_lowercase(),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] local_sign_in() identifier_kind must be a string, got {}",
+                other.type_name()
+            )))
+        }
+        None => "email".to_string(),
+    };
+
+    let identifier = match credentials.get("identifier") {
+        Some(Value::String(identifier)) if !identifier.is_empty() => identifier.clone(),
+        Some(Value::String(_)) => {
+            return Err(IntentError::type_error(
+                "[auth] local_sign_in() identifier must not be empty".to_string(),
+            ))
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] local_sign_in() identifier must be a string, got {}",
+                other.type_name()
+            )))
+        }
+        None if identifier_kind == "email" => match credentials.get("email") {
+            Some(Value::String(email)) if !email.is_empty() => email.clone(),
+            Some(Value::String(_)) => {
+                return Err(IntentError::type_error(
+                    "[auth] local_sign_in() email must not be empty".to_string(),
+                ))
+            }
+            Some(other) => {
+                return Err(IntentError::type_error(format!(
+                    "[auth] local_sign_in() email must be a string, got {}",
+                    other.type_name()
+                )))
+            }
+            None => return Err(IntentError::type_error(
+                "[auth] local_sign_in() credentials.identifier or credentials.email is required"
+                    .to_string(),
+            )),
+        },
+        None => {
+            return Err(IntentError::type_error(
+                "[auth] local_sign_in() credentials.identifier is required".to_string(),
+            ))
+        }
+    };
+
+    let password = match credentials.get("password") {
+        Some(Value::String(password)) if !password.is_empty() => password.clone(),
+        Some(Value::String(_)) => {
+            return Err(IntentError::type_error(
+                "[auth] local_sign_in() password must not be empty".to_string(),
+            ))
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] local_sign_in() password must be a string, got {}",
+                other.type_name()
+            )))
+        }
+        None => {
+            return Err(IntentError::type_error(
+                "[auth] local_sign_in() credentials.password is required".to_string(),
+            ))
+        }
+    };
+
+    Ok((identifier_kind, identifier, password))
+}
+
+fn is_auth_option_key(key: &str) -> bool {
+    matches!(
+        key,
+        "session_ttl"
+            | "challenge_kind"
+            | "challenge_ttl"
+            | "cookie_path"
+            | "cookie_domain"
+            | "cookie_secure"
+            | "cookie_http_only"
+            | "cookie_same_site"
+            | "cookie_name"
+            | "cookie_max_age"
+    )
+}
+
+fn is_auth_session_data_key(key: &str) -> bool {
+    matches!(
+        key,
+        "subject_id"
+            | "provider"
+            | "email"
+            | "identifier"
+            | "identifier_kind"
+            | "name"
+            | "picture"
+            | "claims"
+            | "data"
+            | "raw"
+    )
+}
+
+fn optional_session_and_options(
+    function_name: &str,
+    first: Option<&Value>,
+    second: Option<&Value>,
+) -> Result<(HashMap<String, Value>, Option<HashMap<String, Value>>)> {
+    let first_map = match first {
+        Some(Value::Map(map)) => Some(map),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] {}() session must be a map, got {}",
+                function_name,
+                other.type_name()
+            )))
+        }
+        None => None,
+    };
+
+    let second_map = match second {
+        Some(Value::Map(map)) => Some(map.clone()),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] {}() options must be a map, got {}",
+                function_name,
+                other.type_name()
+            )))
+        }
+        None => None,
+    };
+
+    match (first_map, second_map) {
+        (Some(session), Some(options)) => Ok((session.clone(), Some(options))),
+        (Some(map), None) => {
+            let has_option_keys = map.keys().any(|key| is_auth_option_key(key));
+            let has_session_keys = map.keys().any(|key| is_auth_session_data_key(key));
+            if has_option_keys && !has_session_keys {
+                Ok((HashMap::new(), Some(map.clone())))
+            } else if has_option_keys && has_session_keys {
+                Err(IntentError::type_error(format!(
+                    "[auth] {}() optional map mixes session data and auth options; pass session and options as separate maps",
+                    function_name
+                )))
+            } else {
+                Ok((map.clone(), None))
+            }
+        }
+        (None, Some(options)) => Ok((HashMap::new(), Some(options))),
+        (None, None) => Ok((HashMap::new(), None)),
+    }
+}
+
+fn local_sign_in_options(
+    args: &[Value],
+) -> Result<(HashMap<String, Value>, Option<HashMap<String, Value>>)> {
+    optional_session_and_options("local_sign_in", args.get(3), args.get(4))
+}
+
+fn staged_session_from_challenge_data(
+    function_name: &str,
+    data_json: &str,
+) -> Result<HashMap<String, Value>> {
+    let data = json_string_to_value_map(data_json);
+    match data.get("session") {
+        Some(Value::Map(session)) => Ok(session.clone()),
+        Some(Value::Unit) | None => Ok(HashMap::new()),
+        Some(other) => Err(IntentError::type_error(format!(
+            "[auth] {}() auth challenge session data must be a map, got {}",
+            function_name,
+            other.type_name()
+        ))),
+    }
+}
+
+fn build_local_session_spec(
+    verified_map: &HashMap<String, Value>,
+    app_session: &HashMap<String, Value>,
+) -> HashMap<String, Value> {
+    let mut session_spec = HashMap::new();
+    for key in [
+        "subject_id",
+        "provider",
+        "email",
+        "identifier",
+        "identifier_kind",
+    ] {
+        if let Some(value) = verified_map.get(key) {
+            session_spec.insert(key.to_string(), value.clone());
+        }
+    }
+    for key in ["name", "picture", "claims", "data", "raw"] {
+        if let Some(value) = app_session.get(key) {
+            session_spec.insert(key.to_string(), value.clone());
+        }
+    }
+    session_spec
+}
+
+fn should_stage_local_sign_in(verified_map: &HashMap<String, Value>) -> bool {
+    matches!(
+        verified_map.get("must_change_password"),
+        Some(Value::Bool(true))
+    )
+}
+
+fn stage_local_sign_in(
+    response: &Value,
+    verified_map: &HashMap<String, Value>,
+    app_session: &HashMap<String, Value>,
+    options: Option<&HashMap<String, Value>>,
+    config: &AuthConfig,
+) -> Result<Value> {
+    let subject_id = match verified_map.get("subject_id") {
+        Some(Value::String(subject_id)) => subject_id.clone(),
+        _ => {
+            return Err(IntentError::runtime_error(
+                "[auth] local_sign_in() verified credential missing subject_id".to_string(),
+            ))
+        }
+    };
+    let kind = match options.and_then(|m| m.get("challenge_kind")) {
+        Some(Value::String(kind)) => {
+            validate_auth_challenge_kind(kind).map_err(IntentError::type_error)?
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] local_sign_in() challenge_kind must be a string, got {}",
+                other.type_name()
+            )))
+        }
+        None => "password_change_required".to_string(),
+    };
+    let ttl = match options.and_then(|m| m.get("challenge_ttl")) {
+        Some(Value::Int(ttl)) if *ttl > 0 => *ttl,
+        Some(Value::Int(_)) => {
+            return Err(IntentError::type_error(
+                "[auth] local_sign_in() challenge_ttl must be greater than 0".to_string(),
+            ))
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] local_sign_in() challenge_ttl must be an int, got {}",
+                other.type_name()
+            )))
+        }
+        None => storage::AUTH_CHALLENGE_TTL,
+    };
+
+    let mut data = verified_map.clone();
+    if !app_session.is_empty() {
+        data.insert("session".to_string(), Value::Map(app_session.clone()));
+    }
+    let challenge = create_auth_challenge(&HashMap::from([
+        ("subject_id".to_string(), Value::String(subject_id)),
+        ("provider".to_string(), Value::String("local".to_string())),
+        ("kind".to_string(), Value::String(kind)),
+        ("ttl".to_string(), Value::Int(ttl)),
+        ("data".to_string(), Value::Map(data)),
+    ]))
+    .map_err(IntentError::type_error)?;
+    let cookie = build_signed_auth_challenge_cookie(config, &challenge.id, ttl, options)
+        .map_err(IntentError::type_error)?;
+    let response = add_set_cookie_header(response, &cookie).map_err(IntentError::type_error)?;
+    store_auth_challenge(challenge);
     Ok(response)
 }
 
@@ -1662,7 +2076,7 @@ pub fn init() -> HashMap<String, Value> {
                 let challenge =
                     create_auth_challenge(&challenge_spec).map_err(IntentError::type_error)?;
                 let ttl = challenge.expires_at - chrono::Utc::now().timestamp();
-                let cookie = build_signed_auth_challenge_cookie(&config, &challenge.id, ttl)
+                let cookie = build_signed_auth_challenge_cookie(&config, &challenge.id, ttl, None)
                     .map_err(IntentError::type_error)?;
                 let response =
                     add_set_cookie_header(&args[0], &cookie).map_err(IntentError::type_error)?;
@@ -1683,7 +2097,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param response The Response map to attach cookies to
     // @param req The current HTTP request
     // @param session Optional session data map merged onto the completed session
-    // @param options Optional session options like `session_ttl` and cookie overrides
+    // @param options Optional `session_ttl` and challenge-cookie clearing overrides
     // @returns Response with the auth challenge consumed and the session cookie attached
     // @see_also begin_auth_challenge, current_auth_challenge, cancel_auth_challenge, sign_in_session
     // @since v0.4.9
@@ -1713,27 +2127,11 @@ pub fn init() -> HashMap<String, Value> {
 
                 validate_http_request_arg("complete_auth_challenge", &args[1])?;
 
-                let session_spec = match args.get(2) {
-                    Some(Value::Map(map)) => map.clone(),
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] complete_auth_challenge() session must be a map, got {}",
-                            other.type_name()
-                        )))
-                    }
-                    None => HashMap::new(),
-                };
-
-                let options = match args.get(3) {
-                    Some(Value::Map(map)) => Some(map.clone()),
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] complete_auth_challenge() options must be a map, got {}",
-                            other.type_name()
-                        )))
-                    }
-                    None => None,
-                };
+                let (session_spec, options) = optional_session_and_options(
+                    "complete_auth_challenge",
+                    args.get(2),
+                    args.get(3),
+                )?;
 
                 let challenge_id = get_auth_challenge_id_from_request(&args[1]).ok_or_else(|| {
                     IntentError::runtime_error(
@@ -1754,7 +2152,11 @@ pub fn init() -> HashMap<String, Value> {
                         )
                     })?;
 
-                let mut merged_session = session_spec.clone();
+                let mut merged_session = staged_session_from_challenge_data(
+                    "complete_auth_challenge",
+                    &challenge.data_json,
+                )?;
+                merged_session.extend(session_spec.clone());
                 match merged_session.get("subject_id") {
                     Some(Value::String(subject_id)) if subject_id == &challenge.subject_id => {}
                     Some(Value::String(_)) => {
@@ -1815,11 +2217,11 @@ pub fn init() -> HashMap<String, Value> {
                 let session = create_manual_session(&merged_session, effective_session_ttl)
                     .map_err(IntentError::type_error)?;
                 let session = prepare_request_aware_manual_session(&args[1], session);
-                let session_cookie =
-                    build_signed_session_cookie(&config, &session.id, options.as_ref())
-                        .map_err(IntentError::type_error)?;
+                let session_cookie = build_signed_session_cookie(&config, &session.id, None)
+                    .map_err(IntentError::type_error)?;
                 let cleared_challenge_cookie =
-                    build_cleared_auth_challenge_cookie(&config).map_err(IntentError::type_error)?;
+                    build_cleared_auth_challenge_cookie(&config, options.as_ref())
+                        .map_err(IntentError::type_error)?;
                 let response =
                     add_set_cookie_header(&args[0], &session_cookie).map_err(IntentError::type_error)?;
                 let response = add_set_cookie_header(&response, &cleared_challenge_cookie)
@@ -1842,12 +2244,13 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt cancel_auth_challenge
     // @module std/auth
-    // @signature cancel_auth_challenge(response: Response, req: Request) -> Response
+    // @signature cancel_auth_challenge(response: Response, req: Request, options?: Map) -> Response
     // Cancel the current auth challenge and clear the challenge cookie.
     //
     // Use this when a staged auth flow is abandoned, fails, or needs to be reset.
     // @param response The Response map to attach the clearing cookie to
     // @param req The current HTTP request
+    // @param options Optional cookie overrides matching the challenge cookie path/settings
     // @returns Response with the challenge cookie cleared
     // @see_also begin_auth_challenge, current_auth_challenge, complete_auth_challenge
     // @since v0.4.9
@@ -1858,12 +2261,12 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "cancel_auth_challenge".to_string(),
             arity: 2,
-            max_arity: 2,
+            max_arity: 3,
             requires: None,
             func: |args| {
-                if args.len() != 2 {
+                if args.len() < 2 || args.len() > 3 {
                     return Err(IntentError::type_error(
-                        "[auth] cancel_auth_challenge() requires response and request".to_string(),
+                        "[auth] cancel_auth_challenge() requires response, request, and optional options".to_string(),
                     ));
                 }
 
@@ -1874,8 +2277,23 @@ pub fn init() -> HashMap<String, Value> {
                     )
                 })?;
 
-                let cleared_cookie =
-                    build_cleared_auth_challenge_cookie(&config).map_err(IntentError::type_error)?;
+                validate_http_request_arg("cancel_auth_challenge", &args[1])?;
+                let options = match args.get(2) {
+                    Some(Value::Map(map)) => Some(map.clone()),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] cancel_auth_challenge() options must be a map, got {}",
+                            other.type_name()
+                        )))
+                    }
+                    None => None,
+                };
+
+                let cleared_cookie = build_cleared_auth_challenge_cookie(
+                    &config,
+                    options.as_ref(),
+                )
+                .map_err(IntentError::type_error)?;
                 let response =
                     add_set_cookie_header(&args[0], &cleared_cookie).map_err(IntentError::type_error)?;
 
@@ -3738,6 +4156,168 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt create_local_user
+    // @module std/auth
+    // @signature create_local_user(identifier: String, password: String, options?: Map) -> Result<Map, String>
+    // Create an auth-owned local identity and password credential.
+    //
+    // This is a primitive for provisioning local accounts without app-owned
+    // credential tables. Email is the default identifier kind. Options may include
+    // `identifier_kind`, `state`, `must_change_password`, `metadata`, and `id`.
+    // App profile fields, roles, orgs, and session claims remain app-owned.
+    // Local identity/credential provisioning currently supports the memory and
+    // SQLite auth stores; PostgreSQL and Redis fail closed until their local-auth
+    // record families are implemented.
+    // @param identifier Local login identifier; email by default
+    // @param password Plaintext initial password to hash and store
+    // @param options Optional map with identifier/account-state settings
+    // @returns Ok(map) with safe local user metadata, or Err(message)
+    // @error RuntimeError ~ "Auth not initialized" fix: "Call enable_auth(...) before creating local users"
+    // @see_also bootstrap_local_user, verify_local_password, local_sign_in
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #security
+    // @example create_local_user("admin@example.com", password, map { "state": "password_change_required" }) ~ "Provision a local user"
+    module.insert(
+        "create_local_user".to_string(),
+        Value::NativeFunction {
+            name: "create_local_user".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "[auth] create_local_user() requires identifier, password, and optional options"
+                            .to_string(),
+                    ));
+                }
+                let _config = get_auth_config().ok_or_else(|| {
+                    IntentError::runtime_error(
+                        "[auth] Auth not initialized. Call enable_auth() before create_local_user()."
+                            .to_string(),
+                    )
+                })?;
+                let identifier = match &args[0] {
+                    Value::String(identifier) => identifier.as_str(),
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] create_local_user() identifier must be a string, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let password = match &args[1] {
+                    Value::String(password) => password.as_str(),
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] create_local_user() password must be a string, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let options = match args.get(2) {
+                    Some(Value::Map(map)) => Some(map),
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] create_local_user() options must be a map, got {}",
+                            other.type_name()
+                        )))
+                    }
+                    None => None,
+                };
+                let identifier_kind = local_options_identifier_kind(options, "create_local_user")?;
+                let (state, must_change_password, metadata_json, id) =
+                    local_creation_options(options)?;
+
+                match create_local_user_record(
+                    identifier_kind,
+                    identifier,
+                    password,
+                    state,
+                    must_change_password,
+                    metadata_json,
+                    id,
+                ) {
+                    Ok(creation) => Ok(Value::ok(local_user_creation_to_value(creation))),
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
+    // @ntnt bootstrap_local_user
+    // @module std/auth
+    // @signature bootstrap_local_user(options?: Map) -> Result<Map, String>
+    // Create the initial bootstrap local account exactly once.
+    //
+    // Reads `email`/`identifier` and `password` from the options map, or from
+    // `NTNT_AUTH_BOOTSTRAP_EMAIL` and `NTNT_AUTH_BOOTSTRAP_PASSWORD` by default.
+    // If the identity already exists, it returns `created: false` and does not
+    // replace the stored credential, preventing env-configured bootstrap passwords
+    // from becoming a recurring password-reset path on restart. Local bootstrap
+    // state currently supports the memory and SQLite auth stores; PostgreSQL and
+    // Redis fail closed until their local-auth record families are implemented.
+    // @param options Optional map with `email` or `identifier`, `password`, `identifier_kind`, `identifier_env`, and `password_env`
+    // @returns Ok(map) with safe local user metadata and `created`, or Err(message)
+    // @error RuntimeError ~ "requires email/password" fix: "Pass options or set bootstrap env vars"
+    // @see_also create_local_user, verify_local_password, local_sign_in
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #bootstrap, #security
+    // @example bootstrap_local_user(map { "email": get_env("ADMIN_EMAIL")?, "password": get_env("ADMIN_PASSWORD")? }) ~ "Create first admin credential"
+    module.insert(
+        "bootstrap_local_user".to_string(),
+        Value::NativeFunction {
+            name: "bootstrap_local_user".to_string(),
+            arity: 0,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                if args.len() > 1 {
+                    return Err(IntentError::type_error(
+                        "[auth] bootstrap_local_user() accepts optional options".to_string(),
+                    ));
+                }
+                let _config = get_auth_config().ok_or_else(|| {
+                    IntentError::runtime_error(
+                        "[auth] Auth not initialized. Call enable_auth() before bootstrap_local_user()."
+                            .to_string(),
+                    )
+                })?;
+                let empty = HashMap::new();
+                let options = match args.first() {
+                    Some(Value::Map(map)) => map,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] bootstrap_local_user() options must be a map, got {}",
+                            other.type_name()
+                        )))
+                    }
+                    None => &empty,
+                };
+                let identifier_kind = local_options_identifier_kind(Some(options), "bootstrap_local_user")?;
+                let identifier = bootstrap_option_string(
+                    options,
+                    &["identifier", "email"],
+                    "identifier_env",
+                    "NTNT_AUTH_BOOTSTRAP_EMAIL",
+                    "identifier/email",
+                )?;
+                let password = bootstrap_option_string(
+                    options,
+                    &["password"],
+                    "password_env",
+                    "NTNT_AUTH_BOOTSTRAP_PASSWORD",
+                    "password",
+                )?;
+
+                match bootstrap_local_user_record(identifier_kind, &identifier, &password) {
+                    Ok(creation) => Ok(Value::ok(local_user_creation_to_value(creation))),
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
     // @ntnt verify_local_password
     // @module std/auth
     // @signature verify_local_password(identifier: String, password: String, options?: Map) -> Result<Map, String>
@@ -3751,7 +4331,10 @@ pub fn init() -> HashMap<String, Value> {
     // and locked accounts all return the same invalid-credentials error to avoid
     // account-state or identity enumeration. Corrupted or unsupported stored hashes
     // return a generic operational auth error without backend parser details after
-    // running the same dummy verification work used for absent credentials. Bootstrap,
+    // running the same dummy verification work used for absent credentials. Local
+    // identity/credential lookup currently supports the memory and SQLite auth
+    // stores; PostgreSQL and Redis fail closed until their local-auth record
+    // families are implemented. Bootstrap,
     // pending-setup, and password-change-required identities can verify credentials,
     // but the returned payload forces `must_change_password: true` so callers do not
     // accidentally treat setup-required accounts as fully active sessions.
@@ -3834,6 +4417,115 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt local_sign_in
+    // @module std/auth
+    // @signature local_sign_in(response: Response, req: Request, credentials: Map, session?: Map, options?: Map) -> Result<Response, String>
+    // Verify local credentials and complete or stage local sign-in.
+    //
+    // Active users are signed in through the same request-aware session completion
+    // path as `sign_in_session(...)`, including session rotation and request-derived
+    // metadata capture. Setup-required users (bootstrap, pending setup, or password
+    // change required) receive an auth challenge cookie instead of a full session.
+    // Invalid credentials return `Err("Invalid local credentials")` without setting
+    // cookies. Local identity/credential lookup currently supports the memory and
+    // SQLite auth stores; PostgreSQL and Redis fail closed until their local-auth
+    // record families are implemented.
+    // @param response Response to attach the session or challenge cookie to
+    // @param req Current HTTP request
+    // @param credentials Map with `email` or `identifier`, `password`, and optional `identifier_kind`
+    // @param session Optional app-owned session data such as `claims`, `data`, `name`, or `picture`
+    // @param options Optional map with `session_ttl`, `challenge_kind`, `challenge_ttl`, and cookie overrides (`cookie_path`, `cookie_domain`, `cookie_secure`, `cookie_http_only`, `cookie_same_site`, `cookie_max_age`)
+    // @returns Ok(Response) with a session/challenge cookie, or Err(message)
+    // @error TypeError ~ "request must be an HTTP request map" fix: "Pass the current route request as the second argument"
+    // @see_also create_local_user, bootstrap_local_user, verify_local_password, sign_in_session
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #session, #security
+    // @example local_sign_in(redirect("/admin"), req, map { "email": email, "password": password }, map { "claims": app_claims }) ~ "Verify and sign in local user"
+    module.insert(
+        "local_sign_in".to_string(),
+        Value::NativeFunction {
+            name: "local_sign_in".to_string(),
+            arity: 3,
+            max_arity: 5,
+            requires: None,
+            func: |args| {
+                if args.len() < 3 || args.len() > 5 {
+                    return Err(IntentError::type_error(
+                        "[auth] local_sign_in() requires response, request, credentials, optional session, and optional options"
+                            .to_string(),
+                    ));
+                }
+                let config = get_auth_config().ok_or_else(|| {
+                    IntentError::runtime_error(
+                        "[auth] Auth not initialized. Call enable_auth() before local_sign_in()."
+                            .to_string(),
+                    )
+                })?;
+                validate_http_request_arg("local_sign_in", &args[1])?;
+                let credentials = match &args[2] {
+                    Value::Map(map) => map,
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] local_sign_in() credentials must be a map, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let (identifier_kind, identifier, password) = local_sign_in_credentials(credentials)?;
+                let (app_session, options) = local_sign_in_options(args)?;
+                let verified = match verify_local_password_record(&identifier_kind, &identifier, &password) {
+                    Ok(verified) => verified,
+                    Err(message) => return Ok(Value::err(Value::String(message))),
+                };
+                let verified_value = verified_local_password_to_value(verified);
+                let verified_map = match verified_value {
+                    Value::Map(map) => map,
+                    _ => {
+                        return Err(IntentError::runtime_error(
+                            "[auth] local_sign_in() verified credential payload was invalid"
+                                .to_string(),
+                        ))
+                    }
+                };
+
+                if should_stage_local_sign_in(&verified_map) {
+                    return stage_local_sign_in(
+                        &args[0],
+                        &verified_map,
+                        &app_session,
+                        options.as_ref(),
+                        &config,
+                    )
+                    .map(|response| Value::ok(response));
+                }
+
+                let session_ttl = match options.as_ref().and_then(|m| m.get("session_ttl")) {
+                    Some(Value::Int(i)) => *i,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] local_sign_in() session_ttl must be an int, got {}",
+                            other.type_name()
+                        )))
+                    }
+                    None => config.session_ttl,
+                };
+                let effective_session_ttl =
+                    session_ttl.min(config.max_session_ttl.unwrap_or(session_ttl));
+                let session_spec = build_local_session_spec(&verified_map, &app_session);
+                let session = create_manual_session(&session_spec, effective_session_ttl)
+                    .map_err(IntentError::type_error)?;
+                persist_request_aware_manual_session(
+                    &args[0],
+                    &args[1],
+                    session,
+                    options.as_ref(),
+                    &config,
+                )
+                .map(Value::ok)
+            },
+        },
+    );
+
     // @ntnt sign_in_session
     // @module std/auth
     // @signature sign_in_session(response: Response, req: Request, session: Map, options?: Map) -> Response
@@ -3854,7 +4546,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param response The Response map to attach the session cookie to
     // @param req The current HTTP request
     // @param session Session data map, including required `subject_id`
-    // @param options Optional map with `session_ttl` and cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+    // @param options Optional map with `session_ttl` and cookie override keys (`cookie_path`, `cookie_domain`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
     // @returns Response with a persisted session and Set-Cookie header
     // @error TypeError ~ "request must be an HTTP request map" fix: "Call sign_in_session(response, req, session, options?) from a route handler and pass the current req"
     // @see_also sign_out_session, current_session, rotate_session
@@ -3942,7 +4634,7 @@ pub fn init() -> HashMap<String, Value> {
     // session fixation while preserving the existing session payload.
     // @param response The Response map to attach the rotated cookie to
     // @param req The current HTTP request
-    // @param options Optional cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
+    // @param options Optional cookie override keys (`cookie_path`, `cookie_domain`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`, `cookie_max_age`)
     // @returns Response with the rotated session cookie
     // @see_also sign_in_session, sign_out_session, current_session
     // @since v0.4.9
@@ -4009,7 +4701,7 @@ pub fn init() -> HashMap<String, Value> {
     // built-in redirect handler.
     // @param response The Response map to attach the clearing cookie to
     // @param req The current HTTP request
-    // @param options Optional cookie override keys (`cookie_path`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`)
+    // @param options Optional cookie override keys (`cookie_path`, `cookie_domain`, `cookie_same_site`, `cookie_secure`, `cookie_http_only`)
     // @returns Response with the auth cookie cleared
     // @see_also sign_in_session, rotate_session, current_user
     // @since v0.4.9
@@ -4350,15 +5042,40 @@ mod tests {
         cleanup_expired_oauth_state_records, consume_auth_challenge_record,
         consume_exchange_token_record, consume_oauth_state_record,
         delete_all_session_records_for_user, delete_session_record, extend_session_record_expiry,
-        get_auth_challenge_record, get_refreshable_session_record, get_session_record,
-        list_session_records_for_user, migrate_session_record, store_auth_challenge_record,
-        store_exchange_token_record, store_oauth_state_record, store_session_record,
-        update_session_record_data, update_session_record_tokens, OAUTH_STATE_TTL,
+        get_auth_challenge_record, get_local_identity_by_id_record, get_refreshable_session_record,
+        get_session_record, list_session_records_for_user, migrate_session_record,
+        store_auth_challenge_record, store_exchange_token_record, store_oauth_state_record,
+        store_session_record, update_session_record_data, update_session_record_tokens,
+        OAUTH_STATE_TTL,
     };
     use super::*;
 
     static AUTH_TEST_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     fn reset_auth_test_state() {
         let mut store = SESSION_STORE.lock().unwrap();
@@ -4382,6 +5099,30 @@ mod tests {
         }
     }
 
+    fn result_ok_value(value: Value) -> Value {
+        let Value::EnumValue {
+            enum_name,
+            variant,
+            values,
+        } = value
+        else {
+            panic!("expected Result::Ok, got {value:?}");
+        };
+        assert_eq!(enum_name, "Result");
+        assert_eq!(variant, "Ok");
+        values
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("missing Result::Ok payload"))
+    }
+
+    fn result_ok_map(value: Value) -> HashMap<String, Value> {
+        match result_ok_value(value) {
+            Value::Map(map) => map,
+            other => panic!("expected Result::Ok(Map), got {other:?}"),
+        }
+    }
+
     fn result_err_string(value: Value) -> String {
         let Value::EnumValue {
             enum_name,
@@ -4399,6 +5140,20 @@ mod tests {
         }
     }
 
+    fn assert_map_string(map: &HashMap<String, Value>, key: &str, expected: &str) {
+        match map.get(key) {
+            Some(Value::String(actual)) => assert_eq!(actual, expected),
+            other => panic!("expected {key} string {expected:?}, got {other:?}"),
+        }
+    }
+
+    fn assert_map_bool(map: &HashMap<String, Value>, key: &str, expected: bool) {
+        match map.get(key) {
+            Some(Value::Bool(actual)) => assert_eq!(*actual, expected),
+            other => panic!("expected {key} bool {expected}, got {other:?}"),
+        }
+    }
+
     fn cookie_header_from_response(response: &Value) -> String {
         let cookies = cookie_headers_from_response(response);
         cookies
@@ -4407,7 +5162,22 @@ mod tests {
             .unwrap_or_else(|| panic!("missing Set-Cookie header"))
     }
 
+    fn set_cookie_header_from_response(response: &Value) -> String {
+        let cookies = set_cookie_headers_from_response(response);
+        cookies
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("missing Set-Cookie header"))
+    }
+
     fn cookie_headers_from_response(response: &Value) -> Vec<String> {
+        set_cookie_headers_from_response(response)
+            .into_iter()
+            .map(|s| s.split(';').next().unwrap().to_string())
+            .collect()
+    }
+
+    fn set_cookie_headers_from_response(response: &Value) -> Vec<String> {
         let headers = match response {
             Value::Map(map) => match map.get("headers") {
                 Some(Value::Map(headers)) => headers,
@@ -4423,11 +5193,11 @@ mod tests {
             .unwrap_or_else(|| panic!("missing Set-Cookie header"));
 
         match cookie {
-            Value::String(s) => vec![s.split(';').next().unwrap().to_string()],
+            Value::String(s) => vec![s.to_string()],
             Value::Array(values) => values
                 .iter()
                 .map(|value| match value {
-                    Value::String(s) => s.split(';').next().unwrap().to_string(),
+                    Value::String(s) => s.to_string(),
                     other => panic!("expected cookie string in array, got {:?}", other),
                 })
                 .collect(),
@@ -6944,6 +7714,872 @@ mod tests {
 
         let fetched = get_session_by_id(&session.id).expect("session should exist");
         assert_eq!(fetched.expires_at, session.expires_at);
+    }
+
+    #[test]
+    fn test_create_local_user_and_verify_password_round_trip() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let create_local_user = module_fn(&module, "create_local_user");
+        let verify_local_password = module_fn(&module, "verify_local_password");
+
+        let created = result_ok_map(
+            create_local_user(&[
+                Value::String("Alice@Example.COM".to_string()),
+                Value::String("correct horse battery staple".to_string()),
+            ])
+            .unwrap(),
+        );
+        match created.get("state") {
+            Some(Value::String(state)) => assert_eq!(state, "active"),
+            other => panic!("expected active state, got {:?}", other),
+        }
+        match created.get("email") {
+            Some(Value::String(email)) => assert_eq!(email, "Alice@Example.COM"),
+            other => panic!("expected email, got {:?}", other),
+        }
+
+        let verified = result_ok_map(
+            verify_local_password(&[
+                Value::String("alice@example.com".to_string()),
+                Value::String("correct horse battery staple".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert_map_string(&verified, "state", "active");
+        assert_map_bool(&verified, "must_change_password", false);
+        assert!(!verified.contains_key("password_hash"));
+    }
+
+    #[test]
+    fn test_create_local_user_rejects_caller_supplied_id_collision_without_overwrite() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let create_local_user = module_fn(&module, "create_local_user");
+        let verify_local_password = module_fn(&module, "verify_local_password");
+
+        result_ok_map(
+            create_local_user(&[
+                Value::String("alice@example.com".to_string()),
+                Value::String("original password".to_string()),
+                Value::Map(HashMap::from([(
+                    "id".to_string(),
+                    Value::String("stable-local-user-id".to_string()),
+                )])),
+            ])
+            .unwrap(),
+        );
+
+        let collision_error = result_err_string(
+            create_local_user(&[
+                Value::String("bob@example.com".to_string()),
+                Value::String("replacement password".to_string()),
+                Value::Map(HashMap::from([(
+                    "id".to_string(),
+                    Value::String("stable-local-user-id".to_string()),
+                )])),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(collision_error, "[auth] local identity id already exists");
+
+        let stored = get_local_identity_by_id_record("stable-local-user-id")
+            .unwrap()
+            .expect("original identity should remain stored");
+        assert_eq!(stored.identifier_normalized, "alice@example.com");
+        assert_eq!(stored.identifier, "alice@example.com");
+
+        let verified_original = result_ok_map(
+            verify_local_password(&[
+                Value::String("alice@example.com".to_string()),
+                Value::String("original password".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert_map_string(&verified_original, "email", "alice@example.com");
+
+        let bob_error = result_err_string(
+            verify_local_password(&[
+                Value::String("bob@example.com".to_string()),
+                Value::String("replacement password".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(bob_error, "Invalid local credentials");
+    }
+
+    #[test]
+    fn test_create_local_user_rolls_back_identity_when_credential_write_fails() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        {
+            let conn_guard = SQLITE_CONN.lock().unwrap();
+            let conn = conn_guard.as_ref().expect("SQLite should be initialized");
+            conn.execute("DROP TABLE auth_local_credentials", [])
+                .expect("test setup should remove credentials table");
+        }
+
+        let module = init();
+        let create_local_user = module_fn(&module, "create_local_user");
+
+        let error = result_err_string(
+            create_local_user(&[
+                Value::String("partial@example.com".to_string()),
+                Value::String("will not be stored".to_string()),
+                Value::Map(HashMap::from([(
+                    "id".to_string(),
+                    Value::String("partial-local-user-id".to_string()),
+                )])),
+            ])
+            .unwrap(),
+        );
+        assert!(
+            error.starts_with("[auth] failed to store local credential"),
+            "unexpected error: {error}"
+        );
+
+        assert!(
+            get_local_identity_by_id_record("partial-local-user-id")
+                .unwrap()
+                .is_none(),
+            "failed local user creation must not leave an identity without credentials"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_local_user_is_one_time_and_forces_password_change() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+        let verify_local_password = module_fn(&module, "verify_local_password");
+
+        let first = result_ok_map(
+            bootstrap_local_user(&[Value::Map(HashMap::from([
+                (
+                    "email".to_string(),
+                    Value::String("Admin@Example.COM".to_string()),
+                ),
+                (
+                    "password".to_string(),
+                    Value::String("temporary bootstrap password".to_string()),
+                ),
+            ]))])
+            .unwrap(),
+        );
+        assert_map_bool(&first, "created", true);
+        assert_map_string(&first, "state", "bootstrap");
+        assert_map_bool(&first, "must_change_password", true);
+
+        let second = result_ok_map(
+            bootstrap_local_user(&[Value::Map(HashMap::from([
+                (
+                    "email".to_string(),
+                    Value::String("admin@example.com".to_string()),
+                ),
+                (
+                    "password".to_string(),
+                    Value::String("should not replace original".to_string()),
+                ),
+            ]))])
+            .unwrap(),
+        );
+        assert_map_bool(&second, "created", false);
+
+        let verified_original = result_ok_map(
+            verify_local_password(&[
+                Value::String("admin@example.com".to_string()),
+                Value::String("temporary bootstrap password".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert_map_bool(&verified_original, "must_change_password", true);
+
+        let changed_error = result_err_string(
+            verify_local_password(&[
+                Value::String("admin@example.com".to_string()),
+                Value::String("should not replace original".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(changed_error, "Invalid local credentials");
+    }
+
+    #[test]
+    fn test_bootstrap_local_user_rejects_empty_password_from_env() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let _email_env = EnvVarGuard::set("NTNT_AUTH_BOOTSTRAP_EMAIL", "admin@example.com");
+        let _password_env = EnvVarGuard::set("NTNT_AUTH_BOOTSTRAP_PASSWORD", "");
+
+        let module = init();
+        let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+        let err = bootstrap_local_user(&[]).unwrap_err();
+        assert!(format!("{}", err).contains(
+            "[auth] bootstrap_local_user() NTNT_AUTH_BOOTSTRAP_PASSWORD env var must not be empty"
+        ));
+    }
+
+    #[test]
+    fn test_bootstrap_local_user_record_rejects_empty_password() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+
+        let error = match bootstrap_local_user_record("email", "admin@example.com", "") {
+            Ok(_) => panic!("expected empty bootstrap password to fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "[auth] local password must not be empty");
+    }
+
+    #[test]
+    fn test_bootstrap_local_user_rejects_second_bootstrap_identifier() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+        let verify_local_password = module_fn(&module, "verify_local_password");
+
+        result_ok_map(
+            bootstrap_local_user(&[Value::Map(HashMap::from([
+                (
+                    "email".to_string(),
+                    Value::String("admin@example.com".to_string()),
+                ),
+                (
+                    "password".to_string(),
+                    Value::String("first bootstrap password".to_string()),
+                ),
+            ]))])
+            .unwrap(),
+        );
+
+        let second_error = result_err_string(
+            bootstrap_local_user(&[Value::Map(HashMap::from([
+                (
+                    "email".to_string(),
+                    Value::String("second-admin@example.com".to_string()),
+                ),
+                (
+                    "password".to_string(),
+                    Value::String("second bootstrap password".to_string()),
+                ),
+            ]))])
+            .unwrap(),
+        );
+        assert_eq!(second_error, "[auth] bootstrap local user already exists");
+
+        let verified_original = result_ok_map(
+            verify_local_password(&[
+                Value::String("admin@example.com".to_string()),
+                Value::String("first bootstrap password".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert_map_bool(&verified_original, "must_change_password", true);
+
+        let second_verify_error = result_err_string(
+            verify_local_password(&[
+                Value::String("second-admin@example.com".to_string()),
+                Value::String("second bootstrap password".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(second_verify_error, "Invalid local credentials");
+    }
+
+    #[test]
+    fn test_local_sign_in_creates_request_aware_session_for_active_user() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let create_local_user = module_fn(&module, "create_local_user");
+        let local_sign_in = module_fn(&module, "local_sign_in");
+        let current_session = module_fn(&module, "current_session");
+
+        result_ok_map(
+            create_local_user(&[
+                Value::String("alice@example.com".to_string()),
+                Value::String("let me in".to_string()),
+            ])
+            .unwrap(),
+        );
+
+        let signed_in = result_ok_value(
+            local_sign_in(&[
+                redirect_response("/admin", None),
+                request_with_cookie_and_security_headers(""),
+                Value::Map(HashMap::from([
+                    (
+                        "email".to_string(),
+                        Value::String("alice@example.com".to_string()),
+                    ),
+                    (
+                        "password".to_string(),
+                        Value::String("let me in".to_string()),
+                    ),
+                ])),
+                Value::Map(HashMap::from([(
+                    "claims".to_string(),
+                    Value::Map(HashMap::from([(
+                        "role".to_string(),
+                        Value::String("admin".to_string()),
+                    )])),
+                )])),
+            ])
+            .unwrap(),
+        );
+
+        let cookie = cookie_header_from_response(&signed_in);
+        assert!(cookie.starts_with("ntnt_session="));
+        let session_id = get_session_id_from_request(&request_with_cookie(&cookie))
+            .expect("session cookie should verify");
+        let session = get_session_by_id(&session_id).expect("session should be persisted");
+        assert!(session.user_id.starts_with("local:"));
+        assert_eq!(session.email.as_deref(), Some("alice@example.com"));
+        assert_eq!(session.device_name.as_deref(), Some("Mac · Safari"));
+        assert!(session.user_agent_hash.is_some());
+        assert!(session.last_ip_hash.is_some());
+
+        match current_session(&[request_with_cookie(&cookie)]).unwrap() {
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                assert_eq!(variant, "Some");
+                let session_map = match values.first() {
+                    Some(Value::Map(map)) => map,
+                    other => panic!("expected session map, got {:?}", other),
+                };
+                match session_map.get("data") {
+                    Some(Value::Map(data)) => assert_map_string(data, "role", "admin"),
+                    other => panic!("expected session data, got {:?}", other),
+                }
+            }
+            other => panic!("expected Some(session), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_local_sign_in_accepts_case_insensitive_email_alias_identifier_kind() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let create_local_user = module_fn(&module, "create_local_user");
+        let local_sign_in = module_fn(&module, "local_sign_in");
+
+        result_ok_map(
+            create_local_user(&[
+                Value::String("alice@example.com".to_string()),
+                Value::String("let me in".to_string()),
+            ])
+            .unwrap(),
+        );
+
+        let signed_in = result_ok_value(
+            local_sign_in(&[
+                redirect_response("/admin", None),
+                request_with_cookie_and_security_headers(""),
+                Value::Map(HashMap::from([
+                    (
+                        "identifier_kind".to_string(),
+                        Value::String(" Email ".to_string()),
+                    ),
+                    (
+                        "email".to_string(),
+                        Value::String("alice@example.com".to_string()),
+                    ),
+                    (
+                        "password".to_string(),
+                        Value::String("let me in".to_string()),
+                    ),
+                ])),
+            ])
+            .unwrap(),
+        );
+
+        assert!(cookie_header_from_response(&signed_in).starts_with("ntnt_session="));
+    }
+
+    #[test]
+    fn test_local_sign_in_treats_single_options_map_as_options() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let create_local_user = module_fn(&module, "create_local_user");
+        let local_sign_in = module_fn(&module, "local_sign_in");
+
+        result_ok_map(
+            create_local_user(&[
+                Value::String("alice@example.com".to_string()),
+                Value::String("let me in".to_string()),
+            ])
+            .unwrap(),
+        );
+
+        let signed_in = result_ok_value(
+            local_sign_in(&[
+                redirect_response("/admin", None),
+                request_with_cookie_and_security_headers(""),
+                Value::Map(HashMap::from([
+                    (
+                        "email".to_string(),
+                        Value::String("alice@example.com".to_string()),
+                    ),
+                    (
+                        "password".to_string(),
+                        Value::String("let me in".to_string()),
+                    ),
+                ])),
+                Value::Map(HashMap::from([
+                    (
+                        "cookie_path".to_string(),
+                        Value::String("/admin".to_string()),
+                    ),
+                    (
+                        "cookie_domain".to_string(),
+                        Value::String("Example.COM".to_string()),
+                    ),
+                    ("cookie_secure".to_string(), Value::Bool(false)),
+                ])),
+            ])
+            .unwrap(),
+        );
+
+        let set_cookie = set_cookie_header_from_response(&signed_in);
+        assert!(set_cookie.starts_with("ntnt_session="));
+        assert!(
+            set_cookie.contains("Path=/admin"),
+            "single optional map should be interpreted as auth options: {set_cookie}"
+        );
+        assert!(set_cookie.contains("Domain=example.com"));
+        assert!(!set_cookie.contains("; Secure"));
+    }
+
+    #[test]
+    fn test_local_sign_in_rejects_mixed_single_session_options_map() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let local_sign_in = module_fn(&module, "local_sign_in");
+
+        let err = local_sign_in(&[
+            redirect_response("/admin", None),
+            request_with_cookie_and_security_headers(""),
+            Value::Map(HashMap::from([
+                (
+                    "email".to_string(),
+                    Value::String("alice@example.com".to_string()),
+                ),
+                (
+                    "password".to_string(),
+                    Value::String("let me in".to_string()),
+                ),
+            ])),
+            Value::Map(HashMap::from([
+                (
+                    "claims".to_string(),
+                    Value::Map(HashMap::from([(
+                        "role".to_string(),
+                        Value::String("admin".to_string()),
+                    )])),
+                ),
+                (
+                    "cookie_path".to_string(),
+                    Value::String("/admin".to_string()),
+                ),
+            ])),
+        ])
+        .unwrap_err();
+
+        assert!(format!("{}", err)
+            .contains("[auth] local_sign_in() optional map mixes session data and auth options"));
+    }
+
+    #[test]
+    fn test_local_sign_in_rejects_invalid_cookie_domain() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let create_local_user = module_fn(&module, "create_local_user");
+        let local_sign_in = module_fn(&module, "local_sign_in");
+
+        result_ok_map(
+            create_local_user(&[
+                Value::String("alice@example.com".to_string()),
+                Value::String("let me in".to_string()),
+            ])
+            .unwrap(),
+        );
+
+        let err = local_sign_in(&[
+            redirect_response("/admin", None),
+            request_with_cookie_and_security_headers(""),
+            Value::Map(HashMap::from([
+                (
+                    "email".to_string(),
+                    Value::String("alice@example.com".to_string()),
+                ),
+                (
+                    "password".to_string(),
+                    Value::String("let me in".to_string()),
+                ),
+            ])),
+            Value::Map(HashMap::from([(
+                "cookie_domain".to_string(),
+                Value::String("example.com; HttpOnly=false".to_string()),
+            )])),
+        ])
+        .unwrap_err();
+
+        assert!(format!("{}", err).contains("[auth] cookie_domain contains invalid characters"));
+    }
+
+    #[test]
+    fn test_local_sign_in_rejects_empty_cookie_domain() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let create_local_user = module_fn(&module, "create_local_user");
+        let local_sign_in = module_fn(&module, "local_sign_in");
+
+        result_ok_map(
+            create_local_user(&[
+                Value::String("alice@example.com".to_string()),
+                Value::String("let me in".to_string()),
+            ])
+            .unwrap(),
+        );
+
+        let err = local_sign_in(&[
+            redirect_response("/admin", None),
+            request_with_cookie_and_security_headers(""),
+            Value::Map(HashMap::from([
+                (
+                    "email".to_string(),
+                    Value::String("alice@example.com".to_string()),
+                ),
+                (
+                    "password".to_string(),
+                    Value::String("let me in".to_string()),
+                ),
+            ])),
+            Value::Map(HashMap::from([(
+                "cookie_domain".to_string(),
+                Value::String("   ".to_string()),
+            )])),
+        ])
+        .unwrap_err();
+
+        assert!(format!("{}", err).contains("[auth] cookie_domain must not be empty"));
+    }
+
+    #[test]
+    fn test_local_sign_in_rejects_invalid_credentials_without_session_or_challenge_cookie() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let create_local_user = module_fn(&module, "create_local_user");
+        let local_sign_in = module_fn(&module, "local_sign_in");
+        let current_auth_challenge = module_fn(&module, "current_auth_challenge");
+        let current_session = module_fn(&module, "current_session");
+
+        result_ok_map(
+            create_local_user(&[
+                Value::String("alice@example.com".to_string()),
+                Value::String("correct password".to_string()),
+            ])
+            .unwrap(),
+        );
+
+        let error = result_err_string(
+            local_sign_in(&[
+                redirect_response("/admin", None),
+                request_with_cookie_and_security_headers(""),
+                Value::Map(HashMap::from([
+                    (
+                        "email".to_string(),
+                        Value::String("alice@example.com".to_string()),
+                    ),
+                    (
+                        "password".to_string(),
+                        Value::String("wrong password".to_string()),
+                    ),
+                ])),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(error, "Invalid local credentials");
+
+        let req = request_with_cookie("");
+        match current_session(&[req.clone()]).unwrap() {
+            Value::EnumValue { variant, .. } => assert_eq!(variant, "None"),
+            other => panic!("expected None session, got {:?}", other),
+        }
+        match current_auth_challenge(&[req]).unwrap() {
+            Value::EnumValue { variant, .. } => assert_eq!(variant, "None"),
+            other => panic!("expected None challenge, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_local_sign_in_rejects_empty_password_before_verification() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let local_sign_in = module_fn(&module, "local_sign_in");
+        let err = local_sign_in(&[
+            redirect_response("/admin", None),
+            request_with_cookie_and_security_headers(""),
+            Value::Map(HashMap::from([
+                (
+                    "email".to_string(),
+                    Value::String("alice@example.com".to_string()),
+                ),
+                ("password".to_string(), Value::String("".to_string())),
+            ])),
+        ])
+        .unwrap_err();
+
+        assert!(format!("{}", err).contains("[auth] local_sign_in() password must not be empty"));
+    }
+
+    #[test]
+    fn test_local_sign_in_stages_bootstrap_user_instead_of_full_session() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+        let local_sign_in = module_fn(&module, "local_sign_in");
+        let complete_auth_challenge = module_fn(&module, "complete_auth_challenge");
+        let current_auth_challenge = module_fn(&module, "current_auth_challenge");
+        let current_session = module_fn(&module, "current_session");
+
+        result_ok_map(
+            bootstrap_local_user(&[Value::Map(HashMap::from([
+                (
+                    "email".to_string(),
+                    Value::String("admin@example.com".to_string()),
+                ),
+                (
+                    "password".to_string(),
+                    Value::String("temp password".to_string()),
+                ),
+            ]))])
+            .unwrap(),
+        );
+
+        let cookie_overrides = HashMap::from([
+            (
+                "cookie_path".to_string(),
+                Value::String("/admin/setup".to_string()),
+            ),
+            (
+                "cookie_domain".to_string(),
+                Value::String("Example.COM".to_string()),
+            ),
+            ("cookie_secure".to_string(), Value::Bool(false)),
+        ]);
+
+        let staged = result_ok_value(
+            local_sign_in(&[
+                redirect_response("/admin/setup", None),
+                request_with_cookie_and_security_headers(""),
+                Value::Map(HashMap::from([
+                    (
+                        "email".to_string(),
+                        Value::String("admin@example.com".to_string()),
+                    ),
+                    (
+                        "password".to_string(),
+                        Value::String("temp password".to_string()),
+                    ),
+                ])),
+                Value::Map(HashMap::from([
+                    (
+                        "claims".to_string(),
+                        Value::Map(HashMap::from([(
+                            "role".to_string(),
+                            Value::String("bootstrap-admin".to_string()),
+                        )])),
+                    ),
+                    (
+                        "data".to_string(),
+                        Value::Map(HashMap::from([(
+                            "tenant".to_string(),
+                            Value::String("acme".to_string()),
+                        )])),
+                    ),
+                ])),
+                Value::Map(cookie_overrides.clone()),
+            ])
+            .unwrap(),
+        );
+
+        let set_cookie = set_cookie_header_from_response(&staged);
+        assert!(set_cookie.starts_with("ntnt_session_challenge="));
+        assert!(
+            set_cookie.contains("Path=/admin/setup"),
+            "challenge cookie should honor local_sign_in cookie_path override: {set_cookie}"
+        );
+        assert!(set_cookie.contains("Domain=example.com"));
+        assert!(!set_cookie.contains("; Secure"));
+        let cookie = cookie_header_from_response(&staged);
+        let req = request_with_cookie(&cookie);
+
+        match current_auth_challenge(&[req.clone()]).unwrap() {
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                assert_eq!(variant, "Some");
+                let challenge_map = match values.first() {
+                    Some(Value::Map(map)) => map,
+                    other => panic!("expected challenge map, got {:?}", other),
+                };
+                assert_map_string(challenge_map, "kind", "password_change_required");
+            }
+            other => panic!("expected Some(challenge), got {:?}", other),
+        }
+
+        match current_session(&[req.clone()]).unwrap() {
+            Value::EnumValue { variant, .. } => assert_eq!(variant, "None"),
+            other => panic!("expected None session, got {:?}", other),
+        }
+
+        let completed = complete_auth_challenge(&[
+            redirect_response("/admin", None),
+            req,
+            Value::Map(HashMap::from([(
+                "claims".to_string(),
+                Value::Map(HashMap::from([(
+                    "role".to_string(),
+                    Value::String("completed-admin".to_string()),
+                )])),
+            )])),
+            Value::Map(cookie_overrides),
+        ])
+        .unwrap();
+        let completed_cookies = set_cookie_headers_from_response(&completed);
+        let session_cookie = completed_cookies
+            .iter()
+            .find(|cookie| cookie.starts_with("ntnt_session="))
+            .unwrap_or_else(|| {
+                panic!(
+                    "complete_auth_challenge should attach a full session cookie: {completed_cookies:?}"
+                )
+            });
+        assert!(
+            session_cookie.contains("Path=/"),
+            "full session cookie should use the configured session cookie path, not the staged challenge path: {session_cookie}"
+        );
+        assert!(
+            !session_cookie.contains("Path=/admin/setup"),
+            "full session cookie must not inherit the staged challenge cookie path: {session_cookie}"
+        );
+        let session_cookie_header = session_cookie
+            .split(';')
+            .next()
+            .unwrap_or_else(|| panic!("missing session cookie pair: {session_cookie}"));
+        match current_session(&[request_with_cookie(session_cookie_header)]).unwrap() {
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                assert_eq!(variant, "Some");
+                let session_map = match values.first() {
+                    Some(Value::Map(map)) => map,
+                    other => panic!("expected session map, got {:?}", other),
+                };
+                match session_map.get("data") {
+                    Some(Value::Map(data)) => {
+                        assert_map_string(data, "role", "completed-admin");
+                        assert_map_string(data, "tenant", "acme");
+                    }
+                    other => panic!(
+                        "complete_auth_challenge should preserve staged session data, got {:?}",
+                        other
+                    ),
+                }
+            }
+            other => panic!("expected completed staged session, got {:?}", other),
+        }
+        let cleared_challenge_cookie = completed_cookies
+            .iter()
+            .find(|cookie| cookie.starts_with("ntnt_session_challenge=;"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "complete_auth_challenge should clear the staged challenge cookie: {completed_cookies:?}"
+                )
+            });
+        assert!(
+            cleared_challenge_cookie.contains("Path=/admin/setup"),
+            "cleared challenge cookie should preserve the challenge cookie path override: {cleared_challenge_cookie}"
+        );
+        assert!(cleared_challenge_cookie.contains("Domain=example.com"));
+        assert!(cleared_challenge_cookie.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn test_cancel_auth_challenge_clears_cookie_with_overrides() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let cancel_auth_challenge = module_fn(&module, "cancel_auth_challenge");
+        let cancelled = cancel_auth_challenge(&[
+            redirect_response("/login", None),
+            request_with_cookie(""),
+            Value::Map(HashMap::from([
+                (
+                    "cookie_path".to_string(),
+                    Value::String("/admin/setup".to_string()),
+                ),
+                ("cookie_secure".to_string(), Value::Bool(false)),
+                ("cookie_max_age".to_string(), Value::Int(999)),
+            ])),
+        ])
+        .unwrap();
+
+        let set_cookie = set_cookie_header_from_response(&cancelled);
+        assert!(set_cookie.starts_with("ntnt_session_challenge=;"));
+        assert!(
+            set_cookie.contains("Path=/admin/setup"),
+            "cancel_auth_challenge should clear the same challenge cookie path: {set_cookie}"
+        );
+        assert!(set_cookie.contains("Max-Age=0"));
+        assert!(!set_cookie.contains("Max-Age=999"));
+        assert!(!set_cookie.contains("; Secure"));
     }
 
     #[test]

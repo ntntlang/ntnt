@@ -341,6 +341,17 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
     )
     .map_err(|e| format!("Failed to create auth_local_credentials table: {}", e))?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS auth_local_bootstrap_state (
+            key TEXT PRIMARY KEY,
+            local_user_id TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY(local_user_id) REFERENCES auth_local_identities(id) ON DELETE CASCADE
+        )",
+        [],
+    )
+    .map_err(|e| format!("Failed to create auth_local_bootstrap_state table: {}", e))?;
+
     let mut sqlite_conn = SQLITE_CONN.lock().unwrap();
     *sqlite_conn = Some(conn);
     Ok(())

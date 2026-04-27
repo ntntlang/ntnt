@@ -1,5 +1,7 @@
-// Local-auth storage intentionally includes write-side helpers before the
-// public create/reset/bootstrap flows land in later DD-062 slices.
+// Local-auth storage owns the explicit record families for DD-062 local
+// credentials. The current public surface covers identity provisioning,
+// bootstrap, password verification, and request-aware sign-in; reset/TOTP
+// enrollment records remain reserved for later slices.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::*;
@@ -95,7 +97,7 @@ pub(in crate::stdlib::auth) struct LocalIdentity {
     pub(in crate::stdlib::auth) metadata_json: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(in crate::stdlib::auth) struct LocalCredentialSecret {
     pub(in crate::stdlib::auth) local_user_id: String,
     pub(in crate::stdlib::auth) password_hash: String,
@@ -103,6 +105,19 @@ pub(in crate::stdlib::auth) struct LocalCredentialSecret {
     pub(in crate::stdlib::auth) password_hash_params_json: String,
     pub(in crate::stdlib::auth) password_changed_at: i64,
     pub(in crate::stdlib::auth) must_change_password: bool,
+}
+
+impl std::fmt::Debug for LocalCredentialSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalCredentialSecret")
+            .field("local_user_id", &self.local_user_id)
+            .field("password_hash", &"[REDACTED]")
+            .field("password_hash_algorithm", &self.password_hash_algorithm)
+            .field("password_hash_params_json", &"[REDACTED]")
+            .field("password_changed_at", &self.password_changed_at)
+            .field("must_change_password", &self.must_change_password)
+            .finish()
+    }
 }
 
 pub(in crate::stdlib::auth) fn normalize_local_identifier(
@@ -138,6 +153,7 @@ pub(in crate::stdlib::auth) struct LocalAuthMemoryStore {
     identities_by_id: HashMap<String, LocalIdentity>,
     identity_id_by_lookup_key: HashMap<String, String>,
     credential_secrets_by_local_user_id: HashMap<String, LocalCredentialSecret>,
+    bootstrap_local_user_id: Option<String>,
 }
 
 impl LocalAuthMemoryStore {
@@ -200,17 +216,7 @@ impl LocalAuthMemoryStore {
         &mut self,
         credential: LocalCredentialSecret,
     ) -> std::result::Result<(), String> {
-        if credential.local_user_id.trim().is_empty() {
-            return Err("[auth] local credential local_user_id must not be empty".to_string());
-        }
-        if credential.password_hash.trim().is_empty() {
-            return Err("[auth] local credential password_hash must not be empty".to_string());
-        }
-        if credential.password_hash_algorithm.trim().is_empty() {
-            return Err(
-                "[auth] local credential password_hash_algorithm must not be empty".to_string(),
-            );
-        }
+        validate_local_credential_secret(&credential, None)?;
         if !self
             .identities_by_id
             .contains_key(&credential.local_user_id)
@@ -232,6 +238,66 @@ impl LocalAuthMemoryStore {
             .credential_secrets_by_local_user_id
             .get(local_user_id)
             .cloned())
+    }
+
+    pub(in crate::stdlib::auth) fn get_bootstrap_local_user_id(
+        &self,
+    ) -> std::result::Result<Option<String>, String> {
+        Ok(self.bootstrap_local_user_id.clone())
+    }
+
+    pub(in crate::stdlib::auth) fn store_bootstrap_local_user_id(
+        &mut self,
+        local_user_id: &str,
+    ) -> std::result::Result<(), String> {
+        if local_user_id.trim().is_empty() {
+            return Err("[auth] bootstrap local user id must not be empty".to_string());
+        }
+        if let Some(existing_id) = &self.bootstrap_local_user_id {
+            if existing_id != local_user_id {
+                return Err("[auth] bootstrap local user already exists".to_string());
+            }
+        }
+        self.bootstrap_local_user_id = Some(local_user_id.to_string());
+        Ok(())
+    }
+
+    pub(in crate::stdlib::auth) fn provision_user(
+        &mut self,
+        identity: LocalIdentity,
+        credential: LocalCredentialSecret,
+        mark_bootstrap: bool,
+    ) -> std::result::Result<(), String> {
+        let identity = normalize_local_identity_for_storage(identity)?;
+        validate_local_credential_secret(&credential, Some(&identity.id))?;
+        if self.identities_by_id.contains_key(&identity.id) {
+            return Err("[auth] local identity id already exists".to_string());
+        }
+        let lookup_key =
+            local_identity_lookup_key(&identity.identifier_kind, &identity.identifier_normalized)?;
+        if self.identity_id_by_lookup_key.contains_key(&lookup_key) {
+            return Err(format!(
+                "[auth] local identity already exists for {}",
+                identity.identifier_kind
+            ));
+        }
+        if mark_bootstrap {
+            if let Some(existing_id) = &self.bootstrap_local_user_id {
+                if existing_id != &identity.id {
+                    return Err("[auth] bootstrap local user already exists".to_string());
+                }
+            }
+        }
+
+        self.identity_id_by_lookup_key
+            .insert(lookup_key, identity.id.clone());
+        self.credential_secrets_by_local_user_id
+            .insert(credential.local_user_id.clone(), credential);
+        if mark_bootstrap {
+            self.bootstrap_local_user_id = Some(identity.id.clone());
+        }
+        self.identities_by_id.insert(identity.id.clone(), identity);
+        Ok(())
     }
 }
 
@@ -257,6 +323,55 @@ fn normalize_local_identity_for_storage(
     Ok(identity)
 }
 
+fn validate_local_credential_secret(
+    credential: &LocalCredentialSecret,
+    expected_local_user_id: Option<&str>,
+) -> std::result::Result<(), String> {
+    if credential.local_user_id.trim().is_empty() {
+        return Err("[auth] local credential local_user_id must not be empty".to_string());
+    }
+    if let Some(expected) = expected_local_user_id {
+        if credential.local_user_id != expected {
+            return Err(
+                "[auth] local credential must reference the provisioned local identity".to_string(),
+            );
+        }
+    }
+    if credential.password_hash.trim().is_empty() {
+        return Err("[auth] local credential password_hash must not be empty".to_string());
+    }
+    if credential.password_hash_algorithm.trim().is_empty() {
+        return Err(
+            "[auth] local credential password_hash_algorithm must not be empty".to_string(),
+        );
+    }
+    Ok(())
+}
+
+pub(in crate::stdlib::auth) fn provision_local_user_record(
+    identity: &LocalIdentity,
+    credential: &LocalCredentialSecret,
+    mark_bootstrap: bool,
+) -> std::result::Result<(), String> {
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => SESSION_STORE.lock().unwrap().local_auth.provision_user(
+            identity.clone(),
+            credential.clone(),
+            mark_bootstrap,
+        ),
+        AuthStorageBackend::Sqlite => {
+            provision_local_user_sqlite(identity, credential, mark_bootstrap)
+        }
+        AuthStorageBackend::Postgres => {
+            Err("[auth] local user provisioning is not implemented for PostgreSQL yet".to_string())
+        }
+        AuthStorageBackend::Redis => Err(
+            "[auth] local user provisioning is not implemented for Redis/Valkey yet".to_string(),
+        ),
+    }
+}
+
+#[cfg(test)]
 pub(in crate::stdlib::auth) fn store_local_identity_record(
     identity: &LocalIdentity,
 ) -> std::result::Result<(), String> {
@@ -317,25 +432,6 @@ pub(in crate::stdlib::auth) fn get_local_identity_by_identifier_record(
     }
 }
 
-pub(in crate::stdlib::auth) fn store_local_credential_secret_record(
-    credential: &LocalCredentialSecret,
-) -> std::result::Result<(), String> {
-    match active_auth_storage_backend() {
-        AuthStorageBackend::Memory => SESSION_STORE
-            .lock()
-            .unwrap()
-            .local_auth
-            .store_credential_secret(credential.clone()),
-        AuthStorageBackend::Sqlite => store_local_credential_secret_sqlite(credential),
-        AuthStorageBackend::Postgres => {
-            Err("[auth] local credential storage is not implemented for PostgreSQL yet".to_string())
-        }
-        AuthStorageBackend::Redis => Err(
-            "[auth] local credential storage is not implemented for Redis/Valkey yet".to_string(),
-        ),
-    }
-}
-
 pub(in crate::stdlib::auth) fn get_local_credential_secret_record(
     local_user_id: &str,
 ) -> std::result::Result<Option<LocalCredentialSecret>, String> {
@@ -355,6 +451,190 @@ pub(in crate::stdlib::auth) fn get_local_credential_secret_record(
     }
 }
 
+#[cfg(test)]
+pub(in crate::stdlib::auth) fn store_local_credential_secret_record(
+    credential: &LocalCredentialSecret,
+) -> std::result::Result<(), String> {
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => SESSION_STORE
+            .lock()
+            .unwrap()
+            .local_auth
+            .store_credential_secret(credential.clone()),
+        AuthStorageBackend::Sqlite => store_local_credential_secret_sqlite(credential),
+        AuthStorageBackend::Postgres => {
+            Err("[auth] local credential storage is not implemented for PostgreSQL yet".to_string())
+        }
+        AuthStorageBackend::Redis => Err(
+            "[auth] local credential storage is not implemented for Redis/Valkey yet".to_string(),
+        ),
+    }
+}
+
+pub(in crate::stdlib::auth) fn get_bootstrap_local_user_id_record(
+) -> std::result::Result<Option<String>, String> {
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => SESSION_STORE
+            .lock()
+            .unwrap()
+            .local_auth
+            .get_bootstrap_local_user_id(),
+        AuthStorageBackend::Sqlite => get_bootstrap_local_user_id_sqlite(),
+        AuthStorageBackend::Postgres => Err(
+            "[auth] bootstrap local user lookup is not implemented for PostgreSQL yet".to_string(),
+        ),
+        AuthStorageBackend::Redis => Err(
+            "[auth] bootstrap local user lookup is not implemented for Redis/Valkey yet"
+                .to_string(),
+        ),
+    }
+}
+
+pub(in crate::stdlib::auth) fn store_bootstrap_local_user_id_record(
+    local_user_id: &str,
+) -> std::result::Result<(), String> {
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => SESSION_STORE
+            .lock()
+            .unwrap()
+            .local_auth
+            .store_bootstrap_local_user_id(local_user_id),
+        AuthStorageBackend::Sqlite => store_bootstrap_local_user_id_sqlite(local_user_id),
+        AuthStorageBackend::Postgres => Err(
+            "[auth] bootstrap local user storage is not implemented for PostgreSQL yet".to_string(),
+        ),
+        AuthStorageBackend::Redis => Err(
+            "[auth] bootstrap local user storage is not implemented for Redis/Valkey yet"
+                .to_string(),
+        ),
+    }
+}
+
+fn insert_local_identity_sqlite(
+    conn: &rusqlite::Connection,
+    identity: &LocalIdentity,
+) -> std::result::Result<(), String> {
+    conn.execute(
+        "INSERT INTO auth_local_identities
+         (id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            identity.id,
+            identity.identifier_kind,
+            identity.identifier,
+            identity.identifier_normalized,
+            identity.created_at,
+            identity.updated_at,
+            identity.state.as_str(),
+            identity.metadata_json,
+        ],
+    )
+    .map_err(|e| format!("[auth] failed to store local identity: {}", e))?;
+    Ok(())
+}
+
+fn insert_local_credential_secret_sqlite(
+    conn: &rusqlite::Connection,
+    credential: &LocalCredentialSecret,
+) -> std::result::Result<(), String> {
+    conn.execute(
+        "INSERT INTO auth_local_credentials
+         (local_user_id, password_hash, password_hash_algorithm, password_hash_params_json, password_changed_at, must_change_password)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            credential.local_user_id,
+            credential.password_hash,
+            credential.password_hash_algorithm,
+            credential.password_hash_params_json,
+            credential.password_changed_at,
+            if credential.must_change_password { 1 } else { 0 },
+        ],
+    )
+    .map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
+    Ok(())
+}
+
+fn bootstrap_local_user_id_sqlite_conn(
+    conn: &rusqlite::Connection,
+) -> std::result::Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT local_user_id FROM auth_local_bootstrap_state WHERE key = 'bootstrap'",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("[auth] failed to lookup bootstrap local user: {}", e))
+}
+
+fn provision_local_user_sqlite(
+    identity: &LocalIdentity,
+    credential: &LocalCredentialSecret,
+    mark_bootstrap: bool,
+) -> std::result::Result<(), String> {
+    let identity = normalize_local_identity_for_storage(identity.clone())?;
+    validate_local_credential_secret(credential, Some(&identity.id))?;
+    let mut conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_mut().ok_or("SQLite not initialized")?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("[auth] failed to provision local user: {}", e))?;
+
+    if get_local_identity_by_id_sqlite_conn(&tx, &identity.id)?.is_some() {
+        return Err("[auth] local identity id already exists".to_string());
+    }
+    if get_local_identity_by_identifier_sqlite_conn(
+        &tx,
+        &identity.identifier_kind,
+        &identity.identifier_normalized,
+    )?
+    .is_some()
+    {
+        return Err(format!(
+            "[auth] local identity already exists for {}",
+            identity.identifier_kind
+        ));
+    }
+    if mark_bootstrap && bootstrap_local_user_id_sqlite_conn(&tx)?.is_some() {
+        return Err("[auth] bootstrap local user already exists".to_string());
+    }
+
+    insert_local_identity_sqlite(&tx, &identity)?;
+    insert_local_credential_secret_sqlite(&tx, credential)?;
+    if mark_bootstrap {
+        tx.execute(
+            "INSERT INTO auth_local_bootstrap_state (key, local_user_id, created_at)
+             VALUES ('bootstrap', ?1, ?2)",
+            rusqlite::params![identity.id, chrono::Utc::now().timestamp()],
+        )
+        .map_err(|e| format!("[auth] failed to store bootstrap local user: {}", e))?;
+    }
+    tx.commit()
+        .map_err(|e| format!("[auth] failed to provision local user: {}", e))?;
+    Ok(())
+}
+
+fn local_identity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalIdentity> {
+    let state: String = row.get(6)?;
+    let state = LocalAccountState::from_str(&state).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            6,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
+    })?;
+    Ok(LocalIdentity {
+        id: row.get(0)?,
+        identifier_kind: row.get(1)?,
+        identifier: row.get(2)?,
+        identifier_normalized: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        state,
+        metadata_json: row.get(7)?,
+    })
+}
+
+#[cfg(test)]
 fn store_local_identity_sqlite(identity: &LocalIdentity) -> std::result::Result<(), String> {
     let identity = normalize_local_identity_for_storage(identity.clone())?;
     let conn_guard = SQLITE_CONN.lock().unwrap();
@@ -385,30 +665,10 @@ fn store_local_identity_sqlite(identity: &LocalIdentity) -> std::result::Result<
     Ok(())
 }
 
-fn local_identity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalIdentity> {
-    let state: String = row.get(6)?;
-    let state = LocalAccountState::from_str(&state).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            6,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-        )
-    })?;
-    Ok(LocalIdentity {
-        id: row.get(0)?,
-        identifier_kind: row.get(1)?,
-        identifier: row.get(2)?,
-        identifier_normalized: row.get(3)?,
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
-        state,
-        metadata_json: row.get(7)?,
-    })
-}
-
-fn get_local_identity_by_id_sqlite(id: &str) -> std::result::Result<Option<LocalIdentity>, String> {
-    let conn_guard = SQLITE_CONN.lock().unwrap();
-    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+fn get_local_identity_by_id_sqlite_conn(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> std::result::Result<Option<LocalIdentity>, String> {
     conn.query_row(
         "SELECT id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json
          FROM auth_local_identities
@@ -420,12 +680,17 @@ fn get_local_identity_by_id_sqlite(id: &str) -> std::result::Result<Option<Local
     .map_err(|e| format!("[auth] failed to lookup local identity: {}", e))
 }
 
-fn get_local_identity_by_identifier_sqlite(
+fn get_local_identity_by_id_sqlite(id: &str) -> std::result::Result<Option<LocalIdentity>, String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+    get_local_identity_by_id_sqlite_conn(conn, id)
+}
+
+fn get_local_identity_by_identifier_sqlite_conn(
+    conn: &rusqlite::Connection,
     identifier_kind: &str,
     identifier_normalized: &str,
 ) -> std::result::Result<Option<LocalIdentity>, String> {
-    let conn_guard = SQLITE_CONN.lock().unwrap();
-    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
     let kind = identifier_kind.trim().to_ascii_lowercase();
     let normalized = identifier_normalized.trim().to_ascii_lowercase();
     conn.query_row(
@@ -439,6 +704,16 @@ fn get_local_identity_by_identifier_sqlite(
     .map_err(|e| format!("[auth] failed to lookup local identity: {}", e))
 }
 
+fn get_local_identity_by_identifier_sqlite(
+    identifier_kind: &str,
+    identifier_normalized: &str,
+) -> std::result::Result<Option<LocalIdentity>, String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+    get_local_identity_by_identifier_sqlite_conn(conn, identifier_kind, identifier_normalized)
+}
+
+#[cfg(test)]
 fn store_local_credential_secret_sqlite(
     credential: &LocalCredentialSecret,
 ) -> std::result::Result<(), String> {
@@ -493,6 +768,31 @@ fn get_local_credential_secret_sqlite(
     .map_err(|e| format!("[auth] failed to lookup local credential: {}", e))
 }
 
+fn get_bootstrap_local_user_id_sqlite() -> std::result::Result<Option<String>, String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+    bootstrap_local_user_id_sqlite_conn(conn)
+}
+
+fn store_bootstrap_local_user_id_sqlite(local_user_id: &str) -> std::result::Result<(), String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO auth_local_bootstrap_state (key, local_user_id, created_at)
+             VALUES ('bootstrap', ?1, ?2)",
+            rusqlite::params![local_user_id, chrono::Utc::now().timestamp()],
+        )
+        .map_err(|e| format!("[auth] failed to store bootstrap local user: {}", e))?;
+    if inserted == 0 {
+        let existing = bootstrap_local_user_id_sqlite_conn(conn)?;
+        if existing.as_deref() != Some(local_user_id) {
+            return Err("[auth] bootstrap local user already exists".to_string());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +841,26 @@ mod tests {
             store.get_credential_secret("local-user-1").unwrap(),
             Some(credential)
         );
+    }
+
+    #[test]
+    fn test_local_credential_secret_debug_redacts_hash_material() {
+        let credential = LocalCredentialSecret {
+            local_user_id: "local-user-1".to_string(),
+            password_hash: "argon2$fixture-hash-value".to_string(),
+            password_hash_algorithm: "argon2id".to_string(),
+            password_hash_params_json: "{\"salt\":\"fixture-salt\"}".to_string(),
+            password_changed_at: 101,
+            must_change_password: false,
+        };
+
+        let formatted = format!("{:?}", credential);
+        assert!(formatted.contains("LocalCredentialSecret"));
+        assert!(formatted.contains("local-user-1"));
+        assert!(formatted.contains("argon2id"));
+        assert!(formatted.contains("[REDACTED]"));
+        assert!(!formatted.contains("super-secret-hash"));
+        assert!(!formatted.contains("secret-salt"));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 **Status:** In Progress
 **Author:** Larri
 **Date:** 2026-03-20
-**Branch:** `main` through v0.4.9; `feat/local-auth-blueprint` carries the next planning pass for first-class local auth and architecture discipline
+**Branch:** `main` through v0.4.9; PR #98 landed the first local-auth credential/storage slice, and `feat/local-auth-sign-in-bootstrap` adds the next bootstrap/request-aware sign-in slice before DD-062 continues with setup completion, TOTP, and reset work
 
 ---
 
@@ -50,16 +50,18 @@ If a capability is security-sensitive lifecycle state that every app otherwise r
 - [x] Password hashing and generic crypto helpers in `std/crypto`
 - [x] TOTP/MFA primitives (`totp_secret`, `totp_verify`, `totp_uri`) in `std/auth`
 - [x] API key validation, Turnstile CAPTCHA verification, OAuth token introspection, client credentials grant, and OIDC discovery
+- [x] Local-auth credential foundation from PR #98: focused `auth/storage/local.rs` storage home, explicit local-auth record/fallback policy, local identity/account state model, memory/SQLite identity + credential storage, and public `verify_local_password(identifier, password, options?)`
+- [x] Local-auth bootstrap/sign-in branch: public `create_local_user`, `bootstrap_local_user`, and request-aware `local_sign_in(response, req, credentials, session?, options?)` helpers that reuse shared session/challenge cookie semantics
 
 ### What's Still Missing (the gap to "best ever")
-- [ ] First-class local email/password/TOTP credential lifecycle owned by `std/auth`
-- [ ] Auth-owned local credential/reset/TOTP enrollment stores with fail-closed fallback semantics
-- [ ] First-class local credential sign-in helper that feeds verified local credentials into the existing request-aware session-completion path
+- [ ] Complete first-class local email/password/TOTP credential lifecycle owned by `std/auth`; local identity/credential storage, bootstrap provisioning, password verification, and request-aware sign-in are started, but setup completion/reset/TOTP flows are not complete
+- [ ] Auth-owned password reset and TOTP enrollment stores with fail-closed fallback semantics
+- [x] First-class local credential sign-in domain helper that feeds verified local credentials into the existing request-aware session-completion path
 - [ ] Admin/arbitrary-user session APIs (`list_sessions(user_id)`, `revoke_session(session_id)`, `revoke_all_sessions(user_id)`) distinct from current-user helpers
 - [ ] Security event storage and suspicious-activity policy actions (`warn`, `challenge`, `revoke`)
 - [ ] Fully behavioral remember-me support (`remember_ttl`, request capture, cookie/session TTL selection)
-- [ ] Stronger test ratchets for session metadata round-trips, route-protection end-to-end flows, and Postgres/Redis CI coverage
-- [ ] Architecture guardrails that keep new auth work inside the post-4.5 module boundaries instead of re-growing `auth.rs` or `auth/storage.rs`
+- [ ] Stronger test ratchets for session metadata round-trips, route-protection end-to-end flows, local-auth migration paths, and Postgres/Redis CI coverage
+- [ ] Architecture guardrails that keep new auth work inside focused auth modules instead of re-growing `auth.rs` or the storage contract boundary
 
 ## Unified Phased Implementation Plan
 
@@ -108,7 +110,7 @@ This is the single source of truth for how we should build `std/auth` forward. T
 ### Phase 3 — Session Core and Cookie Helpers
 **Goal:** Remove the most repetitive and error-prone login/logout/session code.
 
-**Result:** Merged in PR #78 (`feat: add auth session helpers`) on 2026-04-13, then tightened on `feat/local-auth-blueprint` so manual/staged session completion is request-aware before first-class local auth builds on it.
+**Result:** Merged in PR #78 (`feat: add auth session helpers`) on 2026-04-13, then tightened in PR #97 so manual/staged session completion is request-aware before first-class local auth builds on it.
 
 - [x] Rotate session ID automatically on successful OAuth callback/session upgrade paths
 - [x] Invalidate old session ID immediately after rotation
@@ -352,24 +354,25 @@ fn login(req) {
 A later `enable_local_auth(...)` convenience wrapper is acceptable only if it delegates into the same primitive provider/config path and keeps policy hooks explicit. It must not become two auth systems or bake roles, onboarding, email delivery, or account UI into `std/auth`.
 
 #### Phase 9A — Architecture Preflight and Storage Boundary
-- [ ] Split or carve `auth/storage.rs` enough that new local-auth state does not get buried in the existing storage monolith
-- [ ] Define explicit local-auth record families before code lands: local identity, credential secret, password reset token, TOTP enrollment/setup state, and bootstrap state
-- [ ] Define local-auth fallback/error policy before implementation; durable credential/TOTP/reset state should fail closed rather than silently fall back to process memory in production
+- [x] Split or carve `auth/storage.rs` enough that new local-auth state does not get buried in the existing storage monolith (`auth/storage/local.rs` now owns the first local-auth records)
+- [x] Define explicit local-auth record families before code lands: local identity, credential secret, password reset token, TOTP enrollment/setup state, and bootstrap state
+- [x] Define local-auth fallback/error policy before implementation; durable credential/TOTP/reset state should fail closed rather than silently fall back to process memory in production
 - [ ] Move the backend contract harness toward reusable storage-module ownership so every new local-auth record can extend it immediately
 - [ ] Document which parts of `auth.rs` are allowed to grow for local auth and which must live in focused modules
 - [ ] Add review checklist items for local-auth regressions: captured-but-not-persisted state, reset-token replay, backend mismatch, swallowed migration errors, and app/std ownership ambiguity
 
-**Exit criterion:** the storage and module homes for local auth are obvious before the first credential table/helper is implemented.
+**Status after PR #98:** the first credential table/helper slice has a focused storage/domain home, but the reusable contract-harness/review-guidance ratchet is still open and should be paired with the next local-auth slice.
 
 #### Phase 9B — Local Identity and Credential Store
-- [ ] Add first-class local credential storage owned by `std/auth`
-- [ ] Support a generic local subject + identifier model; ship email as the first documented identifier preset with normalization rules, not as the only possible local-auth identity shape
-- [ ] Store password hashes in auth-owned tables rather than pushing that responsibility to apps
-- [ ] Define a lean durable local-user/account shape: identity + auth state first, not a full profile platform
-- [ ] Support account states needed by real flows: bootstrap/pending setup/active/disabled/locked/password-change-required
-- [ ] Support bootstrap account creation from config/env for the common admin-panel case
-- [ ] Ensure bootstrap credentials force rotation/setup instead of becoming a permanent production secret path
-- [ ] Add memory/SQLite contract tests by default and Postgres/Redis contract tests in required backend CI
+- [x] Add first-class local credential storage owned by `std/auth` for memory and SQLite
+- [x] Support a generic local subject + identifier model; ship email as the first documented identifier preset with normalization rules, not as the only possible local-auth identity shape
+- [x] Store password hashes in auth-owned tables rather than pushing that responsibility to apps
+- [x] Define a lean durable local-user/account shape: identity + auth state first, not a full profile platform
+- [x] Support account states needed by real flows: bootstrap/pending setup/active/disabled/locked/password-change-required
+- [x] Support bootstrap account creation from config/env for the common admin-panel case
+- [x] Ensure bootstrap credentials force rotation/setup instead of becoming a permanent production secret path
+- [x] Add memory/SQLite contract tests by default
+- [ ] Add Postgres/Redis contract tests in required backend CI
 
 #### Phase 9C — Request-Aware Local Sign-In Flow
 
@@ -377,12 +380,13 @@ A later `enable_local_auth(...)` convenience wrapper is acceptable only if it de
 
 Because this lands before 0.4.9 is released, the old pre-release `sign_in_session(response, session, options?)` shape should not be kept as a compatibility shim. Callers must migrate by passing the route `req` as the second argument; otherwise local/manual auth would silently miss rotation, existing-session migration, and request metadata capture.
 
-- [ ] Add built-in email/password verification through `std/auth`
-- [ ] Use the existing request-aware session-completion primitive from the local sign-in path so it can rotate/migrate existing sessions and capture request metadata
-- [ ] Reuse the same session cookie, session TTL, sliding/max-lifetime, metadata, and revocation semantics as OAuth-backed sign-in
-- [ ] Reuse staged auth challenge primitives for local login continuation instead of inventing a second pending-auth model
-- [ ] Support straightforward local sign-in that upgrades into a real auth session with app-supplied claims/session data
-- [ ] Ensure local sessions receive `device_name`, `user_agent_hash`, and `last_ip_hash` just like OAuth sessions
+- [x] Add built-in email/password verification through `std/auth` (`verify_local_password`)
+- [x] Use the existing request-aware session-completion primitive from the local sign-in path so it can rotate/migrate existing sessions and capture request metadata
+- [x] Reuse the same session cookie, session TTL, metadata, and rotation semantics as OAuth-backed sign-in
+- [x] Reuse staged auth challenge primitives for local login continuation instead of inventing a second pending-auth model
+- [x] Support straightforward local sign-in that upgrades into a real auth session with app-supplied claims/session data
+- [x] Ensure local sessions receive `device_name`, `user_agent_hash`, and `last_ip_hash` just like OAuth sessions
+- [ ] Finish full remember-me behavior for local sign-in once `remember_ttl` policy is ratcheted end-to-end
 
 #### Phase 9D — First-Login Activation, Forced Password Change, and TOTP Enrollment
 - [ ] Support first-login setup as a first-class local-auth flow
@@ -431,7 +435,7 @@ Because this lands before 0.4.9 is released, the old pre-release `sign_in_sessio
 ### Phase 10 — Architecture Discipline and Complexity Budget
 **Goal:** Prevent `std/auth` from collapsing back into a monolith as local auth, session management, security events, and future auth features land.
 
-**Status:** Starts immediately. This phase is numbered after local auth because it is ongoing discipline, but its first guardrails must land before Phase 9 implementation begins.
+**Status:** Active. This phase is numbered after local auth because it is ongoing discipline; PR #98 landed the first local-auth storage guardrail, but contributor guidance, reusable contract harnesses, and backend CI visibility still need to harden.
 
 **Assessment after the Phase 8 branch review:** the 4.5 cleanup largely achieved its intended effect, but only partially solved the long-term maintainability problem. The module split is real and materially improves clarity. The storage contract is also much more coherent than before. Recent review feedback mostly hit end-to-end plumbing gaps and edge-case semantics rather than “where does this logic even belong?” confusion. That is a meaningful architectural win.
 
@@ -456,7 +460,8 @@ Because this lands before 0.4.9 is released, the old pre-release `sign_in_sessio
 - [ ] Move obvious non-surface types/helpers out of `auth.rs` when doing so improves ownership without destabilizing the public API
 - [ ] Extract JWT and TOTP wrappers if they continue to grow or distract from the public auth surface
 - [ ] Move memory-store/global-state code toward focused module ownership
-- [ ] Split storage by record family and/or backend before adding durable local-auth records
+- [x] Start splitting storage by record family before adding durable local-auth records (`auth/storage/local.rs`)
+- [ ] Continue splitting storage/test ownership as reset, TOTP, bootstrap, and backend implementations land
 - [ ] Reassess whether the main auth test concentration should move toward module-local test ownership over time
 - [ ] Track `auth.rs` and `auth/storage.rs` growth relative to internal modules so broad edits become visible early
 
@@ -506,8 +511,8 @@ Those are now shipped. The next big win is local email/password/TOTP auth, but o
 | **6** | OAuth Hardening + Observability | refresh token rotation and auth health diagnostics | Tightens security posture and production debuggability |
 | **7** | Auto-Routes + UI Convenience | configurable auth routes and login page generator | Improves DX without compromising app-owned UX |
 | **8** | Advanced Sessions Foundation | metadata/security-signal plumbing, remember-me plumbing | Establishes the data path for device sessions and security events |
-| **8.5** | Architecture Guardrails Preflight | Phase 10A/10B minimum guardrails before local-auth code | Prevents Phase 9 from re-growing the monolith |
-| **9** | First-Class Local Auth | local identity store, request-aware login, TOTP setup, password reset, template migration | Closes the biggest remaining real-app auth gap |
+| **8.5** | Architecture Guardrails Preflight | Focused local-auth storage home and fail-closed policy baseline | Prevented the first Phase 9 slice from re-growing the monolith |
+| **9** | First-Class Local Auth | local identity store, request-aware login, TOTP setup, password reset, template migration | In progress; credential storage/verification landed first, remaining lifecycle work closes the real-app auth gap |
 | **10** | Ongoing Architecture Discipline | complexity budget, contract-test ratchet, periodic audits | Keeps `std/auth` excellent as features continue landing |
 
 ### Delivery Wave Deliverables
@@ -603,24 +608,35 @@ Those are now shipped. The next big win is local email/password/TOTP auth, but o
 **Value:** moves `std/auth` from solid to category-leading, provided the plumbing is turned into product behavior in later slices.
 
 #### Wave 8.5 — Architecture Guardrails Preflight
-**Ships before Phase 9 implementation:**
-- auth contributor/review guidance
-- storage/module ownership decision for local auth
-- contract-test ratchet for new auth record families
-- local-auth fallback/error policy
+**Shipped in PR #98:**
+- focused `auth/storage/local.rs` home for the first local-auth record families
+- explicit local-auth record-family enum and fail-closed fallback policy baseline
+- memory/SQLite local identity + credential contract coverage in module-local tests
 
-**Value:** prevents the local-auth wave from undoing the architecture cleanup.
+**Still needed:**
+- auth contributor/review guidance
+- reusable contract-test ratchet for every new auth record family
+- visible Postgres/Redis backend coverage instead of env-gated silence
+
+**Value:** prevented the first local-auth slice from undoing the architecture cleanup. The ratchet still needs teeth, because vibes are not a test harness.
 
 #### Wave 9 — First-Class Local Auth
-**Ships:**
-- local identity and credential store
-- request-aware email/password sign-in
-- staged first-login / forced-password-change / TOTP enrollment
-- password reset token lifecycle
-- local-auth backend contract tests
-- template migration away from custom local auth persistence
+**Shipped so far in PR #98:**
+- local identity/account-state model
+- memory and SQLite local identity/credential storage
+- public `verify_local_password(identifier, password, options?)` with safe non-enumerating failure behavior
+- generated stdlib docs and AI agent guide examples for verify-then-`sign_in_session` usage
 
-**Value:** closes the gap between great auth primitives and great auth architecture.
+**Landing in `feat/local-auth-sign-in-bootstrap`:**
+- first-class `local_sign_in(response, req, credentials, session?, options?)` domain operation that delegates to request-aware session completion or staged auth challenges
+- `create_local_user(...)` and exactly-once `bootstrap_local_user(...)` provisioning with forced setup/credential-rotation semantics
+
+**Still ships next:**
+- completion handlers for first-login setup / forced password change and staged TOTP enrollment
+- password reset token lifecycle
+- local-auth backend CI/contracts beyond the memory/SQLite local credential baseline, plus template migration away from custom auth persistence
+
+**Value:** closes the gap between great auth primitives and great auth architecture. This branch lands the provisioning and request-aware sign-in entry points; the remaining work is the full setup/reset/TOTP lifecycle after those staged continuations.
 
 #### Wave 10 — Ongoing Architecture Discipline
 **Ships continuously:**
@@ -654,7 +670,7 @@ This table tracks the intended competitive posture after the v0.4.9 auth work an
 | Suspicious activity policy | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Behavioral remember-me TTL | ❌ | ✅ | ✅ | ◐ | ✅ | ✅ |
 | TOTP/MFA primitives | ✅ | ✅ | ❌ | ❌¹ | ❌ | ❌³ |
-| First-class local email/password/TOTP lifecycle | ❌ | ✅ | ❌ | ❌ | ◐ | ✅ |
+| First-class local email/password/TOTP lifecycle | ◐ | ✅ | ❌ | ❌ | ◐ | ✅ |
 | Auth-owned password reset tokens | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
 | Bootstrap admin local auth | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
 | Safari ITP workaround | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
