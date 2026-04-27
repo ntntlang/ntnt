@@ -1703,10 +1703,10 @@ Full OAuth, session management, CSRF, JWT, TOTP, and local credential bootstrap,
 
 ### Local Credential Bootstrap and Setup Completion
 
-`std/auth` owns local identity/credential lifecycle state. Use `bootstrap_local_user(...)` to provision a setup credential, verify that current setup/forced-change credential, then call `set_local_password(...)` to rotate it and clear setup-required state before granting regular access. Both helpers return only safe local-user metadata; they never expose passwords, password hashes, hash parameters, tokens, or raw credential records.
+`std/auth` owns local identity/credential lifecycle state. Use `bootstrap_local_user(...)` to provision a setup credential, then call `set_local_password(...)` with that current setup/forced-change credential plus the replacement password to rotate it and clear setup-required state before granting regular access. Both helpers return only safe local-user metadata; they never expose passwords, password hashes, hash parameters, tokens, or raw credential records.
 
 ```ntnt
-import { bootstrap_local_user, set_local_password, sign_in_session, verify_local_password } from "std/auth"
+import { bootstrap_local_user, set_local_password, sign_in_session } from "std/auth"
 import { parse_form, redirect } from "std/http/server"
 
 fn provision_first_admin(email, setup_password) {
@@ -1715,8 +1715,11 @@ fn provision_first_admin(email, setup_password) {
 
 fn complete_setup(req) {
     let form = parse_form(req)
-    let setup_user = verify_local_password(form["email"] ?? "", form["setup_password"] ?? "")?
-    let user = set_local_password(setup_user["identifier_normalized"], form["new_password"] ?? "")?
+    let user = set_local_password(
+        form["email"] ?? "",
+        form["setup_password"] ?? "",
+        form["new_password"] ?? ""
+    )?
 
     return sign_in_session(redirect("/admin"), req, map {
         "subject_id": user["subject_id"],

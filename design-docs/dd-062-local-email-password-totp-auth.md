@@ -175,7 +175,7 @@ Possible helpers; exact names can change during implementation:
 - `create_local_user(identifier, options) -> Result<LocalUser, String>`
 - `disable_local_user(identifier_or_id) -> Result<Unit, String>`
 - `require_password_change(identifier_or_id) -> Result<Unit, String>`
-- `set_local_password(identifier, new_password, options?) -> Result<LocalUser, String>` — shipped as the narrow setup-completion/password-rotation primitive; returns the same safe local user payload shape as credential verification
+- `set_local_password(identifier, current_password, new_password, options?) -> Result<LocalUser, String>` — shipped as the narrow setup-completion/password-rotation primitive; verifies the current credential and returns the same safe local user payload shape as credential verification
 
 These should be intentionally small. App profile and authorization data should remain app-owned. Session claims should be supplied through explicit hooks/session-completion data, not static universal `claims` config on the credential provider.
 

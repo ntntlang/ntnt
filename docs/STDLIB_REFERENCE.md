@@ -1856,7 +1856,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`rotate_session`](#rotatesession) | Rotate the current session ID and attach the new auth cookie to a response. |
 | [`session_data`](#sessiondata) | Get custom data stored in the current session. |
 | [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions, auth challenges, OAuth states, and exchange tokens from the session store. |
-| [`set_local_password`](#setlocalpassword) | Rotate a local user's password and clear setup-required local account state. |
+| [`set_local_password`](#setlocalpassword) | Verify the current local credential, rotate the user's password, and clear setup-required local account state. |
 | [`set_session`](#setsession) | Store custom data in the current session. |
 | [`sign_in_session`](#signinsession) | Persist a request-aware session and attach the auth cookie to an existing response. |
 | [`sign_out_session`](#signoutsession) | Revoke the current session and attach a clearing auth cookie to a response. |
@@ -2905,16 +2905,17 @@ sessions_cleanup()  // Remove expired sessions
 #### `set_local_password`
 
 ```ntnt
-set_local_password(identifier: String, new_password: String, options?: Map) -> Result<Map, String>
+set_local_password(identifier: String, current_password: String, new_password: String, options?: Map) -> Result<Map, String>
 ```
 
-Rotate a local user's password and clear setup-required local account state.
+Verify the current local credential, rotate the user's password, and clear setup-required local account state.
 
-The helper normalizes the identifier (email by default), loads the auth-owned local identity, writes a replacement password credential, transitions the identity to `active`, clears `must_change_password`, and returns the same safe local user payload shape as `verify_local_password(...)`. Use it only after verifying the current setup/forced-change credential or from a trusted admin recovery path, then compose the resulting user through request-aware `sign_in_session(...)`. It never exposes passwords, password hashes, hash parameters, credentials, secrets, or tokens.
+The helper normalizes the identifier (email by default), loads the auth-owned local identity, writes a replacement password credential, transitions the identity to `active`, clears `must_change_password`, and returns the same safe local user payload shape as `verify_local_password(...)`. It requires the current setup/forced-change password before rotation, then callers can compose the resulting user through request-aware `sign_in_session(...)`. It never exposes passwords, password hashes, hash parameters, credentials, secrets, or tokens.
 
 **Parameters:**
 
 - `identifier` — The local user identifier. Email is the default identifier kind.
+- `current_password` — The current setup, forced-change, or active local password to verify before rotation
 - `new_password` — The replacement plaintext password to hash and store
 - `options` — Optional map with `identifier_kind` (default `"email"`)
 
@@ -2923,8 +2924,7 @@ The helper normalizes the identifier (email by default), loads the auth-owned lo
 **Examples:**
 
 ```ntnt
-let setup_user = verify_local_password(form["email"] ?? "", form["setup_password"] ?? "")?  // Verify the current setup or forced-change credential before rotation
-let user = set_local_password(setup_user["identifier_normalized"], form["new_password"] ?? "")?  // Complete local setup by rotating the bootstrap password
+let user = set_local_password(form["email"] ?? "", form["setup_password"] ?? "", form["new_password"] ?? "")?  // Complete local setup by verifying and rotating the bootstrap password
 sign_in_session(redirect("/admin"), req, map { "subject_id": user["subject_id"], "email": user["email"] })  // Sign in after setup completion with request-aware session handling
 ```
 

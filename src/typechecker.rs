@@ -3832,6 +3832,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 "set_local_password",
                 [
                     "identifier" => Type::String,
+                    "current_password" => Type::String,
                     "new_password" => Type::String,
                     "options" => Type::Map {
                         key_type: Box::new(Type::String),
@@ -3848,7 +3849,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                         Type::String,
                     ],
                 },
-                required(2)
+                required(3)
             );
             sig!(
                 "verify_local_password",
@@ -4277,7 +4278,7 @@ mod tests {
         let errs = check_errors(
             r#"
             import { set_local_password } from "std/auth"
-            set_local_password(42, "pw")
+            set_local_password(42, "current", "new")
             "#,
         );
         assert_eq!(errs.len(), 1);

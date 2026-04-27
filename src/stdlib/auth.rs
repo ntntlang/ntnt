@@ -3835,18 +3835,19 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt set_local_password
     // @module std/auth
-    // @signature set_local_password(identifier: String, new_password: String, options?: Map) -> Result<Map, String>
-    // Rotate a local user's password and clear setup-required local account state.
+    // @signature set_local_password(identifier: String, current_password: String, new_password: String, options?: Map) -> Result<Map, String>
+    // Verify the current local credential, rotate the user's password, and clear setup-required local account state.
     //
     // The helper normalizes the identifier (email by default), loads the auth-owned
     // local identity, writes a replacement password credential, transitions the
     // identity to `active`, clears `must_change_password`, and returns the same
-    // safe local user payload shape as `verify_local_password(...)`. Use it only
-    // after verifying the current setup/forced-change credential or from a trusted
-    // admin recovery path, then compose the resulting user through request-aware
-    // `sign_in_session(...)`. It never exposes passwords, password hashes, hash
-    // parameters, credentials, secrets, or tokens.
+    // safe local user payload shape as `verify_local_password(...)`. It requires
+    // the current setup/forced-change password before rotation, then callers can
+    // compose the resulting user through request-aware `sign_in_session(...)`. It
+    // never exposes passwords, password hashes, hash parameters, credentials,
+    // secrets, or tokens.
     // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param current_password The current setup, forced-change, or active local password to verify before rotation
     // @param new_password The replacement plaintext password to hash and store
     // @param options Optional map with `identifier_kind` (default `"email"`)
     // @returns Ok(map) with safe local user fields; Err(message) on invalid credentials, invalid input, or unsupported storage backend
@@ -3855,20 +3856,19 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also bootstrap_local_user, verify_local_password, sign_in_session
     // @since v0.4.9
     // @tags #auth, #local-auth, #security
-    // @example let setup_user = verify_local_password(form["email"] ?? "", form["setup_password"] ?? "")? ~ "Verify the current setup or forced-change credential before rotation"
-    // @example let user = set_local_password(setup_user["identifier_normalized"], form["new_password"] ?? "")? ~ "Complete local setup by rotating the bootstrap password"
+    // @example let user = set_local_password(form["email"] ?? "", form["setup_password"] ?? "", form["new_password"] ?? "")? ~ "Complete local setup by verifying and rotating the bootstrap password"
     // @example sign_in_session(redirect("/admin"), req, map { "subject_id": user["subject_id"], "email": user["email"] }) ~ "Sign in after setup completion with request-aware session handling"
     module.insert(
         "set_local_password".to_string(),
         Value::NativeFunction {
             name: "set_local_password".to_string(),
-            arity: 2,
-            max_arity: 3,
+            arity: 3,
+            max_arity: 4,
             requires: None,
             func: |args| {
-                if args.len() < 2 || args.len() > 3 {
+                if args.len() < 3 || args.len() > 4 {
                     return Err(IntentError::type_error(
-                        "[auth] set_local_password() requires identifier, new_password, and optional options"
+                        "[auth] set_local_password() requires identifier, current_password, new_password, and optional options"
                             .to_string(),
                     ));
                 }
@@ -3889,7 +3889,16 @@ pub fn init() -> HashMap<String, Value> {
                         )))
                     }
                 };
-                let new_password = match &args[1] {
+                let current_password = match &args[1] {
+                    Value::String(s) => s.as_str(),
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] set_local_password() current_password must be a string, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let new_password = match &args[2] {
                     Value::String(s) => s.as_str(),
                     other => {
                         return Err(IntentError::type_error(format!(
@@ -3898,7 +3907,7 @@ pub fn init() -> HashMap<String, Value> {
                         )))
                     }
                 };
-                let identifier_kind = match args.get(2) {
+                let identifier_kind = match args.get(3) {
                     Some(Value::Map(map)) => match map.get("identifier_kind") {
                         Some(Value::String(kind)) => kind.as_str(),
                         Some(other) => {
@@ -3918,7 +3927,12 @@ pub fn init() -> HashMap<String, Value> {
                     None => "email",
                 };
 
-                match set_local_password_record(identifier_kind, identifier, new_password) {
+                match set_local_password_record(
+                    identifier_kind,
+                    identifier,
+                    current_password,
+                    new_password,
+                ) {
                     Ok(verified) => Ok(Value::ok(verified_local_password_to_value(verified))),
                     Err(message) => Ok(Value::err(Value::String(message))),
                 }
@@ -6350,9 +6364,32 @@ mod tests {
                 other => panic!("unexpected bootstrap must_change_password payload: {other:?}"),
             }
 
+            let missing_current_password = set_local_password(&[
+                Value::String(" rotate@example.com ".to_string()),
+                Value::String("rotated local password".to_string()),
+            ])
+            .expect_err("set_local_password should require the current password");
+            assert!(
+                missing_current_password
+                    .to_string()
+                    .contains("requires identifier, current_password, new_password"),
+                "unexpected missing-current-password error: {missing_current_password}"
+            );
+
+            let wrong_current_password = result_err_string(
+                set_local_password(&[
+                    Value::String(" rotate@example.com ".to_string()),
+                    Value::String("wrong setup password".to_string()),
+                    Value::String("rotated local password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(wrong_current_password, "Invalid local credentials");
+
             let updated = result_ok_map(
                 set_local_password(&[
                     Value::String(" rotate@example.com ".to_string()),
+                    Value::String("temporary setup password".to_string()),
                     Value::String("rotated local password".to_string()),
                 ])
                 .unwrap(),

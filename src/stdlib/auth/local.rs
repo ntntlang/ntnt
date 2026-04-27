@@ -73,32 +73,23 @@ pub(in crate::stdlib::auth) fn bootstrap_local_user_record(
 pub(in crate::stdlib::auth) fn set_local_password_record(
     identifier_kind: &str,
     identifier: &str,
+    current_password: &str,
     new_password: &str,
 ) -> std::result::Result<VerifiedLocalPassword, String> {
     let kind = identifier_kind.trim().to_ascii_lowercase();
-    let identifier_normalized = match normalize_local_identifier(&kind, identifier) {
-        Ok(identifier_normalized) => identifier_normalized,
-        Err(_) => return Err(INVALID_LOCAL_CREDENTIALS.to_string()),
-    };
+    let identifier = identifier.trim();
 
     if new_password.trim().is_empty() {
         return Err("[auth] local password must not be empty".to_string());
     }
 
-    let existing_identity = get_local_identity_by_identifier_record(&kind, &identifier_normalized)?
-        .ok_or_else(|| INVALID_LOCAL_CREDENTIALS.to_string())?;
-    if matches!(
-        existing_identity.state,
-        LocalAccountState::Disabled | LocalAccountState::Locked
-    ) {
-        return Err(INVALID_LOCAL_CREDENTIALS.to_string());
-    }
+    let verified = verify_local_password_record(&kind, identifier, current_password)?;
 
     let now = chrono::Utc::now().timestamp();
     let identity = LocalIdentity {
         updated_at: now,
         state: LocalAccountState::Active,
-        ..existing_identity
+        ..verified.identity
     };
     let credential = LocalCredentialSecret {
         local_user_id: identity.id.clone(),
