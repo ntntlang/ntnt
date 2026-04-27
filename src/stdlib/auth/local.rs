@@ -5,8 +5,8 @@ use std::collections::HashMap;
 
 use super::storage::{
     get_local_credential_secret_record, get_local_identity_by_identifier_record,
-    normalize_local_identifier, store_local_credential_secret_record, store_local_identity_record,
-    LocalAccountState, LocalCredentialSecret, LocalIdentity,
+    normalize_local_identifier, store_local_identity_and_credential_record, LocalAccountState,
+    LocalCredentialSecret, LocalIdentity,
 };
 
 const INVALID_LOCAL_CREDENTIALS: &str = "Invalid local credentials";
@@ -62,8 +62,7 @@ pub(in crate::stdlib::auth) fn bootstrap_local_user_record(
         must_change_password: true,
     };
 
-    store_local_identity_record(&identity)?;
-    store_local_credential_secret_record(&credential)?;
+    store_local_identity_and_credential_record(&identity, &credential)?;
 
     Ok(VerifiedLocalPassword {
         identity,

@@ -5584,6 +5584,120 @@ mod tests {
     }
 
     #[test]
+    fn test_local_identity_and_credential_atomic_store_rejects_invalid_credential_without_orphaning_memory_and_sqlite(
+    ) {
+        use super::storage::{
+            get_local_credential_secret_record, get_local_identity_by_identifier_record,
+            store_local_identity_and_credential_record, LocalAccountState, LocalCredentialSecret,
+            LocalIdentity,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            let identity = LocalIdentity {
+                id: "local-user-atomic-failure".to_string(),
+                identifier_kind: "email".to_string(),
+                identifier: "atomic@example.com".to_string(),
+                identifier_normalized: "atomic@example.com".to_string(),
+                created_at: 100,
+                updated_at: 100,
+                state: LocalAccountState::Bootstrap,
+                metadata_json: "{}".to_string(),
+            };
+            let invalid_credential = LocalCredentialSecret {
+                local_user_id: identity.id.clone(),
+                password_hash: "".to_string(),
+                password_hash_algorithm: "bcrypt".to_string(),
+                password_hash_params_json: "{}".to_string(),
+                password_changed_at: 101,
+                must_change_password: true,
+            };
+
+            let err = store_local_identity_and_credential_record(&identity, &invalid_credential)
+                .expect_err("atomic store should reject invalid credentials");
+            assert!(
+                err.contains("password_hash"),
+                "unexpected invalid credential error: {err}"
+            );
+            assert_eq!(
+                get_local_identity_by_identifier_record("email", "atomic@example.com").unwrap(),
+                None,
+                "failed atomic store must not leave an orphaned identity"
+            );
+            assert_eq!(
+                get_local_credential_secret_record("local-user-atomic-failure").unwrap(),
+                None,
+                "failed atomic store must not leave a credential"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sqlite_atomic_local_identity_and_credential_store_rolls_back_identity_on_credential_failure(
+    ) {
+        use super::storage::{
+            get_local_identity_by_identifier_record, store_local_identity_and_credential_record,
+            LocalAccountState, LocalCredentialSecret, LocalIdentity,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        {
+            let conn_guard = SQLITE_CONN.lock().unwrap();
+            let conn = conn_guard.as_ref().expect("SQLite should be initialized");
+            conn.execute(
+                "CREATE TRIGGER fail_local_credential_insert
+                 BEFORE INSERT ON auth_local_credentials
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced local credential failure');
+                 END",
+                [],
+            )
+            .expect("test trigger should be installed");
+        }
+
+        let identity = LocalIdentity {
+            id: "local-user-sqlite-atomic".to_string(),
+            identifier_kind: "email".to_string(),
+            identifier: "sqlite-atomic@example.com".to_string(),
+            identifier_normalized: "sqlite-atomic@example.com".to_string(),
+            created_at: 100,
+            updated_at: 100,
+            state: LocalAccountState::Bootstrap,
+            metadata_json: "{}".to_string(),
+        };
+        let credential = LocalCredentialSecret {
+            local_user_id: identity.id.clone(),
+            password_hash: "bcrypt$hash".to_string(),
+            password_hash_algorithm: "bcrypt".to_string(),
+            password_hash_params_json: "{}".to_string(),
+            password_changed_at: 101,
+            must_change_password: true,
+        };
+
+        let err = store_local_identity_and_credential_record(&identity, &credential)
+            .expect_err("credential failure should abort the atomic store");
+        assert!(
+            err.contains("forced local credential failure"),
+            "unexpected SQLite credential failure: {err}"
+        );
+        assert_eq!(
+            get_local_identity_by_identifier_record("email", "sqlite-atomic@example.com").unwrap(),
+            None,
+            "SQLite transaction failure must roll back the identity insert"
+        );
+    }
+
+    #[test]
     fn test_local_credential_store_rejects_missing_identity_memory_and_sqlite() {
         use super::storage::{store_local_credential_secret_record, LocalCredentialSecret};
 

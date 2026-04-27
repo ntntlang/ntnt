@@ -4,12 +4,13 @@ mod local;
 
 pub(super) use local::{
     get_local_credential_secret_record, get_local_identity_by_identifier_record,
-    normalize_local_identifier, store_local_credential_secret_record, store_local_identity_record,
-    LocalAccountState, LocalAuthMemoryStore, LocalCredentialSecret, LocalIdentity,
+    normalize_local_identifier, store_local_identity_and_credential_record, LocalAccountState,
+    LocalAuthMemoryStore, LocalCredentialSecret, LocalIdentity,
 };
 #[cfg(test)]
 pub(super) use local::{
-    get_local_identity_by_id_record, local_auth_record_fallback_policy, LocalAuthRecordKind,
+    get_local_identity_by_id_record, local_auth_record_fallback_policy,
+    store_local_credential_secret_record, store_local_identity_record, LocalAuthRecordKind,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
