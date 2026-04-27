@@ -5,7 +5,8 @@ use std::collections::HashMap;
 
 use super::storage::{
     get_local_credential_secret_record, get_local_identity_by_identifier_record,
-    normalize_local_identifier, LocalAccountState, LocalCredentialSecret, LocalIdentity,
+    normalize_local_identifier, store_local_identity_and_credential_record, LocalAccountState,
+    LocalCredentialSecret, LocalIdentity,
 };
 
 const INVALID_LOCAL_CREDENTIALS: &str = "Invalid local credentials";
@@ -19,6 +20,54 @@ const DUMMY_LOCAL_ARGON2_PASSWORD_HASH: &str =
 pub(in crate::stdlib::auth) struct VerifiedLocalPassword {
     identity: LocalIdentity,
     credential: LocalCredentialSecret,
+}
+
+pub(in crate::stdlib::auth) fn bootstrap_local_user_record(
+    identifier_kind: &str,
+    identifier: &str,
+    password: &str,
+) -> std::result::Result<VerifiedLocalPassword, String> {
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier = identifier.trim();
+    let identifier_normalized = normalize_local_identifier(&kind, identifier)?;
+
+    if password.trim().is_empty() {
+        return Err("[auth] local bootstrap password must not be empty".to_string());
+    }
+
+    if get_local_identity_by_identifier_record(&kind, &identifier_normalized)?.is_some() {
+        return Err(format!("[auth] local identity already exists for {}", kind));
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let identity = LocalIdentity {
+        id: format!("local:{}", uuid::Uuid::new_v4()),
+        identifier_kind: kind,
+        identifier: identifier.to_string(),
+        identifier_normalized,
+        created_at: now,
+        updated_at: now,
+        state: LocalAccountState::Bootstrap,
+        metadata_json: "{}".to_string(),
+    };
+    let credential = LocalCredentialSecret {
+        local_user_id: identity.id.clone(),
+        password_hash: bcrypt::hash(password, bcrypt::DEFAULT_COST)
+            .map_err(|_| "[auth] failed to hash local bootstrap password".to_string())?,
+        password_hash_algorithm: CredentialPasswordAlgorithm::Bcrypt
+            .storage_name()
+            .to_string(),
+        password_hash_params_json: "{}".to_string(),
+        password_changed_at: now,
+        must_change_password: true,
+    };
+
+    store_local_identity_and_credential_record(&identity, &credential)?;
+
+    Ok(VerifiedLocalPassword {
+        identity,
+        credential,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +231,10 @@ pub(in crate::stdlib::auth) fn verified_local_password_to_value(
         ),
         (
             "id".to_string(),
+            Value::String(verified.identity.id.clone()),
+        ),
+        (
+            "local_user_id".to_string(),
             Value::String(verified.identity.id.clone()),
         ),
         ("provider".to_string(), Value::String("local".to_string())),

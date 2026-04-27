@@ -200,17 +200,7 @@ impl LocalAuthMemoryStore {
         &mut self,
         credential: LocalCredentialSecret,
     ) -> std::result::Result<(), String> {
-        if credential.local_user_id.trim().is_empty() {
-            return Err("[auth] local credential local_user_id must not be empty".to_string());
-        }
-        if credential.password_hash.trim().is_empty() {
-            return Err("[auth] local credential password_hash must not be empty".to_string());
-        }
-        if credential.password_hash_algorithm.trim().is_empty() {
-            return Err(
-                "[auth] local credential password_hash_algorithm must not be empty".to_string(),
-            );
-        }
+        validate_local_credential_secret_for_storage(&credential)?;
         if !self
             .identities_by_id
             .contains_key(&credential.local_user_id)
@@ -221,6 +211,45 @@ impl LocalAuthMemoryStore {
         }
         self.credential_secrets_by_local_user_id
             .insert(credential.local_user_id.clone(), credential);
+        Ok(())
+    }
+
+    pub(in crate::stdlib::auth) fn store_identity_and_credential(
+        &mut self,
+        identity: LocalIdentity,
+        credential: LocalCredentialSecret,
+    ) -> std::result::Result<(), String> {
+        let identity = normalize_local_identity_for_storage(identity)?;
+        validate_local_credential_secret_for_storage(&credential)?;
+        validate_local_identity_credential_pair(&identity, &credential)?;
+
+        let lookup_key =
+            local_identity_lookup_key(&identity.identifier_kind, &identity.identifier_normalized)?;
+        if let Some(existing_id) = self.identity_id_by_lookup_key.get(&lookup_key) {
+            if existing_id != &identity.id {
+                return Err(format!(
+                    "[auth] local identity identifier already exists for {}",
+                    identity.identifier_kind
+                ));
+            }
+        }
+
+        if let Some(previous) = self.identities_by_id.get(&identity.id) {
+            let previous_lookup_key = local_identity_lookup_key(
+                &previous.identifier_kind,
+                &previous.identifier_normalized,
+            )?;
+            if previous_lookup_key != lookup_key {
+                self.identity_id_by_lookup_key.remove(&previous_lookup_key);
+            }
+        }
+
+        self.identity_id_by_lookup_key
+            .insert(lookup_key, identity.id.clone());
+        self.identities_by_id
+            .insert(identity.id.clone(), identity.clone());
+        self.credential_secrets_by_local_user_id
+            .insert(identity.id, credential);
         Ok(())
     }
 
@@ -257,6 +286,33 @@ fn normalize_local_identity_for_storage(
     Ok(identity)
 }
 
+fn validate_local_credential_secret_for_storage(
+    credential: &LocalCredentialSecret,
+) -> std::result::Result<(), String> {
+    if credential.local_user_id.trim().is_empty() {
+        return Err("[auth] local credential local_user_id must not be empty".to_string());
+    }
+    if credential.password_hash.trim().is_empty() {
+        return Err("[auth] local credential password_hash must not be empty".to_string());
+    }
+    if credential.password_hash_algorithm.trim().is_empty() {
+        return Err(
+            "[auth] local credential password_hash_algorithm must not be empty".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_local_identity_credential_pair(
+    identity: &LocalIdentity,
+    credential: &LocalCredentialSecret,
+) -> std::result::Result<(), String> {
+    if credential.local_user_id != identity.id {
+        return Err("[auth] local credential must reference the paired local identity".to_string());
+    }
+    Ok(())
+}
+
 pub(in crate::stdlib::auth) fn store_local_identity_record(
     identity: &LocalIdentity,
 ) -> std::result::Result<(), String> {
@@ -273,6 +329,30 @@ pub(in crate::stdlib::auth) fn store_local_identity_record(
         AuthStorageBackend::Redis => {
             Err("[auth] local identity storage is not implemented for Redis/Valkey yet".to_string())
         }
+    }
+}
+
+pub(in crate::stdlib::auth) fn store_local_identity_and_credential_record(
+    identity: &LocalIdentity,
+    credential: &LocalCredentialSecret,
+) -> std::result::Result<(), String> {
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => SESSION_STORE
+            .lock()
+            .unwrap()
+            .local_auth
+            .store_identity_and_credential(identity.clone(), credential.clone()),
+        AuthStorageBackend::Sqlite => {
+            store_local_identity_and_credential_sqlite(identity, credential)
+        }
+        AuthStorageBackend::Postgres => Err(
+            "[auth] local identity and credential storage is not implemented for PostgreSQL yet"
+                .to_string(),
+        ),
+        AuthStorageBackend::Redis => Err(
+            "[auth] local identity and credential storage is not implemented for Redis/Valkey yet"
+                .to_string(),
+        ),
     }
 }
 
@@ -385,6 +465,69 @@ fn store_local_identity_sqlite(identity: &LocalIdentity) -> std::result::Result<
     Ok(())
 }
 
+fn store_local_identity_and_credential_sqlite(
+    identity: &LocalIdentity,
+    credential: &LocalCredentialSecret,
+) -> std::result::Result<(), String> {
+    let identity = normalize_local_identity_for_storage(identity.clone())?;
+    validate_local_credential_secret_for_storage(credential)?;
+    validate_local_identity_credential_pair(&identity, credential)?;
+
+    let mut conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_mut().ok_or("SQLite not initialized")?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("[auth] failed to begin local bootstrap transaction: {}", e))?;
+
+    tx.execute(
+        "INSERT INTO auth_local_identities
+         (id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+            identifier_kind = excluded.identifier_kind,
+            identifier = excluded.identifier,
+            identifier_normalized = excluded.identifier_normalized,
+            updated_at = excluded.updated_at,
+            state = excluded.state,
+            metadata_json = excluded.metadata_json",
+        rusqlite::params![
+            identity.id,
+            identity.identifier_kind,
+            identity.identifier,
+            identity.identifier_normalized,
+            identity.created_at,
+            identity.updated_at,
+            identity.state.as_str(),
+            identity.metadata_json,
+        ],
+    )
+    .map_err(|e| format!("[auth] failed to store local identity: {}", e))?;
+
+    tx.execute(
+        "INSERT INTO auth_local_credentials
+         (local_user_id, password_hash, password_hash_algorithm, password_hash_params_json, password_changed_at, must_change_password)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(local_user_id) DO UPDATE SET
+            password_hash = excluded.password_hash,
+            password_hash_algorithm = excluded.password_hash_algorithm,
+            password_hash_params_json = excluded.password_hash_params_json,
+            password_changed_at = excluded.password_changed_at,
+            must_change_password = excluded.must_change_password",
+        rusqlite::params![
+            credential.local_user_id,
+            credential.password_hash,
+            credential.password_hash_algorithm,
+            credential.password_hash_params_json,
+            credential.password_changed_at,
+            if credential.must_change_password { 1 } else { 0 },
+        ],
+    )
+    .map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
+
+    tx.commit()
+        .map_err(|e| format!("[auth] failed to commit local bootstrap transaction: {}", e))
+}
+
 fn local_identity_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalIdentity> {
     let state: String = row.get(6)?;
     let state = LocalAccountState::from_str(&state).map_err(|e| {
@@ -442,6 +585,7 @@ fn get_local_identity_by_identifier_sqlite(
 fn store_local_credential_secret_sqlite(
     credential: &LocalCredentialSecret,
 ) -> std::result::Result<(), String> {
+    validate_local_credential_secret_for_storage(credential)?;
     let conn_guard = SQLITE_CONN.lock().unwrap();
     let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
     conn.execute(
