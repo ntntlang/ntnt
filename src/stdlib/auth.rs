@@ -5133,7 +5133,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                Ok(Value::Bool(verify_totp_code(&secret, &code, "")))
+                Ok(Value::Bool(verify_totp_code(&secret, &code, "", "NTNT")))
             },
         },
     );
@@ -5217,6 +5217,13 @@ mod tests {
         match map.get(key) {
             Some(Value::Bool(value)) => assert_eq!(*value, expected, "unexpected {key}"),
             other => panic!("expected {key} bool, got {other:?}"),
+        }
+    }
+
+    fn map_int(map: &HashMap<String, Value>, key: &str) -> i64 {
+        match map.get(key) {
+            Some(Value::Int(value)) => *value,
+            other => panic!("expected {key} int, got {other:?}"),
         }
     }
 
@@ -7366,6 +7373,8 @@ mod tests {
             );
             assert_map_bool(&enrollment, "pending", true);
             assert_map_bool(&enrollment, "enabled", false);
+            let enrollment_created_at = map_int(&enrollment, "created_at");
+            assert!(enrollment_created_at > 0);
             assert!(
                 !enrollment.contains_key("secret"),
                 "begin_totp_enrollment must not expose the raw secret field"
@@ -7423,6 +7432,7 @@ mod tests {
             );
             assert_map_bool(&confirmed, "enabled", true);
             assert_map_bool(&confirmed, "pending", false);
+            assert_eq!(map_int(&confirmed, "created_at"), enrollment_created_at);
             assert_no_totp_secret_material(&Value::Map(confirmed.clone()), &pending_secret);
 
             let verified = result_ok_map(
@@ -7439,6 +7449,7 @@ mod tests {
                 totp_status(&[Value::String("totp@example.com".to_string())]).unwrap(),
             );
             assert_map_bool(&status, "enabled", true);
+            assert_eq!(map_int(&status, "created_at"), enrollment_created_at);
             assert_no_totp_secret_material(&Value::Map(status.clone()), &pending_secret);
 
             let signed_in = sign_in_session(&[
@@ -7465,6 +7476,10 @@ mod tests {
             );
             assert_map_bool(&active_reenrollment, "enabled", true);
             assert_map_bool(&active_reenrollment, "pending", true);
+            assert_eq!(
+                map_int(&active_reenrollment, "created_at"),
+                enrollment_created_at
+            );
 
             let reset = result_ok_map(
                 reset_totp(&[Value::String("totp@example.com".to_string())]).unwrap(),

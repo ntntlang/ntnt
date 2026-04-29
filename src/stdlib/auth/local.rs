@@ -123,12 +123,13 @@ pub(in crate::stdlib::auth) fn confirm_totp_enrollment_record(
             let totp = auth_totp_metadata(&metadata)?;
             let pending_secret = string_field(&totp, "pending_secret")
                 .ok_or_else(|| "[auth] no pending local TOTP enrollment".to_string())?;
-            if !super::verify_totp_code(&pending_secret, code, &identity.identifier) {
-                return Err("Invalid local TOTP code".to_string());
-            }
             let issuer = string_field(&totp, "issuer").unwrap_or_else(|| "NTNT".to_string());
             let label = string_field(&totp, "label").unwrap_or_else(|| identity.identifier.clone());
             let required = bool_field(&totp, "required").unwrap_or(false);
+            let created_at = int_field(&totp, "created_at").unwrap_or(now);
+            if !super::verify_totp_code(&pending_secret, code, &identity.identifier, &issuer) {
+                return Err("Invalid local TOTP code".to_string());
+            }
             set_auth_totp_metadata(
                 &mut metadata,
                 Some(HashMap::from([
@@ -138,6 +139,7 @@ pub(in crate::stdlib::auth) fn confirm_totp_enrollment_record(
                     ("secret".to_string(), Value::String(pending_secret)),
                     ("issuer".to_string(), Value::String(issuer)),
                     ("label".to_string(), Value::String(label)),
+                    ("created_at".to_string(), Value::Int(created_at)),
                     ("confirmed_at".to_string(), Value::Int(now)),
                     ("updated_at".to_string(), Value::Int(now)),
                 ])),
@@ -165,7 +167,8 @@ pub(in crate::stdlib::auth) fn verify_local_totp_record(
     }
     let secret = string_field(&totp, "secret")
         .ok_or_else(|| "[auth] local TOTP enrollment is missing secret material".to_string())?;
-    if !super::verify_totp_code(&secret, code, &identity.identifier) {
+    let issuer = string_field(&totp, "issuer").unwrap_or_else(|| "NTNT".to_string());
+    if !super::verify_totp_code(&secret, code, &identity.identifier, &issuer) {
         return Err("Invalid local TOTP code".to_string());
     }
     let mut status = totp_status_from_identity(&identity)?;
