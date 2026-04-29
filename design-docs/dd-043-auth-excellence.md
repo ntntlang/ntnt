@@ -168,7 +168,7 @@ Design posture:
 - Keep attestation and enterprise hardware-bound policy optional. Consumer passkeys should work without attestation; regulated/high-assurance apps can opt into attestation policy later.
 - Do not serialize WebAuthn ceremony state to client cookies. If a dependency exposes such a feature, keep it off by default; state belongs in auth-owned server storage with TTL and one-time consume.
 
-### WebAuthn PR 1 — Foundation, Config, and Storage Contract
+### WA-PR 1 — Foundation, Config, and Storage Contract
 
 Goal: add the auth-owned record families and dependency/config shell without exposing public login helpers yet.
 
@@ -191,7 +191,7 @@ Goal: add the auth-owned record families and dependency/config shell without exp
 - [ ] Add memory + SQLite contract tests by default; decide whether Postgres/Redis passkey storage is in-scope for this phase or explicitly deferred
 - [ ] Add health/config diagnostics that reveal misconfiguration without leaking challenge or credential material
 
-### WebAuthn PR 2 — Passkey Registration Helpers
+### WA-PR 2 — Passkey Registration Helpers
 
 Goal: let an authenticated local user enroll and manage passkeys without changing sign-in behavior yet.
 
@@ -204,7 +204,7 @@ Goal: let an authenticated local user enroll and manage passkeys without changin
 - [ ] Document client-side JSON/base64url handling in `docs/AI_AGENT_GUIDE.md`; do not assume raw browser `ArrayBuffer` values can be passed through ntnt maps unchanged
 - [ ] Add tests for happy path, replayed finish, expired state, cross-user credential collision, malformed client response, disabled local account, and secret/challenge non-exposure
 
-### WebAuthn PR 3 — Passkey Authentication + Session Completion
+### WA-PR 3 — Passkey Authentication + Session Completion
 
 Goal: use passkeys to authenticate through the existing session lifecycle rather than creating a parallel session path.
 
@@ -217,7 +217,7 @@ Goal: use passkeys to authenticate through the existing session lifecycle rather
 - [ ] Add tests for username-known login, usernameless/discoverable login if enabled, counter regression/cloned-credential behavior, disabled credential, disabled local account, session rotation, and metadata capture
 - [ ] Add template-style examples for page login and JSON/API login endpoints
 
-### WebAuthn PR 4 — Template UX + Policy Hardening
+### WA-PR 4 — Template UX + Policy Hardening
 
 Goal: prove passkeys are usable in a real ntnt app and tighten policy seams before declaring the phase complete.
 
