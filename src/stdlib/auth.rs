@@ -766,6 +766,16 @@ fn is_http_request_value(value: &Value) -> bool {
     )
 }
 
+fn is_auth_session_value(value: &Value) -> bool {
+    let Value::Map(map) = value else {
+        return false;
+    };
+    let has_session_id = matches!(map.get("id"), Some(Value::String(id)) if !id.trim().is_empty());
+    let has_user = matches!(map.get("user"), Some(Value::Map(user)) if matches!(user.get("id"), Some(Value::String(id)) if !id.trim().is_empty()));
+    let has_data = matches!(map.get("data"), Some(Value::Map(_)));
+    has_session_id && has_user && has_data
+}
+
 fn session_value_for_auth_subject(value: &Value) -> Result<Option<Value>> {
     if is_http_request_value(value) {
         validate_http_request_arg("has_group", value)?;
@@ -776,7 +786,10 @@ fn session_value_for_auth_subject(value: &Value) -> Result<Option<Value>> {
     }
 
     match value {
-        Value::Map(_) => Ok(Some(value.clone())),
+        Value::Map(_) if is_auth_session_value(value) => Ok(Some(value.clone())),
+        Value::Map(_) => Err(IntentError::type_error(
+            "[auth] has_group() expects a request map or auth session map with id, user.id, and data",
+        )),
         other => Err(IntentError::type_error(format!(
             "[auth] has_group() expects a request or session map, got {}",
             other.type_name()
@@ -6790,6 +6803,65 @@ mod tests {
     }
 
     #[test]
+    fn test_local_user_metadata_updates_merge_atomically_in_memory() {
+        use super::storage::{store_local_identity_record, LocalAccountState, LocalIdentity};
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        store_local_identity_record(&LocalIdentity {
+            id: "local-user-atomic-metadata".to_string(),
+            identifier_kind: "email".to_string(),
+            identifier: "Atomic@Example.COM".to_string(),
+            identifier_normalized: "atomic@example.com".to_string(),
+            created_at: 100,
+            updated_at: 100,
+            state: LocalAccountState::Active,
+            metadata_json: "{}".to_string(),
+        })
+        .unwrap();
+
+        let thread_count = 24;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(thread_count));
+        let handles: Vec<_> = (0..thread_count)
+            .map(|index| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    super::local::update_local_user_metadata_record(
+                        "email",
+                        "atomic@example.com",
+                        &HashMap::from([(
+                            format!("flag_{index}"),
+                            Value::String(format!("value_{index}")),
+                        )]),
+                        false,
+                    )
+                    .unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let module = init();
+        let local_user = module_fn(&module, "local_user");
+        let user =
+            result_ok_map(local_user(&[Value::String("atomic@example.com".to_string())]).unwrap());
+        let Some(Value::Map(metadata)) = user.get("metadata") else {
+            panic!("expected metadata map after concurrent updates, got {user:?}");
+        };
+        for index in 0..thread_count {
+            match metadata.get(&format!("flag_{index}")) {
+                Some(Value::String(value)) => assert_eq!(value, &format!("value_{index}")),
+                other => panic!("metadata update for flag_{index} was lost: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_local_user_metadata_helpers_round_trip_memory_and_sqlite() {
         use super::storage::{
             get_local_identity_by_identifier_record, store_local_credential_secret_record,
@@ -7047,6 +7119,20 @@ mod tests {
             Value::Bool(true) => {}
             other => panic!("expected any-group membership to be true, got {other:?}"),
         }
+
+        let arbitrary_map = HashMap::from([(
+            "data".to_string(),
+            Value::Map(HashMap::from([(
+                "group_ids".to_string(),
+                Value::Array(vec![Value::String("admins".to_string())]),
+            )])),
+        )]);
+        let err = has_group(&[
+            Value::Map(arbitrary_map),
+            Value::String("admins".to_string()),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("auth session map"));
     }
 
     #[test]

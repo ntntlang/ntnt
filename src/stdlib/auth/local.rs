@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use super::storage::{
     get_local_credential_secret_record, get_local_identity_by_identifier_record,
     normalize_local_identifier, store_local_identity_and_credential_record,
-    store_local_identity_record, LocalAccountState, LocalCredentialSecret, LocalIdentity,
+    update_local_identity_by_identifier_record, LocalAccountState, LocalCredentialSecret,
+    LocalIdentity,
 };
 
 const INVALID_LOCAL_CREDENTIALS: &str = "Invalid local credentials";
@@ -40,19 +41,22 @@ pub(in crate::stdlib::auth) fn update_local_user_metadata_record(
 ) -> std::result::Result<LocalIdentity, String> {
     reject_reserved_local_metadata_namespaces(metadata)?;
 
-    let mut identity = local_user_record(identifier_kind, identifier)?;
-    let mut updated_metadata = local_metadata_to_value_map(&identity.metadata_json)?;
-    if replace {
-        updated_metadata.retain(|key, _| key == "auth" || key.starts_with("auth."));
-    }
-    for (key, value) in metadata {
-        updated_metadata.insert(key.clone(), value.clone());
-    }
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier_normalized = normalize_local_identifier(&kind, identifier.trim())?;
+    update_local_identity_by_identifier_record(&kind, &identifier_normalized, |identity| {
+        let mut updated_metadata = local_metadata_to_value_map(&identity.metadata_json)?;
+        if replace {
+            updated_metadata.retain(|key, _| key == "auth" || key.starts_with("auth."));
+        }
+        for (key, value) in metadata {
+            updated_metadata.insert(key.clone(), value.clone());
+        }
 
-    identity.metadata_json = local_metadata_to_json_string(&updated_metadata)?;
-    identity.updated_at = chrono::Utc::now().timestamp();
-    store_local_identity_record(&identity)?;
-    Ok(identity)
+        identity.metadata_json = local_metadata_to_json_string(&updated_metadata)?;
+        identity.updated_at = chrono::Utc::now().timestamp();
+        Ok(())
+    })?
+    .ok_or_else(|| "[auth] local user not found".to_string())
 }
 
 fn reject_reserved_local_metadata_namespaces(

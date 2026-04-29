@@ -3854,7 +3854,13 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             );
             sig!(
                 "has_group",
-                ["subject" => Type::Any, "group_ids" => Type::Any],
+                [
+                    "subject" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "group_ids" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::String))])
+                ],
                 Type::Bool
             );
             sig!(
@@ -4334,6 +4340,20 @@ mod tests {
             "#,
         );
         assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
+    }
+
+    #[test]
+    fn test_std_auth_has_group_signature_rejects_non_string_group_ids() {
+        let errs = check_errors(
+            r#"
+            import { has_group } from "std/auth"
+            let req = map { "method": "GET", "path": "/admin", "headers": map {} }
+            has_group(req, ["admins", 42])
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("expected"));
+        assert!(errs[0].message.contains("String"));
     }
 
     #[test]
