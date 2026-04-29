@@ -3909,6 +3909,113 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 required(3)
             );
             sig!(
+                "begin_totp_enrollment",
+                [
+                    "identifier" => Type::String,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(1)
+            );
+            sig!(
+                "confirm_totp_enrollment",
+                [
+                    "identifier" => Type::String,
+                    "code" => Type::String,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(2)
+            );
+            sig!(
+                "verify_local_totp",
+                [
+                    "identifier" => Type::String,
+                    "code" => Type::String,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(2)
+            );
+            sig!(
+                "totp_status",
+                [
+                    "identifier" => Type::String,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(1)
+            );
+            sig!(
+                "reset_totp",
+                [
+                    "identifier" => Type::String,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(1)
+            );
+            sig!(
                 "verify_local_password",
                 [
                     "identifier" => Type::String,
@@ -4393,6 +4500,39 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("expected String"));
         assert!(errs[0].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_auth_totp_helper_signatures_check_args() {
+        let errs = check_errors(
+            r#"
+            import { begin_totp_enrollment, confirm_totp_enrollment, verify_local_totp, totp_status, reset_totp } from "std/auth"
+            begin_totp_enrollment(42)
+            confirm_totp_enrollment("admin@example.com", 123456)
+            verify_local_totp("admin@example.com", 123456)
+            totp_status(42)
+            reset_totp(42)
+            "#,
+        );
+        assert_eq!(errs.len(), 5);
+        assert!(errs
+            .iter()
+            .all(|err| err.message.contains("expected String")));
+    }
+
+    #[test]
+    fn test_std_auth_totp_helper_signatures_allow_options() {
+        let errs = check_errors(
+            r#"
+            import { begin_totp_enrollment, confirm_totp_enrollment, verify_local_totp, totp_status, reset_totp } from "std/auth"
+            let setup = begin_totp_enrollment("admin@example.com", map { "issuer": "Admin", "label": "admin@example.com" })
+            let confirmed = confirm_totp_enrollment("admin@example.com", "123456", map { "identifier_kind": "email" })
+            let verified = verify_local_totp("admin@example.com", "123456", map { "identifier_kind": "email" })
+            let status = totp_status("admin@example.com", map { "identifier_kind": "email" })
+            let reset = reset_totp("admin@example.com", map { "identifier_kind": "email" })
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
     }
 
     // ── Scope nesting ───────────────────────────────────────────

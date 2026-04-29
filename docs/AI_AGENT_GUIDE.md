@@ -1751,6 +1751,75 @@ fn login(req) {
 
 Session claims, roles, profiles, and organization membership stay app-owned; local auth only owns credential lifecycle state and safe verification/setup results.
 
+### Local TOTP Enrollment and Verification
+
+Use the local TOTP helpers when an app needs MFA without maintaining its own TOTP table. `begin_totp_enrollment(...)` stores pending secret material under the reserved `auth.totp` metadata namespace and returns an `otpauth://` setup URI for QR-code display. `confirm_totp_enrollment(...)`, `verify_local_totp(...)`, `totp_status(...)`, and `reset_totp(...)` return secret-free status maps; safe user payloads never expose pending or confirmed TOTP secrets.
+
+The setup URI is secret-bearing because authenticator apps need it to enroll. Render it only in the setup response; do not log it, persist it in app metadata, cache it, or expose it through API responses unrelated to setup.
+
+For login, keep password-verified users in a staged auth challenge until TOTP verification succeeds. Do not call `sign_in_session(...)` for a TOTP-required account until the second factor is complete. Pair TOTP routes with the app's normal rate limiting/backoff; `verify_local_totp(...)` verifies the code but does not own account lockout policy.
+
+```ntnt
+import {
+    begin_auth_challenge,
+    begin_totp_enrollment,
+    complete_auth_challenge,
+    confirm_totp_enrollment,
+    current_auth_challenge,
+    current_user,
+    sign_in_session,
+    totp_status,
+    verify_local_password,
+    verify_local_totp
+} from "std/auth"
+import { html, parse_form, redirect } from "std/http/server"
+
+fn start_totp_setup(req) {
+    let user = current_user(req) otherwise return redirect("/login")
+    let setup = begin_totp_enrollment(user["email"], map { "issuer": "Admin" })?
+    return html(template("totp_setup.html", map { "uri": setup["uri"] }))
+}
+
+fn finish_totp_setup(req) {
+    let user = current_user(req) otherwise return redirect("/login")
+    let form = parse_form(req)
+    confirm_totp_enrollment(user["email"], form["code"] ?? "")?
+    return redirect("/admin/security")
+}
+
+fn login(req) {
+    let form = parse_form(req)
+    let verified = verify_local_password(form["email"] ?? "", form["password"] ?? "")?
+    let mfa = totp_status(form["email"] ?? "")?
+
+    if mfa["enabled"] {
+        return begin_auth_challenge(redirect("/login/totp"), map {
+            "subject_id": verified["subject_id"],
+            "kind": "mfa_pending",
+            "data": map { "email": verified["email"] }
+        })
+    }
+
+    return sign_in_session(redirect("/admin"), req, map {
+        "subject_id": verified["subject_id"],
+        "email": verified["email"]
+    })
+}
+
+fn finish_totp_login(req) {
+    let challenge = current_auth_challenge(req) otherwise return redirect("/login")
+    if challenge["kind"] != "mfa_pending" { return redirect("/login") }
+    let form = parse_form(req)
+    let email = challenge["data"]["email"] ?? ""
+    verify_local_totp(email, form["code"] ?? "")?
+
+    return complete_auth_challenge(redirect("/admin"), req, map {
+        "subject_id": challenge["subject_id"],
+        "email": email
+    })
+}
+```
+
 ### Local Metadata and Group Authorization
 
 Use `local_user(...)` and `update_local_user_metadata(...)` from trusted server-side code to read/update app-owned local identity metadata without creating a parallel auth model. Metadata is namespaced: `auth.*` is reserved for `std/auth` lifecycle helpers, while app data should live under namespaces such as `app` or `template`. Safe local-user payloads omit reserved auth metadata so TOTP/reset internals do not leak into templates or API responses.

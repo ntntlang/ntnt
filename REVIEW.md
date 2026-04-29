@@ -86,6 +86,7 @@ Apply this section to any change touching `src/stdlib/auth.rs`, `src/stdlib/auth
 - Does local login use request-aware `sign_in_session(response, req, session, options?)` or the same internal completion primitive instead of creating a weaker parallel session path?
 - Are reset tokens hash-stored, TTL-bound, one-time-use, and replay-tested?
 - Is TOTP enrollment durable account state, not only pending challenge metadata?
+- Do TOTP verification helpers avoid local-identity/MFA-status enumeration by using one generic failure for not-found, disabled/locked, not-enabled, missing-secret, malformed metadata, and wrong-code cases, with dummy verification on unavailable-state paths?
 - Is the email/SMS delivery boundary explicit (`std/auth` issues/validates tokens and URLs; apps/plugins deliver messages)?
 - Does the template integration delete custom auth persistence instead of wrapping it?
 

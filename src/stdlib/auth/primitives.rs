@@ -97,8 +97,8 @@ pub fn get_totp_uri(
 }
 
 /// Verify a TOTP code
-pub fn verify_totp_code(secret: &str, code: &str, email: &str) -> bool {
-    match create_totp(secret, email, "NTNT") {
+pub fn verify_totp_code(secret: &str, code: &str, email: &str, issuer: &str) -> bool {
+    match create_totp(secret, email, issuer) {
         Ok(totp) => totp.check_current(code).unwrap_or(false),
         Err(_) => false,
     }

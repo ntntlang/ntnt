@@ -71,9 +71,10 @@ pub use guards::{
     enforce_auth_for_request, get_protected_paths, register_protected_paths, reset_protected_paths,
 };
 use local::{
-    bootstrap_local_user_record, local_identity_to_safe_value, local_user_record,
-    set_local_password_record, update_local_user_metadata_record, verified_local_password_to_value,
-    verify_local_password_record,
+    begin_totp_enrollment_record, bootstrap_local_user_record, confirm_totp_enrollment_record,
+    local_identity_to_safe_value, local_user_record, reset_totp_record, set_local_password_record,
+    totp_status_record, update_local_user_metadata_record, verified_local_password_to_value,
+    verify_local_password_record, verify_local_totp_record,
 };
 use oauth::extract_user_info;
 pub use oauth::{
@@ -734,6 +735,74 @@ fn parse_local_metadata_update_options(options: Option<&Value>) -> Result<(Strin
             other.type_name()
         ))),
         None => Ok(("email".to_string(), false)),
+    }
+}
+
+fn require_auth_initialized_for(function_name: &str) -> Result<()> {
+    get_auth_config().map(|_| ()).ok_or_else(|| {
+        IntentError::runtime_error(format!(
+            "[auth] Auth not initialized. Call enable_auth() before {}().",
+            function_name
+        ))
+    })
+}
+
+fn string_arg<'a>(
+    function_name: &str,
+    args: &'a [Value],
+    index: usize,
+    name: &str,
+) -> Result<&'a str> {
+    match args.get(index) {
+        Some(Value::String(value)) => Ok(value.as_str()),
+        Some(other) => Err(IntentError::type_error(format!(
+            "[auth] {}() {} must be a string, got {}",
+            function_name,
+            name,
+            other.type_name()
+        ))),
+        None => Err(IntentError::type_error(format!(
+            "[auth] {}() missing required {}",
+            function_name, name
+        ))),
+    }
+}
+
+fn parse_totp_options(
+    function_name: &str,
+    options: Option<&Value>,
+) -> Result<(String, Option<String>, Option<String>)> {
+    match options {
+        Some(Value::Map(map)) => {
+            let identifier_kind = optional_string_option(map, "identifier_kind", function_name)?
+                .unwrap_or_else(|| "email".to_string());
+            let issuer = optional_string_option(map, "issuer", function_name)?;
+            let label = optional_string_option(map, "label", function_name)?;
+            Ok((identifier_kind, issuer, label))
+        }
+        Some(other) => Err(IntentError::type_error(format!(
+            "[auth] {}() options must be a map, got {}",
+            function_name,
+            other.type_name()
+        ))),
+        None => Ok(("email".to_string(), None, None)),
+    }
+}
+
+fn optional_string_option(
+    map: &HashMap<String, Value>,
+    key: &str,
+    function_name: &str,
+) -> Result<Option<String>> {
+    match map.get(key) {
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(other) => Err(IntentError::type_error(format!(
+            "[auth] {}() {} must be a string, got {}",
+            function_name,
+            key,
+            other.type_name()
+        ))),
+        None => Ok(None),
     }
 }
 
@@ -4356,6 +4425,212 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt begin_totp_enrollment
+    // @module std/auth
+    // @signature begin_totp_enrollment(identifier: String, options?: Map) -> Result<Map, String>
+    // Start TOTP enrollment for a local identity and return one-time setup material.
+    //
+    // Generates a new TOTP secret, stores it under std/auth-owned local identity metadata (`auth.totp.pending_secret`),
+    // and returns safe status fields plus an `otpauth://` URI for QR-code setup. The raw secret is not returned as a
+    // standalone field and is never exposed through `local_user(...)`, `current_user(...)`, or `totp_status(...)`.
+    // The setup URI itself is secret-bearing; render it only in the setup response and do not log, cache, or persist it.
+    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param options Optional map with `identifier_kind`, `issuer`, and `label`
+    // @returns Ok(map) with pending TOTP status and setup `uri`; Err(message) on invalid identity/state/storage
+    // @see_also confirm_totp_enrollment, totp_status, verify_local_totp, reset_totp
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #mfa, #totp
+    // @example begin_totp_enrollment("admin@example.com", map { "issuer": "Admin" })? ~ "Create TOTP setup URI"
+    module.insert(
+        "begin_totp_enrollment".to_string(),
+        Value::NativeFunction {
+            name: "begin_totp_enrollment".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::type_error(
+                        "[auth] begin_totp_enrollment() requires identifier and optional options"
+                            .to_string(),
+                    ));
+                }
+                require_auth_initialized_for("begin_totp_enrollment")?;
+                let identifier = string_arg("begin_totp_enrollment", args, 0, "identifier")?;
+                let (identifier_kind, issuer, label) =
+                    parse_totp_options("begin_totp_enrollment", args.get(1))?;
+                match begin_totp_enrollment_record(
+                    &identifier_kind,
+                    identifier,
+                    issuer.as_deref(),
+                    label.as_deref(),
+                ) {
+                    Ok(status) => Ok(Value::ok(Value::Map(status))),
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
+    // @ntnt confirm_totp_enrollment
+    // @module std/auth
+    // @signature confirm_totp_enrollment(identifier: String, code: String, options?: Map) -> Result<Map, String>
+    // Confirm a pending local TOTP enrollment using a code from the authenticator app.
+    //
+    // Moves `auth.totp.pending_secret` to std/auth-owned confirmed secret metadata only after the submitted code
+    // verifies. Returned status is secret-free and safe to use in setup flows.
+    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param code The 6-digit TOTP code from the authenticator app
+    // @param options Optional map with `identifier_kind`
+    // @returns Ok(map) with confirmed TOTP status; Err(message) on missing pending setup or invalid code
+    // @see_also begin_totp_enrollment, verify_local_totp, totp_status, reset_totp
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #mfa, #totp
+    // @example confirm_totp_enrollment("admin@example.com", form["code"] ?? "")? ~ "Finish TOTP setup"
+    module.insert(
+        "confirm_totp_enrollment".to_string(),
+        Value::NativeFunction {
+            name: "confirm_totp_enrollment".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "[auth] confirm_totp_enrollment() requires identifier, code, and optional options"
+                            .to_string(),
+                    ));
+                }
+                require_auth_initialized_for("confirm_totp_enrollment")?;
+                let identifier = string_arg("confirm_totp_enrollment", args, 0, "identifier")?;
+                let code = string_arg("confirm_totp_enrollment", args, 1, "code")?;
+                let (identifier_kind, _, _) =
+                    parse_totp_options("confirm_totp_enrollment", args.get(2))?;
+                match confirm_totp_enrollment_record(&identifier_kind, identifier, code) {
+                    Ok(status) => Ok(Value::ok(Value::Map(status))),
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
+    // @ntnt verify_local_totp
+    // @module std/auth
+    // @signature verify_local_totp(identifier: String, code: String, options?: Map) -> Result<Map, String>
+    // Verify a local user's confirmed TOTP code without exposing the stored secret.
+    //
+    // Use after `verify_local_password(...)` in staged login flows. Apps should keep the user in an auth challenge
+    // until this helper succeeds, then complete the challenge with `complete_auth_challenge(...)` or sign in through
+    // `sign_in_session(...)`. Pair TOTP endpoints with app rate limiting/backoff; this helper verifies codes but does
+    // not own account lockout policy.
+    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param code The 6-digit TOTP code from the authenticator app
+    // @param options Optional map with `identifier_kind`
+    // @returns Ok(map) with `verified: true` and safe TOTP status; Err(message) on invalid code or unavailable TOTP
+    // @see_also begin_auth_challenge, complete_auth_challenge, totp_status
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #mfa, #totp
+    // @example verify_local_totp("admin@example.com", form["code"] ?? "")? ~ "Verify second factor"
+    module.insert(
+        "verify_local_totp".to_string(),
+        Value::NativeFunction {
+            name: "verify_local_totp".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "[auth] verify_local_totp() requires identifier, code, and optional options"
+                            .to_string(),
+                    ));
+                }
+                require_auth_initialized_for("verify_local_totp")?;
+                let identifier = string_arg("verify_local_totp", args, 0, "identifier")?;
+                let code = string_arg("verify_local_totp", args, 1, "code")?;
+                let (identifier_kind, _, _) = parse_totp_options("verify_local_totp", args.get(2))?;
+                match verify_local_totp_record(&identifier_kind, identifier, code) {
+                    Ok(status) => Ok(Value::ok(Value::Map(status))),
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
+    // @ntnt totp_status
+    // @module std/auth
+    // @signature totp_status(identifier: String, options?: Map) -> Result<Map, String>
+    // Read a local user's safe TOTP enrollment status.
+    //
+    // Returns status booleans and display metadata only. It never includes pending or confirmed TOTP secret material.
+    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param options Optional map with `identifier_kind`
+    // @returns Ok(map) with safe TOTP status; Err(message) on invalid identity/storage
+    // @see_also begin_totp_enrollment, confirm_totp_enrollment, verify_local_totp, reset_totp
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #mfa, #totp
+    // @example totp_status("admin@example.com")? ~ "Check whether TOTP is enabled"
+    module.insert(
+        "totp_status".to_string(),
+        Value::NativeFunction {
+            name: "totp_status".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::type_error(
+                        "[auth] totp_status() requires identifier and optional options".to_string(),
+                    ));
+                }
+                require_auth_initialized_for("totp_status")?;
+                let identifier = string_arg("totp_status", args, 0, "identifier")?;
+                let (identifier_kind, _, _) = parse_totp_options("totp_status", args.get(1))?;
+                match totp_status_record(&identifier_kind, identifier) {
+                    Ok(status) => Ok(Value::ok(Value::Map(status))),
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
+    // @ntnt reset_totp
+    // @module std/auth
+    // @signature reset_totp(identifier: String, options?: Map) -> Result<Map, String>
+    // Clear a local user's pending or confirmed TOTP enrollment.
+    //
+    // Removes only std/auth-owned `auth.totp` metadata and preserves app-owned metadata namespaces.
+    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param options Optional map with `identifier_kind`
+    // @returns Ok(map) with disabled TOTP status; Err(message) on invalid identity/state/storage
+    // @see_also begin_totp_enrollment, confirm_totp_enrollment, totp_status
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #mfa, #totp
+    // @example reset_totp("admin@example.com")? ~ "Remove TOTP enrollment"
+    module.insert(
+        "reset_totp".to_string(),
+        Value::NativeFunction {
+            name: "reset_totp".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::type_error(
+                        "[auth] reset_totp() requires identifier and optional options".to_string(),
+                    ));
+                }
+                require_auth_initialized_for("reset_totp")?;
+                let identifier = string_arg("reset_totp", args, 0, "identifier")?;
+                let (identifier_kind, _, _) = parse_totp_options("reset_totp", args.get(1))?;
+                match reset_totp_record(&identifier_kind, identifier) {
+                    Ok(status) => Ok(Value::ok(Value::Map(status))),
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
     // @ntnt sign_in_session
     // @module std/auth
     // @signature sign_in_session(response: Response, req: Request, session: Map, options?: Map) -> Response
@@ -4858,7 +5133,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                Ok(Value::Bool(verify_totp_code(&secret, &code, "")))
+                Ok(Value::Bool(verify_totp_code(&secret, &code, "", "NTNT")))
             },
         },
     );
@@ -4935,6 +5210,49 @@ mod tests {
         match values.first() {
             Some(Value::Map(map)) => map.clone(),
             other => panic!("unexpected Result::Ok payload: {other:?}"),
+        }
+    }
+
+    fn assert_map_bool(map: &HashMap<String, Value>, key: &str, expected: bool) {
+        match map.get(key) {
+            Some(Value::Bool(value)) => assert_eq!(*value, expected, "unexpected {key}"),
+            other => panic!("expected {key} bool, got {other:?}"),
+        }
+    }
+
+    fn map_int(map: &HashMap<String, Value>, key: &str) -> i64 {
+        match map.get(key) {
+            Some(Value::Int(value)) => *value,
+            other => panic!("expected {key} int, got {other:?}"),
+        }
+    }
+
+    fn assert_no_totp_secret_material(value: &Value, secret: &str) {
+        match value {
+            Value::String(s) => assert!(
+                !s.contains(secret),
+                "string value unexpectedly exposed TOTP secret material"
+            ),
+            Value::Array(values) => {
+                for item in values {
+                    assert_no_totp_secret_material(item, secret);
+                }
+            }
+            Value::Map(map) => {
+                for (key, item) in map {
+                    assert!(
+                        key != "secret" && key != "pending_secret",
+                        "safe payload unexpectedly exposed TOTP secret key {key}"
+                    );
+                    assert_no_totp_secret_material(item, secret);
+                }
+            }
+            Value::EnumValue { values, .. } => {
+                for item in values {
+                    assert_no_totp_secret_material(item, secret);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -6994,6 +7312,336 @@ mod tests {
                 .unwrap();
             assert!(stored.metadata_json.contains("\"theme\":\"light\""));
             assert!(stored.metadata_json.contains("server-only"));
+        }
+    }
+
+    #[test]
+    fn test_totp_enrollment_helpers_round_trip_memory_and_sqlite_without_secret_leakage() {
+        use super::storage::{
+            get_local_identity_by_identifier_record, store_local_credential_secret_record,
+            store_local_identity_record, LocalAccountState, LocalCredentialSecret, LocalIdentity,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            store_local_identity_record(&LocalIdentity {
+                id: "local-user-totp".to_string(),
+                identifier_kind: "email".to_string(),
+                identifier: "Totp@Example.COM".to_string(),
+                identifier_normalized: "totp@example.com".to_string(),
+                created_at: 100,
+                updated_at: 100,
+                state: LocalAccountState::Active,
+                metadata_json: r#"{"app":{"theme":"dark"}}"#.to_string(),
+            })
+            .unwrap();
+            store_local_credential_secret_record(&LocalCredentialSecret {
+                local_user_id: "local-user-totp".to_string(),
+                password_hash: bcrypt::hash("totp password", 4).unwrap(),
+                password_hash_algorithm: "bcrypt".to_string(),
+                password_hash_params_json: "{}".to_string(),
+                password_changed_at: 101,
+                must_change_password: false,
+            })
+            .unwrap();
+
+            let module = init();
+            let begin_totp_enrollment = module_fn(&module, "begin_totp_enrollment");
+            let confirm_totp_enrollment = module_fn(&module, "confirm_totp_enrollment");
+            let verify_local_totp = module_fn(&module, "verify_local_totp");
+            let totp_status = module_fn(&module, "totp_status");
+            let reset_totp = module_fn(&module, "reset_totp");
+            let local_user = module_fn(&module, "local_user");
+            let sign_in_session = module_fn(&module, "sign_in_session");
+            let current_user = module_fn(&module, "current_user");
+
+            let enrollment = result_ok_map(
+                begin_totp_enrollment(&[
+                    Value::String("totp@example.com".to_string()),
+                    Value::Map(HashMap::from([(
+                        "issuer".to_string(),
+                        Value::String("Example Admin".to_string()),
+                    )])),
+                ])
+                .unwrap(),
+            );
+            assert_map_bool(&enrollment, "pending", true);
+            assert_map_bool(&enrollment, "enabled", false);
+            let enrollment_created_at = map_int(&enrollment, "created_at");
+            assert!(enrollment_created_at > 0);
+            assert!(
+                !enrollment.contains_key("secret"),
+                "begin_totp_enrollment must not expose the raw secret field"
+            );
+            match enrollment.get("uri") {
+                Some(Value::String(uri)) => assert!(uri.starts_with("otpauth://totp/")),
+                other => panic!("expected setup uri, got {other:?}"),
+            }
+
+            let safe_user = result_ok_map(
+                local_user(&[Value::String("totp@example.com".to_string())]).unwrap(),
+            );
+
+            let stored = get_local_identity_by_identifier_record("email", "totp@example.com")
+                .unwrap()
+                .unwrap();
+            assert!(stored.metadata_json.contains("pending_secret"));
+            let pending_secret = serde_json::from_str::<serde_json::Value>(&stored.metadata_json)
+                .unwrap()["auth"]["totp"]["pending_secret"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_no_totp_secret_material(&Value::Map(safe_user.clone()), &pending_secret);
+
+            let bad_code = result_err_string(
+                confirm_totp_enrollment(&[
+                    Value::String("totp@example.com".to_string()),
+                    Value::String("000000".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert!(bad_code.contains("Invalid local TOTP code"));
+
+            let secret_bytes = Secret::Encoded(pending_secret.clone())
+                .to_bytes()
+                .expect("test secret should decode");
+            let totp = TOTP::new(
+                TotpAlgorithm::SHA1,
+                6,
+                1,
+                30,
+                secret_bytes,
+                Some("Example Admin".to_string()),
+                "totp@example.com".to_string(),
+            )
+            .expect("test TOTP should construct");
+            let valid_code = totp.generate_current().expect("test code should generate");
+
+            let confirmed = result_ok_map(
+                confirm_totp_enrollment(&[
+                    Value::String("totp@example.com".to_string()),
+                    Value::String(valid_code.clone()),
+                ])
+                .unwrap(),
+            );
+            assert_map_bool(&confirmed, "enabled", true);
+            assert_map_bool(&confirmed, "pending", false);
+            assert_eq!(map_int(&confirmed, "created_at"), enrollment_created_at);
+            assert_no_totp_secret_material(&Value::Map(confirmed.clone()), &pending_secret);
+
+            let verified = result_ok_map(
+                verify_local_totp(&[
+                    Value::String("totp@example.com".to_string()),
+                    Value::String(valid_code),
+                ])
+                .unwrap(),
+            );
+            assert_map_bool(&verified, "verified", true);
+            assert_map_bool(&verified, "enabled", true);
+
+            let status = result_ok_map(
+                totp_status(&[Value::String("totp@example.com".to_string())]).unwrap(),
+            );
+            assert_map_bool(&status, "enabled", true);
+            assert_eq!(map_int(&status, "created_at"), enrollment_created_at);
+            assert_no_totp_secret_material(&Value::Map(status.clone()), &pending_secret);
+
+            let signed_in = sign_in_session(&[
+                redirect_response("/admin", None),
+                request_with_cookie(""),
+                Value::Map(HashMap::from([
+                    (
+                        "subject_id".to_string(),
+                        Value::String("local-user-totp".to_string()),
+                    ),
+                    (
+                        "email".to_string(),
+                        Value::String("totp@example.com".to_string()),
+                    ),
+                ])),
+            ])
+            .unwrap();
+            let cookie = cookie_header_from_response(&signed_in);
+            let current_user_value = current_user(&[request_with_cookie(&cookie)]).unwrap();
+            assert_no_totp_secret_material(&current_user_value, &pending_secret);
+
+            let active_reenrollment = result_ok_map(
+                begin_totp_enrollment(&[Value::String("totp@example.com".to_string())]).unwrap(),
+            );
+            assert_map_bool(&active_reenrollment, "enabled", true);
+            assert_map_bool(&active_reenrollment, "pending", true);
+            assert_eq!(
+                map_int(&active_reenrollment, "created_at"),
+                enrollment_created_at
+            );
+
+            let reset = result_ok_map(
+                reset_totp(&[Value::String("totp@example.com".to_string())]).unwrap(),
+            );
+            assert_map_bool(&reset, "enabled", false);
+            assert_map_bool(&reset, "pending", false);
+
+            let after_reset = get_local_identity_by_identifier_record("email", "totp@example.com")
+                .unwrap()
+                .unwrap();
+            assert!(!after_reset.metadata_json.contains("totp"));
+            assert!(after_reset.metadata_json.contains("theme"));
+
+            let reenrollment = result_ok_map(
+                begin_totp_enrollment(&[Value::String("totp@example.com".to_string())]).unwrap(),
+            );
+            assert_map_bool(&reenrollment, "pending", true);
+            assert_map_bool(&reenrollment, "enabled", false);
+        }
+    }
+
+    #[test]
+    fn test_totp_helpers_reject_disabled_and_locked_local_accounts() {
+        use super::storage::{store_local_identity_record, LocalAccountState, LocalIdentity};
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        for (email, state) in [
+            ("disabled@example.com", LocalAccountState::Disabled),
+            ("locked@example.com", LocalAccountState::Locked),
+        ] {
+            store_local_identity_record(&LocalIdentity {
+                id: format!("local-user-{email}"),
+                identifier_kind: "email".to_string(),
+                identifier: email.to_string(),
+                identifier_normalized: email.to_string(),
+                created_at: 100,
+                updated_at: 100,
+                state,
+                metadata_json: "{}".to_string(),
+            })
+            .unwrap();
+        }
+
+        let module = init();
+        let begin_totp_enrollment = module_fn(&module, "begin_totp_enrollment");
+        let confirm_totp_enrollment = module_fn(&module, "confirm_totp_enrollment");
+        let verify_local_totp = module_fn(&module, "verify_local_totp");
+        let totp_status = module_fn(&module, "totp_status");
+        let reset_totp = module_fn(&module, "reset_totp");
+
+        for email in ["disabled@example.com", "locked@example.com"] {
+            let begin_error = result_err_string(
+                begin_totp_enrollment(&[Value::String(email.to_string())]).unwrap(),
+            );
+            assert!(begin_error.contains("cannot manage TOTP"));
+
+            let confirm_error = result_err_string(
+                confirm_totp_enrollment(&[
+                    Value::String(email.to_string()),
+                    Value::String("000000".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert!(confirm_error.contains("cannot manage TOTP"));
+
+            let verify_error = result_err_string(
+                verify_local_totp(&[
+                    Value::String(email.to_string()),
+                    Value::String("000000".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(verify_error, "Invalid local TOTP code");
+
+            let status_error =
+                result_err_string(totp_status(&[Value::String(email.to_string())]).unwrap());
+            assert!(status_error.contains("cannot manage TOTP"));
+
+            let reset_error =
+                result_err_string(reset_totp(&[Value::String(email.to_string())]).unwrap());
+            assert!(reset_error.contains("cannot manage TOTP"));
+        }
+    }
+
+    #[test]
+    fn test_verify_local_totp_uses_generic_errors_for_unavailable_or_disabled_mfa() {
+        use super::storage::{store_local_identity_record, LocalAccountState, LocalIdentity};
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        for (id, email, state, metadata_json) in [
+            (
+                "local-user-no-totp",
+                "no-totp@example.com",
+                LocalAccountState::Active,
+                "{}",
+            ),
+            (
+                "local-user-missing-secret",
+                "missing-secret@example.com",
+                LocalAccountState::Active,
+                "{\"auth\":{\"totp\":{\"enabled\":true,\"issuer\":\"Admin\"}}}",
+            ),
+            (
+                "local-user-malformed-totp",
+                "malformed-totp@example.com",
+                LocalAccountState::Active,
+                "{\"auth\":{\"totp\":\"not-a-map\"}}",
+            ),
+            (
+                "local-user-disabled-totp",
+                "disabled-totp@example.com",
+                LocalAccountState::Disabled,
+                "{}",
+            ),
+            (
+                "local-user-locked-totp",
+                "locked-totp@example.com",
+                LocalAccountState::Locked,
+                "{}",
+            ),
+        ] {
+            store_local_identity_record(&LocalIdentity {
+                id: id.to_string(),
+                identifier_kind: "email".to_string(),
+                identifier: email.to_string(),
+                identifier_normalized: email.to_string(),
+                created_at: 100,
+                updated_at: 100,
+                state,
+                metadata_json: metadata_json.to_string(),
+            })
+            .unwrap();
+        }
+
+        let module = init();
+        let verify_local_totp = module_fn(&module, "verify_local_totp");
+
+        for email in [
+            "unknown@example.com",
+            "no-totp@example.com",
+            "missing-secret@example.com",
+            "malformed-totp@example.com",
+            "disabled-totp@example.com",
+            "locked-totp@example.com",
+        ] {
+            let message = result_err_string(
+                verify_local_totp(&[
+                    Value::String(email.to_string()),
+                    Value::String("000000".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(
+                message, "Invalid local TOTP code",
+                "unexpected error for {email}"
+            );
         }
     }
 
