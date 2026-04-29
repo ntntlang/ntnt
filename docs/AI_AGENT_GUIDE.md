@@ -1751,6 +1751,44 @@ fn login(req) {
 
 Session claims, roles, profiles, and organization membership stay app-owned; local auth only owns credential lifecycle state and safe verification/setup results.
 
+### Local Metadata and Group Authorization
+
+Use `local_user(...)` and `update_local_user_metadata(...)` from trusted server-side code to read/update app-owned local identity metadata without creating a parallel auth model. Metadata is namespaced: `auth.*` is reserved for `std/auth` lifecycle helpers, while app data should live under namespaces such as `app` or `template`. Safe local-user payloads omit reserved auth metadata so TOTP/reset internals do not leak into templates or API responses.
+
+For authorization, attach app-owned group IDs or claims during request-aware session completion, then use `has_group(...)` to gate pages and JSON/API endpoints. `std/auth` does not define RBAC policy; it only provides the session-data convention and helper.
+
+```ntnt
+import { has_group, require_auth, sign_in_session, update_local_user_metadata, verify_local_password } from "std/auth"
+import { json, parse_form, redirect } from "std/http/server"
+
+fn set_admin_group(email) {
+    return update_local_user_metadata(email, map {
+        "app": map { "group_ids": ["admins"] }
+    })?
+}
+
+fn login(req) {
+    let form = parse_form(req)
+    let verified = verify_local_password(form["email"] ?? "", form["password"] ?? "")?
+    let group_ids = app_group_ids_for_local_user(verified["subject_id"])
+
+    return sign_in_session(redirect("/admin"), req, map {
+        "subject_id": verified["subject_id"],
+        "email": verified["email"],
+        "data": map { "group_ids": group_ids }
+    })
+}
+
+fn admin_api(req) {
+    let auth_response = require_auth(req)
+    if typeof(auth_response) == "Map" { return auth_response }
+    if !has_group(req, "admins") {
+        return json(map { "error": "forbidden" }, 403)
+    }
+    return json(map { "ok": true })
+}
+```
+
 ### Basic OAuth Setup
 
 ```ntnt

@@ -53,7 +53,7 @@ Full skill with workflow, examples, and deep review techniques: see ntnt-code-re
 
 ## Auth-Specific Guardrails
 
-Apply this section to any change touching `src/stdlib/auth.rs`, `src/stdlib/auth/**`, auth docs, auth generated docs, auth typechecker signatures, or auth tests. DD-043 and DD-062 are the current roadmap for the auth architecture.
+Apply this section to any change touching `src/stdlib/auth.rs`, `src/stdlib/auth/**`, auth docs, auth generated docs, auth typechecker signatures, or auth tests. DD-043 is the current roadmap for the auth architecture.
 
 ### Module Ownership
 - `src/stdlib/auth.rs` should stay focused on public API registration, shared surface types that cannot move yet, and minimal coordination glue. Do not add new domain logic there just because it is convenient.

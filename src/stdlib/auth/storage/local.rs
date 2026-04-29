@@ -1,12 +1,13 @@
-// Local-auth storage intentionally includes write-side helpers before the
-// public create/reset/bootstrap flows land in later DD-062 slices.
+// Local-auth storage includes write-side helpers for credential lifecycle.
+// DD-043 keeps app-specific extensions in metadata_json, while security-critical
+// lifecycle state such as reset tokens may still require auth-owned helpers/storage.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::*;
 use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 
-/// Durable local-auth record families planned by DD-062.
+/// Durable local-auth record families (DD-043).
 ///
 /// These are deliberately modeled before implementation so credential-related
 /// state does not inherit the softer memory fallback semantics used by some
@@ -194,6 +195,30 @@ impl LocalAuthMemoryStore {
             .get(&lookup_key)
             .and_then(|id| self.identities_by_id.get(id))
             .cloned())
+    }
+
+    pub(in crate::stdlib::auth) fn update_identity_by_identifier<F>(
+        &mut self,
+        identifier_kind: &str,
+        identifier_normalized: &str,
+        updater: F,
+    ) -> std::result::Result<Option<LocalIdentity>, String>
+    where
+        F: FnOnce(&mut LocalIdentity) -> std::result::Result<(), String>,
+    {
+        let lookup_key = local_identity_lookup_key(identifier_kind, identifier_normalized)?;
+        let Some(identity_id) = self.identity_id_by_lookup_key.get(&lookup_key).cloned() else {
+            return Ok(None);
+        };
+        let mut identity = self
+            .identities_by_id
+            .get(&identity_id)
+            .cloned()
+            .ok_or_else(|| "[auth] local identity lookup index is corrupt".to_string())?;
+
+        updater(&mut identity)?;
+        self.store_identity(identity.clone())?;
+        Ok(Some(identity))
     }
 
     pub(in crate::stdlib::auth) fn store_credential_secret(
@@ -397,6 +422,34 @@ pub(in crate::stdlib::auth) fn get_local_identity_by_identifier_record(
     }
 }
 
+pub(in crate::stdlib::auth) fn update_local_identity_by_identifier_record<F>(
+    identifier_kind: &str,
+    identifier_normalized: &str,
+    updater: F,
+) -> std::result::Result<Option<LocalIdentity>, String>
+where
+    F: FnOnce(&mut LocalIdentity) -> std::result::Result<(), String>,
+{
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => SESSION_STORE
+            .lock()
+            .unwrap()
+            .local_auth
+            .update_identity_by_identifier(identifier_kind, identifier_normalized, updater),
+        AuthStorageBackend::Sqlite => update_local_identity_by_identifier_sqlite(
+            identifier_kind,
+            identifier_normalized,
+            updater,
+        ),
+        AuthStorageBackend::Postgres => {
+            Err("[auth] local identity update is not implemented for PostgreSQL yet".to_string())
+        }
+        AuthStorageBackend::Redis => {
+            Err("[auth] local identity update is not implemented for Redis/Valkey yet".to_string())
+        }
+    }
+}
+
 pub(in crate::stdlib::auth) fn store_local_credential_secret_record(
     credential: &LocalCredentialSecret,
 ) -> std::result::Result<(), String> {
@@ -580,6 +633,73 @@ fn get_local_identity_by_identifier_sqlite(
     )
     .optional()
     .map_err(|e| format!("[auth] failed to lookup local identity: {}", e))
+}
+
+fn update_local_identity_by_identifier_sqlite<F>(
+    identifier_kind: &str,
+    identifier_normalized: &str,
+    updater: F,
+) -> std::result::Result<Option<LocalIdentity>, String>
+where
+    F: FnOnce(&mut LocalIdentity) -> std::result::Result<(), String>,
+{
+    let mut conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_mut().ok_or("SQLite not initialized")?;
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let normalized = identifier_normalized.trim().to_ascii_lowercase();
+    let tx = conn.transaction().map_err(|e| {
+        format!(
+            "[auth] failed to begin local identity update transaction: {}",
+            e
+        )
+    })?;
+
+    let Some(mut identity) = tx
+        .query_row(
+            "SELECT id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json
+             FROM auth_local_identities
+             WHERE identifier_kind = ?1 AND identifier_normalized = ?2",
+            rusqlite::params![kind, normalized],
+            local_identity_from_row,
+        )
+        .optional()
+        .map_err(|e| format!("[auth] failed to lookup local identity: {}", e))?
+    else {
+        tx.commit()
+            .map_err(|e| format!("[auth] failed to commit local identity update transaction: {}", e))?;
+        return Ok(None);
+    };
+
+    updater(&mut identity)?;
+    let identity = normalize_local_identity_for_storage(identity)?;
+    tx.execute(
+        "UPDATE auth_local_identities
+         SET identifier_kind = ?2,
+             identifier = ?3,
+             identifier_normalized = ?4,
+             updated_at = ?5,
+             state = ?6,
+             metadata_json = ?7
+         WHERE id = ?1",
+        rusqlite::params![
+            identity.id,
+            identity.identifier_kind,
+            identity.identifier,
+            identity.identifier_normalized,
+            identity.updated_at,
+            identity.state.as_str(),
+            identity.metadata_json,
+        ],
+    )
+    .map_err(|e| format!("[auth] failed to update local identity: {}", e))?;
+    tx.commit().map_err(|e| {
+        format!(
+            "[auth] failed to commit local identity update transaction: {}",
+            e
+        )
+    })?;
+
+    Ok(Some(identity))
 }
 
 fn store_local_credential_secret_sqlite(

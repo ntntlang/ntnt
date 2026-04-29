@@ -1839,9 +1839,11 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`enable_auth`](#enableauth) | Initialize the authentication system with OAuth providers. |
 | [`get_session`](#getsession) | Get the current session from the request. |
 | [`get_user`](#getuser) | Get the current authenticated user from the request. |
+| [`has_group`](#hasgroup) | Check app-owned group IDs from authenticated session data. |
 | [`jwt_decode`](#jwtdecode) | Decode a JWT token WITHOUT verifying the signature. |
 | [`jwt_sign`](#jwtsign) | Create a signed JWT token from claims. |
 | [`jwt_verify`](#jwtverify) | Verify a JWT token and return its claims. |
+| [`local_user`](#localuser) | Load a safe local identity payload, including non-secret extension metadata. |
 | [`logout_all`](#logoutall) | Log out all sessions for the current user. |
 | [`logout_user`](#logoutuser) | Log out the current user and return a redirect response. |
 | [`oauth`](#oauth) | Create an OAuth provider configuration. |
@@ -1862,6 +1864,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`sign_out_session`](#signoutsession) | Revoke the current session and attach a clearing auth cookie to a response. |
 | [`totp_secret`](#totpsecret) | Generate a new TOTP secret for MFA setup. |
 | [`totp_uri`](#totpuri) | Generate an otpauth:// URI for QR codes. |
+| [`update_local_user_metadata`](#updatelocalusermetadata) | Merge or replace app-owned local identity metadata and return a safe payload. |
 | [`user_sessions`](#usersessions) | Get all active sessions for the current user. |
 | [`validate_csrf`](#validatecsrf) | Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH). |
 | [`verify_csrf`](#verifycsrf) | Verify a CSRF token against the session's token. |
@@ -2396,6 +2399,36 @@ get_user(req) otherwise return redirect("/login")  // Require auth
 
 ---
 
+#### `has_group`
+
+```ntnt
+has_group(subject: Request | Session, group_ids: String | [String]) -> Bool
+```
+
+Check app-owned group IDs from authenticated session data.
+
+This is a thin authorization helper, not an RBAC system. Apps decide what group IDs mean and attach them during `sign_in_session(...)` as `data.group_ids` or `data.claims.group_ids`. The helper accepts either a request with an auth cookie or a session map from `current_session(req)`.
+
+**Parameters:**
+
+- `subject` — Request or Session map
+- `group_ids` — Required group ID or any-of list
+
+**Returns:** true if the active session contains any requested group ID
+
+**Examples:**
+
+```ntnt
+has_group(req, "admins")  // Check an API/page request for admin group membership
+has_group(current_session(req)?, ["admins", "owners"])  // Check any accepted group
+```
+
+**See also:** `require_auth`, `current_session`, `sign_in_session`
+
+*Since v0.4.9*
+
+---
+
 #### `jwt_decode`
 
 ```ntnt
@@ -2481,6 +2514,35 @@ jwt_verify(token, secret)  // Verify and get claims
 **See also:** `jwt_sign`, `jwt_decode`
 
 *Since v0.3.11*
+
+---
+
+#### `local_user`
+
+```ntnt
+local_user(identifier: String, options?: Map) -> Result<Map, String>
+```
+
+Load a safe local identity payload, including non-secret extension metadata.
+
+Use this from trusted server-side setup/admin code when an app needs the local identity record and app-owned metadata without verifying a password. Reserved `auth.*` metadata is kept server-side and omitted from the returned payload; use dedicated std/auth helpers for stdlib-managed lifecycle state.
+
+**Parameters:**
+
+- `identifier` — The local user identifier. Email is the default identifier kind.
+- `options` — Optional map with `identifier_kind` (default `"email"`)
+
+**Returns:** Ok(map) with safe local user fields and `metadata`; Err(message) when missing or unsupported
+
+**Examples:**
+
+```ntnt
+let user = local_user("admin@example.com")?  // Load a safe local user payload
+```
+
+**See also:** `update_local_user_metadata`, `verify_local_password`
+
+*Since v0.4.9*
 
 ---
 
@@ -3084,6 +3146,36 @@ totp_uri(secret, "user@example.com", "MyApp")  // => Ok("otpauth://...")  // Get
 **See also:** `totp_secret`, `verify_totp`
 
 *Since v0.3.11*
+
+---
+
+#### `update_local_user_metadata`
+
+```ntnt
+update_local_user_metadata(identifier: String, metadata: Map, options?: Map) -> Result<Map, String>
+```
+
+Merge or replace app-owned local identity metadata and return a safe payload.
+
+By default this helper performs a top-level merge into `metadata_json` and preserves reserved `auth.*` namespaces for std/auth-managed lifecycle state. Pass `map { "replace": true }` to replace app-visible metadata. Inputs may not write `auth` or `auth.*` keys directly.
+
+**Parameters:**
+
+- `identifier` — The local user identifier. Email is the default identifier kind.
+- `metadata` — App-owned metadata map to merge or replace
+- `options` — Optional map with `identifier_kind` and `replace`
+
+**Returns:** Ok(map) with safe local user fields and metadata; Err(message) on missing user, reserved namespace, or unsupported backend
+
+**Examples:**
+
+```ntnt
+update_local_user_metadata(user.email, map { "app": map { "group_ids": ["admins"] } })?  // Attach app authorization context
+```
+
+**See also:** `local_user`, `verify_local_password`
+
+*Since v0.4.9*
 
 ---
 
