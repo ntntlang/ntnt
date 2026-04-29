@@ -40,6 +40,12 @@ pub(in crate::stdlib::auth) fn update_local_user_metadata_record(
     replace: bool,
 ) -> std::result::Result<LocalIdentity, String> {
     reject_reserved_local_metadata_namespaces(metadata)?;
+    if replace && metadata.is_empty() {
+        return Err(
+            "[auth] update_local_user_metadata() replace=true with empty metadata would clear all app metadata; pass at least one app metadata key"
+                .to_string(),
+        );
+    }
 
     let kind = identifier_kind.trim().to_ascii_lowercase();
     let identifier_normalized = normalize_local_identifier(&kind, identifier.trim())?;

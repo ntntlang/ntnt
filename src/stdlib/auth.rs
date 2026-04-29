@@ -6979,6 +6979,16 @@ mod tests {
             );
             assert!(reserved_update.contains("reserved"));
 
+            let empty_replace = result_err_string(
+                update_local_user_metadata(&[
+                    Value::String("meta@example.com".to_string()),
+                    Value::Map(HashMap::new()),
+                    Value::Map(HashMap::from([("replace".to_string(), Value::Bool(true))])),
+                ])
+                .unwrap(),
+            );
+            assert!(empty_replace.contains("replace=true with empty metadata"));
+
             let stored = get_local_identity_by_identifier_record("email", "meta@example.com")
                 .unwrap()
                 .unwrap();
