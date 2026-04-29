@@ -164,7 +164,7 @@ Design posture:
 - Use opaque, non-PII user handles for WebAuthn `user.id`; WebAuthn user handles are capped at 64 bytes and are returned by discoverable/usernameless flows.
 - Track credential metadata needed for security and UX: credential ID, public key/passkey object, sign counter, transports, user verification, backup eligibility/state when available, created/last-used timestamps, nickname, and disabled/revoked status.
 - Enforce credential-ID uniqueness across all users before accepting registration.
-- On authentication, validate counters where the authenticator supplies meaningful counters; equal/lower non-zero counters should be treated as cloned-credential risk and fail closed or disable the credential.
+- On authentication, validate counters where the authenticator supplies meaningful counters; equal/lower non-zero counters must reject the current authentication attempt. After rejection, disable or quarantine the credential unless explicit policy says to only alert.
 - Keep attestation and enterprise hardware-bound policy optional. Consumer passkeys should work without attestation; regulated/high-assurance apps can opt into attestation policy later.
 - Do not serialize WebAuthn ceremony state to client cookies. If a dependency exposes such a feature, keep it off by default; state belongs in auth-owned server storage with TTL and one-time consume.
 
