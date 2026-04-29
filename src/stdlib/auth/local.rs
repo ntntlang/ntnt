@@ -65,6 +65,144 @@ pub(in crate::stdlib::auth) fn update_local_user_metadata_record(
     .ok_or_else(|| "[auth] local user not found".to_string())
 }
 
+pub(in crate::stdlib::auth) fn begin_totp_enrollment_record(
+    identifier_kind: &str,
+    identifier: &str,
+    issuer: Option<&str>,
+    label: Option<&str>,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier_normalized = normalize_local_identifier(&kind, identifier.trim())?;
+    let secret = super::generate_totp_secret();
+    let issuer = clean_totp_display_value(issuer, "NTNT")?;
+    let now = chrono::Utc::now().timestamp();
+
+    let updated_identity =
+        update_local_identity_by_identifier_record(&kind, &identifier_normalized, |identity| {
+            ensure_totp_manageable_identity(identity)?;
+            let label = clean_totp_display_value(label, identity.identifier.as_str())?;
+            let mut metadata = local_metadata_to_value_map(&identity.metadata_json)?;
+            let mut totp = auth_totp_metadata(&metadata)?;
+            let enabled = bool_field(&totp, "enabled").unwrap_or(false);
+            totp.insert("enabled".to_string(), Value::Bool(enabled));
+            totp.insert("pending".to_string(), Value::Bool(true));
+            totp.insert("pending_secret".to_string(), Value::String(secret.clone()));
+            totp.insert("issuer".to_string(), Value::String(issuer.clone()));
+            totp.insert("label".to_string(), Value::String(label));
+            totp.insert("updated_at".to_string(), Value::Int(now));
+            if !totp.contains_key("created_at") {
+                totp.insert("created_at".to_string(), Value::Int(now));
+            }
+            set_auth_totp_metadata(&mut metadata, Some(totp))?;
+            identity.metadata_json = local_metadata_to_json_string(&metadata)?;
+            identity.updated_at = now;
+            Ok(())
+        })?
+        .ok_or_else(|| "[auth] local user not found".to_string())?;
+
+    let mut status = totp_status_from_identity(&updated_identity)?;
+    let label =
+        string_field(&status, "label").unwrap_or_else(|| updated_identity.identifier.clone());
+    let uri = super::get_totp_uri(&secret, &label, &issuer)?;
+    status.insert("uri".to_string(), Value::String(uri));
+    Ok(status)
+}
+
+pub(in crate::stdlib::auth) fn confirm_totp_enrollment_record(
+    identifier_kind: &str,
+    identifier: &str,
+    code: &str,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier_normalized = normalize_local_identifier(&kind, identifier.trim())?;
+    let now = chrono::Utc::now().timestamp();
+    let updated_identity =
+        update_local_identity_by_identifier_record(&kind, &identifier_normalized, |identity| {
+            ensure_totp_manageable_identity(identity)?;
+            let mut metadata = local_metadata_to_value_map(&identity.metadata_json)?;
+            let totp = auth_totp_metadata(&metadata)?;
+            let pending_secret = string_field(&totp, "pending_secret")
+                .ok_or_else(|| "[auth] no pending local TOTP enrollment".to_string())?;
+            if !super::verify_totp_code(&pending_secret, code, &identity.identifier) {
+                return Err("Invalid local TOTP code".to_string());
+            }
+            let issuer = string_field(&totp, "issuer").unwrap_or_else(|| "NTNT".to_string());
+            let label = string_field(&totp, "label").unwrap_or_else(|| identity.identifier.clone());
+            let required = bool_field(&totp, "required").unwrap_or(false);
+            set_auth_totp_metadata(
+                &mut metadata,
+                Some(HashMap::from([
+                    ("enabled".to_string(), Value::Bool(true)),
+                    ("pending".to_string(), Value::Bool(false)),
+                    ("required".to_string(), Value::Bool(required)),
+                    ("secret".to_string(), Value::String(pending_secret)),
+                    ("issuer".to_string(), Value::String(issuer)),
+                    ("label".to_string(), Value::String(label)),
+                    ("confirmed_at".to_string(), Value::Int(now)),
+                    ("updated_at".to_string(), Value::Int(now)),
+                ])),
+            )?;
+            identity.metadata_json = local_metadata_to_json_string(&metadata)?;
+            identity.updated_at = now;
+            Ok(())
+        })?
+        .ok_or_else(|| "[auth] local user not found".to_string())?;
+
+    totp_status_from_identity(&updated_identity)
+}
+
+pub(in crate::stdlib::auth) fn verify_local_totp_record(
+    identifier_kind: &str,
+    identifier: &str,
+    code: &str,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    let identity = local_user_record(identifier_kind, identifier)?;
+    ensure_totp_manageable_identity(&identity)?;
+    let metadata = local_metadata_to_value_map(&identity.metadata_json)?;
+    let totp = auth_totp_metadata(&metadata)?;
+    if !bool_field(&totp, "enabled").unwrap_or(false) {
+        return Err("[auth] local TOTP is not enabled".to_string());
+    }
+    let secret = string_field(&totp, "secret")
+        .ok_or_else(|| "[auth] local TOTP enrollment is missing secret material".to_string())?;
+    if !super::verify_totp_code(&secret, code, &identity.identifier) {
+        return Err("Invalid local TOTP code".to_string());
+    }
+    let mut status = totp_status_from_identity(&identity)?;
+    status.insert("verified".to_string(), Value::Bool(true));
+    Ok(status)
+}
+
+pub(in crate::stdlib::auth) fn totp_status_record(
+    identifier_kind: &str,
+    identifier: &str,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    let identity = local_user_record(identifier_kind, identifier)?;
+    ensure_totp_manageable_identity(&identity)?;
+    totp_status_from_identity(&identity)
+}
+
+pub(in crate::stdlib::auth) fn reset_totp_record(
+    identifier_kind: &str,
+    identifier: &str,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier_normalized = normalize_local_identifier(&kind, identifier.trim())?;
+    let now = chrono::Utc::now().timestamp();
+    let updated_identity =
+        update_local_identity_by_identifier_record(&kind, &identifier_normalized, |identity| {
+            ensure_totp_manageable_identity(identity)?;
+            let mut metadata = local_metadata_to_value_map(&identity.metadata_json)?;
+            set_auth_totp_metadata(&mut metadata, None)?;
+            identity.metadata_json = local_metadata_to_json_string(&metadata)?;
+            identity.updated_at = now;
+            Ok(())
+        })?
+        .ok_or_else(|| "[auth] local user not found".to_string())?;
+
+    totp_status_from_identity(&updated_identity)
+}
+
 fn reject_reserved_local_metadata_namespaces(
     metadata: &HashMap<String, Value>,
 ) -> std::result::Result<(), String> {
@@ -77,6 +215,146 @@ fn reject_reserved_local_metadata_namespaces(
         }
     }
     Ok(())
+}
+
+fn clean_totp_display_value(
+    value: Option<&str>,
+    default: &str,
+) -> std::result::Result<String, String> {
+    let cleaned = value.unwrap_or(default).trim();
+    if cleaned.is_empty() {
+        return Err("[auth] TOTP issuer/label must not be empty".to_string());
+    }
+    Ok(cleaned.to_string())
+}
+
+fn ensure_totp_manageable_identity(identity: &LocalIdentity) -> std::result::Result<(), String> {
+    if matches!(
+        identity.state,
+        LocalAccountState::Disabled | LocalAccountState::Locked
+    ) {
+        return Err("[auth] local user cannot manage TOTP in current state".to_string());
+    }
+    Ok(())
+}
+
+fn auth_totp_metadata(
+    metadata: &HashMap<String, Value>,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    match metadata.get("auth") {
+        Some(Value::Map(auth)) => match auth.get("totp") {
+            Some(Value::Map(totp)) => Ok(totp.clone()),
+            Some(_) => Err("[auth] local TOTP metadata must be a map".to_string()),
+            None => Ok(HashMap::new()),
+        },
+        Some(_) => Err("[auth] local auth metadata must be a map".to_string()),
+        None => Ok(HashMap::new()),
+    }
+}
+
+fn set_auth_totp_metadata(
+    metadata: &mut HashMap<String, Value>,
+    totp: Option<HashMap<String, Value>>,
+) -> std::result::Result<(), String> {
+    let mut auth = match metadata.remove("auth") {
+        Some(Value::Map(auth)) => auth,
+        Some(_) => return Err("[auth] local auth metadata must be a map".to_string()),
+        None => HashMap::new(),
+    };
+
+    match totp {
+        Some(totp) => {
+            auth.insert("totp".to_string(), Value::Map(totp));
+            metadata.insert("auth".to_string(), Value::Map(auth));
+        }
+        None => {
+            auth.remove("totp");
+            if !auth.is_empty() {
+                metadata.insert("auth".to_string(), Value::Map(auth));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn bool_field(map: &HashMap<String, Value>, key: &str) -> Option<bool> {
+    match map.get(key) {
+        Some(Value::Bool(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn int_field(map: &HashMap<String, Value>, key: &str) -> Option<i64> {
+    match map.get(key) {
+        Some(Value::Int(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn string_field(map: &HashMap<String, Value>, key: &str) -> Option<String> {
+    match map.get(key) {
+        Some(Value::String(value)) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn totp_status_from_identity(
+    identity: &LocalIdentity,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    let metadata = local_metadata_to_value_map(&identity.metadata_json)?;
+    let totp = auth_totp_metadata(&metadata)?;
+    let enabled = bool_field(&totp, "enabled").unwrap_or(false);
+    let pending = bool_field(&totp, "pending").unwrap_or(false);
+    let required = bool_field(&totp, "required").unwrap_or(false);
+
+    let mut status = HashMap::from([
+        ("subject_id".to_string(), Value::String(identity.id.clone())),
+        ("id".to_string(), Value::String(identity.id.clone())),
+        (
+            "local_user_id".to_string(),
+            Value::String(identity.id.clone()),
+        ),
+        (
+            "identifier_kind".to_string(),
+            Value::String(identity.identifier_kind.clone()),
+        ),
+        (
+            "identifier".to_string(),
+            Value::String(identity.identifier.clone()),
+        ),
+        (
+            "identifier_normalized".to_string(),
+            Value::String(identity.identifier_normalized.clone()),
+        ),
+        (
+            "state".to_string(),
+            Value::String(identity.state.as_str().to_string()),
+        ),
+        ("enabled".to_string(), Value::Bool(enabled)),
+        ("pending".to_string(), Value::Bool(pending)),
+        ("required".to_string(), Value::Bool(required)),
+    ]);
+
+    if identity.identifier_kind == "email" {
+        status.insert(
+            "email".to_string(),
+            Value::String(identity.identifier.clone()),
+        );
+    }
+    if let Some(issuer) = string_field(&totp, "issuer") {
+        status.insert("issuer".to_string(), Value::String(issuer));
+    }
+    if let Some(label) = string_field(&totp, "label") {
+        status.insert("label".to_string(), Value::String(label));
+    }
+    for key in ["created_at", "updated_at", "confirmed_at"] {
+        if let Some(value) = int_field(&totp, key) {
+            status.insert(key.to_string(), Value::Int(value));
+        }
+    }
+
+    Ok(status)
 }
 
 fn local_metadata_to_value_map(

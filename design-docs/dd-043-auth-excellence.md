@@ -48,6 +48,7 @@ Everything below is merged or intended as the current v0.4.9 baseline:
 - Current-user session management: `user_sessions(req)`, `logout_all(req, keep_current)`
 - Staged auth challenge primitives: `begin_auth_challenge()`, `current_auth_challenge()`, `complete_auth_challenge()`, `cancel_auth_challenge()`
 - TOTP primitives: `totp_secret()`, `verify_totp()`, `totp_uri()`
+- Local TOTP helpers: `begin_totp_enrollment(...)`, `confirm_totp_enrollment(...)`, `verify_local_totp(...)`, `totp_status(...)`, `reset_totp(...)`
 - Route/API protection: `require_auth()` middleware/path/request helper with HTML redirect vs API 401 behavior
 - Bearer-token/resource-server helpers: `oauth_validate(...)`, `oauth_introspect(...)`
 - Built-in login page with configurable title/logo/copy/provider buttons
@@ -117,12 +118,12 @@ Goal: make the extension seam explicit and safe without inventing a full RBAC sy
 
 Goal: make TOTP a real local-auth extension path without requiring template-owned TOTP tables.
 
-- [ ] Add TOTP enrollment helpers around the existing primitives, e.g. `begin_totp_enrollment(...)`, `confirm_totp_enrollment(...)`, `totp_status(...)`, `reset_totp(...)`
-- [ ] Store TOTP enrollment state under the reserved auth metadata namespace on the local identity, unless implementation proves a separate auth-owned record is necessary
-- [ ] Keep TOTP secrets server-side only and absent from safe payloads/current-user/template data
-- [ ] Use staged auth challenges for password → TOTP and setup-required continuations
-- [ ] Ensure protected-route/API access is not granted until required setup/TOTP steps complete
-- [ ] Add tests for enrollment, verification, reset/re-enrollment, disabled/locked account rejection, and no-secret leakage
+- [x] Add TOTP enrollment helpers around the existing primitives: `begin_totp_enrollment(...)`, `confirm_totp_enrollment(...)`, `verify_local_totp(...)`, `totp_status(...)`, `reset_totp(...)`
+- [x] Store TOTP enrollment state under the reserved auth metadata namespace on the local identity
+- [x] Keep TOTP secrets server-side and absent from safe payloads/current-user/template data; only one-time setup URI material is returned by enrollment
+- [x] Document staged auth challenge composition for password → TOTP and setup-required continuations
+- [x] Ensure examples do not grant protected-route/API access until required setup/TOTP steps complete
+- [x] Add tests for enrollment, verification, reset/re-enrollment, disabled/locked account rejection, and no-secret leakage
 
 ### PR 3 — Password Reset Essentials
 
@@ -172,6 +173,7 @@ Everything below is explicitly deferred. It may be valuable later, but it is not
 Only if real apps prove the final-sprint primitives are insufficient:
 
 - Dedicated TOTP enrollment storage instead of reserved local-user metadata
+- TOTP failed-attempt throttling and last-used-step replay tracking if apps need std/auth-owned lockout policy
 - Dedicated local-account profile/admin APIs
 - Higher-level `local_sign_in(...)` wrapper if explicit composition proves too verbose
 - `enable_local_auth(...)` convenience preset

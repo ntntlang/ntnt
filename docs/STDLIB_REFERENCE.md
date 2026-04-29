@@ -1827,9 +1827,11 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`auth_me`](#authme) | Return current user as JSON for SPAs. |
 | [`auth_start`](#authstart) | Handle OAuth login start - redirects to the provider's authorization page. |
 | [`begin_auth_challenge`](#beginauthchallenge) | Persist a pending auth challenge and attach the challenge cookie. |
+| [`begin_totp_enrollment`](#begintotpenrollment) | Start TOTP enrollment for a local identity and return one-time setup material. |
 | [`bootstrap_local_user`](#bootstraplocaluser) | Provision an initial local credential record for app setup flows. |
 | [`cancel_auth_challenge`](#cancelauthchallenge) | Cancel the current auth challenge and clear the challenge cookie. |
 | [`complete_auth_challenge`](#completeauthchallenge) | Upgrade the current auth challenge into a full authenticated session. |
+| [`confirm_totp_enrollment`](#confirmtotpenrollment) | Confirm a pending local TOTP enrollment using a code from the authenticator app. |
 | [`create_session_from_oauth`](#createsessionfromoauth) | Create a session from OAuth user info and tokens. |
 | [`csrf_field`](#csrffield) | Get an HTML hidden input field with the CSRF token. |
 | [`csrf_token`](#csrftoken) | Get the CSRF token for the current session. |
@@ -1855,6 +1857,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`oauth_start`](#oauthstart) | Generate an OAuth authorization URL for manual flow control. |
 | [`oauth_validate`](#oauthvalidate) | Validate an incoming bearer token (for APIs acting as resource servers). |
 | [`require_auth`](#requireauth) | Protect routes with the configured auth session. |
+| [`reset_totp`](#resettotp) | Clear a local user's pending or confirmed TOTP enrollment. |
 | [`rotate_session`](#rotatesession) | Rotate the current session ID and attach the new auth cookie to a response. |
 | [`session_data`](#sessiondata) | Get custom data stored in the current session. |
 | [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions, auth challenges, OAuth states, and exchange tokens from the session store. |
@@ -1863,12 +1866,14 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`sign_in_session`](#signinsession) | Persist a request-aware session and attach the auth cookie to an existing response. |
 | [`sign_out_session`](#signoutsession) | Revoke the current session and attach a clearing auth cookie to a response. |
 | [`totp_secret`](#totpsecret) | Generate a new TOTP secret for MFA setup. |
+| [`totp_status`](#totpstatus) | Read a local user's safe TOTP enrollment status. |
 | [`totp_uri`](#totpuri) | Generate an otpauth:// URI for QR codes. |
 | [`update_local_user_metadata`](#updatelocalusermetadata) | Merge or replace app-owned local identity metadata and return a safe payload. |
 | [`user_sessions`](#usersessions) | Get all active sessions for the current user. |
 | [`validate_csrf`](#validatecsrf) | Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH). |
 | [`verify_csrf`](#verifycsrf) | Verify a CSRF token against the session's token. |
 | [`verify_local_password`](#verifylocalpassword) | Verify a local credential record and return a safe auth user payload. |
+| [`verify_local_totp`](#verifylocaltotp) | Verify a local user's confirmed TOTP code without exposing the stored secret. |
 | [`verify_totp`](#verifytotp) | Verify a TOTP code against a secret. |
 
 #### `auth_callback`
@@ -2040,6 +2045,35 @@ begin_auth_challenge(redirect("/admin/verify"), map { "subject_id": user.id, "ki
 
 ---
 
+#### `begin_totp_enrollment`
+
+```ntnt
+begin_totp_enrollment(identifier: String, options?: Map) -> Result<Map, String>
+```
+
+Start TOTP enrollment for a local identity and return one-time setup material.
+
+Generates a new TOTP secret, stores it under std/auth-owned local identity metadata (`auth.totp.pending_secret`), and returns safe status fields plus an `otpauth://` URI for QR-code setup. The raw secret is not returned as a standalone field and is never exposed through `local_user(...)`, `current_user(...)`, or `totp_status(...)`. The setup URI itself is secret-bearing; render it only in the setup response and do not log, cache, or persist it.
+
+**Parameters:**
+
+- `identifier` — The local user identifier. Email is the default identifier kind.
+- `options` — Optional map with `identifier_kind`, `issuer`, and `label`
+
+**Returns:** Ok(map) with pending TOTP status and setup `uri`; Err(message) on invalid identity/state/storage
+
+**Examples:**
+
+```ntnt
+begin_totp_enrollment("admin@example.com", map { "issuer": "Admin" })?  // Create TOTP setup URI
+```
+
+**See also:** `confirm_totp_enrollment`, `totp_status`, `verify_local_totp`, `reset_totp`
+
+*Since v0.4.9*
+
+---
+
 #### `bootstrap_local_user`
 
 ```ntnt
@@ -2131,6 +2165,36 @@ complete_auth_challenge(redirect("/admin"), req, map { "claims": app_claims_for_
 ```
 
 **See also:** `begin_auth_challenge`, `current_auth_challenge`, `cancel_auth_challenge`, `sign_in_session`
+
+*Since v0.4.9*
+
+---
+
+#### `confirm_totp_enrollment`
+
+```ntnt
+confirm_totp_enrollment(identifier: String, code: String, options?: Map) -> Result<Map, String>
+```
+
+Confirm a pending local TOTP enrollment using a code from the authenticator app.
+
+Moves `auth.totp.pending_secret` to std/auth-owned confirmed secret metadata only after the submitted code verifies. Returned status is secret-free and safe to use in setup flows.
+
+**Parameters:**
+
+- `identifier` — The local user identifier. Email is the default identifier kind.
+- `code` — The 6-digit TOTP code from the authenticator app
+- `options` — Optional map with `identifier_kind`
+
+**Returns:** Ok(map) with confirmed TOTP status; Err(message) on missing pending setup or invalid code
+
+**Examples:**
+
+```ntnt
+confirm_totp_enrollment("admin@example.com", form["code"] ?? "")?  // Finish TOTP setup
+```
+
+**See also:** `begin_totp_enrollment`, `verify_local_totp`, `totp_status`, `reset_totp`
 
 *Since v0.4.9*
 
@@ -2882,6 +2946,35 @@ require_auth("/admin/*")  // Protect all admin file routes
 
 ---
 
+#### `reset_totp`
+
+```ntnt
+reset_totp(identifier: String, options?: Map) -> Result<Map, String>
+```
+
+Clear a local user's pending or confirmed TOTP enrollment.
+
+Removes only std/auth-owned `auth.totp` metadata and preserves app-owned metadata namespaces.
+
+**Parameters:**
+
+- `identifier` — The local user identifier. Email is the default identifier kind.
+- `options` — Optional map with `identifier_kind`
+
+**Returns:** Ok(map) with disabled TOTP status; Err(message) on invalid identity/state/storage
+
+**Examples:**
+
+```ntnt
+reset_totp("admin@example.com")?  // Remove TOTP enrollment
+```
+
+**See also:** `begin_totp_enrollment`, `confirm_totp_enrollment`, `totp_status`
+
+*Since v0.4.9*
+
+---
+
 #### `rotate_session`
 
 ```ntnt
@@ -3119,6 +3212,35 @@ totp_secret()  // => "JBSWY3DPEHPK3PXP..."  // Generate secret
 
 ---
 
+#### `totp_status`
+
+```ntnt
+totp_status(identifier: String, options?: Map) -> Result<Map, String>
+```
+
+Read a local user's safe TOTP enrollment status.
+
+Returns status booleans and display metadata only. It never includes pending or confirmed TOTP secret material.
+
+**Parameters:**
+
+- `identifier` — The local user identifier. Email is the default identifier kind.
+- `options` — Optional map with `identifier_kind`
+
+**Returns:** Ok(map) with safe TOTP status; Err(message) on invalid identity/storage
+
+**Examples:**
+
+```ntnt
+totp_status("admin@example.com")?  // Check whether TOTP is enabled
+```
+
+**See also:** `begin_totp_enrollment`, `confirm_totp_enrollment`, `verify_local_totp`, `reset_totp`
+
+*Since v0.4.9*
+
+---
+
 #### `totp_uri`
 
 ```ntnt
@@ -3301,6 +3423,36 @@ sign_in_session(redirect("/admin"), req, map { "subject_id": verified["subject_i
 - **TypeError**: identifier must be a string — *Fix: Pass the submitted email/identifier as a string*
 
 **See also:** `sign_in_session`, `current_session`
+
+*Since v0.4.9*
+
+---
+
+#### `verify_local_totp`
+
+```ntnt
+verify_local_totp(identifier: String, code: String, options?: Map) -> Result<Map, String>
+```
+
+Verify a local user's confirmed TOTP code without exposing the stored secret.
+
+Use after `verify_local_password(...)` in staged login flows. Apps should keep the user in an auth challenge until this helper succeeds, then complete the challenge with `complete_auth_challenge(...)` or sign in through `sign_in_session(...)`. Pair TOTP endpoints with app rate limiting/backoff; this helper verifies codes but does not own account lockout policy.
+
+**Parameters:**
+
+- `identifier` — The local user identifier. Email is the default identifier kind.
+- `code` — The 6-digit TOTP code from the authenticator app
+- `options` — Optional map with `identifier_kind`
+
+**Returns:** Ok(map) with `verified: true` and safe TOTP status; Err(message) on invalid code or unavailable TOTP
+
+**Examples:**
+
+```ntnt
+verify_local_totp("admin@example.com", form["code"] ?? "")?  // Verify second factor
+```
+
+**See also:** `begin_auth_challenge`, `complete_auth_challenge`, `totp_status`
 
 *Since v0.4.9*
 
