@@ -7296,6 +7296,7 @@ mod tests {
                 "credential",
                 "secret",
                 "token_hash",
+                "local_user_id",
             ] {
                 assert!(
                     !issued.contains_key(secret_key),
@@ -7384,6 +7385,91 @@ mod tests {
     }
 
     #[test]
+    fn test_password_reset_consume_is_atomic_when_sqlite_credential_write_fails() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let module = init();
+        let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+        let issue_password_reset = module_fn(&module, "issue_password_reset");
+        let consume_password_reset = module_fn(&module, "consume_password_reset");
+        let verify_local_password = module_fn(&module, "verify_local_password");
+
+        result_ok_map(
+            bootstrap_local_user(&[
+                Value::String("atomic-reset@example.com".to_string()),
+                Value::String("temporary reset password".to_string()),
+            ])
+            .unwrap(),
+        );
+        let issued = result_ok_map(
+            issue_password_reset(&[Value::String("atomic-reset@example.com".to_string())]).unwrap(),
+        );
+        let token = map_string(&issued, "token");
+
+        {
+            let conn_guard = SQLITE_CONN.lock().unwrap();
+            let conn = conn_guard.as_ref().expect("SQLite should be initialized");
+            conn.execute(
+                "CREATE TRIGGER fail_password_reset_credential_update
+                 BEFORE UPDATE ON auth_local_credentials
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced password reset credential failure');
+                 END",
+                [],
+            )
+            .expect("test trigger should be installed");
+        }
+
+        let failed = result_err_string(
+            consume_password_reset(&[
+                Value::String(token.clone()),
+                Value::String("rotated by reset".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert!(
+            failed.contains("forced password reset credential failure"),
+            "unexpected storage failure message: {failed}"
+        );
+
+        let old_password_still_valid = result_ok_map(
+            verify_local_password(&[
+                Value::String("atomic-reset@example.com".to_string()),
+                Value::String("temporary reset password".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(map_string(&old_password_still_valid, "state"), "bootstrap");
+
+        {
+            let conn_guard = SQLITE_CONN.lock().unwrap();
+            let conn = conn_guard.as_ref().expect("SQLite should be initialized");
+            conn.execute("DROP TRIGGER fail_password_reset_credential_update", [])
+                .expect("test trigger should be dropped");
+        }
+
+        let consumed = result_ok_map(
+            consume_password_reset(&[
+                Value::String(token),
+                Value::String("rotated by reset".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(map_string(&consumed, "state"), "active");
+
+        let new_password = result_ok_map(
+            verify_local_password(&[
+                Value::String("atomic-reset@example.com".to_string()),
+                Value::String("rotated by reset".to_string()),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(map_string(&new_password, "state"), "active");
+    }
+
+    #[test]
     fn test_password_reset_helpers_use_generic_responses_for_missing_expired_and_malformed_tokens()
     {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
@@ -7423,15 +7509,11 @@ mod tests {
                 ])
                 .unwrap(),
             );
-            let expired_token = map_string(&expired_issue, "token");
-            let expired = result_err_string(
-                consume_password_reset(&[
-                    Value::String(expired_token),
-                    Value::String("expired reset password".to_string()),
-                ])
-                .unwrap(),
+            assert_eq!(map_string(&expired_issue, "status"), "accepted");
+            assert!(
+                !expired_issue.contains_key("token") && !expired_issue.contains_key("selector"),
+                "zero-ttl reset issuance must not return unstored token material"
             );
-            assert_eq!(expired, "Invalid password reset token");
 
             let malformed = result_err_string(
                 consume_password_reset(&[

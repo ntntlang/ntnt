@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 use super::storage::{
-    consume_local_password_reset_token_record, get_local_credential_secret_record,
-    get_local_identity_by_id_record, get_local_identity_by_identifier_record,
+    consume_local_password_reset_token_and_store_credential_record,
+    get_local_credential_secret_record, get_local_identity_by_identifier_record,
     normalize_local_identifier, store_local_identity_and_credential_record,
     store_local_password_reset_token_record, update_local_identity_by_identifier_record,
     LocalAccountState, LocalCredentialSecret, LocalIdentity, LocalPasswordResetToken,
@@ -590,26 +590,27 @@ pub(in crate::stdlib::auth) fn issue_password_reset_record(
         return Ok(password_reset_accepted_response());
     }
 
+    let now = chrono::Utc::now().timestamp();
+    let expires_at = now.saturating_add(ttl_seconds.max(0));
+    if expires_at <= now {
+        return Ok(password_reset_accepted_response());
+    }
+
     let selector = random_urlsafe_token(16);
     let verifier = random_urlsafe_token(32);
     let token = format!("{selector}.{verifier}");
-    let now = chrono::Utc::now().timestamp();
-    let expires_at = now.saturating_add(ttl_seconds.max(0));
-    if expires_at > now {
-        store_local_password_reset_token_record(&LocalPasswordResetToken {
-            selector: selector.clone(),
-            local_user_id: identity.id.clone(),
-            token_hash: hash_password_reset_verifier(&verifier),
-            created_at: now,
-            expires_at,
-        })?;
-    }
+    store_local_password_reset_token_record(&LocalPasswordResetToken {
+        selector: selector.clone(),
+        local_user_id: identity.id.clone(),
+        token_hash: hash_password_reset_verifier(&verifier),
+        created_at: now,
+        expires_at,
+    })?;
 
     Ok(HashMap::from([
         ("status".to_string(), Value::String("accepted".to_string())),
         ("selector".to_string(), Value::String(selector)),
         ("token".to_string(), Value::String(token)),
-        ("local_user_id".to_string(), Value::String(identity.id)),
         ("created_at".to_string(), Value::Int(now)),
         ("expires_at".to_string(), Value::Int(expires_at)),
     ]))
@@ -631,31 +632,9 @@ pub(in crate::stdlib::auth) fn consume_password_reset_record(
     }
 
     let now = chrono::Utc::now().timestamp();
-    let Some(reset_token) = consume_local_password_reset_token_record(selector, now)? else {
-        return Err(INVALID_PASSWORD_RESET_TOKEN.to_string());
-    };
     let submitted_hash = hash_password_reset_verifier(verifier);
-    if !super::constant_time_compare(&reset_token.token_hash, &submitted_hash) {
-        return Err(INVALID_PASSWORD_RESET_TOKEN.to_string());
-    }
-
-    let identity = get_local_identity_by_id_record(&reset_token.local_user_id)?
-        .ok_or_else(|| INVALID_PASSWORD_RESET_TOKEN.to_string())?;
-    if matches!(
-        identity.state,
-        LocalAccountState::Disabled | LocalAccountState::Locked
-    ) {
-        return Err(INVALID_PASSWORD_RESET_TOKEN.to_string());
-    }
-
-    let now = chrono::Utc::now().timestamp();
-    let identity = LocalIdentity {
-        updated_at: now,
-        state: LocalAccountState::Active,
-        ..identity
-    };
     let credential = LocalCredentialSecret {
-        local_user_id: identity.id.clone(),
+        local_user_id: String::new(),
         password_hash: bcrypt::hash(new_password, bcrypt::DEFAULT_COST)
             .map_err(|_| "[auth] failed to hash local password".to_string())?,
         password_hash_algorithm: CredentialPasswordAlgorithm::Bcrypt
@@ -665,8 +644,16 @@ pub(in crate::stdlib::auth) fn consume_password_reset_record(
         password_changed_at: now,
         must_change_password: false,
     };
-
-    store_local_identity_and_credential_record(&identity, &credential)?;
+    let Some((identity, credential)) =
+        consume_local_password_reset_token_and_store_credential_record(
+            selector,
+            &submitted_hash,
+            &credential,
+            now,
+        )?
+    else {
+        return Err(INVALID_PASSWORD_RESET_TOKEN.to_string());
+    };
     Ok(VerifiedLocalPassword {
         identity,
         credential,
