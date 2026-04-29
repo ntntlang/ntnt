@@ -70,6 +70,50 @@ pub(in crate::stdlib::auth) fn bootstrap_local_user_record(
     })
 }
 
+pub(in crate::stdlib::auth) fn set_local_password_record(
+    identifier_kind: &str,
+    identifier: &str,
+    current_password: &str,
+    new_password: &str,
+) -> std::result::Result<VerifiedLocalPassword, String> {
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier = identifier.trim();
+
+    if new_password.trim().is_empty() {
+        return Err("[auth] local password must not be empty".to_string());
+    }
+
+    let verified = verify_local_password_record(&kind, identifier, current_password)?;
+    if current_password == new_password {
+        return Err("[auth] local password must differ from current password".to_string());
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let identity = LocalIdentity {
+        updated_at: now,
+        state: LocalAccountState::Active,
+        ..verified.identity
+    };
+    let credential = LocalCredentialSecret {
+        local_user_id: identity.id.clone(),
+        password_hash: bcrypt::hash(new_password, bcrypt::DEFAULT_COST)
+            .map_err(|_| "[auth] failed to hash local password".to_string())?,
+        password_hash_algorithm: CredentialPasswordAlgorithm::Bcrypt
+            .storage_name()
+            .to_string(),
+        password_hash_params_json: "{}".to_string(),
+        password_changed_at: now,
+        must_change_password: false,
+    };
+
+    store_local_identity_and_credential_record(&identity, &credential)?;
+
+    Ok(VerifiedLocalPassword {
+        identity,
+        credential,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CredentialPasswordAlgorithm {
     Bcrypt,

@@ -3829,6 +3829,29 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 required(2)
             );
             sig!(
+                "set_local_password",
+                [
+                    "identifier" => Type::String,
+                    "current_password" => Type::String,
+                    "new_password" => Type::String,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(3)
+            );
+            sig!(
                 "verify_local_password",
                 [
                     "identifier" => Type::String,
@@ -4243,6 +4266,19 @@ mod tests {
             r#"
             import { bootstrap_local_user } from "std/auth"
             bootstrap_local_user(42, "pw")
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("expected String"));
+        assert!(errs[0].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_auth_set_local_password_signature_checks_args() {
+        let errs = check_errors(
+            r#"
+            import { set_local_password } from "std/auth"
+            set_local_password(42, "current", "new")
             "#,
         );
         assert_eq!(errs.len(), 1);

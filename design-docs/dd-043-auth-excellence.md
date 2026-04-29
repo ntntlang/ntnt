@@ -302,9 +302,11 @@ Current pressure points:
 ### Phase 9 — First-Class Local Auth
 **Goal:** Make `std/auth` world-class not only for OAuth/session plumbing, but also for the extremely common app shape of **local email + password + TOTP auth**.
 
-**Current PR #100 slice:** PR #100 adds a narrow `bootstrap_local_user(identifier, password, options?)` provisioning primitive on top of the existing local identity/credential storage. It stores the auth-owned local identity and credential atomically for memory/SQLite, returns only a safe bootstrap user payload, marks the account `bootstrap` with `must_change_password: true`, and intentionally does not add a public `local_sign_in(...)` wrapper or any cookie/challenge/session semantic changes.
+**PR #100 baseline:** PR #100 added a narrow `bootstrap_local_user(identifier, password, options?)` provisioning primitive on top of the existing local identity/credential storage. It stores the auth-owned local identity and credential atomically for memory/SQLite, returns only a safe bootstrap user payload, marks the account `bootstrap` with `must_change_password: true`, and intentionally does not add a public `local_sign_in(...)` wrapper or any cookie/challenge/session semantic changes.
 
-**Current baseline after this slice:** local identity/credential storage, `verify_local_password(...)`, `bootstrap_local_user(...)`, generated docs, typechecker signatures, and request-aware manual session completion exist. The next implementation work should compose these primitives explicitly until a higher-level local sign-in helper is proven necessary.
+**Current follow-up slice:** this branch adds `set_local_password(identifier, current_password, new_password, options?)`, a narrow setup-completion/password-rotation primitive. It verifies the current local credential, rejects reusing the same plaintext as the replacement, rotates the local credential, transitions setup-required local accounts to `active`, clears `must_change_password`, returns only the safe local user payload, and still does not sign users in, create sessions, set cookies, enroll TOTP, reset passwords, or own app roles/profile data.
+
+**Current baseline after these slices:** local identity/credential storage, `verify_local_password(...)`, `bootstrap_local_user(...)`, `set_local_password(...)`, generated docs, typechecker signatures, and request-aware manual session completion exist. The next implementation work should compose these primitives explicitly until a higher-level local sign-in helper is proven necessary.
 
 **Why this must exist:** the current `std/auth` surface is strong at sessions, cookies, staged auth challenges, OAuth/OIDC, TOTP primitives, sign-in/sign-out helpers, and protected-route handling. But a normal local admin/app flow still requires developers to build and own a mini auth system beside it:
 
@@ -373,6 +375,7 @@ A later `enable_local_auth(...)` convenience wrapper is acceptable only if it de
 - [x] Support account states needed by real flows: bootstrap/pending setup/active/disabled/locked/password-change-required
 - [x] Add public bootstrap provisioning through `bootstrap_local_user(...)` as the first narrow setup primitive
 - [x] Store bootstrap identity + credential atomically for memory/SQLite so a credential-write failure cannot orphan the identity row
+- [x] Add explicit setup-completion/password-rotation through `set_local_password(...)` so bootstrap credentials can be rotated before normal session completion
 - [ ] Support config/env-driven bootstrap seeding for the common admin-panel deployment case
 - [ ] Ensure bootstrap credentials force rotation/setup completion instead of becoming a permanent production secret path
 - [x] Add memory/SQLite contract tests by default
@@ -392,9 +395,10 @@ Because this lands before 0.4.9 is released, the old pre-release `sign_in_sessio
 - [ ] Ensure local sessions receive `device_name`, `user_agent_hash`, and `last_ip_hash` just like OAuth sessions
 
 #### Phase 9D — First-Login Activation, Forced Password Change, and TOTP Enrollment
-- [ ] Support first-login setup as a first-class local-auth flow
+- [x] Support the password-rotation/setup-completion primitive through `set_local_password(...)`
+- [ ] Support first-login setup as a staged first-class local-auth flow
 - [ ] Support staged TOTP enrollment using the existing auth challenge model
-- [ ] Support forced password change before final session completion
+- [x] Support forced password rotation before final session completion through explicit primitive composition
 - [ ] Support completion into a normal signed-in session only after required setup steps are satisfied
 - [ ] Persist TOTP enrollment/setup state explicitly; do not hide durable enrollment state inside generic challenge `data_json`
 - [ ] Define TOTP reset/re-enrollment behavior after password reset or admin intervention
