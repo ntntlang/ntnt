@@ -71,7 +71,8 @@ pub use guards::{
     enforce_auth_for_request, get_protected_paths, register_protected_paths, reset_protected_paths,
 };
 use local::{
-    bootstrap_local_user_record, set_local_password_record, verified_local_password_to_value,
+    bootstrap_local_user_record, local_identity_to_safe_value, local_user_record,
+    set_local_password_record, update_local_user_metadata_record, verified_local_password_to_value,
     verify_local_password_record,
 };
 use oauth::extract_user_info;
@@ -679,6 +680,135 @@ fn validate_http_request_arg(function_name: &str, req: &Value) -> Result<()> {
             function_name,
             other.type_name()
         ))),
+    }
+}
+
+fn parse_local_identifier_options(function_name: &str, options: Option<&Value>) -> Result<String> {
+    match options {
+        Some(Value::Map(map)) => match map.get("identifier_kind") {
+            Some(Value::String(kind)) => Ok(kind.clone()),
+            Some(other) => Err(IntentError::type_error(format!(
+                "[auth] {}() identifier_kind must be a string, got {}",
+                function_name,
+                other.type_name()
+            ))),
+            None => Ok("email".to_string()),
+        },
+        Some(other) => Err(IntentError::type_error(format!(
+            "[auth] {}() options must be a map, got {}",
+            function_name,
+            other.type_name()
+        ))),
+        None => Ok("email".to_string()),
+    }
+}
+
+fn parse_local_metadata_update_options(options: Option<&Value>) -> Result<(String, bool)> {
+    match options {
+        Some(Value::Map(map)) => {
+            let identifier_kind = match map.get("identifier_kind") {
+                Some(Value::String(kind)) => kind.clone(),
+                Some(other) => {
+                    let message = format!(
+                        "[auth] update_local_user_metadata() identifier_kind must be a string, got {}",
+                        other.type_name()
+                    );
+                    return Err(IntentError::type_error(message));
+                }
+                None => "email".to_string(),
+            };
+            let replace = match map.get("replace") {
+                Some(Value::Bool(value)) => *value,
+                Some(other) => {
+                    return Err(IntentError::type_error(format!(
+                        "[auth] update_local_user_metadata() replace must be a bool, got {}",
+                        other.type_name()
+                    )))
+                }
+                None => false,
+            };
+            Ok((identifier_kind, replace))
+        }
+        Some(other) => Err(IntentError::type_error(format!(
+            "[auth] update_local_user_metadata() options must be a map, got {}",
+            other.type_name()
+        ))),
+        None => Ok(("email".to_string(), false)),
+    }
+}
+
+fn requested_group_ids(value: &Value) -> Result<Vec<String>> {
+    match value {
+        Value::String(group_id) => Ok(vec![group_id.clone()]),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(group_id) => Ok(group_id.clone()),
+                other => Err(IntentError::type_error(format!(
+                    "[auth] has_group() group IDs must be strings, got {}",
+                    other.type_name()
+                ))),
+            })
+            .collect(),
+        other => Err(IntentError::type_error(format!(
+            "[auth] has_group() expects a group id string or array of strings, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn is_http_request_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Map(map)
+            if matches!(map.get("method"), Some(Value::String(_)))
+                && matches!(map.get("path"), Some(Value::String(_)))
+    )
+}
+
+fn session_value_for_auth_subject(value: &Value) -> Result<Option<Value>> {
+    if is_http_request_value(value) {
+        validate_http_request_arg("has_group", value)?;
+        let Some(session_id) = get_session_id_from_request(value) else {
+            return Ok(None);
+        };
+        return Ok(get_session_by_id(&session_id).map(|session| session_to_value(&session)));
+    }
+
+    match value {
+        Value::Map(_) => Ok(Some(value.clone())),
+        other => Err(IntentError::type_error(format!(
+            "[auth] has_group() expects a request or session map, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn session_value_has_group(session_value: &Value, group_ids: &[String]) -> bool {
+    let Value::Map(session) = session_value else {
+        return false;
+    };
+    let Some(Value::Map(data)) = session.get("data") else {
+        return false;
+    };
+    value_map_has_group(data, group_ids)
+}
+
+fn value_map_has_group(map: &HashMap<String, Value>, group_ids: &[String]) -> bool {
+    let direct_match = match map.get("group_ids") {
+        Some(Value::Array(values)) => values.iter().any(|value| match value {
+            Value::String(candidate) => group_ids.iter().any(|expected| expected == candidate),
+            _ => false,
+        }),
+        _ => false,
+    };
+    if direct_match {
+        return true;
+    }
+
+    match map.get("claims") {
+        Some(Value::Map(claims)) => value_map_has_group(claims, group_ids),
+        _ => false,
     }
 }
 
@@ -3741,6 +3871,183 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt local_user
+    // @module std/auth
+    // @signature local_user(identifier: String, options?: Map) -> Result<Map, String>
+    // Load a safe local identity payload, including non-secret extension metadata.
+    //
+    // Use this from trusted server-side setup/admin code when an app needs the
+    // local identity record and app-owned metadata without verifying a password.
+    // Reserved `auth.*` metadata is kept server-side and omitted from the returned
+    // payload; use dedicated std/auth helpers for stdlib-managed lifecycle state.
+    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param options Optional map with `identifier_kind` (default `"email"`)
+    // @returns Ok(map) with safe local user fields and `metadata`; Err(message) when missing or unsupported
+    // @see_also update_local_user_metadata, verify_local_password
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #metadata
+    // @example let user = local_user("admin@example.com")? ~ "Load a safe local user payload"
+    module.insert(
+        "local_user".to_string(),
+        Value::NativeFunction {
+            name: "local_user".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::type_error(
+                        "[auth] local_user() requires identifier and optional options".to_string(),
+                    ));
+                }
+
+                let _config = get_auth_config().ok_or_else(|| {
+                    IntentError::runtime_error(
+                        "[auth] Auth not initialized. Call enable_auth() before local_user()."
+                            .to_string(),
+                    )
+                })?;
+
+                let identifier = match &args[0] {
+                    Value::String(s) => s.as_str(),
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] local_user() identifier must be a string, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let identifier_kind = parse_local_identifier_options("local_user", args.get(1))?;
+
+                match local_user_record(&identifier_kind, identifier) {
+                    Ok(identity) => match local_identity_to_safe_value(&identity) {
+                        Ok(value) => Ok(Value::ok(value)),
+                        Err(message) => Ok(Value::err(Value::String(message))),
+                    },
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
+    // @ntnt update_local_user_metadata
+    // @module std/auth
+    // @signature update_local_user_metadata(identifier: String, metadata: Map, options?: Map) -> Result<Map, String>
+    // Merge or replace app-owned local identity metadata and return a safe payload.
+    //
+    // By default this helper performs a top-level merge into `metadata_json` and
+    // preserves reserved `auth.*` namespaces for std/auth-managed lifecycle state.
+    // Pass `map { "replace": true }` to replace app-visible metadata. Inputs may
+    // not write `auth` or `auth.*` keys directly.
+    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param metadata App-owned metadata map to merge or replace
+    // @param options Optional map with `identifier_kind` and `replace`
+    // @returns Ok(map) with safe local user fields and metadata; Err(message) on missing user, reserved namespace, or unsupported backend
+    // @see_also local_user, verify_local_password
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #metadata
+    // @example update_local_user_metadata(user.email, map { "app": map { "group_ids": ["admins"] } })? ~ "Attach app authorization context"
+    module.insert(
+        "update_local_user_metadata".to_string(),
+        Value::NativeFunction {
+            name: "update_local_user_metadata".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "[auth] update_local_user_metadata() requires identifier, metadata, and optional options"
+                            .to_string(),
+                    ));
+                }
+
+                let _config = get_auth_config().ok_or_else(|| {
+                    IntentError::runtime_error(
+                        "[auth] Auth not initialized. Call enable_auth() before update_local_user_metadata()."
+                            .to_string(),
+                    )
+                })?;
+
+                let identifier = match &args[0] {
+                    Value::String(s) => s.as_str(),
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] update_local_user_metadata() identifier must be a string, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let metadata = match &args[1] {
+                    Value::Map(map) => map,
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] update_local_user_metadata() metadata must be a map, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let (identifier_kind, replace) = parse_local_metadata_update_options(args.get(2))?;
+
+                match update_local_user_metadata_record(
+                    &identifier_kind,
+                    identifier,
+                    metadata,
+                    replace,
+                ) {
+                    Ok(identity) => match local_identity_to_safe_value(&identity) {
+                        Ok(value) => Ok(Value::ok(value)),
+                        Err(message) => Ok(Value::err(Value::String(message))),
+                    },
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
+    // @ntnt has_group
+    // @module std/auth
+    // @signature has_group(subject: Request | Session, group_ids: String | [String]) -> Bool
+    // Check app-owned group IDs from authenticated session data.
+    //
+    // This is a thin authorization helper, not an RBAC system. Apps decide what
+    // group IDs mean and attach them during `sign_in_session(...)` as
+    // `data.group_ids` or `data.claims.group_ids`. The helper accepts either a
+    // request with an auth cookie or a session map from `current_session(req)`.
+    // @param subject Request or Session map
+    // @param group_ids Required group ID or any-of list
+    // @returns true if the active session contains any requested group ID
+    // @see_also require_auth, current_session, sign_in_session
+    // @since v0.4.9
+    // @tags #auth, #authorization, #rbac
+    // @example has_group(req, "admins") ~ "Check an API/page request for admin group membership"
+    // @example has_group(current_session(req)?, ["admins", "owners"]) ~ "Check any accepted group"
+    module.insert(
+        "has_group".to_string(),
+        Value::NativeFunction {
+            name: "has_group".to_string(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                if args.len() != 2 {
+                    return Err(IntentError::type_error(
+                        "[auth] has_group() requires a request/session and group id(s)".to_string(),
+                    ));
+                }
+
+                let group_ids = requested_group_ids(&args[1])?;
+                let Some(session_value) = session_value_for_auth_subject(&args[0])? else {
+                    return Ok(Value::Bool(false));
+                };
+                Ok(Value::Bool(session_value_has_group(
+                    &session_value,
+                    &group_ids,
+                )))
+            },
+        },
+    );
+
     // @ntnt bootstrap_local_user
     // @module std/auth
     // @signature bootstrap_local_user(identifier: String, password: String, options?: Map) -> Result<Map, String>
@@ -6479,6 +6786,266 @@ mod tests {
                 Some(Value::Bool(value)) => assert!(!*value),
                 other => panic!("unexpected verified must_change_password payload: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn test_local_user_metadata_helpers_round_trip_memory_and_sqlite() {
+        use super::storage::{
+            get_local_identity_by_identifier_record, store_local_credential_secret_record,
+            store_local_identity_record, LocalAccountState, LocalCredentialSecret, LocalIdentity,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            store_local_identity_record(&LocalIdentity {
+                id: "local-user-metadata".to_string(),
+                identifier_kind: "email".to_string(),
+                identifier: "Meta@Example.COM".to_string(),
+                identifier_normalized: "meta@example.com".to_string(),
+                created_at: 100,
+                updated_at: 100,
+                state: LocalAccountState::Active,
+                metadata_json: r#"{"app":{"theme":"dark"},"auth":{"totp":{"enabled":true,"secret":"server-only"}}}"#.to_string(),
+            })
+            .unwrap();
+            store_local_credential_secret_record(&LocalCredentialSecret {
+                local_user_id: "local-user-metadata".to_string(),
+                password_hash: bcrypt::hash("metadata password", 4).unwrap(),
+                password_hash_algorithm: "bcrypt".to_string(),
+                password_hash_params_json: "{}".to_string(),
+                password_changed_at: 101,
+                must_change_password: false,
+            })
+            .unwrap();
+
+            let module = init();
+            let local_user = module_fn(&module, "local_user");
+            let update_local_user_metadata = module_fn(&module, "update_local_user_metadata");
+            let verify_local_password = module_fn(&module, "verify_local_password");
+
+            let user = result_ok_map(
+                local_user(&[Value::String(" meta@example.com ".to_string())]).unwrap(),
+            );
+            match user.get("metadata") {
+                Some(Value::Map(metadata)) => {
+                    assert!(metadata.contains_key("app"));
+                    assert!(
+                        !format!("{metadata:?}").contains("server-only"),
+                        "safe local_user metadata must not expose std/auth secret material"
+                    );
+                }
+                other => panic!("expected safe metadata map, got {other:?}"),
+            }
+
+            let updated = result_ok_map(
+                update_local_user_metadata(&[
+                    Value::String("meta@example.com".to_string()),
+                    Value::Map(HashMap::from([(
+                        "app".to_string(),
+                        Value::Map(HashMap::from([
+                            ("theme".to_string(), Value::String("light".to_string())),
+                            (
+                                "group_ids".to_string(),
+                                Value::Array(vec![Value::String("admins".to_string())]),
+                            ),
+                        ])),
+                    )])),
+                ])
+                .unwrap(),
+            );
+            match updated.get("metadata") {
+                Some(Value::Map(metadata)) => match metadata.get("app") {
+                    Some(Value::Map(app)) => {
+                        match app.get("theme") {
+                            Some(Value::String(theme)) => assert_eq!(theme, "light"),
+                            other => panic!("expected theme metadata string, got {other:?}"),
+                        }
+                        match app.get("group_ids") {
+                            Some(Value::Array(group_ids)) => match group_ids.first() {
+                                Some(Value::String(group_id)) => assert_eq!(group_id, "admins"),
+                                other => panic!("expected group id string, got {other:?}"),
+                            },
+                            other => panic!("expected group_ids metadata array, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected app metadata map, got {other:?}"),
+                },
+                other => panic!("expected safe metadata map, got {other:?}"),
+            }
+
+            let verified = result_ok_map(
+                verify_local_password(&[
+                    Value::String("meta@example.com".to_string()),
+                    Value::String("metadata password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert!(
+                !verified.contains_key("metadata"),
+                "verify_local_password must stay auth-safe and not expose metadata by default"
+            );
+
+            let reserved_update = result_err_string(
+                update_local_user_metadata(&[
+                    Value::String("meta@example.com".to_string()),
+                    Value::Map(HashMap::from([(
+                        "auth".to_string(),
+                        Value::Map(HashMap::from([(
+                            "totp".to_string(),
+                            Value::String("client-controlled".to_string()),
+                        )])),
+                    )])),
+                ])
+                .unwrap(),
+            );
+            assert!(reserved_update.contains("reserved"));
+
+            let stored = get_local_identity_by_identifier_record("email", "meta@example.com")
+                .unwrap()
+                .unwrap();
+            assert!(stored.metadata_json.contains("\"theme\":\"light\""));
+            assert!(stored.metadata_json.contains("server-only"));
+        }
+    }
+
+    #[test]
+    fn test_local_password_login_sign_in_captures_request_metadata_and_groups() {
+        use super::storage::{
+            store_local_credential_secret_record, store_local_identity_record, LocalAccountState,
+            LocalCredentialSecret, LocalIdentity,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        store_local_identity_record(&LocalIdentity {
+            id: "local-user-login".to_string(),
+            identifier_kind: "email".to_string(),
+            identifier: "Login@Example.COM".to_string(),
+            identifier_normalized: "login@example.com".to_string(),
+            created_at: 100,
+            updated_at: 100,
+            state: LocalAccountState::Active,
+            metadata_json: "{}".to_string(),
+        })
+        .unwrap();
+        store_local_credential_secret_record(&LocalCredentialSecret {
+            local_user_id: "local-user-login".to_string(),
+            password_hash: bcrypt::hash("login password", 4).unwrap(),
+            password_hash_algorithm: "bcrypt".to_string(),
+            password_hash_params_json: "{}".to_string(),
+            password_changed_at: 101,
+            must_change_password: false,
+        })
+        .unwrap();
+
+        let module = init();
+        let verify_local_password = module_fn(&module, "verify_local_password");
+        let sign_in_session = module_fn(&module, "sign_in_session");
+        let has_group = module_fn(&module, "has_group");
+        let verified = result_ok_map(
+            verify_local_password(&[
+                Value::String("login@example.com".to_string()),
+                Value::String("login password".to_string()),
+            ])
+            .unwrap(),
+        );
+        let request = request_with_cookie_and_security_headers("");
+
+        let signed_in = sign_in_session(&[
+            redirect_response("/admin", None),
+            request,
+            Value::Map(HashMap::from([
+                (
+                    "subject_id".to_string(),
+                    verified.get("subject_id").cloned().unwrap(),
+                ),
+                ("email".to_string(), verified.get("email").cloned().unwrap()),
+                (
+                    "data".to_string(),
+                    Value::Map(HashMap::from([(
+                        "group_ids".to_string(),
+                        Value::Array(vec![Value::String("admins".to_string())]),
+                    )])),
+                ),
+            ])),
+        ])
+        .unwrap();
+
+        let cookie = cookie_header_from_response(&signed_in);
+        let req = request_with_cookie(&cookie);
+        let session_id = get_session_id_from_request(&req).expect("session cookie should verify");
+        let session = get_session_by_id(&session_id).expect("session should be persisted");
+        assert_eq!(session.device_name.as_deref(), Some("Mac · Safari"));
+        assert!(session.user_agent_hash.is_some());
+        assert!(session.last_ip_hash.is_some());
+        match has_group(&[req, Value::String("admins".to_string())]).unwrap() {
+            Value::Bool(true) => {}
+            other => panic!("expected local login session to carry admin group, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_has_group_checks_session_data_for_pages_and_api_requests() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let has_group = module_fn(&module, "has_group");
+        let session = Session {
+            id: "session-groups".to_string(),
+            user_id: "local-user-groups".to_string(),
+            provider: "local".to_string(),
+            email: Some("groups@example.com".to_string()),
+            name: None,
+            picture: None,
+            raw_json: "{}".to_string(),
+            data_json: r#"{"group_ids":["admins","billing"],"claims":{"scope":"admin"}}"#
+                .to_string(),
+            csrf_token: "csrf-groups".to_string(),
+            access_token: None,
+            refresh_token: None,
+            token_expires_at: None,
+            device_name: Some("Test Device".to_string()),
+            user_agent_hash: Some("ua-hash".to_string()),
+            last_ip_hash: Some("ip-hash".to_string()),
+            created_at: 100,
+            expires_at: chrono::Utc::now().timestamp() + 300,
+        };
+        store_session(session.clone());
+        let cookie =
+            build_signed_session_cookie(get_auth_config().as_ref().unwrap(), &session.id, None)
+                .unwrap();
+        let req = request_with_cookie(&cookie);
+
+        match has_group(&[req.clone(), Value::String("admins".to_string())]).unwrap() {
+            Value::Bool(true) => {}
+            other => panic!("expected admins membership to be true, got {other:?}"),
+        }
+        match has_group(&[req.clone(), Value::String("operators".to_string())]).unwrap() {
+            Value::Bool(false) => {}
+            other => panic!("expected operators membership to be false, got {other:?}"),
+        }
+        match has_group(&[
+            session_to_value(&session),
+            Value::Array(vec![
+                Value::String("operators".to_string()),
+                Value::String("billing".to_string()),
+            ]),
+        ])
+        .unwrap()
+        {
+            Value::Bool(true) => {}
+            other => panic!("expected any-group membership to be true, got {other:?}"),
         }
     }
 

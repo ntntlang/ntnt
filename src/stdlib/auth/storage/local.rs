@@ -1,12 +1,13 @@
-// Local-auth storage intentionally includes write-side helpers before the
-// public create/reset/bootstrap flows land in later DD-062 slices.
+// Local-auth storage includes write-side helpers for credential lifecycle.
+// DD-043 keeps app-specific extensions in metadata_json, while security-critical
+// lifecycle state such as reset tokens may still require auth-owned helpers/storage.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::*;
 use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 
-/// Durable local-auth record families planned by DD-062.
+/// Durable local-auth record families (DD-043).
 ///
 /// These are deliberately modeled before implementation so credential-related
 /// state does not inherit the softer memory fallback semantics used by some

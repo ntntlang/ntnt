@@ -5,8 +5,8 @@ use std::collections::HashMap;
 
 use super::storage::{
     get_local_credential_secret_record, get_local_identity_by_identifier_record,
-    normalize_local_identifier, store_local_identity_and_credential_record, LocalAccountState,
-    LocalCredentialSecret, LocalIdentity,
+    normalize_local_identifier, store_local_identity_and_credential_record,
+    store_local_identity_record, LocalAccountState, LocalCredentialSecret, LocalIdentity,
 };
 
 const INVALID_LOCAL_CREDENTIALS: &str = "Invalid local credentials";
@@ -20,6 +20,126 @@ const DUMMY_LOCAL_ARGON2_PASSWORD_HASH: &str =
 pub(in crate::stdlib::auth) struct VerifiedLocalPassword {
     identity: LocalIdentity,
     credential: LocalCredentialSecret,
+}
+
+pub(in crate::stdlib::auth) fn local_user_record(
+    identifier_kind: &str,
+    identifier: &str,
+) -> std::result::Result<LocalIdentity, String> {
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier_normalized = normalize_local_identifier(&kind, identifier.trim())?;
+    get_local_identity_by_identifier_record(&kind, &identifier_normalized)?
+        .ok_or_else(|| "[auth] local user not found".to_string())
+}
+
+pub(in crate::stdlib::auth) fn update_local_user_metadata_record(
+    identifier_kind: &str,
+    identifier: &str,
+    metadata: &HashMap<String, Value>,
+    replace: bool,
+) -> std::result::Result<LocalIdentity, String> {
+    reject_reserved_local_metadata_namespaces(metadata)?;
+
+    let mut identity = local_user_record(identifier_kind, identifier)?;
+    let mut updated_metadata = local_metadata_to_value_map(&identity.metadata_json)?;
+    if replace {
+        updated_metadata.retain(|key, _| key == "auth" || key.starts_with("auth."));
+    }
+    for (key, value) in metadata {
+        updated_metadata.insert(key.clone(), value.clone());
+    }
+
+    identity.metadata_json = local_metadata_to_json_string(&updated_metadata)?;
+    identity.updated_at = chrono::Utc::now().timestamp();
+    store_local_identity_record(&identity)?;
+    Ok(identity)
+}
+
+fn reject_reserved_local_metadata_namespaces(
+    metadata: &HashMap<String, Value>,
+) -> std::result::Result<(), String> {
+    for key in metadata.keys() {
+        if key == "auth" || key.starts_with("auth.") {
+            return Err(
+                "[auth] local user metadata keys under auth.* are reserved for std/auth helpers"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn local_metadata_to_value_map(
+    metadata_json: &str,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    let json = serde_json::from_str::<serde_json::Value>(metadata_json)
+        .map_err(|_| "[auth] local user metadata_json must be a JSON object".to_string())?;
+    match crate::stdlib::json::json_to_intent_value(&json) {
+        Value::Map(map) => Ok(map),
+        _ => Err("[auth] local user metadata_json must be a JSON object".to_string()),
+    }
+}
+
+fn local_metadata_to_json_string(
+    metadata: &HashMap<String, Value>,
+) -> std::result::Result<String, String> {
+    let json = crate::stdlib::json::intent_value_to_json(&Value::Map(metadata.clone()));
+    match json {
+        serde_json::Value::Object(_) => serde_json::to_string(&json)
+            .map_err(|_| "[auth] failed to encode local user metadata".to_string()),
+        _ => Err("[auth] local user metadata must be a map".to_string()),
+    }
+}
+
+fn safe_local_metadata_map(
+    identity: &LocalIdentity,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    let mut metadata = local_metadata_to_value_map(&identity.metadata_json)?;
+    metadata.retain(|key, _| key != "auth" && !key.starts_with("auth."));
+    Ok(metadata)
+}
+
+pub(in crate::stdlib::auth) fn local_identity_to_safe_value(
+    identity: &LocalIdentity,
+) -> std::result::Result<Value, String> {
+    let mut map = HashMap::from([
+        ("subject_id".to_string(), Value::String(identity.id.clone())),
+        ("id".to_string(), Value::String(identity.id.clone())),
+        (
+            "local_user_id".to_string(),
+            Value::String(identity.id.clone()),
+        ),
+        ("provider".to_string(), Value::String("local".to_string())),
+        (
+            "identifier_kind".to_string(),
+            Value::String(identity.identifier_kind.clone()),
+        ),
+        (
+            "identifier".to_string(),
+            Value::String(identity.identifier.clone()),
+        ),
+        (
+            "identifier_normalized".to_string(),
+            Value::String(identity.identifier_normalized.clone()),
+        ),
+        (
+            "state".to_string(),
+            Value::String(identity.state.as_str().to_string()),
+        ),
+        (
+            "metadata".to_string(),
+            Value::Map(safe_local_metadata_map(identity)?),
+        ),
+    ]);
+
+    if identity.identifier_kind == "email" {
+        map.insert(
+            "email".to_string(),
+            Value::String(identity.identifier.clone()),
+        );
+    }
+
+    Ok(Value::Map(map))
 }
 
 pub(in crate::stdlib::auth) fn bootstrap_local_user_record(

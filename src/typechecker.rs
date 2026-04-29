@@ -3807,6 +3807,57 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
         }
         "std/auth" => {
             sig!(
+                "local_user",
+                [
+                    "identifier" => Type::String,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(1)
+            );
+            sig!(
+                "update_local_user_metadata",
+                [
+                    "identifier" => Type::String,
+                    "metadata" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(2)
+            );
+            sig!(
+                "has_group",
+                ["subject" => Type::Any, "group_ids" => Type::Any],
+                Type::Bool
+            );
+            sig!(
                 "bootstrap_local_user",
                 [
                     "identifier" => Type::String,
@@ -4245,6 +4296,44 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("expected String"));
         assert!(errs[0].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_auth_local_user_signature_checks_args() {
+        let errs = check_errors(
+            r#"
+            import { local_user } from "std/auth"
+            local_user(42)
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("expected String"));
+        assert!(errs[0].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_auth_update_local_user_metadata_signature_checks_args() {
+        let errs = check_errors(
+            r#"
+            import { update_local_user_metadata } from "std/auth"
+            update_local_user_metadata("admin@example.com", "not metadata")
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("expected Map"));
+        assert!(errs[0].message.contains("got String"));
+    }
+
+    #[test]
+    fn test_std_auth_has_group_signature_allows_request_or_session_values() {
+        let errs = check_errors(
+            r#"
+            import { has_group } from "std/auth"
+            let req = map { "method": "GET", "path": "/admin", "headers": map {} }
+            let ok = has_group(req, ["admins", "owners"])
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
     }
 
     #[test]
