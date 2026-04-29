@@ -4016,6 +4016,44 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 required(1)
             );
             sig!(
+                "issue_password_reset",
+                [
+                    "identifier" => Type::String,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                },
+                required(1)
+            );
+            sig!(
+                "consume_password_reset",
+                [
+                    "token" => Type::String,
+                    "new_password" => Type::String
+                ],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::String,
+                    ],
+                }
+            );
+            sig!(
                 "verify_local_password",
                 [
                     "identifier" => Type::String,
@@ -4500,6 +4538,33 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("expected String"));
         assert!(errs[0].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_auth_password_reset_signatures_check_args() {
+        let errs = check_errors(
+            r#"
+            import { issue_password_reset, consume_password_reset } from "std/auth"
+            issue_password_reset(42)
+            consume_password_reset("token", 123)
+            "#,
+        );
+        assert_eq!(errs.len(), 2);
+        assert!(errs
+            .iter()
+            .all(|err| err.message.contains("expected String")));
+    }
+
+    #[test]
+    fn test_std_auth_password_reset_signatures_allow_options() {
+        let errs = check_errors(
+            r#"
+            import { issue_password_reset, consume_password_reset } from "std/auth"
+            let issued = issue_password_reset("admin@example.com", map { "identifier_kind": "email", "ttl_seconds": 600 })
+            let consumed = consume_password_reset("selector.verifier", "new-password")
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
     }
 
     #[test]

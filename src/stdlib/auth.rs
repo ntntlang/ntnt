@@ -72,8 +72,9 @@ pub use guards::{
 };
 use local::{
     begin_totp_enrollment_record, bootstrap_local_user_record, confirm_totp_enrollment_record,
-    local_identity_to_safe_value, local_user_record, reset_totp_record, set_local_password_record,
-    totp_status_record, update_local_user_metadata_record, verified_local_password_to_value,
+    consume_password_reset_record, issue_password_reset_record, local_identity_to_safe_value,
+    local_user_record, reset_totp_record, set_local_password_record, totp_status_record,
+    update_local_user_metadata_record, verified_local_password_to_value,
     verify_local_password_record, verify_local_totp_record,
 };
 use oauth::extract_user_info;
@@ -765,6 +766,36 @@ fn string_arg<'a>(
             "[auth] {}() missing required {}",
             function_name, name
         ))),
+    }
+}
+
+fn parse_password_reset_issue_options(
+    function_name: &str,
+    options: Option<&Value>,
+) -> Result<(String, Option<i64>)> {
+    match options {
+        Some(Value::Map(map)) => {
+            let identifier_kind = optional_string_option(map, "identifier_kind", function_name)?
+                .unwrap_or_else(|| "email".to_string());
+            let ttl_seconds = match map.get("ttl_seconds") {
+                Some(Value::Int(value)) => Some(*value),
+                Some(other) => {
+                    return Err(IntentError::type_error(format!(
+                        "[auth] {}() ttl_seconds must be an int, got {}",
+                        function_name,
+                        other.type_name()
+                    )))
+                }
+                None => None,
+            };
+            Ok((identifier_kind, ttl_seconds))
+        }
+        Some(other) => Err(IntentError::type_error(format!(
+            "[auth] {}() options must be a map, got {}",
+            function_name,
+            other.type_name()
+        ))),
+        None => Ok(("email".to_string(), None)),
     }
 }
 
@@ -4329,6 +4360,93 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt issue_password_reset
+    // @module std/auth
+    // @signature issue_password_reset(identifier: String, options?: Map) -> Result<Map, String>
+    // Issue a one-time password reset token for a local identity.
+    //
+    // The helper normalizes the identifier (email by default), stores only a hashed
+    // verifier with an opaque selector, and returns deliverable token material only
+    // when the local identity exists and can receive a reset. Missing, malformed,
+    // disabled, or locked identities return a generic accepted payload without token
+    // material so callers can show the same response without account enumeration.
+    // Store or send the returned `token` out-of-band; std/auth never stores the raw token.
+    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param options Optional map with `identifier_kind` and `ttl_seconds` (default 3600)
+    // @returns Ok(map) with `status: "accepted"`; existing accounts also include `token`, `selector`, `created_at`, and `expires_at`
+    // @see_also consume_password_reset, verify_local_password, set_local_password
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #password-reset, #security
+    // @example let reset = issue_password_reset(form["email"] ?? "")? ~ "Begin password reset without account enumeration"
+    module.insert(
+        "issue_password_reset".to_string(),
+        Value::NativeFunction {
+            name: "issue_password_reset".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::type_error(
+                        "[auth] issue_password_reset() requires identifier and optional options"
+                            .to_string(),
+                    ));
+                }
+                require_auth_initialized_for("issue_password_reset")?;
+                let identifier = string_arg("issue_password_reset", args, 0, "identifier")?;
+                let (identifier_kind, ttl_seconds) =
+                    parse_password_reset_issue_options("issue_password_reset", args.get(1))?;
+                match issue_password_reset_record(&identifier_kind, identifier, ttl_seconds) {
+                    Ok(payload) => Ok(Value::ok(Value::Map(payload))),
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
+    // @ntnt consume_password_reset
+    // @module std/auth
+    // @signature consume_password_reset(token: String, new_password: String) -> Result<Map, String>
+    // Consume a one-time password reset token and rotate the local password.
+    //
+    // Valid tokens are consumed atomically, verified against the stored hash, and
+    // then used to replace the local credential, transition the identity to `active`,
+    // and clear `must_change_password`. Missing, malformed, expired, replayed, and
+    // wrong-verifier tokens all return the same generic error. Returned payloads are
+    // safe local auth user maps and never expose password hashes, token hashes, raw
+    // token material, credentials, or secrets.
+    // @param token The `selector.verifier` token returned by `issue_password_reset(...)`
+    // @param new_password Replacement plaintext password to hash and store
+    // @returns Ok(map) with safe local user fields; Err(message) for invalid/expired/replayed tokens or storage failure
+    // @see_also issue_password_reset, verify_local_password, sign_in_session
+    // @since v0.4.9
+    // @tags #auth, #local-auth, #password-reset, #security
+    // @example let user = consume_password_reset(form["token"] ?? "", form["new_password"] ?? "")? ~ "Finish a password reset"
+    module.insert(
+        "consume_password_reset".to_string(),
+        Value::NativeFunction {
+            name: "consume_password_reset".to_string(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                if args.len() != 2 {
+                    return Err(IntentError::type_error(
+                        "[auth] consume_password_reset() requires token and new_password"
+                            .to_string(),
+                    ));
+                }
+                require_auth_initialized_for("consume_password_reset")?;
+                let token = string_arg("consume_password_reset", args, 0, "token")?;
+                let new_password = string_arg("consume_password_reset", args, 1, "new_password")?;
+                match consume_password_reset_record(token, new_password) {
+                    Ok(verified) => Ok(Value::ok(verified_local_password_to_value(verified))),
+                    Err(message) => Ok(Value::err(Value::String(message))),
+                }
+            },
+        },
+    );
+
     // @ntnt verify_local_password
     // @module std/auth
     // @signature verify_local_password(identifier: String, password: String, options?: Map) -> Result<Map, String>
@@ -5224,6 +5342,13 @@ mod tests {
         match map.get(key) {
             Some(Value::Int(value)) => *value,
             other => panic!("expected {key} int, got {other:?}"),
+        }
+    }
+
+    fn map_string(map: &HashMap<String, Value>, key: &str) -> String {
+        match map.get(key) {
+            Some(Value::String(value)) => value.clone(),
+            other => panic!("expected {key} string, got {other:?}"),
         }
     }
 
@@ -7117,6 +7242,227 @@ mod tests {
                 Some(Value::Bool(value)) => assert!(!*value),
                 other => panic!("unexpected verified must_change_password payload: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn test_password_reset_helpers_issue_consume_and_reject_replay_memory_and_sqlite() {
+        use super::storage::{
+            get_local_credential_secret_record, get_local_identity_by_identifier_record,
+            LocalAccountState,
+        };
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            let module = init();
+            let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+            let issue_password_reset = module_fn(&module, "issue_password_reset");
+            let consume_password_reset = module_fn(&module, "consume_password_reset");
+            let verify_local_password = module_fn(&module, "verify_local_password");
+
+            result_ok_map(
+                bootstrap_local_user(&[
+                    Value::String(" Reset@Example.COM ".to_string()),
+                    Value::String("temporary reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+
+            let issued = result_ok_map(
+                issue_password_reset(&[Value::String(" reset@example.com ".to_string())]).unwrap(),
+            );
+            let token = map_string(&issued, "token");
+            let selector = map_string(&issued, "selector");
+            assert!(
+                token.len() >= 64,
+                "reset token should have high-entropy material"
+            );
+            assert!(
+                token.starts_with(&format!("{selector}.")),
+                "token should include its selector prefix for lookup"
+            );
+            assert!(map_int(&issued, "expires_at") > map_int(&issued, "created_at"));
+            for secret_key in [
+                "password",
+                "password_hash",
+                "password_hash_algorithm",
+                "password_hash_params_json",
+                "credential",
+                "secret",
+                "token_hash",
+            ] {
+                assert!(
+                    !issued.contains_key(secret_key),
+                    "issue_password_reset payload must not expose {secret_key}"
+                );
+            }
+
+            let stored_identity =
+                get_local_identity_by_identifier_record("email", "reset@example.com")
+                    .unwrap()
+                    .expect("reset identity should be stored");
+            assert_eq!(stored_identity.state, LocalAccountState::Bootstrap);
+            assert!(
+                !stored_identity.metadata_json.contains(&token),
+                "raw reset token must not be stored in local identity metadata"
+            );
+            assert!(
+                !stored_identity.metadata_json.contains("token_hash"),
+                "reset token hashes belong in reset-token storage, not metadata"
+            );
+
+            let consumed = result_ok_map(
+                consume_password_reset(&[
+                    Value::String(token.clone()),
+                    Value::String("rotated by reset".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(map_string(&consumed, "local_user_id"), stored_identity.id);
+            match consumed.get("state") {
+                Some(Value::String(state)) => assert_eq!(state, "active"),
+                other => panic!("unexpected reset state payload: {other:?}"),
+            }
+            match consumed.get("must_change_password") {
+                Some(Value::Bool(value)) => assert!(!*value),
+                other => panic!("unexpected reset must_change_password payload: {other:?}"),
+            }
+            for secret_key in [
+                "password",
+                "password_hash",
+                "password_hash_algorithm",
+                "password_hash_params_json",
+                "credential",
+                "secret",
+                "token",
+                "selector",
+                "token_hash",
+            ] {
+                assert!(
+                    !consumed.contains_key(secret_key),
+                    "consume_password_reset payload must not expose {secret_key}"
+                );
+            }
+
+            let old_password = result_err_string(
+                verify_local_password(&[
+                    Value::String("reset@example.com".to_string()),
+                    Value::String("temporary reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(old_password, "Invalid local credentials");
+
+            let verified = result_ok_map(
+                verify_local_password(&[
+                    Value::String("reset@example.com".to_string()),
+                    Value::String("rotated by reset".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(map_string(&verified, "local_user_id"), stored_identity.id);
+            let rotated_credential = get_local_credential_secret_record(&stored_identity.id)
+                .unwrap()
+                .expect("reset credential should be stored");
+            assert!(!rotated_credential.must_change_password);
+
+            let replay = result_err_string(
+                consume_password_reset(&[
+                    Value::String(token),
+                    Value::String("replay reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(replay, "Invalid password reset token");
+        }
+    }
+
+    #[test]
+    fn test_password_reset_helpers_use_generic_responses_for_missing_expired_and_malformed_tokens()
+    {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            let module = init();
+            let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+            let issue_password_reset = module_fn(&module, "issue_password_reset");
+            let consume_password_reset = module_fn(&module, "consume_password_reset");
+            let verify_local_password = module_fn(&module, "verify_local_password");
+
+            let missing_user = result_ok_map(
+                issue_password_reset(&[Value::String("missing@example.com".to_string())]).unwrap(),
+            );
+            assert_eq!(map_string(&missing_user, "status"), "accepted");
+            assert!(
+                !missing_user.contains_key("token") && !missing_user.contains_key("selector"),
+                "missing-account reset issuance must not fabricate deliverable token material"
+            );
+
+            result_ok_map(
+                bootstrap_local_user(&[
+                    Value::String("expire@example.com".to_string()),
+                    Value::String("temporary reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+            let expired_issue = result_ok_map(
+                issue_password_reset(&[
+                    Value::String("expire@example.com".to_string()),
+                    Value::Map(HashMap::from([("ttl_seconds".to_string(), Value::Int(0))])),
+                ])
+                .unwrap(),
+            );
+            let expired_token = map_string(&expired_issue, "token");
+            let expired = result_err_string(
+                consume_password_reset(&[
+                    Value::String(expired_token),
+                    Value::String("expired reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(expired, "Invalid password reset token");
+
+            let malformed = result_err_string(
+                consume_password_reset(&[
+                    Value::String("not-a-valid-reset-token".to_string()),
+                    Value::String("malformed reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(malformed, "Invalid password reset token");
+
+            let wrong_verifier_issue = result_ok_map(
+                issue_password_reset(&[Value::String("expire@example.com".to_string())]).unwrap(),
+            );
+            let wrong_selector = map_string(&wrong_verifier_issue, "selector");
+            let wrong_verifier = result_err_string(
+                consume_password_reset(&[
+                    Value::String(format!("{wrong_selector}.definitely-wrong-verifier")),
+                    Value::String("wrong verifier password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(wrong_verifier, "Invalid password reset token");
+
+            let still_old_password = result_ok_map(
+                verify_local_password(&[
+                    Value::String("expire@example.com".to_string()),
+                    Value::String("temporary reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(map_string(&still_old_password, "state"), "bootstrap");
         }
     }
 

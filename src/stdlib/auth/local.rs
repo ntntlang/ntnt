@@ -1,17 +1,23 @@
 use crate::interpreter::Value;
 use argon2::password_hash::Error as PasswordHashError;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use base64::Engine;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 use super::storage::{
-    get_local_credential_secret_record, get_local_identity_by_identifier_record,
+    consume_local_password_reset_token_record, get_local_credential_secret_record,
+    get_local_identity_by_id_record, get_local_identity_by_identifier_record,
     normalize_local_identifier, store_local_identity_and_credential_record,
-    update_local_identity_by_identifier_record, LocalAccountState, LocalCredentialSecret,
-    LocalIdentity,
+    store_local_password_reset_token_record, update_local_identity_by_identifier_record,
+    LocalAccountState, LocalCredentialSecret, LocalIdentity, LocalPasswordResetToken,
 };
 
 const INVALID_LOCAL_CREDENTIALS: &str = "Invalid local credentials";
 const INVALID_LOCAL_TOTP_CODE: &str = "Invalid local TOTP code";
+const INVALID_PASSWORD_RESET_TOKEN: &str = "Invalid password reset token";
+const DEFAULT_PASSWORD_RESET_TTL_SECONDS: i64 = 60 * 60;
 const INVALID_OR_UNSUPPORTED_LOCAL_CREDENTIAL_HASH: &str =
     "[auth] local credential hash is invalid or unsupported";
 const DUMMY_LOCAL_TOTP_SECRET: &str = "JBSWY3DPEHPK3PXP";
@@ -559,6 +565,126 @@ pub(in crate::stdlib::auth) fn set_local_password_record(
         identity,
         credential,
     })
+}
+
+pub(in crate::stdlib::auth) fn issue_password_reset_record(
+    identifier_kind: &str,
+    identifier: &str,
+    ttl_seconds: Option<i64>,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    let ttl_seconds = ttl_seconds.unwrap_or(DEFAULT_PASSWORD_RESET_TTL_SECONDS);
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier_normalized = match normalize_local_identifier(&kind, identifier.trim()) {
+        Ok(identifier_normalized) => identifier_normalized,
+        Err(_) => return Ok(password_reset_accepted_response()),
+    };
+
+    let Some(identity) = get_local_identity_by_identifier_record(&kind, &identifier_normalized)?
+    else {
+        return Ok(password_reset_accepted_response());
+    };
+    if matches!(
+        identity.state,
+        LocalAccountState::Disabled | LocalAccountState::Locked
+    ) {
+        return Ok(password_reset_accepted_response());
+    }
+
+    let selector = random_urlsafe_token(16);
+    let verifier = random_urlsafe_token(32);
+    let token = format!("{selector}.{verifier}");
+    let now = chrono::Utc::now().timestamp();
+    let expires_at = now.saturating_add(ttl_seconds.max(0));
+    if expires_at > now {
+        store_local_password_reset_token_record(&LocalPasswordResetToken {
+            selector: selector.clone(),
+            local_user_id: identity.id.clone(),
+            token_hash: hash_password_reset_verifier(&verifier),
+            created_at: now,
+            expires_at,
+        })?;
+    }
+
+    Ok(HashMap::from([
+        ("status".to_string(), Value::String("accepted".to_string())),
+        ("selector".to_string(), Value::String(selector)),
+        ("token".to_string(), Value::String(token)),
+        ("local_user_id".to_string(), Value::String(identity.id)),
+        ("created_at".to_string(), Value::Int(now)),
+        ("expires_at".to_string(), Value::Int(expires_at)),
+    ]))
+}
+
+pub(in crate::stdlib::auth) fn consume_password_reset_record(
+    token: &str,
+    new_password: &str,
+) -> std::result::Result<VerifiedLocalPassword, String> {
+    if new_password.trim().is_empty() {
+        return Err("[auth] local password must not be empty".to_string());
+    }
+
+    let Some((selector, verifier)) = token.split_once('.') else {
+        return Err(INVALID_PASSWORD_RESET_TOKEN.to_string());
+    };
+    if selector.trim().is_empty() || verifier.trim().is_empty() || token.split('.').count() != 2 {
+        return Err(INVALID_PASSWORD_RESET_TOKEN.to_string());
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let Some(reset_token) = consume_local_password_reset_token_record(selector, now)? else {
+        return Err(INVALID_PASSWORD_RESET_TOKEN.to_string());
+    };
+    let submitted_hash = hash_password_reset_verifier(verifier);
+    if !super::constant_time_compare(&reset_token.token_hash, &submitted_hash) {
+        return Err(INVALID_PASSWORD_RESET_TOKEN.to_string());
+    }
+
+    let identity = get_local_identity_by_id_record(&reset_token.local_user_id)?
+        .ok_or_else(|| INVALID_PASSWORD_RESET_TOKEN.to_string())?;
+    if matches!(
+        identity.state,
+        LocalAccountState::Disabled | LocalAccountState::Locked
+    ) {
+        return Err(INVALID_PASSWORD_RESET_TOKEN.to_string());
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let identity = LocalIdentity {
+        updated_at: now,
+        state: LocalAccountState::Active,
+        ..identity
+    };
+    let credential = LocalCredentialSecret {
+        local_user_id: identity.id.clone(),
+        password_hash: bcrypt::hash(new_password, bcrypt::DEFAULT_COST)
+            .map_err(|_| "[auth] failed to hash local password".to_string())?,
+        password_hash_algorithm: CredentialPasswordAlgorithm::Bcrypt
+            .storage_name()
+            .to_string(),
+        password_hash_params_json: "{}".to_string(),
+        password_changed_at: now,
+        must_change_password: false,
+    };
+
+    store_local_identity_and_credential_record(&identity, &credential)?;
+    Ok(VerifiedLocalPassword {
+        identity,
+        credential,
+    })
+}
+
+fn password_reset_accepted_response() -> HashMap<String, Value> {
+    HashMap::from([("status".to_string(), Value::String("accepted".to_string()))])
+}
+
+fn random_urlsafe_token(byte_count: usize) -> String {
+    let mut bytes = vec![0_u8; byte_count];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn hash_password_reset_verifier(verifier: &str) -> String {
+    hex::encode(Sha256::digest(verifier.as_bytes()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

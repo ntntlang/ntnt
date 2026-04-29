@@ -1699,7 +1699,7 @@ fn get(req) {
 
 Boundary rule: use `std/auth` for auth flows, sessions, CSRF, current-user helpers, and TOTP. Use `std/crypto` for generic crypto helpers like `uuid`, `hash_password`, and `verify_password`.
 
-Full OAuth, session management, CSRF, JWT, TOTP, and local credential bootstrap, setup completion, and verification support.
+Full OAuth, session management, CSRF, JWT, TOTP, and local credential bootstrap, setup completion, password reset, and verification support.
 
 ### Local Credential Bootstrap and Setup Completion
 
@@ -1750,6 +1750,43 @@ fn login(req) {
 ```
 
 Session claims, roles, profiles, and organization membership stay app-owned; local auth only owns credential lifecycle state and safe verification/setup results.
+
+### Local Password Reset
+
+Use `issue_password_reset(...)` and `consume_password_reset(...)` for reset links instead of storing reset state in app metadata or generic auth challenges. Issuance stores only a hashed verifier plus selector in auth-owned reset-token storage. The raw `selector.verifier` token is returned once so the app can email it or render a setup link. Missing, malformed, disabled, locked, and expired accounts/tokens use generic responses to avoid account enumeration.
+
+```ntnt
+import { consume_password_reset, issue_password_reset, sign_in_session } from "std/auth"
+import { parse_form, redirect } from "std/http/server"
+
+fn request_password_reset(req) {
+    let form = parse_form(req)
+    let reset = issue_password_reset(form["email"] ?? "")?
+
+    // Only present for an existing resettable local user. Still show the same UI either way.
+    if reset["token"] != None {
+        send_reset_email(form["email"] ?? "", reset["token"])
+    }
+
+    return redirect("/password-reset/sent")
+}
+
+fn finish_password_reset(req) {
+    let form = parse_form(req)
+    let user = consume_password_reset(
+        form["token"] ?? "",
+        form["new_password"] ?? ""
+    )?
+
+    return sign_in_session(redirect("/admin"), req, map {
+        "subject_id": user["subject_id"],
+        "email": user["email"],
+        "claims": app_claims_for_local_user(user)
+    })
+}
+```
+
+Reset tokens are one-time records. Never log the returned token, store it in `local_user.metadata`, or echo it through unrelated API responses. If a token is missing, expired, malformed, replayed, or has a wrong verifier, `consume_password_reset(...)` returns the same `Err("Invalid password reset token")`.
 
 ### Local TOTP Enrollment and Verification
 

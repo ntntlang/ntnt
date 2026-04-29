@@ -341,6 +341,30 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
     )
     .map_err(|e| format!("Failed to create auth_local_credentials table: {}", e))?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS auth_local_password_reset_tokens (
+            selector TEXT PRIMARY KEY,
+            local_user_id TEXT NOT NULL,
+            token_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            FOREIGN KEY(local_user_id) REFERENCES auth_local_identities(id) ON DELETE CASCADE
+        )",
+        [],
+    )
+    .map_err(|e| {
+        format!(
+            "Failed to create auth_local_password_reset_tokens table: {}",
+            e
+        )
+    })?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_auth_local_password_reset_tokens_expires ON auth_local_password_reset_tokens(expires_at)",
+        [],
+    )
+    .map_err(|e| format!("Failed to create auth_local_password_reset_tokens index: {}", e))?;
+
     let mut sqlite_conn = SQLITE_CONN.lock().unwrap();
     *sqlite_conn = Some(conn);
     Ok(())
