@@ -11,8 +11,10 @@ use super::storage::{
 };
 
 const INVALID_LOCAL_CREDENTIALS: &str = "Invalid local credentials";
+const INVALID_LOCAL_TOTP_CODE: &str = "Invalid local TOTP code";
 const INVALID_OR_UNSUPPORTED_LOCAL_CREDENTIAL_HASH: &str =
     "[auth] local credential hash is invalid or unsupported";
+const DUMMY_LOCAL_TOTP_SECRET: &str = "JBSWY3DPEHPK3PXP";
 const DUMMY_LOCAL_BCRYPT_PASSWORD_HASH: &str =
     "$2b$12$.yG5RREnsakkWw6jeYfJNOxZnY6SGO22Ce8jBqKkvXnbV/2Hm3h.y";
 const DUMMY_LOCAL_ARGON2_PASSWORD_HASH: &str =
@@ -158,18 +160,43 @@ pub(in crate::stdlib::auth) fn verify_local_totp_record(
     identifier: &str,
     code: &str,
 ) -> std::result::Result<HashMap<String, Value>, String> {
-    let identity = local_user_record(identifier_kind, identifier)?;
-    ensure_totp_manageable_identity(&identity)?;
-    let metadata = local_metadata_to_value_map(&identity.metadata_json)?;
-    let totp = auth_totp_metadata(&metadata)?;
-    if !bool_field(&totp, "enabled").unwrap_or(false) {
-        return Err("[auth] local TOTP is not enabled".to_string());
+    let kind = identifier_kind.trim().to_ascii_lowercase();
+    let identifier_normalized = match normalize_local_identifier(&kind, identifier.trim()) {
+        Ok(identifier_normalized) => identifier_normalized,
+        Err(_) => return invalid_local_totp_result(code),
+    };
+
+    let identity = match get_local_identity_by_identifier_record(&kind, &identifier_normalized) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => return invalid_local_totp_result(code),
+        Err(err) => {
+            verify_dummy_local_totp(code);
+            return Err(err);
+        }
+    };
+
+    if matches!(
+        identity.state,
+        LocalAccountState::Disabled | LocalAccountState::Locked
+    ) {
+        return invalid_local_totp_result(code);
     }
-    let secret = string_field(&totp, "secret")
-        .ok_or_else(|| "[auth] local TOTP enrollment is missing secret material".to_string())?;
+
+    let metadata = match local_metadata_to_value_map(&identity.metadata_json) {
+        Ok(metadata) => metadata,
+        Err(_) => return invalid_local_totp_result(code),
+    };
+    let totp = match auth_totp_metadata(&metadata) {
+        Ok(totp) => totp,
+        Err(_) => return invalid_local_totp_result(code),
+    };
+    let secret = match string_field(&totp, "secret") {
+        Some(secret) if bool_field(&totp, "enabled").unwrap_or(false) => secret,
+        _ => return invalid_local_totp_result(code),
+    };
     let issuer = string_field(&totp, "issuer").unwrap_or_else(|| "NTNT".to_string());
     if !super::verify_totp_code(&secret, code, &identity.identifier, &issuer) {
-        return Err("Invalid local TOTP code".to_string());
+        return Err(INVALID_LOCAL_TOTP_CODE.to_string());
     }
     let mut status = totp_status_from_identity(&identity)?;
     status.insert("verified".to_string(), Value::Bool(true));
@@ -229,6 +256,15 @@ fn clean_totp_display_value(
         return Err("[auth] TOTP issuer/label must not be empty".to_string());
     }
     Ok(cleaned.to_string())
+}
+
+fn verify_dummy_local_totp(code: &str) {
+    let _ = super::verify_totp_code(DUMMY_LOCAL_TOTP_SECRET, code, "__dummy__", "NTNT");
+}
+
+fn invalid_local_totp_result<T>(code: &str) -> std::result::Result<T, String> {
+    verify_dummy_local_totp(code);
+    Err(INVALID_LOCAL_TOTP_CODE.to_string())
 }
 
 fn ensure_totp_manageable_identity(identity: &LocalIdentity) -> std::result::Result<(), String> {

@@ -7555,7 +7555,7 @@ mod tests {
                 ])
                 .unwrap(),
             );
-            assert!(verify_error.contains("cannot manage TOTP"));
+            assert_eq!(verify_error, "Invalid local TOTP code");
 
             let status_error =
                 result_err_string(totp_status(&[Value::String(email.to_string())]).unwrap());
@@ -7564,6 +7564,84 @@ mod tests {
             let reset_error =
                 result_err_string(reset_totp(&[Value::String(email.to_string())]).unwrap());
             assert!(reset_error.contains("cannot manage TOTP"));
+        }
+    }
+
+    #[test]
+    fn test_verify_local_totp_uses_generic_errors_for_unavailable_or_disabled_mfa() {
+        use super::storage::{store_local_identity_record, LocalAccountState, LocalIdentity};
+
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        for (id, email, state, metadata_json) in [
+            (
+                "local-user-no-totp",
+                "no-totp@example.com",
+                LocalAccountState::Active,
+                "{}",
+            ),
+            (
+                "local-user-missing-secret",
+                "missing-secret@example.com",
+                LocalAccountState::Active,
+                "{\"auth\":{\"totp\":{\"enabled\":true,\"issuer\":\"Admin\"}}}",
+            ),
+            (
+                "local-user-malformed-totp",
+                "malformed-totp@example.com",
+                LocalAccountState::Active,
+                "{\"auth\":{\"totp\":\"not-a-map\"}}",
+            ),
+            (
+                "local-user-disabled-totp",
+                "disabled-totp@example.com",
+                LocalAccountState::Disabled,
+                "{}",
+            ),
+            (
+                "local-user-locked-totp",
+                "locked-totp@example.com",
+                LocalAccountState::Locked,
+                "{}",
+            ),
+        ] {
+            store_local_identity_record(&LocalIdentity {
+                id: id.to_string(),
+                identifier_kind: "email".to_string(),
+                identifier: email.to_string(),
+                identifier_normalized: email.to_string(),
+                created_at: 100,
+                updated_at: 100,
+                state,
+                metadata_json: metadata_json.to_string(),
+            })
+            .unwrap();
+        }
+
+        let module = init();
+        let verify_local_totp = module_fn(&module, "verify_local_totp");
+
+        for email in [
+            "unknown@example.com",
+            "no-totp@example.com",
+            "missing-secret@example.com",
+            "malformed-totp@example.com",
+            "disabled-totp@example.com",
+            "locked-totp@example.com",
+        ] {
+            let message = result_err_string(
+                verify_local_totp(&[
+                    Value::String(email.to_string()),
+                    Value::String("000000".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(
+                message, "Invalid local TOTP code",
+                "unexpected error for {email}"
+            );
         }
     }
 
