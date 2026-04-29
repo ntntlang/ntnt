@@ -2,8 +2,8 @@
 
 **Status:** In Progress — Final Sprint
 **Author:** Larri
-**Date:** 2026-03-20 (slashed and sharpened 2026-04-28)
-**Branch:** `main` through v0.4.9; remaining work is 2-3 focused PRs
+**Date:** 2026-03-20 (slashed and sharpened 2026-04-28; WebAuthn/passkeys phase added 2026-04-29)
+**Branch:** `main` through v0.4.9; remaining v0.4.9 work is PR 3 + template proof; WebAuthn/passkeys are post-v0.4.9
 
 ---
 
@@ -52,6 +52,7 @@ Everything below is merged or intended as the current v0.4.9 baseline:
 - Route/API protection: `require_auth()` middleware/path/request helper with HTML redirect vs API 401 behavior
 - Bearer-token/resource-server helpers: `oauth_validate(...)`, `oauth_introspect(...)`
 - Built-in login page with configurable title/logo/copy/provider buttons
+- No WebAuthn/passkey support yet; that is intentionally post-v0.4.9, after PR 3 and the template integration proof
 - Configurable route prefixes, startup route logging, collision diagnostics
 - Auth health check endpoint, dev-only by default
 - Refresh-token rotation/preservation with provider-aware semantics
@@ -150,9 +151,100 @@ This may be a separate template-repo PR, but it is the real acceptance test.
 
 ---
 
-## Done Criteria
+## Post-v0.4.9 Phase — WebAuthn + Passkeys
 
-DD-043 is complete when:
+This phase is intentionally **after** PR 3, the template integration proof, and the v0.4.9 auth release. It should not delay 0.4.9. The goal is to add phishing-resistant WebAuthn/passkey primitives that compose with the same `std/auth` local identity, staged challenge, request-aware session, and route/API protection model.
+
+Design posture:
+
+- Treat passkeys as another credential family under `std/auth`, not a separate user system.
+- Use standards-shaped ceremonies: server starts a registration/authentication ceremony, stores challenge state server-side, browser calls `navigator.credentials.create/get`, server finishes and consumes state.
+- Prefer established Rust implementation work such as `webauthn-rs` rather than home-grown WebAuthn verification. The library docs explicitly warn that ceremony state must be stored server-side and that credential IDs must be globally unique across accounts.
+- Store relying-party configuration explicitly: `rp_id`, allowed origins, display name, timeout, user-verification policy, attestation policy, and discoverable-credential policy.
+- Use opaque, non-PII user handles for WebAuthn `user.id`; WebAuthn user handles are capped at 64 bytes and are returned by discoverable/usernameless flows.
+- Track credential metadata needed for security and UX: credential ID, public key/passkey object, sign counter, transports, user verification, backup eligibility/state when available, created/last-used timestamps, nickname, and disabled/revoked status.
+- Enforce credential-ID uniqueness across all users before accepting registration.
+- On authentication, validate counters where the authenticator supplies meaningful counters; equal/lower non-zero counters must reject the current authentication attempt. After rejection, disable or quarantine the credential unless explicit policy says to only alert.
+- Keep attestation and enterprise hardware-bound policy optional. Consumer passkeys should work without attestation; regulated/high-assurance apps can opt into attestation policy later.
+- Do not serialize WebAuthn ceremony state to client cookies. If a dependency exposes such a feature, keep it off by default; state belongs in auth-owned server storage with TTL and one-time consume.
+
+### WA-PR 1 — Foundation, Config, and Storage Contract
+
+Goal: add the auth-owned record families and dependency/config shell without exposing public login helpers yet.
+
+- [ ] Add a focused `src/stdlib/auth/webauthn.rs` module rather than growing `auth.rs`
+- [ ] Add WebAuthn dependency/config glue, likely behind a Cargo feature if dependency weight warrants it
+- [ ] Add `enable_auth(...)` WebAuthn options:
+  - `rp_id` (domain only, no scheme/port)
+  - `origin` / `origins`
+  - `rp_name`
+  - `user_verification` (`required`, `preferred`, `discouraged`) with safe defaults
+  - `resident_key` / discoverable credential policy
+  - `attestation` (`none` by default; stricter policy deferred)
+  - challenge TTL
+- [ ] Add storage records for:
+  - WebAuthn credentials / passkeys linked to local identity subject IDs
+  - pending registration ceremony state
+  - pending authentication ceremony state
+- [ ] Ensure pending ceremony state is TTL-bound and one-time consumed; replay must fail
+- [ ] Enforce credential-ID global uniqueness in storage, not only in public helper code
+- [ ] Add memory + SQLite contract tests by default; decide whether Postgres/Redis passkey storage is in-scope for this phase or explicitly deferred
+- [ ] Add health/config diagnostics that reveal misconfiguration without leaking challenge or credential material
+
+### WA-PR 2 — Passkey Registration Helpers
+
+Goal: let an authenticated local user enroll and manage passkeys without changing sign-in behavior yet.
+
+- [ ] Add `begin_passkey_registration(req, identifier_or_user, options?) -> Result<Map, String>` or equivalent shape that starts registration and stores server-side ceremony state
+- [ ] Add `finish_passkey_registration(req, credential_response, options?) -> Result<Map, String>` that validates the browser response, consumes registration state, checks credential-ID uniqueness, and stores the credential
+- [ ] Return browser-consumable JSON/map creation options suitable for `navigator.credentials.create({ publicKey })`
+- [ ] Add `passkeys(identifier_or_user, options?)` / `local_passkeys(...)` safe listing helper with nickname, created/last-used, transports, backup state, and disabled/revoked fields only
+- [ ] Add `rename_passkey(...)` and `revoke_passkey(...)` or defer management helpers explicitly if template UX does not need them yet
+- [ ] Prevent duplicate registration for the same credential and for credentials already registered to another account
+- [ ] Document client-side JSON/base64url handling in `docs/AI_AGENT_GUIDE.md`; do not assume raw browser `ArrayBuffer` values can be passed through ntnt maps unchanged
+- [ ] Add tests for happy path, replayed finish, expired state, cross-user credential collision, malformed client response, disabled local account, and secret/challenge non-exposure
+
+### WA-PR 3 — Passkey Authentication + Session Completion
+
+Goal: use passkeys to authenticate through the existing session lifecycle rather than creating a parallel session path.
+
+- [ ] Add `begin_passkey_authentication(req, identifier?, options?) -> Result<Map, String>` for username-known and optionally discoverable/usernameless flows
+- [ ] Add `finish_passkey_authentication(req, credential_response, options?) -> Result<Map, String>` that verifies the browser assertion response, consumes authentication state, updates counters/last-used metadata, and returns safe subject/session data
+- [ ] Compose successful authentication with `sign_in_session(response, req, session, options?)` or the same internal request-aware completion primitive
+- [ ] Support passwordless sign-in for enrolled passkeys without requiring TOTP; passkeys already include authenticator-local user verification when policy requires it
+- [ ] Preserve shared session behavior: rotation/migration, `device_name`, `user_agent_hash`, `last_ip_hash`, TTL/max lifetime/cookie policy, and group/claims handoff
+- [ ] Return generic failures for unknown user / missing passkey / disabled credential / wrong assertion to avoid enumeration
+- [ ] Add tests for username-known login, usernameless/discoverable login if enabled, counter regression/cloned-credential behavior, disabled credential, disabled local account, session rotation, and metadata capture
+- [ ] Add template-style examples for page login and JSON/API login endpoints
+
+### WA-PR 4 — Template UX + Policy Hardening
+
+Goal: prove passkeys are usable in a real ntnt app and tighten policy seams before declaring the phase complete.
+
+- [ ] Add template passkey enrollment, login, list, rename, and revoke flows using the stdlib helpers
+- [ ] Add progressive enhancement checks for browser support (`PublicKeyCredential`, conditional mediation when used) and graceful fallback to password/TOTP flows
+- [ ] Add recovery/account-lockout guidance: passkeys are strong, but apps still need account recovery policy if passwords are disabled
+- [ ] Add optional policy hooks for high-assurance apps:
+  - require user verification
+  - prefer/require platform or roaming authenticators only if WebAuthn APIs expose enough signal
+  - attestation allowlists for enterprise/security-key deployments
+  - reject or flag backed-up/synced credentials when an app explicitly requires hardware-bound credentials
+- [ ] Keep the default consumer posture permissive: no attestation requirement, allow synced passkeys, require safe origin/RP configuration
+- [ ] Add end-to-end browser/manual test notes because WebAuthn cannot be fully covered by pure unit tests without ceremony mocks
+
+Non-goals for the first WebAuthn phase:
+
+- Becoming a hosted identity/passkey provider
+- Owning account recovery UI or business policy
+- Enterprise attestation policy as the default path
+- Browser polyfills or non-WebAuthn credential protocols
+- Shipping WebAuthn before v0.4.9 final auth/template work is complete
+
+---
+
+## v0.4.9 Final Sprint Done Criteria
+
+The v0.4.9 final sprint is complete when:
 
 1. `std/auth` primitives are solid and composable for OAuth, local email/password, TOTP, password reset, pages, and API endpoints.
 2. Password reset tokens are hashed, TTL-bound, one-time, non-enumerating, and not app-reimplemented.
@@ -161,6 +253,8 @@ DD-043 is complete when:
 5. Local and OAuth sessions share lifecycle, cookie posture, rotation, metadata, and security behavior.
 6. Metadata is a deliberate extension seam with namespacing, safe payload rules, and no raw secrets.
 7. The template runs on `std/auth` models plus metadata/session-data extensions, with no parallel auth subsystem.
+
+The WebAuthn/passkey phase is complete later when passkey registration, safe listing/revocation, passkey authentication, request-aware session completion, credential replay/counter protection, template UX, and browser-facing examples all work without creating a second user/session system.
 
 ---
 
@@ -179,6 +273,16 @@ Only if real apps prove the final-sprint primitives are insufficient:
 - `enable_local_auth(...)` convenience preset
 - Built-in reset/setup/reference routes and pages
 - Full Postgres/Redis local-auth credential/reset/TOTP storage parity
+
+### Advanced WebAuthn / Passkey Policy
+
+After the first WebAuthn/passkey phase proves the primitive shape:
+
+- Attestation trust-store management and enterprise hardware-bound enforcement
+- Account-level policy such as “passkey required for admins” or “multiple passkeys required before password disable”
+- Conditional UI / usernameless-first login UX polish across browsers
+- Browser/device compatibility matrix and automated WebAuthn ceremony fixtures
+- Native/mobile app credential handoff patterns if ntnt grows beyond web apps
 
 ### Advanced Authorization / RBAC
 
@@ -231,4 +335,4 @@ Only if real apps prove the final-sprint primitives are insufficient:
 
 ---
 
-*Sharpened 2026-04-28. One DD, one roadmap. DD-062 retired. Final sprint keeps the secure essentials first-class — reset, TOTP, API/page protection, and authorization handoff — while pushing product/RBAC/platform bloat to Future Refinements.*
+*Sharpened 2026-04-28. One DD, one roadmap. DD-062 retired. Final sprint keeps the secure essentials first-class — reset, TOTP, API/page protection, and authorization handoff — while pushing product/RBAC/platform bloat to Future Refinements. WebAuthn/passkeys added 2026-04-29 as a post-v0.4.9 phase after PR 3 and template proof.*
