@@ -209,7 +209,7 @@ Goal: let an authenticated local user enroll and manage passkeys without changin
 Goal: use passkeys to authenticate through the existing session lifecycle rather than creating a parallel session path.
 
 - [ ] Add `begin_passkey_authentication(req, identifier?, options?) -> Result<Map, String>` for username-known and optionally discoverable/usernameless flows
-- [ ] Add `finish_passkey_authentication(response, req, options?) -> Result<Map, String>` that verifies the assertion, consumes authentication state, updates counters/last-used metadata, and returns safe subject/session data
+- [ ] Add `finish_passkey_authentication(req, credential_response, options?) -> Result<Map, String>` that verifies the browser assertion response, consumes authentication state, updates counters/last-used metadata, and returns safe subject/session data
 - [ ] Compose successful authentication with `sign_in_session(response, req, session, options?)` or the same internal request-aware completion primitive
 - [ ] Support passwordless sign-in for enrolled passkeys without requiring TOTP; passkeys already include authenticator-local user verification when policy requires it
 - [ ] Preserve shared session behavior: rotation/migration, `device_name`, `user_agent_hash`, `last_ip_hash`, TTL/max lifetime/cookie policy, and group/claims handoff
