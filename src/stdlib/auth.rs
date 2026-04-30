@@ -4373,7 +4373,7 @@ pub fn init() -> HashMap<String, Value> {
     // Store or send the returned `token` out-of-band; std/auth never stores the raw token.
     // @param identifier The local user identifier. Email is the default identifier kind.
     // @param options Optional map with `identifier_kind` and `ttl_seconds` (default 3600)
-    // @returns Ok(map) with `status: "accepted"`; existing accounts also include `token`, `selector`, `created_at`, and `expires_at`
+    // @returns Ok(map) with `status: "accepted"`; syntactically valid reset requests also include `token`, `selector`, `created_at`, and `expires_at` without revealing whether a matching account exists
     // @see_also consume_password_reset, verify_local_password, set_local_password
     // @since v0.4.9
     // @tags #auth, #local-auth, #password-reset, #security
@@ -7490,10 +7490,20 @@ mod tests {
                 issue_password_reset(&[Value::String("missing@example.com".to_string())]).unwrap(),
             );
             assert_eq!(map_string(&missing_user, "status"), "accepted");
+            let missing_token = map_string(&missing_user, "token");
+            let missing_selector = map_string(&missing_user, "selector");
             assert!(
-                !missing_user.contains_key("token") && !missing_user.contains_key("selector"),
-                "missing-account reset issuance must not fabricate deliverable token material"
+                missing_token.starts_with(&format!("{missing_selector}.")),
+                "missing-account issuance should preserve response shape without storing a usable token"
             );
+            let missing_consume = result_err_string(
+                consume_password_reset(&[
+                    Value::String(missing_token),
+                    Value::String("missing account reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(missing_consume, "Invalid password reset token");
 
             result_ok_map(
                 bootstrap_local_user(&[
@@ -7528,23 +7538,33 @@ mod tests {
                 issue_password_reset(&[Value::String("expire@example.com".to_string())]).unwrap(),
             );
             let wrong_selector = map_string(&wrong_verifier_issue, "selector");
+            let wrong_verifier_token = format!("{wrong_selector}.definitely-wrong-verifier");
             let wrong_verifier = result_err_string(
                 consume_password_reset(&[
-                    Value::String(format!("{wrong_selector}.definitely-wrong-verifier")),
+                    Value::String(wrong_verifier_token),
                     Value::String("wrong verifier password".to_string()),
                 ])
                 .unwrap(),
             );
             assert_eq!(wrong_verifier, "Invalid password reset token");
 
-            let still_old_password = result_ok_map(
-                verify_local_password(&[
-                    Value::String("expire@example.com".to_string()),
-                    Value::String("temporary reset password".to_string()),
+            let valid_after_wrong_verifier = result_ok_map(
+                consume_password_reset(&[
+                    Value::String(map_string(&wrong_verifier_issue, "token")),
+                    Value::String("valid after wrong verifier".to_string()),
                 ])
                 .unwrap(),
             );
-            assert_eq!(map_string(&still_old_password, "state"), "bootstrap");
+            assert_eq!(map_string(&valid_after_wrong_verifier, "state"), "active");
+
+            let rotated_password = result_ok_map(
+                verify_local_password(&[
+                    Value::String("expire@example.com".to_string()),
+                    Value::String("valid after wrong verifier".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(map_string(&rotated_password, "state"), "active");
         }
     }
 

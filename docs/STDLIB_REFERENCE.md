@@ -2539,7 +2539,7 @@ The helper normalizes the identifier (email by default), stores only a hashed ve
 - `identifier` — The local user identifier. Email is the default identifier kind.
 - `options` — Optional map with `identifier_kind` and `ttl_seconds` (default 3600)
 
-**Returns:** Ok(map) with `status: "accepted"`; existing accounts also include `token`, `selector`, `created_at`, and `expires_at`
+**Returns:** Ok(map) with `status: "accepted"`; syntactically valid reset requests also include `token`, `selector`, `created_at`, and `expires_at` without revealing whether a matching account exists
 
 **Examples:**
 

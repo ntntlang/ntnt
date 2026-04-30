@@ -1753,7 +1753,7 @@ Session claims, roles, profiles, and organization membership stay app-owned; loc
 
 ### Local Password Reset
 
-Use `issue_password_reset(...)` and `consume_password_reset(...)` for reset links instead of storing reset state in app metadata or generic auth challenges. Issuance stores only a hashed verifier plus selector in auth-owned reset-token storage. The raw `selector.verifier` token is returned once so the app can email it or render a setup link. Missing, malformed, disabled, locked, and expired accounts/tokens use generic responses to avoid account enumeration.
+Use `issue_password_reset(...)` and `consume_password_reset(...)` for reset links instead of storing reset state in app metadata or generic auth challenges. Issuance stores only a hashed verifier plus selector in auth-owned reset-token storage for resettable local identities. The raw `selector.verifier` token is returned once so the app can email it or render a setup link; syntactically valid requests receive the same response shape whether or not a matching account exists. Missing, malformed, disabled, locked, and expired accounts/tokens use generic responses/errors to avoid account enumeration.
 
 ```ntnt
 import { consume_password_reset, issue_password_reset, sign_in_session } from "std/auth"
@@ -1763,7 +1763,8 @@ fn request_password_reset(req) {
     let form = parse_form(req)
     let reset = issue_password_reset(form["email"] ?? "")?
 
-    // Only present for an existing resettable local user. Still show the same UI either way.
+    // `token` is present for valid-shaped requests, not as an account-existence signal.
+    // Keep the same UI either way; send the link out-of-band if configured.
     if reset["token"] != None {
         send_reset_email(form["email"] ?? "", reset["token"])
     }

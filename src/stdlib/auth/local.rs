@@ -579,17 +579,6 @@ pub(in crate::stdlib::auth) fn issue_password_reset_record(
         Err(_) => return Ok(password_reset_accepted_response()),
     };
 
-    let Some(identity) = get_local_identity_by_identifier_record(&kind, &identifier_normalized)?
-    else {
-        return Ok(password_reset_accepted_response());
-    };
-    if matches!(
-        identity.state,
-        LocalAccountState::Disabled | LocalAccountState::Locked
-    ) {
-        return Ok(password_reset_accepted_response());
-    }
-
     let now = chrono::Utc::now().timestamp();
     let expires_at = now.saturating_add(ttl_seconds.max(0));
     if expires_at <= now {
@@ -599,21 +588,26 @@ pub(in crate::stdlib::auth) fn issue_password_reset_record(
     let selector = random_urlsafe_token(16);
     let verifier = random_urlsafe_token(32);
     let token = format!("{selector}.{verifier}");
-    store_local_password_reset_token_record(&LocalPasswordResetToken {
-        selector: selector.clone(),
-        local_user_id: identity.id.clone(),
-        token_hash: hash_password_reset_verifier(&verifier),
-        created_at: now,
-        expires_at,
-    })?;
 
-    Ok(HashMap::from([
-        ("status".to_string(), Value::String("accepted".to_string())),
-        ("selector".to_string(), Value::String(selector)),
-        ("token".to_string(), Value::String(token)),
-        ("created_at".to_string(), Value::Int(now)),
-        ("expires_at".to_string(), Value::Int(expires_at)),
-    ]))
+    if let Some(identity) = get_local_identity_by_identifier_record(&kind, &identifier_normalized)?
+    {
+        if !matches!(
+            identity.state,
+            LocalAccountState::Disabled | LocalAccountState::Locked
+        ) {
+            store_local_password_reset_token_record(&LocalPasswordResetToken {
+                selector: selector.clone(),
+                local_user_id: identity.id.clone(),
+                token_hash: hash_password_reset_verifier(&verifier),
+                created_at: now,
+                expires_at,
+            })?;
+        }
+    }
+
+    Ok(password_reset_token_response(
+        selector, token, now, expires_at,
+    ))
 }
 
 pub(in crate::stdlib::auth) fn consume_password_reset_record(
@@ -633,23 +627,24 @@ pub(in crate::stdlib::auth) fn consume_password_reset_record(
 
     let now = chrono::Utc::now().timestamp();
     let submitted_hash = hash_password_reset_verifier(verifier);
-    let credential = LocalCredentialSecret {
-        local_user_id: String::new(),
-        password_hash: bcrypt::hash(new_password, bcrypt::DEFAULT_COST)
-            .map_err(|_| "[auth] failed to hash local password".to_string())?,
-        password_hash_algorithm: CredentialPasswordAlgorithm::Bcrypt
-            .storage_name()
-            .to_string(),
-        password_hash_params_json: "{}".to_string(),
-        password_changed_at: now,
-        must_change_password: false,
-    };
     let Some((identity, credential)) =
         consume_local_password_reset_token_and_store_credential_record(
             selector,
             &submitted_hash,
-            &credential,
             now,
+            |local_user_id| {
+                Ok(LocalCredentialSecret {
+                    local_user_id: local_user_id.to_string(),
+                    password_hash: bcrypt::hash(new_password, bcrypt::DEFAULT_COST)
+                        .map_err(|_| "[auth] failed to hash local password".to_string())?,
+                    password_hash_algorithm: CredentialPasswordAlgorithm::Bcrypt
+                        .storage_name()
+                        .to_string(),
+                    password_hash_params_json: "{}".to_string(),
+                    password_changed_at: now,
+                    must_change_password: false,
+                })
+            },
         )?
     else {
         return Err(INVALID_PASSWORD_RESET_TOKEN.to_string());
@@ -662,6 +657,21 @@ pub(in crate::stdlib::auth) fn consume_password_reset_record(
 
 fn password_reset_accepted_response() -> HashMap<String, Value> {
     HashMap::from([("status".to_string(), Value::String("accepted".to_string()))])
+}
+
+fn password_reset_token_response(
+    selector: String,
+    token: String,
+    created_at: i64,
+    expires_at: i64,
+) -> HashMap<String, Value> {
+    HashMap::from([
+        ("status".to_string(), Value::String("accepted".to_string())),
+        ("selector".to_string(), Value::String(selector)),
+        ("token".to_string(), Value::String(token)),
+        ("created_at".to_string(), Value::Int(created_at)),
+        ("expires_at".to_string(), Value::Int(expires_at)),
+    ])
 }
 
 fn random_urlsafe_token(byte_count: usize) -> String {
