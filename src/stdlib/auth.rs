@@ -4366,11 +4366,13 @@ pub fn init() -> HashMap<String, Value> {
     // Issue a one-time password reset token for a local identity.
     //
     // The helper normalizes the identifier (email by default), stores only a hashed
-    // verifier with an opaque selector, and returns deliverable token material only
-    // when the local identity exists and can receive a reset. Missing, malformed,
-    // disabled, or locked identities return a generic accepted payload without token
-    // material so callers can show the same response without account enumeration.
-    // Store or send the returned `token` out-of-band; std/auth never stores the raw token.
+    // verifier with an opaque selector, and returns syntactically valid token material
+    // for valid-shaped requests so response shape does not reveal account existence.
+    // Only resettable local identities have the selector/verifier persisted; dummy
+    // token material for missing, disabled, or locked identities later fails with the
+    // same generic consume error. Malformed identifiers or non-positive TTLs return
+    // a generic accepted payload without token material. Store or send the returned
+    // `token` out-of-band; std/auth never stores the raw token.
     // @param identifier The local user identifier. Email is the default identifier kind.
     // @param options Optional map with `identifier_kind` and `ttl_seconds` (default 3600)
     // @returns Ok(map) with `status: "accepted"`; syntactically valid reset requests also include `token`, `selector`, `created_at`, and `expires_at` without revealing whether a matching account exists

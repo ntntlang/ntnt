@@ -365,6 +365,12 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
     )
     .map_err(|e| format!("Failed to create auth_local_password_reset_tokens index: {}", e))?;
 
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_auth_local_password_reset_tokens_user ON auth_local_password_reset_tokens(local_user_id)",
+        [],
+    )
+    .map_err(|e| format!("Failed to create auth_local_password_reset_tokens user index: {}", e))?;
+
     let mut sqlite_conn = SQLITE_CONN.lock().unwrap();
     *sqlite_conn = Some(conn);
     Ok(())
