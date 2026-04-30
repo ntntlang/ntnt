@@ -7288,6 +7288,10 @@ mod tests {
                 "token should include its selector prefix for lookup"
             );
             assert!(map_int(&issued, "expires_at") > map_int(&issued, "created_at"));
+            let sibling_issued = result_ok_map(
+                issue_password_reset(&[Value::String("reset@example.com".to_string())]).unwrap(),
+            );
+            let sibling_token = map_string(&sibling_issued, "token");
             for secret_key in [
                 "password",
                 "password_hash",
@@ -7381,6 +7385,15 @@ mod tests {
                 .unwrap(),
             );
             assert_eq!(replay, "Invalid password reset token");
+
+            let sibling_replay = result_err_string(
+                consume_password_reset(&[
+                    Value::String(sibling_token),
+                    Value::String("sibling reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(sibling_replay, "Invalid password reset token");
         }
     }
 

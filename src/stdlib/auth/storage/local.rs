@@ -358,7 +358,8 @@ impl LocalAuthMemoryStore {
             ..identity
         };
         self.store_identity_and_credential(identity.clone(), credential.clone())?;
-        self.password_reset_tokens_by_selector.remove(selector);
+        self.password_reset_tokens_by_selector
+            .retain(|_, token| token.local_user_id != reset_token.local_user_id);
         Ok(Some((identity, credential)))
     }
 }
@@ -1075,10 +1076,10 @@ where
     )
     .map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
     tx.execute(
-        "DELETE FROM auth_local_password_reset_tokens WHERE selector = ?1",
-        rusqlite::params![selector],
+        "DELETE FROM auth_local_password_reset_tokens WHERE local_user_id = ?1",
+        rusqlite::params![reset_token.local_user_id],
     )
-    .map_err(|e| format!("[auth] failed to delete password reset token: {}", e))?;
+    .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
     tx.commit().map_err(|e| {
         format!(
             "[auth] failed to commit password reset consume transaction: {}",
