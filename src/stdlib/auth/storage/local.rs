@@ -254,6 +254,15 @@ impl LocalAuthMemoryStore {
         identity: LocalIdentity,
         credential: LocalCredentialSecret,
     ) -> std::result::Result<(), String> {
+        self.store_identity_and_credential_with_reset_revocation(identity, credential, false)
+    }
+
+    pub(in crate::stdlib::auth) fn store_identity_and_credential_with_reset_revocation(
+        &mut self,
+        identity: LocalIdentity,
+        credential: LocalCredentialSecret,
+        revoke_password_resets: bool,
+    ) -> std::result::Result<(), String> {
         let identity = normalize_local_identity_for_storage(identity)?;
         validate_local_credential_secret_for_storage(&credential)?;
         validate_local_identity_credential_pair(&identity, &credential)?;
@@ -284,7 +293,11 @@ impl LocalAuthMemoryStore {
         self.identities_by_id
             .insert(identity.id.clone(), identity.clone());
         self.credential_secrets_by_local_user_id
-            .insert(identity.id, credential);
+            .insert(identity.id.clone(), credential);
+        if revoke_password_resets {
+            self.password_reset_tokens_by_selector
+                .retain(|_, token| token.local_user_id != identity.id);
+        }
         Ok(())
     }
 
@@ -454,14 +467,33 @@ pub(in crate::stdlib::auth) fn store_local_identity_and_credential_record(
     identity: &LocalIdentity,
     credential: &LocalCredentialSecret,
 ) -> std::result::Result<(), String> {
+    store_local_identity_and_credential_record_inner(identity, credential, false)
+}
+
+pub(in crate::stdlib::auth) fn store_local_identity_and_credential_revoke_password_resets_record(
+    identity: &LocalIdentity,
+    credential: &LocalCredentialSecret,
+) -> std::result::Result<(), String> {
+    store_local_identity_and_credential_record_inner(identity, credential, true)
+}
+
+fn store_local_identity_and_credential_record_inner(
+    identity: &LocalIdentity,
+    credential: &LocalCredentialSecret,
+    revoke_password_resets: bool,
+) -> std::result::Result<(), String> {
     match active_auth_storage_backend() {
         AuthStorageBackend::Memory => SESSION_STORE
             .lock()
             .unwrap()
             .local_auth
-            .store_identity_and_credential(identity.clone(), credential.clone()),
+            .store_identity_and_credential_with_reset_revocation(
+                identity.clone(),
+                credential.clone(),
+                revoke_password_resets,
+            ),
         AuthStorageBackend::Sqlite => {
-            store_local_identity_and_credential_sqlite(identity, credential)
+            store_local_identity_and_credential_sqlite(identity, credential, revoke_password_resets)
         }
         AuthStorageBackend::Postgres => Err(
             "[auth] local identity and credential storage is not implemented for PostgreSQL yet"
@@ -671,6 +703,7 @@ fn store_local_identity_sqlite(identity: &LocalIdentity) -> std::result::Result<
 fn store_local_identity_and_credential_sqlite(
     identity: &LocalIdentity,
     credential: &LocalCredentialSecret,
+    revoke_password_resets: bool,
 ) -> std::result::Result<(), String> {
     let identity = normalize_local_identity_for_storage(identity.clone())?;
     validate_local_credential_secret_for_storage(credential)?;
@@ -726,6 +759,14 @@ fn store_local_identity_and_credential_sqlite(
         ],
     )
     .map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
+
+    if revoke_password_resets {
+        tx.execute(
+            "DELETE FROM auth_local_password_reset_tokens WHERE local_user_id = ?1",
+            rusqlite::params![identity.id],
+        )
+        .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
+    }
 
     tx.commit()
         .map_err(|e| format!("[auth] failed to commit local bootstrap transaction: {}", e))

@@ -7400,6 +7400,66 @@ mod tests {
     }
 
     #[test]
+    fn test_set_local_password_revokes_outstanding_password_reset_tokens() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            let module = init();
+            let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+            let issue_password_reset = module_fn(&module, "issue_password_reset");
+            let consume_password_reset = module_fn(&module, "consume_password_reset");
+            let set_local_password = module_fn(&module, "set_local_password");
+            let verify_local_password = module_fn(&module, "verify_local_password");
+
+            result_ok_map(
+                bootstrap_local_user(&[
+                    Value::String("manual-rotate@example.com".to_string()),
+                    Value::String("temporary reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+            let issued = result_ok_map(
+                issue_password_reset(&[Value::String("manual-rotate@example.com".to_string())])
+                    .unwrap(),
+            );
+            let token = map_string(&issued, "token");
+
+            let rotated = result_ok_map(
+                set_local_password(&[
+                    Value::String("manual-rotate@example.com".to_string()),
+                    Value::String("temporary reset password".to_string()),
+                    Value::String("manually rotated password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(map_string(&rotated, "state"), "active");
+
+            let stale_reset = result_err_string(
+                consume_password_reset(&[
+                    Value::String(token),
+                    Value::String("attacker chosen reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(stale_reset, "Invalid password reset token");
+
+            let current_password_still_valid = result_ok_map(
+                verify_local_password(&[
+                    Value::String("manual-rotate@example.com".to_string()),
+                    Value::String("manually rotated password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(map_string(&current_password_still_valid, "state"), "active");
+        }
+    }
+
+    #[test]
     fn test_password_reset_consume_is_atomic_when_sqlite_credential_write_fails() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();

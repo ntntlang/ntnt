@@ -10,6 +10,7 @@ use super::storage::{
     consume_local_password_reset_token_and_store_credential_record,
     get_local_credential_secret_record, get_local_identity_by_identifier_record,
     normalize_local_identifier, store_local_identity_and_credential_record,
+    store_local_identity_and_credential_revoke_password_resets_record,
     store_local_password_reset_token_record, update_local_identity_by_identifier_record,
     LocalAccountState, LocalCredentialSecret, LocalIdentity, LocalPasswordResetToken,
 };
@@ -559,7 +560,7 @@ pub(in crate::stdlib::auth) fn set_local_password_record(
         must_change_password: false,
     };
 
-    store_local_identity_and_credential_record(&identity, &credential)?;
+    store_local_identity_and_credential_revoke_password_resets_record(&identity, &credential)?;
 
     Ok(VerifiedLocalPassword {
         identity,
