@@ -402,6 +402,22 @@ async fn axum_to_bridge_request(
     let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
         .await
         .map_err(|e| IntentError::runtime_error(format!("Failed to read body: {}", e)))?;
+    let is_multipart = headers
+        .get("content-type")
+        .map(|content_type| {
+            content_type
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("multipart/form-data")
+        })
+        .unwrap_or(false);
+    let raw_body_bytes = if is_multipart {
+        body_bytes.to_vec()
+    } else {
+        Vec::new()
+    };
     let body = String::from_utf8_lossy(&body_bytes).to_string();
 
     Ok(BridgeRequest {
@@ -413,6 +429,7 @@ async fn axum_to_bridge_request(
         params,
         headers,
         body,
+        body_bytes: raw_body_bytes,
         id: uuid::Uuid::new_v4().to_string(),
         ip: client_ip.unwrap_or_else(|| "unknown".to_string()),
         protocol: "http".to_string(),

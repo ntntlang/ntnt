@@ -54,14 +54,30 @@ pub struct BridgeRequest {
     pub params: HashMap<String, String>,
     /// HTTP headers (lowercase keys)
     pub headers: HashMap<String, String>,
-    /// Request body as string
+    /// Request body as string (UTF-8 lossless when possible, lossy for binary bodies)
     pub body: String,
+    /// Raw request body bytes for binary-safe handlers such as multipart uploads
+    pub body_bytes: Vec<u8>,
     /// Unique request ID
     pub id: String,
     /// Client IP address
     pub ip: String,
     /// Protocol (http/https)
     pub protocol: String,
+}
+
+fn is_multipart_request(headers: &HashMap<String, String>) -> bool {
+    headers
+        .get("content-type")
+        .map(|content_type| {
+            content_type
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("multipart/form-data")
+        })
+        .unwrap_or(false)
 }
 
 impl BridgeRequest {
@@ -74,6 +90,20 @@ impl BridgeRequest {
         map.insert("url".to_string(), Value::String(self.url.clone()));
         map.insert("query".to_string(), Value::String(self.query.clone()));
         map.insert("body".to_string(), Value::String(self.body.clone()));
+        let exposed_body_bytes: &[u8] = if is_multipart_request(&self.headers) {
+            &self.body_bytes
+        } else {
+            &[]
+        };
+        map.insert(
+            "body_bytes".to_string(),
+            Value::Array(
+                exposed_body_bytes
+                    .iter()
+                    .map(|byte| Value::Int(*byte as i64))
+                    .collect(),
+            ),
+        );
         map.insert("id".to_string(), Value::String(self.id.clone()));
         map.insert("ip".to_string(), Value::String(self.ip.clone()));
         map.insert("protocol".to_string(), Value::String(self.protocol.clone()));
@@ -257,6 +287,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_bridge_request_exposes_body_bytes_only_for_multipart() {
+        let mut req = BridgeRequest {
+            method: "POST".to_string(),
+            path: "/upload".to_string(),
+            url: "/upload".to_string(),
+            query: "".to_string(),
+            query_params: HashMap::new(),
+            params: HashMap::new(),
+            headers: [("content-type".to_string(), "application/json".to_string())]
+                .into_iter()
+                .collect(),
+            body: "{}".to_string(),
+            body_bytes: vec![1, 2, 3],
+            id: "req-json".to_string(),
+            ip: "127.0.0.1".to_string(),
+            protocol: "http".to_string(),
+        };
+
+        let value = req.to_value();
+        match value {
+            Value::Map(map) => match map.get("body_bytes") {
+                Some(Value::Array(bytes)) => assert!(bytes.is_empty()),
+                other => panic!("Expected empty body_bytes array, got {:?}", other),
+            },
+            other => panic!("Expected Map, got {:?}", other),
+        }
+
+        req.headers.insert(
+            "content-type".to_string(),
+            "multipart/form-data; boundary=ntnt".to_string(),
+        );
+        let value = req.to_value();
+        match value {
+            Value::Map(map) => match map.get("body_bytes") {
+                Some(Value::Array(bytes)) => {
+                    let parsed: Vec<i64> = bytes
+                        .iter()
+                        .map(|value| match value {
+                            Value::Int(n) => *n,
+                            other => panic!("Expected Int byte, got {:?}", other),
+                        })
+                        .collect();
+                    assert_eq!(parsed, vec![1, 2, 3]);
+                }
+                other => panic!("Expected populated body_bytes array, got {:?}", other),
+            },
+            other => panic!("Expected Map, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_bridge_request_to_value() {
         let req = BridgeRequest {
             method: "GET".to_string(),
@@ -271,6 +352,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             body: "".to_string(),
+            body_bytes: Vec::new(),
             id: "req-123".to_string(),
             ip: "127.0.0.1".to_string(),
             protocol: "http".to_string(),
@@ -292,6 +374,10 @@ mod tests {
                     Some(Value::String(id)) => assert_eq!(id, "42"),
                     _ => panic!("Expected id param"),
                 }
+            }
+            match map.get("body_bytes") {
+                Some(Value::Array(bytes)) => assert!(bytes.is_empty()),
+                _ => panic!("Expected body_bytes array"),
             }
         } else {
             panic!("Expected Map");
@@ -391,6 +477,7 @@ mod tests {
             params: HashMap::new(),
             headers: HashMap::new(),
             body: "".to_string(),
+            body_bytes: Vec::new(),
             id: "1".to_string(),
             ip: "127.0.0.1".to_string(),
             protocol: "http".to_string(),

@@ -1114,6 +1114,7 @@ pub fn request_to_value(
     request: &tiny_http::Request,
     params: HashMap<String, String>,
     body: String,
+    body_bytes: Vec<u8>,
 ) -> Value {
     let mut req_map: HashMap<String, Value> = HashMap::new();
 
@@ -1180,10 +1181,28 @@ pub fn request_to_value(
 
         headers.insert(field_lower, Value::String(value));
     }
+    let is_multipart = headers
+        .get("content-type")
+        .and_then(|value| match value {
+            Value::String(content_type) => Some(is_multipart_content_type(content_type)),
+            _ => None,
+        })
+        .unwrap_or(false);
     req_map.insert("headers".to_string(), Value::Map(headers));
 
-    // Body
+    // Body. Raw byte materialization is intentionally limited to multipart
+    // requests; converting every request body into Array<Int> is extremely
+    // expensive for JSON/form routes that never read it.
     req_map.insert("body".to_string(), Value::String(body));
+    let exposed_body_bytes = if is_multipart {
+        body_bytes.as_slice()
+    } else {
+        &[]
+    };
+    req_map.insert(
+        "body_bytes".to_string(),
+        bytes_to_value_array(exposed_body_bytes),
+    );
 
     // Client IP (from proxy headers or remote address)
     let ip = client_ip.unwrap_or_else(|| {
@@ -2365,12 +2384,14 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Extracts fields and files from a multipart request. Text fields are returned
     // as String values. File fields are returned as Maps with: `filename` (String),
-    // `content_type` (String), `size` (Int), and `data` (String - may be lossy for
-    // binary files).
+    // `content_type` (String), `size` (Int), `data_bytes` (Array<Int>), and
+    // `data` (String - best-effort text compatibility field).
     //
-    // Note: Binary file data passes through String conversion and may be lossy.
-    // For binary files, use `save_upload()` to write directly to disk.
-    // @param req The Request map with Content-Type header and body.
+    // Binary file data is parsed from raw request bytes when available. Runtime
+    // Request maps populate `body_bytes` for multipart/form-data requests and use
+    // an empty array for other content types to avoid unnecessary memory overhead.
+    // Use `save_upload()` to write `data_bytes` directly to disk without UTF-8 loss.
+    // @param req The Request map with Content-Type header and body/body_bytes.
     // @returns Ok(Map) with field names as keys, or Err(String) on parse failure.
     // @see_also save_upload, parse_form
     // @since v0.3.11
@@ -2392,13 +2413,32 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| {
                 let (content_type, body) = match &args[0] {
                     Value::Map(map) => {
-                        let body = match map.get("body") {
-                            Some(Value::String(b)) => b.clone(),
-                            _ => {
-                                return Ok(Value::err(Value::String(
-                                    "Request has no body".to_string(),
-                                )))
-                            }
+                        let body = match map.get("body_bytes") {
+                            Some(value) => match value_array_to_bytes(value, "body_bytes") {
+                                Ok(bytes) => {
+                                    // Compatibility for tests/manual maps that include an empty
+                                    // body_bytes field but still carry the body as a String.
+                                    if bytes.is_empty() {
+                                        match map.get("body") {
+                                            Some(Value::String(b)) if !b.is_empty() => {
+                                                b.as_bytes().to_vec()
+                                            }
+                                            _ => bytes,
+                                        }
+                                    } else {
+                                        bytes
+                                    }
+                                }
+                                Err(e) => return Ok(Value::err(Value::String(e))),
+                            },
+                            None => match map.get("body") {
+                                Some(Value::String(b)) => b.as_bytes().to_vec(),
+                                _ => {
+                                    return Ok(Value::err(Value::String(
+                                        "Request has no body".to_string(),
+                                    )))
+                                }
+                            },
                         };
 
                         let content_type = match map.get("headers") {
@@ -2473,7 +2513,7 @@ pub fn init() -> HashMap<String, Value> {
     // Security: Paths are validated to prevent directory traversal attacks.
     // Relative paths are resolved from the current working directory.
     // Paths containing `..` are rejected for security.
-    // @param file_field The file field Map from parse_multipart() with a `data` key.
+    // @param file_field The file field Map from parse_multipart() with `data_bytes` (or legacy `data`).
     // @param path The filesystem path to save the file to (relative or absolute).
     // @returns Ok(Int) bytes written, or Err(String) on failure.
     // @see_also parse_multipart
@@ -2491,13 +2531,19 @@ pub fn init() -> HashMap<String, Value> {
             requires: None,
             func: |args| {
                 let data = match &args[0] {
-                    Value::Map(map) => match map.get("data") {
-                        Some(Value::String(d)) => d.clone(),
-                        _ => {
-                            return Ok(Value::err(Value::String(
-                                "File field has no data".to_string(),
-                            )))
-                        }
+                    Value::Map(map) => match map.get("data_bytes") {
+                        Some(value) => match value_array_to_bytes(value, "data_bytes") {
+                            Ok(bytes) => bytes,
+                            Err(e) => return Ok(Value::err(Value::String(e))),
+                        },
+                        None => match map.get("data") {
+                            Some(Value::String(d)) => d.as_bytes().to_vec(),
+                            _ => {
+                                return Ok(Value::err(Value::String(
+                                    "File field has no data".to_string(),
+                                )))
+                            }
+                        },
                     },
                     _ => {
                         return Err(IntentError::type_error(
@@ -2534,7 +2580,7 @@ pub fn init() -> HashMap<String, Value> {
                 }
 
                 // Write file to disk
-                match std::fs::write(&path, data.as_bytes()) {
+                match std::fs::write(&path, &data) {
                     Ok(()) => Ok(Value::ok(Value::Int(data.len() as i64))),
                     Err(e) => Ok(Value::err(Value::String(format!(
                         "Failed to save file: {}",
@@ -2579,89 +2625,232 @@ pub fn init() -> HashMap<String, Value> {
     module
 }
 
+fn is_multipart_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("multipart/form-data")
+}
+
 /// Parse a multipart/form-data body into fields
 fn parse_multipart_body(
-    body: &str,
+    body: &[u8],
     boundary: &str,
 ) -> std::result::Result<HashMap<String, Value>, String> {
     let mut fields = HashMap::new();
-    let delimiter = format!("--{}", boundary);
-    let end_delimiter = format!("--{}--", boundary);
+    let delimiter = format!("--{}", boundary).into_bytes();
 
-    // Split body by boundary
-    let parts: Vec<&str> = body.split(&delimiter).collect();
+    if delimiter.len() <= 2 {
+        return Err("Invalid multipart boundary".to_string());
+    }
 
-    for part in parts {
-        let part = part.trim();
+    let delimiter_table = build_kmp_table(&delimiter);
+    let mut boundary_pos = match find_multipart_boundary(body, &delimiter, &delimiter_table, 0) {
+        Some(pos) => pos,
+        None => return Ok(fields),
+    };
 
-        // Skip empty parts and the final delimiter
-        if part.is_empty() || part == "--" || part.starts_with("--") {
-            continue;
+    loop {
+        let mut part_start = boundary_pos + delimiter.len();
+
+        // Final boundary: --boundary--
+        if body.get(part_start..part_start + 2) == Some(b"--") {
+            break;
         }
 
-        // Split headers from content (separated by \r\n\r\n or \n\n)
-        let (headers_section, content) = if let Some(pos) = part.find("\r\n\r\n") {
-            (&part[..pos], &part[pos + 4..])
-        } else if let Some(pos) = part.find("\n\n") {
-            (&part[..pos], &part[pos + 2..])
+        // Each part starts after the boundary line ending.
+        if body.get(part_start..part_start + 2) == Some(b"\r\n") {
+            part_start += 2;
+        } else if body.get(part_start) == Some(&b'\n') {
+            part_start += 1;
         } else {
-            continue;
-        };
-
-        // Remove trailing boundary marker from content
-        let content = content
-            .trim_end_matches(&end_delimiter)
-            .trim_end_matches("\r\n")
-            .trim_end_matches('\n');
-
-        // Parse Content-Disposition header
-        let mut name: Option<String> = None;
-        let mut filename: Option<String> = None;
-        let mut content_type: Option<String> = None;
-
-        for line in headers_section.lines() {
-            let line = line.trim();
-            if line.to_lowercase().starts_with("content-disposition:") {
-                let disposition = &line["content-disposition:".len()..];
-                // Parse name="value" pairs
-                for part in disposition.split(';') {
-                    let part = part.trim();
-                    if part.starts_with("name=") {
-                        name = Some(part["name=".len()..].trim_matches('"').to_string());
-                    } else if part.starts_with("filename=") {
-                        // Sanitize filename to prevent path traversal and injection
-                        let raw_filename = part["filename=".len()..].trim_matches('"');
-                        filename = Some(sanitize_filename(raw_filename));
-                    }
-                }
-            } else if line.to_lowercase().starts_with("content-type:") {
-                content_type = Some(line["content-type:".len()..].trim().to_string());
-            }
+            return Err("Invalid multipart boundary framing".to_string());
         }
 
-        // Add field to result
-        if let Some(field_name) = name {
-            if let Some(fname) = filename {
-                // File field
-                let mut file_map = HashMap::new();
-                file_map.insert("filename".to_string(), Value::String(fname));
-                file_map.insert(
-                    "content_type".to_string(),
-                    Value::String(
-                        content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
-                    ),
-                );
-                file_map.insert("size".to_string(), Value::Int(content.len() as i64));
-                file_map.insert("data".to_string(), Value::String(content.to_string()));
-                fields.insert(field_name, Value::Map(file_map));
-            } else {
-                // Text field
-                fields.insert(field_name, Value::String(content.to_string()));
-            }
+        let next_boundary =
+            match find_multipart_boundary(body, &delimiter, &delimiter_table, part_start) {
+                Some(pos) => pos,
+                None => break,
+            };
+        let mut part_end = next_boundary;
+
+        // The CRLF immediately before the next boundary is framing, not file data.
+        if part_end >= part_start + 2 && &body[part_end - 2..part_end] == b"\r\n" {
+            part_end -= 2;
+        } else if part_end > part_start && body[part_end - 1] == b'\n' {
+            part_end -= 1;
         }
+
+        parse_multipart_part(&body[part_start..part_end], &mut fields)?;
+        boundary_pos = next_boundary;
     }
 
     Ok(fields)
+}
+
+fn parse_multipart_part(
+    part: &[u8],
+    fields: &mut HashMap<String, Value>,
+) -> std::result::Result<(), String> {
+    let (headers_section, content) = if let Some(pos) = find_subslice(part, b"\r\n\r\n") {
+        (&part[..pos], &part[pos + 4..])
+    } else if let Some(pos) = find_subslice(part, b"\n\n") {
+        (&part[..pos], &part[pos + 2..])
+    } else {
+        return Ok(());
+    };
+
+    let headers_text = String::from_utf8_lossy(headers_section);
+    let mut name: Option<String> = None;
+    let mut filename: Option<String> = None;
+    let mut content_type: Option<String> = None;
+
+    for line in headers_text.lines() {
+        let line = line.trim();
+        if line.to_lowercase().starts_with("content-disposition:") {
+            let disposition = &line["content-disposition:".len()..];
+            for part in disposition.split(';') {
+                let part = part.trim();
+                if part.starts_with("name=") {
+                    name = Some(part["name=".len()..].trim_matches('"').to_string());
+                } else if part.starts_with("filename=") {
+                    let raw_filename = part["filename=".len()..].trim_matches('"');
+                    filename = Some(sanitize_filename(raw_filename));
+                }
+            }
+        } else if line.to_lowercase().starts_with("content-type:") {
+            content_type = Some(line["content-type:".len()..].trim().to_string());
+        }
+    }
+
+    if let Some(field_name) = name {
+        if let Some(fname) = filename {
+            let mut file_map = HashMap::new();
+            file_map.insert("filename".to_string(), Value::String(fname));
+            file_map.insert(
+                "content_type".to_string(),
+                Value::String(
+                    content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+                ),
+            );
+            file_map.insert("size".to_string(), Value::Int(content.len() as i64));
+            file_map.insert("data_bytes".to_string(), bytes_to_value_array(content));
+            file_map.insert(
+                "data".to_string(),
+                Value::String(String::from_utf8_lossy(content).to_string()),
+            );
+            fields.insert(field_name, Value::Map(file_map));
+        } else {
+            fields.insert(
+                field_name,
+                Value::String(String::from_utf8_lossy(content).to_string()),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn find_multipart_boundary(
+    body: &[u8],
+    delimiter: &[u8],
+    delimiter_table: &[usize],
+    from: usize,
+) -> Option<usize> {
+    let mut search_from = from;
+    while let Some(pos) = find_subslice_from(body, delimiter, delimiter_table, search_from) {
+        if is_multipart_boundary_at(body, delimiter, pos) {
+            return Some(pos);
+        }
+        search_from = pos + 1;
+    }
+    None
+}
+
+fn is_multipart_boundary_at(body: &[u8], delimiter: &[u8], pos: usize) -> bool {
+    // Boundaries are delimiter lines: the first starts at byte 0, subsequent
+    // ones are preceded by LF (normally CRLF). A raw "--boundary" inside file
+    // content without line framing is just data.
+    if pos != 0 && body.get(pos.wrapping_sub(1)) != Some(&b'\n') {
+        return false;
+    }
+
+    let after = pos + delimiter.len();
+    body.get(after..after + 2) == Some(b"--")
+        || body.get(after..after + 2) == Some(b"\r\n")
+        || body.get(after) == Some(&b'\n')
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let table = build_kmp_table(needle);
+    find_subslice_from(haystack, needle, &table, 0)
+}
+
+fn find_subslice_from(
+    haystack: &[u8],
+    needle: &[u8],
+    table: &[usize],
+    from: usize,
+) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(from.min(haystack.len()));
+    }
+    if from >= haystack.len() {
+        return None;
+    }
+
+    let mut matched = 0usize;
+    for (index, byte) in haystack.iter().enumerate().skip(from) {
+        while matched > 0 && *byte != needle[matched] {
+            matched = table[matched - 1];
+        }
+        if *byte == needle[matched] {
+            matched += 1;
+            if matched == needle.len() {
+                return Some(index + 1 - matched);
+            }
+        }
+    }
+    None
+}
+
+fn build_kmp_table(needle: &[u8]) -> Vec<usize> {
+    let mut table = vec![0; needle.len()];
+    let mut prefix_len = 0usize;
+    for index in 1..needle.len() {
+        while prefix_len > 0 && needle[index] != needle[prefix_len] {
+            prefix_len = table[prefix_len - 1];
+        }
+        if needle[index] == needle[prefix_len] {
+            prefix_len += 1;
+            table[index] = prefix_len;
+        }
+    }
+    table
+}
+
+fn bytes_to_value_array(bytes: &[u8]) -> Value {
+    Value::Array(bytes.iter().map(|byte| Value::Int(*byte as i64)).collect())
+}
+
+fn value_array_to_bytes(value: &Value, key: &str) -> std::result::Result<Vec<u8>, String> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| match item {
+                Value::Int(n) if (0..=255).contains(n) => Ok(*n as u8),
+                Value::Int(n) => Err(format!("{}[{}] byte {} is outside 0..255", key, index, n)),
+                other => Err(format!(
+                    "{}[{}] must be an Int byte, got {:?}",
+                    key, index, other
+                )),
+            })
+            .collect(),
+        other => Err(format!("{} must be Array<Int>, got {:?}", key, other)),
+    }
 }
 
 /// Validate an upload path to prevent directory traversal attacks
@@ -2923,12 +3112,13 @@ pub fn process_request(
         }
     }
 
-    // Read the request body with size limit using take()
+    // Read the request body with size limit using take(). Keep raw bytes for
+    // multipart/file uploads; expose a best-effort String body for text routes.
     use std::io::Read;
-    let mut body_string = String::new();
+    let mut body_bytes = Vec::new();
     let mut limited_reader = request.as_reader().take((max_size + 1) as u64);
 
-    match limited_reader.read_to_string(&mut body_string) {
+    match limited_reader.read_to_end(&mut body_bytes) {
         Ok(n) => {
             if n > max_size {
                 return Err(IntentError::runtime_error(format!(
@@ -2945,9 +3135,10 @@ pub fn process_request(
             )));
         }
     }
+    let body_string = String::from_utf8_lossy(&body_bytes).to_string();
 
     // Create request value
-    let req_value = request_to_value(&request, params, body_string);
+    let req_value = request_to_value(&request, params, body_string, body_bytes);
 
     Ok((req_value, request))
 }
@@ -4505,6 +4696,124 @@ mod tests {
             headers.get("cache-control").is_none(),
             "Should not add duplicate lowercase cache-control"
         );
+    }
+
+    #[test]
+    fn test_request_to_value_limits_body_bytes_to_multipart() {
+        let request = tiny_http::TestRequest::new()
+            .with_header("content-type: application/json".parse().unwrap())
+            .with_body("{}");
+        let (value, _request) = process_request(request.into(), HashMap::new()).unwrap();
+        match value {
+            Value::Map(map) => match map.get("body_bytes") {
+                Some(Value::Array(bytes)) => assert!(bytes.is_empty()),
+                other => panic!("Expected empty body_bytes array, got {:?}", other),
+            },
+            other => panic!("Expected request map, got {:?}", other),
+        }
+
+        let body = "--ntnt-boundary--\r\n";
+        let request = tiny_http::TestRequest::new()
+            .with_header(
+                "content-type: multipart/form-data; boundary=ntnt-boundary"
+                    .parse()
+                    .unwrap(),
+            )
+            .with_body(body);
+        let (value, _request) = process_request(request.into(), HashMap::new()).unwrap();
+        match value {
+            Value::Map(map) => match map.get("body_bytes") {
+                Some(Value::Array(bytes)) => assert_eq!(bytes.len(), body.as_bytes().len()),
+                other => panic!("Expected populated body_bytes array, got {:?}", other),
+            },
+            other => panic!("Expected request map, got {:?}", other),
+        }
+    }
+
+    // ===========================================
+    // Multipart Upload Tests
+    // ===========================================
+
+    #[test]
+    fn test_parse_multipart_preserves_binary_file_bytes() {
+        let boundary = "ntnt-boundary";
+        let mut binary = vec![0, 159, 146, 150, 255, b'\r', b'\n', 1, 2, 3, b'-', b'-'];
+        // A raw delimiter-looking sequence inside the file content must not split
+        // the part unless it is framed as a multipart boundary line.
+        binary.extend_from_slice(b"xx--ntnt-boundaryyy");
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"title\"\r\n\r\n");
+        body.extend_from_slice(b"hello");
+        body.extend_from_slice(format!("\r\n--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"photo\"; filename=\"test.png\"\r\n",
+        );
+        body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+        body.extend_from_slice(&binary);
+        body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
+
+        let fields = parse_multipart_body(&body, boundary).unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_value_string(fields.get("title").unwrap(), "hello");
+
+        let file = match fields.get("photo") {
+            Some(Value::Map(map)) => map,
+            other => panic!("Expected photo file map, got {:?}", other),
+        };
+        assert_eq!(get_map_string(file, "filename"), "test.png");
+        assert_eq!(get_map_string(file, "content_type"), "image/png");
+        assert_eq!(get_map_int(file, "size"), binary.len() as i64);
+
+        let parsed_bytes =
+            value_array_to_bytes(file.get("data_bytes").unwrap(), "data_bytes").unwrap();
+        assert_eq!(parsed_bytes, binary);
+    }
+
+    #[test]
+    fn test_parse_multipart_handles_adjacent_boundaries_without_panic() {
+        let body = b"--X\r\n--X\r\n--X--\r\n";
+        let fields = parse_multipart_body(body, "X").expect("adjacent boundaries should parse");
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn test_save_upload_writes_data_bytes_exactly() {
+        let binary = vec![0, 159, 146, 150, 255, b'\r', b'\n', 1, 2, 3];
+        let mut file_map = HashMap::new();
+        file_map.insert(
+            "filename".to_string(),
+            Value::String("upload.bin".to_string()),
+        );
+        file_map.insert("data_bytes".to_string(), bytes_to_value_array(&binary));
+
+        let path =
+            std::env::temp_dir().join(format!("ntnt-save-upload-{}.bin", uuid::Uuid::new_v4()));
+        let path_string = path.to_string_lossy().to_string();
+
+        let module = init();
+        let save_upload = match module.get("save_upload").unwrap() {
+            Value::NativeFunction { func, .. } => *func,
+            other => panic!("Expected save_upload native function, got {:?}", other),
+        };
+
+        let result = save_upload(&[Value::Map(file_map), Value::String(path_string)]).unwrap();
+        match result {
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                assert_eq!(variant, "Ok");
+                match values.first() {
+                    Some(Value::Int(n)) => assert_eq!(*n, binary.len() as i64),
+                    other => panic!("Expected byte count, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Result::Ok, got {:?}", other),
+        }
+
+        let saved = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(saved, binary);
     }
 
     // ===========================================

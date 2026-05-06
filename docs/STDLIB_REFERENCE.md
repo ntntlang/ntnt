@@ -6797,13 +6797,13 @@ parse_multipart(req: Request) -> Result<Map<String, Any>, String>
 
 Parse a multipart/form-data request body.
 
-Extracts fields and files from a multipart request. Text fields are returned as String values. File fields are returned as Maps with: `filename` (String), `content_type` (String), `size` (Int), and `data` (String - may be lossy for binary files).
+Extracts fields and files from a multipart request. Text fields are returned as String values. File fields are returned as Maps with: `filename` (String), `content_type` (String), `size` (Int), `data_bytes` (Array<Int>), and `data` (String - best-effort text compatibility field).
 
-Note: Binary file data passes through String conversion and may be lossy. For binary files, use `save_upload()` to write directly to disk.
+Binary file data is parsed from raw request bytes when available. Runtime Request maps populate `body_bytes` for multipart/form-data requests and use an empty array for other content types to avoid unnecessary memory overhead. Use `save_upload()` to write `data_bytes` directly to disk without UTF-8 loss.
 
 **Parameters:**
 
-- `req` — The Request map with Content-Type header and body.
+- `req` — The Request map with Content-Type header and body/body_bytes.
 
 **Returns:** Ok(Map) with field names as keys, or Err(String) on parse failure.
 
@@ -6952,7 +6952,7 @@ Security: Paths are validated to prevent directory traversal attacks. Relative p
 
 **Parameters:**
 
-- `file_field` — The file field Map from parse_multipart() with a `data` key.
+- `file_field` — The file field Map from parse_multipart() with `data_bytes` (or legacy `data`).
 - `path` — The filesystem path to save the file to (relative or absolute).
 
 **Returns:** Ok(Int) bytes written, or Err(String) on failure.

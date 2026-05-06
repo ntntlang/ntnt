@@ -3430,6 +3430,7 @@ impl TypeContext {
                 ("url".to_string(), Type::String),
                 ("query".to_string(), Type::String),
                 ("body".to_string(), Type::String),
+                ("body_bytes".to_string(), Type::Array(Box::new(Type::Int))),
                 ("id".to_string(), Type::String),
                 ("ip".to_string(), Type::String),
                 ("protocol".to_string(), Type::String),
