@@ -106,6 +106,15 @@ pub(in crate::stdlib::auth) struct LocalCredentialSecret {
     pub(in crate::stdlib::auth) must_change_password: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::stdlib::auth) struct LocalPasswordResetToken {
+    pub(in crate::stdlib::auth) selector: String,
+    pub(in crate::stdlib::auth) local_user_id: String,
+    pub(in crate::stdlib::auth) token_hash: String,
+    pub(in crate::stdlib::auth) created_at: i64,
+    pub(in crate::stdlib::auth) expires_at: i64,
+}
+
 pub(in crate::stdlib::auth) fn normalize_local_identifier(
     identifier_kind: &str,
     identifier: &str,
@@ -139,6 +148,7 @@ pub(in crate::stdlib::auth) struct LocalAuthMemoryStore {
     identities_by_id: HashMap<String, LocalIdentity>,
     identity_id_by_lookup_key: HashMap<String, String>,
     credential_secrets_by_local_user_id: HashMap<String, LocalCredentialSecret>,
+    password_reset_tokens_by_selector: HashMap<String, LocalPasswordResetToken>,
 }
 
 impl LocalAuthMemoryStore {
@@ -244,6 +254,15 @@ impl LocalAuthMemoryStore {
         identity: LocalIdentity,
         credential: LocalCredentialSecret,
     ) -> std::result::Result<(), String> {
+        self.store_identity_and_credential_with_reset_revocation(identity, credential, false)
+    }
+
+    pub(in crate::stdlib::auth) fn store_identity_and_credential_with_reset_revocation(
+        &mut self,
+        identity: LocalIdentity,
+        credential: LocalCredentialSecret,
+        revoke_password_resets: bool,
+    ) -> std::result::Result<(), String> {
         let identity = normalize_local_identity_for_storage(identity)?;
         validate_local_credential_secret_for_storage(&credential)?;
         validate_local_identity_credential_pair(&identity, &credential)?;
@@ -274,7 +293,11 @@ impl LocalAuthMemoryStore {
         self.identities_by_id
             .insert(identity.id.clone(), identity.clone());
         self.credential_secrets_by_local_user_id
-            .insert(identity.id, credential);
+            .insert(identity.id.clone(), credential);
+        if revoke_password_resets {
+            self.password_reset_tokens_by_selector
+                .retain(|_, token| token.local_user_id != identity.id);
+        }
         Ok(())
     }
 
@@ -286,6 +309,71 @@ impl LocalAuthMemoryStore {
             .credential_secrets_by_local_user_id
             .get(local_user_id)
             .cloned())
+    }
+
+    pub(in crate::stdlib::auth) fn store_password_reset_token(
+        &mut self,
+        token: LocalPasswordResetToken,
+    ) -> std::result::Result<(), String> {
+        validate_local_password_reset_token_for_storage(&token)?;
+        if !self.identities_by_id.contains_key(&token.local_user_id) {
+            return Err(
+                "[auth] password reset token must reference an existing local identity".to_string(),
+            );
+        }
+        self.password_reset_tokens_by_selector
+            .insert(token.selector.clone(), token);
+        Ok(())
+    }
+
+    pub(in crate::stdlib::auth) fn consume_password_reset_token_and_store_credential<F>(
+        &mut self,
+        selector: &str,
+        token_hash: &str,
+        now: i64,
+        credential_builder: F,
+    ) -> std::result::Result<Option<(LocalIdentity, LocalCredentialSecret)>, String>
+    where
+        F: FnOnce(&str) -> std::result::Result<LocalCredentialSecret, String>,
+    {
+        let Some(reset_token) = self
+            .password_reset_tokens_by_selector
+            .get(selector)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if reset_token.expires_at <= now {
+            self.password_reset_tokens_by_selector.remove(selector);
+            return Ok(None);
+        }
+        if !constant_time_compare(&reset_token.token_hash, token_hash) {
+            return Ok(None);
+        }
+        let Some(identity) = self
+            .identities_by_id
+            .get(&reset_token.local_user_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if matches!(
+            identity.state,
+            LocalAccountState::Disabled | LocalAccountState::Locked
+        ) {
+            return Ok(None);
+        }
+        let credential = credential_builder(&reset_token.local_user_id)?;
+        validate_local_credential_secret_for_storage(&credential)?;
+        let identity = LocalIdentity {
+            updated_at: now,
+            state: LocalAccountState::Active,
+            ..identity
+        };
+        self.store_identity_and_credential(identity.clone(), credential.clone())?;
+        self.password_reset_tokens_by_selector
+            .retain(|_, token| token.local_user_id != reset_token.local_user_id);
+        Ok(Some((identity, credential)))
     }
 }
 
@@ -328,6 +416,24 @@ fn validate_local_credential_secret_for_storage(
     Ok(())
 }
 
+fn validate_local_password_reset_token_for_storage(
+    token: &LocalPasswordResetToken,
+) -> std::result::Result<(), String> {
+    if token.selector.trim().is_empty() {
+        return Err("[auth] password reset token selector must not be empty".to_string());
+    }
+    if token.local_user_id.trim().is_empty() {
+        return Err("[auth] password reset token local_user_id must not be empty".to_string());
+    }
+    if token.token_hash.trim().is_empty() {
+        return Err("[auth] password reset token hash must not be empty".to_string());
+    }
+    if token.expires_at <= token.created_at {
+        return Err("[auth] password reset token expires_at must be after created_at".to_string());
+    }
+    Ok(())
+}
+
 fn validate_local_identity_credential_pair(
     identity: &LocalIdentity,
     credential: &LocalCredentialSecret,
@@ -361,14 +467,33 @@ pub(in crate::stdlib::auth) fn store_local_identity_and_credential_record(
     identity: &LocalIdentity,
     credential: &LocalCredentialSecret,
 ) -> std::result::Result<(), String> {
+    store_local_identity_and_credential_record_inner(identity, credential, false)
+}
+
+pub(in crate::stdlib::auth) fn store_local_identity_and_credential_revoke_password_resets_record(
+    identity: &LocalIdentity,
+    credential: &LocalCredentialSecret,
+) -> std::result::Result<(), String> {
+    store_local_identity_and_credential_record_inner(identity, credential, true)
+}
+
+fn store_local_identity_and_credential_record_inner(
+    identity: &LocalIdentity,
+    credential: &LocalCredentialSecret,
+    revoke_password_resets: bool,
+) -> std::result::Result<(), String> {
     match active_auth_storage_backend() {
         AuthStorageBackend::Memory => SESSION_STORE
             .lock()
             .unwrap()
             .local_auth
-            .store_identity_and_credential(identity.clone(), credential.clone()),
+            .store_identity_and_credential_with_reset_revocation(
+                identity.clone(),
+                credential.clone(),
+                revoke_password_resets,
+            ),
         AuthStorageBackend::Sqlite => {
-            store_local_identity_and_credential_sqlite(identity, credential)
+            store_local_identity_and_credential_sqlite(identity, credential, revoke_password_resets)
         }
         AuthStorageBackend::Postgres => Err(
             "[auth] local identity and credential storage is not implemented for PostgreSQL yet"
@@ -488,6 +613,63 @@ pub(in crate::stdlib::auth) fn get_local_credential_secret_record(
     }
 }
 
+pub(in crate::stdlib::auth) fn store_local_password_reset_token_record(
+    token: &LocalPasswordResetToken,
+) -> std::result::Result<(), String> {
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => SESSION_STORE
+            .lock()
+            .unwrap()
+            .local_auth
+            .store_password_reset_token(token.clone()),
+        AuthStorageBackend::Sqlite => store_local_password_reset_token_sqlite(token),
+        AuthStorageBackend::Postgres => Err(
+            "[auth] password reset token storage is not implemented for PostgreSQL yet".to_string(),
+        ),
+        AuthStorageBackend::Redis => Err(
+            "[auth] password reset token storage is not implemented for Redis/Valkey yet"
+                .to_string(),
+        ),
+    }
+}
+
+pub(in crate::stdlib::auth) fn consume_local_password_reset_token_and_store_credential_record<F>(
+    selector: &str,
+    token_hash: &str,
+    now: i64,
+    credential_builder: F,
+) -> std::result::Result<Option<(LocalIdentity, LocalCredentialSecret)>, String>
+where
+    F: FnOnce(&str) -> std::result::Result<LocalCredentialSecret, String>,
+{
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => SESSION_STORE
+            .lock()
+            .unwrap()
+            .local_auth
+            .consume_password_reset_token_and_store_credential(
+                selector,
+                token_hash,
+                now,
+                credential_builder,
+            ),
+        AuthStorageBackend::Sqlite => {
+            consume_local_password_reset_token_and_store_credential_sqlite(
+                selector,
+                token_hash,
+                now,
+                credential_builder,
+            )
+        }
+        AuthStorageBackend::Postgres => {
+            Err("[auth] password reset consume is not implemented for PostgreSQL yet".to_string())
+        }
+        AuthStorageBackend::Redis => {
+            Err("[auth] password reset consume is not implemented for Redis/Valkey yet".to_string())
+        }
+    }
+}
+
 fn store_local_identity_sqlite(identity: &LocalIdentity) -> std::result::Result<(), String> {
     let identity = normalize_local_identity_for_storage(identity.clone())?;
     let conn_guard = SQLITE_CONN.lock().unwrap();
@@ -521,6 +703,7 @@ fn store_local_identity_sqlite(identity: &LocalIdentity) -> std::result::Result<
 fn store_local_identity_and_credential_sqlite(
     identity: &LocalIdentity,
     credential: &LocalCredentialSecret,
+    revoke_password_resets: bool,
 ) -> std::result::Result<(), String> {
     let identity = normalize_local_identity_for_storage(identity.clone())?;
     validate_local_credential_secret_for_storage(credential)?;
@@ -576,6 +759,14 @@ fn store_local_identity_and_credential_sqlite(
         ],
     )
     .map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
+
+    if revoke_password_resets {
+        tx.execute(
+            "DELETE FROM auth_local_password_reset_tokens WHERE local_user_id = ?1",
+            rusqlite::params![identity.id],
+        )
+        .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
+    }
 
     tx.commit()
         .map_err(|e| format!("[auth] failed to commit local bootstrap transaction: {}", e))
@@ -755,6 +946,189 @@ fn get_local_credential_secret_sqlite(
     )
     .optional()
     .map_err(|e| format!("[auth] failed to lookup local credential: {}", e))
+}
+
+fn store_local_password_reset_token_sqlite(
+    token: &LocalPasswordResetToken,
+) -> std::result::Result<(), String> {
+    validate_local_password_reset_token_for_storage(token)?;
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+    conn.execute(
+        "INSERT INTO auth_local_password_reset_tokens
+         (selector, local_user_id, token_hash, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(selector) DO UPDATE SET
+            local_user_id = excluded.local_user_id,
+            token_hash = excluded.token_hash,
+            created_at = excluded.created_at,
+            expires_at = excluded.expires_at",
+        rusqlite::params![
+            token.selector,
+            token.local_user_id,
+            token.token_hash,
+            token.created_at,
+            token.expires_at,
+        ],
+    )
+    .map_err(|e| format!("[auth] failed to store password reset token: {}", e))?;
+    Ok(())
+}
+
+fn consume_local_password_reset_token_and_store_credential_sqlite<F>(
+    selector: &str,
+    token_hash: &str,
+    now: i64,
+    credential_builder: F,
+) -> std::result::Result<Option<(LocalIdentity, LocalCredentialSecret)>, String>
+where
+    F: FnOnce(&str) -> std::result::Result<LocalCredentialSecret, String>,
+{
+    let mut conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_mut().ok_or("SQLite not initialized")?;
+    let tx = conn.transaction().map_err(|e| {
+        format!(
+            "[auth] failed to begin password reset consume transaction: {}",
+            e
+        )
+    })?;
+
+    let Some(reset_token) = tx
+        .query_row(
+            "SELECT selector, local_user_id, token_hash, created_at, expires_at
+             FROM auth_local_password_reset_tokens
+             WHERE selector = ?1",
+            rusqlite::params![selector],
+            |row| {
+                Ok(LocalPasswordResetToken {
+                    selector: row.get(0)?,
+                    local_user_id: row.get(1)?,
+                    token_hash: row.get(2)?,
+                    created_at: row.get(3)?,
+                    expires_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| format!("[auth] failed to lookup password reset token: {}", e))?
+    else {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit password reset consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    };
+
+    if reset_token.expires_at <= now {
+        tx.execute(
+            "DELETE FROM auth_local_password_reset_tokens WHERE selector = ?1",
+            rusqlite::params![selector],
+        )
+        .map_err(|e| {
+            format!(
+                "[auth] failed to delete expired password reset token: {}",
+                e
+            )
+        })?;
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit password reset consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    }
+    if !constant_time_compare(&reset_token.token_hash, token_hash) {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit password reset consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    }
+    let credential = credential_builder(&reset_token.local_user_id)?;
+    validate_local_credential_secret_for_storage(&credential)?;
+
+    let Some(identity) = tx
+        .query_row(
+            "SELECT id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json
+             FROM auth_local_identities
+             WHERE id = ?1",
+            rusqlite::params![reset_token.local_user_id],
+            local_identity_from_row,
+        )
+        .optional()
+        .map_err(|e| format!("[auth] failed to lookup local identity: {}", e))?
+    else {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit password reset consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    };
+    if matches!(
+        identity.state,
+        LocalAccountState::Disabled | LocalAccountState::Locked
+    ) {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit password reset consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    }
+
+    let identity = normalize_local_identity_for_storage(LocalIdentity {
+        updated_at: now,
+        state: LocalAccountState::Active,
+        ..identity
+    })?;
+    tx.execute(
+        "UPDATE auth_local_identities
+         SET updated_at = ?2, state = ?3
+         WHERE id = ?1",
+        rusqlite::params![identity.id, identity.updated_at, identity.state.as_str()],
+    )
+    .map_err(|e| format!("[auth] failed to update local identity: {}", e))?;
+    tx.execute(
+        "INSERT INTO auth_local_credentials
+         (local_user_id, password_hash, password_hash_algorithm, password_hash_params_json, password_changed_at, must_change_password)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(local_user_id) DO UPDATE SET
+            password_hash = excluded.password_hash,
+            password_hash_algorithm = excluded.password_hash_algorithm,
+            password_hash_params_json = excluded.password_hash_params_json,
+            password_changed_at = excluded.password_changed_at,
+            must_change_password = excluded.must_change_password",
+        rusqlite::params![
+            credential.local_user_id,
+            credential.password_hash,
+            credential.password_hash_algorithm,
+            credential.password_hash_params_json,
+            credential.password_changed_at,
+            if credential.must_change_password { 1 } else { 0 },
+        ],
+    )
+    .map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
+    tx.execute(
+        "DELETE FROM auth_local_password_reset_tokens WHERE local_user_id = ?1",
+        rusqlite::params![reset_token.local_user_id],
+    )
+    .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
+    tx.commit().map_err(|e| {
+        format!(
+            "[auth] failed to commit password reset consume transaction: {}",
+            e
+        )
+    })?;
+
+    Ok(Some((identity, credential.clone())))
 }
 
 #[cfg(test)]

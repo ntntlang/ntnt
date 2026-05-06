@@ -1832,6 +1832,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`cancel_auth_challenge`](#cancelauthchallenge) | Cancel the current auth challenge and clear the challenge cookie. |
 | [`complete_auth_challenge`](#completeauthchallenge) | Upgrade the current auth challenge into a full authenticated session. |
 | [`confirm_totp_enrollment`](#confirmtotpenrollment) | Confirm a pending local TOTP enrollment using a code from the authenticator app. |
+| [`consume_password_reset`](#consumepasswordreset) | Consume a one-time password reset token and rotate the local password. |
 | [`create_session_from_oauth`](#createsessionfromoauth) | Create a session from OAuth user info and tokens. |
 | [`csrf_field`](#csrffield) | Get an HTML hidden input field with the CSRF token. |
 | [`csrf_token`](#csrftoken) | Get the CSRF token for the current session. |
@@ -1842,6 +1843,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`get_session`](#getsession) | Get the current session from the request. |
 | [`get_user`](#getuser) | Get the current authenticated user from the request. |
 | [`has_group`](#hasgroup) | Check app-owned group IDs from authenticated session data. |
+| [`issue_password_reset`](#issuepasswordreset) | Issue a one-time password reset token for a local identity. |
 | [`jwt_decode`](#jwtdecode) | Decode a JWT token WITHOUT verifying the signature. |
 | [`jwt_sign`](#jwtsign) | Create a signed JWT token from claims. |
 | [`jwt_verify`](#jwtverify) | Verify a JWT token and return its claims. |
@@ -2200,6 +2202,35 @@ confirm_totp_enrollment("admin@example.com", form["code"] ?? "")?  // Finish TOT
 
 ---
 
+#### `consume_password_reset`
+
+```ntnt
+consume_password_reset(token: String, new_password: String) -> Result<Map, String>
+```
+
+Consume a one-time password reset token and rotate the local password.
+
+Valid tokens are consumed atomically, verified against the stored hash, and then used to replace the local credential, transition the identity to `active`, and clear `must_change_password`. Missing, malformed, expired, replayed, and wrong-verifier tokens all return the same generic error. Returned payloads are safe local auth user maps and never expose password hashes, token hashes, raw token material, credentials, or secrets.
+
+**Parameters:**
+
+- `token` — The `selector.verifier` token returned by `issue_password_reset(...)`
+- `new_password` — Replacement plaintext password to hash and store
+
+**Returns:** Ok(map) with safe local user fields; Err(message) for invalid/expired/replayed tokens or storage failure
+
+**Examples:**
+
+```ntnt
+let user = consume_password_reset(form["token"] ?? "", form["new_password"] ?? "")?  // Finish a password reset
+```
+
+**See also:** `issue_password_reset`, `verify_local_password`, `sign_in_session`
+
+*Since v0.4.9*
+
+---
+
 #### `create_session_from_oauth`
 
 ```ntnt
@@ -2488,6 +2519,35 @@ has_group(current_session(req)?, ["admins", "owners"])  // Check any accepted gr
 ```
 
 **See also:** `require_auth`, `current_session`, `sign_in_session`
+
+*Since v0.4.9*
+
+---
+
+#### `issue_password_reset`
+
+```ntnt
+issue_password_reset(identifier: String, options?: Map) -> Result<Map, String>
+```
+
+Issue a one-time password reset token for a local identity.
+
+The helper normalizes the identifier (email by default), stores only a hashed verifier with an opaque selector, and returns syntactically valid token material for valid-shaped requests so response shape does not reveal account existence. Only resettable local identities have the selector/verifier persisted; dummy token material for missing, disabled, or locked identities later fails with the same generic consume error. Malformed identifiers or non-positive TTLs return a generic accepted payload without token material. Store or send the returned `token` out-of-band; std/auth never stores the raw token.
+
+**Parameters:**
+
+- `identifier` — The local user identifier. Email is the default identifier kind.
+- `options` — Optional map with `identifier_kind` and `ttl_seconds` (default 3600)
+
+**Returns:** Ok(map) with `status: "accepted"`; syntactically valid reset requests also include `token`, `selector`, `created_at`, and `expires_at` without revealing whether a matching account exists
+
+**Examples:**
+
+```ntnt
+let reset = issue_password_reset(form["email"] ?? "")?  // Begin password reset without account enumeration
+```
+
+**See also:** `consume_password_reset`, `verify_local_password`, `set_local_password`
 
 *Since v0.4.9*
 
