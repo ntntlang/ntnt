@@ -2677,9 +2677,9 @@ fn parse_multipart_body(
         let mut part_end = next_boundary;
 
         // The CRLF immediately before the next boundary is framing, not file data.
-        if part_end >= 2 && &body[part_end - 2..part_end] == b"\r\n" {
+        if part_end >= part_start + 2 && &body[part_end - 2..part_end] == b"\r\n" {
             part_end -= 2;
-        } else if part_end >= 1 && body[part_end - 1] == b'\n' {
+        } else if part_end > part_start && body[part_end - 1] == b'\n' {
             part_end -= 1;
         }
 
@@ -4768,6 +4768,13 @@ mod tests {
         let parsed_bytes =
             value_array_to_bytes(file.get("data_bytes").unwrap(), "data_bytes").unwrap();
         assert_eq!(parsed_bytes, binary);
+    }
+
+    #[test]
+    fn test_parse_multipart_handles_adjacent_boundaries_without_panic() {
+        let body = b"--X\r\n--X\r\n--X--\r\n";
+        let fields = parse_multipart_body(body, "X").expect("adjacent boundaries should parse");
+        assert!(fields.is_empty());
     }
 
     #[test]
