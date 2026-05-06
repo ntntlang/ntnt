@@ -1181,11 +1181,28 @@ pub fn request_to_value(
 
         headers.insert(field_lower, Value::String(value));
     }
+    let is_multipart = headers
+        .get("content-type")
+        .and_then(|value| match value {
+            Value::String(content_type) => Some(is_multipart_content_type(content_type)),
+            _ => None,
+        })
+        .unwrap_or(false);
     req_map.insert("headers".to_string(), Value::Map(headers));
 
-    // Body
+    // Body. Raw byte materialization is intentionally limited to multipart
+    // requests; converting every request body into Array<Int> is extremely
+    // expensive for JSON/form routes that never read it.
     req_map.insert("body".to_string(), Value::String(body));
-    req_map.insert("body_bytes".to_string(), bytes_to_value_array(&body_bytes));
+    let exposed_body_bytes = if is_multipart {
+        body_bytes.as_slice()
+    } else {
+        &[]
+    };
+    req_map.insert(
+        "body_bytes".to_string(),
+        bytes_to_value_array(exposed_body_bytes),
+    );
 
     // Client IP (from proxy headers or remote address)
     let ip = client_ip.unwrap_or_else(|| {
@@ -2370,9 +2387,11 @@ pub fn init() -> HashMap<String, Value> {
     // `content_type` (String), `size` (Int), `data_bytes` (Array<Int>), and
     // `data` (String - best-effort text compatibility field).
     //
-    // Binary file data is parsed from raw request bytes when available. Use
-    // `save_upload()` to write `data_bytes` directly to disk without UTF-8 loss.
-    // @param req The Request map with Content-Type header and body.
+    // Binary file data is parsed from raw request bytes when available. Runtime
+    // Request maps populate `body_bytes` for multipart/form-data requests and use
+    // an empty array for other content types to avoid unnecessary memory overhead.
+    // Use `save_upload()` to write `data_bytes` directly to disk without UTF-8 loss.
+    // @param req The Request map with Content-Type header and body/body_bytes.
     // @returns Ok(Map) with field names as keys, or Err(String) on parse failure.
     // @see_also save_upload, parse_form
     // @since v0.3.11
@@ -2606,6 +2625,15 @@ pub fn init() -> HashMap<String, Value> {
     module
 }
 
+fn is_multipart_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("multipart/form-data")
+}
+
 /// Parse a multipart/form-data body into fields
 fn parse_multipart_body(
     body: &[u8],
@@ -2618,9 +2646,14 @@ fn parse_multipart_body(
         return Err("Invalid multipart boundary".to_string());
     }
 
-    let mut cursor = 0usize;
-    while let Some(rel_start) = find_subslice(&body[cursor..], &delimiter) {
-        let mut part_start = cursor + rel_start + delimiter.len();
+    let delimiter_table = build_kmp_table(&delimiter);
+    let mut boundary_pos = match find_multipart_boundary(body, &delimiter, &delimiter_table, 0) {
+        Some(pos) => pos,
+        None => return Ok(fields),
+    };
+
+    loop {
+        let mut part_start = boundary_pos + delimiter.len();
 
         // Final boundary: --boundary--
         if body.get(part_start..part_start + 2) == Some(b"--") {
@@ -2632,13 +2665,16 @@ fn parse_multipart_body(
             part_start += 2;
         } else if body.get(part_start) == Some(&b'\n') {
             part_start += 1;
+        } else {
+            return Err("Invalid multipart boundary framing".to_string());
         }
 
-        let next_rel = match find_subslice(&body[part_start..], &delimiter) {
-            Some(pos) => pos,
-            None => break,
-        };
-        let mut part_end = part_start + next_rel;
+        let next_boundary =
+            match find_multipart_boundary(body, &delimiter, &delimiter_table, part_start) {
+                Some(pos) => pos,
+                None => break,
+            };
+        let mut part_end = next_boundary;
 
         // The CRLF immediately before the next boundary is framing, not file data.
         if part_end >= 2 && &body[part_end - 2..part_end] == b"\r\n" {
@@ -2648,7 +2684,7 @@ fn parse_multipart_body(
         }
 
         parse_multipart_part(&body[part_start..part_end], &mut fields)?;
-        cursor = part_start + next_rel;
+        boundary_pos = next_boundary;
     }
 
     Ok(fields)
@@ -2717,13 +2753,82 @@ fn parse_multipart_part(
     Ok(())
 }
 
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
+fn find_multipart_boundary(
+    body: &[u8],
+    delimiter: &[u8],
+    delimiter_table: &[usize],
+    from: usize,
+) -> Option<usize> {
+    let mut search_from = from;
+    while let Some(pos) = find_subslice_from(body, delimiter, delimiter_table, search_from) {
+        if is_multipart_boundary_at(body, delimiter, pos) {
+            return Some(pos);
+        }
+        search_from = pos + 1;
     }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+    None
+}
+
+fn is_multipart_boundary_at(body: &[u8], delimiter: &[u8], pos: usize) -> bool {
+    // Boundaries are delimiter lines: the first starts at byte 0, subsequent
+    // ones are preceded by LF (normally CRLF). A raw "--boundary" inside file
+    // content without line framing is just data.
+    if pos != 0 && body.get(pos.wrapping_sub(1)) != Some(&b'\n') {
+        return false;
+    }
+
+    let after = pos + delimiter.len();
+    body.get(after..after + 2) == Some(b"--")
+        || body.get(after..after + 2) == Some(b"\r\n")
+        || body.get(after) == Some(&b'\n')
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let table = build_kmp_table(needle);
+    find_subslice_from(haystack, needle, &table, 0)
+}
+
+fn find_subslice_from(
+    haystack: &[u8],
+    needle: &[u8],
+    table: &[usize],
+    from: usize,
+) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(from.min(haystack.len()));
+    }
+    if from >= haystack.len() {
+        return None;
+    }
+
+    let mut matched = 0usize;
+    for (index, byte) in haystack.iter().enumerate().skip(from) {
+        while matched > 0 && *byte != needle[matched] {
+            matched = table[matched - 1];
+        }
+        if *byte == needle[matched] {
+            matched += 1;
+            if matched == needle.len() {
+                return Some(index + 1 - matched);
+            }
+        }
+    }
+    None
+}
+
+fn build_kmp_table(needle: &[u8]) -> Vec<usize> {
+    let mut table = vec![0; needle.len()];
+    let mut prefix_len = 0usize;
+    for index in 1..needle.len() {
+        while prefix_len > 0 && needle[index] != needle[prefix_len] {
+            prefix_len = table[prefix_len - 1];
+        }
+        if needle[index] == needle[prefix_len] {
+            prefix_len += 1;
+            table[index] = prefix_len;
+        }
+    }
+    table
 }
 
 fn bytes_to_value_array(bytes: &[u8]) -> Value {
@@ -4593,6 +4698,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_request_to_value_limits_body_bytes_to_multipart() {
+        let request = tiny_http::TestRequest::new()
+            .with_header("content-type: application/json".parse().unwrap())
+            .with_body("{}");
+        let (value, _request) = process_request(request.into(), HashMap::new()).unwrap();
+        match value {
+            Value::Map(map) => match map.get("body_bytes") {
+                Some(Value::Array(bytes)) => assert!(bytes.is_empty()),
+                other => panic!("Expected empty body_bytes array, got {:?}", other),
+            },
+            other => panic!("Expected request map, got {:?}", other),
+        }
+
+        let body = "--ntnt-boundary--\r\n";
+        let request = tiny_http::TestRequest::new()
+            .with_header(
+                "content-type: multipart/form-data; boundary=ntnt-boundary"
+                    .parse()
+                    .unwrap(),
+            )
+            .with_body(body);
+        let (value, _request) = process_request(request.into(), HashMap::new()).unwrap();
+        match value {
+            Value::Map(map) => match map.get("body_bytes") {
+                Some(Value::Array(bytes)) => assert_eq!(bytes.len(), body.as_bytes().len()),
+                other => panic!("Expected populated body_bytes array, got {:?}", other),
+            },
+            other => panic!("Expected request map, got {:?}", other),
+        }
+    }
+
     // ===========================================
     // Multipart Upload Tests
     // ===========================================
@@ -4600,7 +4737,10 @@ mod tests {
     #[test]
     fn test_parse_multipart_preserves_binary_file_bytes() {
         let boundary = "ntnt-boundary";
-        let binary = vec![0, 159, 146, 150, 255, b'\r', b'\n', 1, 2, 3, b'-', b'-'];
+        let mut binary = vec![0, 159, 146, 150, 255, b'\r', b'\n', 1, 2, 3, b'-', b'-'];
+        // A raw delimiter-looking sequence inside the file content must not split
+        // the part unless it is framed as a multipart boundary line.
+        binary.extend_from_slice(b"xx--ntnt-boundaryyy");
         let mut body = Vec::new();
         body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
         body.extend_from_slice(b"Content-Disposition: form-data; name=\"title\"\r\n\r\n");
