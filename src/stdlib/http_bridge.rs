@@ -54,8 +54,10 @@ pub struct BridgeRequest {
     pub params: HashMap<String, String>,
     /// HTTP headers (lowercase keys)
     pub headers: HashMap<String, String>,
-    /// Request body as string
+    /// Request body as string (UTF-8 lossless when possible, lossy for binary bodies)
     pub body: String,
+    /// Raw request body bytes for binary-safe handlers such as multipart uploads
+    pub body_bytes: Vec<u8>,
     /// Unique request ID
     pub id: String,
     /// Client IP address
@@ -74,6 +76,15 @@ impl BridgeRequest {
         map.insert("url".to_string(), Value::String(self.url.clone()));
         map.insert("query".to_string(), Value::String(self.query.clone()));
         map.insert("body".to_string(), Value::String(self.body.clone()));
+        map.insert(
+            "body_bytes".to_string(),
+            Value::Array(
+                self.body_bytes
+                    .iter()
+                    .map(|byte| Value::Int(*byte as i64))
+                    .collect(),
+            ),
+        );
         map.insert("id".to_string(), Value::String(self.id.clone()));
         map.insert("ip".to_string(), Value::String(self.ip.clone()));
         map.insert("protocol".to_string(), Value::String(self.protocol.clone()));
@@ -271,6 +282,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             body: "".to_string(),
+            body_bytes: Vec::new(),
             id: "req-123".to_string(),
             ip: "127.0.0.1".to_string(),
             protocol: "http".to_string(),
@@ -292,6 +304,10 @@ mod tests {
                     Some(Value::String(id)) => assert_eq!(id, "42"),
                     _ => panic!("Expected id param"),
                 }
+            }
+            match map.get("body_bytes") {
+                Some(Value::Array(bytes)) => assert!(bytes.is_empty()),
+                _ => panic!("Expected body_bytes array"),
             }
         } else {
             panic!("Expected Map");
@@ -391,6 +407,7 @@ mod tests {
             params: HashMap::new(),
             headers: HashMap::new(),
             body: "".to_string(),
+            body_bytes: Vec::new(),
             id: "1".to_string(),
             ip: "127.0.0.1".to_string(),
             protocol: "http".to_string(),

@@ -413,6 +413,7 @@ async fn axum_to_bridge_request(
         params,
         headers,
         body,
+        body_bytes: body_bytes.to_vec(),
         id: uuid::Uuid::new_v4().to_string(),
         ip: client_ip.unwrap_or_else(|| "unknown".to_string()),
         protocol: "http".to_string(),
