@@ -1701,6 +1701,98 @@ Boundary rule: use `std/auth` for auth flows, sessions, CSRF, current-user helpe
 
 Full OAuth, session management, CSRF, JWT, TOTP, and local credential bootstrap, setup completion, password reset, and verification support.
 
+### Local Auth Quickstart
+
+The 0.4.9 local-auth path is intentionally explicit: `std/auth` owns credentials, reset tokens, TOTP state, sessions, cookies, CSRF, and route protection; the app owns the forms, delivery, roles, and policy copy. Local credentials and reset tokens are stored by the configured auth backend: memory, SQLite, PostgreSQL, or Redis/Valkey.
+
+Supported local identifier kinds are:
+
+- `email` — default; normalized case-insensitively.
+- `phone` — accepts digits plus common separators and stores a normalized E.164-ish string.
+- `username` — lowercase 3-64 character usernames using letters, digits, `_`, `-`, and `.`.
+- `custom` — app-defined opaque identifiers, trimmed and rejected if empty/control-bearing.
+
+```ntnt
+import {
+    bootstrap_local_user,
+    consume_password_reset,
+    enable_auth,
+    issue_password_reset,
+    logout_all,
+    require_auth,
+    sign_in_session,
+    update_local_user_metadata,
+    verify_local_password
+} from "std/auth"
+import { get_env } from "std/env"
+import { json, parse_form, redirect } from "std/http/server"
+
+enable_auth([], map {
+    "session_secret": get_env("SESSION_SECRET"),
+    "session_store": get_env("AUTH_STORE") ?? "sqlite:./auth.db",
+    "login_url": "/login",
+    "logout_url": "/"
+})
+
+fn create_invited_user(email, temporary_password) {
+    // Server-side/admin code. Apps decide who may call this.
+    let user = bootstrap_local_user(email, temporary_password, map {
+        "identifier_kind": "email"
+    })?
+    update_local_user_metadata(email, map {
+        "app": map { "group_ids": ["users"] }
+    })?
+    return user
+}
+
+fn post_login(req) {
+    let form = parse_form(req)
+    let verified = verify_local_password(form["email"] ?? "", form["password"] ?? "")?
+
+    return sign_in_session(redirect("/dashboard"), req, map {
+        "subject_id": verified["subject_id"],
+        "email": verified["email"],
+        "data": map { "group_ids": app_group_ids_for_local_user(verified) }
+    })
+}
+
+fn post_password_reset_request(req) {
+    let form = parse_form(req)
+    let reset = issue_password_reset(form["email"] ?? "")?
+
+    if reset["token"] != None {
+        // App-owned delivery. Do not log or persist the token.
+        send_reset_email(form["email"] ?? "", reset["token"])
+    }
+
+    return redirect("/password-reset/sent")
+}
+
+fn post_password_reset(req) {
+    let form = parse_form(req)
+    let user = consume_password_reset(
+        form["token"] ?? "",
+        form["new_password"] ?? "",
+        map { "revoke_sessions": form["logout_all_devices"] == "on" }
+    )?
+
+    return sign_in_session(redirect("/dashboard"), req, map {
+        "subject_id": user["subject_id"],
+        "email": user["email"]
+    })
+}
+
+fn post_logout_all(req) {
+    let auth_response = require_auth(req)
+    if typeof(auth_response) == "Map" { return auth_response }
+
+    // Use this behind UI like “log me out of all active sessions”.
+    return logout_all(req, false)
+}
+```
+
+Password reset does **not** revoke sessions by default. If the reset form has a “log me out of all active sessions” checkbox, pass `map { "revoke_sessions": true }` to `consume_password_reset(...)`. For a standalone account-security page, use `logout_all(req, keep_current)`; pass `false` to revoke every active session including the current one, or `true` to keep the current session and revoke the rest.
+
 ### Local Credential Bootstrap and Setup Completion
 
 `std/auth` owns local identity/credential lifecycle state. Use `bootstrap_local_user(...)` to provision a setup credential, then call `set_local_password(...)` with that current setup/forced-change credential plus a different replacement password to rotate it and clear setup-required state before granting regular access. Both helpers return only safe local-user metadata; they never expose passwords, password hashes, hash parameters, tokens, or raw credential records.
@@ -1776,7 +1868,8 @@ fn finish_password_reset(req) {
     let form = parse_form(req)
     let user = consume_password_reset(
         form["token"] ?? "",
-        form["new_password"] ?? ""
+        form["new_password"] ?? "",
+        map { "revoke_sessions": form["logout_all_devices"] == "on" }
     )?
 
     return sign_in_session(redirect("/admin"), req, map {
@@ -1787,7 +1880,7 @@ fn finish_password_reset(req) {
 }
 ```
 
-Reset tokens are one-time records. Never log the returned token, store it in `local_user.metadata`, or echo it through unrelated API responses. If a token is missing, expired, malformed, replayed, or has a wrong verifier, `consume_password_reset(...)` returns the same `Err("Invalid password reset token")`.
+Reset tokens are one-time records. Never log the returned token, store it in `local_user.metadata`, or echo it through unrelated API responses. If a token is missing, expired, malformed, replayed, or has a wrong verifier, `consume_password_reset(...)` returns the same `Err("Invalid password reset token")`. Existing sessions are preserved unless the app explicitly passes `map { "revoke_sessions": true }`; use that option for a reset-page checkbox like “log me out of all active sessions.”
 
 ### Local TOTP Enrollment and Verification
 

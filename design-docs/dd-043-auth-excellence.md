@@ -1,9 +1,9 @@
 # DD-043: World-Class Auth — Making `std/auth` the Best stdlib Auth Ever
 
-**Status:** In Progress — Final Sprint
+**Status:** In Progress — 0.4.9 release polish
 **Author:** Larri
-**Date:** 2026-03-20 (slashed and sharpened 2026-04-28; WebAuthn/passkeys phase added 2026-04-29)
-**Branch:** `main` through v0.4.9; remaining v0.4.9 work is PR 3 + template proof; WebAuthn/passkeys are post-v0.4.9
+**Date:** 2026-03-20 (slashed and sharpened 2026-04-28; WebAuthn/passkeys phase added 2026-04-29; 0.4.9 auth polish updated 2026-05-29)
+**Branch:** `main` through v0.4.9; current polish branch: `feat/auth-049-local-backends-polish`; WebAuthn/passkeys are post-v0.4.9
 
 ---
 
@@ -52,17 +52,21 @@ Everything below is merged or intended as the current v0.4.9 baseline:
 - Route/API protection: `require_auth()` middleware/path/request helper with HTML redirect vs API 401 behavior
 - Bearer-token/resource-server helpers: `oauth_validate(...)`, `oauth_introspect(...)`
 - Built-in login page with configurable title/logo/copy/provider buttons
-- No WebAuthn/passkey support yet; that is intentionally post-v0.4.9, after PR 3 and the template integration proof
+- No WebAuthn/passkey support yet; that is intentionally post-v0.4.9, after the template integration proof
 - Configurable route prefixes, startup route logging, collision diagnostics
 - Auth health check endpoint, dev-only by default
 - Refresh-token rotation/preservation with provider-aware semantics
 - Safari ITP workaround through a two-phase exchange-token flow
-- Local identity/credential store owned by `std/auth`
-- `verify_local_password(identifier, password)` credential verification
+- Local identity/credential store owned by `std/auth` across memory, SQLite, PostgreSQL, and Redis/Valkey backends
+- Supported local `identifier_kind` values: `email` (default), `phone`, `username`, and `custom`
+- `verify_local_password(identifier, password, options?)` credential verification
 - `bootstrap_local_user(identifier, password, options?)` bootstrap provisioning
 - `set_local_password(identifier, current_password, new_password, options?)` password rotation/setup completion
+- `issue_password_reset(identifier, options?)` and `consume_password_reset(token, new_password, options?)` with hashed selector/verifier storage, TTL, one-time consume, replay rejection, and generic non-enumerating responses
+- Password reset session revocation is explicit: `consume_password_reset(..., map { "revoke_sessions": true })`; default is to preserve existing sessions
+- Standalone current-user session revocation UI can use `logout_all(req, keep_current)` for “log me out of all active sessions” flows
+- Local TOTP helpers use auth-owned local identity metadata, so the configured local identity backend carries TOTP state as well
 - Internal module split: config, cookies, providers, OAuth, guards, routes, request helpers, sessions, storage, primitives, utilities
-- Memory/SQLite coverage for local identity/credential paths; Postgres/Redis local credential backends are future unless explicitly implemented in the final sprint
 
 ---
 
@@ -93,7 +97,7 @@ Rules:
 
 ---
 
-## Remaining Work (Fast Path — 2-3 PRs)
+## Acceptance Work Still Open
 
 ### PR 1 — Metadata + Authorization Context Polish
 
@@ -130,13 +134,14 @@ Goal: make TOTP a real local-auth extension path without requiring template-owne
 
 Goal: ship reset password securely enough to use, without owning email delivery or account UI.
 
-- [ ] Add `issue_password_reset(identifier, options?) -> Result<PasswordReset, String>`
-- [ ] Add `consume_password_reset(token, new_password, options?) -> Result<PasswordResetResult, String>`
-- [ ] Store only token selectors/hashes, never raw tokens
-- [ ] Enforce TTL, one-time consume, replay rejection, and generic responses that do not enumerate accounts
-- [ ] Define reset consequences as explicit options/defaults: revoke sessions, force password change, clear/reset TOTP enrollment
-- [ ] Apps/plugins own email/SMS delivery; `std/auth` returns the token/safe URL material to deliver
-- [ ] Add memory/SQLite tests by default; clearly document/skip Postgres/Redis local reset support unless implemented
+- [x] Add `issue_password_reset(identifier, options?) -> Result<PasswordReset, String>`
+- [x] Add `consume_password_reset(token, new_password, options?) -> Result<PasswordResetResult, String>`
+- [x] Store only token selectors/hashes, never raw tokens
+- [x] Enforce TTL, one-time consume, replay rejection, and generic responses that do not enumerate accounts
+- [x] Define session revocation as an explicit reset option: default preserves sessions; `revoke_sessions: true` revokes active sessions after successful reset
+- [x] Apps/plugins own email/SMS delivery; `std/auth` returns the token/safe URL material to deliver
+- [x] Add local reset tests and backend contract coverage across memory, SQLite, PostgreSQL, and Redis/Valkey
+- Deferred post-v0.4.9 unless app/template pressure proves them: force-password-change-after-reset policy, TOTP reset-on-reset policy, and security-event emission
 
 ### Template Integration Proof
 
@@ -148,12 +153,13 @@ This may be a separate template-repo PR, but it is the real acceptance test.
 - [ ] Template protects both pages and API endpoints through `require_auth(...)` / group helpers
 - [ ] Template deletes parallel auth tables/state machines
 - [ ] The before/after diff is materially simpler
+- [x] `docs/AI_AGENT_GUIDE.md` includes a local auth quickstart showing login, reset, explicit reset-session revocation checkbox plumbing, and standalone `logout_all(...)` UI composition
 
 ---
 
 ## Post-v0.4.9 Phase — WebAuthn + Passkeys
 
-This phase is intentionally **after** PR 3, the template integration proof, and the v0.4.9 auth release. It should not delay 0.4.9. The goal is to add phishing-resistant WebAuthn/passkey primitives that compose with the same `std/auth` local identity, staged challenge, request-aware session, and route/API protection model.
+This phase is intentionally **after** the template integration proof and the v0.4.9 auth release. It should not delay 0.4.9. The goal is to add phishing-resistant WebAuthn/passkey primitives that compose with the same `std/auth` local identity, staged challenge, request-aware session, and route/API protection model.
 
 Design posture:
 
@@ -247,12 +253,13 @@ Non-goals for the first WebAuthn phase:
 The v0.4.9 final sprint is complete when:
 
 1. `std/auth` primitives are solid and composable for OAuth, local email/password, TOTP, password reset, pages, and API endpoints.
-2. Password reset tokens are hashed, TTL-bound, one-time, non-enumerating, and not app-reimplemented.
+2. Password reset tokens are hashed, TTL-bound, one-time, non-enumerating, and not app-reimplemented; reset-time session revocation is explicit and off by default.
 3. TOTP has first-class helper support and no template-owned TOTP model.
 4. Authorization context has a clean `group_ids` / claims handoff that apps can use for RBAC without `std/auth` owning RBAC.
 5. Local and OAuth sessions share lifecycle, cookie posture, rotation, metadata, and security behavior.
 6. Metadata is a deliberate extension seam with namespacing, safe payload rules, and no raw secrets.
-7. The template runs on `std/auth` models plus metadata/session-data extensions, with no parallel auth subsystem.
+7. Local auth works on the configured auth backend: memory, SQLite, PostgreSQL, or Redis/Valkey.
+8. The template runs on `std/auth` models plus metadata/session-data extensions, with no parallel auth subsystem.
 
 The WebAuthn/passkey phase is complete later when passkey registration, safe listing/revocation, passkey authentication, request-aware session completion, credential replay/counter protection, template UX, and browser-facing examples all work without creating a second user/session system.
 
@@ -272,7 +279,7 @@ Only if real apps prove the final-sprint primitives are insufficient:
 - Higher-level `local_sign_in(...)` wrapper if explicit composition proves too verbose
 - `enable_local_auth(...)` convenience preset
 - Built-in reset/setup/reference routes and pages
-- Full Postgres/Redis local-auth credential/reset/TOTP storage parity
+- Dedicated arbitrary-user admin session APIs beyond current-user `logout_all(...)`
 
 ### Advanced WebAuthn / Passkey Policy
 
@@ -297,8 +304,8 @@ After the first WebAuthn/passkey phase proves the primitive shape:
 ### Advanced Session Management
 
 - `list_sessions(user_id)` API for admin/arbitrary-user session lookup
-- `revoke_session(session_id)` and `revoke_all_sessions(user_id)` APIs
-- Password-change/account-disable hooks for session revocation
+- `revoke_session(session_id)` and arbitrary-user `revoke_all_sessions(user_id)` APIs
+- Password-change/account-disable hooks for session revocation beyond the explicit password-reset `revoke_sessions` option
 - Behavioral `remember_me` TTL selection beyond current plumbing
 - Device metadata management UI helpers
 
@@ -335,4 +342,4 @@ After the first WebAuthn/passkey phase proves the primitive shape:
 
 ---
 
-*Sharpened 2026-04-28. One DD, one roadmap. DD-062 retired. Final sprint keeps the secure essentials first-class — reset, TOTP, API/page protection, and authorization handoff — while pushing product/RBAC/platform bloat to Future Refinements. WebAuthn/passkeys added 2026-04-29 as a post-v0.4.9 phase after PR 3 and template proof.*
+*Sharpened 2026-04-28. One DD, one roadmap. DD-062 retired. Final sprint keeps the secure essentials first-class — reset, TOTP, API/page protection, local backend parity, and authorization handoff — while pushing product/RBAC/platform bloat to Future Refinements. WebAuthn/passkeys added 2026-04-29 as a post-v0.4.9 phase after template proof.*

@@ -799,6 +799,29 @@ fn parse_password_reset_issue_options(
     }
 }
 
+fn parse_password_reset_consume_options(
+    function_name: &str,
+    options: Option<&Value>,
+) -> Result<bool> {
+    match options {
+        Some(Value::Map(map)) => match map.get("revoke_sessions") {
+            Some(Value::Bool(value)) => Ok(*value),
+            Some(other) => Err(IntentError::type_error(format!(
+                "[auth] {}() revoke_sessions must be a bool, got {}",
+                function_name,
+                other.type_name()
+            ))),
+            None => Ok(false),
+        },
+        Some(other) => Err(IntentError::type_error(format!(
+            "[auth] {}() options must be a map, got {}",
+            function_name,
+            other.type_name()
+        ))),
+        None => Ok(false),
+    }
+}
+
 fn parse_totp_options(
     function_name: &str,
     options: Option<&Value>,
@@ -3993,8 +4016,8 @@ pub fn init() -> HashMap<String, Value> {
     // local identity record and app-owned metadata without verifying a password.
     // Reserved `auth.*` metadata is kept server-side and omitted from the returned
     // payload; use dedicated std/auth helpers for stdlib-managed lifecycle state.
-    // @param identifier The local user identifier. Email is the default identifier kind.
-    // @param options Optional map with `identifier_kind` (default `"email"`)
+    // @param identifier The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
+    // @param options Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`)
     // @returns Ok(map) with safe local user fields and `metadata`; Err(message) when missing or unsupported
     // @see_also update_local_user_metadata, verify_local_password
     // @since v0.4.9
@@ -4052,7 +4075,7 @@ pub fn init() -> HashMap<String, Value> {
     // preserves reserved `auth.*` namespaces for std/auth-managed lifecycle state.
     // Pass `map { "replace": true }` to replace app-visible metadata. Inputs may
     // not write `auth` or `auth.*` keys directly.
-    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param identifier The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
     // @param metadata App-owned metadata map to merge or replace
     // @param options Optional map with `identifier_kind` and `replace`
     // @returns Ok(map) with safe local user fields and metadata; Err(message) on missing user, reserved namespace, or unsupported backend
@@ -4174,10 +4197,10 @@ pub fn init() -> HashMap<String, Value> {
     // app-owned setup code can force rotation before granting regular access.
     // It never exposes passwords, password hashes, hash parameters, credentials,
     // secrets, or tokens.
-    // @param identifier The local setup identifier. Email is the default identifier kind.
+    // @param identifier The local setup identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
     // @param password The temporary plaintext password to hash and store
-    // @param options Optional map with `identifier_kind` (default `"email"`)
-    // @returns Ok(map) with safe local user fields; Err(message) on duplicate, invalid input, or unsupported storage backend
+    // @param options Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`)
+    // @returns Ok(map) with safe local user fields; Err(message) on duplicate, invalid input, or storage backend failure
     // @error RuntimeError ~ "Auth not initialized" fix: "Call enable_auth(...) during app startup before bootstrapping local credentials"
     // @error TypeError ~ "identifier must be a string" fix: "Pass the setup email/identifier as a string"
     // @see_also verify_local_password, sign_in_session
@@ -4266,11 +4289,11 @@ pub fn init() -> HashMap<String, Value> {
     // compose the resulting user through request-aware `sign_in_session(...)`. It
     // never exposes passwords, password hashes, hash parameters, credentials,
     // secrets, or tokens.
-    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param identifier The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
     // @param current_password The current setup, forced-change, or active local password to verify before rotation
     // @param new_password The replacement plaintext password to hash and store; it must differ from the current password
-    // @param options Optional map with `identifier_kind` (default `"email"`)
-    // @returns Ok(map) with safe local user fields; Err(message) on invalid credentials, invalid input, or unsupported storage backend
+    // @param options Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`)
+    // @returns Ok(map) with safe local user fields; Err(message) on invalid credentials, invalid input, or storage backend failure
     // @error RuntimeError ~ "Auth not initialized" fix: "Call enable_auth(...) during app startup before rotating local credentials"
     // @error TypeError ~ "identifier must be a string" fix: "Pass the setup email/identifier as a string"
     // @see_also bootstrap_local_user, verify_local_password, sign_in_session
@@ -4373,8 +4396,8 @@ pub fn init() -> HashMap<String, Value> {
     // same generic consume error. Malformed identifiers or non-positive TTLs return
     // a generic accepted payload without token material. Store or send the returned
     // `token` out-of-band; std/auth never stores the raw token.
-    // @param identifier The local user identifier. Email is the default identifier kind.
-    // @param options Optional map with `identifier_kind` and `ttl_seconds` (default 3600)
+    // @param identifier The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
+    // @param options Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`) and `ttl_seconds` (default 3600)
     // @returns Ok(map) with `status: "accepted"`; syntactically valid reset requests also include `token`, `selector`, `created_at`, and `expires_at` without revealing whether a matching account exists
     // @see_also consume_password_reset, verify_local_password, set_local_password
     // @since v0.4.9
@@ -4408,7 +4431,7 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt consume_password_reset
     // @module std/auth
-    // @signature consume_password_reset(token: String, new_password: String) -> Result<Map, String>
+    // @signature consume_password_reset(token: String, new_password: String, options?: Map) -> Result<Map, String>
     // Consume a one-time password reset token and rotate the local password.
     //
     // Valid tokens are consumed atomically, verified against the stored hash, and
@@ -4416,33 +4439,48 @@ pub fn init() -> HashMap<String, Value> {
     // and clear `must_change_password`. Missing, malformed, expired, replayed, and
     // wrong-verifier tokens all return the same generic error. Returned payloads are
     // safe local auth user maps and never expose password hashes, token hashes, raw
-    // token material, credentials, or secrets.
+    // token material, credentials, or secrets. Pass `map { "revoke_sessions": true }`
+    // to explicitly revoke that local user's existing sessions after a successful reset;
+    // by default, existing sessions are left active.
     // @param token The `selector.verifier` token returned by `issue_password_reset(...)`
     // @param new_password Replacement plaintext password to hash and store
-    // @returns Ok(map) with safe local user fields; Err(message) for invalid/expired/replayed tokens or storage failure
-    // @see_also issue_password_reset, verify_local_password, sign_in_session
+    // @param options Optional map with `revoke_sessions` (default false)
+    // @returns Ok(map) with safe local user fields and `revoked_sessions`; Err(message) for invalid/expired/replayed tokens or storage failure
+    // @see_also issue_password_reset, verify_local_password, logout_all, sign_in_session
     // @since v0.4.9
     // @tags #auth, #local-auth, #password-reset, #security
-    // @example let user = consume_password_reset(form["token"] ?? "", form["new_password"] ?? "")? ~ "Finish a password reset"
+    // @example let user = consume_password_reset(form["token"] ?? "", form["new_password"] ?? "")? ~ "Finish a password reset without revoking sessions"
+    // @example let user = consume_password_reset(form["token"] ?? "", form["new_password"] ?? "", map { "revoke_sessions": form["logout_all"] == "on" })? ~ "Finish a reset and explicitly revoke existing sessions from a checkbox"
     module.insert(
         "consume_password_reset".to_string(),
         Value::NativeFunction {
             name: "consume_password_reset".to_string(),
             arity: 2,
-            max_arity: 2,
+            max_arity: 3,
             requires: None,
             func: |args| {
-                if args.len() != 2 {
+                if args.len() < 2 || args.len() > 3 {
                     return Err(IntentError::type_error(
-                        "[auth] consume_password_reset() requires token and new_password"
+                        "[auth] consume_password_reset() requires token, new_password, and optional options"
                             .to_string(),
                     ));
                 }
                 require_auth_initialized_for("consume_password_reset")?;
                 let token = string_arg("consume_password_reset", args, 0, "token")?;
                 let new_password = string_arg("consume_password_reset", args, 1, "new_password")?;
-                match consume_password_reset_record(token, new_password) {
-                    Ok(verified) => Ok(Value::ok(verified_local_password_to_value(verified))),
+                let revoke_sessions =
+                    parse_password_reset_consume_options("consume_password_reset", args.get(2))?;
+                match consume_password_reset_record(token, new_password, revoke_sessions) {
+                    Ok((verified, revoked_sessions)) => {
+                        let mut value = verified_local_password_to_value(verified);
+                        if let Value::Map(ref mut map) = value {
+                            map.insert(
+                                "revoked_sessions".to_string(),
+                                Value::Int(revoked_sessions as i64),
+                            );
+                        }
+                        Ok(Value::ok(value))
+                    }
                     Err(message) => Ok(Value::err(Value::String(message))),
                 }
             },
@@ -4468,7 +4506,7 @@ pub fn init() -> HashMap<String, Value> {
     // accidentally treat setup-required accounts as fully active sessions.
     // @param identifier The local login identifier. Email is the default identifier kind.
     // @param password The plaintext password from the login form
-    // @param options Optional map with `identifier_kind` (default `"email"`)
+    // @param options Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`)
     // @returns Ok(map) with `subject_id`, `provider`, identifier fields, account `state`, and password-change metadata; Err(message) on invalid credentials or operational credential errors
     // @error RuntimeError ~ "Auth not initialized" fix: "Call enable_auth(...) during app startup before verifying local credentials"
     // @error TypeError ~ "identifier must be a string" fix: "Pass the submitted email/identifier as a string"
@@ -4554,7 +4592,7 @@ pub fn init() -> HashMap<String, Value> {
     // and returns safe status fields plus an `otpauth://` URI for QR-code setup. The raw secret is not returned as a
     // standalone field and is never exposed through `local_user(...)`, `current_user(...)`, or `totp_status(...)`.
     // The setup URI itself is secret-bearing; render it only in the setup response and do not log, cache, or persist it.
-    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param identifier The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
     // @param options Optional map with `identifier_kind`, `issuer`, and `label`
     // @returns Ok(map) with pending TOTP status and setup `uri`; Err(message) on invalid identity/state/storage
     // @see_also confirm_totp_enrollment, totp_status, verify_local_totp, reset_totp
@@ -4599,7 +4637,7 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Moves `auth.totp.pending_secret` to std/auth-owned confirmed secret metadata only after the submitted code
     // verifies. Returned status is secret-free and safe to use in setup flows.
-    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param identifier The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
     // @param code The 6-digit TOTP code from the authenticator app
     // @param options Optional map with `identifier_kind`
     // @returns Ok(map) with confirmed TOTP status; Err(message) on missing pending setup or invalid code
@@ -4643,7 +4681,7 @@ pub fn init() -> HashMap<String, Value> {
     // until this helper succeeds, then complete the challenge with `complete_auth_challenge(...)` or sign in through
     // `sign_in_session(...)`. Pair TOTP endpoints with app rate limiting/backoff; this helper verifies codes but does
     // not own account lockout policy.
-    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param identifier The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
     // @param code The 6-digit TOTP code from the authenticator app
     // @param options Optional map with `identifier_kind`
     // @returns Ok(map) with `verified: true` and safe TOTP status; Err(message) on invalid code or unavailable TOTP
@@ -4683,7 +4721,7 @@ pub fn init() -> HashMap<String, Value> {
     // Read a local user's safe TOTP enrollment status.
     //
     // Returns status booleans and display metadata only. It never includes pending or confirmed TOTP secret material.
-    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param identifier The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
     // @param options Optional map with `identifier_kind`
     // @returns Ok(map) with safe TOTP status; Err(message) on invalid identity/storage
     // @see_also begin_totp_enrollment, confirm_totp_enrollment, verify_local_totp, reset_totp
@@ -4720,7 +4758,7 @@ pub fn init() -> HashMap<String, Value> {
     // Clear a local user's pending or confirmed TOTP enrollment.
     //
     // Removes only std/auth-owned `auth.totp` metadata and preserves app-owned metadata namespaces.
-    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param identifier The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
     // @param options Optional map with `identifier_kind`
     // @returns Ok(map) with disabled TOTP status; Err(message) on invalid identity/state/storage
     // @see_also begin_totp_enrollment, confirm_totp_enrollment, totp_status
@@ -5265,12 +5303,17 @@ pub fn init() -> HashMap<String, Value> {
 mod tests {
     use super::storage::{
         cleanup_expired_oauth_state_records, consume_auth_challenge_record,
-        consume_exchange_token_record, consume_oauth_state_record,
+        consume_exchange_token_record,
+        consume_local_password_reset_token_and_store_credential_record, consume_oauth_state_record,
         delete_all_session_records_for_user, delete_session_record, extend_session_record_expiry,
-        get_auth_challenge_record, get_refreshable_session_record, get_session_record,
-        list_session_records_for_user, migrate_session_record, store_auth_challenge_record,
-        store_exchange_token_record, store_oauth_state_record, store_session_record,
-        update_session_record_data, update_session_record_tokens, OAUTH_STATE_TTL,
+        get_auth_challenge_record, get_local_credential_secret_record,
+        get_local_identity_by_identifier_record, get_refreshable_session_record,
+        get_session_record, list_session_records_for_user, migrate_session_record,
+        store_auth_challenge_record, store_exchange_token_record,
+        store_local_identity_and_credential_record, store_local_password_reset_token_record,
+        store_oauth_state_record, store_session_record, update_session_record_data,
+        update_session_record_tokens, LocalAccountState, LocalCredentialSecret, LocalIdentity,
+        LocalPasswordResetToken, OAUTH_STATE_TTL,
     };
     use super::*;
 
@@ -5645,6 +5688,110 @@ mod tests {
         assert!(get_session_record(&rotated_session.id)
             .unwrap_or_else(|e| panic!("{} deleted session lookup should succeed: {}", label, e))
             .is_none());
+
+        let local_identity = LocalIdentity {
+            id: format!("local-user-{}", label),
+            identifier_kind: "username".to_string(),
+            identifier: format!("{}User", label),
+            identifier_normalized: format!("{}user", label),
+            created_at: now,
+            updated_at: now,
+            state: LocalAccountState::Active,
+            metadata_json: r#"{"app":{"group_ids":["admins"]}}"#.to_string(),
+        };
+        let local_credential = LocalCredentialSecret {
+            local_user_id: local_identity.id.clone(),
+            password_hash: format!("hash-{}", label),
+            password_hash_algorithm: "bcrypt".to_string(),
+            password_hash_params_json: "{}".to_string(),
+            password_changed_at: now,
+            must_change_password: false,
+        };
+        store_local_identity_and_credential_record(&local_identity, &local_credential)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{} local identity+credential store should succeed: {}",
+                    label, e
+                )
+            });
+        let stored_local_identity =
+            get_local_identity_by_identifier_record("username", &format!("{}user", label))
+                .unwrap_or_else(|e| panic!("{} local identity lookup should succeed: {}", label, e))
+                .unwrap_or_else(|| panic!("{} local identity should exist", label));
+        assert_eq!(stored_local_identity.id, local_identity.id);
+        assert_eq!(
+            stored_local_identity.metadata_json,
+            local_identity.metadata_json
+        );
+        let stored_local_credential = get_local_credential_secret_record(&local_identity.id)
+            .unwrap_or_else(|e| panic!("{} local credential lookup should succeed: {}", label, e))
+            .unwrap_or_else(|| panic!("{} local credential should exist", label));
+        assert_eq!(
+            stored_local_credential.password_hash,
+            local_credential.password_hash
+        );
+        let reset_token = LocalPasswordResetToken {
+            selector: format!("reset-selector-{}", label),
+            local_user_id: local_identity.id.clone(),
+            token_hash: format!("reset-hash-{}", label),
+            created_at: now,
+            expires_at: now + 3600,
+        };
+        store_local_password_reset_token_record(&reset_token).unwrap_or_else(|e| {
+            panic!(
+                "{} local password reset token store should succeed: {}",
+                label, e
+            )
+        });
+        let consumed_reset = consume_local_password_reset_token_and_store_credential_record(
+            &reset_token.selector,
+            &reset_token.token_hash,
+            now,
+            |local_user_id| {
+                Ok(LocalCredentialSecret {
+                    local_user_id: local_user_id.to_string(),
+                    password_hash: format!("hash-{}-rotated", label),
+                    password_hash_algorithm: "bcrypt".to_string(),
+                    password_hash_params_json: "{}".to_string(),
+                    password_changed_at: now + 1,
+                    must_change_password: false,
+                })
+            },
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "{} local password reset consume should succeed: {}",
+                label, e
+            )
+        })
+        .unwrap_or_else(|| panic!("{} local password reset token should consume", label));
+        assert_eq!(consumed_reset.0.id, local_identity.id);
+        assert_eq!(
+            consumed_reset.1.password_hash,
+            format!("hash-{}-rotated", label)
+        );
+        assert!(
+            consume_local_password_reset_token_and_store_credential_record(
+                &reset_token.selector,
+                &reset_token.token_hash,
+                now,
+                |local_user_id| {
+                    Ok(LocalCredentialSecret {
+                        local_user_id: local_user_id.to_string(),
+                        password_hash: "unused".to_string(),
+                        password_hash_algorithm: "bcrypt".to_string(),
+                        password_hash_params_json: "{}".to_string(),
+                        password_changed_at: now + 2,
+                        must_change_password: false,
+                    })
+                },
+            )
+            .unwrap_or_else(|e| panic!(
+                "{} local password reset replay lookup should succeed: {}",
+                label, e
+            ))
+            .is_none()
+        );
 
         let oauth_state = OAuthState {
             state: format!("oauth-{}-active", label),
@@ -7324,6 +7471,26 @@ mod tests {
                 "reset token hashes belong in reset-token storage, not metadata"
             );
 
+            store_session_record(&Session {
+                id: "reset-default-keeps-session".to_string(),
+                user_id: stored_identity.id.clone(),
+                provider: "local".to_string(),
+                email: Some("reset@example.com".to_string()),
+                name: None,
+                picture: None,
+                raw_json: "{}".to_string(),
+                data_json: "{}".to_string(),
+                csrf_token: "csrf-reset-default-keeps-session".to_string(),
+                access_token: None,
+                refresh_token: None,
+                token_expires_at: None,
+                device_name: None,
+                user_agent_hash: None,
+                last_ip_hash: None,
+                created_at: chrono::Utc::now().timestamp(),
+                expires_at: chrono::Utc::now().timestamp() + 300,
+            })
+            .unwrap();
             let consumed = result_ok_map(
                 consume_password_reset(&[
                     Value::String(token.clone()),
@@ -7331,6 +7498,14 @@ mod tests {
                 ])
                 .unwrap(),
             );
+            assert_eq!(map_int(&consumed, "revoked_sessions"), 0);
+            assert!(
+                get_session_record("reset-default-keeps-session")
+                    .unwrap()
+                    .is_some(),
+                "password reset must keep existing sessions unless explicitly asked to revoke"
+            );
+            delete_session_record("reset-default-keeps-session").unwrap();
             assert_eq!(map_string(&consumed, "local_user_id"), stored_identity.id);
             match consumed.get("state") {
                 Some(Value::String(state)) => assert_eq!(state, "active"),
@@ -7396,6 +7571,49 @@ mod tests {
                 .unwrap(),
             );
             assert_eq!(sibling_replay, "Invalid password reset token");
+
+            let revoke_issued = result_ok_map(
+                issue_password_reset(&[Value::String("reset@example.com".to_string())]).unwrap(),
+            );
+            let revoke_token = map_string(&revoke_issued, "token");
+            store_session_record(&Session {
+                id: "reset-option-revokes-session".to_string(),
+                user_id: stored_identity.id.clone(),
+                provider: "local".to_string(),
+                email: Some("reset@example.com".to_string()),
+                name: None,
+                picture: None,
+                raw_json: "{}".to_string(),
+                data_json: "{}".to_string(),
+                csrf_token: "csrf-reset-option-revokes-session".to_string(),
+                access_token: None,
+                refresh_token: None,
+                token_expires_at: None,
+                device_name: None,
+                user_agent_hash: None,
+                last_ip_hash: None,
+                created_at: chrono::Utc::now().timestamp(),
+                expires_at: chrono::Utc::now().timestamp() + 300,
+            })
+            .unwrap();
+            let consumed_with_revoke = result_ok_map(
+                consume_password_reset(&[
+                    Value::String(revoke_token),
+                    Value::String("rotated and revoked sessions".to_string()),
+                    Value::Map(HashMap::from([(
+                        "revoke_sessions".to_string(),
+                        Value::Bool(true),
+                    )])),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(map_int(&consumed_with_revoke, "revoked_sessions"), 1);
+            assert!(
+                get_session_record("reset-option-revokes-session")
+                    .unwrap()
+                    .is_none(),
+                "explicit revoke_sessions option should revoke existing sessions"
+            );
         }
     }
 
@@ -8423,6 +8641,109 @@ mod tests {
             return;
         };
         run_auth_storage_contract_round_trip(store, "redis");
+    }
+
+    #[test]
+    fn test_redis_password_reset_consume_is_one_time_under_concurrency() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(store) = auth_test_redis_store() else {
+            eprintln!(
+                "[auth-test] skipping Redis password reset concurrency test — set NTNT_AUTH_TEST_REDIS_URL"
+            );
+            return;
+        };
+        reset_auth_test_state();
+        init_test_auth(store);
+
+        let now = chrono::Utc::now().timestamp();
+        let identity = LocalIdentity {
+            id: format!("local-user-redis-concurrent-{now}"),
+            identifier_kind: "email".to_string(),
+            identifier: format!("redis-concurrent-{now}@example.com"),
+            identifier_normalized: format!("redis-concurrent-{now}@example.com"),
+            created_at: now,
+            updated_at: now,
+            state: LocalAccountState::Active,
+            metadata_json: "{}".to_string(),
+        };
+        let credential = LocalCredentialSecret {
+            local_user_id: identity.id.clone(),
+            password_hash: "hash-before-concurrent-reset".to_string(),
+            password_hash_algorithm: "bcrypt".to_string(),
+            password_hash_params_json: "{}".to_string(),
+            password_changed_at: now,
+            must_change_password: false,
+        };
+        store_local_identity_and_credential_record(&identity, &credential).unwrap();
+        let reset_token = LocalPasswordResetToken {
+            selector: format!("redis-concurrent-selector-{now}"),
+            local_user_id: identity.id.clone(),
+            token_hash: format!("redis-concurrent-token-hash-{now}"),
+            created_at: now,
+            expires_at: now + 3600,
+        };
+        store_local_password_reset_token_record(&reset_token).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for index in 0..2 {
+            let barrier = barrier.clone();
+            let selector = reset_token.selector.clone();
+            let token_hash = reset_token.token_hash.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                consume_local_password_reset_token_and_store_credential_record(
+                    &selector,
+                    &token_hash,
+                    now,
+                    |local_user_id| {
+                        Ok(LocalCredentialSecret {
+                            local_user_id: local_user_id.to_string(),
+                            password_hash: format!("hash-after-concurrent-reset-{index}"),
+                            password_hash_algorithm: "bcrypt".to_string(),
+                            password_hash_params_json: "{}".to_string(),
+                            password_changed_at: now + index,
+                            must_change_password: false,
+                        })
+                    },
+                )
+            }));
+        }
+
+        let successes = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("redis consume thread should not panic")
+            })
+            .map(|result| result.expect("redis consume should not return storage error"))
+            .filter(|result| result.is_some())
+            .count();
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent Redis password reset consume should succeed"
+        );
+        assert!(
+            consume_local_password_reset_token_and_store_credential_record(
+                &reset_token.selector,
+                &reset_token.token_hash,
+                now,
+                |local_user_id| {
+                    Ok(LocalCredentialSecret {
+                        local_user_id: local_user_id.to_string(),
+                        password_hash: "unused-replay-hash".to_string(),
+                        password_hash_algorithm: "bcrypt".to_string(),
+                        password_hash_params_json: "{}".to_string(),
+                        password_changed_at: now + 10,
+                        must_change_password: false,
+                    })
+                },
+            )
+            .unwrap()
+            .is_none(),
+            "Redis password reset token should be gone after the successful consume"
+        );
     }
 
     #[test]

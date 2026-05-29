@@ -498,6 +498,69 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
         )
         .ok();
 
+    client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS auth_local_identities (
+            id TEXT PRIMARY KEY,
+            identifier_kind TEXT NOT NULL,
+            identifier TEXT NOT NULL,
+            identifier_normalized TEXT NOT NULL,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL,
+            state TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            UNIQUE(identifier_kind, identifier_normalized)
+        )",
+            &[],
+        )
+        .map_err(|e| format!("Failed to create auth_local_identities table: {}", e))?;
+
+    client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS auth_local_credentials (
+            local_user_id TEXT PRIMARY KEY REFERENCES auth_local_identities(id) ON DELETE CASCADE,
+            password_hash TEXT NOT NULL,
+            password_hash_algorithm TEXT NOT NULL,
+            password_hash_params_json TEXT NOT NULL,
+            password_changed_at BIGINT NOT NULL,
+            must_change_password BOOLEAN NOT NULL DEFAULT FALSE
+        )",
+            &[],
+        )
+        .map_err(|e| format!("Failed to create auth_local_credentials table: {}", e))?;
+
+    client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS auth_local_password_reset_tokens (
+            selector TEXT PRIMARY KEY,
+            local_user_id TEXT NOT NULL REFERENCES auth_local_identities(id) ON DELETE CASCADE,
+            token_hash TEXT NOT NULL,
+            created_at BIGINT NOT NULL,
+            expires_at BIGINT NOT NULL
+        )",
+            &[],
+        )
+        .map_err(|e| {
+            format!(
+                "Failed to create auth_local_password_reset_tokens table: {}",
+                e
+            )
+        })?;
+
+    client
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_auth_local_password_reset_tokens_expires ON auth_local_password_reset_tokens(expires_at)",
+            &[],
+        )
+        .ok();
+
+    client
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_auth_local_password_reset_tokens_user ON auth_local_password_reset_tokens(local_user_id)",
+            &[],
+        )
+        .ok();
+
     // Store URL for later connections
     let mut pg_url = POSTGRES_URL.lock().unwrap();
     *pg_url = Some(url.to_string());

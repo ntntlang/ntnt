@@ -4041,7 +4041,11 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 "consume_password_reset",
                 [
                     "token" => Type::String,
-                    "new_password" => Type::String
+                    "new_password" => Type::String,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
                 ],
                 Type::Generic {
                     name: "Result".to_string(),
@@ -4052,7 +4056,8 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                         },
                         Type::String,
                     ],
-                }
+                },
+                required(2)
             );
             sig!(
                 "verify_local_password",
@@ -4562,7 +4567,7 @@ mod tests {
             r#"
             import { issue_password_reset, consume_password_reset } from "std/auth"
             let issued = issue_password_reset("admin@example.com", map { "identifier_kind": "email", "ttl_seconds": 600 })
-            let consumed = consume_password_reset("selector.verifier", "new-password")
+            let consumed = consume_password_reset("selector.verifier", "new-password", map { "revoke_sessions": true })
             "#,
         );
         assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");

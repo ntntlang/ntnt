@@ -1,6 +1,6 @@
 # DD-059: Hard-Remove Generic Crypto Exports from `std/auth`
 
-## Status: implemented on branch / awaiting PR review
+## Status: implemented in the v0.4.9 baseline
 
 ## Problem
 `std/auth` should own authentication concerns, not generic crypto utilities.
@@ -19,7 +19,7 @@ After this change:
 - `hash_password` must be imported from `std/crypto`
 - `verify_password` must be imported from `std/crypto`
 - `uuid` remains in `std/crypto`
-- auth-owned helpers remain in `std/auth`
+- auth-owned helpers remain in `std/auth`, including local identity/credential lifecycle, password reset, TOTP, sessions, OAuth, CSRF, staged challenges, route/API protection, and current-user session management
 
 ## Explicitly In Scope vs Out of Scope
 **In scope**
@@ -77,7 +77,7 @@ One nearby repo, `larri-site-template`, still imports `totp_secret` / `verify_to
 - [x] Open PR with the DD, implementation, and audit context together
 
 ## Validation
-Implemented on branch `feat/dd-059-auth-crypto-boundary`.
+Implemented in the v0.4.9 auth baseline; original work happened on `feat/dd-059-auth-crypto-boundary`. Current 0.4.9 polish keeps the boundary intact while adding auth-owned local password/reset/TOTP features in `std/auth`.
 
 Validated behavior:
 - `hash_password` works from `std/crypto`
@@ -88,4 +88,4 @@ Validated behavior:
 ## Bottom Line
 Ship it.
 
-This is a small breaking change, but it is the right one: it removes the remaining generic crypto aliases from `std/auth` without dragging auth-specific helpers into unnecessary churn.
+This is a small breaking change, but it is the right one: it removes the remaining generic crypto aliases from `std/auth` without dragging auth-specific helpers into unnecessary churn. The added local-auth primitives do not reopen the generic-crypto boundary; they are auth lifecycle APIs, not generic hash/UUID utilities.

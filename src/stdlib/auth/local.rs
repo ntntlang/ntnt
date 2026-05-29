@@ -8,8 +8,9 @@ use std::collections::HashMap;
 
 use super::storage::{
     consume_local_password_reset_token_and_store_credential_record,
-    get_local_credential_secret_record, get_local_identity_by_identifier_record,
-    normalize_local_identifier, store_local_identity_and_credential_record,
+    delete_all_session_records_for_user, get_local_credential_secret_record,
+    get_local_identity_by_identifier_record, normalize_local_identifier,
+    store_local_identity_and_credential_record,
     store_local_identity_and_credential_revoke_password_resets_record,
     store_local_password_reset_token_record, update_local_identity_by_identifier_record,
     LocalAccountState, LocalCredentialSecret, LocalIdentity, LocalPasswordResetToken,
@@ -614,7 +615,8 @@ pub(in crate::stdlib::auth) fn issue_password_reset_record(
 pub(in crate::stdlib::auth) fn consume_password_reset_record(
     token: &str,
     new_password: &str,
-) -> std::result::Result<VerifiedLocalPassword, String> {
+    revoke_sessions: bool,
+) -> std::result::Result<(VerifiedLocalPassword, u64), String> {
     if new_password.trim().is_empty() {
         return Err("[auth] local password must not be empty".to_string());
     }
@@ -650,10 +652,18 @@ pub(in crate::stdlib::auth) fn consume_password_reset_record(
     else {
         return Err(INVALID_PASSWORD_RESET_TOKEN.to_string());
     };
-    Ok(VerifiedLocalPassword {
-        identity,
-        credential,
-    })
+    let revoked_sessions = if revoke_sessions {
+        delete_all_session_records_for_user(&identity.id, None)?
+    } else {
+        0
+    };
+    Ok((
+        VerifiedLocalPassword {
+            identity,
+            credential,
+        },
+        revoked_sessions,
+    ))
 }
 
 fn password_reset_accepted_response() -> HashMap<String, Value> {
