@@ -2059,7 +2059,7 @@ Generates a new TOTP secret, stores it under std/auth-owned local identity metad
 
 **Parameters:**
 
-- `identifier` — The local user identifier. Email is the default identifier kind.
+- `identifier` — The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
 - `options` — Optional map with `identifier_kind`, `issuer`, and `label`
 
 **Returns:** Ok(map) with pending TOTP status and setup `uri`; Err(message) on invalid identity/state/storage
@@ -2088,11 +2088,11 @@ The helper normalizes the identifier (email by default), rejects an existing loc
 
 **Parameters:**
 
-- `identifier` — The local setup identifier. Email is the default identifier kind.
+- `identifier` — The local setup identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
 - `password` — The temporary plaintext password to hash and store
-- `options` — Optional map with `identifier_kind` (default `"email"`)
+- `options` — Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`)
 
-**Returns:** Ok(map) with safe local user fields; Err(message) on duplicate, invalid input, or unsupported storage backend
+**Returns:** Ok(map) with safe local user fields; Err(message) on duplicate, invalid input, or storage backend failure
 
 **Examples:**
 
@@ -2184,7 +2184,7 @@ Moves `auth.totp.pending_secret` to std/auth-owned confirmed secret metadata onl
 
 **Parameters:**
 
-- `identifier` — The local user identifier. Email is the default identifier kind.
+- `identifier` — The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
 - `code` — The 6-digit TOTP code from the authenticator app
 - `options` — Optional map with `identifier_kind`
 
@@ -2205,27 +2205,29 @@ confirm_totp_enrollment("admin@example.com", form["code"] ?? "")?  // Finish TOT
 #### `consume_password_reset`
 
 ```ntnt
-consume_password_reset(token: String, new_password: String) -> Result<Map, String>
+consume_password_reset(token: String, new_password: String, options?: Map) -> Result<Map, String>
 ```
 
 Consume a one-time password reset token and rotate the local password.
 
-Valid tokens are consumed atomically, verified against the stored hash, and then used to replace the local credential, transition the identity to `active`, and clear `must_change_password`. Missing, malformed, expired, replayed, and wrong-verifier tokens all return the same generic error. Returned payloads are safe local auth user maps and never expose password hashes, token hashes, raw token material, credentials, or secrets.
+Valid tokens are consumed atomically, verified against the stored hash, and then used to replace the local credential, transition the identity to `active`, and clear `must_change_password`. Missing, malformed, expired, replayed, and wrong-verifier tokens all return the same generic error. Returned payloads are safe local auth user maps and never expose password hashes, token hashes, raw token material, credentials, or secrets. Pass `map { "revoke_sessions": true }` to explicitly revoke that local user's existing sessions after a successful reset; by default, existing sessions are left active.
 
 **Parameters:**
 
 - `token` — The `selector.verifier` token returned by `issue_password_reset(...)`
 - `new_password` — Replacement plaintext password to hash and store
+- `options` — Optional map with `revoke_sessions` (default false)
 
-**Returns:** Ok(map) with safe local user fields; Err(message) for invalid/expired/replayed tokens or storage failure
+**Returns:** Ok(map) with safe local user fields and `revoked_sessions`; Err(message) for invalid/expired/replayed tokens or storage failure
 
 **Examples:**
 
 ```ntnt
-let user = consume_password_reset(form["token"] ?? "", form["new_password"] ?? "")?  // Finish a password reset
+let user = consume_password_reset(form["token"] ?? "", form["new_password"] ?? "")?  // Finish a password reset without revoking sessions
+let user = consume_password_reset(form["token"] ?? "", form["new_password"] ?? "", map { "revoke_sessions": form["logout_all"] == "on" })?  // Finish a reset and explicitly revoke existing sessions from a checkbox
 ```
 
-**See also:** `issue_password_reset`, `verify_local_password`, `sign_in_session`
+**See also:** `issue_password_reset`, `verify_local_password`, `logout_all`, `sign_in_session`
 
 *Since v0.4.9*
 
@@ -2536,8 +2538,8 @@ The helper normalizes the identifier (email by default), stores only a hashed ve
 
 **Parameters:**
 
-- `identifier` — The local user identifier. Email is the default identifier kind.
-- `options` — Optional map with `identifier_kind` and `ttl_seconds` (default 3600)
+- `identifier` — The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
+- `options` — Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`) and `ttl_seconds` (default 3600)
 
 **Returns:** Ok(map) with `status: "accepted"`; syntactically valid reset requests also include `token`, `selector`, `created_at`, and `expires_at` without revealing whether a matching account exists
 
@@ -2653,8 +2655,8 @@ Use this from trusted server-side setup/admin code when an app needs the local i
 
 **Parameters:**
 
-- `identifier` — The local user identifier. Email is the default identifier kind.
-- `options` — Optional map with `identifier_kind` (default `"email"`)
+- `identifier` — The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
+- `options` — Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`)
 
 **Returns:** Ok(map) with safe local user fields and `metadata`; Err(message) when missing or unsupported
 
@@ -3018,7 +3020,7 @@ Removes only std/auth-owned `auth.totp` metadata and preserves app-owned metadat
 
 **Parameters:**
 
-- `identifier` — The local user identifier. Email is the default identifier kind.
+- `identifier` — The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
 - `options` — Optional map with `identifier_kind`
 
 **Returns:** Ok(map) with disabled TOTP status; Err(message) on invalid identity/state/storage
@@ -3129,12 +3131,12 @@ The helper normalizes the identifier (email by default), loads the auth-owned lo
 
 **Parameters:**
 
-- `identifier` — The local user identifier. Email is the default identifier kind.
+- `identifier` — The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
 - `current_password` — The current setup, forced-change, or active local password to verify before rotation
 - `new_password` — The replacement plaintext password to hash and store; it must differ from the current password
-- `options` — Optional map with `identifier_kind` (default `"email"`)
+- `options` — Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`)
 
-**Returns:** Ok(map) with safe local user fields; Err(message) on invalid credentials, invalid input, or unsupported storage backend
+**Returns:** Ok(map) with safe local user fields; Err(message) on invalid credentials, invalid input, or storage backend failure
 
 **Examples:**
 
@@ -3284,7 +3286,7 @@ Returns status booleans and display metadata only. It never includes pending or 
 
 **Parameters:**
 
-- `identifier` — The local user identifier. Email is the default identifier kind.
+- `identifier` — The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
 - `options` — Optional map with `identifier_kind`
 
 **Returns:** Ok(map) with safe TOTP status; Err(message) on invalid identity/storage
@@ -3343,7 +3345,7 @@ By default this helper performs a top-level merge into `metadata_json` and prese
 
 **Parameters:**
 
-- `identifier` — The local user identifier. Email is the default identifier kind.
+- `identifier` — The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
 - `metadata` — App-owned metadata map to merge or replace
 - `options` — Optional map with `identifier_kind` and `replace`
 
@@ -3466,7 +3468,7 @@ The helper normalizes the identifier (email by default), loads the auth-owned lo
 
 - `identifier` — The local login identifier. Email is the default identifier kind.
 - `password` — The plaintext password from the login form
-- `options` — Optional map with `identifier_kind` (default `"email"`)
+- `options` — Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`)
 
 **Returns:** Ok(map) with `subject_id`, `provider`, identifier fields, account `state`, and password-change metadata; Err(message) on invalid credentials or operational credential errors
 
@@ -3500,7 +3502,7 @@ Use after `verify_local_password(...)` in staged login flows. Apps should keep t
 
 **Parameters:**
 
-- `identifier` — The local user identifier. Email is the default identifier kind.
+- `identifier` — The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
 - `code` — The 6-digit TOTP code from the authenticator app
 - `options` — Optional map with `identifier_kind`
 
