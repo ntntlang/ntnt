@@ -885,7 +885,7 @@ pub(super) fn create_auth_challenge(
         None => AUTH_CHALLENGE_TTL,
     };
 
-    let data_map = match challenge_spec.get("data") {
+    let mut data_map = match challenge_spec.get("data") {
         Some(Value::Map(map)) => map.clone(),
         Some(other) => {
             return Err(format!(
@@ -895,6 +895,10 @@ pub(super) fn create_auth_challenge(
         }
         None => HashMap::new(),
     };
+    data_map.insert(
+        AUTH_CHALLENGE_CSRF_DATA_KEY.to_string(),
+        Value::String(uuid::Uuid::new_v4().to_string()),
+    );
 
     let now = chrono::Utc::now().timestamp();
     Ok(AuthChallenge {

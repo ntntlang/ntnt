@@ -15,6 +15,7 @@ import {
     auth_callback,
     auth_logout,
     auth_start,
+    auth_challenge_csrf_field,
     begin_auth_challenge,
     begin_totp_enrollment,
     bootstrap_local_user,
@@ -35,12 +36,12 @@ import {
     totp_status,
     update_local_user_metadata,
     user_sessions,
+    verify_auth_challenge_csrf,
     verify_csrf,
     verify_local_password,
     verify_local_totp
 } from "std/auth"
 import { get_key } from "std/collections"
-import { uuid } from "std/crypto"
 import { load_env, get_env } from "std/env"
 import { html_escape, trim, lower } from "std/string"
 
@@ -213,7 +214,7 @@ fn local_login(req) {
             "subject_id": user["subject_id"],
             "kind": "local.password_change",
             "ttl": 900,
-            "data": map { "user": user, "email": email, "csrf": uuid() }
+            "data": map { "user": user, "email": email }
         })
     }
 
@@ -223,7 +224,7 @@ fn local_login(req) {
             "subject_id": user["subject_id"],
             "kind": "local.totp",
             "ttl": 300,
-            "data": map { "user": user, "email": email, "csrf": uuid() }
+            "data": map { "user": user, "email": email }
         })
     }
 
@@ -252,7 +253,7 @@ fn change_password_page(req) {
 {{{notice_html(req)}}}
 <section class="card">
   <form method="post" action="/local/change-password">
-    <input type="hidden" name="_csrf" value="{{data["csrf"]}}">
+    {{{auth_challenge_csrf_field(req, "local.password_change")}}}
     <label>Email</label><input name="email" value="{{data["email"]}}" readonly>
     <label>Current setup password</label><input name="current_password" type="password" autocomplete="current-password">
     <label>New password</label><input name="new_password" type="password" autocomplete="new-password">
@@ -272,7 +273,7 @@ fn change_password(req) {
     if form_email != email {
         return redirect("/local/change-password?error=Invalid password change challenge")
     }
-    if (form["_csrf"] ?? "") != (value["data"]["csrf"] ?? "") {
+    if !verify_auth_challenge_csrf(req, form["_csrf"] ?? "", "local.password_change") {
         return html("CSRF token missing or invalid", 403)
     }
     let user = set_local_password(email, form["current_password"] ?? "", form["new_password"] ?? "")
@@ -293,7 +294,7 @@ fn local_totp_page(req) {
 {{{notice_html(req)}}}
 <section class="card">
   <form method="post" action="/local/totp">
-    <input type="hidden" name="_csrf" value="{{data["csrf"]}}">
+    {{{auth_challenge_csrf_field(req, "local.totp")}}}
     <label>Code for {{email}}</label><input name="code" inputmode="numeric" autocomplete="one-time-code">
     <button type="submit">Complete login</button>
   </form>
@@ -307,7 +308,7 @@ fn local_totp(req) {
     let value = unwrap(challenge)
     let email = value["data"]["email"]
     let form = parse_form(req)
-    if (form["_csrf"] ?? "") != (value["data"]["csrf"] ?? "") {
+    if !verify_auth_challenge_csrf(req, form["_csrf"] ?? "", "local.totp") {
         return html("CSRF token missing or invalid", 403)
     }
     let verified = verify_local_totp(email, trim(form["code"] ?? ""))

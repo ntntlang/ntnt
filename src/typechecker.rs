@@ -4081,6 +4081,46 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 },
                 required(2)
             );
+            sig!(
+                "auth_challenge_csrf_token",
+                [
+                    "req" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "kind" => Type::String
+                ],
+                Type::Generic {
+                    name: "Option".to_string(),
+                    args: vec![Type::String],
+                },
+                required(1)
+            );
+            sig!(
+                "auth_challenge_csrf_field",
+                [
+                    "req" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "kind" => Type::String
+                ],
+                Type::String,
+                required(1)
+            );
+            sig!(
+                "verify_auth_challenge_csrf",
+                [
+                    "req" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    "token" => Type::String,
+                    "kind" => Type::String
+                ],
+                Type::Bool,
+                required(2)
+            );
         }
         "std/crypto" => {
             sig!("sha256", ["data" => Type::String], Type::String);
@@ -4601,6 +4641,33 @@ mod tests {
             let verified = verify_local_totp("admin@example.com", "123456", map { "identifier_kind": "email" })
             let status = totp_status("admin@example.com", map { "identifier_kind": "email" })
             let reset = reset_totp("admin@example.com", map { "identifier_kind": "email" })
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
+    }
+
+    #[test]
+    fn test_std_auth_challenge_csrf_signatures_check_args() {
+        let errs = check_errors(
+            r#"
+            import { auth_challenge_csrf_field, auth_challenge_csrf_token, verify_auth_challenge_csrf } from "std/auth"
+            auth_challenge_csrf_token("not request")
+            auth_challenge_csrf_field(map { "method": "GET", "path": "/" }, 42)
+            verify_auth_challenge_csrf(map { "method": "POST", "path": "/" }, 123)
+            "#,
+        );
+        assert_eq!(errs.len(), 3, "expected three errors, got: {:?}", errs);
+    }
+
+    #[test]
+    fn test_std_auth_challenge_csrf_signatures_allow_kind() {
+        let errs = check_errors(
+            r#"
+            import { auth_challenge_csrf_field, auth_challenge_csrf_token, verify_auth_challenge_csrf } from "std/auth"
+            let req = map { "method": "POST", "path": "/local/totp", "headers": map {} }
+            let token = auth_challenge_csrf_token(req, "local.totp")
+            let field = auth_challenge_csrf_field(req, "local.totp")
+            let ok = verify_auth_challenge_csrf(req, "token", "local.totp")
             "#,
         );
         assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");

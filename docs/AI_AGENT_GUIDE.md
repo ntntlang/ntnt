@@ -1890,8 +1890,11 @@ The setup URI is secret-bearing because authenticator apps need it to enroll. Re
 
 For login, keep password-verified users in a staged auth challenge until TOTP verification succeeds. Do not call `sign_in_session(...)` for a TOTP-required account until the second factor is complete. Pair TOTP routes with the app's normal rate limiting/backoff; `verify_local_totp(...)` verifies the code but does not own account lockout policy.
 
+Staged auth challenges are not authenticated sessions, so session CSRF helpers (`csrf_field`, `verify_csrf`) are intentionally not enough for pre-session forms. `begin_auth_challenge(...)` creates a challenge-bound CSRF nonce automatically. Render it with `auth_challenge_csrf_field(req, kind)` and verify submissions with `verify_auth_challenge_csrf(req, form["_csrf"], kind)` before mutating credentials, MFA state, or sessions.
+
 ```ntnt
 import {
+    auth_challenge_csrf_field,
     begin_auth_challenge,
     begin_totp_enrollment,
     complete_auth_challenge,
@@ -1900,6 +1903,7 @@ import {
     current_user,
     sign_in_session,
     totp_status,
+    verify_auth_challenge_csrf,
     verify_local_password,
     verify_local_totp
 } from "std/auth"
@@ -1937,10 +1941,23 @@ fn login(req) {
     })
 }
 
+fn totp_login_page(req) {
+    return html("""
+<form method="post" action="/login/totp">
+  {{{auth_challenge_csrf_field(req, "mfa_pending")}}}
+  <input name="code" inputmode="numeric" autocomplete="one-time-code">
+  <button type="submit">Verify</button>
+</form>
+""")
+}
+
 fn finish_totp_login(req) {
     let challenge = current_auth_challenge(req) otherwise return redirect("/login")
     if challenge["kind"] != "mfa_pending" { return redirect("/login") }
     let form = parse_form(req)
+    if !verify_auth_challenge_csrf(req, form["_csrf"] ?? "", "mfa_pending") {
+        return html("CSRF token missing or invalid", 403)
+    }
     let email = challenge["data"]["email"] ?? ""
     verify_local_totp(email, form["code"] ?? "")?
 

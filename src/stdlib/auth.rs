@@ -134,6 +134,8 @@ use utils::{
 // During this cleanup, prefer explicit semantics over clever abstraction, keep fallback/error
 // behavior intentional, and avoid mixing new auth features into refactor-only slices.
 
+const AUTH_CHALLENGE_CSRF_DATA_KEY: &str = "auth.challenge_csrf";
+
 // ============================================================================
 // SECURITY HELPERS
 // ============================================================================
@@ -682,6 +684,53 @@ fn validate_http_request_arg(function_name: &str, req: &Value) -> Result<()> {
             function_name,
             other.type_name()
         ))),
+    }
+}
+
+fn optional_kind_arg(function_name: &str, args: &[Value], index: usize) -> Result<Option<String>> {
+    match args.get(index) {
+        Some(Value::String(kind)) => {
+            Ok(Some(validate_auth_challenge_kind(kind).map_err(|err| {
+                IntentError::type_error(err.replace("begin_auth_challenge", function_name))
+            })?))
+        }
+        Some(other) => Err(IntentError::type_error(format!(
+            "[auth] {}() kind must be a string, got {}",
+            function_name,
+            other.type_name()
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn active_auth_challenge_for_request(
+    function_name: &str,
+    req: &Value,
+    expected_kind: Option<&str>,
+) -> Result<Option<AuthChallenge>> {
+    validate_http_request_arg(function_name, req)?;
+
+    let Some(challenge_id) = get_auth_challenge_id_from_request(req) else {
+        return Ok(None);
+    };
+    let Some(challenge) =
+        get_auth_challenge_by_id(&challenge_id).map_err(IntentError::runtime_error)?
+    else {
+        return Ok(None);
+    };
+    if let Some(kind) = expected_kind {
+        if challenge.kind != kind {
+            return Ok(None);
+        }
+    }
+    Ok(Some(challenge))
+}
+
+fn auth_challenge_csrf_token(challenge: &AuthChallenge) -> Option<String> {
+    let data = json_string_to_value_map(&challenge.data_json);
+    match data.get(AUTH_CHALLENGE_CSRF_DATA_KEY) {
+        Some(Value::String(token)) if !token.is_empty() => Some(token.clone()),
+        _ => None,
     }
 }
 
@@ -1878,6 +1927,152 @@ pub fn init() -> HashMap<String, Value> {
                 }
 
                 Ok(make_none())
+            },
+        },
+    );
+
+    // @ntnt auth_challenge_csrf_token
+    // @module std/auth
+    // @signature auth_challenge_csrf_token(req: Request, kind?: String) -> Option<String>
+    // Get the CSRF token bound to the current staged auth challenge.
+    //
+    // Use this only for pre-session staged forms such as first-login password
+    // rotation or password -> TOTP verification. Signed-in forms should use
+    // `csrf_field(req)` and `verify_csrf(req, token)` instead.
+    // @param req The HTTP request object
+    // @param kind Optional challenge kind to require before returning a token
+    // @returns Option containing the challenge CSRF token, or None when no matching challenge is active
+    // @see_also auth_challenge_csrf_field, verify_auth_challenge_csrf, begin_auth_challenge
+    // @since v0.4.9
+    // @tags #auth, #security, #csrf
+    // @example auth_challenge_csrf_token(req, "local.totp") ~ "Read staged challenge CSRF token"
+    module.insert(
+        "auth_challenge_csrf_token".to_string(),
+        Value::NativeFunction {
+            name: "auth_challenge_csrf_token".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::type_error(
+                        "[auth] auth_challenge_csrf_token() requires request and optional kind"
+                            .to_string(),
+                    ));
+                }
+                let kind = optional_kind_arg("auth_challenge_csrf_token", args, 1)?;
+                let Some(challenge) = active_auth_challenge_for_request(
+                    "auth_challenge_csrf_token",
+                    &args[0],
+                    kind.as_deref(),
+                )?
+                else {
+                    return Ok(make_none());
+                };
+                match auth_challenge_csrf_token(&challenge) {
+                    Some(token) => Ok(make_some(Value::String(token))),
+                    None => Ok(make_none()),
+                }
+            },
+        },
+    );
+
+    // @ntnt auth_challenge_csrf_field
+    // @module std/auth
+    // @signature auth_challenge_csrf_field(req: Request, kind?: String) -> String
+    // Get an HTML hidden input field for the current staged auth challenge CSRF token.
+    //
+    // `begin_auth_challenge()` creates a server-side challenge CSRF nonce automatically.
+    // Render this helper in pre-session staged forms, then verify the submitted value
+    // with `verify_auth_challenge_csrf(req, form["_csrf"], kind)` before mutating
+    // credentials, MFA state, or sessions.
+    // @param req The HTTP request object
+    // @param kind Optional challenge kind to require before rendering a field
+    // @returns HTML string like `<input type="hidden" name="_csrf" value="..."/>`, or an empty string when no matching challenge is active
+    // @see_also verify_auth_challenge_csrf, auth_challenge_csrf_token, csrf_field
+    // @since v0.4.9
+    // @tags #auth, #security, #csrf
+    // @example auth_challenge_csrf_field(req, "local.password_change") ~ "Render hidden CSRF input for staged password change"
+    module.insert(
+        "auth_challenge_csrf_field".to_string(),
+        Value::NativeFunction {
+            name: "auth_challenge_csrf_field".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::type_error(
+                        "[auth] auth_challenge_csrf_field() requires request and optional kind"
+                            .to_string(),
+                    ));
+                }
+                let kind = optional_kind_arg("auth_challenge_csrf_field", args, 1)?;
+                let Some(challenge) = active_auth_challenge_for_request(
+                    "auth_challenge_csrf_field",
+                    &args[0],
+                    kind.as_deref(),
+                )?
+                else {
+                    return Ok(Value::String(String::new()));
+                };
+                let Some(token) = auth_challenge_csrf_token(&challenge) else {
+                    return Ok(Value::String(String::new()));
+                };
+                Ok(Value::String(format!(
+                    r#"<input type="hidden" name="_csrf" value="{}"/>"#,
+                    token
+                )))
+            },
+        },
+    );
+
+    // @ntnt verify_auth_challenge_csrf
+    // @module std/auth
+    // @signature verify_auth_challenge_csrf(req: Request, token: String, kind?: String) -> Bool
+    // Verify a submitted CSRF token against the current staged auth challenge.
+    //
+    // This is for pre-session challenge forms. It validates against the active
+    // auth-challenge cookie rather than the authenticated-session cookie used by
+    // `verify_csrf()`.
+    // @param req The HTTP request object
+    // @param token The submitted `_csrf` form value
+    // @param kind Optional challenge kind to require before accepting the token
+    // @returns true when the token matches the active staged challenge, false otherwise
+    // @see_also auth_challenge_csrf_field, auth_challenge_csrf_token, verify_csrf
+    // @since v0.4.9
+    // @tags #auth, #security, #csrf
+    // @example verify_auth_challenge_csrf(req, form["_csrf"], "local.totp") ~ "Validate staged challenge form"
+    module.insert(
+        "verify_auth_challenge_csrf".to_string(),
+        Value::NativeFunction {
+            name: "verify_auth_challenge_csrf".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "[auth] verify_auth_challenge_csrf() requires request, token, and optional kind"
+                            .to_string(),
+                    ));
+                }
+                let submitted_token = string_arg("verify_auth_challenge_csrf", args, 1, "token")?;
+                let kind = optional_kind_arg("verify_auth_challenge_csrf", args, 2)?;
+                let Some(challenge) = active_auth_challenge_for_request(
+                    "verify_auth_challenge_csrf",
+                    &args[0],
+                    kind.as_deref(),
+                )? else {
+                    return Ok(Value::Bool(false));
+                };
+                let Some(expected_token) = auth_challenge_csrf_token(&challenge) else {
+                    return Ok(Value::Bool(false));
+                };
+                Ok(Value::Bool(constant_time_compare(
+                    &expected_token,
+                    submitted_token,
+                )))
             },
         },
     );
@@ -6142,6 +6337,88 @@ mod tests {
         assert!(
             matches!(current_session(&[req]).unwrap(), Value::EnumValue { ref variant, .. } if variant == "None")
         );
+    }
+
+    #[test]
+    fn test_auth_challenge_csrf_helpers_validate_active_challenge_token() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let begin_auth_challenge = module_fn(&module, "begin_auth_challenge");
+        let csrf_token = module_fn(&module, "auth_challenge_csrf_token");
+        let csrf_field = module_fn(&module, "auth_challenge_csrf_field");
+        let verify_csrf = module_fn(&module, "verify_auth_challenge_csrf");
+
+        let started = begin_auth_challenge(&[
+            redirect_response("/local/totp", None),
+            Value::Map(HashMap::from([
+                (
+                    "subject_id".to_string(),
+                    Value::String("user-123".to_string()),
+                ),
+                ("kind".to_string(), Value::String("local.totp".to_string())),
+            ])),
+        ])
+        .unwrap();
+        let cookie = cookie_header_from_response(&started);
+        let req = request_with_cookie(&cookie);
+
+        let token_value =
+            csrf_token(&[req.clone(), Value::String("local.totp".to_string())]).unwrap();
+        let token = match token_value {
+            Value::EnumValue {
+                variant,
+                mut values,
+                ..
+            } => {
+                assert_eq!(variant, "Some");
+                match values.remove(0) {
+                    Value::String(token) => token,
+                    other => panic!("expected challenge csrf token string, got {:?}", other),
+                }
+            }
+            other => panic!("expected Some(token), got {:?}", other),
+        };
+        assert!(!token.is_empty());
+
+        let field = csrf_field(&[req.clone(), Value::String("local.totp".to_string())]).unwrap();
+        match field {
+            Value::String(field) => {
+                assert!(field.contains(r#"name="_csrf""#));
+                assert!(field.contains(&token));
+            }
+            other => panic!("expected challenge csrf field string, got {:?}", other),
+        }
+
+        assert!(matches!(
+            verify_csrf(&[
+                req.clone(),
+                Value::String(token.clone()),
+                Value::String("local.totp".to_string()),
+            ])
+            .unwrap(),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            verify_csrf(&[
+                req.clone(),
+                Value::String("wrong".to_string()),
+                Value::String("local.totp".to_string()),
+            ])
+            .unwrap(),
+            Value::Bool(false)
+        ));
+        assert!(matches!(
+            verify_csrf(&[
+                req,
+                Value::String(token),
+                Value::String("local.password_change".to_string()),
+            ])
+            .unwrap(),
+            Value::Bool(false)
+        ));
     }
 
     #[test]
