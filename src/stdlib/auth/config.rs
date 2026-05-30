@@ -297,6 +297,7 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
             subject_id TEXT NOT NULL,
             provider TEXT NOT NULL,
             kind TEXT NOT NULL,
+            csrf_token TEXT NOT NULL DEFAULT '',
             data_json TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL
@@ -304,6 +305,11 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
         [],
     )
     .map_err(|e| format!("Failed to create auth_challenges table: {}", e))?;
+
+    ignore_duplicate_column_sqlite(conn.execute(
+        "ALTER TABLE auth_challenges ADD COLUMN csrf_token TEXT NOT NULL DEFAULT ''",
+        [],
+    ))?;
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expires_at)",
@@ -483,6 +489,7 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             subject_id TEXT NOT NULL,
             provider TEXT NOT NULL,
             kind TEXT NOT NULL,
+            csrf_token TEXT NOT NULL DEFAULT '',
             data_json TEXT NOT NULL,
             created_at BIGINT NOT NULL,
             expires_at BIGINT NOT NULL
@@ -490,6 +497,11 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             &[],
         )
         .map_err(|e| format!("Failed to create auth_challenges table: {}", e))?;
+
+    run_postgres_migration(
+        &mut client,
+        "ALTER TABLE auth_challenges ADD COLUMN IF NOT EXISTS csrf_token TEXT NOT NULL DEFAULT ''",
+    )?;
 
     client
         .execute(

@@ -260,6 +260,9 @@ pub struct AuthChallenge {
     pub subject_id: String,
     pub provider: String,
     pub kind: String,
+    /// Server-side nonce for pre-session staged auth forms. This must not be
+    /// exposed through the app-owned `data` map returned by current_auth_challenge().
+    pub csrf_token: String,
     pub data_json: String,
     pub created_at: i64,
     pub expires_at: i64,
@@ -727,6 +730,13 @@ fn active_auth_challenge_for_request(
 }
 
 fn auth_challenge_csrf_token(challenge: &AuthChallenge) -> Option<String> {
+    if !challenge.csrf_token.is_empty() {
+        return Some(challenge.csrf_token.clone());
+    }
+
+    // Compatibility for challenges created by the pre-review implementation.
+    // New challenges store this nonce in the dedicated csrf_token field so app-owned
+    // continuation data cannot leak or be overwritten.
     let data = json_string_to_value_map(&challenge.data_json);
     match data.get(AUTH_CHALLENGE_CSRF_DATA_KEY) {
         Some(Value::String(token)) if !token.is_empty() => Some(token.clone()),
@@ -6111,6 +6121,7 @@ mod tests {
             subject_id: format!("user-{}", label),
             provider: "local".to_string(),
             kind: "mfa_pending".to_string(),
+            csrf_token: "test-csrf".to_string(),
             data_json: "{}".to_string(),
             created_at: now,
             expires_at: now + 60,
@@ -6327,6 +6338,10 @@ mod tests {
                         assert!(
                             matches!(data.get("next"), Some(Value::String(next)) if next == "/admin")
                         );
+                        assert!(
+                            !data.contains_key(AUTH_CHALLENGE_CSRF_DATA_KEY),
+                            "current_auth_challenge() must not expose the private challenge csrf nonce"
+                        );
                     }
                     other => panic!("expected challenge data map, got {:?}", other),
                 }
@@ -6337,6 +6352,125 @@ mod tests {
         assert!(
             matches!(current_session(&[req]).unwrap(), Value::EnumValue { ref variant, .. } if variant == "None")
         );
+    }
+
+    #[test]
+    fn test_current_auth_challenge_hides_legacy_data_embedded_csrf_token() {
+        let now = chrono::Utc::now().timestamp();
+        let challenge = AuthChallenge {
+            id: "challenge-legacy-csrf".to_string(),
+            subject_id: "user-123".to_string(),
+            provider: "local".to_string(),
+            kind: "mfa_pending".to_string(),
+            csrf_token: String::new(),
+            data_json: value_map_to_json_string(&HashMap::from([
+                (
+                    AUTH_CHALLENGE_CSRF_DATA_KEY.to_string(),
+                    Value::String("legacy-secret".to_string()),
+                ),
+                ("next".to_string(), Value::String("/admin".to_string())),
+            ])),
+            created_at: now,
+            expires_at: now + 60,
+        };
+
+        let Value::Map(challenge_map) = auth_challenge_to_value(&challenge) else {
+            panic!("expected challenge map");
+        };
+        let Some(Value::Map(data)) = challenge_map.get("data") else {
+            panic!("expected data map");
+        };
+        assert!(
+            !data.contains_key(AUTH_CHALLENGE_CSRF_DATA_KEY),
+            "legacy data-embedded csrf tokens must stay private"
+        );
+        assert!(matches!(data.get("next"), Some(Value::String(next)) if next == "/admin"));
+    }
+
+    #[test]
+    fn test_begin_auth_challenge_preserves_app_data_named_like_internal_csrf_key() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let begin_auth_challenge = module_fn(&module, "begin_auth_challenge");
+        let current_auth_challenge = module_fn(&module, "current_auth_challenge");
+        let csrf_token = module_fn(&module, "auth_challenge_csrf_token");
+        let verify_csrf = module_fn(&module, "verify_auth_challenge_csrf");
+
+        let app_value = "app-owned-value".to_string();
+        let started = begin_auth_challenge(&[
+            redirect_response("/local/totp", None),
+            Value::Map(HashMap::from([
+                (
+                    "subject_id".to_string(),
+                    Value::String("user-123".to_string()),
+                ),
+                ("kind".to_string(), Value::String("local.totp".to_string())),
+                (
+                    "data".to_string(),
+                    Value::Map(HashMap::from([(
+                        AUTH_CHALLENGE_CSRF_DATA_KEY.to_string(),
+                        Value::String(app_value.clone()),
+                    )])),
+                ),
+            ])),
+        ])
+        .unwrap();
+        let req = request_with_cookie(&cookie_header_from_response(&started));
+
+        let challenge = current_auth_challenge(&[req.clone()]).unwrap();
+        let Value::EnumValue {
+            variant, values, ..
+        } = challenge
+        else {
+            panic!("expected Some(challenge)");
+        };
+        assert_eq!(variant, "Some");
+        let Some(Value::Map(challenge_map)) = values.first() else {
+            panic!("expected challenge map, got {:?}", values.first());
+        };
+        let Some(Value::Map(data)) = challenge_map.get("data") else {
+            panic!("expected challenge data map");
+        };
+        assert!(
+            matches!(data.get(AUTH_CHALLENGE_CSRF_DATA_KEY), Some(Value::String(value)) if value == &app_value)
+        );
+
+        let token_value =
+            csrf_token(&[req.clone(), Value::String("local.totp".to_string())]).unwrap();
+        let Value::EnumValue {
+            variant,
+            mut values,
+            ..
+        } = token_value
+        else {
+            panic!("expected Some(token)");
+        };
+        assert_eq!(variant, "Some");
+        let Value::String(generated_token) = values.remove(0) else {
+            panic!("expected generated challenge csrf token");
+        };
+        assert_ne!(generated_token, app_value);
+        assert!(matches!(
+            verify_csrf(&[
+                req.clone(),
+                Value::String(generated_token),
+                Value::String("local.totp".to_string()),
+            ])
+            .unwrap(),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            verify_csrf(&[
+                req,
+                Value::String(app_value),
+                Value::String("local.totp".to_string()),
+            ])
+            .unwrap(),
+            Value::Bool(false)
+        ));
     }
 
     #[test]
@@ -9248,6 +9382,7 @@ mod tests {
             subject_id: "user-sqlite".to_string(),
             provider: "local".to_string(),
             kind: "mfa_pending".to_string(),
+            csrf_token: "test-csrf".to_string(),
             data_json: "{}".to_string(),
             created_at: now,
             expires_at: now + 60,
@@ -9273,6 +9408,7 @@ mod tests {
             subject_id: "user-sqlite".to_string(),
             provider: "local".to_string(),
             kind: "password_reset".to_string(),
+            csrf_token: "test-csrf".to_string(),
             data_json: "{}".to_string(),
             created_at: now - 120,
             expires_at: now - 60,
@@ -9298,6 +9434,7 @@ mod tests {
             subject_id: "user-123".to_string(),
             provider: "local".to_string(),
             kind: "mfa_pending".to_string(),
+            csrf_token: "test-csrf".to_string(),
             data_json: value_map_to_json_string(&HashMap::from([(
                 "next".to_string(),
                 Value::String("/admin".to_string()),
@@ -9327,6 +9464,7 @@ mod tests {
             subject_id: "user-456".to_string(),
             provider: "local".to_string(),
             kind: "password_reset".to_string(),
+            csrf_token: "test-csrf".to_string(),
             data_json: "{}".to_string(),
             created_at: now - 120,
             expires_at: now - 60,
@@ -9407,6 +9545,7 @@ mod tests {
             subject_id: "user-123".to_string(),
             provider: "local".to_string(),
             kind: "mfa_pending".to_string(),
+            csrf_token: "test-csrf".to_string(),
             data_json: "{}".to_string(),
             created_at: now - 120,
             expires_at: now - 60,
@@ -9435,6 +9574,7 @@ mod tests {
                 subject_id: "user-123".to_string(),
                 provider: "local".to_string(),
                 kind: "mfa_pending".to_string(),
+                csrf_token: "test-csrf".to_string(),
                 data_json: "{}".to_string(),
                 created_at: now - 120,
                 expires_at: now - 60,
@@ -9461,6 +9601,7 @@ mod tests {
             subject_id: "user-123".to_string(),
             provider: "local".to_string(),
             kind: "mfa_pending".to_string(),
+            csrf_token: "test-csrf".to_string(),
             data_json: "{}".to_string(),
             created_at: now,
             expires_at: now + 60,
