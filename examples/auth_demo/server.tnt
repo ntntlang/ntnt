@@ -1,488 +1,495 @@
-// OAuth Authentication Demo
+// NTNT Auth Demo
 // Run: ntnt run examples/auth_demo/server.tnt
-// Then visit: http://localhost:8080
+// Visit: http://localhost:8080
 //
-// Features demonstrated:
-// - OAuth login with GitHub
-// - Session management (view sessions, logout all)
-// - CSRF protection
-//
-// Note: Local user registration, password auth, and MFA are application-level
-// concerns. See the stdlib primitives (hash_password, verify_password,
-// totp_secret, verify_totp) for building your own user system.
+// One canonical auth demo for 0.4.9:
+// - Local email/password auth with std/auth-owned identities and credentials
+// - First-login password rotation with set_local_password(...)
+// - Optional TOTP enrollment and staged password -> TOTP login challenge
+// - Password reset with one-time reset tokens and explicit session revocation
+// - Request-aware session completion, group checks, protected pages/APIs, logout-all
+// - Optional GitHub OAuth if GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET are configured
 
 import { json, html, redirect, parse_form } from "std/http/server"
 import {
-    oauth, enable_auth, get_user, get_session,
-    auth_start, auth_callback, auth_logout,
-    user_sessions, logout_all,
-    verify_csrf
+    auth_callback,
+    auth_logout,
+    auth_start,
+    begin_auth_challenge,
+    begin_totp_enrollment,
+    bootstrap_local_user,
+    complete_auth_challenge,
+    confirm_totp_enrollment,
+    consume_password_reset,
+    current_auth_challenge,
+    current_user,
+    enable_auth,
+    has_group,
+    issue_password_reset,
+    local_user,
+    logout_all,
+    oauth,
+    set_local_password,
+    sign_in_session,
+    totp_status,
+    update_local_user_metadata,
+    user_sessions,
+    verify_local_password,
+    verify_local_totp
 } from "std/auth"
 import { get_key } from "std/collections"
 import { load_env, get_env } from "std/env"
+import { trim, lower } from "std/string"
 
-// Load environment variables from .env file (in same directory as this script)
 load_env("examples/auth_demo/.env")
 
-// Configure GitHub OAuth from environment
-let github_id = match get_env("GITHUB_CLIENT_ID") {
-    Some(id) => id,
-    None => {
-        print("ERROR: GITHUB_CLIENT_ID not set. Add it to examples/auth_demo/.env")
-        print("  See: https://github.com/settings/developers to create an OAuth app")
-        ""
-    }
-}
-let github_secret = match get_env("GITHUB_CLIENT_SECRET") {
-    Some(s) => s,
-    None => {
-        print("ERROR: GITHUB_CLIENT_SECRET not set. Add it to examples/auth_demo/.env")
-        ""
-    }
-}
-let github = oauth("github", github_id, github_secret)
+let demo_email = lower(trim(get_env("DEMO_EMAIL") ?? "demo@example.com"))
+let demo_password = get_env("DEMO_PASSWORD") ?? "change-me"
+let session_secret = get_env("AUTH_SESSION_SECRET") ?? "dev-secret-for-testing-only-change-in-production"
+let session_store = get_env("AUTH_SESSION_STORE") ?? "sqlite:./examples/auth_demo/sessions.db"
+let github_id = get_env("GITHUB_CLIENT_ID") ?? ""
+let github_secret = get_env("GITHUB_CLIENT_SECRET") ?? ""
+let github_enabled = github_id != "" && github_secret != ""
+let providers = if github_enabled { [oauth("github", github_id, github_secret)] } else { [] }
 
-// Get config from environment with defaults
-let session_secret = match get_env("AUTH_SESSION_SECRET") {
-    Some(s) => s,
-    None => "dev-secret-for-testing-only-change-in-production"
-}
-let session_store = match get_env("AUTH_SESSION_STORE") {
-    Some(s) => s,
-    None => "sqlite:./sessions.db"
-}
-let after_login = match get_env("AUTH_AFTER_LOGIN") {
-    Some(s) => s,
-    None => "/dashboard"
-}
-let after_logout = match get_env("AUTH_AFTER_LOGOUT") {
-    Some(s) => s,
-    None => "/"
-}
-let after_failure = match get_env("AUTH_AFTER_FAILURE") {
-    Some(s) => s,
-    None => "/?error=auth_failed"
-}
-
-// Enable auth with GitHub provider
-enable_auth([github], map {
+enable_auth(providers, "admin", map {
     "session_secret": session_secret,
-    "after_login": after_login,
-    "after_logout": after_logout,
-    "after_failure": after_failure,
-    "session_store": session_store
+    "session_store": session_store,
+    "cookie_secure": get_env("AUTH_COOKIE_SECURE") == "true",
+    "success_url": "/dashboard",
+    "failure_url": "/?error=oauth_failed",
+    "logout_url": "/?success=logged_out"
 })
 
-// ============================================================================
-// Shared Styles
-// ============================================================================
-
-let styles = """
-<style>
-    * { box-sizing: border-box; }
-    body {
-        font-family: system-ui, -apple-system, sans-serif;
-        max-width: 700px;
-        margin: 0 auto;
-        padding: 20px;
-        background: #f5f7fa;
-        color: #1a1a2e;
-    }
-    h1 { color: #16213e; margin-bottom: 10px; }
-    h2 { color: #0f3460; margin-top: 30px; }
-    .card {
-        background: white;
-        padding: 24px;
-        border-radius: 12px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        margin: 20px 0;
-    }
-    .user-card {
-        display: flex;
-        align-items: center;
-        gap: 20px;
-    }
-    .avatar {
-        width: 80px;
-        height: 80px;
-        border-radius: 50%;
-        background: #e94560;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: white;
-        font-size: 32px;
-        font-weight: bold;
-    }
-    .avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
-    .btn {
-        display: inline-block;
-        padding: 12px 24px;
-        border-radius: 8px;
-        text-decoration: none;
-        font-size: 16px;
-        font-weight: 500;
-        border: none;
-        cursor: pointer;
-        transition: transform 0.1s, box-shadow 0.1s;
-    }
-    .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
-    .btn-primary { background: #0f3460; color: white; }
-    .btn-danger { background: #e94560; color: white; }
-    .btn-secondary { background: #6c757d; color: white; }
-    .btn-github {
-        background: #24292e;
-        color: white;
-        display: inline-flex;
-        align-items: center;
-        gap: 10px;
-    }
-    .btn-github svg { width: 20px; height: 20px; fill: white; }
-    .error { color: #e94560; background: #ffe5e5; padding: 12px; border-radius: 8px; margin-bottom: 16px; }
-    .success { color: #155724; background: #d4edda; padding: 12px; border-radius: 8px; margin-bottom: 16px; }
-    .info { color: #0c5460; background: #d1ecf1; padding: 12px; border-radius: 8px; margin-bottom: 16px; }
-    .session-list { list-style: none; padding: 0; margin: 0; }
-    .session-item {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 16px;
-        border-bottom: 1px solid #e0e0e0;
-    }
-    .session-item:last-child { border-bottom: none; }
-    .session-current { background: #e8f5e9; border-radius: 8px; }
-    .badge {
-        display: inline-block;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 12px;
-        font-weight: 600;
-    }
-    .badge-success { background: #28a745; color: white; }
-    .badge-info { background: #17a2b8; color: white; }
-    .tabs { display: flex; gap: 8px; margin-bottom: 20px; }
-    .tab {
-        padding: 10px 20px;
-        border-radius: 8px;
-        text-decoration: none;
-        color: #6c757d;
-        background: #e9ecef;
-    }
-    .tab.active { background: #0f3460; color: white; }
-    a { color: #0f3460; }
-    .nav {
-        display: flex;
-        gap: 20px;
-        margin-bottom: 30px;
-        padding-bottom: 20px;
-        border-bottom: 1px solid #e0e0e0;
-    }
-</style>
-"""
-
-let github_icon = """<svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>"""
-
-// ============================================================================
-// Home Page - Login
-// ============================================================================
-
-fn home(req) {
-    let user = get_user(req)
-    match user {
-        Some(u) => redirect("/dashboard"),
-        None => {
-            let error = get_key(req.query_params, "error")
-            let success = get_key(req.query_params, "success")
-            let error_html = match error { Some(e) => "<div class=\"error\">#{e}</div>", None => "" }
-            let success_html = match success { Some(s) => "<div class=\"success\">#{s}</div>", None => "" }
-
-            html("""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>NTNT Auth Demo</title>
-    {{styles}}
-</head>
-<body>
-    <h1>NTNT Auth Demo</h1>
-    <p>OAuth authentication with session management</p>
-
-    {{error_html}}
-    {{success_html}}
-
-    <div class="card">
-        <h2 style="margin-top: 0;">Sign In</h2>
-
-        <a href="/auth/github" class="btn btn-github" style="width: 100%; justify-content: center;">
-            {{github_icon}}
-            Continue with GitHub
-        </a>
-
-        <div class="info" style="margin-top: 20px;">
-            <strong>Note:</strong> This demo shows OAuth authentication.
-            For local password auth, use the <code>hash_password</code> and
-            <code>verify_password</code> primitives with your own user storage.
-        </div>
-    </div>
-</body>
-</html>
-            """)
+fn demo_metadata() {
+    return map {
+        "app": map {
+            "group_ids": ["demo-users"],
+            "role": "member"
         }
     }
 }
 
-// ============================================================================
-// Dashboard - Protected Page
-// ============================================================================
+fn ensure_demo_user() {
+    let created = bootstrap_local_user(demo_email, demo_password)
+    if is_ok(created) {
+        let _updated = update_local_user_metadata(demo_email, demo_metadata())
+        return true
+    }
+
+    let existing = local_user(demo_email)
+    if is_ok(existing) {
+        let _updated = update_local_user_metadata(demo_email, demo_metadata())
+        return true
+    }
+    return false
+}
+
+fn session_for(user) {
+    let email = user["email"] ?? user["identifier"] ?? ""
+    return map {
+        "subject_id": user["subject_id"],
+        "email": email,
+        "name": email,
+        "provider": "local",
+        "claims": map { "role": "member" },
+        "data": map {
+            "email": email,
+            "group_ids": ["demo-users"]
+        }
+    }
+}
+
+fn query(req, key) {
+    return get_key(req.query_params, key) ?? ""
+}
+
+fn notice_html(req) {
+    let error = query(req, "error")
+    let success = query(req, "success")
+    return "#{if error != "" { "<div class='error'>#{error}</div>" } else { "" }}#{if success != "" { "<div class='success'>#{success}</div>" } else { "" }}"
+}
+
+let styles = """
+<style>
+* { box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, sans-serif; max-width: 860px; margin: 0 auto; padding: 24px; background: #f6f7fb; color: #172033; }
+h1 { margin-bottom: 8px; }
+h2 { margin-top: 0; }
+.card { background: white; border: 1px solid #e5e7ef; border-radius: 14px; padding: 22px; margin: 18px 0; box-shadow: 0 2px 10px rgba(23,32,51,.05); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 16px; }
+label { display: block; margin: 12px 0 6px; font-weight: 650; }
+input { width: 100%; padding: 11px 12px; border: 1px solid #cfd5e3; border-radius: 9px; font: inherit; }
+button, .btn { display: inline-block; margin-top: 12px; padding: 11px 16px; border: 0; border-radius: 9px; background: #173b75; color: white; text-decoration: none; font-weight: 700; cursor: pointer; }
+.btn.secondary, button.secondary { background: #667085; }
+.btn.danger, button.danger { background: #b42318; }
+.nav { display: flex; gap: 12px; flex-wrap: wrap; margin: 0 0 20px; }
+.notice, .success, .error, .info { padding: 12px 14px; border-radius: 10px; margin: 12px 0; }
+.success { background: #dcfae6; color: #067647; }
+.error { background: #fee4e2; color: #b42318; }
+.info { background: #e0f2fe; color: #075985; }
+code { word-break: break-all; background: #f2f4f7; padding: 2px 5px; border-radius: 5px; }
+ul { padding-left: 20px; }
+.small { color: #667085; font-size: .92rem; }
+</style>
+"""
+
+fn page(title, body) {
+    return html("""
+<!doctype html>
+<html>
+<head><title>{{title}}</title>{{{styles}}}</head>
+<body>
+<nav class="nav">
+  <a href="/">Home</a>
+  <a href="/dashboard">Dashboard</a>
+  <a href="/sessions">Sessions</a>
+  <a href="/api/me">API /me</a>
+</nav>
+{{{body}}}
+</body>
+</html>
+""")
+}
+
+fn home(req) {
+    let user = current_user(req)
+    if !is_none(user) {
+        return redirect("/dashboard")
+    }
+
+    let oauth_html = if github_enabled {
+        "<a class='btn secondary' href='/auth/github'>Continue with GitHub OAuth</a>"
+    } else {
+        "<p class='small'>GitHub OAuth is optional. Set <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> in <code>examples/auth_demo/.env</code> to enable it.</p>"
+    }
+
+    return page("NTNT Auth Demo", """
+<h1>NTNT Auth Demo</h1>
+<p>Canonical 0.4.9 auth example: local credentials, TOTP, reset tokens, sessions, groups, protected APIs, plus optional OAuth.</p>
+{{notice_html(req)}}
+<div class="grid">
+  <section class="card">
+    <h2>Local login</h2>
+    <p class="small">Seed user: <code>{{demo_email}}</code>. Initial password comes from <code>DEMO_PASSWORD</code> and defaults to <code>change-me</code>; first login requires rotation.</p>
+    <form method="post" action="/local/login">
+      <label>Email</label><input name="email" value="{{demo_email}}" autocomplete="username">
+      <label>Password</label><input name="password" type="password" autocomplete="current-password">
+      <button type="submit">Sign in locally</button>
+    </form>
+  </section>
+  <section class="card">
+    <h2>Optional OAuth</h2>
+    <p class="small">The same auth config can also mount provider routes.</p>
+    {{oauth_html}}
+  </section>
+  <section class="card">
+    <h2>Password reset</h2>
+    <p class="small">Demo renders the one-time reset link. Real apps email/SMS it and never log it.</p>
+    <form method="post" action="/password-reset/request">
+      <label>Email</label><input name="email" value="{{demo_email}}">
+      <button type="submit">Issue reset token</button>
+    </form>
+  </section>
+</div>
+""")
+}
+
+fn local_login(req) {
+    let form = parse_form(req)
+    let email = lower(trim(form["email"] ?? ""))
+    let password = form["password"] ?? ""
+    let verified = verify_local_password(email, password)
+    if !is_ok(verified) {
+        return redirect("/?error=Invalid local credentials")
+    }
+
+    let user = unwrap(verified)
+    if user["must_change_password"] ?? false {
+        return begin_auth_challenge(redirect("/local/change-password"), map {
+            "subject_id": user["subject_id"],
+            "kind": "local.password_change",
+            "ttl": 900,
+            "data": map { "user": user, "email": email }
+        })
+    }
+
+    let mfa = totp_status(email)
+    if is_ok(mfa) && (unwrap(mfa)["enabled"] ?? false) {
+        return begin_auth_challenge(redirect("/local/totp"), map {
+            "subject_id": user["subject_id"],
+            "kind": "local.totp",
+            "ttl": 300,
+            "data": map { "user": user, "email": email }
+        })
+    }
+
+    return sign_in_session(redirect("/dashboard"), req, session_for(user))
+}
+
+fn current_challenge_or_home(req, kind) {
+    let challenge = current_auth_challenge(req)
+    if is_none(challenge) {
+        return None
+    }
+    let value = unwrap(challenge)
+    if value["kind"] != kind {
+        return None
+    }
+    return Some(value)
+}
+
+fn change_password_page(req) {
+    let challenge = current_challenge_or_home(req, "local.password_change")
+    if is_none(challenge) { return redirect("/") }
+    let data = unwrap(challenge)["data"]
+    return page("Change password", """
+<h1>Rotate setup password</h1>
+<p class="info">Bootstrap users start with <code>must_change_password: true</code>. Complete setup with <code>set_local_password(...)</code>.</p>
+{{notice_html(req)}}
+<section class="card">
+  <form method="post" action="/local/change-password">
+    <label>Email</label><input name="email" value="{{data["email"]}}" readonly>
+    <label>Current setup password</label><input name="current_password" type="password" autocomplete="current-password">
+    <label>New password</label><input name="new_password" type="password" autocomplete="new-password">
+    <button type="submit">Rotate password and sign in</button>
+  </form>
+</section>
+""")
+}
+
+fn change_password(req) {
+    let challenge = current_challenge_or_home(req, "local.password_change")
+    if is_none(challenge) { return redirect("/") }
+    let form = parse_form(req)
+    let email = lower(trim(form["email"] ?? ""))
+    let user = set_local_password(email, form["current_password"] ?? "", form["new_password"] ?? "")
+    if !is_ok(user) {
+        return redirect("/local/change-password?error=Password rotation failed")
+    }
+    return complete_auth_challenge(redirect("/dashboard?success=password_changed"), req, session_for(unwrap(user)))
+}
+
+fn local_totp_page(req) {
+    let challenge = current_challenge_or_home(req, "local.totp")
+    if is_none(challenge) { return redirect("/") }
+    let email = unwrap(challenge)["data"]["email"]
+    return page("Verify TOTP", """
+<h1>Verify TOTP</h1>
+<p class="info">Password is verified; the session is still staged in an auth challenge until the second factor succeeds.</p>
+{{notice_html(req)}}
+<section class="card">
+  <form method="post" action="/local/totp">
+    <label>Code for {{email}}</label><input name="code" inputmode="numeric" autocomplete="one-time-code">
+    <button type="submit">Complete login</button>
+  </form>
+</section>
+""")
+}
+
+fn local_totp(req) {
+    let challenge = current_challenge_or_home(req, "local.totp")
+    if is_none(challenge) { return redirect("/") }
+    let value = unwrap(challenge)
+    let email = value["data"]["email"]
+    let form = parse_form(req)
+    let verified = verify_local_totp(email, trim(form["code"] ?? ""))
+    if !is_ok(verified) {
+        return redirect("/local/totp?error=Invalid TOTP code")
+    }
+    return complete_auth_challenge(redirect("/dashboard"), req, session_for(value["data"]["user"]))
+}
 
 fn dashboard(req) {
-    let user = get_user(req)
-    match user {
-        Some(u) => {
-            let name = match get_key(u, "name") { Some(n) => n, None => u["id"] }
-            let email = match get_key(u, "email") { Some(e) => e, None => "" }
-            let picture = match get_key(u, "picture") { Some(p) => p, None => "" }
-            let provider = u["provider"]
-
-            // Get first letter for avatar
-            let initial = if name { str(name)[0] } else { "?" }
-
-            let avatar_html = if picture {
-                "<div class=\"avatar\"><img src=\"#{picture}\" alt=\"Avatar\"></div>"
-            } else {
-                "<div class=\"avatar\">#{initial}</div>"
-            }
-
-            html("""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Dashboard - NTNT Auth Demo</title>
-    {{styles}}
-</head>
-<body>
-    <nav class="nav">
-        <a href="/dashboard" class="tab active">Dashboard</a>
-        <a href="/sessions" class="tab">Sessions</a>
-    </nav>
-
-    <h1>Welcome back!</h1>
-
-    <div class="card user-card">
-        {{avatar_html}}
-        <div>
-            <h2 style="margin: 0;">{{name}}</h2>
-            <p style="margin: 5px 0; color: #6c757d;">{{email}}</p>
-            <p style="margin: 5px 0;">
-                <span class="badge badge-info">{{provider}}</span>
-            </p>
-        </div>
-    </div>
-
-    <div class="card">
-        <h3>Quick Actions</h3>
-        <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-            <a href="/sessions" class="btn btn-secondary">Manage Sessions</a>
-            <form method="POST" action="/auth/logout" style="display: inline;">
-                <button type="submit" class="btn btn-danger">Sign Out</button>
-            </form>
-        </div>
-    </div>
-
-    <div class="card">
-        <h3>Your Account Data</h3>
-        <pre style="background: #f5f5f5; padding: 16px; border-radius: 8px; overflow-x: auto;">{{u | json}}</pre>
-    </div>
-</body>
-</html>
-            """)
-        },
-        None => redirect("/")
-    }
+    let user = current_user(req)
+    if is_none(user) { return redirect("/") }
+    let value = unwrap(user)
+    let email = value["email"] ?? ""
+    let group_badge = if has_group(req, "demo-users") { "yes" } else { "no" }
+    return page("Dashboard", """
+<h1>Dashboard</h1>
+{{notice_html(req)}}
+<section class="card">
+  <h2>Current user</h2>
+  <ul>
+    <li>Subject: <code>{{value["subject_id"] ?? value["id"]}}</code></li>
+    <li>Email: <code>{{email}}</code></li>
+    <li>Provider: <code>{{value["provider"] ?? "oauth"}}</code></li>
+    <li>Has <code>demo-users</code> group: <strong>{{group_badge}}</strong></li>
+  </ul>
+</section>
+<div class="grid">
+  <section class="card">
+    <h2>Enroll TOTP</h2>
+    <p class="small">Uses <code>begin_totp_enrollment</code> and <code>confirm_totp_enrollment</code>. The setup URI is secret-bearing and shown only once.</p>
+    <form method="post" action="/totp/setup/start"><button type="submit">Start TOTP setup</button></form>
+  </section>
+  <section class="card">
+    <h2>Change password</h2>
+    <form method="post" action="/password/change">
+      <label>Current password</label><input name="current_password" type="password">
+      <label>New password</label><input name="new_password" type="password">
+      <button type="submit">Change password</button>
+    </form>
+  </section>
+  <section class="card">
+    <h2>Logout</h2>
+    <form method="post" action="/auth/logout"><button class="secondary" type="submit">Sign out current session</button></form>
+  </section>
+</div>
+""")
 }
 
-// ============================================================================
-// Sessions Management Page
-// ============================================================================
+fn start_totp_setup(req) {
+    let user = current_user(req)
+    if is_none(user) { return redirect("/") }
+    let value = unwrap(user)
+    let email = value["email"] ?? ""
+    let setup = begin_totp_enrollment(email, map { "issuer": "NTNT Auth Demo", "label": email })
+    if !is_ok(setup) {
+        return redirect("/dashboard?error=Could not start TOTP setup")
+    }
+    let payload = unwrap(setup)
+    return page("TOTP setup", """
+<h1>TOTP setup</h1>
+<p class="info">Copy this <code>otpauth://</code> URI into your authenticator app. Real apps usually render a QR code here.</p>
+<section class="card">
+  <p><code>{{payload["uri"]}}</code></p>
+  <form method="post" action="/totp/setup/confirm">
+    <label>Authenticator code</label><input name="code" inputmode="numeric" autocomplete="one-time-code">
+    <button type="submit">Confirm TOTP</button>
+  </form>
+</section>
+""")
+}
+
+fn confirm_totp_setup(req) {
+    let user = current_user(req)
+    if is_none(user) { return redirect("/") }
+    let email = unwrap(user)["email"] ?? ""
+    let form = parse_form(req)
+    let confirmed = confirm_totp_enrollment(email, trim(form["code"] ?? ""))
+    if !is_ok(confirmed) {
+        return redirect("/dashboard?error=TOTP confirmation failed")
+    }
+    return redirect("/dashboard?success=totp_enabled")
+}
+
+fn change_password_signed_in(req) {
+    let user = current_user(req)
+    if is_none(user) { return redirect("/") }
+    let email = unwrap(user)["email"] ?? ""
+    let form = parse_form(req)
+    let updated = set_local_password(email, form["current_password"] ?? "", form["new_password"] ?? "")
+    if !is_ok(updated) {
+        return redirect("/dashboard?error=password_change_failed")
+    }
+    return sign_in_session(redirect("/dashboard?success=password_changed"), req, session_for(unwrap(updated)))
+}
+
+fn request_password_reset(req) {
+    let form = parse_form(req)
+    let email = lower(trim(form["email"] ?? ""))
+    let reset = issue_password_reset(email)
+    if !is_ok(reset) {
+        return redirect("/?error=reset_not_issued")
+    }
+    let token = unwrap(reset)["token"]
+    return page("Password reset issued", """
+<h1>Password reset issued</h1>
+<p class="info">Demo-only: copy the link below. Production apps send it through email/SMS and never log it.</p>
+<section class="card">
+  <p><a href="/password-reset/finish?token={{token}}">Reset password</a></p>
+  <p><code>{{token}}</code></p>
+</section>
+""")
+}
+
+fn reset_finish_page(req) {
+    let token = query(req, "token")
+    return page("Finish password reset", """
+<h1>Finish password reset</h1>
+{{notice_html(req)}}
+<section class="card">
+  <form method="post" action="/password-reset/finish">
+    <input type="hidden" name="token" value="{{token}}">
+    <label>New password</label><input name="new_password" type="password" autocomplete="new-password">
+    <label><input style="width: auto" type="checkbox" name="logout_all_devices" checked> Revoke existing sessions</label>
+    <button type="submit">Reset password</button>
+  </form>
+</section>
+""")
+}
+
+fn reset_finish(req) {
+    let form = parse_form(req)
+    let reset = consume_password_reset(form["token"] ?? "", form["new_password"] ?? "", map {
+        "revoke_sessions": form["logout_all_devices"] == "on"
+    })
+    if !is_ok(reset) {
+        return redirect("/password-reset/finish?error=Invalid or expired reset token")
+    }
+    return sign_in_session(redirect("/dashboard?success=password_reset"), req, session_for(unwrap(reset)))
+}
 
 fn sessions_page(req) {
-    let user = get_user(req)
-    match user {
-        Some(u) => {
-            let sessions_result = user_sessions(req)
-            let sessions_html = match sessions_result {
-                Ok(sessions) => {
-                    let items = ""
-                    for s in sessions {
-                        let is_current = s["is_current"]
-                        let current_class = if is_current { "session-item session-current" } else { "session-item" }
-                        let current_badge = if is_current { "<span class=\"badge badge-success\">Current</span>" } else { "" }
-                        let provider = s["provider"]
-                        let created = s["created_at"]
-                        let session_id = s["id"]
-
-                        items = items + """
-                        <li class="{{current_class}}">
-                            <div>
-                                <strong>{{provider}}</strong> {{current_badge}}<br>
-                                <small style="color: #6c757d;">Session: {{session_id}}</small><br>
-                                <small style="color: #6c757d;">Created: {{created}}</small>
-                            </div>
-                        </li>
-                        """
-                    }
-                    "<ul class=\"session-list\">#{items}</ul>"
-                },
-                Err(e) => "<div class=\"error\">#{e}</div>"
-            }
-
-            let session = get_session(req)
-            let csrf = match session { Some(s) => match get_key(s, "csrf_token") { Some(t) => t, None => "" }, None => "" }
-
-            let error = get_key(req.query_params, "error")
-            let success = get_key(req.query_params, "success")
-            let error_html = match error { Some(e) => "<div class=\"error\">#{e}</div>", None => "" }
-            let success_html = match success { Some(s) => "<div class=\"success\">#{s}</div>", None => "" }
-
-            html("""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Sessions - NTNT Auth Demo</title>
-    {{styles}}
-</head>
-<body>
-    <nav class="nav">
-        <a href="/dashboard" class="tab">Dashboard</a>
-        <a href="/sessions" class="tab active">Sessions</a>
-    </nav>
-
-    <h1>Active Sessions</h1>
-    <p>Manage your active login sessions across devices</p>
-
-    {{error_html}}
-    {{success_html}}
-
-    <div class="card">
-        {{sessions_html}}
-    </div>
-
-    <div class="card">
-        <h3>Session Actions</h3>
-        <p>Sign out of all other sessions while keeping your current session active.</p>
-        <form method="POST" action="/logout-all">
-            <input type="hidden" name="csrf_token" value="{{csrf}}">
-            <input type="hidden" name="keep_current" value="true">
-            <button type="submit" class="btn btn-danger">Sign Out All Other Sessions</button>
-        </form>
-
-        <p style="margin-top: 20px;">Or sign out of all sessions including this one:</p>
-        <form method="POST" action="/logout-all">
-            <input type="hidden" name="csrf_token" value="{{csrf}}">
-            <input type="hidden" name="keep_current" value="false">
-            <button type="submit" class="btn btn-danger">Sign Out Everywhere</button>
-        </form>
-    </div>
-
-    <p><a href="/dashboard">&larr; Back to Dashboard</a></p>
-</body>
-</html>
-            """)
-        },
-        None => redirect("/")
-    }
+    let user = current_user(req)
+    if is_none(user) { return redirect("/") }
+    let sessions = user_sessions(req)
+    let session_html = if is_ok(sessions) { "<pre>#{str(unwrap(sessions))}</pre>" } else { "<p>Could not load sessions.</p>" }
+    return page("Sessions", """
+<h1>Sessions</h1>
+<section class="card">{{session_html}}</section>
+<section class="card">
+  <form method="post" action="/logout-all"><input type="hidden" name="keep_current" value="true"><button class="danger" type="submit">Revoke other sessions</button></form>
+  <form method="post" action="/logout-all"><input type="hidden" name="keep_current" value="false"><button class="danger" type="submit">Revoke every session</button></form>
+</section>
+""")
 }
 
-// Handle logout all sessions
 fn handle_logout_all(req) {
     let form = parse_form(req)
-    let csrf_token = form["csrf_token"]
     let keep_current = form["keep_current"] == "true"
-
-    // Verify CSRF token
-    let csrf_valid = verify_csrf(req, csrf_token)
-    if !csrf_valid {
-        return redirect("/sessions?error=Invalid request")
+    let count = logout_all(req, keep_current)
+    if !is_ok(count) {
+        return redirect("/sessions?error=logout_all_failed")
     }
-
-    let result = logout_all(req, keep_current)
-    match result {
-        Ok(count) => {
-            if keep_current {
-                redirect("/sessions?success=Signed out of #{count} other sessions")
-            } else {
-                redirect("/?success=Signed out of all sessions")
-            }
-        },
-        Err(e) => redirect("/sessions?error=#{e}")
+    if keep_current {
+        return redirect("/sessions?success=revoked_#{unwrap(count)}_sessions")
     }
+    return redirect("/?success=logged_out_everywhere")
 }
-
-// ============================================================================
-// API Endpoints
-// ============================================================================
 
 fn api_me(req) {
-    let user = get_user(req)
-    match user {
-        Some(u) => json(u),
-        None => json(map { "error": "Not authenticated" }, 401)
-    }
+    let user = current_user(req)
+    if is_none(user) { return json(map { "error": "not_authenticated" }, 401) }
+    if !has_group(req, "demo-users") { return json(map { "error": "missing_group" }, 403) }
+    return json(map { "user": unwrap(user), "has_demo_group": true })
 }
 
-fn api_sessions(req) {
-    let result = user_sessions(req)
-    match result {
-        Ok(sessions) => json(map { "sessions": sessions }),
-        Err(e) => json(map { "error": e }, 401)
-    }
-}
+ensure_demo_user()
 
-// ============================================================================
-// Routes
-// ============================================================================
-
-// Public pages
 get("/", home)
-
-// Protected pages
+post("/local/login", local_login)
+get("/local/change-password", change_password_page)
+post("/local/change-password", change_password)
+get("/local/totp", local_totp_page)
+post("/local/totp", local_totp)
 get("/dashboard", dashboard)
+post("/totp/setup/start", start_totp_setup)
+post("/totp/setup/confirm", confirm_totp_setup)
+post("/password/change", change_password_signed_in)
+post("/password-reset/request", request_password_reset)
+get("/password-reset/finish", reset_finish_page)
+post("/password-reset/finish", reset_finish)
 get("/sessions", sessions_page)
-
-// Protected actions
 post("/logout-all", handle_logout_all)
-
-// API endpoints
 get("/api/me", api_me)
-get("/api/sessions", api_sessions)
-
-// OAuth routes
 get("/auth/{provider}", auth_start)
 get("/auth/{provider}/callback", auth_callback)
 post("/auth/logout", auth_logout)
 
-// ============================================================================
-// Start Server
-// ============================================================================
-
-// Get port from environment with default
-let port = match get_env("PORT") {
-    Some(p) => int(p),
-    None => 8080
-}
-
-print("===========================================")
-print("  NTNT OAuth Authentication Demo")
-print("===========================================")
-print("")
-print("Visit: http://localhost:#{port}")
-print("")
-print("Features:")
-print("  - OAuth login with GitHub")
-print("  - Session management (view/revoke)")
-print("  - CSRF protection")
-print("")
-print("Config loaded from .env file")
-print("===========================================")
-
+let port = int(get_env("PORT") ?? "8080")
+print("NTNT auth demo running on http://localhost:#{port}")
+print("Local demo user: #{demo_email}")
 listen(port)
