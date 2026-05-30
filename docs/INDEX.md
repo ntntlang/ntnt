@@ -39,6 +39,7 @@ Source files:
 | Document | Description |
 |----------|-------------|
 | [Roadmap](../ROADMAP.md) | Implementation phases and progress |
+| [v0.4.9 Release Notes](release-notes/v0.4.9.md) | Local auth primitives, backend support, demo, and upgrade guidance |
 | [Contributing](../CONTRIBUTING.md) | How to contribute |
 | [Code of Conduct](../CODE_OF_CONDUCT.md) | Community standards |
 | [Acknowledgements](../ACKNOWLEDGEMENTS.md) | Credits and recognition |

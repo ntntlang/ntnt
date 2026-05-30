@@ -8,6 +8,7 @@ Code examples demonstrating NTNT language features.
 |---------|-------------|
 | [ntnt-lang-org/](ntnt-lang-org/) | Production website with file-based routing, templates, middleware |
 | [website/](website/) | Simple website with hot-reloadable templates |
+| [auth_demo/](auth_demo/) | Canonical 0.4.9 auth demo: local credentials, TOTP, reset tokens, groups, sessions, protected APIs, optional OAuth |
 | [crypto_chart/](crypto_chart/) | Chart application with intent specification |
 | [snowgauge/](snowgauge/) | Snow conditions dashboard |
 
@@ -69,6 +70,10 @@ ntnt run examples/hello.tnt
 
 # For web servers
 ntnt run examples/http_server.tnt
+# Then visit http://localhost:8080
+
+# Canonical auth demo
+ntnt run examples/auth_demo/server.tnt
 # Then visit http://localhost:8080
 
 # For IDD examples
