@@ -2030,19 +2030,100 @@ fn store_local_password_reset_token_redis(
     }
     let token_key = redis_local_password_reset_key(&token.selector);
     let user_set_key = redis_local_password_reset_user_set_key(&token.local_user_id);
-    redis::pipe()
-        .atomic()
-        .cmd("SETEX")
-        .arg(&token_key)
-        .arg(ttl)
-        .arg(local_password_reset_token_to_json(token))
-        .ignore()
-        .cmd("SADD")
-        .arg(&user_set_key)
-        .arg(&token_key)
-        .ignore()
-        .query::<()>(&mut conn)
-        .map_err(|e| format!("Redis password reset token store error: {}", e))
+    redis::Script::new(
+        r#"
+        redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2])
+        redis.call('SADD', KEYS[2], KEYS[1])
+
+        local current_ttl = redis.call('TTL', KEYS[2])
+        local token_ttl = tonumber(ARGV[1])
+        if current_ttl < token_ttl then
+            redis.call('EXPIRE', KEYS[2], token_ttl)
+        end
+
+        return 1
+        "#,
+    )
+    .key(&token_key)
+    .key(&user_set_key)
+    .arg(ttl)
+    .arg(local_password_reset_token_to_json(token))
+    .invoke::<i64>(&mut conn)
+    .map(|_| ())
+    .map_err(|e| format!("Redis password reset token store error: {}", e))
+}
+
+fn invoke_redis_password_reset_consume_script(
+    conn: &mut redis::Connection,
+    token_key: &str,
+    identity_key: &str,
+    credential_key: &str,
+    reset_set_key: &str,
+    now: i64,
+    token_hash: &str,
+    local_user_id: &str,
+    credential_json: &str,
+) -> std::result::Result<i64, String> {
+    redis::Script::new(
+        r#"
+        local token_json = redis.call('GET', KEYS[1])
+        if not token_json then
+            return 0
+        end
+
+        local token = cjson.decode(token_json)
+        if tonumber(token.expires_at) <= tonumber(ARGV[1]) then
+            redis.call('DEL', KEYS[1])
+            redis.call('SREM', KEYS[4], KEYS[1])
+            return 0
+        end
+
+        if token.token_hash ~= ARGV[2] or token.local_user_id ~= ARGV[3] then
+            return 0
+        end
+
+        local current_identity_json = redis.call('GET', KEYS[2])
+        if not current_identity_json then
+            return 0
+        end
+        local current_identity = cjson.decode(current_identity_json)
+        if current_identity.id ~= ARGV[3] then
+            return 0
+        end
+        if current_identity.state == 'disabled' or current_identity.state == 'locked' then
+            return 0
+        end
+
+        local current_lookup_key = 'ntnt:local_identity_lookup:' .. current_identity.identifier_kind .. ':' .. current_identity.identifier_normalized
+        local existing_id = redis.call('GET', current_lookup_key)
+        if existing_id and existing_id ~= ARGV[3] then
+            return -1
+        end
+
+        current_identity.state = 'active'
+        current_identity.updated_at = tonumber(ARGV[1])
+        redis.call('SET', KEYS[2], cjson.encode(current_identity))
+        redis.call('SET', current_lookup_key, ARGV[3])
+        redis.call('SET', KEYS[3], ARGV[4])
+
+        local reset_keys = redis.call('SMEMBERS', KEYS[4])
+        for _, key in ipairs(reset_keys) do
+            redis.call('DEL', key)
+        end
+        redis.call('DEL', KEYS[4])
+        return 1
+        "#,
+    )
+    .key(token_key)
+    .key(identity_key)
+    .key(credential_key)
+    .key(reset_set_key)
+    .arg(now)
+    .arg(token_hash)
+    .arg(local_user_id)
+    .arg(credential_json)
+    .invoke(conn)
+    .map_err(|e| format!("Redis password reset consume error: {}", e))
 }
 
 fn consume_local_password_reset_token_and_store_credential_redis<F>(
@@ -2106,57 +2187,19 @@ where
     })?;
 
     let identity_key = redis_local_identity_key(&identity.id);
-    let lookup_key =
-        redis_local_identity_lookup_key(&identity.identifier_kind, &identity.identifier_normalized);
     let credential_key = redis_local_credential_key(&credential.local_user_id);
     let reset_set_key = redis_local_password_reset_user_set_key(&identity.id);
-    let consumed: i64 = redis::Script::new(
-        r#"
-        local token_json = redis.call('GET', KEYS[1])
-        if not token_json then
-            return 0
-        end
-
-        local token = cjson.decode(token_json)
-        if tonumber(token.expires_at) <= tonumber(ARGV[1]) then
-            redis.call('DEL', KEYS[1])
-            redis.call('SREM', KEYS[4], KEYS[1])
-            return 0
-        end
-
-        if token.token_hash ~= ARGV[2] or token.local_user_id ~= ARGV[3] then
-            return 0
-        end
-
-        local existing_id = redis.call('GET', KEYS[5])
-        if existing_id and existing_id ~= ARGV[3] then
-            return -1
-        end
-
-        redis.call('SET', KEYS[2], ARGV[4])
-        redis.call('SET', KEYS[5], ARGV[3])
-        redis.call('SET', KEYS[3], ARGV[5])
-
-        local reset_keys = redis.call('SMEMBERS', KEYS[4])
-        for _, key in ipairs(reset_keys) do
-            redis.call('DEL', key)
-        end
-        redis.call('DEL', KEYS[4])
-        return 1
-        "#,
-    )
-    .key(&token_key)
-    .key(&identity_key)
-    .key(&credential_key)
-    .key(&reset_set_key)
-    .key(&lookup_key)
-    .arg(now)
-    .arg(token_hash)
-    .arg(&identity.id)
-    .arg(local_identity_to_json(&identity))
-    .arg(local_credential_to_json(&credential))
-    .invoke(&mut conn)
-    .map_err(|e| format!("Redis password reset consume error: {}", e))?;
+    let consumed = invoke_redis_password_reset_consume_script(
+        &mut conn,
+        &token_key,
+        &identity_key,
+        &credential_key,
+        &reset_set_key,
+        now,
+        token_hash,
+        &identity.id,
+        &local_credential_to_json(&credential),
+    )?;
 
     if consumed == -1 {
         return Err(format!(
@@ -2167,7 +2210,10 @@ where
     if consumed != 1 {
         return Ok(None);
     }
-    Ok(Some((identity, credential)))
+    let stored_identity = get_local_identity_by_id_redis(&identity.id)?.ok_or_else(|| {
+        "[auth] Redis password reset consumed token but local identity is missing".to_string()
+    })?;
+    Ok(Some((stored_identity, credential)))
 }
 
 #[cfg(test)]
@@ -2272,5 +2318,195 @@ mod tests {
 
         store.store_identity(first).unwrap();
         assert!(store.store_identity(second).is_err());
+    }
+
+    #[cfg(feature = "redis-tests")]
+    fn redis_test_connection() -> Option<redis::Connection> {
+        let url = std::env::var("NTNT_REDIS_TEST_URL")
+            .or_else(|_| std::env::var("REDIS_URL"))
+            .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+        *REDIS_URL.lock().unwrap() = Some(url);
+        match redis_connection() {
+            Ok(mut conn) => {
+                let ping = redis::cmd("PING").query::<String>(&mut conn);
+                if let Err(err) = ping {
+                    eprintln!("skipping Redis local-auth test: Redis PING failed: {err}");
+                    return None;
+                }
+                Some(conn)
+            }
+            Err(err) => {
+                eprintln!("skipping Redis local-auth test: {err}");
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "redis-tests")]
+    fn unique_redis_test_suffix(name: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{name}-{nanos}")
+    }
+
+    #[cfg(feature = "redis-tests")]
+    fn redis_test_identity(id: &str) -> LocalIdentity {
+        LocalIdentity {
+            id: id.to_string(),
+            identifier_kind: "email".to_string(),
+            identifier: format!("{id}@example.test"),
+            identifier_normalized: format!("{id}@example.test"),
+            created_at: 100,
+            updated_at: 100,
+            state: LocalAccountState::Active,
+            metadata_json: "{}".to_string(),
+        }
+    }
+
+    #[cfg(feature = "redis-tests")]
+    fn redis_test_credential(local_user_id: &str) -> LocalCredentialSecret {
+        LocalCredentialSecret {
+            local_user_id: local_user_id.to_string(),
+            password_hash: "argon2$rotated-hash".to_string(),
+            password_hash_algorithm: "argon2id".to_string(),
+            password_hash_params_json: "{}".to_string(),
+            password_changed_at: 200,
+            must_change_password: false,
+        }
+    }
+
+    #[cfg(feature = "redis-tests")]
+    fn cleanup_redis_local_auth_keys(
+        conn: &mut redis::Connection,
+        identity: &LocalIdentity,
+        selectors: &[&str],
+    ) {
+        let reset_set_key = redis_local_password_reset_user_set_key(&identity.id);
+        let keys: Vec<String> = selectors
+            .iter()
+            .map(|selector| redis_local_password_reset_key(selector))
+            .chain([
+                redis_local_identity_key(&identity.id),
+                redis_local_identity_lookup_key(
+                    &identity.identifier_kind,
+                    &identity.identifier_normalized,
+                ),
+                redis_local_credential_key(&identity.id),
+                reset_set_key,
+            ])
+            .collect();
+        let _ = redis::cmd("DEL").arg(keys).query::<i64>(conn);
+    }
+
+    #[cfg(feature = "redis-tests")]
+    #[test]
+    fn test_redis_password_reset_user_index_expires_and_does_not_shorten() {
+        let Some(mut conn) = redis_test_connection() else {
+            return;
+        };
+        let suffix = unique_redis_test_suffix("reset-index-expiry");
+        let identity = redis_test_identity(&suffix);
+        let selector_long = format!("{suffix}-long");
+        let selector_short = format!("{suffix}-short");
+        cleanup_redis_local_auth_keys(&mut conn, &identity, &[&selector_long, &selector_short]);
+
+        store_local_identity_redis_with_connection(&mut conn, &identity).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        store_local_password_reset_token_redis(&LocalPasswordResetToken {
+            selector: selector_long.clone(),
+            local_user_id: identity.id.clone(),
+            token_hash: "long-token-hash".to_string(),
+            created_at: now,
+            expires_at: now + 3600,
+        })
+        .unwrap();
+        let reset_set_key = redis_local_password_reset_user_set_key(&identity.id);
+        let ttl_after_long = redis::cmd("TTL")
+            .arg(&reset_set_key)
+            .query::<i64>(&mut conn)
+            .unwrap();
+        assert!(ttl_after_long > 0);
+
+        store_local_password_reset_token_redis(&LocalPasswordResetToken {
+            selector: selector_short.clone(),
+            local_user_id: identity.id.clone(),
+            token_hash: "short-token-hash".to_string(),
+            created_at: now,
+            expires_at: now + 60,
+        })
+        .unwrap();
+        let ttl_after_short = redis::cmd("TTL")
+            .arg(&reset_set_key)
+            .query::<i64>(&mut conn)
+            .unwrap();
+        assert!(
+            ttl_after_short >= 3500,
+            "shorter reset token TTL should not shorten the per-user reset index TTL: {ttl_after_short}"
+        );
+
+        cleanup_redis_local_auth_keys(&mut conn, &identity, &[&selector_long, &selector_short]);
+    }
+
+    #[cfg(feature = "redis-tests")]
+    #[test]
+    fn test_redis_password_reset_consume_rechecks_locked_state_atomically() {
+        let Some(mut conn) = redis_test_connection() else {
+            return;
+        };
+        let suffix = unique_redis_test_suffix("reset-locked-recheck");
+        let identity = redis_test_identity(&suffix);
+        let selector = format!("{suffix}-selector");
+        cleanup_redis_local_auth_keys(&mut conn, &identity, &[&selector]);
+
+        store_local_identity_redis_with_connection(&mut conn, &identity).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let token_hash = "reset-token-hash";
+        store_local_password_reset_token_redis(&LocalPasswordResetToken {
+            selector: selector.clone(),
+            local_user_id: identity.id.clone(),
+            token_hash: token_hash.to_string(),
+            created_at: now,
+            expires_at: now + 3600,
+        })
+        .unwrap();
+
+        let mut locked_identity = identity.clone();
+        locked_identity.state = LocalAccountState::Locked;
+        locked_identity.updated_at = now + 10;
+        store_local_identity_redis_with_connection(&mut conn, &locked_identity).unwrap();
+
+        let credential = redis_test_credential(&identity.id);
+        let consumed = invoke_redis_password_reset_consume_script(
+            &mut conn,
+            &redis_local_password_reset_key(&selector),
+            &redis_local_identity_key(&identity.id),
+            &redis_local_credential_key(&identity.id),
+            &redis_local_password_reset_user_set_key(&identity.id),
+            now + 20,
+            token_hash,
+            &identity.id,
+            &local_credential_to_json(&credential),
+        )
+        .unwrap();
+
+        assert_eq!(consumed, 0);
+        let stored_credential: Option<String> = redis::cmd("GET")
+            .arg(redis_local_credential_key(&identity.id))
+            .query(&mut conn)
+            .unwrap();
+        assert!(stored_credential.is_none());
+        let stored_token: Option<String> = redis::cmd("GET")
+            .arg(redis_local_password_reset_key(&selector))
+            .query(&mut conn)
+            .unwrap();
+        assert!(stored_token.is_some());
+        let stored_identity = get_local_identity_by_id_redis(&identity.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_identity.state, LocalAccountState::Locked);
+
+        cleanup_redis_local_auth_keys(&mut conn, &identity, &[&selector]);
     }
 }
