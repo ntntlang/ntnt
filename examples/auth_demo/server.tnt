@@ -21,6 +21,7 @@ import {
     complete_auth_challenge,
     confirm_totp_enrollment,
     consume_password_reset,
+    csrf_field,
     current_auth_challenge,
     current_user,
     enable_auth,
@@ -34,12 +35,13 @@ import {
     totp_status,
     update_local_user_metadata,
     user_sessions,
+    verify_csrf,
     verify_local_password,
     verify_local_totp
 } from "std/auth"
 import { get_key } from "std/collections"
 import { load_env, get_env } from "std/env"
-import { trim, lower } from "std/string"
+import { html_escape, trim, lower } from "std/string"
 
 load_env("examples/auth_demo/.env")
 
@@ -105,8 +107,8 @@ fn query(req, key) {
 }
 
 fn notice_html(req) {
-    let error = query(req, "error")
-    let success = query(req, "success")
+    let error = html_escape(query(req, "error"))
+    let success = html_escape(query(req, "success"))
     return "#{if error != "" { "<div class='error'>#{error}</div>" } else { "" }}#{if success != "" { "<div class='success'>#{success}</div>" } else { "" }}"
 }
 
@@ -167,7 +169,7 @@ fn home(req) {
     return page("NTNT Auth Demo", """
 <h1>NTNT Auth Demo</h1>
 <p>Canonical 0.4.9 auth example: local credentials, TOTP, reset tokens, sessions, groups, protected APIs, plus optional OAuth.</p>
-{{notice_html(req)}}
+{{{notice_html(req)}}}
 <div class="grid">
   <section class="card">
     <h2>Local login</h2>
@@ -181,7 +183,7 @@ fn home(req) {
   <section class="card">
     <h2>Optional OAuth</h2>
     <p class="small">The same auth config can also mount provider routes.</p>
-    {{oauth_html}}
+    {{{oauth_html}}}
   </section>
   <section class="card">
     <h2>Password reset</h2>
@@ -246,9 +248,10 @@ fn change_password_page(req) {
     return page("Change password", """
 <h1>Rotate setup password</h1>
 <p class="info">Bootstrap users start with <code>must_change_password: true</code>. Complete setup with <code>set_local_password(...)</code>.</p>
-{{notice_html(req)}}
+{{{notice_html(req)}}}
 <section class="card">
   <form method="post" action="/local/change-password">
+    {{{csrf_field(req)}}}
     <label>Email</label><input name="email" value="{{data["email"]}}" readonly>
     <label>Current setup password</label><input name="current_password" type="password" autocomplete="current-password">
     <label>New password</label><input name="new_password" type="password" autocomplete="new-password">
@@ -262,7 +265,12 @@ fn change_password(req) {
     let challenge = current_challenge_or_home(req, "local.password_change")
     if is_none(challenge) { return redirect("/") }
     let form = parse_form(req)
-    let email = lower(trim(form["email"] ?? ""))
+    let value = unwrap(challenge)
+    let email = lower(trim(value["data"]["email"] ?? ""))
+    let form_email = lower(trim(form["email"] ?? ""))
+    if form_email != email {
+        return redirect("/local/change-password?error=Invalid password change challenge")
+    }
     let user = set_local_password(email, form["current_password"] ?? "", form["new_password"] ?? "")
     if !is_ok(user) {
         return redirect("/local/change-password?error=Password rotation failed")
@@ -277,7 +285,7 @@ fn local_totp_page(req) {
     return page("Verify TOTP", """
 <h1>Verify TOTP</h1>
 <p class="info">Password is verified; the session is still staged in an auth challenge until the second factor succeeds.</p>
-{{notice_html(req)}}
+{{{notice_html(req)}}}
 <section class="card">
   <form method="post" action="/local/totp">
     <label>Code for {{email}}</label><input name="code" inputmode="numeric" autocomplete="one-time-code">
@@ -308,7 +316,7 @@ fn dashboard(req) {
     let group_badge = if has_group(req, "demo-users") { "yes" } else { "no" }
     return page("Dashboard", """
 <h1>Dashboard</h1>
-{{notice_html(req)}}
+{{{notice_html(req)}}}
 <section class="card">
   <h2>Current user</h2>
   <ul>
@@ -322,11 +330,12 @@ fn dashboard(req) {
   <section class="card">
     <h2>Enroll TOTP</h2>
     <p class="small">Uses <code>begin_totp_enrollment</code> and <code>confirm_totp_enrollment</code>. The setup URI is secret-bearing and shown only once.</p>
-    <form method="post" action="/totp/setup/start"><button type="submit">Start TOTP setup</button></form>
+    <form method="post" action="/totp/setup/start">{{{csrf_field(req)}}}<button type="submit">Start TOTP setup</button></form>
   </section>
   <section class="card">
     <h2>Change password</h2>
     <form method="post" action="/password/change">
+      {{{csrf_field(req)}}}
       <label>Current password</label><input name="current_password" type="password">
       <label>New password</label><input name="new_password" type="password">
       <button type="submit">Change password</button>
@@ -334,7 +343,7 @@ fn dashboard(req) {
   </section>
   <section class="card">
     <h2>Logout</h2>
-    <form method="post" action="/auth/logout"><button class="secondary" type="submit">Sign out current session</button></form>
+    <form method="post" action="/auth/logout">{{{csrf_field(req)}}}<button class="secondary" type="submit">Sign out current session</button></form>
   </section>
 </div>
 """)
@@ -343,6 +352,8 @@ fn dashboard(req) {
 fn start_totp_setup(req) {
     let user = current_user(req)
     if is_none(user) { return redirect("/") }
+    let form = parse_form(req)
+    if !verify_csrf(req, form["_csrf"] ?? "") { return html("CSRF token missing or invalid", 403) }
     let value = unwrap(user)
     let email = value["email"] ?? ""
     let setup = begin_totp_enrollment(email, map { "issuer": "NTNT Auth Demo", "label": email })
@@ -356,6 +367,7 @@ fn start_totp_setup(req) {
 <section class="card">
   <p><code>{{payload["uri"]}}</code></p>
   <form method="post" action="/totp/setup/confirm">
+    {{{csrf_field(req)}}}
     <label>Authenticator code</label><input name="code" inputmode="numeric" autocomplete="one-time-code">
     <button type="submit">Confirm TOTP</button>
   </form>
@@ -368,6 +380,7 @@ fn confirm_totp_setup(req) {
     if is_none(user) { return redirect("/") }
     let email = unwrap(user)["email"] ?? ""
     let form = parse_form(req)
+    if !verify_csrf(req, form["_csrf"] ?? "") { return html("CSRF token missing or invalid", 403) }
     let confirmed = confirm_totp_enrollment(email, trim(form["code"] ?? ""))
     if !is_ok(confirmed) {
         return redirect("/dashboard?error=TOTP confirmation failed")
@@ -380,6 +393,7 @@ fn change_password_signed_in(req) {
     if is_none(user) { return redirect("/") }
     let email = unwrap(user)["email"] ?? ""
     let form = parse_form(req)
+    if !verify_csrf(req, form["_csrf"] ?? "") { return html("CSRF token missing or invalid", 403) }
     let updated = set_local_password(email, form["current_password"] ?? "", form["new_password"] ?? "")
     if !is_ok(updated) {
         return redirect("/dashboard?error=password_change_failed")
@@ -409,7 +423,7 @@ fn reset_finish_page(req) {
     let token = query(req, "token")
     return page("Finish password reset", """
 <h1>Finish password reset</h1>
-{{notice_html(req)}}
+{{{notice_html(req)}}}
 <section class="card">
   <form method="post" action="/password-reset/finish">
     <input type="hidden" name="token" value="{{token}}">
@@ -436,19 +450,20 @@ fn sessions_page(req) {
     let user = current_user(req)
     if is_none(user) { return redirect("/") }
     let sessions = user_sessions(req)
-    let session_html = if is_ok(sessions) { "<pre>#{str(unwrap(sessions))}</pre>" } else { "<p>Could not load sessions.</p>" }
+    let session_html = if is_ok(sessions) { "<pre>#{html_escape(str(unwrap(sessions)))}</pre>" } else { "<p>Could not load sessions.</p>" }
     return page("Sessions", """
 <h1>Sessions</h1>
-<section class="card">{{session_html}}</section>
+<section class="card">{{{session_html}}}</section>
 <section class="card">
-  <form method="post" action="/logout-all"><input type="hidden" name="keep_current" value="true"><button class="danger" type="submit">Revoke other sessions</button></form>
-  <form method="post" action="/logout-all"><input type="hidden" name="keep_current" value="false"><button class="danger" type="submit">Revoke every session</button></form>
+  <form method="post" action="/logout-all">{{{csrf_field(req)}}}<input type="hidden" name="keep_current" value="true"><button class="danger" type="submit">Revoke other sessions</button></form>
+  <form method="post" action="/logout-all">{{{csrf_field(req)}}}<input type="hidden" name="keep_current" value="false"><button class="danger" type="submit">Revoke every session</button></form>
 </section>
 """)
 }
 
 fn handle_logout_all(req) {
     let form = parse_form(req)
+    if !verify_csrf(req, form["_csrf"] ?? "") { return html("CSRF token missing or invalid", 403) }
     let keep_current = form["keep_current"] == "true"
     let count = logout_all(req, keep_current)
     if !is_ok(count) {
