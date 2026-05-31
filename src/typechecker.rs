@@ -634,7 +634,12 @@ impl TypeContext {
         }
     }
 
-    fn infer_null_coalesce_type(&self, left: &Expression, left_ty: &Type, right_ty: &Type) -> Type {
+    fn infer_null_coalesce_type(
+        &mut self,
+        left: &Expression,
+        right: &Expression,
+        left_ty: &Type,
+    ) -> Type {
         let known_variant = match left {
             Expression::EnumVariant { variant, .. } => Some(variant.as_str()),
             Expression::Call { function, .. } => match function.as_ref() {
@@ -661,12 +666,13 @@ impl TypeContext {
                     }
                     return Type::Any;
                 }
-                "None" | "Err" => return right_ty.clone(),
+                "None" | "Err" => return self.infer_expression(right),
                 _ => {}
             }
         }
 
-        self.infer_binary_op(&BinaryOp::NullCoalesce, left_ty, right_ty)
+        let right_ty = self.infer_expression(right);
+        self.infer_binary_op(&BinaryOp::NullCoalesce, left_ty, &right_ty)
     }
 
     fn return_otherwise_uses_value_fallback_union(&self, expr_ty: &Type) -> bool {
@@ -1715,11 +1721,12 @@ impl TypeContext {
                 right,
             } => {
                 let left_type = self.infer_expression(left);
-                let right_type = self.infer_expression(right);
 
                 if matches!(operator, BinaryOp::NullCoalesce) {
-                    return self.infer_null_coalesce_type(left, &left_type, &right_type);
+                    return self.infer_null_coalesce_type(left, right, &left_type);
                 }
+
+                let right_type = self.infer_expression(right);
 
                 // Validate comparison operand compatibility
                 if matches!(

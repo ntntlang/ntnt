@@ -974,6 +974,7 @@ fn test_known_success_null_coalesce_does_not_union_unreachable_fallback() {
     let code = r#"
 let a: Int = Some(1) ?? "not an int"
 let b: Int = Ok(2) ?? "also not an int"
+let c: Int = Some(3) ?? len()
 "#;
 
     let (stdout, _stderr, _code) = lint_code(code);
