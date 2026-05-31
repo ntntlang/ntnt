@@ -1,9 +1,9 @@
 # DD-043: World-Class Auth — Making `std/auth` the Best stdlib Auth Ever
 
-**Status:** In Progress — 0.4.9 release polish
+**Status:** Release candidate — final v0.4.9 validation
 **Author:** Larri
-**Date:** 2026-03-20 (slashed and sharpened 2026-04-28; WebAuthn/passkeys phase added 2026-04-29; 0.4.9 auth polish updated 2026-05-29)
-**Branch:** `main` through v0.4.9; current polish branch: `feat/auth-049-local-backends-polish`; WebAuthn/passkeys are post-v0.4.9
+**Date:** 2026-03-20 (slashed and sharpened 2026-04-28; WebAuthn/passkeys phase added 2026-04-29; 0.4.9 auth polish updated 2026-05-29; release-readiness sync 2026-05-31)
+**Branch:** `main` for v0.4.9; WebAuthn/passkeys are post-v0.4.9
 
 ---
 
@@ -145,14 +145,14 @@ Goal: ship reset password securely enough to use, without owning email delivery 
 
 ### Template Integration Proof
 
-This may be a separate template-repo PR, but it is the real acceptance test.
+Completed in `larimonious/larri-site-template` PR #1 (`feat(auth): move template admin to std/auth primitives`), merged before the final v0.4.9 release-readiness pass.
 
-- [ ] `template.heylarri.com` uses built-in local identity, credential, session, challenge, TOTP, and reset primitives
-- [ ] Template stores app-specific auth extension data in namespaced metadata or session data
-- [ ] Template uses `group_ids` / claims to build app RBAC without stdlib owning app policy
-- [ ] Template protects both pages and API endpoints through `require_auth(...)` / group helpers
-- [ ] Template deletes parallel auth tables/state machines
-- [ ] The before/after diff is materially simpler
+- [x] `template.heylarri.com` uses built-in local identity, credential, session, challenge, TOTP, and reset primitives
+- [x] Template stores app-specific auth extension data in namespaced metadata or session data
+- [x] Template uses `group_ids` / claims to build app RBAC without stdlib owning app policy
+- [x] Template protects both pages and API endpoints through `require_auth(...)` / group helpers
+- [x] Template deletes parallel auth tables/state machines
+- [x] The before/after diff is materially simpler
 - [x] `docs/AI_AGENT_GUIDE.md` includes a local auth quickstart showing login, reset, explicit reset-session revocation checkbox plumbing, and standalone `logout_all(...)` UI composition
 
 ---
@@ -342,4 +342,4 @@ After the first WebAuthn/passkey phase proves the primitive shape:
 
 ---
 
-*Sharpened 2026-04-28. One DD, one roadmap. DD-062 retired. Final sprint keeps the secure essentials first-class — reset, TOTP, API/page protection, local backend parity, and authorization handoff — while pushing product/RBAC/platform bloat to Future Refinements. WebAuthn/passkeys added 2026-04-29 as a post-v0.4.9 phase after template proof.*
+*Sharpened 2026-04-28. One DD, one roadmap. DD-062 retired. Final sprint keeps the secure essentials first-class — reset, TOTP, API/page protection, local backend parity, and authorization handoff — while pushing product/RBAC/platform bloat to Future Refinements. WebAuthn/passkeys added 2026-04-29 as a post-v0.4.9 phase. Template proof completed 2026-05-31; remaining release work is validation, issue triage, tagging, and publishing.*

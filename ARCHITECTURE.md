@@ -52,7 +52,8 @@ src/
     ├── http_server.rs       # std/http/server — Response builders
     ├── http_server_async.rs # Async HTTP server (Axum + Tokio)
     ├── http_bridge.rs       # Bridge between async server and sync interpreter
-    ├── auth.rs              # std/auth — OAuth 2.0, OIDC, PKCE, TOTP, JWT (7,211 lines)
+    ├── auth.rs              # std/auth public registration/docs/tests (~11.5k lines)
+    ├── auth/                # std/auth internals: local auth, sessions, storage, OAuth, guards
     ├── template.rs          # External template loading (Mustache-style)
     ├── postgres.rs          # std/db/postgres — PostgreSQL (deadpool connection pool)
     ├── sqlite.rs            # std/db/sqlite — SQLite (bundled via rusqlite)
@@ -304,11 +305,12 @@ IAL is a term rewriting system that translates natural language assertions into 
 
 ## Auth System (`std/auth`)
 
-Full OAuth 2.0 and OIDC implementation (~7,200 lines):
+`std/auth` is the shared authentication subsystem for OAuth/OIDC and local app auth. The public module registers the API surface; focused internal modules own OAuth, sessions, cookies, guards, request helpers, local identity/credential lifecycle, storage backends, and route handlers.
 
 - **Flows:** Authorization Code, Authorization Code + PKCE, Client Credentials, Refresh Token
 - **Providers:** Google, GitHub, or any custom OIDC provider (auto-discovery from issuer URL)
-- **Features:** ID token validation, nonce replay protection, JWT encode/decode, TOTP (2FA), bcrypt/argon2 password hashing, AES-GCM encryption, constant-time comparison
+- **Features:** ID token validation, nonce replay protection, JWT encode/decode, CSRF, request-aware sessions, staged auth challenges, local credentials, password reset, TOTP, route/API protection, and app-owned claims/group handoff
+- **Boundary:** Generic crypto helpers such as `hash_password`, `verify_password`, UUIDs, HMAC, and AES-GCM live in `std/crypto`; `std/auth` owns auth lifecycle primitives that compose through shared session/challenge storage.
 
 ```ntnt
 import { oauth, enable_auth, get_user } from "std/auth"
@@ -369,7 +371,7 @@ CI validates that generated docs are up-to-date (build fails on drift).
 | `std/log` | Structured logging with levels (debug/info/warn/error), JSON context |
 | `std/http` | HTTP client (fetch with 1-arg and 2-arg forms, download) |
 | `std/http/server` | Response builders (json, html, redirect, set_cookie) |
-| `std/auth` | OAuth 2.0, OIDC, PKCE, JWT, TOTP, password hashing |
+| `std/auth` | OAuth/OIDC, JWT, CSRF, sessions, local credentials, password reset, TOTP, staged challenges, route/API protection |
 | `std/db/postgres` | PostgreSQL with connection pooling (deadpool), transactions |
 | `std/db/sqlite` | SQLite (bundled, zero external deps) with transactions |
 | `std/kv` | Unified key-value store (SQLite and Redis/Valkey backends) |

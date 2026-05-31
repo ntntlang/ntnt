@@ -225,7 +225,7 @@ NTNT was built for human-AI collaboration. Requirements aren't separate from the
 | **Design by Contract** | `requires` and `ensures` built into function syntax. Agents read them as specs. Humans read them as docs. In HTTP routes, contract violations return 400/500 automatically. |
 | **Agent-Native Tooling** | `ntnt inspect` outputs JSON describing every function, route, and contract. `ntnt validate` returns machine-readable errors. An agent can understand an entire codebase in one call. |
 | **Gradual Type System** | Two independent axes: `NTNT_LINT_MODE` (static) and `NTNT_TYPE_MODE` (runtime). Start untyped, add annotations where they help, enable full type checking when you want it. |
-| **Built-In Auth & OAuth** | Full OAuth 2.0, OIDC discovery, JWT, CSRF, session management, bcrypt, TOTP — all in `std/auth`. Add Google or GitHub login in a few lines, not a few dependencies. |
+| **Built-In Auth** | OAuth/OIDC, JWT, CSRF, session management, local credentials, password reset, TOTP, staged auth challenges, and route/API protection — all in `std/auth`. Add Google/GitHub login or local email/password auth without dependency sprawl. |
 | **Background Jobs** | Language-native job DSL with priority queues, cron, unique jobs, and dead letter handling. Memory, PostgreSQL, and Redis backends. |
 | **Secure by Design** | No package manager means no supply chain attacks. Auto-escaping, SSRF protection, and security headers ship with the language. |
 | **Batteries Included** | HTTP servers, PostgreSQL, SQLite, Redis, JSON, CSV, file I/O, crypto, concurrency — all in the standard library. |
@@ -274,7 +274,7 @@ Everything's built in. No package manager needed.
 | **Web** | `std/http/server`, `std/http` | HTTP server with routing, middleware, static files; HTTP client |
 | **Data** | `std/json`, `std/csv`, `std/db/postgres`, `std/db/sqlite` | Parse/stringify; PostgreSQL and SQLite with transactions |
 | **Key-Value** | `std/kv` | Unified KV store (Redis, Valkey, DragonflyDB, SQLite, in-memory) |
-| **Auth** | `std/auth` | OAuth 2.0, OIDC, JWT, CSRF, session management, bcrypt, Argon2, TOTP |
+| **Auth** | `std/auth` | OAuth/OIDC, JWT, CSRF, sessions, local credentials, password reset, TOTP, staged challenges, route/API protection |
 | **Jobs** | `std/jobs` | Background job DSL with priority queues, cron, unique jobs, retry, dead letters. Memory, PostgreSQL, and Redis backends |
 | **Concurrency** | `std/concurrent` | Spawn, typed channels (Tx/Rx), select, parallel, race, schedule, after |
 | **Collections** | `std/collections` | push, pop, sort, reverse, keys, values, entries, map, filter, reduce, find, any, all |
