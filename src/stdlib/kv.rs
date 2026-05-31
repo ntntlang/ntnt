@@ -463,7 +463,16 @@ impl SQLiteKV {
                         )));
                     }
                 };
-                let new_val = current + amount;
+                let new_val = match current.checked_add(amount) {
+                    Some(n) => n,
+                    None => {
+                        let _ = self.conn.execute_batch("ROLLBACK");
+                        return Err(IntentError::runtime_error(format!(
+                            "kv_incr() value is out of range for key '{}'",
+                            key
+                        )));
+                    }
+                };
                 let upd = self.conn.execute(
                     "UPDATE _kv SET value = ? WHERE key = ?",
                     params![new_val.to_string(), key],
@@ -930,7 +939,21 @@ impl RedisKV {
             .key(key)
             .arg(amount)
             .invoke(&mut self.conn)
-            .map_err(|e| IntentError::runtime_error(format!("Redis incr error: {}", e)))?;
+            .map_err(|e| {
+                let message = e.to_string();
+                if matches!(
+                    e.kind(),
+                    redis::ErrorKind::ResponseError | redis::ErrorKind::ExtensionError | redis::ErrorKind::TypeError
+                ) && message.contains("value is not an integer or out of range")
+                {
+                    IntentError::runtime_error(format!(
+                        "kv_incr() requires an integer value, but key '{}' is not an integer or is out of range",
+                        key
+                    ))
+                } else {
+                    IntentError::runtime_error(format!("Redis incr error: {}", e))
+                }
+            })?;
         Ok(new_val)
     }
 }
@@ -1043,10 +1066,33 @@ fn native_counter_delta(handle: &Value, key: &str, amount: i64) -> Result<Value>
         }
     };
 
-    Ok(match new_val {
-        Ok(new_val) => Value::ok(Value::Int(new_val)),
-        Err(e) => Value::err(Value::String(e.to_string())),
-    })
+    match new_val {
+        Ok(new_val) => Ok(Value::ok(Value::Int(new_val))),
+        Err(e) => {
+            if let Some(message) = counter_domain_error_message(&e) {
+                Ok(Value::err(Value::String(message)))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+fn counter_domain_error_message(error: &IntentError) -> Option<String> {
+    let message = match error {
+        IntentError::RuntimeError { message, .. } | IntentError::TypeError { message, .. } => {
+            message
+        }
+        _ => return None,
+    };
+
+    if message.contains("kv_incr() requires an integer value")
+        || message.contains("kv_incr() value is out of range")
+    {
+        Some(message.clone())
+    } else {
+        None
+    }
 }
 
 fn parse_counter_key(args: &[Value], function_name: &str) -> Result<String> {
@@ -2154,7 +2200,12 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             func: |args| {
                 let key = parse_counter_key(args, "decr_by")?;
                 let amount = parse_counter_amount(args, 2, "decr_by")?;
-                native_counter_delta(&args[0], &key, -amount)
+                let Some(delta) = amount.checked_neg() else {
+                    return Ok(Value::err(Value::String(
+                        "decr_by() amount is out of range".to_string(),
+                    )));
+                };
+                native_counter_delta(&args[0], &key, delta)
             },
         },
     );
@@ -2444,6 +2495,15 @@ mod tests {
                 variant, values, ..
             } if variant == "Ok" => values.into_iter().next().unwrap_or(Value::Unit),
             other => panic!("Expected Ok result, got {:?}", other),
+        }
+    }
+
+    fn unwrap_err(value: Value) -> Value {
+        match value {
+            Value::EnumValue {
+                variant, values, ..
+            } if variant == "Err" => values.into_iter().next().unwrap_or(Value::Unit),
+            other => panic!("Expected Err result, got {:?}", other),
         }
     }
 
@@ -2921,6 +2981,41 @@ mod tests {
             matches!(&ttl_inner, Value::EnumValue { variant, .. } if variant == "Some"),
             "TTL should be preserved after incr: {:?}",
             ttl_inner
+        );
+    }
+
+    #[test]
+    fn test_kv_module_counter_helpers_recoverable_domain_errors() {
+        let module = create_kv_module();
+        let open = get_fn(&module, "open");
+        let set = get_fn(&module, "set");
+        let incr = get_fn(&module, "incr");
+        let decr_by = get_fn(&module, "decr_by");
+
+        let kv = unwrap_ok(open(&[Value::String(":memory:".to_string())]).unwrap());
+
+        set(&[
+            kv.clone(),
+            Value::String("not_counter".to_string()),
+            Value::String("hello".to_string()),
+        ])
+        .unwrap();
+
+        let r = incr(&[kv.clone(), Value::String("not_counter".to_string())]).unwrap();
+        assert!(
+            matches!(unwrap_err(r), Value::String(message) if message.contains("integer")),
+            "non-integer counter values should be recoverable Err(String)"
+        );
+
+        let r = decr_by(&[
+            kv.clone(),
+            Value::String("counter".to_string()),
+            Value::Int(i64::MIN),
+        ])
+        .unwrap();
+        assert!(
+            matches!(unwrap_err(r), Value::String(message) if message.contains("out of range")),
+            "i64::MIN decr_by should not panic or wrap"
         );
     }
 }

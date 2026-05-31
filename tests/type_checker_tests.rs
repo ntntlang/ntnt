@@ -969,6 +969,24 @@ let x: Int = int("bad") ?? "not an int"
     );
 }
 
+#[test]
+fn test_known_success_null_coalesce_does_not_union_unreachable_fallback() {
+    let code = r#"
+let a: Int = Some(1) ?? "not an int"
+let b: Int = Ok(2) ?? "also not an int"
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert_eq!(
+        errors, 0,
+        "known Some/Ok coalesce should infer the success value type only. Output: {}",
+        stdout
+    );
+}
+
 // ============================================================================
 // Generic type parameter unification tests (DD-009 Phase 7.4)
 // ============================================================================

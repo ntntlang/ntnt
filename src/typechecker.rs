@@ -634,6 +634,41 @@ impl TypeContext {
         }
     }
 
+    fn infer_null_coalesce_type(&self, left: &Expression, left_ty: &Type, right_ty: &Type) -> Type {
+        let known_variant = match left {
+            Expression::EnumVariant { variant, .. } => Some(variant.as_str()),
+            Expression::Call { function, .. } => match function.as_ref() {
+                Expression::Identifier(name) => Some(name.as_str()),
+                _ => None,
+            },
+            Expression::Identifier(name) if name == "None" => Some("None"),
+            _ => None,
+        };
+
+        if let Some(variant) = known_variant {
+            match variant {
+                "Some" => {
+                    if let Type::Optional(inner) = left_ty {
+                        return (**inner).clone();
+                    }
+                    return Type::Any;
+                }
+                "Ok" => {
+                    if let Type::Generic { name, args } = left_ty {
+                        if name == "Result" && !args.is_empty() {
+                            return args[0].clone();
+                        }
+                    }
+                    return Type::Any;
+                }
+                "None" | "Err" => return right_ty.clone(),
+                _ => {}
+            }
+        }
+
+        self.infer_binary_op(&BinaryOp::NullCoalesce, left_ty, right_ty)
+    }
+
     fn return_otherwise_uses_value_fallback_union(&self, expr_ty: &Type) -> bool {
         matches!(expr_ty, Type::Optional(_))
             || matches!(expr_ty, Type::Generic { name, args } if name == "Result" && !args.is_empty())
@@ -1681,6 +1716,10 @@ impl TypeContext {
             } => {
                 let left_type = self.infer_expression(left);
                 let right_type = self.infer_expression(right);
+
+                if matches!(operator, BinaryOp::NullCoalesce) {
+                    return self.infer_null_coalesce_type(left, &left_type, &right_type);
+                }
 
                 // Validate comparison operand compatibility
                 if matches!(
