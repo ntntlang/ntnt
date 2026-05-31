@@ -514,7 +514,7 @@ get("/auth/{provider}", auth_start)
 get("/auth/{provider}/callback", auth_callback)
 post("/auth/logout", auth_logout)
 
-let port = int(get_env("PORT") ?? "8080")
+let port = int(get_env("PORT") ?? "8080") ?? 8080
 print("NTNT auth demo running on http://localhost:#{port}")
 print("Local demo user: #{demo_email}")
 listen(port)

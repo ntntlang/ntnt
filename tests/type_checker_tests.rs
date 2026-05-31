@@ -935,15 +935,37 @@ fn check(x: Int, y: String) -> Bool {
         "Should have a comparison type warning"
     );
 
-    // The hint should mention int() or str() conversion
+    // The hint should mention handleable int() conversion or str() conversion
     let has_conversion_hint = comparison_warnings.iter().any(|w| {
         let hint = w["hint"].as_str().unwrap_or("");
-        hint.contains("int(") || hint.contains("str(")
+        hint.contains("int(") && (hint.contains("??") || hint.contains("str("))
     });
     assert!(
         has_conversion_hint,
-        "Comparison hint should suggest int()/str() conversion. Warnings: {:?}",
+        "Comparison hint should suggest handleable int()/str() conversion. Warnings: {:?}",
         comparison_warnings
+    );
+}
+
+#[test]
+fn test_result_null_coalesce_fallback_type_is_checked() {
+    let code = r#"
+let x: Int = int("bad") ?? "not an int"
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let files = json["files"].as_array().unwrap();
+    assert!(!files.is_empty(), "lint should report file results");
+    let issues = files[0]["issues"].as_array().unwrap();
+    assert!(
+        issues.iter().any(|issue| {
+            let msg = issue["message"].as_str().unwrap_or("");
+            msg.contains("Type mismatch") && msg.contains("String") && msg.contains("Int")
+        }),
+        "Result ?? fallback with a String fallback should not typecheck as Int. Issues: {:?}",
+        issues
     );
 }
 

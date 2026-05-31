@@ -1023,6 +1023,52 @@ fn get_redis_kv(handle: &Value) -> Result<Arc<Mutex<RedisKV>>> {
     }
 }
 
+/// Apply an atomic counter delta for native std/kv counter helpers.
+fn native_counter_delta(handle: &Value, key: &str, amount: i64) -> Result<Value> {
+    let backend = get_backend_type(handle)?;
+    let new_val = match backend {
+        KVBackend::SQLite => {
+            let kv_arc = get_sqlite_kv(handle)?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.incr(key, amount)
+        }
+        KVBackend::Redis => {
+            let kv_arc = get_redis_kv(handle)?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.incr(key, amount)
+        }
+    };
+
+    Ok(match new_val {
+        Ok(new_val) => Value::ok(Value::Int(new_val)),
+        Err(e) => Value::err(Value::String(e.to_string())),
+    })
+}
+
+fn parse_counter_key(args: &[Value], function_name: &str) -> Result<String> {
+    match &args[1] {
+        Value::String(s) => Ok(s.clone()),
+        _ => Err(IntentError::type_error(format!(
+            "{}() requires a string key",
+            function_name
+        ))),
+    }
+}
+
+fn parse_counter_amount(args: &[Value], index: usize, function_name: &str) -> Result<i64> {
+    match &args[index] {
+        Value::Int(i) => Ok(*i),
+        _ => Err(IntentError::type_error(format!(
+            "{}() requires an integer amount",
+            function_name
+        ))),
+    }
+}
+
 // ============================================================================
 // Module Export
 // ============================================================================
@@ -2011,72 +2057,104 @@ pub fn create_kv_module() -> HashMap<String, Value> {
 
     // @ntnt incr
     // @module std/kv
-    // @signature incr(kv: KVStore, key: String, amount: Int) -> Result<Int, String>
-    // Atomically increment an integer value by amount.
+    // @signature incr(kv: KVStore, key: String) -> Result<Int, String>
+    // Atomically increment an integer value by 1.
     //
-    // If the key doesn't exist, it is created with value = amount (effectively starting from 0).
+    // If the key doesn't exist, it is created with value = 1 (effectively starting from 0).
     // Preserves any existing TTL on the key — does not reset it.
     // Returns the new value after incrementing.
     // @param kv The KV store handle from open()
     // @param key The key to increment
-    // @param amount Integer to add (use negative values to decrement)
     // @returns Result containing the new integer value, or Err if the key holds a non-integer
     // @error TypeError ~ "kv_incr() requires an integer value" fix: "Ensure the key was set with an integer value or hasn't been written yet"
-    // @see_also expire, set
-    // @example incr(kv, "page_views", 1) => Ok(1) ~ "Increment a counter from zero"
-    // @example incr(kv, "score", 10) ~ "Add 10 to a score counter"
-    // @example incr(kv, "countdown", -1) ~ "Decrement a counter"
+    // @see_also decr, incr_by, decr_by, expire, set
+    // @example incr(kv, "page_views") => Ok(1) ~ "Increment a counter from zero"
     module.insert(
         "incr".to_string(),
         Value::NativeFunction {
             name: "incr".to_string(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                let key = parse_counter_key(args, "incr")?;
+                native_counter_delta(&args[0], &key, 1)
+            },
+        },
+    );
+
+    // @ntnt decr
+    // @module std/kv
+    // @signature decr(kv: KVStore, key: String) -> Result<Int, String>
+    // Atomically decrement an integer value by 1.
+    // @param kv The KV store handle from open()
+    // @param key The key to decrement
+    // @returns Result containing the new integer value, or Err if the key holds a non-integer
+    // @error TypeError ~ "kv_incr() requires an integer value" fix: "Ensure the key was set with an integer value or hasn't been written yet"
+    // @see_also incr, incr_by, decr_by
+    // @example decr(kv, "stock") => Ok(-1) ~ "Decrement a missing counter from zero"
+    module.insert(
+        "decr".to_string(),
+        Value::NativeFunction {
+            name: "decr".to_string(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                let key = parse_counter_key(args, "decr")?;
+                native_counter_delta(&args[0], &key, -1)
+            },
+        },
+    );
+
+    // @ntnt incr_by
+    // @module std/kv
+    // @signature incr_by(kv: KVStore, key: String, amount: Int) -> Result<Int, String>
+    // Atomically increment an integer value by amount.
+    // @param kv The KV store handle from open()
+    // @param key The key to increment
+    // @param amount Integer to add
+    // @returns Result containing the new integer value, or Err if the key holds a non-integer
+    // @error TypeError ~ "kv_incr() requires an integer value" fix: "Ensure the key was set with an integer value or hasn't been written yet"
+    // @see_also incr, decr, decr_by
+    // @example incr_by(kv, "score", 10) => Ok(10) ~ "Add 10 to a score counter"
+    module.insert(
+        "incr_by".to_string(),
+        Value::NativeFunction {
+            name: "incr_by".to_string(),
             arity: 3,
             max_arity: 3,
             requires: None,
             func: |args| {
-                if args.len() != 3 {
-                    return Err(IntentError::type_error(
-                        "incr() requires 3 arguments (kv, key, amount)".to_string(),
-                    ));
-                }
+                let key = parse_counter_key(args, "incr_by")?;
+                let amount = parse_counter_amount(args, 2, "incr_by")?;
+                native_counter_delta(&args[0], &key, amount)
+            },
+        },
+    );
 
-                let key = match &args[1] {
-                    Value::String(s) => s.clone(),
-                    _ => {
-                        return Err(IntentError::type_error(
-                            "incr() requires a string key".to_string(),
-                        ))
-                    }
-                };
-
-                let amount = match &args[2] {
-                    Value::Int(i) => *i,
-                    _ => {
-                        return Err(IntentError::type_error(
-                            "incr() requires an integer amount".to_string(),
-                        ))
-                    }
-                };
-
-                let backend = get_backend_type(&args[0])?;
-                let new_val = match backend {
-                    KVBackend::SQLite => {
-                        let kv_arc = get_sqlite_kv(&args[0])?;
-                        let kv = kv_arc.lock().map_err(|e| {
-                            IntentError::runtime_error(format!("KV lock error: {}", e))
-                        })?;
-                        kv.incr(&key, amount)?
-                    }
-                    KVBackend::Redis => {
-                        let kv_arc = get_redis_kv(&args[0])?;
-                        let mut kv = kv_arc.lock().map_err(|e| {
-                            IntentError::runtime_error(format!("KV lock error: {}", e))
-                        })?;
-                        kv.incr(&key, amount)?
-                    }
-                };
-
-                Ok(Value::ok(Value::Int(new_val)))
+    // @ntnt decr_by
+    // @module std/kv
+    // @signature decr_by(kv: KVStore, key: String, amount: Int) -> Result<Int, String>
+    // Atomically decrement an integer value by amount.
+    // @param kv The KV store handle from open()
+    // @param key The key to decrement
+    // @param amount Integer to subtract
+    // @returns Result containing the new integer value, or Err if the key holds a non-integer
+    // @error TypeError ~ "kv_incr() requires an integer value" fix: "Ensure the key was set with an integer value or hasn't been written yet"
+    // @see_also incr, decr, incr_by
+    // @example decr_by(kv, "stock", 3) => Ok(-3) ~ "Subtract 3 from a counter"
+    module.insert(
+        "decr_by".to_string(),
+        Value::NativeFunction {
+            name: "decr_by".to_string(),
+            arity: 3,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                let key = parse_counter_key(args, "decr_by")?;
+                let amount = parse_counter_amount(args, 2, "decr_by")?;
+                native_counter_delta(&args[0], &key, -amount)
             },
         },
     );
@@ -2803,29 +2881,37 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_module_incr() {
+    fn test_kv_module_counter_helpers() {
         let module = create_kv_module();
         let open = get_fn(&module, "open");
         let incr = get_fn(&module, "incr");
+        let decr = get_fn(&module, "decr");
+        let incr_by = get_fn(&module, "incr_by");
+        let decr_by = get_fn(&module, "decr_by");
         let expire = get_fn(&module, "expire");
 
         let kv = unwrap_ok(open(&[Value::String(":memory:".to_string())]).unwrap());
 
-        // First incr on missing key returns 1
-        let r = incr(&[kv.clone(), Value::String("c".to_string()), Value::Int(1)]).unwrap();
+        // incr/decr default to +/-1
+        let r = incr(&[kv.clone(), Value::String("c".to_string())]).unwrap();
         assert!(matches!(unwrap_ok(r), Value::Int(1)));
 
-        // Second incr returns 2
-        let r = incr(&[kv.clone(), Value::String("c".to_string()), Value::Int(1)]).unwrap();
+        let r = incr(&[kv.clone(), Value::String("c".to_string())]).unwrap();
         assert!(matches!(unwrap_ok(r), Value::Int(2)));
 
-        // incr by 5
-        let r = incr(&[kv.clone(), Value::String("c".to_string()), Value::Int(5)]).unwrap();
+        let r = decr(&[kv.clone(), Value::String("c".to_string())]).unwrap();
+        assert!(matches!(unwrap_ok(r), Value::Int(1)));
+
+        // Explicit by helpers handle larger deltas.
+        let r = incr_by(&[kv.clone(), Value::String("c".to_string()), Value::Int(10)]).unwrap();
+        assert!(matches!(unwrap_ok(r), Value::Int(11)));
+
+        let r = decr_by(&[kv.clone(), Value::String("c".to_string()), Value::Int(4)]).unwrap();
         assert!(matches!(unwrap_ok(r), Value::Int(7)));
 
         // expire on the key, then incr again should preserve TTL
         expire(&[kv.clone(), Value::String("c".to_string()), Value::Int(3600)]).unwrap();
-        incr(&[kv.clone(), Value::String("c".to_string()), Value::Int(1)]).unwrap();
+        incr(&[kv.clone(), Value::String("c".to_string())]).unwrap();
         // TTL is still set (not None)
         let ttl_fn = get_fn(&module, "ttl");
         let ttl_result = ttl_fn(&[kv.clone(), Value::String("c".to_string())]).unwrap();

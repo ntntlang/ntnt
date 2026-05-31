@@ -1186,6 +1186,101 @@ print(val)
     assert!(stdout.contains("42"), "Should unwrap Some(42)");
 }
 
+#[test]
+fn test_null_coalesce_operator_unwraps_result() {
+    let code = r#"
+let good = Ok(42) ?? 0
+let bad = Err("nope") ?? 7
+print(good)
+print(bad)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "?? operator should work with Result");
+    assert!(stdout.contains("42"), "Should unwrap Ok value");
+    assert!(stdout.contains("7"), "Should use fallback for Err");
+}
+
+#[test]
+fn test_numeric_conversions_return_results() {
+    let code = r#"
+let good = int("42") ?? 0
+let bad = int("none") ?? 7
+let fgood = float("3.5") ?? 0.0
+let fbad = float("nope") ?? 2.5
+match int("42") {
+    Ok(v) => print("int-ok:" + str(v)),
+    Err(_) => print("int-unexpected")
+}
+match int("none") {
+    Ok(_) => print("int-unexpected"),
+    Err(e) => print("int-err:" + e)
+}
+match float("3.5") {
+    Ok(v) => print("float-ok:" + str(v)),
+    Err(_) => print("float-unexpected")
+}
+match float("nope") {
+    Ok(_) => print("float-unexpected"),
+    Err(e) => print("float-err:" + e)
+}
+print(good)
+print(bad)
+print(fgood)
+print(fbad)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "int()/float() parse failures should be handleable\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    assert!(stdout.contains("42"), "int should unwrap valid parse");
+    assert!(
+        stdout.contains("7"),
+        "int should fall back on invalid parse"
+    );
+    assert!(stdout.contains("3.5"), "float should unwrap valid parse");
+    assert!(
+        stdout.contains("2.5"),
+        "float should fall back on invalid parse"
+    );
+    assert!(
+        stdout.contains("int-ok:42"),
+        "int should return Ok for valid parse"
+    );
+    assert!(
+        stdout.contains("int-err:Cannot parse as int: none"),
+        "int should return Err for invalid parse"
+    );
+    assert!(
+        stdout.contains("float-ok:3.5"),
+        "float should return Ok for valid parse"
+    );
+    assert!(
+        stdout.contains("float-err:Cannot parse as float: nope"),
+        "float should return Err for invalid parse"
+    );
+}
+
+#[test]
+fn test_runtime_errors_show_approximate_source_context() {
+    let code = r#"
+let x = 1 / 0
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "division by zero should fail");
+    assert!(
+        stderr.contains("Source context"),
+        "runtime error should include source context: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("approximate failing statement"),
+        "runtime error without expression column should label the pointer approximate: {}",
+        stderr
+    );
+}
+
 // ============================================================================
 // String Functions: replace_chars, remove_chars, keep_chars
 // ============================================================================
@@ -4602,6 +4697,27 @@ get_int(123, "k")
         stderr.contains("KV store handle") || stderr.contains("Expected a KV store handle"),
         "error should mention KV handle, got: {}",
         stderr
+    );
+}
+
+#[test]
+fn test_kv_counter_helpers_return_err_result_on_non_integer_value() {
+    let code = r#"
+import { open, set, incr } from "std/kv"
+let kv = unwrap(open(":memory:"))
+unwrap(set(kv, "counter", "not-an-int"))
+let recovered = incr(kv, "counter") ?? 99
+print(recovered)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "incr() domain failures should be recoverable Result::Err\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    assert!(
+        stdout.contains("99"),
+        "?? should recover from non-integer counter errors"
     );
 }
 

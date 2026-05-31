@@ -675,16 +675,65 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
                 }
             }
 
-            // No route or static file - return 404
-            error_response(
-                404,
-                "Not Found",
-                &method.to_string(),
-                &path,
-                "",
-                state.is_production,
-                csp_ref,
-            )
+            if state.is_production {
+                return error_response(
+                    404,
+                    "Not Found",
+                    &method.to_string(),
+                    &path,
+                    "",
+                    state.is_production,
+                    csp_ref,
+                );
+            }
+
+            // In development, the interpreter owns hot-reload checks. A request for a newly
+            // added file-based route may miss this async route index until the interpreter
+            // gets a chance to rescan routes/. Forward the would-be 404 once so hot-reload
+            // can run before deciding the route is really missing.
+            let mut response = match axum_to_bridge_request(req, HashMap::new()).await {
+                Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
+                    Ok(response) => bridge_to_axum_response(response, csp_ref),
+                    Err(e) => {
+                        let error_msg = format!("{}", e);
+                        eprintln!(
+                            "[ERROR] {} {} | fallback route refresh | {}",
+                            method, path, error_msg
+                        );
+                        error_response(
+                            500,
+                            &error_msg,
+                            &method.to_string(),
+                            &path,
+                            "",
+                            state.is_production,
+                            csp_ref,
+                        )
+                    }
+                },
+                Err(e) => {
+                    let error_msg = format!("{}", e);
+                    eprintln!(
+                        "[ERROR] {} {} | fallback request parse | {}",
+                        method, path, error_msg
+                    );
+                    error_response(
+                        400,
+                        &error_msg,
+                        &method.to_string(),
+                        &path,
+                        "",
+                        state.is_production,
+                        csp_ref,
+                    )
+                }
+            };
+
+            if method == axum::http::Method::HEAD {
+                *response.body_mut() = Body::empty();
+            }
+
+            response
         }
     }
 }
