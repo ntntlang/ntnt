@@ -240,10 +240,14 @@ pub fn auth_challenge_to_value(challenge: &AuthChallenge) -> Value {
     map.insert("kind".to_string(), Value::String(challenge.kind.clone()));
     map.insert("created_at".to_string(), Value::Int(challenge.created_at));
     map.insert("expires_at".to_string(), Value::Int(challenge.expires_at));
-    map.insert(
-        "data".to_string(),
-        Value::Map(json_string_to_value_map(&challenge.data_json)),
-    );
+    let mut data = json_string_to_value_map(&challenge.data_json);
+    if matches!(
+        data.get(AUTH_CHALLENGE_CSRF_DATA_KEY),
+        Some(Value::String(token)) if challenge.csrf_token.is_empty() || token == &challenge.csrf_token
+    ) {
+        data.remove(AUTH_CHALLENGE_CSRF_DATA_KEY);
+    }
+    map.insert("data".to_string(), Value::Map(data));
 
     Value::Map(map)
 }

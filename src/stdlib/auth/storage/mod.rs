@@ -902,6 +902,7 @@ pub(super) fn create_auth_challenge(
         subject_id,
         provider,
         kind,
+        csrf_token: uuid::Uuid::new_v4().to_string(),
         data_json: value_map_to_json_string(&data_map),
         created_at: now,
         expires_at: now + ttl,
@@ -1041,13 +1042,14 @@ pub(super) fn store_auth_challenge_sqlite(
 
     conn.execute(
         "INSERT OR REPLACE INTO auth_challenges
-         (id, subject_id, provider, kind, data_json, created_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         (id, subject_id, provider, kind, csrf_token, data_json, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             challenge.id,
             challenge.subject_id,
             challenge.provider,
             challenge.kind,
+            challenge.csrf_token,
             challenge.data_json,
             challenge.created_at,
             challenge.expires_at,
@@ -1065,15 +1067,16 @@ fn store_auth_challenge_postgres(challenge: &AuthChallenge) -> std::result::Resu
     client
         .execute(
             "INSERT INTO auth_challenges
-             (id, subject_id, provider, kind, data_json, created_at, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             (id, subject_id, provider, kind, csrf_token, data_json, created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (id) DO UPDATE SET
-                subject_id = $2, provider = $3, kind = $4, data_json = $5, created_at = $6, expires_at = $7",
+                subject_id = $2, provider = $3, kind = $4, csrf_token = $5, data_json = $6, created_at = $7, expires_at = $8",
             &[
                 &challenge.id,
                 &challenge.subject_id,
                 &challenge.provider,
                 &challenge.kind,
+                &challenge.csrf_token,
                 &challenge.data_json,
                 &challenge.created_at,
                 &challenge.expires_at,
@@ -1100,6 +1103,19 @@ pub(super) fn auth_challenge_from_json_str(
             .ok_or_else(|| format!("Auth challenge JSON missing string field: {}", field))
     };
 
+    let csrf_token = json["csrf_token"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| {
+            json["data_json"].as_str().and_then(|data_json| {
+                match json_string_to_value_map(data_json).get(AUTH_CHALLENGE_CSRF_DATA_KEY) {
+                    Some(Value::String(token)) if !token.is_empty() => Some(token.clone()),
+                    _ => None,
+                }
+            })
+        })
+        .unwrap_or_default();
+
     let get_i64 = |field: &str| -> std::result::Result<i64, String> {
         json[field]
             .as_i64()
@@ -1111,6 +1127,7 @@ pub(super) fn auth_challenge_from_json_str(
         subject_id: get_string("subject_id")?,
         provider: get_string("provider")?,
         kind: get_string("kind")?,
+        csrf_token,
         data_json: get_string("data_json")?,
         created_at: get_i64("created_at")?,
         expires_at: get_i64("expires_at")?,
@@ -1132,6 +1149,7 @@ fn store_auth_challenge_redis(challenge: &AuthChallenge) -> std::result::Result<
         "subject_id": challenge.subject_id,
         "provider": challenge.provider,
         "kind": challenge.kind,
+        "csrf_token": challenge.csrf_token,
         "data_json": challenge.data_json,
         "created_at": challenge.created_at,
         "expires_at": challenge.expires_at,
@@ -1189,7 +1207,7 @@ fn get_auth_challenge_sqlite(id: &str) -> std::result::Result<Option<AuthChallen
     let now = chrono::Utc::now().timestamp();
 
     let result = conn.query_row(
-        "SELECT id, subject_id, provider, kind, data_json, created_at, expires_at
+        "SELECT id, subject_id, provider, kind, csrf_token, data_json, created_at, expires_at
          FROM auth_challenges WHERE id = ?1 AND expires_at > ?2",
         rusqlite::params![id, now],
         |row| {
@@ -1198,9 +1216,10 @@ fn get_auth_challenge_sqlite(id: &str) -> std::result::Result<Option<AuthChallen
                 subject_id: row.get(1)?,
                 provider: row.get(2)?,
                 kind: row.get(3)?,
-                data_json: row.get(4)?,
-                created_at: row.get(5)?,
-                expires_at: row.get(6)?,
+                csrf_token: row.get(4)?,
+                data_json: row.get(5)?,
+                created_at: row.get(6)?,
+                expires_at: row.get(7)?,
             })
         },
     );
@@ -1220,7 +1239,7 @@ fn get_auth_challenge_postgres(id: &str) -> std::result::Result<Option<AuthChall
     let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
     let rows = client
         .query(
-            "SELECT id, subject_id, provider, kind, data_json, created_at, expires_at
+            "SELECT id, subject_id, provider, kind, csrf_token, data_json, created_at, expires_at
              FROM auth_challenges WHERE id = $1 AND expires_at > $2",
             &[&id, &now],
         )
@@ -1232,9 +1251,10 @@ fn get_auth_challenge_postgres(id: &str) -> std::result::Result<Option<AuthChall
             subject_id: row.get(1),
             provider: row.get(2),
             kind: row.get(3),
-            data_json: row.get(4),
-            created_at: row.get(5),
-            expires_at: row.get(6),
+            csrf_token: row.get(4),
+            data_json: row.get(5),
+            created_at: row.get(6),
+            expires_at: row.get(7),
         }))
     } else {
         Ok(None)
@@ -1339,7 +1359,7 @@ fn consume_auth_challenge_sqlite(id: &str) -> std::result::Result<Option<AuthCha
     let result = conn.query_row(
         "DELETE FROM auth_challenges
          WHERE id = ?1 AND expires_at > ?2
-         RETURNING id, subject_id, provider, kind, data_json, created_at, expires_at",
+         RETURNING id, subject_id, provider, kind, csrf_token, data_json, created_at, expires_at",
         rusqlite::params![id, now],
         |row| {
             Ok(AuthChallenge {
@@ -1347,9 +1367,10 @@ fn consume_auth_challenge_sqlite(id: &str) -> std::result::Result<Option<AuthCha
                 subject_id: row.get(1)?,
                 provider: row.get(2)?,
                 kind: row.get(3)?,
-                data_json: row.get(4)?,
-                created_at: row.get(5)?,
-                expires_at: row.get(6)?,
+                csrf_token: row.get(4)?,
+                data_json: row.get(5)?,
+                created_at: row.get(6)?,
+                expires_at: row.get(7)?,
             })
         },
     );
@@ -1371,7 +1392,7 @@ fn consume_auth_challenge_postgres(id: &str) -> std::result::Result<Option<AuthC
         .query(
             "DELETE FROM auth_challenges
              WHERE id = $1 AND expires_at > $2
-             RETURNING id, subject_id, provider, kind, data_json, created_at, expires_at",
+             RETURNING id, subject_id, provider, kind, csrf_token, data_json, created_at, expires_at",
             &[&id, &now],
         )
         .map_err(|e| e.to_string())?;
@@ -1382,9 +1403,10 @@ fn consume_auth_challenge_postgres(id: &str) -> std::result::Result<Option<AuthC
             subject_id: row.get(1),
             provider: row.get(2),
             kind: row.get(3),
-            data_json: row.get(4),
-            created_at: row.get(5),
-            expires_at: row.get(6),
+            csrf_token: row.get(4),
+            data_json: row.get(5),
+            created_at: row.get(6),
+            expires_at: row.get(7),
         }))
     } else {
         Ok(None)

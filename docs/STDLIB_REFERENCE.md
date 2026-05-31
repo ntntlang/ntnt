@@ -1822,6 +1822,8 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | Function | Description |
 |----------|-------------|
 | [`auth_callback`](#authcallback) | Handle OAuth callback - exchanges code for tokens, creates session. |
+| [`auth_challenge_csrf_field`](#authchallengecsrffield) | Get an HTML hidden input field for the current staged auth challenge CSRF token. |
+| [`auth_challenge_csrf_token`](#authchallengecsrftoken) | Get the CSRF token bound to the current staged auth challenge. |
 | [`auth_health`](#authhealth) | Return auth diagnostics for the built-in `/auth/health` route. |
 | [`auth_logout`](#authlogout) | Handle logout - clears the session and redirects. |
 | [`auth_me`](#authme) | Return current user as JSON for SPAs. |
@@ -1873,6 +1875,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`update_local_user_metadata`](#updatelocalusermetadata) | Merge or replace app-owned local identity metadata and return a safe payload. |
 | [`user_sessions`](#usersessions) | Get all active sessions for the current user. |
 | [`validate_csrf`](#validatecsrf) | Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH). |
+| [`verify_auth_challenge_csrf`](#verifyauthchallengecsrf) | Verify a submitted CSRF token against the current staged auth challenge. |
 | [`verify_csrf`](#verifycsrf) | Verify a CSRF token against the session's token. |
 | [`verify_local_password`](#verifylocalpassword) | Verify a local credential record and return a safe auth user payload. |
 | [`verify_local_totp`](#verifylocaltotp) | Verify a local user's confirmed TOTP code without exposing the stored secret. |
@@ -1903,6 +1906,64 @@ get("/auth/{provider}/callback", auth_callback)  // Wire up callback route
 **See also:** `enable_auth`, `auth_start`
 
 *Since v0.3.11*
+
+---
+
+#### `auth_challenge_csrf_field`
+
+```ntnt
+auth_challenge_csrf_field(req: Request, kind?: String) -> String
+```
+
+Get an HTML hidden input field for the current staged auth challenge CSRF token.
+
+`begin_auth_challenge()` creates a server-side challenge CSRF nonce automatically. Render this helper in pre-session staged forms, then verify the submitted value with `verify_auth_challenge_csrf(req, form["_csrf"], kind)` before mutating credentials, MFA state, or sessions.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+- `kind` — Optional challenge kind to require before rendering a field
+
+**Returns:** HTML string like `<input type="hidden" name="_csrf" value="..."/>`, or an empty string when no matching challenge is active
+
+**Examples:**
+
+```ntnt
+auth_challenge_csrf_field(req, "local.password_change")  // Render hidden CSRF input for staged password change
+```
+
+**See also:** `verify_auth_challenge_csrf`, `auth_challenge_csrf_token`, `csrf_field`
+
+*Since v0.4.9*
+
+---
+
+#### `auth_challenge_csrf_token`
+
+```ntnt
+auth_challenge_csrf_token(req: Request, kind?: String) -> Option<String>
+```
+
+Get the CSRF token bound to the current staged auth challenge.
+
+Use this only for pre-session staged forms such as first-login password rotation or password -> TOTP verification. Signed-in forms should use `csrf_field(req)` and `verify_csrf(req, token)` instead.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+- `kind` — Optional challenge kind to require before returning a token
+
+**Returns:** Option containing the challenge CSRF token, or None when no matching challenge is active
+
+**Examples:**
+
+```ntnt
+auth_challenge_csrf_token(req, "local.totp")  // Read staged challenge CSRF token
+```
+
+**See also:** `auth_challenge_csrf_field`, `verify_auth_challenge_csrf`, `begin_auth_challenge`
+
+*Since v0.4.9*
 
 ---
 
@@ -3422,6 +3483,36 @@ validate_csrf(req)  // Check CSRF token on POST
 **See also:** `get_user`, `get_session`
 
 *Since v0.4.0*
+
+---
+
+#### `verify_auth_challenge_csrf`
+
+```ntnt
+verify_auth_challenge_csrf(req: Request, token: String, kind?: String) -> Bool
+```
+
+Verify a submitted CSRF token against the current staged auth challenge.
+
+This is for pre-session challenge forms. It validates against the active auth-challenge cookie rather than the authenticated-session cookie used by `verify_csrf()`.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+- `token` — The submitted `_csrf` form value
+- `kind` — Optional challenge kind to require before accepting the token
+
+**Returns:** true when the token matches the active staged challenge, false otherwise
+
+**Examples:**
+
+```ntnt
+verify_auth_challenge_csrf(req, form["_csrf"], "local.totp")  // Validate staged challenge form
+```
+
+**See also:** `auth_challenge_csrf_field`, `auth_challenge_csrf_token`, `verify_csrf`
+
+*Since v0.4.9*
 
 ---
 
