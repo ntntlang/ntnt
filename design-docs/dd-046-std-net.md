@@ -726,9 +726,11 @@ WHOIS is domain registry plumbing, not core connectivity. It also involves refer
 
 Remote command execution is too privileged for `std/net`. If added, it should likely be `std/ssh` or an app/plugin-level module with explicit host-key verification and credential handling. Default-permissive known-host behavior is not acceptable for a stdlib primitive.
 
-### SNMP
+### SNMP / network monitoring
 
-SNMP is a real network-monitoring need, but it is its own protocol family. Defer to `std/snmp` or a private/experimental monitoring module. Do not make the first `std/net` PR carry BER/ASN.1 and SNMP semantics.
+SNMP and higher-level monitoring concerns are covered by [DD-047: `std/netmon`](dd-047-std-netmon.md). Keep them out of the initial `std/net` module. `std/net` should provide safe primitives; `std/netmon` can build SNMP/device telemetry, interface counters, topology hints, composite checks, and alert-state helpers on top.
+
+SNMP is a real network-monitoring need, but it is its own protocol family. It should likely start as a private or separately distributed `std/netmon` library rather than default stdlib surface area. Do not make the first `std/net` PR carry BER/ASN.1 and SNMP semantics.
 
 ---
 
