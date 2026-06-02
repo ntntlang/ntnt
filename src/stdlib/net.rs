@@ -607,32 +607,32 @@ fn tcp_reachability(
     timeout: Duration,
     allow_private: bool,
 ) -> Result<TcpProbeResult, String> {
+    let targets = resolve_tcp_targets(host, ports)?;
+    if targets.is_empty() {
+        return Ok(TcpProbeResult {
+            reachable: false,
+            connected_port: None,
+            latency_ms: None,
+            reason: "no resolved addresses".to_string(),
+        });
+    }
+    enforce_resolved_target_policy(&targets, allow_private)?;
+
     let mut last_reason = "unreachable".to_string();
-    for port in ports {
-        let addrs: Vec<SocketAddr> = (host, *port)
-            .to_socket_addrs()
-            .map_err(|e| format!("failed to resolve {}:{}: {}", host, port, e))?
-            .collect();
-        if addrs.is_empty() {
-            last_reason = "no resolved addresses".to_string();
-            continue;
-        }
-        for addr in addrs {
-            enforce_target_policy(addr.ip(), allow_private)?;
-            let start = Instant::now();
-            match TcpStream::connect_timeout(&addr, timeout) {
-                Ok(stream) => {
-                    drop(stream);
-                    return Ok(TcpProbeResult {
-                        reachable: true,
-                        connected_port: Some(*port),
-                        latency_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
-                        reason: "connected".to_string(),
-                    });
-                }
-                Err(e) => {
-                    last_reason = e.kind().to_string();
-                }
+    for (port, addr) in targets {
+        let start = Instant::now();
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => {
+                drop(stream);
+                return Ok(TcpProbeResult {
+                    reachable: true,
+                    connected_port: Some(port),
+                    latency_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
+                    reason: "connected".to_string(),
+                });
+            }
+            Err(e) => {
+                last_reason = e.kind().to_string();
             }
         }
     }
@@ -642,6 +642,28 @@ fn tcp_reachability(
         latency_ms: None,
         reason: last_reason,
     })
+}
+
+fn resolve_tcp_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, SocketAddr)>, String> {
+    let mut targets = Vec::new();
+    for port in ports {
+        let addrs: Vec<SocketAddr> = (host, *port)
+            .to_socket_addrs()
+            .map_err(|e| format!("failed to resolve {}:{}: {}", host, port, e))?
+            .collect();
+        targets.extend(addrs.into_iter().map(|addr| (*port, addr)));
+    }
+    Ok(targets)
+}
+
+fn enforce_resolved_target_policy(
+    targets: &[(u16, SocketAddr)],
+    allow_private: bool,
+) -> Result<(), String> {
+    for (_, addr) in targets {
+        enforce_target_policy(addr.ip(), allow_private)?;
+    }
+    Ok(())
 }
 
 fn parse_ip(input: &str) -> Result<ParsedInput, String> {
@@ -829,6 +851,9 @@ fn classify_ip(ip: IpAddr) -> IpClassification {
             is_unique_local: false,
         },
         IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return classify_ip(IpAddr::V4(mapped));
+            }
             let first_segment = ip.segments()[0];
             let is_unique_local = (first_segment & 0xfe00) == 0xfc00;
             let is_link_local = (first_segment & 0xffc0) == 0xfe80;
@@ -859,7 +884,9 @@ fn enforce_target_policy(ip: IpAddr, allow_private: bool) -> Result<(), String> 
     let denied_by_default = classification.is_private
         || classification.is_loopback
         || classification.is_link_local
-        || classification.is_unspecified;
+        || classification.is_unspecified
+        || classification.is_multicast
+        || classification.is_documentation;
     if !denied_by_default {
         return Ok(());
     }
@@ -1110,4 +1137,37 @@ fn range_to_networks(
 fn floor_log2(value: u128) -> u32 {
     debug_assert!(value > 0);
     127 - value.leading_zeros()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_policy_classifies_ipv4_mapped_ipv6_by_embedded_address() {
+        let mapped_loopback = "[::ffff:127.0.0.1]:80".parse::<SocketAddr>().unwrap();
+        let mapped_metadata = "[::ffff:169.254.169.254]:80".parse::<SocketAddr>().unwrap();
+
+        assert!(enforce_resolved_target_policy(&[(80, mapped_loopback)], false).is_err());
+        assert!(enforce_resolved_target_policy(&[(80, mapped_metadata)], false).is_err());
+    }
+
+    #[test]
+    fn target_policy_rejects_special_ranges_by_default() {
+        let multicast = "224.0.0.1:80".parse::<SocketAddr>().unwrap();
+        let documentation = "192.0.2.1:80".parse::<SocketAddr>().unwrap();
+
+        assert!(enforce_resolved_target_policy(&[(80, multicast)], false).is_err());
+        assert!(enforce_resolved_target_policy(&[(80, documentation)], false).is_err());
+    }
+
+    #[test]
+    fn target_policy_checks_all_resolved_addresses_before_probe() {
+        let public = "93.184.216.34:443".parse::<SocketAddr>().unwrap();
+        let private = "127.0.0.1:443".parse::<SocketAddr>().unwrap();
+        let targets = [(443, public), (443, private)];
+
+        let err = enforce_resolved_target_policy(&targets, false).unwrap_err();
+        assert!(err.contains("Network target denied by policy"));
+    }
 }

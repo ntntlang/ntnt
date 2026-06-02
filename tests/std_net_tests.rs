@@ -237,3 +237,41 @@ match ping("127.0.0.1", map { "allow_private": true, "method": "tcp", "tcp_ports
         "stdout: {stdout}"
     );
 }
+
+#[test]
+fn ping_rejects_ipv4_mapped_and_special_ranges_by_default() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { ping } from "std/net"
+
+match ping("::ffff:127.0.0.1", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected mapped"),
+    Err(e) => print("mapped=" + e)
+}
+
+match ping("224.0.0.1", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected multicast"),
+    Err(e) => print("multicast=" + e)
+}
+
+match ping("192.0.2.1", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected documentation"),
+    Err(e) => print("documentation=" + e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("mapped=Network target denied by policy"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("multicast=Network target denied by policy"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("documentation=Network target denied by policy"),
+        "stdout: {stdout}"
+    );
+}
