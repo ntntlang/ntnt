@@ -886,7 +886,8 @@ fn enforce_target_policy(ip: IpAddr, allow_private: bool) -> Result<(), String> 
         || classification.is_link_local
         || classification.is_unspecified
         || classification.is_multicast
-        || classification.is_documentation;
+        || classification.is_documentation
+        || matches!(ip, IpAddr::V4(ipv4) if ipv4.is_broadcast());
     if !denied_by_default {
         return Ok(());
     }
@@ -1156,9 +1157,11 @@ mod tests {
     fn target_policy_rejects_special_ranges_by_default() {
         let multicast = "224.0.0.1:80".parse::<SocketAddr>().unwrap();
         let documentation = "192.0.2.1:80".parse::<SocketAddr>().unwrap();
+        let broadcast = "255.255.255.255:80".parse::<SocketAddr>().unwrap();
 
         assert!(enforce_resolved_target_policy(&[(80, multicast)], false).is_err());
         assert!(enforce_resolved_target_policy(&[(80, documentation)], false).is_err());
+        assert!(enforce_resolved_target_policy(&[(80, broadcast)], false).is_err());
     }
 
     #[test]

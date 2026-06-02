@@ -258,6 +258,11 @@ match ping("192.0.2.1", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 1
     Ok(info) => print("unexpected documentation"),
     Err(e) => print("documentation=" + e)
 }
+
+match ping("255.255.255.255", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected broadcast"),
+    Err(e) => print("broadcast=" + e)
+}
 "#,
     );
 
@@ -272,6 +277,10 @@ match ping("192.0.2.1", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 1
     );
     assert!(
         stdout.contains("documentation=Network target denied by policy"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("broadcast=Network target denied by policy"),
         "stdout: {stdout}"
     );
 }
