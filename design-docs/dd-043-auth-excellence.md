@@ -1,8 +1,8 @@
 # DD-043: World-Class Auth — Making `std/auth` the Best stdlib Auth Ever
 
-**Status:** Release candidate — final v0.4.9 validation
+**Status:** Shipped in v0.4.9; WebAuthn/passkeys remain post-v0.4.9 planning
 **Author:** Larri
-**Date:** 2026-03-20 (slashed and sharpened 2026-04-28; WebAuthn/passkeys phase added 2026-04-29; 0.4.9 auth polish updated 2026-05-29; release-readiness sync 2026-05-31)
+**Date:** 2026-03-20 (slashed and sharpened 2026-04-28; WebAuthn/passkeys phase added 2026-04-29; 0.4.9 auth polish updated 2026-05-29; release-readiness sync 2026-05-31; release status sync 2026-06-02)
 **Branch:** `main` for v0.4.9; WebAuthn/passkeys are post-v0.4.9
 
 ---
@@ -34,7 +34,7 @@ The rule is not “metadata for everything.” The rule is:
 
 ## Current State (v0.4.9) — What Is Shipped
 
-Everything below is merged or intended as the current v0.4.9 baseline:
+Everything below shipped in the v0.4.9 baseline:
 
 - OAuth 2.0 + OIDC providers with PKCE
 - Server-side sessions using memory, SQLite, PostgreSQL, or Redis/Valkey for the main session/challenge/OAuth state families
@@ -248,9 +248,9 @@ Non-goals for the first WebAuthn phase:
 
 ---
 
-## v0.4.9 Final Sprint Done Criteria
+## v0.4.9 Final Sprint Completion
 
-The v0.4.9 final sprint is complete when:
+The v0.4.9 final sprint shipped with these criteria satisfied:
 
 1. `std/auth` primitives are solid and composable for OAuth, local email/password, TOTP, password reset, pages, and API endpoints.
 2. Password reset tokens are hashed, TTL-bound, one-time, non-enumerating, and not app-reimplemented; reset-time session revocation is explicit and off by default.
@@ -342,4 +342,4 @@ After the first WebAuthn/passkey phase proves the primitive shape:
 
 ---
 
-*Sharpened 2026-04-28. One DD, one roadmap. DD-062 retired. Final sprint keeps the secure essentials first-class — reset, TOTP, API/page protection, local backend parity, and authorization handoff — while pushing product/RBAC/platform bloat to Future Refinements. WebAuthn/passkeys added 2026-04-29 as a post-v0.4.9 phase. Template proof completed 2026-05-31; remaining release work is validation, issue triage, tagging, and publishing.*
+*Sharpened 2026-04-28. One DD, one roadmap. DD-062 retired. The v0.4.9 final sprint shipped the secure essentials first-class — reset, TOTP, API/page protection, local backend parity, and authorization handoff — while pushing product/RBAC/platform bloat to Future Refinements. WebAuthn/passkeys were added 2026-04-29 as a post-v0.4.9 phase. Template proof completed 2026-05-31; v0.4.9 was tagged and published 2026-06-02.*
