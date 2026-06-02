@@ -738,7 +738,7 @@ SNMP is a real network-monitoring need, but it is its own protocol family. Defer
 
 As of 2026-06-02:
 
-- [x] **PR 1 — `std/net` shell + IPAM helpers + `ping`**: implemented in [PR #113](https://github.com/ntntlang/ntnt/pull/113). Status: open, mergeable, CI green, no unresolved review threads at head `944a397`.
+- [x] **PR 1 — `std/net` shell + IPAM helpers + `ping`**: implemented in [PR #113](https://github.com/ntntlang/ntnt/pull/113). Status: open, mergeable, CI green, no unresolved review threads.
 - [ ] **PR 2 — Dedicated TCP probe refinement**: next planned slice. Reuses the Phase 1 TCP fallback helper as public `tcp_connect`.
 - [ ] **PR 3 — DNS A/AAAA/PTR**: planned after TCP probe.
 - [ ] **PR 4 — Bounded port scan**: planned after DNS.
@@ -752,87 +752,87 @@ Status: **implemented in PR #113; awaiting merge/review completion.**
 
 Scope:
 
-- `src/stdlib/net.rs`
-- `src/stdlib/mod.rs`
-- `src/typechecker.rs`
-- unit tests for helpers and IPv4/IPv6 IPAM behavior
-- `ip_parse`, `subnet_contains`, `subnet_overlaps`, `subnet_split`, `subnet_supernet`, `subnet_summarize`, `ip_range_to_cidrs`
-- `ping(host, opts?)` with `method: "auto"` default and TCP fallback
-- shared target safety checks used by `ping` and future TCP functions
-- generated docs for all Phase 1 functions
-- safe example showing `ping("example.com")` and an internal-monitoring env-var example
-- IPAM examples for IPv4 subnet splitting and IPv6 parsing/summarization
+- [x] `src/stdlib/net.rs`
+- [x] `src/stdlib/mod.rs`
+- [x] `src/typechecker.rs`
+- [x] unit tests for helpers and IPv4/IPv6 IPAM behavior
+- [x] `ip_parse`, `subnet_contains`, `subnet_overlaps`, `subnet_split`, `subnet_supernet`, `subnet_summarize`, `ip_range_to_cidrs`
+- [x] `ping(host, opts?)` with `method: "auto"` default and TCP fallback
+- [x] shared target safety checks used by `ping` and future TCP functions
+- [x] generated docs for all Phase 1 functions
+- [x] safe example showing `ping("example.com")` and an internal-monitoring env-var example
+- [x] IPAM examples for IPv4 subnet splitting and IPv6 parsing/summarization
 
 Acceptance:
 
-- Phase 1 imports work at runtime and lint/typecheck time.
-- IPv6 parsing, containment, overlap, splitting, supernet, summarization, and range conversion are supported and tested.
-- Large IPv6 counts/results do not overflow or generate unbounded arrays.
-- `ping("example.com")` has a documented no-root/no-capability path through TCP fallback.
-- Missing ICMP capability does not break default `ping()` usage.
-- no public internet dependency
-- no new dependency unless clearly justified; any ICMP dependency must keep the TCP fallback path clean
-- `cargo build --profile dev-release`, `cargo test net`, docs generation pass
+- [x] Phase 1 imports work at runtime and lint/typecheck time.
+- [x] IPv6 parsing, containment, overlap, splitting, supernet, summarization, and range conversion are supported and tested.
+- [x] Large IPv6 counts/results do not overflow or generate unbounded arrays.
+- [x] `ping("example.com")` has a documented no-root/no-capability path through TCP fallback.
+- [x] Missing ICMP capability does not break default `ping()` usage.
+- [x] no public internet dependency
+- [x] no new dependency unless clearly justified; any ICMP dependency must keep the TCP fallback path clean
+- [x] `cargo build --profile dev-release`, `cargo test net`, docs generation pass
 
 ### PR 2 — Dedicated TCP probe refinement
 
 Scope:
 
-- `tcp_connect`
-- reuse/refactor the Phase 1 TCP fallback helper into the public `tcp_connect` API
-- local-listener tests
-- typechecker signature tests
-- AI agent guide section for `std/net` safety and jobs/concurrency guidance
+- [ ] `tcp_connect`
+- [ ] reuse/refactor the Phase 1 TCP fallback helper into the public `tcp_connect` API
+- [ ] local-listener tests
+- [ ] typechecker signature tests
+- [ ] AI agent guide section for `std/net` safety and jobs/concurrency guidance
 
 Acceptance:
 
-- local open/closed port tests pass
-- private/loopback policy behavior is explicit and tested
-- `Err` vs `Ok({ connected: false })` semantics are documented and tested
+- [ ] local open/closed port tests pass
+- [ ] private/loopback policy behavior is explicit and tested
+- [ ] `Err` vs `Ok({ connected: false })` semantics are documented and tested
 
 ### PR 3 — DNS A/AAAA/PTR
 
 Scope:
 
-- `dns_lookup`
-- `dns_reverse`
-- `hickory-resolver` or equivalent dependency decision
-- resolver abstraction or mock/local fixture
+- [ ] `dns_lookup`
+- [ ] `dns_reverse`
+- [ ] `hickory-resolver` or equivalent dependency decision
+- [ ] resolver abstraction or mock/local fixture
 
 Acceptance:
 
-- deterministic CI tests
-- no public DNS dependency by default
-- initial records limited to A/AAAA/PTR unless implementation remains small and clean
+- [ ] deterministic CI tests
+- [ ] no public DNS dependency by default
+- [ ] initial records limited to A/AAAA/PTR unless implementation remains small and clean
 
 ### PR 4 — Bounded port scan
 
 Scope:
 
-- `port_scan` over explicit port arrays
-- bounds and cancellation checks
-- local open/closed test fixture
+- [ ] `port_scan` over explicit port arrays
+- [ ] bounds and cancellation checks
+- [ ] local open/closed test fixture
 
 Acceptance:
 
-- rejects too many ports/concurrency/invalid ports
-- deterministic order
-- no unbounded scanning
+- [ ] rejects too many ports/concurrency/invalid ports
+- [ ] deterministic order
+- [ ] no unbounded scanning
 
 ### PR 5 — TLS info
 
 Scope:
 
-- dependency choice
-- `tls_info`
-- local TLS test server
-- generated docs and examples
+- [ ] dependency choice
+- [ ] `tls_info`
+- [ ] local TLS test server
+- [ ] generated docs and examples
 
 Acceptance:
 
-- returns certificate details for valid and validation-failing certs
-- no dependency claim mismatch
-- no public internet dependency by default
+- [ ] returns certificate details for valid and validation-failing certs
+- [ ] no dependency claim mismatch
+- [ ] no public internet dependency by default
 
 ---
 
