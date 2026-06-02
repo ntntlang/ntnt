@@ -106,7 +106,7 @@ pub enum IntentError {
     },
 
     #[error("Division by zero")]
-    DivisionByZero,
+    DivisionByZero { line: usize },
 
     #[error("Index out of bounds: index {index}, length {length}")]
     IndexOutOfBounds { index: i64, length: usize },
@@ -164,6 +164,7 @@ impl IntentError {
             IntentError::UndefinedVariable { line: l, .. } => *l = line,
             IntentError::UndefinedFunction { line: l, .. } => *l = line,
             IntentError::ArityMismatch { line: l, .. } => *l = line,
+            IntentError::DivisionByZero { line: l } => *l = line,
             _ => {}
         }
         self
@@ -213,7 +214,7 @@ impl IntentError {
             IntentError::UndefinedVariable { .. } => "E006",
             IntentError::UndefinedFunction { .. } => "E007",
             IntentError::ArityMismatch { .. } => "E008",
-            IntentError::DivisionByZero => "E009",
+            IntentError::DivisionByZero { .. } => "E009",
             IntentError::IndexOutOfBounds { .. } => "E010",
             IntentError::InvalidOperation(_) => "E011",
             IntentError::RequiresApproval(_) => "E012",
@@ -230,6 +231,7 @@ impl IntentError {
             IntentError::UndefinedVariable { line, .. } if *line > 0 => Some(*line),
             IntentError::UndefinedFunction { line, .. } if *line > 0 => Some(*line),
             IntentError::ArityMismatch { line, .. } if *line > 0 => Some(*line),
+            IntentError::DivisionByZero { line } if *line > 0 => Some(*line),
             _ => None,
         }
     }
@@ -437,7 +439,7 @@ mod tests {
                 got: 0,
                 line: 0,
             },
-            IntentError::DivisionByZero,
+            IntentError::DivisionByZero { line: 0 },
             IntentError::IndexOutOfBounds {
                 index: 0,
                 length: 0,

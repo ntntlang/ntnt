@@ -406,7 +406,7 @@ len("hello")            // compute a value from input
 split(text, ",")        // create a new array from a string
 trim(input)             // create a new string
 push(arr, item)         // create a new array with item added
-int(form.age)           // convert a value to a new type
+int(form.age) ?? 0      // convert a value to a new type, handling parse failure
 
 // WRONG - method-style calls on stdlib functions
 "hello".len()           // Use len("hello")
@@ -1329,7 +1329,8 @@ for user in users {
     print("Name: #{user[\"name\"]}")
 }
 
-execute(db, "INSERT INTO users (name, age) VALUES ($1, $2)", [name, int(age_str)])
+let age = int(age_str) otherwise { return Err("age must be an integer") }
+execute(db, "INSERT INTO users (name, age) VALUES ($1, $2)", [name, age])
 
 close(db)  // Releases the connection pool
 ```
@@ -1337,8 +1338,8 @@ close(db)  // Releases the connection pool
 **Type conversion for database:**
 ```ntnt
 let form = parse_form(req)
-let age = int(form["age"])     // Convert string to int!
-let price = float(form["price"])
+let age = int(form["age"]) otherwise { return status(400, "age must be an integer") }
+let price = float(form["price"]) ?? 0.0
 
 // WRONG - String to integer column causes "db error"
 execute(db, "INSERT INTO users (age) VALUES ($1)", [form["age"]])
@@ -1514,8 +1515,8 @@ import { now } from "std/time"
 let stat_result = file_stat("public/css/styles.css")
 let CACHE_BUST = if is_ok(stat_result) {
     let m = unwrap(stat_result)["modified"]
-    if m > 0 { m } else { int(now()) }
-} else { int(now()) }
+    if m > 0 { m } else { int(now()) ?? 0 }
+} else { int(now()) ?? 0 }
 
 fn render_page(options) {
     // ... build nav, footer, etc.
@@ -2998,8 +2999,8 @@ with_header(resp, "X-Custom", "value")                  // Add header
 |----------|-------------|
 | `print(x)` | Output to stdout |
 | `str(x)` | Convert to string |
-| `int(x)` | Convert to integer |
-| `float(x)` | Convert to float |
+| `int(x)` | Convert to integer → `Result<Int, String>` |
+| `float(x)` | Convert to float → `Result<Float, String>` |
 | `type(x)` | Get type name as string |
 | `typeof(x)` | Get type name (alias for `type`) |
 
@@ -3140,7 +3141,7 @@ NTNT error messages include error codes (E001-E012), source snippets, line numbe
 | `ensures clause failed` | Postcondition not met | Fix function to return correct values |
 | `key not found` | Missing map key | Use `has_key()` to check, or `get_key()` for Option |
 | `index out of bounds` | Array index invalid | Check `len()` before accessing |
-| `db error` | Type mismatch in query | Convert types: `int(form["age"])` for integers |
+| `db error` | Type mismatch in query | Convert and handle parse failures: `let age = int(form["age"]) otherwise { return status(400, "invalid age") }` |
 
 ### Contract Violations in HTTP Routes
 

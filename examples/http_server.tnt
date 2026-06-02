@@ -121,8 +121,8 @@ fn calc_divide(req) {
     }
 
     let params = req.query_params
-    let a = int(params["a"])
-    let b = int(params["b"])
+    let a = int(params["a"]) otherwise { return status(400, "Invalid parameter: a must be an integer") }
+    let b = int(params["b"]) otherwise { return status(400, "Invalid parameter: b must be an integer") }
     let result = safe_divide(a, b)
 
     return json(map {

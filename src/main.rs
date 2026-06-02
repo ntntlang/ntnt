@@ -734,6 +734,7 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
                 let lines: Vec<&str> = source.lines().collect();
                 let line_idx = line.saturating_sub(1); // 0-indexed
 
+                eprintln!("  {} Source context", "-->".blue().bold());
                 eprintln!("   {}", "|".blue().bold());
 
                 // Show 1 line before for context
@@ -758,12 +759,21 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
                         error_line
                     );
 
-                    // Column pointer
+                    // Column pointer. Runtime/type errors currently carry statement-start
+                    // lines unless the parser supplied a true column, so label those
+                    // locations honestly instead of implying expression precision.
                     if let Some(col) = col_info {
                         if col > 0 {
                             let padding = " ".repeat(col.saturating_sub(1));
                             eprintln!("     {} {}{}", "|".blue().bold(), padding, "^".red().bold());
                         }
+                    } else {
+                        eprintln!(
+                            "     {} {}",
+                            "|".blue().bold(),
+                            "^ approximate failing statement (expression span unavailable)"
+                                .yellow()
+                        );
                     }
                 }
 

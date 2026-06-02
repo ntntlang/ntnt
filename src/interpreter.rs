@@ -2333,20 +2333,22 @@ impl Interpreter {
         );
 
         // @ntnt int
-        // @signature int(x: Int | Float | String | Bool) -> Int
-        // Converts a value to integer.
+        // @signature int(x: Int | Float | String | Bool) -> Result<Int, String>
+        // Converts a value to integer without throwing on parse failure.
         //
         // Accepts Int (identity), Float (truncates toward zero),
-        // String (parses decimal), and Bool (true=1, false=0).
+        // String (parses decimal), and Bool (true=1, false=0). Returns Ok(Int)
+        // on success and Err(String) when the value cannot be converted.
+        // Use `int(value) ?? default` for a fallback or `unwrap(int(value))` to
+        // preserve the old throwing behavior explicitly.
         // @param x The value to convert
-        // @returns The integer value
+        // @returns Result containing the integer value, or Err with a parse/conversion message
         // @tags #pure, #deterministic
-        // @see_also float, str
+        // @see_also float, str, unwrap
         // @since v0.1.0
-        // @example int(3.7) => 3 ~ "Float truncated to int"
-        // @example int("42") => 42 ~ "String parsed to int"
-        // @error TypeError ~ "Cannot parse as int" fix: "Ensure the string contains a valid integer"
-        // @error TypeError ~ "Cannot convert to int" fix: "Pass an Int, Float, String, or Bool"
+        // @example int(3.7) => Ok(3) ~ "Float truncated to int"
+        // @example int("42") => Ok(42) ~ "String parsed to int"
+        // @example int("none") => Err("Cannot parse as int: none") ~ "Invalid strings are handleable"
         self.environment.borrow_mut().define(
             "int".to_string(),
             Value::NativeFunction {
@@ -2354,33 +2356,42 @@ impl Interpreter {
                 arity: 1,
                 max_arity: 1,
                 requires: None,
-                func: |args| match &args[0] {
-                    Value::Int(n) => Ok(Value::Int(*n)),
-                    Value::Float(f) => Ok(Value::Int(*f as i64)),
-                    Value::String(s) => s
-                        .parse::<i64>()
-                        .map(Value::Int)
-                        .map_err(|_| IntentError::type_error("Cannot parse as int".to_string())),
-                    Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
-                    _ => Err(IntentError::type_error("Cannot convert to int".to_string())),
+                func: |args| {
+                    let result = match &args[0] {
+                        Value::Int(n) => Ok(Value::Int(*n)),
+                        Value::Float(f) => Ok(Value::Int(*f as i64)),
+                        Value::String(s) => s.parse::<i64>().map(Value::Int).map_err(|_| {
+                            if s.is_empty() {
+                                "Cannot parse as int: empty string".to_string()
+                            } else {
+                                format!("Cannot parse as int: {}", s)
+                            }
+                        }),
+                        Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
+                        other => Err(format!("Cannot convert {} to int", other.type_name())),
+                    };
+                    Ok(match result {
+                        Ok(value) => Value::ok(value),
+                        Err(message) => Value::err(Value::String(message)),
+                    })
                 },
             },
         );
 
         // @ntnt float
-        // @signature float(x: Int | Float | String) -> Float
-        // Converts a value to float.
+        // @signature float(x: Int | Float | String) -> Result<Float, String>
+        // Converts a value to float without throwing on parse failure.
         //
         // Accepts Int (widens), Float (identity), and String (parses decimal).
+        // Returns Ok(Float) on success and Err(String) when the value cannot be converted.
         // @param x The value to convert
-        // @returns The float value
+        // @returns Result containing the float value, or Err with a parse/conversion message
         // @tags #pure, #deterministic
-        // @see_also int, str
+        // @see_also int, str, unwrap
         // @since v0.1.0
-        // @example float(42) => 42.0 ~ "Integer widened to float"
-        // @example float("3.14") => 3.14 ~ "String parsed to float"
-        // @error TypeError ~ "Cannot parse as float" fix: "Ensure the string contains a valid number"
-        // @error TypeError ~ "Cannot convert to float" fix: "Pass an Int, Float, or String"
+        // @example float(42) => Ok(42.0) ~ "Integer widened to float"
+        // @example float("3.14") => Ok(3.14) ~ "String parsed to float"
+        // @example float("none") => Err("Cannot parse as float: none") ~ "Invalid strings are handleable"
         self.environment.borrow_mut().define(
             "float".to_string(),
             Value::NativeFunction {
@@ -2388,16 +2399,23 @@ impl Interpreter {
                 arity: 1,
                 max_arity: 1,
                 requires: None,
-                func: |args| match &args[0] {
-                    Value::Int(n) => Ok(Value::Float(*n as f64)),
-                    Value::Float(f) => Ok(Value::Float(*f)),
-                    Value::String(s) => s
-                        .parse::<f64>()
-                        .map(Value::Float)
-                        .map_err(|_| IntentError::type_error("Cannot parse as float".to_string())),
-                    _ => Err(IntentError::type_error(
-                        "Cannot convert to float".to_string(),
-                    )),
+                func: |args| {
+                    let result = match &args[0] {
+                        Value::Int(n) => Ok(Value::Float(*n as f64)),
+                        Value::Float(f) => Ok(Value::Float(*f)),
+                        Value::String(s) => s.parse::<f64>().map(Value::Float).map_err(|_| {
+                            if s.is_empty() {
+                                "Cannot parse as float: empty string".to_string()
+                            } else {
+                                format!("Cannot parse as float: {}", s)
+                            }
+                        }),
+                        other => Err(format!("Cannot convert {} to float", other.type_name())),
+                    };
+                    Ok(match result {
+                        Ok(value) => Value::ok(value),
+                        Err(message) => Value::err(Value::String(message)),
+                    })
                 },
             },
         );
@@ -5758,14 +5776,14 @@ impl Interpreter {
                         return Ok(Value::Bool(rhs.is_truthy()));
                     }
                     BinaryOp::NullCoalesce => {
-                        // Return unwrapped left if it's Some, otherwise evaluate and return right
+                        // Return unwrapped left if it's Some/Ok, otherwise evaluate and return right.
+                        // This makes `int(raw) ?? 0` work now that parsing returns Result.
                         match &lhs {
                             Value::EnumValue {
                                 enum_name,
                                 variant,
                                 values,
                             } if enum_name == "Option" && variant == "Some" => {
-                                // Unwrap the Some value
                                 return Ok(values.first().cloned().unwrap_or(Value::Unit));
                             }
                             Value::EnumValue {
@@ -5773,7 +5791,19 @@ impl Interpreter {
                             } if enum_name == "Option" && variant == "None" => {
                                 return self.eval_expression(right);
                             }
-                            // For non-Option values, return as-is (like JavaScript's ??)
+                            Value::EnumValue {
+                                enum_name,
+                                variant,
+                                values,
+                            } if enum_name == "Result" && variant == "Ok" => {
+                                return Ok(values.first().cloned().unwrap_or(Value::Unit));
+                            }
+                            Value::EnumValue {
+                                enum_name, variant, ..
+                            } if enum_name == "Result" && variant == "Err" => {
+                                return self.eval_expression(right);
+                            }
+                            // For non-Option/Result values, return as-is (like JavaScript's ??)
                             _ => return Ok(lhs),
                         }
                     }
@@ -6360,7 +6390,13 @@ impl Interpreter {
                                 }
                                 let handler = self.eval_expression(&arguments[1])?;
                                 let method = name.to_uppercase();
-                                self.server_state.add_route(&method, pattern_str, handler);
+                                self.server_state.add_route_with_source(
+                                    &method,
+                                    pattern_str,
+                                    handler,
+                                    self.current_file.clone(),
+                                    self.imported_files.clone(),
+                                );
                                 return Ok(Value::Unit);
                             }
                             // Otherwise fall through to normal function call (HTTP client)
@@ -8971,22 +9007,20 @@ impl Interpreter {
                                         .get_route_source(route_index)
                                         .and_then(|s| s.file_path.clone())
                                         .unwrap_or_default();
-                                    let loc = if self.current_line > 0 {
-                                        format!("line {}", self.current_line)
-                                    } else {
+                                    let loc = if handler_file.is_empty() {
                                         String::new()
+                                    } else {
+                                        e.line()
+                                            .map(|line| {
+                                                format!(":{} (approximate statement start)", line)
+                                            })
+                                            .unwrap_or_default()
                                     };
+                                    let error_context =
+                                        self.format_route_error_context(&e, &handler_file);
                                     eprintln!(
                                         "[ERROR] {} {} | handler: {}{} | {}",
-                                        method,
-                                        path,
-                                        handler_file,
-                                        if loc.is_empty() {
-                                            String::new()
-                                        } else {
-                                            format!(":{}", loc)
-                                        },
-                                        e
+                                        method, path, handler_file, loc, e
                                     );
                                     // Try on_error handler if registered
                                     if let Some(error_handler) =
@@ -9006,7 +9040,7 @@ impl Interpreter {
                                                 let method_path = format!("{} {}", method, path);
                                                 http_server::create_error_response_with_context(
                                                     500,
-                                                    &e.to_string(),
+                                                    &error_context,
                                                     &method_path,
                                                     &handler_file,
                                                 )
@@ -9033,7 +9067,7 @@ impl Interpreter {
                                             } else {
                                                 http_server::create_error_response_with_context(
                                                     500,
-                                                    &e.to_string(),
+                                                    &error_context,
                                                     &method_path,
                                                     &handler_file,
                                                 )
@@ -9041,7 +9075,7 @@ impl Interpreter {
                                         } else {
                                             http_server::create_error_response_with_context(
                                                 500,
-                                                &e.to_string(),
+                                                &error_context,
                                                 &method_path,
                                                 &handler_file,
                                             )
@@ -9338,6 +9372,45 @@ impl Interpreter {
         Ok(Value::Unit)
     }
 
+    /// Format route runtime errors with source context for dev error pages.
+    /// Runtime errors currently carry statement-start lines, not expression spans, so the
+    /// location is explicitly labeled approximate instead of pretending to be exact.
+    fn format_route_error_context(&self, error: &IntentError, handler_file: &str) -> String {
+        let mut message = error.to_string();
+        if handler_file.is_empty() {
+            return message;
+        }
+
+        if let Some(line) = error.line() {
+            message.push_str(&format!(
+                "\n\nLocation: {}:{} (approximate statement start)",
+                handler_file, line
+            ));
+
+            if let Ok(source) = std::fs::read_to_string(handler_file) {
+                let lines: Vec<&str> = source.lines().collect();
+                let idx = line.saturating_sub(1);
+                message.push_str("\n\nSource excerpt:");
+                if idx > 0 {
+                    if let Some(prev) = lines.get(idx - 1) {
+                        message.push_str(&format!("\n {:>4} | {}", line - 1, prev));
+                    }
+                }
+                if let Some(current) = lines.get(idx) {
+                    message.push_str(&format!("\n {:>4} | {}", line, current));
+                    message.push_str("\n      | ^ approximate failing statement");
+                }
+                if let Some(next) = lines.get(idx + 1) {
+                    message.push_str(&format!("\n {:>4} | {}", line + 1, next));
+                }
+            }
+        } else {
+            message.push_str(&format!("\n\nLocation: {} (line unknown)", handler_file));
+        }
+
+        message
+    }
+
     /// Process a single HTTP request: find route, run middleware, call handler, apply CORS
     fn process_request(
         &mut self,
@@ -9475,11 +9548,11 @@ impl Interpreter {
                             .get_route_source(route_index)
                             .and_then(|s| s.file_path.clone())
                             .unwrap_or_default();
-                        let loc = if self.current_line > 0 {
-                            format!(":{}", self.current_line)
-                        } else {
-                            String::new()
-                        };
+                        let loc = e
+                            .line()
+                            .map(|line| format!(":{} (approximate statement start)", line))
+                            .unwrap_or_default();
+                        let error_context = self.format_route_error_context(&e, &handler_file);
                         eprintln!(
                             "[ERROR] {} {} | handler: {}{} | {}",
                             method, path, handler_file, loc, e
@@ -9495,7 +9568,7 @@ impl Interpreter {
                                     eprintln!("[ERROR] on_error handler failed: {}", handler_err);
                                     crate::stdlib::http_server::create_error_response_with_context(
                                         500,
-                                        &e.to_string(),
+                                        &error_context,
                                         &format!("{} {}", method, path),
                                         &handler_file,
                                     )
@@ -9504,7 +9577,7 @@ impl Interpreter {
                         } else {
                             crate::stdlib::http_server::create_error_response_with_context(
                                 500,
-                                &e.to_string(),
+                                &error_context,
                                 &format!("{} {}", method, path),
                                 &handler_file,
                             )
@@ -9983,7 +10056,9 @@ impl Interpreter {
             (BinaryOp::Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
             (BinaryOp::Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
             (BinaryOp::Mul, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
-            (BinaryOp::Div, Value::Int(_), Value::Int(0)) => Err(IntentError::DivisionByZero),
+            (BinaryOp::Div, Value::Int(_), Value::Int(0)) => {
+                Err(IntentError::DivisionByZero { line: 0 })
+            }
             (BinaryOp::Div, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a / b)),
             (BinaryOp::Mod, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
             (BinaryOp::Pow, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.pow(b as u32))),

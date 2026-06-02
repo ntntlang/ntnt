@@ -355,21 +355,21 @@ fn comparison_type_hint(left_type: &Type, right_type: &Type, left_expr: &Express
             || !left_type.is_compatible(right_type))
     {
         return format!(
-            "Map values may have mixed types. Use int() or str() to convert before comparing"
+            "Map values may have mixed types. Use int(value) ?? default, str(value), or another explicit conversion before comparing"
         );
     }
 
     match (left_type, right_type) {
         (Type::Int, Type::String) | (Type::String, Type::Int) => {
-            "Convert types: use int(s) to convert String to Int, or str(n) to convert Int to String"
+            "Convert types: use int(s) ?? default to handle parse errors, or str(n) to convert Int to String"
                 .to_string()
         }
         (Type::Float, Type::String) | (Type::String, Type::Float) => {
-            "Convert types: use float(s) to convert String to Float, or str(n) to convert Float to String"
+            "Convert types: use float(s) ?? default to handle parse errors, or str(n) to convert Float to String"
                 .to_string()
         }
         (Type::Int, Type::Float) | (Type::Float, Type::Int) => {
-            "Convert types: use float(n) or int(f) to match types".to_string()
+            "Convert types: use float(n) or int(f) ?? default to match types".to_string()
         }
         _ => format!(
             "Cannot compare {} with {}. Convert to the same type first",
@@ -632,6 +632,67 @@ impl TypeContext {
             Type::Generic { name, args } if name == "Result" && !args.is_empty() => args[0].clone(),
             _ => expr_ty.clone(),
         }
+    }
+
+    fn infer_null_coalesce_type(
+        &mut self,
+        left: &Expression,
+        right: &Expression,
+        left_ty: &Type,
+    ) -> Type {
+        let left_is_result = matches!(left_ty, Type::Generic { name, .. } if name == "Result");
+        let known_variant = match left {
+            Expression::EnumVariant {
+                enum_name, variant, ..
+            } if enum_name == "Option" || enum_name == "Result" => Some(variant.as_str()),
+            Expression::Call { function, .. } => match function.as_ref() {
+                Expression::Identifier(name)
+                    if name == "Some" && matches!(left_ty, Type::Optional(_)) =>
+                {
+                    Some(name.as_str())
+                }
+                Expression::Identifier(name)
+                    if matches!(name.as_str(), "Ok" | "Err") && left_is_result =>
+                {
+                    Some(name.as_str())
+                }
+                _ => None,
+            },
+            Expression::Identifier(name)
+                if name == "None" && matches!(left_ty, Type::Optional(_)) =>
+            {
+                Some("None")
+            }
+            _ => None,
+        };
+
+        if let Some(variant) = known_variant {
+            match variant {
+                "Some" => {
+                    if let Type::Optional(inner) = left_ty {
+                        return (**inner).clone();
+                    }
+                    return Type::Any;
+                }
+                "Ok" => {
+                    if let Type::Generic { name, args } = left_ty {
+                        if name == "Result" && !args.is_empty() {
+                            return args[0].clone();
+                        }
+                    }
+                    return Type::Any;
+                }
+                "None" | "Err" => return self.infer_expression(right),
+                _ => {}
+            }
+        }
+
+        if !matches!(left_ty, Type::Optional(_) | Type::Any) && !left_is_result {
+            return left_ty.clone();
+        }
+
+        let right_ty = self.infer_expression(right);
+        self.infer_binary_op(&BinaryOp::NullCoalesce, left_ty, &right_ty)
     }
 
     fn return_otherwise_uses_value_fallback_union(&self, expr_ty: &Type) -> bool {
@@ -1680,6 +1741,11 @@ impl TypeContext {
                 right,
             } => {
                 let left_type = self.infer_expression(left);
+
+                if matches!(operator, BinaryOp::NullCoalesce) {
+                    return self.infer_null_coalesce_type(left, right, &left_type);
+                }
+
                 let right_type = self.infer_expression(right);
 
                 // Validate comparison operand compatibility
@@ -2082,7 +2148,7 @@ impl TypeContext {
 
                 // Special handling for Option/Result constructors
                 match (enum_name.as_str(), variant.as_str()) {
-                    ("Option", "Some") | (_, "Some") => {
+                    ("Option", "Some") => {
                         if let Some(first) = arguments.first() {
                             let inner = self.infer_expression(first);
                             if let Type::Optional(_) = &inner {
@@ -2105,8 +2171,8 @@ impl TypeContext {
                             Type::Optional(Box::new(Type::Any))
                         }
                     }
-                    ("Option", "None") | (_, "None") => Type::Optional(Box::new(Type::Any)),
-                    ("Result", "Ok") | (_, "Ok") => {
+                    ("Option", "None") => Type::Optional(Box::new(Type::Any)),
+                    ("Result", "Ok") => {
                         if let Some(first) = arguments.first() {
                             let inner = self.infer_expression(first);
                             Type::Generic {
@@ -2120,7 +2186,7 @@ impl TypeContext {
                             }
                         }
                     }
-                    ("Result", "Err") | (_, "Err") => {
+                    ("Result", "Err") => {
                         if let Some(first) = arguments.first() {
                             let inner = self.infer_expression(first);
                             Type::Generic {
@@ -2367,10 +2433,13 @@ impl TypeContext {
 
             // Null coalescing
             BinaryOp::NullCoalesce => {
-                // a ?? b: if a is Optional(T), result is T, else Any
+                // a ?? b: unwrap Option<T>/Result<T, E> on success, otherwise use b
                 match left {
-                    Type::Optional(inner) => (**inner).clone(),
-                    _ => right.clone(),
+                    Type::Optional(inner) => self.union_type(inner, right),
+                    Type::Generic { name, args } if name == "Result" && !args.is_empty() => {
+                        self.union_type(&args[0], right)
+                    }
+                    _ => left.clone(),
                 }
             }
         }
@@ -3342,8 +3411,8 @@ impl TypeContext {
 
         // Conversion
         sig!("str", ["value" => Type::Any], Type::String);
-        sig!("int", ["value" => Type::Any], Type::Int);
-        sig!("float", ["value" => Type::Any], Type::Float);
+        sig!("int", ["value" => Type::Any], Type::Generic { name: "Result".to_string(), args: vec![Type::Int, Type::String] });
+        sig!("float", ["value" => Type::Any], Type::Generic { name: "Result".to_string(), args: vec![Type::Float, Type::String] });
         sig!("bool", ["value" => Type::Any], Type::Bool);
         sig!("type", ["value" => Type::Any], Type::String);
         sig!("typeof", ["value" => Type::Any], Type::String);
@@ -3618,10 +3687,14 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("get_float", ["kv" => Type::Any, "key" => Type::String, "default" => Type::Float], Type::Float, required(2));
             sig!("get_json", ["kv" => Type::Any, "key" => Type::String, "default" => Type::Any], Type::Any, required(2));
             sig!("get_str", ["kv" => Type::Any, "key" => Type::String, "default" => Type::String], Type::String, required(2));
-            sig!("incr", ["kv" => Type::Any, "key" => Type::String, "amount" => Type::Int], Type::Generic {
+            let kv_int_result = Type::Generic {
                 name: "Result".to_string(),
                 args: vec![Type::Int, Type::String],
-            });
+            };
+            sig!("incr", ["kv" => Type::Any, "key" => Type::String], kv_int_result.clone());
+            sig!("decr", ["kv" => Type::Any, "key" => Type::String], kv_int_result.clone());
+            sig!("incr_by", ["kv" => Type::Any, "key" => Type::String, "amount" => Type::Int], kv_int_result.clone());
+            sig!("decr_by", ["kv" => Type::Any, "key" => Type::String, "amount" => Type::Int], kv_int_result);
         }
         "std/fs" => {
             sig!("read_file", ["path" => Type::String], Type::String);

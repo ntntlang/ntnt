@@ -49,10 +49,10 @@ These functions are available everywhere without importing.
 | [`enable_cors(options?: Map)`](#enablecors) | Enable CORS (Cross-Origin Resource Sharing) for the HTTP server. |
 | [`enable_csp(options?: Map \| Bool)`](#enablecsp) | Enable Content-Security-Policy headers for the HTTP server. |
 | [`flat_map(arr: Array, fn: Function)`](#flatmap) | Apply a function to each element and flatten the results into a single array. |
-| [`float(x: Int \| Float \| String)`](#float) | Converts a value to float. |
+| [`float(x: Int \| Float \| String)`](#float) | Converts a value to float without throwing on parse failure. |
 | [`floor(x: Int \| Float)`](#floor) | Rounds down to the nearest integer. |
 | [`get(pattern: String, handler: Function)`](#get) | Registers a GET route handler. |
-| [`int(x: Int \| Float \| String \| Bool)`](#int) | Converts a value to integer. |
+| [`int(x: Int \| Float \| String \| Bool)`](#int) | Converts a value to integer without throwing on parse failure. |
 | [`is_array(val: Any)`](#isarray) | Returns true if the value is an Array. |
 | [`is_bool(val: Any)`](#isbool) | Returns true if the value is a Bool. |
 | [`is_err(res: Result<Any, Any>)`](#iserr) | Checks if a Result is Err. |
@@ -462,32 +462,28 @@ flat_map([1, 2, 3], fn(x) { [x, x * 10] })  // => [1, 10, 2, 20, 3, 30]  // Expa
 #### `float`
 
 ```ntnt
-float(x: Int | Float | String) -> Float
+float(x: Int | Float | String) -> Result<Float, String>
 ```
 
-Converts a value to float.
+Converts a value to float without throwing on parse failure.
 
-Accepts Int (widens), Float (identity), and String (parses decimal).
+Accepts Int (widens), Float (identity), and String (parses decimal). Returns Ok(Float) on success and Err(String) when the value cannot be converted.
 
 **Parameters:**
 
 - `x` — The value to convert
 
-**Returns:** The float value
+**Returns:** Result containing the float value, or Err with a parse/conversion message
 
 **Examples:**
 
 ```ntnt
-float(42)  // => 42.0  // Integer widened to float
-float("3.14")  // => 3.14  // String parsed to float
+float(42)  // => Ok(42.0)  // Integer widened to float
+float("3.14")  // => Ok(3.14)  // String parsed to float
+float("none")  // => Err("Cannot parse as float: none")  // Invalid strings are handleable
 ```
 
-**Errors:**
-
-- **TypeError**: Cannot parse as float — *Fix: Ensure the string contains a valid number*
-- **TypeError**: Cannot convert to float — *Fix: Pass an Int, Float, or String*
-
-**See also:** `int`, `str`
+**See also:** `int`, `str`, `unwrap`
 
 *Since v0.1.0*
 
@@ -556,32 +552,28 @@ get("/health", fn(req) { return json(map { "ok": true }) })  // => Unit  // Regi
 #### `int`
 
 ```ntnt
-int(x: Int | Float | String | Bool) -> Int
+int(x: Int | Float | String | Bool) -> Result<Int, String>
 ```
 
-Converts a value to integer.
+Converts a value to integer without throwing on parse failure.
 
-Accepts Int (identity), Float (truncates toward zero), String (parses decimal), and Bool (true=1, false=0).
+Accepts Int (identity), Float (truncates toward zero), String (parses decimal), and Bool (true=1, false=0). Returns Ok(Int) on success and Err(String) when the value cannot be converted. Use `int(value) ?? default` for a fallback or `unwrap(int(value))` to preserve the old throwing behavior explicitly.
 
 **Parameters:**
 
 - `x` — The value to convert
 
-**Returns:** The integer value
+**Returns:** Result containing the integer value, or Err with a parse/conversion message
 
 **Examples:**
 
 ```ntnt
-int(3.7)  // => 3  // Float truncated to int
-int("42")  // => 42  // String parsed to int
+int(3.7)  // => Ok(3)  // Float truncated to int
+int("42")  // => Ok(42)  // String parsed to int
+int("none")  // => Err("Cannot parse as int: none")  // Invalid strings are handleable
 ```
 
-**Errors:**
-
-- **TypeError**: Cannot parse as int — *Fix: Ensure the string contains a valid integer*
-- **TypeError**: Cannot convert to int — *Fix: Pass an Int, Float, String, or Bool*
-
-**See also:** `float`, `str`
+**See also:** `float`, `str`, `unwrap`
 
 *Since v0.1.0*
 
@@ -8082,6 +8074,8 @@ import { open, get, get_int } from "std/kv"
 
 | Function | Description |
 |----------|-------------|
+| [`decr`](#decr) | Atomically decrement an integer value by 1. |
+| [`decr_by`](#decrby) | Atomically decrement an integer value by amount. |
 | [`del`](#del) | Delete a key from the KV store. |
 | [`expire`](#expire) | Set a TTL (time-to-live) on an existing key. |
 | [`flush`](#flush) | Delete all keys from the KV store. |
@@ -8091,12 +8085,72 @@ import { open, get, get_int } from "std/kv"
 | [`get_json`](#getjson) | Get a value by key and parse it as JSON. |
 | [`get_str`](#getstr) | Get a value by key and convert it to a string. |
 | [`has`](#has) | Check if a key exists in the KV store. |
-| [`incr`](#incr) | Atomically increment an integer value by amount. |
+| [`incr`](#incr) | Atomically increment an integer value by 1. |
+| [`incr_by`](#incrby) | Atomically increment an integer value by amount. |
 | [`list`](#list) | List keys in the KV store, optionally filtered by prefix. |
 | [`open`](#open) | Open a KV store connection. |
 | [`set`](#set) | Set a key-value pair in the KV store. |
 | [`set_nx`](#setnx) | Set a key only if it doesn't already exist (atomic NX operation). |
 | [`ttl`](#ttl) | Get the remaining TTL (time-to-live) for a key in seconds. |
+
+#### `decr`
+
+```ntnt
+decr(kv: KVStore, key: String) -> Result<Int, String>
+```
+
+Atomically decrement an integer value by 1.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to decrement
+
+**Returns:** Result containing the new integer value, or Err if the key holds a non-integer
+
+**Examples:**
+
+```ntnt
+decr(kv, "stock")  // => Ok(-1)  // Decrement a missing counter from zero
+```
+
+**Errors:**
+
+- **TypeError**: kv_incr() requires an integer value — *Fix: Ensure the key was set with an integer value or hasn't been written yet*
+
+**See also:** `incr`, `incr_by`, `decr_by`
+
+---
+
+#### `decr_by`
+
+```ntnt
+decr_by(kv: KVStore, key: String, amount: Int) -> Result<Int, String>
+```
+
+Atomically decrement an integer value by amount.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to decrement
+- `amount` — Integer to subtract
+
+**Returns:** Result containing the new integer value, or Err if the key holds a non-integer
+
+**Examples:**
+
+```ntnt
+decr_by(kv, "stock", 3)  // => Ok(-3)  // Subtract 3 from a counter
+```
+
+**Errors:**
+
+- **TypeError**: kv_incr() requires an integer value — *Fix: Ensure the key was set with an integer value or hasn't been written yet*
+
+**See also:** `incr`, `decr`, `incr_by`
+
+---
 
 #### `del`
 
@@ -8340,34 +8394,61 @@ has(cache, "user:123")  // Check if key exists
 #### `incr`
 
 ```ntnt
-incr(kv: KVStore, key: String, amount: Int) -> Result<Int, String>
+incr(kv: KVStore, key: String) -> Result<Int, String>
 ```
 
-Atomically increment an integer value by amount.
+Atomically increment an integer value by 1.
 
-If the key doesn't exist, it is created with value = amount (effectively starting from 0). Preserves any existing TTL on the key — does not reset it. Returns the new value after incrementing.
+If the key doesn't exist, it is created with value = 1 (effectively starting from 0). Preserves any existing TTL on the key — does not reset it. Returns the new value after incrementing.
 
 **Parameters:**
 
 - `kv` — The KV store handle from open()
 - `key` — The key to increment
-- `amount` — Integer to add (use negative values to decrement)
 
 **Returns:** Result containing the new integer value, or Err if the key holds a non-integer
 
 **Examples:**
 
 ```ntnt
-incr(kv, "page_views", 1)  // => Ok(1)  // Increment a counter from zero
-incr(kv, "score", 10)  // Add 10 to a score counter
-incr(kv, "countdown", -1)  // Decrement a counter
+incr(kv, "page_views")  // => Ok(1)  // Increment a counter from zero
 ```
 
 **Errors:**
 
 - **TypeError**: kv_incr() requires an integer value — *Fix: Ensure the key was set with an integer value or hasn't been written yet*
 
-**See also:** `expire`, `set`
+**See also:** `decr`, `incr_by`, `decr_by`, `expire`, `set`
+
+---
+
+#### `incr_by`
+
+```ntnt
+incr_by(kv: KVStore, key: String, amount: Int) -> Result<Int, String>
+```
+
+Atomically increment an integer value by amount.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to increment
+- `amount` — Integer to add
+
+**Returns:** Result containing the new integer value, or Err if the key holds a non-integer
+
+**Examples:**
+
+```ntnt
+incr_by(kv, "score", 10)  // => Ok(10)  // Add 10 to a score counter
+```
+
+**Errors:**
+
+- **TypeError**: kv_incr() requires an integer value — *Fix: Ensure the key was set with an integer value or hasn't been written yet*
+
+**See also:** `incr`, `decr`, `decr_by`
 
 ---
 

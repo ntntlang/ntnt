@@ -935,15 +935,83 @@ fn check(x: Int, y: String) -> Bool {
         "Should have a comparison type warning"
     );
 
-    // The hint should mention int() or str() conversion
+    // The hint should mention handleable int() conversion or str() conversion
     let has_conversion_hint = comparison_warnings.iter().any(|w| {
         let hint = w["hint"].as_str().unwrap_or("");
-        hint.contains("int(") || hint.contains("str(")
+        hint.contains("int(") && (hint.contains("??") || hint.contains("str("))
     });
     assert!(
         has_conversion_hint,
-        "Comparison hint should suggest int()/str() conversion. Warnings: {:?}",
+        "Comparison hint should suggest handleable int()/str() conversion. Warnings: {:?}",
         comparison_warnings
+    );
+}
+
+#[test]
+fn test_result_null_coalesce_fallback_type_is_checked() {
+    let code = r#"
+let x: Int = int("bad") ?? "not an int"
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let files = json["files"].as_array().unwrap();
+    assert!(!files.is_empty(), "lint should report file results");
+    let issues = files[0]["issues"].as_array().unwrap();
+    assert!(
+        issues.iter().any(|issue| {
+            let msg = issue["message"].as_str().unwrap_or("");
+            msg.contains("Type mismatch") && msg.contains("String") && msg.contains("Int")
+        }),
+        "Result ?? fallback with a String fallback should not typecheck as Int. Issues: {:?}",
+        issues
+    );
+}
+
+#[test]
+fn test_known_success_null_coalesce_does_not_union_unreachable_fallback() {
+    let code = r#"
+let a: Int = Some(1) ?? "not an int"
+let b: Int = Ok(2) ?? "also not an int"
+let c: Int = Some(3) ?? len()
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert_eq!(
+        errors, 0,
+        "known Some/Ok coalesce should infer the success value type only. Output: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_user_enum_variants_named_like_option_result_do_not_coalesce_as_builtins() {
+    let code = r#"
+enum MyEnum {
+    Ok(Int),
+    Err(String),
+    Some(Int),
+    None
+}
+
+let a: MyEnum = MyEnum::Ok(1) ?? len()
+let b: MyEnum = MyEnum::Some(2) ?? len()
+let c: MyEnum = MyEnum::Err("bad") ?? len()
+let d: MyEnum = MyEnum::None ?? len()
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert_eq!(
+        errors, 0,
+        "user enum variants named Some/None/Ok/Err should stay user enum values under ??. Output: {}",
+        stdout
     );
 }
 
