@@ -263,6 +263,11 @@ match ping("255.255.255.255", map { "method": "tcp", "tcp_ports": [9], "timeout_
     Ok(info) => print("unexpected broadcast"),
     Err(e) => print("broadcast=" + e)
 }
+
+match ping("::ffff:255.255.255.255", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected mapped broadcast"),
+    Err(e) => print("mapped_broadcast=" + e)
+}
 "#,
     );
 
@@ -281,6 +286,10 @@ match ping("255.255.255.255", map { "method": "tcp", "tcp_ports": [9], "timeout_
     );
     assert!(
         stdout.contains("broadcast=Network target denied by policy"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("mapped_broadcast=Network target denied by policy"),
         "stdout: {stdout}"
     );
 }

@@ -836,6 +836,7 @@ struct IpClassification {
     is_multicast: bool,
     is_unspecified: bool,
     is_documentation: bool,
+    is_broadcast: bool,
     is_unique_local: bool,
 }
 
@@ -848,6 +849,7 @@ fn classify_ip(ip: IpAddr) -> IpClassification {
             is_multicast: ip.is_multicast(),
             is_unspecified: ip.is_unspecified(),
             is_documentation: is_ipv4_documentation(ip),
+            is_broadcast: ip.is_broadcast(),
             is_unique_local: false,
         },
         IpAddr::V6(ip) => {
@@ -865,6 +867,7 @@ fn classify_ip(ip: IpAddr) -> IpClassification {
                 is_multicast: ip.is_multicast(),
                 is_unspecified: ip.is_unspecified(),
                 is_documentation,
+                is_broadcast: false,
                 is_unique_local,
             }
         }
@@ -887,7 +890,7 @@ fn enforce_target_policy(ip: IpAddr, allow_private: bool) -> Result<(), String> 
         || classification.is_unspecified
         || classification.is_multicast
         || classification.is_documentation
-        || matches!(ip, IpAddr::V4(ipv4) if ipv4.is_broadcast());
+        || classification.is_broadcast;
     if !denied_by_default {
         return Ok(());
     }
@@ -1158,10 +1161,12 @@ mod tests {
         let multicast = "224.0.0.1:80".parse::<SocketAddr>().unwrap();
         let documentation = "192.0.2.1:80".parse::<SocketAddr>().unwrap();
         let broadcast = "255.255.255.255:80".parse::<SocketAddr>().unwrap();
+        let mapped_broadcast = "[::ffff:255.255.255.255]:80".parse::<SocketAddr>().unwrap();
 
         assert!(enforce_resolved_target_policy(&[(80, multicast)], false).is_err());
         assert!(enforce_resolved_target_policy(&[(80, documentation)], false).is_err());
         assert!(enforce_resolved_target_policy(&[(80, broadcast)], false).is_err());
+        assert!(enforce_resolved_target_policy(&[(80, mapped_broadcast)], false).is_err());
     }
 
     #[test]
