@@ -1,6 +1,6 @@
 # DD-046: `std/net` — Safe Network Primitives for ntnt
 
-**Status:** Refined implementation plan
+**Status:** PR 1 implemented and under review; PRs 2-5 planned
 **Author:** Larri
 **Created:** 2026-03-22
 **Updated:** 2026-06-02
@@ -734,7 +734,21 @@ SNMP is a real network-monitoring need, but it is its own protocol family. Defer
 
 ## Implementation Plan
 
+### Status Dashboard
+
+As of 2026-06-02:
+
+- [x] **PR 1 — `std/net` shell + IPAM helpers + `ping`**: implemented in [PR #113](https://github.com/ntntlang/ntnt/pull/113). Status: open, mergeable, CI green, no unresolved review threads at head `944a397`.
+- [ ] **PR 2 — Dedicated TCP probe refinement**: next planned slice. Reuses the Phase 1 TCP fallback helper as public `tcp_connect`.
+- [ ] **PR 3 — DNS A/AAAA/PTR**: planned after TCP probe.
+- [ ] **PR 4 — Bounded port scan**: planned after DNS.
+- [ ] **PR 5 — TLS info**: planned after port scan/dependency decision.
+
+PR 1 shipped the core module registration, runtime functions, typechecker signatures, generated docs, deterministic examples, and tests for Phase 1. Review hardening added policy fixes for private, link-local, multicast, documentation, mapped-address, and broadcast-style targets.
+
 ### PR 1 — `std/net` shell + IPAM helpers + `ping`
+
+Status: **implemented in PR #113; awaiting merge/review completion.**
 
 Scope:
 
