@@ -9007,12 +9007,15 @@ impl Interpreter {
                                         .get_route_source(route_index)
                                         .and_then(|s| s.file_path.clone())
                                         .unwrap_or_default();
-                                    let loc = e
-                                        .line()
-                                        .map(|line| {
-                                            format!(":{} (approximate statement start)", line)
-                                        })
-                                        .unwrap_or_default();
+                                    let loc = if handler_file.is_empty() {
+                                        String::new()
+                                    } else {
+                                        e.line()
+                                            .map(|line| {
+                                                format!(":{} (approximate statement start)", line)
+                                            })
+                                            .unwrap_or_default()
+                                    };
                                     let error_context =
                                         self.format_route_error_context(&e, &handler_file);
                                     eprintln!(

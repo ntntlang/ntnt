@@ -988,6 +988,33 @@ let c: Int = Some(3) ?? len()
     );
 }
 
+#[test]
+fn test_user_enum_variants_named_like_option_result_do_not_coalesce_as_builtins() {
+    let code = r#"
+enum MyEnum {
+    Ok(Int),
+    Err(String),
+    Some(Int),
+    None
+}
+
+let a: MyEnum = MyEnum::Ok(1) ?? len()
+let b: MyEnum = MyEnum::Some(2) ?? len()
+let c: MyEnum = MyEnum::Err("bad") ?? len()
+let d: MyEnum = MyEnum::None ?? len()
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert_eq!(
+        errors, 0,
+        "user enum variants named Some/None/Ok/Err should stay user enum values under ??. Output: {}",
+        stdout
+    );
+}
+
 // ============================================================================
 // Generic type parameter unification tests (DD-009 Phase 7.4)
 // ============================================================================

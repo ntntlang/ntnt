@@ -640,13 +640,29 @@ impl TypeContext {
         right: &Expression,
         left_ty: &Type,
     ) -> Type {
+        let left_is_result = matches!(left_ty, Type::Generic { name, .. } if name == "Result");
         let known_variant = match left {
-            Expression::EnumVariant { variant, .. } => Some(variant.as_str()),
+            Expression::EnumVariant {
+                enum_name, variant, ..
+            } if enum_name == "Option" || enum_name == "Result" => Some(variant.as_str()),
             Expression::Call { function, .. } => match function.as_ref() {
-                Expression::Identifier(name) => Some(name.as_str()),
+                Expression::Identifier(name)
+                    if name == "Some" && matches!(left_ty, Type::Optional(_)) =>
+                {
+                    Some(name.as_str())
+                }
+                Expression::Identifier(name)
+                    if matches!(name.as_str(), "Ok" | "Err") && left_is_result =>
+                {
+                    Some(name.as_str())
+                }
                 _ => None,
             },
-            Expression::Identifier(name) if name == "None" => Some("None"),
+            Expression::Identifier(name)
+                if name == "None" && matches!(left_ty, Type::Optional(_)) =>
+            {
+                Some("None")
+            }
             _ => None,
         };
 
@@ -669,6 +685,10 @@ impl TypeContext {
                 "None" | "Err" => return self.infer_expression(right),
                 _ => {}
             }
+        }
+
+        if !matches!(left_ty, Type::Optional(_) | Type::Any) && !left_is_result {
+            return left_ty.clone();
         }
 
         let right_ty = self.infer_expression(right);
@@ -2128,7 +2148,7 @@ impl TypeContext {
 
                 // Special handling for Option/Result constructors
                 match (enum_name.as_str(), variant.as_str()) {
-                    ("Option", "Some") | (_, "Some") => {
+                    ("Option", "Some") => {
                         if let Some(first) = arguments.first() {
                             let inner = self.infer_expression(first);
                             if let Type::Optional(_) = &inner {
@@ -2151,8 +2171,8 @@ impl TypeContext {
                             Type::Optional(Box::new(Type::Any))
                         }
                     }
-                    ("Option", "None") | (_, "None") => Type::Optional(Box::new(Type::Any)),
-                    ("Result", "Ok") | (_, "Ok") => {
+                    ("Option", "None") => Type::Optional(Box::new(Type::Any)),
+                    ("Result", "Ok") => {
                         if let Some(first) = arguments.first() {
                             let inner = self.infer_expression(first);
                             Type::Generic {
@@ -2166,7 +2186,7 @@ impl TypeContext {
                             }
                         }
                     }
-                    ("Result", "Err") | (_, "Err") => {
+                    ("Result", "Err") => {
                         if let Some(first) = arguments.first() {
                             let inner = self.infer_expression(first);
                             Type::Generic {
@@ -2419,7 +2439,7 @@ impl TypeContext {
                     Type::Generic { name, args } if name == "Result" && !args.is_empty() => {
                         self.union_type(&args[0], right)
                     }
-                    _ => right.clone(),
+                    _ => left.clone(),
                 }
             }
         }
