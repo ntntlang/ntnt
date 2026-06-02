@@ -970,6 +970,38 @@ let resp = fetch("https://api.example.com/data", map {
 
 Both `fetch(map { "url": url, ... })` and `fetch(url, map { ... })` work. The two-argument form is typically more natural.
 
+### Network/IPAM Helpers (`std/net`)
+
+`std/net` provides deterministic IPv4/IPv6 CIDR helpers plus a first-shot reachability probe:
+
+```ntnt
+import { ip_parse, subnet_contains, subnet_split, subnet_summarize, ping } from "std/net"
+
+let info = ip_parse("192.168.1.0/24")
+let contains = subnet_contains("10.0.0.0/8", "10.42.0.0/16")
+let children = subnet_split("192.168.1.0/24", 28)
+let summary = subnet_summarize(["10.0.0.0/25", "10.0.0.128/25"])
+let reachability = ping("example.com")
+```
+
+`ip_parse()` supports IPv4 and IPv6. Large IPv6 address counts are returned as strings so `/64` and larger networks do not overflow integer values.
+
+`ping()` defaults to `method: "auto"`. Phase 1 uses an unprivileged TCP fallback path instead of requiring root, `CAP_NET_RAW`, or Docker `cap_add` just to run the first example. If you need strict ICMP behavior, pass `method: "icmp"`; unsupported ICMP capability returns `Err(String)` with guidance.
+
+Private/internal targets are denied by default. Monitoring apps must opt in at process scope **and** call scope:
+
+```bash
+NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
+```
+
+```ntnt
+let result = ping("10.0.0.5", map { "allow_private": true })
+```
+
+Do not pipe user-controlled hostnames directly into `std/net` probes in public web apps. The stdlib blocks the worst SSRF targets by default, but app-level validation is still required.
+
+### JSON Body Parsing
+
 Use `"json": map{...}` for JSON POST or `"form": map{...}` for form POST — auto-encodes and sets Content-Type.
 
 ### CORS (Cross-Origin Resource Sharing)
@@ -1610,7 +1642,7 @@ The most-used stdlib functions are auto-injected — no import needed:
 | `std/time` | `now`, `format` |
 | `std/crypto` | `uuid`, `sha256` |
 
-**NOT in prelude** (still need explicit import): `fetch` (std/http), `connect`/`query`/`execute` (database modules), `set_cookie`/`get_cookie`/`with_cookie` (std/http/server), `sort_by`/`first`/`last`/`push`/`pop` (std/collections), KV, jobs, fs, csv, concurrent.
+**NOT in prelude** (still need explicit import): `fetch` (std/http), `std/net` IPAM/probe helpers, `connect`/`query`/`execute` (database modules), `set_cookie`/`get_cookie`/`with_cookie` (std/http/server), `sort_by`/`first`/`last`/`push`/`pop` (std/collections), KV, jobs, fs, csv, concurrent.
 
 Explicit imports still work — prelude just makes them unnecessary for common functions.
 

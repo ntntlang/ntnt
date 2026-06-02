@@ -3771,6 +3771,43 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("join", ["base" => Type::String, "path" => Type::String], Type::String);
             // deprecated alias
         }
+        "std/net" => {
+            let result_map = Type::Generic {
+                name: "Result".to_string(),
+                args: vec![
+                    Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    Type::String,
+                ],
+            };
+            let result_bool = Type::Generic {
+                name: "Result".to_string(),
+                args: vec![Type::Bool, Type::String],
+            };
+            let result_string = Type::Generic {
+                name: "Result".to_string(),
+                args: vec![Type::String, Type::String],
+            };
+            let result_string_array = Type::Generic {
+                name: "Result".to_string(),
+                args: vec![Type::Array(Box::new(Type::String)), Type::String],
+            };
+            let opts = Type::Map {
+                key_type: Box::new(Type::String),
+                value_type: Box::new(Type::Any),
+            };
+
+            sig!("ip_parse", ["ip_or_cidr" => Type::String], result_map.clone());
+            sig!("subnet_contains", ["cidr" => Type::String, "ip_or_cidr" => Type::String], result_bool.clone());
+            sig!("subnet_overlaps", ["a" => Type::String, "b" => Type::String], result_bool);
+            sig!("subnet_split", ["cidr" => Type::String, "new_prefix" => Type::Int, "opts" => opts.clone()], result_string_array.clone(), required(2));
+            sig!("subnet_supernet", ["cidr" => Type::String, "new_prefix" => Type::Int], result_string, required(1));
+            sig!("subnet_summarize", ["cidrs" => Type::Array(Box::new(Type::String))], result_string_array.clone());
+            sig!("ip_range_to_cidrs", ["start_ip" => Type::String, "end_ip" => Type::String], result_string_array);
+            sig!("ping", ["host" => Type::String, "opts" => opts], result_map, required(1));
+        }
         "std/path" => {
             sig!("join_path", ["parts" => Type::String], Type::String, variadic);
             sig!("join", ["parts" => Type::String], Type::String, variadic); // deprecated alias

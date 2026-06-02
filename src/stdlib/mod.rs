@@ -23,6 +23,7 @@ pub mod kv;
 pub mod log;
 pub mod markdown;
 pub mod math;
+pub mod net;
 pub mod path;
 pub mod postgres;
 pub mod sqlite;
@@ -51,6 +52,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/time".to_string(), time::init());
     modules.insert("std/crypto".to_string(), crypto::init());
     modules.insert("std/url".to_string(), url::init());
+    modules.insert("std/net".to_string(), net::init());
     modules.insert("std/http".to_string(), http::init());
     modules.insert("std/http/server".to_string(), http_server::init());
     modules.insert("std/db/postgres".to_string(), postgres::init());

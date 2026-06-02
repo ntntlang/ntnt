@@ -13,6 +13,11 @@ This folder contains planning and design documents for NTNT features.
 | [ial_unit_testing.md](ial_unit_testing.md) | ✅ Complete | Unit testing framework design |
 | [high_concurrency_http_server.md](high_concurrency_http_server.md) | ✅ Complete | Async Axum server (v0.4.0) |
 | [dd-040-fetch-stdlib-friction.md](dd-040-fetch-stdlib-friction.md) | 🔶 Partial | 4/6 issues resolved in v0.4.4; 2 remain |
+| [dd-043-auth-excellence.md](dd-043-auth-excellence.md) | ✅ Shipped in v0.4.9 | `std/auth` local auth, reset, TOTP, session, API/page protection baseline; WebAuthn remains future planning |
+| [dd-046-std-net.md](dd-046-std-net.md) | 📋 Refined Plan | Safe `std/net` primitives: IPAM-grade IPv4/IPv6 CIDR math, first-shot ping, TCP probes, DNS, bounded scans, TLS inspection |
+| [dd-059-auth-crypto-boundary.md](dd-059-auth-crypto-boundary.md) | ✅ Complete | `std/auth` / `std/crypto` helper boundary in the v0.4.9 auth baseline |
+| [dd-060-ai-native-developer-experience.md](dd-060-ai-native-developer-experience.md) | 📋 Draft | AI-native developer experience roadmap |
+| [dd-061-interpreter-performance-roadmap.md](dd-061-interpreter-performance-roadmap.md) | 🔶 In Review | Interpreter-native performance roadmap |
 | [language_comparison.md](language_comparison.md) | ✅ Complete | NTNT vs other languages |
 | [INTENT_DRIVEN_DEVELOPMENT.md](INTENT_DRIVEN_DEVELOPMENT.md) | ✅ Complete | IDD philosophy and workflow |
 | [INTENT_ASSERTION_LANGUAGE.md](INTENT_ASSERTION_LANGUAGE.md) | ✅ Complete | IAL spec v1.0.0 |
