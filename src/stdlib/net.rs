@@ -131,7 +131,7 @@ pub fn init() -> HashMap<String, Value> {
     // Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields.
     // @param ip_or_cidr Address or CIDR string, e.g. "192.168.1.0/24" or "2001:db8::/64"
     // @returns Result containing a map of canonical fields and classification booleans
-    // @since v0.5.0
+    // @since v0.4.10
     // @tags #pure, #deterministic, #network
     // @example ip_parse("192.168.1.0/24") ~ "Parse an IPv4 subnet"
     module.insert(
@@ -154,7 +154,7 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/net
     // @signature subnet_contains(cidr: String, ip_or_cidr: String) -> Result<Bool, String>
     // Returns true when the parent CIDR contains the entire child address or subnet.
-    // @since v0.5.0
+    // @since v0.4.10
     // @tags #pure, #deterministic, #network
     module.insert(
         "subnet_contains".to_string(),
@@ -171,7 +171,7 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/net
     // @signature subnet_overlaps(a: String, b: String) -> Result<Bool, String>
     // Returns true when two IPv4 or IPv6 CIDRs overlap.
-    // @since v0.5.0
+    // @since v0.4.10
     // @tags #pure, #deterministic, #network
     module.insert(
         "subnet_overlaps".to_string(),
@@ -188,7 +188,7 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/net
     // @signature subnet_split(cidr: String, new_prefix: Int, opts?: Map) -> Result<Array<String>, String>
     // Splits a CIDR into child subnets with a longer prefix, enforcing result caps.
-    // @since v0.5.0
+    // @since v0.4.10
     // @tags #pure, #deterministic, #network
     module.insert(
         "subnet_split".to_string(),
@@ -205,7 +205,7 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/net
     // @signature subnet_supernet(cidr: String, new_prefix?: Int) -> Result<String, String>
     // Returns the parent/supernet of a CIDR. Defaults to one bit shorter.
-    // @since v0.5.0
+    // @since v0.4.10
     // @tags #pure, #deterministic, #network
     module.insert(
         "subnet_supernet".to_string(),
@@ -222,7 +222,7 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/net
     // @signature subnet_summarize(cidrs: Array<String>) -> Result<Array<String>, String>
     // Summarizes adjacent or overlapping CIDRs into the shortest equivalent route list.
-    // @since v0.5.0
+    // @since v0.4.10
     // @tags #pure, #deterministic, #network
     module.insert(
         "subnet_summarize".to_string(),
@@ -239,7 +239,7 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/net
     // @signature ip_range_to_cidrs(start_ip: String, end_ip: String) -> Result<Array<String>, String>
     // Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover.
-    // @since v0.5.0
+    // @since v0.4.10
     // @tags #pure, #deterministic, #network
     module.insert(
         "ip_range_to_cidrs".to_string(),
@@ -257,7 +257,7 @@ pub fn init() -> HashMap<String, Value> {
     // @signature ping(host: String, opts?: Map) -> Result<Map, String>
     // Performs a first-shot host reachability probe. The default auto method uses
     // unprivileged TCP fallback when ICMP is unavailable.
-    // @since v0.5.0
+    // @since v0.4.10
     // @tags #network
     module.insert(
         "ping".to_string(),

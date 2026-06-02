@@ -4,7 +4,7 @@
 **Author:** Larri
 **Created:** 2026-03-22
 **Updated:** 2026-06-02
-**Target baseline:** post-v0.4.9
+**Target baseline:** v0.4.10 (`std/net` track)
 
 ---
 

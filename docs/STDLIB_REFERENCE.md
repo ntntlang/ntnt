@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.4.9
+> Last updated: v0.4.10
 
 ## Table of Contents
 
@@ -9723,7 +9723,7 @@ Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields.
 ip_parse("192.168.1.0/24")  // Parse an IPv4 subnet
 ```
 
-*Since v0.5.0*
+*Since v0.4.10*
 
 ---
 
@@ -9735,7 +9735,7 @@ ip_range_to_cidrs(start_ip: String, end_ip: String) -> Result<Array<String>, Str
 
 Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover.
 
-*Since v0.5.0*
+*Since v0.4.10*
 
 ---
 
@@ -9747,7 +9747,7 @@ ping(host: String, opts?: Map) -> Result<Map, String>
 
 Performs a first-shot host reachability probe. The default auto method uses unprivileged TCP fallback when ICMP is unavailable.
 
-*Since v0.5.0*
+*Since v0.4.10*
 
 ---
 
@@ -9759,7 +9759,7 @@ subnet_contains(cidr: String, ip_or_cidr: String) -> Result<Bool, String>
 
 Returns true when the parent CIDR contains the entire child address or subnet.
 
-*Since v0.5.0*
+*Since v0.4.10*
 
 ---
 
@@ -9771,7 +9771,7 @@ subnet_overlaps(a: String, b: String) -> Result<Bool, String>
 
 Returns true when two IPv4 or IPv6 CIDRs overlap.
 
-*Since v0.5.0*
+*Since v0.4.10*
 
 ---
 
@@ -9783,7 +9783,7 @@ subnet_split(cidr: String, new_prefix: Int, opts?: Map) -> Result<Array<String>,
 
 Splits a CIDR into child subnets with a longer prefix, enforcing result caps.
 
-*Since v0.5.0*
+*Since v0.4.10*
 
 ---
 
@@ -9795,7 +9795,7 @@ subnet_summarize(cidrs: Array<String>) -> Result<Array<String>, String>
 
 Summarizes adjacent or overlapping CIDRs into the shortest equivalent route list.
 
-*Since v0.5.0*
+*Since v0.4.10*
 
 ---
 
@@ -9807,7 +9807,7 @@ subnet_supernet(cidr: String, new_prefix?: Int) -> Result<String, String>
 
 Returns the parent/supernet of a CIDR. Defaults to one bit shorter.
 
-*Since v0.5.0*
+*Since v0.4.10*
 
 ---
 
