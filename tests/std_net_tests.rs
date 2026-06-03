@@ -1,0 +1,481 @@
+//! Integration tests for std/net Phase 1 public behavior.
+
+use std::fs;
+use std::io::Write;
+use std::net::TcpListener;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn unique_test_file(prefix: &str) -> String {
+    let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let temp_dir = std::env::temp_dir();
+    temp_dir
+        .join(format!(
+            "ntnt_std_net_{}_{}_{}.tnt",
+            prefix,
+            std::process::id(),
+            counter
+        ))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn ntnt_binary() -> String {
+    let exe = std::env::consts::EXE_SUFFIX;
+    let debug_path = format!("./target/debug/ntnt{}", exe);
+    let release_path = format!("./target/release/ntnt{}", exe);
+
+    if std::path::Path::new(&debug_path).exists() {
+        debug_path
+    } else if std::path::Path::new(&release_path).exists() {
+        release_path
+    } else {
+        panic!("No ntnt binary found. Run 'cargo build' first.");
+    }
+}
+
+fn run_ntnt_code(code: &str) -> (String, String, i32) {
+    run_ntnt_code_with_env(code, &[])
+}
+
+fn run_ntnt_code_with_env(code: &str, envs: &[(&str, &str)]) -> (String, String, i32) {
+    let test_file = unique_test_file("test");
+
+    let mut file = fs::File::create(&test_file).expect("Failed to create test file");
+    writeln!(file, "{}", code).expect("Failed to write test file");
+    drop(file);
+
+    let mut cmd = Command::new(ntnt_binary());
+    cmd.args(["run", &test_file])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("NTNT_ENV", "development");
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+
+    let output = cmd.output().expect("Failed to execute ntnt");
+    let _ = fs::remove_file(&test_file);
+
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn ip_parse_reports_ipv4_network_calculator_fields() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { ip_parse } from "std/net"
+
+match ip_parse("192.168.1.0/24") {
+    Ok(info) => {
+        print(info["version"])
+        print(info["network"])
+        print(info["broadcast"])
+        print(info["netmask"])
+        print(info["wildcard_mask"])
+        print(info["total_addresses"])
+        print(info["usable_hosts"])
+        print(info["is_private"])
+    },
+    Err(e) => print("ERR: " + e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
+    assert!(lines.contains(&"4"), "stdout: {stdout}");
+    assert!(lines.contains(&"192.168.1.0"), "stdout: {stdout}");
+    assert!(lines.contains(&"192.168.1.255"), "stdout: {stdout}");
+    assert!(lines.contains(&"255.255.255.0"), "stdout: {stdout}");
+    assert!(lines.contains(&"0.0.0.255"), "stdout: {stdout}");
+    assert!(lines.contains(&"256"), "stdout: {stdout}");
+    assert!(lines.contains(&"254"), "stdout: {stdout}");
+    assert!(lines.contains(&"true"), "stdout: {stdout}");
+}
+
+#[test]
+fn ip_parse_reports_ipv6_without_overflow() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { ip_parse } from "std/net"
+
+match ip_parse("2001:db8::/64") {
+    Ok(info) => {
+        print(info["version"])
+        print(info["ip"])
+        print(info["network"])
+        print(info["first"])
+        print(info["last"])
+        print(info["total_addresses"])
+        print(info["is_documentation"])
+    },
+    Err(e) => print("ERR: " + e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(stdout.contains("6"), "stdout: {stdout}");
+    assert!(stdout.contains("2001:db8::"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("2001:db8::ffff:ffff:ffff:ffff"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("18446744073709551616"), "stdout: {stdout}");
+    assert!(stdout.contains("true"), "stdout: {stdout}");
+}
+
+#[test]
+fn subnet_helpers_cover_contains_overlaps_split_supernet_and_summarize() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { join } from "std/string"
+import { subnet_contains, subnet_overlaps, subnet_split, subnet_supernet, subnet_summarize, ip_range_to_cidrs } from "std/net"
+
+match subnet_contains("10.0.0.0/8", "10.50.0.0/16") { Ok(v) => print("contains=" + str(v)), Err(e) => print("ERR " + e) }
+match subnet_overlaps("10.0.0.0/24", "10.0.0.128/25") { Ok(v) => print("overlaps=" + str(v)), Err(e) => print("ERR " + e) }
+match subnet_split("192.168.1.0/24", 26) { Ok(v) => print("split=" + join(v, ",")), Err(e) => print("ERR " + e) }
+match subnet_supernet("192.168.1.0/24") { Ok(v) => print("supernet=" + v), Err(e) => print("ERR " + e) }
+match subnet_summarize(["10.0.0.0/25", "10.0.0.128/25"]) { Ok(v) => print("summary=" + join(v, ",")), Err(e) => print("ERR " + e) }
+match ip_range_to_cidrs("192.168.1.20", "192.168.1.31") { Ok(v) => print("range=" + join(v, ",")), Err(e) => print("ERR " + e) }
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(stdout.contains("contains=true"), "stdout: {stdout}");
+    assert!(stdout.contains("overlaps=true"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("split=192.168.1.0/26,192.168.1.64/26,192.168.1.128/26,192.168.1.192/26"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("supernet=192.168.0.0/23"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("summary=10.0.0.0/24"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("range=192.168.1.20/30,192.168.1.24/29"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn subnet_split_rejects_explosive_results() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { subnet_split } from "std/net"
+
+match subnet_split("2001:db8::/64", 128) {
+    Ok(v) => print("unexpected"),
+    Err(e) => print(e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(stdout.contains("too many subnets"), "stdout: {stdout}");
+}
+
+#[test]
+fn tcp_connect_uses_explicit_port_and_multiple_attempts() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+    let port = listener.local_addr().unwrap().port();
+    let count = 3;
+    let handle = std::thread::spawn(move || {
+        for _ in 0..count {
+            let _ = listener.accept();
+        }
+    });
+
+    let code = format!(
+        r#"
+import {{ tcp_connect }} from "std/net"
+
+match tcp_connect("127.0.0.1", {port}, map {{ "allow_private": true, "count": {count}, "timeout_ms": 1000 }}) {{
+    Ok(info) => {{
+        print(info["connected"])
+        print(info["method"])
+        print(info["port"])
+        print(info["connected_port"])
+        print(info["remote_addr"])
+        print(info["local_addr"])
+        print(info["sent"])
+        print(info["received"])
+        print(info["failed"])
+        print(info["loss_percent"])
+        print(len(info["attempts"]))
+    }},
+    Err(e) => print("ERR: " + e)
+}}
+"#
+    );
+
+    let (stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(&code, &[("NTNT_NET_ALLOW_PRIVATE", "1")]);
+    let _ = handle.join();
+
+    assert_eq!(
+        exit_code, 0,
+        "stderr: {stderr}
+stdout: {stdout}"
+    );
+    let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
+    assert!(lines.contains(&"true"), "stdout: {stdout}");
+    assert!(lines.contains(&"tcp"), "stdout: {stdout}");
+    let port_string = port.to_string();
+    assert!(lines.contains(&port_string.as_str()), "stdout: {stdout}");
+    assert!(
+        stdout.contains(&format!("127.0.0.1:{port}")),
+        "stdout: {stdout}"
+    );
+    assert!(
+        lines.iter().filter(|line| **line == "3").count() >= 3,
+        "stdout: {stdout}"
+    );
+    assert!(lines.contains(&"0"), "stdout: {stdout}");
+}
+
+#[test]
+fn tcp_connect_closed_port_returns_connected_false() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let code = format!(
+        r#"
+import {{ tcp_connect }} from "std/net"
+
+match tcp_connect("127.0.0.1", {port}, map {{ "allow_private": true, "timeout_ms": 100 }}) {{
+    Ok(info) => {{
+        print(info["connected"])
+        print(info["reachable"])
+        print(info["reason"])
+    }},
+    Err(e) => print("ERR: " + e)
+}}
+"#
+    );
+
+    let (stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(&code, &[("NTNT_NET_ALLOW_PRIVATE", "1")]);
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
+    assert!(lines.contains(&"false"), "stdout: {stdout}");
+    assert!(!stdout.contains("ERR:"), "stdout: {stdout}");
+}
+
+#[test]
+fn reachable_uses_explicit_tcp_fallback_without_calling_it_ping() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        let _ = listener.accept();
+    });
+
+    let code = format!(
+        r#"
+import {{ reachable }} from "std/net"
+
+match reachable("127.0.0.1", map {{ "allow_private": true, "tcp_ports": [{port}], "timeout_ms": 1000 }}) {{
+    Ok(info) => {{
+        print(info["reachable"])
+        print(info["method"])
+        print(info["fallback_from"])
+        print(info["connected_port"])
+    }},
+    Err(e) => print("ERR: " + e)
+}}
+"#
+    );
+
+    let (stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(&code, &[("NTNT_NET_ALLOW_PRIVATE", "1")]);
+    let _ = handle.join();
+
+    assert_eq!(
+        exit_code, 0,
+        "stderr: {stderr}
+stdout: {stdout}"
+    );
+    assert!(stdout.contains("true"), "stdout: {stdout}");
+    assert!(stdout.contains("tcp"), "stdout: {stdout}");
+    assert!(stdout.contains("icmp"), "stdout: {stdout}");
+    assert!(stdout.contains(&port.to_string()), "stdout: {stdout}");
+}
+
+#[test]
+fn ping_auto_returns_icmp_unavailable_without_tcp_fallback() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { ping } from "std/net"
+
+match ping("example.com") {
+    Ok(info) => print("unexpected"),
+    Err(e) => print(e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("does not fall back to TCP automatically"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn tcp_connect_private_target_requires_process_level_opt_in() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { tcp_connect } from "std/net"
+
+match tcp_connect("127.0.0.1", 9, map { "allow_private": true, "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected"),
+    Err(e) => print(e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("private targets require NTNT_NET_ALLOW_PRIVATE=1"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn tcp_connect_rejects_ipv4_mapped_and_special_ranges_by_default() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { tcp_connect } from "std/net"
+
+match tcp_connect("::ffff:127.0.0.1", 9, map { "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected mapped"),
+    Err(e) => print("mapped=" + e)
+}
+
+match tcp_connect("224.0.0.1", 9, map { "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected multicast"),
+    Err(e) => print("multicast=" + e)
+}
+
+match tcp_connect("192.0.2.1", 9, map { "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected documentation"),
+    Err(e) => print("documentation=" + e)
+}
+
+match tcp_connect("255.255.255.255", 9, map { "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected broadcast"),
+    Err(e) => print("broadcast=" + e)
+}
+
+match tcp_connect("::ffff:255.255.255.255", 9, map { "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected mapped broadcast"),
+    Err(e) => print("mapped_broadcast=" + e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("mapped=Network target denied by policy"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("multicast=Network target denied by policy"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("documentation=Network target denied by policy"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("broadcast=Network target denied by policy"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("mapped_broadcast=Network target denied by policy"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn tcp_connect_rejects_never_allowed_targets_even_with_private_opt_in() {
+    let (stdout, stderr, code) = run_ntnt_code_with_env(
+        r#"
+import { tcp_connect } from "std/net"
+
+match tcp_connect("169.254.169.254", 80, map { "allow_private": true, "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected metadata"),
+    Err(e) => print("metadata=" + e)
+}
+
+match tcp_connect("169.254.170.2", 80, map { "allow_private": true, "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected ecs metadata"),
+    Err(e) => print("ecs_metadata=" + e)
+}
+
+match tcp_connect("::ffff:169.254.169.254", 80, map { "allow_private": true, "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected mapped metadata"),
+    Err(e) => print("mapped_metadata=" + e)
+}
+
+match tcp_connect("::ffff:169.254.170.2", 80, map { "allow_private": true, "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected mapped ecs metadata"),
+    Err(e) => print("mapped_ecs_metadata=" + e)
+}
+
+match tcp_connect("224.0.0.1", 9, map { "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected multicast"),
+    Err(e) => print("multicast=" + e)
+}
+
+match tcp_connect("255.255.255.255", 9, map { "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected broadcast"),
+    Err(e) => print("broadcast=" + e)
+}
+"#,
+        &[("NTNT_NET_ALLOW_PRIVATE", "1")],
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains(
+            "metadata=Network target denied by policy: special-purpose targets are not allowed"
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "ecs_metadata=Network target denied by policy: special-purpose targets are not allowed"
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("mapped_metadata=Network target denied by policy: special-purpose targets are not allowed"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("mapped_ecs_metadata=Network target denied by policy: special-purpose targets are not allowed"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "multicast=Network target denied by policy: special-purpose targets are not allowed"
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "broadcast=Network target denied by policy: special-purpose targets are not allowed"
+        ),
+        "stdout: {stdout}"
+    );
+}

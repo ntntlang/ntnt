@@ -1,0 +1,51 @@
+// std/net Phase 1: IPAM-grade IPv4/IPv6 CIDR helpers
+
+import { join } from "std/string"
+import { ip_parse, subnet_contains, subnet_overlaps, subnet_split, subnet_supernet, subnet_summarize, ip_range_to_cidrs } from "std/net"
+
+match ip_parse("192.168.1.0/24") {
+    Ok(info) => {
+        print("network: " + info["network"])
+        print("netmask: " + info["netmask"])
+        print("usable hosts: " + info["usable_hosts"])
+    },
+    Err(e) => print("parse error: " + e)
+}
+
+match ip_parse("2001:db8::/64") {
+    Ok(info) => {
+        print("ipv6 network: " + info["network"])
+        print("ipv6 addresses: " + info["total_addresses"])
+    },
+    Err(e) => print("ipv6 parse error: " + e)
+}
+
+match subnet_contains("10.0.0.0/8", "10.42.0.0/16") {
+    Ok(contains) => print("contains child subnet: " + str(contains)),
+    Err(e) => print("contains error: " + e)
+}
+
+match subnet_overlaps("10.0.0.0/24", "10.0.0.128/25") {
+    Ok(overlaps) => print("overlaps: " + str(overlaps)),
+    Err(e) => print("overlap error: " + e)
+}
+
+match subnet_split("192.168.1.0/24", 28) {
+    Ok(subnets) => print("/28s: " + join(subnets, ", ")),
+    Err(e) => print("split error: " + e)
+}
+
+match subnet_supernet("192.168.1.0/24") {
+    Ok(parent) => print("parent: " + parent),
+    Err(e) => print("supernet error: " + e)
+}
+
+match subnet_summarize(["10.0.0.0/25", "10.0.0.128/25"]) {
+    Ok(routes) => print("summary: " + join(routes, ", ")),
+    Err(e) => print("summary error: " + e)
+}
+
+match ip_range_to_cidrs("192.168.1.20", "192.168.1.31") {
+    Ok(cidrs) => print("range cover: " + join(cidrs, ", ")),
+    Err(e) => print("range error: " + e)
+}
