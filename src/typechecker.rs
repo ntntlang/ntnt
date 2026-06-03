@@ -3794,6 +3794,16 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 name: "Result".to_string(),
                 args: vec![Type::Array(Box::new(Type::String)), Type::String],
             };
+            let result_map_array = Type::Generic {
+                name: "Result".to_string(),
+                args: vec![
+                    Type::Array(Box::new(Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    })),
+                    Type::String,
+                ],
+            };
             let opts = Type::Map {
                 key_type: Box::new(Type::String),
                 value_type: Box::new(Type::Any),
@@ -3805,10 +3815,12 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("subnet_split", ["cidr" => Type::String, "new_prefix" => Type::Int, "opts" => opts.clone()], result_string_array.clone(), required(2));
             sig!("subnet_supernet", ["cidr" => Type::String, "new_prefix" => Type::Int], result_string, required(1));
             sig!("subnet_summarize", ["cidrs" => Type::Array(Box::new(Type::String))], result_string_array.clone());
-            sig!("ip_range_to_cidrs", ["start_ip" => Type::String, "end_ip" => Type::String], result_string_array);
+            sig!("ip_range_to_cidrs", ["start_ip" => Type::String, "end_ip" => Type::String], result_string_array.clone());
             sig!("ping", ["host" => Type::String, "opts" => opts.clone()], result_map.clone(), required(1));
             sig!("tcp_connect", ["host" => Type::String, "port" => Type::Int, "opts" => opts.clone()], result_map.clone(), required(2));
-            sig!("reachable", ["host" => Type::String, "opts" => opts], result_map, required(1));
+            sig!("reachable", ["host" => Type::String, "opts" => opts.clone()], result_map, required(1));
+            sig!("dns_lookup", ["name" => Type::String, "record_type" => Type::String, "opts" => opts.clone()], result_map_array, required(1));
+            sig!("dns_reverse", ["ip" => Type::String, "opts" => opts], result_string_array, required(1));
         }
         "std/path" => {
             sig!("join_path", ["parts" => Type::String], Type::String, variadic);

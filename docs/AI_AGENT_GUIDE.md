@@ -972,10 +972,10 @@ Both `fetch(map { "url": url, ... })` and `fetch(url, map { ... })` work. The tw
 
 ### Network/IPAM Helpers (`std/net`)
 
-`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, and a high-level reachability helper:
+`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, high-level reachability, and DNS lookups:
 
 ```ntnt
-import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, reachable } from "std/net"
+import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, reachable, dns_lookup, dns_reverse } from "std/net"
 
 let info = unwrap(ip_parse("192.168.1.0/24"))
 let contains = unwrap(subnet_contains("10.0.0.0/8", "10.42.0.0/16"))
@@ -983,6 +983,8 @@ let children = unwrap(subnet_split("192.168.1.0/24", 28))
 let summary = unwrap(subnet_summarize(["10.0.0.0/25", "10.0.0.128/25"]))
 let tcp = unwrap(tcp_connect("example.com", 443))
 let reachability = unwrap(reachable("example.com", map { "tcp_ports": [443] }))
+let records = unwrap(dns_lookup("example.com", "A"))
+let ptr_names = unwrap(dns_reverse("8.8.8.8"))
 ```
 
 These helpers return `Result<..., String>`; use `unwrap(...)` for quick scripts/examples, or `match`/`otherwise` when the app should handle invalid input or policy denial.
@@ -1001,6 +1003,15 @@ let reachability = reachable("example.com", map {
 ```
 
 `tcp_connect()` and `reachable()` support optional `count` (1-10), `timeout_ms`, and `interval_ms`, returning per-attempt results plus `sent`, `received`, `failed`, and `loss_percent` summary fields.
+
+`dns_lookup(name, record_type?, opts?)` supports `A`, `AAAA`, and `PTR` records in this slice. It returns `Ok([])` for ordinary no-answer DNS responses and `Err(String)` for invalid record types, invalid options, resolver configuration failures, or DNS transport failures. `dns_reverse(ip, opts?)` returns all PTR names as an array because PTR can legitimately have zero, one, or multiple names.
+
+```ntnt
+let a_records = dns_lookup("example.com", "A", map { "timeout_ms": 1000 })
+let ptr_names = dns_reverse("8.8.8.8", map { "timeout_ms": 1000 })
+```
+
+When passing `dns_lookup` options, include the record type explicitly: `dns_lookup(name, "A", opts)`. The shorter `dns_lookup(name)` form defaults to `A`; `dns_lookup(name, opts)` is intentionally rejected so the call shape stays unambiguous.
 
 Private/internal targets are denied by default. Monitoring apps must opt in at process scope **and** call scope:
 

@@ -1,6 +1,6 @@
 # DD-046: `std/net` — Safe Network Primitives for ntnt
 
-**Status:** PR 1 implemented and under review; includes IPAM helpers, ICMP-honest `ping()`, explicit `tcp_connect()`, and high-level `reachable()`; DNS/scan/TLS slices planned
+**Status:** PR 1 merged; PR 2 DNS A/AAAA/PTR in progress; scan/TLS slices planned
 **Author:** Larri
 **Created:** 2026-03-22
 **Updated:** 2026-06-03
@@ -627,6 +627,8 @@ Implementation notes:
 - Use `hickory-resolver` only when ready to add the dependency intentionally.
 - Do not rely on public DNS in CI.
 - Build a resolver abstraction or local/mock DNS test fixture before adding many record types.
+- `dns_lookup` uses the system resolver and does not expose custom nameserver configuration in this slice.
+- DNS answers are returned as DNS data; target probing/safety policy still applies to connect-style functions (`tcp_connect`, `reachable`, future `port_scan`) rather than filtering A/AAAA answers from lookup results.
 - Custom nameserver support is deferred until safety implications are explicit. A `server` option can bypass enterprise DNS policy and should not be a casual Phase 1 feature.
 
 Tests:
@@ -767,19 +769,18 @@ SNMP is a real network-monitoring need, but it is its own protocol family. It sh
 
 ### Status Dashboard
 
-As of 2026-06-02:
+As of 2026-06-03:
 
-- [x] **PR 1 — `std/net` shell + IPAM helpers + `ping`**: implemented in [PR #113](https://github.com/ntntlang/ntnt/pull/113). Status: open, mergeable, CI green, no unresolved review threads.
-- [ ] **PR 2 — Dedicated TCP probe refinement**: next planned slice. Reuses the Phase 1 explicit TCP reachability helper as public `tcp_connect`.
-- [ ] **PR 3 — DNS A/AAAA/PTR**: planned after TCP probe.
-- [ ] **PR 4 — Bounded port scan**: planned after DNS.
-- [ ] **PR 5 — TLS info**: planned after port scan/dependency decision.
+- [x] **PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability**: merged in [PR #113](https://github.com/ntntlang/ntnt/pull/113).
+- [ ] **PR 2 — DNS A/AAAA/PTR**: in progress on branch `feat/std-net-dns`; adds `dns_lookup` and `dns_reverse` with deterministic tests and opt-in external DNS smoke coverage.
+- [ ] **PR 3 — Bounded port scan**: planned after DNS.
+- [ ] **PR 4 — TLS info**: planned after port scan/dependency decision.
 
 PR 1 shipped the core module registration, runtime functions, typechecker signatures, generated docs, deterministic examples, and tests for Phase 1. Review hardening added policy fixes for private, link-local, multicast, documentation, mapped-address, and broadcast-style targets.
 
 ### PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability
 
-Status: **implemented in PR #113; awaiting merge/review completion.**
+Status: **merged in PR #113.**
 
 Scope:
 
@@ -812,18 +813,20 @@ Acceptance:
 
 ### PR 2 — DNS A/AAAA/PTR
 
+Status: **in progress on `feat/std-net-dns`.**
+
 Scope:
 
-- [ ] `dns_lookup`
-- [ ] `dns_reverse`
-- [ ] `hickory-resolver` or equivalent dependency decision
-- [ ] resolver abstraction or mock/local fixture
+- [x] `dns_lookup`
+- [x] `dns_reverse`
+- [x] `hickory-resolver` dependency decision
+- [x] deterministic parser/result-shaping tests; external DNS smoke coverage gated behind env var
 
 Acceptance:
 
-- [ ] deterministic CI tests
-- [ ] no public DNS dependency by default
-- [ ] initial records limited to A/AAAA/PTR unless implementation remains small and clean
+- [x] deterministic CI tests
+- [x] no public DNS dependency by default
+- [x] initial records limited to A/AAAA/PTR unless implementation remains small and clean
 
 ### PR 3 — Bounded port scan
 

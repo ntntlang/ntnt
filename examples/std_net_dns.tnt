@@ -1,0 +1,11 @@
+// std/net DNS lookup examples
+
+import { dns_lookup, dns_reverse } from "std/net"
+
+let a_records = dns_lookup("example.com", "A", map { "timeout_ms": 1000 })
+let aaaa_records = dns_lookup("example.com", "AAAA", map { "timeout_ms": 1000 })
+let ptr_names = dns_reverse("8.8.8.8", map { "timeout_ms": 1000 })
+
+print(a_records)
+print(aaaa_records)
+print(ptr_names)

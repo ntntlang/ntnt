@@ -9694,6 +9694,8 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 
 | Function | Description |
 |----------|-------------|
+| [`dns_lookup`](#dnslookup) | Looks up DNS records for a name. Phase 3 supports A, AAAA, and PTR records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
+| [`dns_reverse`](#dnsreverse) | Performs a reverse DNS/PTR lookup for an IPv4 or IPv6 address. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
 | [`ip_parse`](#ipparse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
 | [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
 | [`ping`](#ping) | Performs an ICMP ping when ICMP support is available. It is protocol-honest: ping() does not fall back to TCP ports. Apps that want TCP port checks should use tcp_connect(); apps that want explicit ICMP-then-TCP reachability should use reachable(). |
@@ -9704,6 +9706,57 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 | [`subnet_summarize`](#subnetsummarize) | Summarizes adjacent or overlapping CIDRs into the shortest equivalent route list. |
 | [`subnet_supernet`](#subnetsupernet) | Returns the parent/supernet of a CIDR. Defaults to one bit shorter. |
 | [`tcp_connect`](#tcpconnect) | Performs a bounded TCP connect probe to one explicit port. Closed, refused, or timed-out ports return Ok(map { "connected": false, ... }); invalid input, policy denial, and resolver/system failures return Err(String). |
+
+#### `dns_lookup`
+
+```ntnt
+dns_lookup(name: String, record_type?: String, opts?: Map) -> Result<Array<Map>, String>
+```
+
+Looks up DNS records for a name. Phase 3 supports A, AAAA, and PTR records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String).
+
+**Parameters:**
+
+- `name` — DNS name to query
+- `record_type` — Optional DNS record type: A, AAAA, or PTR. Defaults to A.
+- `opts` — Optional map with timeout_ms
+
+**Returns:** Result containing an array of records with type, name, value, and ttl
+
+**Examples:**
+
+```ntnt
+dns_lookup("example.com", "A")  // Look up IPv4 DNS records
+```
+
+*Since v0.4.10*
+
+---
+
+#### `dns_reverse`
+
+```ntnt
+dns_reverse(ip: String, opts?: Map) -> Result<Array<String>, String>
+```
+
+Performs a reverse DNS/PTR lookup for an IPv4 or IPv6 address. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String).
+
+**Parameters:**
+
+- `ip` — IPv4 or IPv6 address
+- `opts` — Optional map with timeout_ms
+
+**Returns:** Result containing zero or more PTR hostnames
+
+**Examples:**
+
+```ntnt
+dns_reverse("8.8.8.8")  // Look up PTR hostnames for an IP address
+```
+
+*Since v0.4.10*
+
+---
 
 #### `ip_parse`
 
