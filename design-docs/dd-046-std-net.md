@@ -93,7 +93,7 @@ As of the v0.4.9 baseline:
 
 5. **No shellouts.** The implementation should not invoke `ping`, `dig`, `nmap`, `openssl`, `whois`, or `ssh`. If a capability requires a large/privileged dependency, defer it rather than pretending it is simple.
 
-6. **No permission hell.** Default APIs should not require root, `CAP_NET_RAW`, Docker `cap_add`, or sysctl tuning. If ICMP is available through unprivileged OS support, use it. If it is not, `ping(..., method: "auto")` must fall back to an unprivileged TCP reachability probe and report which method was used.
+6. **No permission hell, no silent protocol switch.** Default APIs should not require root, `CAP_NET_RAW`, Docker `cap_add`, or sysctl tuning. If ICMP is unavailable in the current runtime, `ping()` should return a clear `Err(String)` rather than quietly trying TCP ports. TCP reachability is still available only as an explicit developer choice (`method: "tcp"` plus explicit `tcp_ports`).
 
 7. **CI-safe by default.** Tests should not require public internet, raw socket capabilities, root, or Docker privileges. External-network and raw-socket tests are opt-in.
 
@@ -208,7 +208,7 @@ Use these rules consistently:
 - `Ok(map { ... "connected": false ... })` for ordinary TCP refused/timeout results.
 - `Ok([])` for DNS names that have no records of the requested type when the resolver returns a clean no-answer response.
 - `Err(String)` for invalid host/port/options, resolver/system errors, policy denial, or permission/capability failure.
-- `ping(..., map { "method": "icmp" })` may return `Err` when the OS denies ICMP capability. `ping(..., map { "method": "auto" })` should not: it should fall back to TCP reachability and include `method: "tcp"`, `fallback_from: "icmp"`, and `permission_limited: true`.
+- `ping(..., map { "method": "icmp" })` and the default `method: "auto"` may return `Err` when ICMP is unavailable or denied. They must not silently fall back to TCP. Apps that intentionally want TCP reachability must request `method: "tcp"` and provide `tcp_ports` explicitly.
 - `Ok(map { "valid": false, "validation_error": ... })` for TLS certificates that connect but fail validation.
 - `Err(String)` for TLS handshake/connect failures where no certificate information can be obtained.
 
@@ -255,7 +255,7 @@ cargo test net -- --test-threads=1
 
 ## Phase 1 — IPAM-Grade IP/CIDR Utilities + First-Shot Ping
 
-Ship first because this gives developers an immediately useful `std/net` module without making them solve Docker capabilities before breakfast. IP/CIDR helpers should be good enough for real IPAM/routing calculators, not just demo parsing. `ping()` ships with an unprivileged default path so the first example works on ordinary machines and containers.
+Ship first because this gives developers an immediately useful `std/net` module. IP/CIDR helpers should be good enough for real IPAM/routing calculators, not just demo parsing. `ping()` intentionally stays protocol-honest: it does not pretend a TCP connect to arbitrary ports is an ICMP ping. If ICMP support is unavailable in Phase 1, callers get a clear `Err`; explicit TCP reachability remains an app/developer decision.
 
 Phase 1 IPAM goals:
 
@@ -430,7 +430,7 @@ Tests:
 
 ### `ping(host, opts?) -> Result<Map, String>`
 
-`ping()` is a host reachability probe. Its default behavior prioritizes "works on the first shot" over purity about ICMP.
+`ping()` is a host reachability probe. Its default behavior is protocol-honest: ICMP ping should either produce ICMP results or fail clearly; it must not silently switch to TCP ports.
 
 Default method:
 
@@ -452,53 +452,69 @@ let result = ping("example.com")
 // })
 ```
 
-If ICMP is unavailable, default `method: "auto"` falls back to TCP reachability:
+If ICMP is unavailable in the runtime, default `method: "auto"` fails clearly instead of falling back to TCP:
 
 ```ntnt
 ping("example.com")
+// Err("ICMP ping unavailable: std/net does not fall back to TCP automatically. Use method: 'tcp' with explicit tcp_ports only when the app intentionally wants TCP reachability instead of ICMP ping.")
+```
+
+Apps that intentionally want TCP reachability can ask for it explicitly and run multiple bounded attempts in one call:
+
+```ntnt
+ping("example.com", map {
+  "method": "tcp",
+  "tcp_ports": [443],
+  "count": 5
+})
 // Ok(map {
 //   "host": "example.com",
 //   "reachable": true,
 //   "method": "tcp",
-//   "fallback_from": "icmp",
-//   "permission_limited": true,
-//   "ports_tried": [443, 80],
-//   "connected_port": 443,
-//   "latency_ms": 22.8
+//   "sent": 5,
+//   "received": 5,
+//   "failed": 0,
+//   "loss_percent": 0,
+//   "min_ms": 18.6,
+//   "avg_ms": 21.4,
+//   "max_ms": 25.2,
+//   "attempts": [...]
 // })
 ```
 
 Options:
 
-- `method`: `"auto"` (default), `"icmp"`, or `"tcp"`
-- `count`: default 4, clamped to `1..=10`
+- `method`: `"auto"` (default), `"icmp"`, or explicit `"tcp"`
+- `count`: default 1, clamped to `1..=10`
 - `timeout_ms`: default 2000, clamped to shared timeout bounds
-- `interval_ms`: default 250, clamped to shared interval bounds
-- `tcp_ports`: default `[443, 80]`, max 10 explicit ports
+- `interval_ms`: default 0, clamped to `0..=5000`
+- `tcp_ports`: required for `method: "tcp"`, max 10 explicit ports; no default/random ports
 - `allow_private`: default false, requires process-level `NTNT_NET_ALLOW_PRIVATE=1`
 
 Semantics:
 
-- `method: "auto"` should never fail solely because ICMP permissions are missing. It should use ICMP when available and TCP fallback otherwise.
-- `method: "icmp"` means the caller explicitly asked for ICMP. If the OS lacks permission/capability, return `Err("ICMP ping unavailable: ...")` with actionable guidance.
-- `method: "tcp"` performs TCP connect probes only and returns `reachable: true` if any configured port connects.
-- `reachable: false` is an ordinary probe result, not an `Err`.
+- `method: "auto"` uses ICMP when available. If ICMP is unavailable/unsupported, return `Err("ICMP ping unavailable: ...")` with actionable guidance.
+- `method: "icmp"` means the caller explicitly asked for ICMP. If the OS lacks permission/capability, return the same clear `Err` instead of degrading to another protocol.
+- `method: "tcp"` is an explicit app-level reachability choice. It performs TCP connect probes only, requires explicit ports, and returns `reachable: true` if any configured port connects.
+- `reachable: false` is an ordinary probe result, not an `Err`, once the selected method is actually available and permitted.
 - Include `resolved_addrs` only if doing so does not leak denied/private resolved targets in policy errors.
 
 Implementation approach:
 
 - Build the API around a small internal `ReachabilityMethod::{Auto, Icmp, Tcp}` parser.
-- Implement TCP fallback first using the same lower-level connect helper planned for `tcp_connect`.
+- Do not implement automatic TCP fallback inside `ping()`; protocol fallback belongs in app code or an explicit future helper.
+- Keep the lower-level TCP connect helper for explicit `method: "tcp"` in Phase 1 and the public `tcp_connect` function in Phase 2.
 - Add ICMP support only through a crate/path that supports unprivileged operation where the OS allows it. Linux may use datagram ICMP sockets when `/proc/sys/net/ipv4/ping_group_range` permits the process group; raw sockets still require `CAP_NET_RAW` and must be optional.
 - Do not shell out to system `ping`.
-- Do not require Docker `cap_add` for the default example. Docker capability docs are for `method: "icmp"`, not the default `auto` path.
+- Do not require Docker `cap_add` for app code that deliberately chooses TCP reachability; ICMP-specific deployment docs belong to the ICMP path.
 
 Tests:
 
 - `method` parser accepts `auto`, `icmp`, `tcp` and rejects unknown values
 - option clamps for `count`, `interval_ms`, `timeout_ms`, and `tcp_ports`
-- local TCP listener fallback returns `reachable: true` without ICMP capability
-- closed local TCP fallback returns `reachable: false`
+- default `method: "auto"` returns a clear ICMP-unavailable `Err` rather than TCP fallback when ICMP is unsupported
+- `method: "tcp"` requires explicit `tcp_ports`
+- explicit TCP method can run multiple bounded attempts and returns per-attempt plus aggregate summary fields
 - forced `method: "icmp"` maps missing capability to clear `Err` in an opt-in/unit-testable path
 - policy-denied private/loopback target unless explicitly allowed by config/test override
 
@@ -717,7 +733,7 @@ Traceroute and other raw packet path-discovery tools require a separate capabili
 - graceful `Err` when unavailable
 - no default CI dependency on raw sockets
 
-`ping()` is **not** deferred. It belongs in Phase 1, but its default `auto` method must avoid permission hell by falling back to TCP reachability when ICMP is unavailable.
+`ping()` is **not** deferred. It belongs in Phase 1, but its default `auto` method must avoid lying: when ICMP is unavailable, return a clear `Err` rather than falling back to TCP reachability. TCP reachability remains explicit app/developer intent.
 
 ### WHOIS
 
@@ -742,7 +758,7 @@ SNMP is a real network-monitoring need, but it is its own protocol family. It sh
 As of 2026-06-02:
 
 - [x] **PR 1 — `std/net` shell + IPAM helpers + `ping`**: implemented in [PR #113](https://github.com/ntntlang/ntnt/pull/113). Status: open, mergeable, CI green, no unresolved review threads.
-- [ ] **PR 2 — Dedicated TCP probe refinement**: next planned slice. Reuses the Phase 1 TCP fallback helper as public `tcp_connect`.
+- [ ] **PR 2 — Dedicated TCP probe refinement**: next planned slice. Reuses the Phase 1 explicit TCP reachability helper as public `tcp_connect`.
 - [ ] **PR 3 — DNS A/AAAA/PTR**: planned after TCP probe.
 - [ ] **PR 4 — Bounded port scan**: planned after DNS.
 - [ ] **PR 5 — TLS info**: planned after port scan/dependency decision.
@@ -760,10 +776,10 @@ Scope:
 - [x] `src/typechecker.rs`
 - [x] unit tests for helpers and IPv4/IPv6 IPAM behavior
 - [x] `ip_parse`, `subnet_contains`, `subnet_overlaps`, `subnet_split`, `subnet_supernet`, `subnet_summarize`, `ip_range_to_cidrs`
-- [x] `ping(host, opts?)` with `method: "auto"` default and TCP fallback
+- [x] `ping(host, opts?)` with strict no-implicit-TCP-fallback semantics and explicit multi-attempt TCP mode
 - [x] shared target safety checks used by `ping` and future TCP functions
 - [x] generated docs for all Phase 1 functions
-- [x] safe example showing `ping("example.com")` and an internal-monitoring env-var example
+- [x] safe example showing `ping("example.com")`, explicit TCP reachability, and an internal-monitoring env-var example
 - [x] IPAM examples for IPv4 subnet splitting and IPv6 parsing/summarization
 
 Acceptance:
@@ -771,10 +787,10 @@ Acceptance:
 - [x] Phase 1 imports work at runtime and lint/typecheck time.
 - [x] IPv6 parsing, containment, overlap, splitting, supernet, summarization, and range conversion are supported and tested.
 - [x] Large IPv6 counts/results do not overflow or generate unbounded arrays.
-- [x] `ping("example.com")` has a documented no-root/no-capability path through TCP fallback.
-- [x] Missing ICMP capability does not break default `ping()` usage.
+- [x] `ping("example.com")` has documented protocol-honest failure when ICMP support is unavailable.
+- [x] Missing ICMP capability does not silently fall back to TCP; explicit TCP reachability requires `method: "tcp"` and `tcp_ports`.
 - [x] no public internet dependency
-- [x] no new dependency unless clearly justified; any ICMP dependency must keep the TCP fallback path clean
+- [x] no new dependency unless clearly justified; any ICMP dependency must preserve no-implicit-TCP-fallback semantics
 - [x] `cargo build --profile dev-release`, `cargo test net`, docs generation pass
 
 ### PR 2 — Dedicated TCP probe refinement
@@ -782,7 +798,7 @@ Acceptance:
 Scope:
 
 - [ ] `tcp_connect`
-- [ ] reuse/refactor the Phase 1 TCP fallback helper into the public `tcp_connect` API
+- [ ] reuse/refactor the Phase 1 explicit TCP reachability helper into the public `tcp_connect` API
 - [ ] local-listener tests
 - [ ] typechecker signature tests
 - [ ] AI agent guide section for `std/net` safety and jobs/concurrency guidance
@@ -918,7 +934,7 @@ For network-specific PRs:
 
 6. Should `ping()` mean strict ICMP or pragmatic reachability?
 
-   Recommendation: pragmatic by default. `method: "auto"` should use ICMP when available and TCP fallback when not. Strict ICMP is still available via `method: "icmp"`, but that path may require OS capability and should fail with clear guidance instead of silently degrading.
+   Decision: strict/protocol-honest by default. `method: "auto"` should use ICMP when available and return a clear `Err` when unavailable. It must not fall back to TCP automatically. Developers can explicitly choose `method: "tcp"` with explicit `tcp_ports` when their app wants TCP reachability instead of ICMP ping.
 
 7. Should internal targets be easy to enable for monitoring?
 

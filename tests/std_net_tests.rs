@@ -186,22 +186,30 @@ match subnet_split("2001:db8::/64", 128) {
 }
 
 #[test]
-fn ping_auto_uses_unprivileged_tcp_fallback_for_private_monitoring() {
+fn ping_tcp_method_uses_explicit_ports_and_multiple_attempts() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
     let port = listener.local_addr().unwrap().port();
+    let count = 3;
     let handle = std::thread::spawn(move || {
-        let _ = listener.accept();
+        for _ in 0..count {
+            let _ = listener.accept();
+        }
     });
 
     let code = format!(
         r#"
 import {{ ping }} from "std/net"
 
-match ping("127.0.0.1", map {{ "allow_private": true, "tcp_ports": [{port}], "timeout_ms": 1000 }}) {{
+match ping("127.0.0.1", map {{ "method": "tcp", "allow_private": true, "tcp_ports": [{port}], "count": {count}, "timeout_ms": 1000 }}) {{
     Ok(info) => {{
         print(info["reachable"])
         print(info["method"])
         print(info["connected_port"])
+        print(info["sent"])
+        print(info["received"])
+        print(info["failed"])
+        print(info["loss_percent"])
+        print(len(info["attempts"]))
     }},
     Err(e) => print("ERR: " + e)
 }}
@@ -213,9 +221,36 @@ match ping("127.0.0.1", map {{ "allow_private": true, "tcp_ports": [{port}], "ti
     let _ = handle.join();
 
     assert_eq!(exit_code, 0, "stderr: {stderr}\nstdout: {stdout}");
-    assert!(stdout.contains("true"), "stdout: {stdout}");
-    assert!(stdout.contains("tcp"), "stdout: {stdout}");
-    assert!(stdout.contains(&port.to_string()), "stdout: {stdout}");
+    let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
+    assert!(lines.contains(&"true"), "stdout: {stdout}");
+    assert!(lines.contains(&"tcp"), "stdout: {stdout}");
+    let port_string = port.to_string();
+    assert!(lines.contains(&port_string.as_str()), "stdout: {stdout}");
+    assert!(
+        lines.iter().filter(|line| **line == "3").count() >= 3,
+        "stdout: {stdout}"
+    );
+    assert!(lines.contains(&"0"), "stdout: {stdout}");
+}
+
+#[test]
+fn ping_auto_returns_icmp_unavailable_without_tcp_fallback() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { ping } from "std/net"
+
+match ping("example.com") {
+    Ok(info) => print("unexpected"),
+    Err(e) => print(e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("does not fall back to TCP automatically"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]

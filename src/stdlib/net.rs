@@ -5,6 +5,7 @@ use crate::interpreter::Value;
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_MAX_RESULTS: usize = 4096;
@@ -12,7 +13,10 @@ const HARD_MAX_RESULTS: usize = 65_536;
 const DEFAULT_TIMEOUT_MS: u64 = 2_000;
 const MIN_TIMEOUT_MS: u64 = 50;
 const MAX_TIMEOUT_MS: u64 = 30_000;
-const DEFAULT_TCP_PORTS: &[u16] = &[443, 80];
+const DEFAULT_PING_COUNT: usize = 1;
+const MAX_PING_COUNT: usize = 10;
+const DEFAULT_INTERVAL_MS: u64 = 0;
+const MAX_INTERVAL_MS: u64 = 5_000;
 const MAX_TCP_PORTS: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,11 +259,12 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt ping
     // @module std/net
     // @signature ping(host: String, opts?: Map) -> Result<Map, String>
-    // Performs a first-shot host reachability probe. The default auto method uses
-    // unprivileged TCP fallback when ICMP is unavailable. Private targets require
-    // both process and call-level opt-in; special-purpose targets such as cloud
-    // metadata, multicast, broadcast, unspecified, and documentation ranges are
-    // never allowed.
+    // Performs a bounded host reachability probe. Phase 1 does not silently fall
+    // back from ICMP ping to TCP ports; apps that intentionally want TCP
+    // reachability must request method: "tcp" and provide tcp_ports explicitly.
+    // Private targets require both process and call-level opt-in; special-purpose
+    // targets such as cloud metadata, multicast, broadcast, unspecified, and
+    // documentation ranges are never allowed.
     // @since v0.4.10
     // @tags #network
     module.insert(
@@ -548,52 +553,34 @@ fn ping_fn(args: &[Value]) -> Result<Value, IntentError> {
 
     Ok(result_from((|| {
         let method = ReachabilityMethod::parse(opts.and_then(|m| m.get("method")))?;
-        if method == ReachabilityMethod::Icmp {
-            return Err(
-                "ICMP ping unavailable: std/net Phase 1 defaults to unprivileged TCP fallback; use method: 'auto' or 'tcp' unless the runtime adds ICMP capability support"
-                    .to_string(),
-            );
-        }
-
         let allow_private = parse_bool_option(opts, "allow_private", false)?;
         let timeout_ms = parse_u64_option(opts, "timeout_ms", DEFAULT_TIMEOUT_MS)?
             .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
-        let tcp_ports = parse_tcp_ports(opts)?;
+        let count = parse_count_option(opts)?;
+        let interval_ms = parse_u64_option(opts, "interval_ms", DEFAULT_INTERVAL_MS)?
+            .clamp(DEFAULT_INTERVAL_MS, MAX_INTERVAL_MS);
 
-        let probe = tcp_reachability(
-            host,
-            &tcp_ports,
-            Duration::from_millis(timeout_ms),
-            allow_private,
-        )?;
-        let mut result = HashMap::new();
-        result.insert("host".to_string(), Value::String(host.to_string()));
-        result.insert("reachable".to_string(), Value::Bool(probe.reachable));
-        result.insert("method".to_string(), Value::String("tcp".to_string()));
-        if method == ReachabilityMethod::Auto {
-            result.insert(
-                "fallback_from".to_string(),
-                Value::String("icmp".to_string()),
-            );
-            result.insert("permission_limited".to_string(), Value::Bool(true));
-        } else {
-            result.insert("permission_limited".to_string(), Value::Bool(false));
+        match method {
+            ReachabilityMethod::Auto | ReachabilityMethod::Icmp => Err(icmp_unavailable_message()),
+            ReachabilityMethod::Tcp => {
+                let tcp_ports = parse_tcp_ports(opts)?;
+                let attempts = tcp_reachability_attempts_for_host(
+                    host,
+                    &tcp_ports,
+                    Duration::from_millis(timeout_ms),
+                    count,
+                    Duration::from_millis(interval_ms),
+                    allow_private,
+                )?;
+                Ok(Value::Map(tcp_ping_result_map(host, &tcp_ports, &attempts)))
+            }
         }
-        result.insert(
-            "ports_tried".to_string(),
-            Value::Array(tcp_ports.iter().map(|p| Value::Int(*p as i64)).collect()),
-        );
-        if let Some(port) = probe.connected_port {
-            result.insert("connected_port".to_string(), Value::Int(port as i64));
-        } else {
-            result.insert("connected_port".to_string(), Value::none());
-            result.insert("reason".to_string(), Value::String(probe.reason));
-        }
-        if let Some(latency_ms) = probe.latency_ms {
-            result.insert("latency_ms".to_string(), Value::Float(latency_ms));
-        }
-        Ok(Value::Map(result))
     })()))
+}
+
+fn icmp_unavailable_message() -> String {
+    "ICMP ping unavailable: std/net does not fall back to TCP automatically. Use method: 'tcp' with explicit tcp_ports only when the app intentionally wants TCP reachability instead of ICMP ping."
+        .to_string()
 }
 
 #[derive(Debug)]
@@ -604,47 +591,71 @@ struct TcpProbeResult {
     reason: String,
 }
 
-fn tcp_reachability(
+fn tcp_reachability_attempts_for_host(
     host: &str,
     ports: &[u16],
     timeout: Duration,
+    count: usize,
+    interval: Duration,
     allow_private: bool,
-) -> Result<TcpProbeResult, String> {
+) -> Result<Vec<TcpProbeResult>, String> {
     let targets = resolve_tcp_targets(host, ports)?;
+    enforce_resolved_target_policy(&targets, allow_private)?;
+    Ok(tcp_reachability_attempts(
+        &targets, timeout, count, interval,
+    ))
+}
+
+fn tcp_reachability_attempts(
+    targets: &[(u16, SocketAddr)],
+    timeout: Duration,
+    count: usize,
+    interval: Duration,
+) -> Vec<TcpProbeResult> {
+    let mut attempts = Vec::with_capacity(count);
+    for attempt_index in 0..count {
+        if attempt_index > 0 && !interval.is_zero() {
+            thread::sleep(interval);
+        }
+        attempts.push(tcp_reachability_once(targets, timeout));
+    }
+    attempts
+}
+
+fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> TcpProbeResult {
     if targets.is_empty() {
-        return Ok(TcpProbeResult {
+        return TcpProbeResult {
             reachable: false,
             connected_port: None,
             latency_ms: None,
             reason: "no resolved addresses".to_string(),
-        });
+        };
     }
-    enforce_resolved_target_policy(&targets, allow_private)?;
 
     let mut last_reason = "unreachable".to_string();
     for (port, addr) in targets {
         let start = Instant::now();
-        match TcpStream::connect_timeout(&addr, timeout) {
+        match TcpStream::connect_timeout(addr, timeout) {
             Ok(stream) => {
                 drop(stream);
-                return Ok(TcpProbeResult {
+                return TcpProbeResult {
                     reachable: true,
-                    connected_port: Some(port),
+                    connected_port: Some(*port),
                     latency_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
                     reason: "connected".to_string(),
-                });
+                };
             }
             Err(e) => {
                 last_reason = e.kind().to_string();
             }
         }
     }
-    Ok(TcpProbeResult {
+    TcpProbeResult {
         reachable: false,
         connected_port: None,
         latency_ms: None,
         reason: last_reason,
-    })
+    }
 }
 
 fn resolve_tcp_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, SocketAddr)>, String> {
@@ -667,6 +678,97 @@ fn enforce_resolved_target_policy(
         enforce_target_policy(addr.ip(), allow_private)?;
     }
     Ok(())
+}
+
+fn tcp_ping_result_map(
+    host: &str,
+    ports: &[u16],
+    attempts: &[TcpProbeResult],
+) -> HashMap<String, Value> {
+    let sent = attempts.len();
+    let received = attempts.iter().filter(|attempt| attempt.reachable).count();
+    let failed = sent.saturating_sub(received);
+    let latencies: Vec<f64> = attempts
+        .iter()
+        .filter_map(|attempt| attempt.latency_ms)
+        .collect();
+
+    let mut result = HashMap::new();
+    result.insert("host".to_string(), Value::String(host.to_string()));
+    result.insert("reachable".to_string(), Value::Bool(received > 0));
+    result.insert("method".to_string(), Value::String("tcp".to_string()));
+    result.insert("permission_limited".to_string(), Value::Bool(false));
+    result.insert("sent".to_string(), Value::Int(sent as i64));
+    result.insert("received".to_string(), Value::Int(received as i64));
+    result.insert("failed".to_string(), Value::Int(failed as i64));
+    result.insert(
+        "loss_percent".to_string(),
+        Value::Float(if sent == 0 {
+            0.0
+        } else {
+            (failed as f64 / sent as f64) * 100.0
+        }),
+    );
+    result.insert(
+        "ports_tried".to_string(),
+        Value::Array(ports.iter().map(|p| Value::Int(*p as i64)).collect()),
+    );
+    result.insert(
+        "attempts".to_string(),
+        Value::Array(attempts.iter().map(tcp_attempt_to_value).collect()),
+    );
+
+    if let Some(first_success) = attempts.iter().find(|attempt| attempt.reachable) {
+        result.insert(
+            "connected_port".to_string(),
+            first_success
+                .connected_port
+                .map(|port| Value::Int(port as i64))
+                .unwrap_or_else(Value::none),
+        );
+    } else {
+        result.insert("connected_port".to_string(), Value::none());
+        if let Some(last_failure) = attempts.last() {
+            result.insert(
+                "reason".to_string(),
+                Value::String(last_failure.reason.clone()),
+            );
+        }
+    }
+
+    if !latencies.is_empty() {
+        let min_ms = latencies.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_ms = latencies.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let avg_ms = latencies.iter().sum::<f64>() / latencies.len() as f64;
+        result.insert("min_ms".to_string(), Value::Float(min_ms));
+        result.insert("avg_ms".to_string(), Value::Float(avg_ms));
+        result.insert("max_ms".to_string(), Value::Float(max_ms));
+        if sent == 1 {
+            result.insert("latency_ms".to_string(), Value::Float(avg_ms));
+        }
+    }
+
+    result
+}
+
+fn tcp_attempt_to_value(attempt: &TcpProbeResult) -> Value {
+    let mut map = HashMap::new();
+    map.insert("reachable".to_string(), Value::Bool(attempt.reachable));
+    map.insert("method".to_string(), Value::String("tcp".to_string()));
+    map.insert(
+        "connected_port".to_string(),
+        attempt
+            .connected_port
+            .map(|port| Value::Int(port as i64))
+            .unwrap_or_else(Value::none),
+    );
+    if let Some(latency_ms) = attempt.latency_ms {
+        map.insert("latency_ms".to_string(), Value::Float(latency_ms));
+    }
+    if !attempt.reachable {
+        map.insert("reason".to_string(), Value::String(attempt.reason.clone()));
+    }
+    Value::Map(map)
 }
 
 fn parse_ip(input: &str) -> Result<ParsedInput, String> {
@@ -992,9 +1094,24 @@ fn parse_u64_option(
     }
 }
 
+fn parse_count_option(opts: Option<&HashMap<String, Value>>) -> Result<usize, String> {
+    match opts.and_then(|m| m.get("count")) {
+        None => Ok(DEFAULT_PING_COUNT),
+        Some(Value::Int(value)) if *value > 0 => {
+            let count = usize::try_from(*value).map_err(|_| "option 'count' is too large")?;
+            Ok(min(count, MAX_PING_COUNT))
+        }
+        Some(Value::Int(_)) => Err("option 'count' must be positive".to_string()),
+        Some(other) => Err(format!(
+            "option 'count' must be Int, got {}",
+            other.type_name()
+        )),
+    }
+}
+
 fn parse_tcp_ports(opts: Option<&HashMap<String, Value>>) -> Result<Vec<u16>, String> {
     let Some(value) = opts.and_then(|m| m.get("tcp_ports")) else {
-        return Ok(DEFAULT_TCP_PORTS.to_vec());
+        return Err("option 'tcp_ports' is required when ping method is 'tcp'".to_string());
     };
     let Value::Array(values) = value else {
         return Err("option 'tcp_ports' must be Array<Int>".to_string());
@@ -1169,6 +1286,24 @@ fn floor_log2(value: u128) -> u32 {
 mod tests {
     use super::*;
 
+    fn assert_result_err_contains(value: Value, expected: &str) {
+        match value {
+            Value::EnumValue {
+                enum_name,
+                variant,
+                values,
+            } => {
+                assert_eq!(enum_name, "Result");
+                assert_eq!(variant, "Err");
+                assert!(
+                    matches!(values.as_slice(), [Value::String(message)] if message.contains(expected)),
+                    "expected Result::Err message to contain {expected:?}, got {values:?}"
+                );
+            }
+            other => panic!("expected Result::Err, got {other:?}"),
+        }
+    }
+
     #[test]
     fn target_policy_classifies_ipv4_mapped_ipv6_by_embedded_address() {
         let mapped_loopback = "[::ffff:127.0.0.1]:80".parse::<SocketAddr>().unwrap();
@@ -1223,5 +1358,72 @@ mod tests {
 
         let err = enforce_resolved_target_policy(&targets, false).unwrap_err();
         assert!(err.contains("Network target denied by policy"));
+    }
+
+    #[test]
+    fn ping_auto_reports_icmp_unavailable_without_tcp_fallback() {
+        let result = ping_fn(&[Value::String("example.com".to_string())]).unwrap();
+        assert_result_err_contains(result, "does not fall back to TCP automatically");
+    }
+
+    #[test]
+    fn ping_tcp_requires_explicit_ports() {
+        let result = ping_fn(&[
+            Value::String("example.com".to_string()),
+            Value::Map(HashMap::from([(
+                "method".to_string(),
+                Value::String("tcp".to_string()),
+            )])),
+        ])
+        .unwrap();
+
+        assert_result_err_contains(result, "tcp_ports");
+    }
+
+    #[test]
+    fn ping_count_is_positive_and_clamped() {
+        assert_eq!(parse_count_option(None).unwrap(), DEFAULT_PING_COUNT);
+        assert_eq!(
+            parse_count_option(Some(&HashMap::from([(
+                "count".to_string(),
+                Value::Int((MAX_PING_COUNT as i64) + 50),
+            )])))
+            .unwrap(),
+            MAX_PING_COUNT
+        );
+        assert!(parse_count_option(Some(&HashMap::from([
+            ("count".to_string(), Value::Int(0),)
+        ])))
+        .is_err());
+    }
+
+    #[test]
+    fn tcp_reachability_attempts_return_per_attempt_summary() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let count = 3;
+        let accept_thread = thread::spawn(move || {
+            for _ in 0..count {
+                let _ = listener.accept();
+            }
+        });
+
+        let attempts = tcp_reachability_attempts(
+            &[(addr.port(), addr)],
+            Duration::from_millis(500),
+            count,
+            Duration::ZERO,
+        );
+        accept_thread.join().unwrap();
+
+        assert_eq!(attempts.len(), count);
+        assert!(attempts.iter().all(|attempt| attempt.reachable));
+
+        let summary = tcp_ping_result_map("127.0.0.1", &[addr.port()], &attempts);
+        assert!(matches!(summary.get("sent"), Some(Value::Int(3))));
+        assert!(matches!(summary.get("received"), Some(Value::Int(3))));
+        assert!(matches!(summary.get("failed"), Some(Value::Int(0))));
+        assert!(matches!(summary.get("loss_percent"), Some(Value::Float(value)) if *value == 0.0));
+        assert!(matches!(summary.get("attempts"), Some(Value::Array(values)) if values.len() == 3));
     }
 }

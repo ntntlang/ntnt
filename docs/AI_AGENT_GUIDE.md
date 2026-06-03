@@ -988,7 +988,15 @@ These helpers return `Result<..., String>`; use `unwrap(...)` for quick scripts/
 
 `ip_parse()` supports IPv4 and IPv6. Large IPv6 address counts are returned as strings so `/64` and larger networks do not overflow integer values.
 
-`ping()` defaults to `method: "auto"`. Phase 1 uses an unprivileged TCP fallback path instead of requiring root, `CAP_NET_RAW`, or Docker `cap_add` just to run the first example. If you need strict ICMP behavior, pass `method: "icmp"`; unsupported ICMP capability returns `Err(String)` with guidance.
+`ping()` defaults to `method: "auto"` and does **not** silently fall back to TCP ports. In Phase 1, unsupported ICMP returns `Err(String)` with guidance. If an app intentionally wants TCP reachability instead of ICMP ping, pass `method: "tcp"` with explicit `tcp_ports` and optional `count` (1-10) to get per-attempt results plus `sent`, `received`, `failed`, and `loss_percent` summary fields.
+
+```ntnt
+let tcp_reachability = ping("example.com", map {
+    "method": "tcp",
+    "tcp_ports": [443],
+    "count": 5
+})
+```
 
 Private/internal targets are denied by default. Monitoring apps must opt in at process scope **and** call scope:
 
