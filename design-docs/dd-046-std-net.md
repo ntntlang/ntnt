@@ -935,7 +935,7 @@ For network-specific PRs:
 
 6. Should `ping()` mean strict ICMP or pragmatic reachability?
 
-   Decision: strict/protocol-honest by default. `method: "auto"` should use ICMP when available and return a clear `Err` when unavailable. It must not fall back to TCP automatically. Developers can explicitly choose `method: "tcp"` with explicit `tcp_ports` when their app wants TCP reachability instead of ICMP ping.
+   Decision: strict/protocol-honest by default. `method: "auto"` should use ICMP when available and return a clear `Err` when unavailable. It must not fall back to TCP automatically. Developers should use `tcp_connect(host, port, opts?)` for explicit TCP port checks, or `reachable(host, map { "tcp_ports": [...] })` when they want a high-level reachability helper with explicit TCP fallback.
 
 7. Should internal targets be easy to enable for monitoring?
 
@@ -954,3 +954,19 @@ The refined `std/net` path is smaller and much safer:
 5. TLS inspection after dependency choice
 
 That gets ntnt real network-monitoring capability without making the first user trip over `CAP_NET_RAW`, and without smuggling in traceroute, SSH, SNMP, scanners, public-network CI flakes, and SSRF footguns in one heroic PR. Heroic PRs are where bugs go to get tenure.
+
+---
+
+## PR #113 Cleanup Note
+
+The PR cleanup deliberately split “can I ICMP ping this host?” from “can I reach the service I care about?” instead of hiding TCP connection attempts behind a function named `ping()`.
+
+What changed:
+
+1. `ping(host, opts?)` stays protocol-honest: ICMP only, with a clear error when ICMP is unavailable.
+2. TCP probing is explicit via `tcp_connect(host, port, opts?)`, so the caller must name the port and own the semantics.
+3. High-level reachability uses `reachable(host, opts?)`, with explicit `tcp_ports`, so fallback behavior is useful but not surprising.
+4. The safety model stays layered: per-call `allow_private: true` plus process-level `NTNT_NET_ALLOW_PRIVATE=1` for private/internal targets; special-purpose targets remain denied.
+5. The typechecker, generated stdlib reference, agent guide, examples, and tests were updated to document and enforce the split.
+
+Net result: PR #113 keeps the operational utility Josh wanted, but avoids calling TCP service checks “ping.” Tiny naming hill, worth defending.
