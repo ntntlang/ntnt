@@ -1,7 +1,4 @@
-//! Integration tests for std/net Phase 1.
-//!
-//! These exercise the public ntnt stdlib surface. They intentionally start red
-//! before the std/net module exists.
+//! Integration tests for std/net Phase 1 public behavior.
 
 use std::fs;
 use std::io::Write;

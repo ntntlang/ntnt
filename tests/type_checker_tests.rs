@@ -1096,7 +1096,7 @@ let x: Int = first([1, 2, 3])
 #[test]
 fn test_std_net_phase1_signatures_accept_valid_usage() {
     let source = r#"
-import { ip_parse, subnet_contains, subnet_split, subnet_supernet, subnet_summarize, ip_range_to_cidrs, ping } from "std/net"
+import { ip_parse, subnet_contains, subnet_split, subnet_supernet, subnet_summarize, ip_range_to_cidrs, ping, tcp_connect, reachable } from "std/net"
 
 let parsed = ip_parse("192.168.1.0/24")
 let contains = subnet_contains("10.0.0.0/8", "10.1.0.0/16")
@@ -1105,7 +1105,9 @@ let split_with_opts = subnet_split("192.168.1.0/24", 28, map { "max_results": 32
 let parent = subnet_supernet("192.168.1.0/24")
 let summary = subnet_summarize(["10.0.0.0/25", "10.0.0.128/25"])
 let range = ip_range_to_cidrs("192.168.1.20", "192.168.1.31")
-let reachability = ping("example.com", map { "method": "tcp", "tcp_ports": [443], "timeout_ms": 1000 })
+let icmp = ping("example.com", map { "method": "icmp", "timeout_ms": 1000 })
+let tcp = tcp_connect("example.com", 443, map { "timeout_ms": 1000 })
+let reachability = reachable("example.com", map { "tcp_ports": [443], "timeout_ms": 1000 })
 "#;
     let (stdout, _stderr, _exit_code) = lint_code(source);
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();

@@ -13,8 +13,8 @@ const HARD_MAX_RESULTS: usize = 65_536;
 const DEFAULT_TIMEOUT_MS: u64 = 2_000;
 const MIN_TIMEOUT_MS: u64 = 50;
 const MAX_TIMEOUT_MS: u64 = 30_000;
-const DEFAULT_PING_COUNT: usize = 1;
-const MAX_PING_COUNT: usize = 10;
+const DEFAULT_PROBE_COUNT: usize = 1;
+const MAX_PROBE_COUNT: usize = 10;
 const DEFAULT_INTERVAL_MS: u64 = 0;
 const MAX_INTERVAL_MS: u64 = 5_000;
 const MAX_TCP_PORTS: usize = 10;
@@ -91,39 +91,29 @@ impl Network {
 
 #[derive(Debug, Clone)]
 struct ParsedInput {
-    input: String,
     original_ip: u128,
     network: Network,
     kind: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PingMethod {
-    Auto,
-    Icmp,
-}
-
-impl PingMethod {
-    fn parse_for_ping(value: Option<&Value>) -> Result<Self, String> {
-        match value {
-            None => Ok(PingMethod::Auto),
-            Some(Value::String(method)) => match method.as_str() {
-                "auto" => Ok(PingMethod::Auto),
-                "icmp" => Ok(PingMethod::Icmp),
-                "tcp" => Err(
-                    "ping() does not perform TCP probes; use tcp_connect() for a TCP port check or reachable() for explicit fallback reachability"
-                        .to_string(),
-                ),
-                other => Err(format!(
-                    "ping() method must be 'auto' or 'icmp', got '{}'",
-                    other
-                )),
-            },
-            Some(other) => Err(format!(
-                "ping() option 'method' must be String, got {}",
-                other.type_name()
+fn validate_ping_method(value: Option<&Value>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(Value::String(method)) => match method.as_str() {
+            "auto" | "icmp" => Ok(()),
+            "tcp" => Err(
+                "ping() does not perform TCP probes; use tcp_connect() for a TCP port check or reachable() for explicit fallback reachability"
+                    .to_string(),
+            ),
+            other => Err(format!(
+                "ping() method must be 'auto' or 'icmp', got '{}'",
+                other
             )),
-        }
+        },
+        Some(other) => Err(format!(
+            "ping() option 'method' must be String, got {}",
+            other.type_name()
+        )),
     }
 }
 
@@ -147,11 +137,11 @@ pub fn init() -> HashMap<String, Value> {
             arity: 1,
             max_arity: 1,
             requires: None,
-            func: |args| match string_arg(args, 0, "ip_parse") {
-                Ok(input) => Ok(result_from(
-                    parse_ip(input).map(|parsed| parsed_to_map(&parsed)),
-                )),
-                Err(e) => Err(e),
+            func: |args| {
+                let input = string_arg(args, 0, "ip_parse")?;
+                Ok(result_value(parse_ip(input).map(|parsed| {
+                    Value::Map(parsed_to_map(input.trim(), &parsed))
+                })))
             },
         },
     );
@@ -370,19 +360,10 @@ fn opts_arg<'a>(
     }
 }
 
-fn result_from<T>(result: Result<T, String>) -> Value
-where
-    T: Into<Value>,
-{
+fn result_value(result: Result<Value, String>) -> Value {
     match result {
-        Ok(value) => Value::ok(value.into()),
+        Ok(value) => Value::ok(value),
         Err(err) => Value::err(Value::String(err)),
-    }
-}
-
-impl From<HashMap<String, Value>> for Value {
-    fn from(value: HashMap<String, Value>) -> Self {
-        Value::Map(value)
     }
 }
 
@@ -391,16 +372,10 @@ fn binary_network_bool(
     fn_name: &str,
     op: fn(&Network, &Network) -> bool,
 ) -> Result<Value, IntentError> {
-    let a = match string_arg(args, 0, fn_name) {
-        Ok(s) => s,
-        Err(e) => return Err(e),
-    };
-    let b = match string_arg(args, 1, fn_name) {
-        Ok(s) => s,
-        Err(e) => return Err(e),
-    };
+    let a = string_arg(args, 0, fn_name)?;
+    let b = string_arg(args, 1, fn_name)?;
 
-    Ok(result_from((|| {
+    Ok(result_value((|| {
         let left = parse_ip(a)?.network;
         let right = parse_ip(b)?.network;
         ensure_same_family(&left, &right)?;
@@ -413,7 +388,7 @@ fn subnet_split_fn(args: &[Value]) -> Result<Value, IntentError> {
     let new_prefix = int_arg(args, 1, "subnet_split")?;
     let opts = opts_arg(args, 2, "subnet_split")?;
 
-    Ok(result_from((|| {
+    Ok(result_value((|| {
         let network = parse_ip(cidr)?.network;
         let bits = network.bits();
         if new_prefix < 0 || new_prefix > bits as i64 {
@@ -460,7 +435,7 @@ fn subnet_split_fn(args: &[Value]) -> Result<Value, IntentError> {
 
 fn subnet_supernet_fn(args: &[Value]) -> Result<Value, IntentError> {
     let cidr = string_arg(args, 0, "subnet_supernet")?;
-    Ok(result_from((|| {
+    Ok(result_value((|| {
         let network = parse_ip(cidr)?.network;
         let new_prefix = if args.len() > 1 {
             let explicit = int_arg(args, 1, "subnet_supernet").map_err(|e| e.to_string())?;
@@ -507,7 +482,7 @@ fn subnet_summarize_fn(args: &[Value]) -> Result<Value, IntentError> {
         }
     };
 
-    Ok(result_from((|| {
+    Ok(result_value((|| {
         if values.len() > DEFAULT_MAX_RESULTS {
             return Err(format!(
                 "too many CIDRs: maximum is {}",
@@ -568,7 +543,7 @@ fn ip_range_to_cidrs_fn(args: &[Value]) -> Result<Value, IntentError> {
     let start = string_arg(args, 0, "ip_range_to_cidrs")?;
     let end = string_arg(args, 1, "ip_range_to_cidrs")?;
 
-    Ok(result_from((|| {
+    Ok(result_value((|| {
         let start = parse_ip(start)?;
         let end = parse_ip(end)?;
         if start.network.prefix != start.network.bits() || end.network.prefix != end.network.bits()
@@ -598,8 +573,8 @@ fn ping_fn(args: &[Value]) -> Result<Value, IntentError> {
     let _host = string_arg(args, 0, "ping")?;
     let opts = opts_arg(args, 1, "ping")?;
 
-    Ok(result_from::<Value>((|| {
-        let _method = PingMethod::parse_for_ping(opts.and_then(|m| m.get("method")))?;
+    Ok(result_value((|| {
+        validate_ping_method(opts.and_then(|m| m.get("method")))?;
         Err(icmp_unavailable_message())
     })()))
 }
@@ -609,7 +584,7 @@ fn tcp_connect_fn(args: &[Value]) -> Result<Value, IntentError> {
     let raw_port = int_arg(args, 1, "tcp_connect")?;
     let opts = opts_arg(args, 2, "tcp_connect")?;
 
-    Ok(result_from((|| {
+    Ok(result_value((|| {
         let port = validate_tcp_port_arg(raw_port, "tcp_connect")?;
         let options = parse_probe_options(opts)?;
         let attempts = tcp_reachability_attempts_for_host(
@@ -628,7 +603,7 @@ fn reachable_fn(args: &[Value]) -> Result<Value, IntentError> {
     let host = string_arg(args, 0, "reachable")?;
     let opts = opts_arg(args, 1, "reachable")?;
 
-    Ok(result_from((|| {
+    Ok(result_value((|| {
         let options = parse_probe_options(opts)?;
         let tcp_ports = parse_tcp_ports(opts, "reachable")?;
         let attempts = tcp_reachability_attempts_for_host(
@@ -797,10 +772,16 @@ fn tcp_reachability_result_map(
     let sent = attempts.len();
     let received = attempts.iter().filter(|attempt| attempt.reachable).count();
     let failed = sent.saturating_sub(received);
-    let latencies: Vec<f64> = attempts
-        .iter()
-        .filter_map(|attempt| attempt.latency_ms)
-        .collect();
+    let mut latency_count = 0usize;
+    let mut latency_sum = 0.0;
+    let mut min_ms = f64::INFINITY;
+    let mut max_ms = f64::NEG_INFINITY;
+    for latency_ms in attempts.iter().filter_map(|attempt| attempt.latency_ms) {
+        latency_count += 1;
+        latency_sum += latency_ms;
+        min_ms = min_ms.min(latency_ms);
+        max_ms = max_ms.max(latency_ms);
+    }
 
     let mut result = HashMap::new();
     result.insert("host".to_string(), Value::String(host.to_string()));
@@ -859,10 +840,8 @@ fn tcp_reachability_result_map(
         }
     }
 
-    if !latencies.is_empty() {
-        let min_ms = latencies.iter().copied().fold(f64::INFINITY, f64::min);
-        let max_ms = latencies.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let avg_ms = latencies.iter().sum::<f64>() / latencies.len() as f64;
+    if latency_count > 0 {
+        let avg_ms = latency_sum / latency_count as f64;
         result.insert("min_ms".to_string(), Value::Float(min_ms));
         result.insert("avg_ms".to_string(), Value::Float(avg_ms));
         result.insert("max_ms".to_string(), Value::Float(max_ms));
@@ -964,7 +943,6 @@ fn parse_ip(input: &str) -> Result<ParsedInput, String> {
     let mask = mask_for(family, prefix);
 
     Ok(ParsedInput {
-        input: input.to_string(),
         original_ip,
         network: Network {
             family,
@@ -979,21 +957,20 @@ fn parse_ip(input: &str) -> Result<ParsedInput, String> {
     })
 }
 
-fn parsed_to_map(parsed: &ParsedInput) -> HashMap<String, Value> {
+fn parsed_to_map(input: &str, parsed: &ParsedInput) -> HashMap<String, Value> {
     let network = &parsed.network;
     let ip = ip_to_string(network.family, parsed.original_ip);
     let network_ip = ip_to_string(network.family, network.network);
-    let first = ip_to_string(network.family, network.network);
     let last = ip_to_string(network.family, network.last());
 
     let mut map = HashMap::new();
-    map.insert("input".to_string(), Value::String(input_cidr_or_ip(parsed)));
+    map.insert("input".to_string(), Value::String(input.to_string()));
     map.insert("kind".to_string(), Value::String(parsed.kind.to_string()));
     map.insert("version".to_string(), Value::Int(network.family.version()));
     map.insert("ip".to_string(), Value::String(ip));
     map.insert("prefix".to_string(), Value::Int(network.prefix as i64));
-    map.insert("network".to_string(), Value::String(network_ip));
-    map.insert("first".to_string(), Value::String(first));
+    map.insert("network".to_string(), Value::String(network_ip.clone()));
+    map.insert("first".to_string(), Value::String(network_ip));
     map.insert("last".to_string(), Value::String(last));
     map.insert(
         "total_addresses".to_string(),
@@ -1010,10 +987,6 @@ fn parsed_to_map(parsed: &ParsedInput) -> HashMap<String, Value> {
     }
 
     map
-}
-
-fn input_cidr_or_ip(parsed: &ParsedInput) -> String {
-    parsed.input.clone()
 }
 
 fn add_ipv4_fields(map: &mut HashMap<String, Value>, parsed: &ParsedInput) {
@@ -1254,10 +1227,10 @@ fn parse_u64_option(
 
 fn parse_count_option(opts: Option<&HashMap<String, Value>>) -> Result<usize, String> {
     match opts.and_then(|m| m.get("count")) {
-        None => Ok(DEFAULT_PING_COUNT),
+        None => Ok(DEFAULT_PROBE_COUNT),
         Some(Value::Int(value)) if *value > 0 => {
             let count = usize::try_from(*value).map_err(|_| "option 'count' is too large")?;
-            Ok(min(count, MAX_PING_COUNT))
+            Ok(min(count, MAX_PROBE_COUNT))
         }
         Some(Value::Int(_)) => Err("option 'count' must be positive".to_string()),
         Some(other) => Err(format!(
@@ -1549,14 +1522,14 @@ mod tests {
 
     #[test]
     fn ping_count_is_positive_and_clamped() {
-        assert_eq!(parse_count_option(None).unwrap(), DEFAULT_PING_COUNT);
+        assert_eq!(parse_count_option(None).unwrap(), DEFAULT_PROBE_COUNT);
         assert_eq!(
             parse_count_option(Some(&HashMap::from([(
                 "count".to_string(),
-                Value::Int((MAX_PING_COUNT as i64) + 50),
+                Value::Int((MAX_PROBE_COUNT as i64) + 50),
             )])))
             .unwrap(),
-            MAX_PING_COUNT
+            MAX_PROBE_COUNT
         );
         assert!(parse_count_option(Some(&HashMap::from([
             ("count".to_string(), Value::Int(0),)
