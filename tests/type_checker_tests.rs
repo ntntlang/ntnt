@@ -1109,6 +1109,7 @@ let icmp = ping("example.com", map { "method": "icmp", "timeout_ms": 1000 })
 let tcp = tcp_connect("example.com", 443, map { "timeout_ms": 1000 })
 let reachability = reachable("example.com", map { "tcp_ports": [443], "timeout_ms": 1000 })
 let dns = dns_lookup("example.com", "A", map { "timeout_ms": 1000 })
+let mx_dns = dns_lookup("example.com", "MX", map { "timeout_ms": 1000 })
 let reverse_dns = dns_reverse("8.8.8.8", map { "timeout_ms": 1000 })
 "#;
     let (stdout, _stderr, _exit_code) = lint_code(source);

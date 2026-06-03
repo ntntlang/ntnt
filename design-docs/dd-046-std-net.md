@@ -1,6 +1,6 @@
 # DD-046: `std/net` — Safe Network Primitives for ntnt
 
-**Status:** PR 1 merged; PR 2 DNS A/AAAA/PTR in progress; scan/TLS slices planned
+**Status:** PR 1 merged; PR 2 DNS lookup types in progress; scan/TLS slices planned
 **Author:** Larri
 **Created:** 2026-03-22
 **Updated:** 2026-06-03
@@ -589,20 +589,40 @@ Tests:
 
 ### `dns_lookup(name, record_type?, opts?) -> Result<Array<Map>, String>`
 
-Supported initial record types:
+Supported record types:
 
 - `A`
 - `AAAA`
-- `PTR`
-
-Candidate follow-up record types once the shape is proven:
-
-- `MX`
-- `TXT`
-- `NS`
+- `ANAME`
+- `CAA`
+- `CDNSKEY`
+- `CDS`
 - `CNAME`
+- `CSYNC`
+- `DNSKEY`
+- `DS`
+- `HINFO`
+- `HTTPS`
+- `KEY`
+- `MX`
+- `NAPTR`
+- `NS`
+- `NSEC`
+- `NSEC3`
+- `NSEC3PARAM`
+- `NULL`
+- `OPENPGPKEY`
+- `PTR`
+- `RRSIG`
+- `SIG`
 - `SOA`
 - `SRV`
+- `SSHFP`
+- `SVCB`
+- `TLSA`
+- `TXT`
+
+Operational/meta query types such as `ANY`, `AXFR`, `IXFR`, `OPT`, `TSIG`, and `ZERO` remain unsupported.
 
 ```ntnt
 import { dns_lookup } from "std/net"
@@ -629,14 +649,15 @@ Implementation notes:
 - Build a resolver abstraction or local/mock DNS test fixture before adding many record types.
 - `dns_lookup` uses the system resolver and does not expose custom nameserver configuration in this slice.
 - DNS answers are returned as DNS data; target probing/safety policy still applies to connect-style functions (`tcp_connect`, `reachable`, future `port_scan`) rather than filtering A/AAAA answers from lookup results.
+- Record maps report the actual returned DNS record type. If a resolver includes related records in a response, those records are not relabeled as the requested type.
 - Custom nameserver support is deferred until safety implications are explicit. A `server` option can bypass enterprise DNS policy and should not be a casual Phase 1 feature.
 
 Tests:
 
-- record-type parser
+- record-type parser accepts the supported data-bearing query types and rejects operational/meta/unknown types
 - no-answer behavior
 - invalid type returns `Err`
-- local/mock resolver results for A/AAAA/PTR
+- deterministic result rendering for generic record maps
 - optional external DNS smoke test gated behind env var, not default CI
 
 ---
@@ -772,7 +793,7 @@ SNMP is a real network-monitoring need, but it is its own protocol family. It sh
 As of 2026-06-03:
 
 - [x] **PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability**: merged in [PR #113](https://github.com/ntntlang/ntnt/pull/113).
-- [ ] **PR 2 — DNS A/AAAA/PTR**: in progress on branch `feat/std-net-dns`; adds `dns_lookup` and `dns_reverse` with deterministic tests and opt-in external DNS smoke coverage.
+- [ ] **PR 2 — DNS lookup types**: in progress on branch `feat/std-net-dns`; adds `dns_lookup` and `dns_reverse` with broad supported record types, deterministic tests, and opt-in external DNS smoke coverage.
 - [ ] **PR 3 — Bounded port scan**: planned after DNS.
 - [ ] **PR 4 — TLS info**: planned after port scan/dependency decision.
 
@@ -811,13 +832,13 @@ Acceptance:
 - [x] no new dependency unless clearly justified; any ICMP dependency must preserve no-implicit-TCP-fallback semantics
 - [x] `cargo build --profile dev-release`, `cargo test`, docs generation, example validation pass
 
-### PR 2 — DNS A/AAAA/PTR
+### PR 2 — DNS lookup types
 
 Status: **in progress on `feat/std-net-dns`.**
 
 Scope:
 
-- [x] `dns_lookup`
+- [x] broad supported record-type set for data-bearing DNS lookup records
 - [x] `dns_reverse`
 - [x] `hickory-resolver` dependency decision
 - [x] deterministic parser/result-shaping tests; external DNS smoke coverage gated behind env var
@@ -826,7 +847,7 @@ Acceptance:
 
 - [x] deterministic CI tests
 - [x] no public DNS dependency by default
-- [x] initial records limited to A/AAAA/PTR unless implementation remains small and clean
+- [x] operational/meta records (`ANY`, `AXFR`, `IXFR`, `OPT`, `TSIG`, `ZERO`) rejected rather than treated as ordinary lookup records
 
 ### PR 3 — Bounded port scan
 

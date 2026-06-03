@@ -4,8 +4,12 @@ import { dns_lookup, dns_reverse } from "std/net"
 
 let a_records = dns_lookup("example.com", "A", map { "timeout_ms": 1000 })
 let aaaa_records = dns_lookup("example.com", "AAAA", map { "timeout_ms": 1000 })
+let mx_records = dns_lookup("example.com", "MX", map { "timeout_ms": 1000 })
+let txt_records = dns_lookup("example.com", "TXT", map { "timeout_ms": 1000 })
 let ptr_names = dns_reverse("8.8.8.8", map { "timeout_ms": 1000 })
 
 print(a_records)
 print(aaaa_records)
+print(mx_records)
+print(txt_records)
 print(ptr_names)

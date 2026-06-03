@@ -9694,7 +9694,7 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 
 | Function | Description |
 |----------|-------------|
-| [`dns_lookup`](#dnslookup) | Looks up DNS records for a name. Phase 3 supports A, AAAA, and PTR records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
+| [`dns_lookup`](#dnslookup) | Looks up DNS records for a name. Supports A, AAAA, ANAME, CAA, CDNSKEY, CDS, CNAME, CSYNC, DNSKEY, DS, HINFO, HTTPS, KEY, MX, NAPTR, NS, NSEC, NSEC3, NSEC3PARAM, NULL, OPENPGPKEY, PTR, RRSIG, SIG, SOA, SRV, SSHFP, SVCB, TLSA, and TXT records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
 | [`dns_reverse`](#dnsreverse) | Performs a reverse DNS/PTR lookup for an IPv4 or IPv6 address. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
 | [`ip_parse`](#ipparse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
 | [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
@@ -9713,15 +9713,15 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 dns_lookup(name: String, record_type?: String, opts?: Map) -> Result<Array<Map>, String>
 ```
 
-Looks up DNS records for a name. Phase 3 supports A, AAAA, and PTR records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String).
+Looks up DNS records for a name. Supports A, AAAA, ANAME, CAA, CDNSKEY, CDS, CNAME, CSYNC, DNSKEY, DS, HINFO, HTTPS, KEY, MX, NAPTR, NS, NSEC, NSEC3, NSEC3PARAM, NULL, OPENPGPKEY, PTR, RRSIG, SIG, SOA, SRV, SSHFP, SVCB, TLSA, and TXT records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String).
 
 **Parameters:**
 
 - `name` — DNS name to query
-- `record_type` — Optional DNS record type: A, AAAA, or PTR. Defaults to A.
+- `record_type` — Optional supported DNS record type. Defaults to A.
 - `opts` — Optional map with timeout_ms. When passing opts, include an explicit record_type such as "A".
 
-**Returns:** Result containing an array of records with type, name, value, and ttl
+**Returns:** Result containing an array of records with actual returned type, name, value, and ttl
 
 **Examples:**
 

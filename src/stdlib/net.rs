@@ -4,11 +4,12 @@ use crate::error::IntentError;
 use crate::interpreter::Value;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::error::{ResolveError, ResolveErrorKind};
-use hickory_resolver::proto::rr::{RData, RecordType};
+use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::Resolver;
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -100,46 +101,75 @@ struct ParsedInput {
     kind: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DnsRecordType {
-    A,
-    Aaaa,
-    Ptr,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DnsRecordType {
+    name: String,
+    record_type: RecordType,
 }
 
 impl DnsRecordType {
     fn parse(value: &str) -> Result<Self, String> {
-        match value.to_ascii_uppercase().as_str() {
-            "A" => Ok(Self::A),
-            "AAAA" => Ok(Self::Aaaa),
-            "PTR" => Ok(Self::Ptr),
-            other => Err(format!(
-                "dns_lookup() record_type must be A, AAAA, or PTR, got '{}'",
-                other
-            )),
-        }
+        let name = value.trim().to_ascii_uppercase();
+        let record_type = match RecordType::from_str(&name) {
+            Ok(record_type) if SUPPORTED_DNS_RECORD_TYPES.contains(&name.as_str()) => record_type,
+            _ => return Err(unsupported_dns_record_type(&name)),
+        };
+        Ok(Self { name, record_type })
     }
 
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::A => "A",
-            Self::Aaaa => "AAAA",
-            Self::Ptr => "PTR",
-        }
+    fn as_str(&self) -> &str {
+        &self.name
     }
 
-    fn hickory_type(self) -> RecordType {
-        match self {
-            Self::A => RecordType::A,
-            Self::Aaaa => RecordType::AAAA,
-            Self::Ptr => RecordType::PTR,
-        }
+    fn hickory_type(&self) -> RecordType {
+        self.record_type
     }
+}
+
+const SUPPORTED_DNS_RECORD_TYPES: &[&str] = &[
+    "A",
+    "AAAA",
+    "ANAME",
+    "CAA",
+    "CDNSKEY",
+    "CDS",
+    "CNAME",
+    "CSYNC",
+    "DNSKEY",
+    "DS",
+    "HINFO",
+    "HTTPS",
+    "KEY",
+    "MX",
+    "NAPTR",
+    "NS",
+    "NSEC",
+    "NSEC3",
+    "NSEC3PARAM",
+    "NULL",
+    "OPENPGPKEY",
+    "PTR",
+    "RRSIG",
+    "SIG",
+    "SOA",
+    "SRV",
+    "SSHFP",
+    "SVCB",
+    "TLSA",
+    "TXT",
+];
+
+fn unsupported_dns_record_type(record_type: &str) -> String {
+    format!(
+        "dns_lookup() record_type must be one of {}, got '{}'",
+        SUPPORTED_DNS_RECORD_TYPES.join(", "),
+        record_type
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DnsAnswer {
-    record_type: DnsRecordType,
+    record_type: String,
     name: String,
     value: String,
     ttl: u32,
@@ -367,12 +397,15 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt dns_lookup
     // @module std/net
     // @signature dns_lookup(name: String, record_type?: String, opts?: Map) -> Result<Array<Map>, String>
-    // Looks up DNS records for a name. Phase 3 supports A, AAAA, and PTR records.
+    // Looks up DNS records for a name. Supports A, AAAA, ANAME, CAA, CDNSKEY, CDS,
+    // CNAME, CSYNC, DNSKEY, DS, HINFO, HTTPS, KEY, MX, NAPTR, NS, NSEC,
+    // NSEC3, NSEC3PARAM, NULL, OPENPGPKEY, PTR, RRSIG, SIG, SOA, SRV,
+    // SSHFP, SVCB, TLSA, and TXT records.
     // No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String).
     // @param name DNS name to query
-    // @param record_type Optional DNS record type: A, AAAA, or PTR. Defaults to A.
+    // @param record_type Optional supported DNS record type. Defaults to A.
     // @param opts Optional map with timeout_ms. When passing opts, include an explicit record_type such as "A".
-    // @returns Result containing an array of records with type, name, value, and ttl
+    // @returns Result containing an array of records with actual returned type, name, value, and ttl
     // @since v0.4.10
     // @tags #network
     // @example dns_lookup("example.com", "A") ~ "Look up IPv4 DNS records"
@@ -803,21 +836,16 @@ fn dns_lookup_records(
         let Some(data) = record.data() else {
             continue;
         };
-        let value = match (record_type, data) {
-            (DnsRecordType::A | DnsRecordType::Aaaa, data) => {
-                data.ip_addr().map(|ip| ip.to_string())
-            }
-            (DnsRecordType::Ptr, RData::PTR(ptr)) => Some(ptr.to_utf8()),
-            _ => None,
-        };
-        if let Some(value) = value {
-            answers.push(DnsAnswer {
-                record_type,
-                name: record.name().to_utf8(),
-                value,
-                ttl: record.ttl(),
-            });
-        }
+        let value = data
+            .ip_addr()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| data.to_string());
+        answers.push(DnsAnswer {
+            record_type: record.record_type().to_string(),
+            name: record.name().to_utf8(),
+            value,
+            ttl: record.ttl(),
+        });
     }
     Ok(answers)
 }
@@ -840,10 +868,7 @@ fn dns_answers_to_value(answers: Vec<DnsAnswer>) -> Value {
             .into_iter()
             .map(|answer| {
                 let mut map = HashMap::new();
-                map.insert(
-                    "type".to_string(),
-                    Value::String(answer.record_type.as_str().to_string()),
-                );
+                map.insert("type".to_string(), Value::String(answer.record_type));
                 map.insert("name".to_string(), Value::String(answer.name));
                 map.insert("value".to_string(), Value::String(answer.value));
                 map.insert("ttl".to_string(), Value::Int(answer.ttl as i64));
@@ -1771,28 +1796,76 @@ mod tests {
     }
 
     #[test]
-    fn dns_record_type_parser_accepts_initial_phase_types_only() {
-        assert_eq!(DnsRecordType::parse("a").unwrap(), DnsRecordType::A);
-        assert_eq!(DnsRecordType::parse("AAAA").unwrap(), DnsRecordType::Aaaa);
-        assert_eq!(DnsRecordType::parse("ptr").unwrap(), DnsRecordType::Ptr);
-        assert!(DnsRecordType::parse("MX")
-            .unwrap_err()
-            .contains("A, AAAA, or PTR"));
+    fn dns_record_type_parser_accepts_supported_lookup_types() {
+        for record_type in [
+            "a",
+            "AAAA",
+            "aname",
+            "CAA",
+            "CDNSKEY",
+            "CDS",
+            "CNAME",
+            "CSYNC",
+            "DNSKEY",
+            "DS",
+            "HINFO",
+            "HTTPS",
+            "KEY",
+            "MX",
+            "NAPTR",
+            "NS",
+            "NSEC",
+            "NSEC3",
+            "NSEC3PARAM",
+            "NULL",
+            "OPENPGPKEY",
+            "PTR",
+            "RRSIG",
+            "SIG",
+            "SOA",
+            "SRV",
+            "SSHFP",
+            "SVCB",
+            "TLSA",
+            "TXT",
+        ] {
+            assert_eq!(
+                DnsRecordType::parse(record_type).unwrap().as_str(),
+                record_type.to_ascii_uppercase()
+            );
+        }
+    }
+
+    #[test]
+    fn dns_record_type_parser_rejects_meta_and_unknown_types() {
+        for record_type in ["ANY", "AXFR", "IXFR", "OPT", "TSIG", "ZERO", "BOGUS"] {
+            assert!(DnsRecordType::parse(record_type)
+                .unwrap_err()
+                .contains("record_type must be one of"));
+        }
     }
 
     #[test]
     fn dns_answers_render_stable_record_maps() {
-        let value = dns_answers_to_value(vec![DnsAnswer {
-            record_type: DnsRecordType::A,
-            name: "example.com.".to_string(),
-            value: "93.184.216.34".to_string(),
-            ttl: 300,
-        }]);
+        let value = dns_answers_to_value(vec![
+            DnsAnswer {
+                record_type: "A".to_string(),
+                name: "example.com.".to_string(),
+                value: "93.184.216.34".to_string(),
+                ttl: 300,
+            },
+            DnsAnswer {
+                record_type: "MX".to_string(),
+                name: "example.com.".to_string(),
+                value: "10 mail.example.com.".to_string(),
+                ttl: 600,
+            },
+        ]);
 
         let Value::Array(records) = value else {
             panic!("expected DNS records array");
         };
-        assert_eq!(records.len(), 1);
+        assert_eq!(records.len(), 2);
         let Value::Map(record) = &records[0] else {
             panic!("expected DNS record map");
         };
@@ -1804,6 +1877,15 @@ mod tests {
             matches!(record.get("value"), Some(Value::String(value)) if value == "93.184.216.34")
         );
         assert!(matches!(record.get("ttl"), Some(Value::Int(300))));
+
+        let Value::Map(record) = &records[1] else {
+            panic!("expected DNS record map");
+        };
+        assert!(matches!(record.get("type"), Some(Value::String(value)) if value == "MX"));
+        assert!(
+            matches!(record.get("value"), Some(Value::String(value)) if value == "10 mail.example.com.")
+        );
+        assert!(matches!(record.get("ttl"), Some(Value::Int(600))));
     }
 
     #[test]

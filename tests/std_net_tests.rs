@@ -183,12 +183,12 @@ match subnet_split("2001:db8::/64", 128) {
 }
 
 #[test]
-fn dns_lookup_rejects_unsupported_initial_record_types_as_result_error() {
+fn dns_lookup_rejects_unknown_record_types_as_result_error() {
     let (stdout, stderr, code) = run_ntnt_code(
         r#"
 import { dns_lookup } from "std/net"
 
-match dns_lookup("example.com", "MX", map { "timeout_ms": 100 }) {
+match dns_lookup("example.com", "BOGUS", map { "timeout_ms": 100 }) {
     Ok(records) => print("unexpected"),
     Err(e) => print(e)
 }
@@ -196,7 +196,29 @@ match dns_lookup("example.com", "MX", map { "timeout_ms": 100 }) {
     );
 
     assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
-    assert!(stdout.contains("A, AAAA, or PTR"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("record_type must be one of"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn dns_lookup_rejects_operational_meta_record_types_as_result_error() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { dns_lookup } from "std/net"
+
+for record_type in ["ANY", "AXFR", "IXFR", "OPT", "TSIG", "ZERO"] {
+    match dns_lookup("example.com", record_type, map { "timeout_ms": 100 }) {
+        Ok(records) => print("unexpected"),
+        Err(e) => print(contains(e, "record_type must be one of"))
+    }
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert_eq!(stdout.matches("true").count(), 6, "stdout: {stdout}");
 }
 
 #[test]

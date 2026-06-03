@@ -1004,10 +1004,12 @@ let reachability = reachable("example.com", map {
 
 `tcp_connect()` and `reachable()` support optional `count` (1-10), `timeout_ms`, and `interval_ms`, returning per-attempt results plus `sent`, `received`, `failed`, and `loss_percent` summary fields.
 
-`dns_lookup(name, record_type?, opts?)` supports `A`, `AAAA`, and `PTR` records in this slice. It returns `Ok([])` for ordinary no-answer DNS responses and `Err(String)` for invalid record types, invalid options, resolver configuration failures, or DNS transport failures. `dns_reverse(ip, opts?)` returns all PTR names as an array because PTR can legitimately have zero, one, or multiple names.
+`dns_lookup(name, record_type?, opts?)` supports common data-bearing DNS record types, including `A`, `AAAA`, `MX`, `TXT`, `NS`, `CNAME`, `SOA`, `SRV`, `CAA`, `TLSA`, `HTTPS`, and `SVCB`. It returns `Ok([])` for ordinary no-answer DNS responses and `Err(String)` for invalid record types, invalid options, resolver configuration failures, or DNS transport failures. Record maps use the actual returned DNS type, so a resolver response that includes related records reports those records honestly instead of relabeling everything as the requested type. `dns_reverse(ip, opts?)` returns all PTR names as an array because PTR can legitimately have zero, one, or multiple names.
 
 ```ntnt
 let a_records = dns_lookup("example.com", "A", map { "timeout_ms": 1000 })
+let mx_records = dns_lookup("example.com", "MX", map { "timeout_ms": 1000 })
+let txt_records = dns_lookup("example.com", "TXT", map { "timeout_ms": 1000 })
 let ptr_names = dns_reverse("8.8.8.8", map { "timeout_ms": 1000 })
 ```
 
