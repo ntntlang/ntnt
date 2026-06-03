@@ -9719,7 +9719,7 @@ Looks up DNS records for a name. Phase 3 supports A, AAAA, and PTR records. No-a
 
 - `name` — DNS name to query
 - `record_type` — Optional DNS record type: A, AAAA, or PTR. Defaults to A.
-- `opts` — Optional map with timeout_ms
+- `opts` — Optional map with timeout_ms. When passing opts, include an explicit record_type such as "A".
 
 **Returns:** Result containing an array of records with type, name, value, and ttl
 
