@@ -256,7 +256,10 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/net
     // @signature ping(host: String, opts?: Map) -> Result<Map, String>
     // Performs a first-shot host reachability probe. The default auto method uses
-    // unprivileged TCP fallback when ICMP is unavailable.
+    // unprivileged TCP fallback when ICMP is unavailable. Private targets require
+    // both process and call-level opt-in; special-purpose targets such as cloud
+    // metadata, multicast, broadcast, unspecified, and documentation ranges are
+    // never allowed.
     // @since v0.4.10
     // @tags #network
     module.insert(
@@ -837,6 +840,7 @@ struct IpClassification {
     is_unspecified: bool,
     is_documentation: bool,
     is_broadcast: bool,
+    is_metadata_endpoint: bool,
     is_unique_local: bool,
 }
 
@@ -850,6 +854,7 @@ fn classify_ip(ip: IpAddr) -> IpClassification {
             is_unspecified: ip.is_unspecified(),
             is_documentation: is_ipv4_documentation(ip),
             is_broadcast: ip.is_broadcast(),
+            is_metadata_endpoint: is_ipv4_metadata_endpoint(ip),
             is_unique_local: false,
         },
         IpAddr::V6(ip) => {
@@ -868,6 +873,7 @@ fn classify_ip(ip: IpAddr) -> IpClassification {
                 is_unspecified: ip.is_unspecified(),
                 is_documentation,
                 is_broadcast: false,
+                is_metadata_endpoint: is_ipv6_metadata_endpoint(ip),
                 is_unique_local,
             }
         }
@@ -882,16 +888,32 @@ fn is_ipv4_documentation(ip: Ipv4Addr) -> bool {
     )
 }
 
+fn is_ipv4_metadata_endpoint(ip: Ipv4Addr) -> bool {
+    ip.octets() == [169, 254, 169, 254]
+}
+
+fn is_ipv6_metadata_endpoint(ip: Ipv6Addr) -> bool {
+    ip.segments() == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254]
+}
+
 fn enforce_target_policy(ip: IpAddr, allow_private: bool) -> Result<(), String> {
     let classification = classify_ip(ip);
-    let denied_by_default = classification.is_private
-        || classification.is_loopback
-        || classification.is_link_local
+    let never_allowed = classification.is_metadata_endpoint
         || classification.is_unspecified
         || classification.is_multicast
         || classification.is_documentation
         || classification.is_broadcast;
-    if !denied_by_default {
+    if never_allowed {
+        return Err(
+            "Network target denied by policy: special-purpose targets are not allowed".to_string(),
+        );
+    }
+
+    let private_target = classification.is_private
+        || classification.is_loopback
+        || classification.is_link_local
+        || classification.is_unique_local;
+    if !private_target {
         return Ok(());
     }
     if !allow_private || !process_allows_private_targets() {
@@ -1167,6 +1189,26 @@ mod tests {
         assert!(enforce_resolved_target_policy(&[(80, documentation)], false).is_err());
         assert!(enforce_resolved_target_policy(&[(80, broadcast)], false).is_err());
         assert!(enforce_resolved_target_policy(&[(80, mapped_broadcast)], false).is_err());
+    }
+
+    #[test]
+    fn target_policy_never_allows_metadata_or_special_ranges() {
+        let metadata = "169.254.169.254:80".parse::<SocketAddr>().unwrap();
+        let mapped_metadata = "[::ffff:169.254.169.254]:80".parse::<SocketAddr>().unwrap();
+        let multicast = "224.0.0.1:80".parse::<SocketAddr>().unwrap();
+        let documentation = "192.0.2.1:80".parse::<SocketAddr>().unwrap();
+        let broadcast = "255.255.255.255:80".parse::<SocketAddr>().unwrap();
+
+        for target in [
+            metadata,
+            mapped_metadata,
+            multicast,
+            documentation,
+            broadcast,
+        ] {
+            let err = enforce_resolved_target_policy(&[(80, target)], true).unwrap_err();
+            assert!(err.contains("special-purpose targets are not allowed"));
+        }
     }
 
     #[test]

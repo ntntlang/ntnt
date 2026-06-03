@@ -293,3 +293,57 @@ match ping("::ffff:255.255.255.255", map { "method": "tcp", "tcp_ports": [9], "t
         "stdout: {stdout}"
     );
 }
+
+#[test]
+fn ping_rejects_never_allowed_targets_even_with_private_opt_in() {
+    let (stdout, stderr, code) = run_ntnt_code_with_env(
+        r#"
+import { ping } from "std/net"
+
+match ping("169.254.169.254", map { "allow_private": true, "method": "tcp", "tcp_ports": [80], "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected metadata"),
+    Err(e) => print("metadata=" + e)
+}
+
+match ping("::ffff:169.254.169.254", map { "allow_private": true, "method": "tcp", "tcp_ports": [80], "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected mapped metadata"),
+    Err(e) => print("mapped_metadata=" + e)
+}
+
+match ping("224.0.0.1", map { "allow_private": true, "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected multicast"),
+    Err(e) => print("multicast=" + e)
+}
+
+match ping("255.255.255.255", map { "allow_private": true, "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected broadcast"),
+    Err(e) => print("broadcast=" + e)
+}
+"#,
+        &[("NTNT_NET_ALLOW_PRIVATE", "1")],
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains(
+            "metadata=Network target denied by policy: special-purpose targets are not allowed"
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("mapped_metadata=Network target denied by policy: special-purpose targets are not allowed"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "multicast=Network target denied by policy: special-purpose targets are not allowed"
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "broadcast=Network target denied by policy: special-purpose targets are not allowed"
+        ),
+        "stdout: {stdout}"
+    );
+}

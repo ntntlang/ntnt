@@ -156,6 +156,7 @@ That option should only work when the process-level config also allows private t
 - Loopback/private/link-local target: denied by default in all server/runtime modes.
 - Loopback/private/link-local target with `allow_private: true` but no process-level opt-in: `Err("Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1")`.
 - Loopback/private/link-local target with process-level opt-in and `allow_private: true`: allowed.
+- Cloud metadata, multicast, broadcast, unspecified, and documentation targets: never allowed, even with private-network opt-in.
 - User-controlled target strings in public web apps: still the app's responsibility to validate input, but stdlib policy blocks the worst SSRF targets by default.
 
 This keeps the first-shot developer experience clean for the common public-host case while making internal monitoring a visible deployment choice, not a hidden code-path surprise.
@@ -306,7 +307,7 @@ Recommended fields:
 - `netmask`: IPv4 dotted-quad for IPv4 networks
 - `wildcard_mask`: IPv4 dotted-quad for IPv4 networks
 - `reverse_zone`: reverse DNS zone for CIDR prefixes that align cleanly on nibble/octet boundaries; otherwise `None`
-- classification booleans: `is_private`, `is_loopback`, `is_link_local`, `is_multicast`, `is_unspecified`, `is_documentation`, `is_unique_local`
+- classification booleans: `is_private`, `is_loopback`, `is_link_local`, `is_multicast`, `is_unspecified`, `is_documentation`, `is_broadcast`, `is_unique_local`
 
 ### `subnet_contains(cidr, ip_or_cidr) -> Result<Bool, String>`
 

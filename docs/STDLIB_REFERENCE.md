@@ -9696,7 +9696,7 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 |----------|-------------|
 | [`ip_parse`](#ipparse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
 | [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
-| [`ping`](#ping) | Performs a first-shot host reachability probe. The default auto method uses unprivileged TCP fallback when ICMP is unavailable. |
+| [`ping`](#ping) | Performs a first-shot host reachability probe. The default auto method uses unprivileged TCP fallback when ICMP is unavailable. Private targets require both process and call-level opt-in; special-purpose targets such as cloud metadata, multicast, broadcast, unspecified, and documentation ranges are never allowed. |
 | [`subnet_contains`](#subnetcontains) | Returns true when the parent CIDR contains the entire child address or subnet. |
 | [`subnet_overlaps`](#subnetoverlaps) | Returns true when two IPv4 or IPv6 CIDRs overlap. |
 | [`subnet_split`](#subnetsplit) | Splits a CIDR into child subnets with a longer prefix, enforcing result caps. |
@@ -9745,7 +9745,7 @@ Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover.
 ping(host: String, opts?: Map) -> Result<Map, String>
 ```
 
-Performs a first-shot host reachability probe. The default auto method uses unprivileged TCP fallback when ICMP is unavailable.
+Performs a first-shot host reachability probe. The default auto method uses unprivileged TCP fallback when ICMP is unavailable. Private targets require both process and call-level opt-in; special-purpose targets such as cloud metadata, multicast, broadcast, unspecified, and documentation ranges are never allowed.
 
 *Since v0.4.10*
 
