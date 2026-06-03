@@ -305,9 +305,19 @@ match ping("169.254.169.254", map { "allow_private": true, "method": "tcp", "tcp
     Err(e) => print("metadata=" + e)
 }
 
+match ping("169.254.170.2", map { "allow_private": true, "method": "tcp", "tcp_ports": [80], "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected ecs metadata"),
+    Err(e) => print("ecs_metadata=" + e)
+}
+
 match ping("::ffff:169.254.169.254", map { "allow_private": true, "method": "tcp", "tcp_ports": [80], "timeout_ms": 100 }) {
     Ok(info) => print("unexpected mapped metadata"),
     Err(e) => print("mapped_metadata=" + e)
+}
+
+match ping("::ffff:169.254.170.2", map { "allow_private": true, "method": "tcp", "tcp_ports": [80], "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected mapped ecs metadata"),
+    Err(e) => print("mapped_ecs_metadata=" + e)
 }
 
 match ping("224.0.0.1", map { "allow_private": true, "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
@@ -331,7 +341,17 @@ match ping("255.255.255.255", map { "allow_private": true, "method": "tcp", "tcp
         "stdout: {stdout}"
     );
     assert!(
+        stdout.contains(
+            "ecs_metadata=Network target denied by policy: special-purpose targets are not allowed"
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(
         stdout.contains("mapped_metadata=Network target denied by policy: special-purpose targets are not allowed"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("mapped_ecs_metadata=Network target denied by policy: special-purpose targets are not allowed"),
         "stdout: {stdout}"
     );
     assert!(

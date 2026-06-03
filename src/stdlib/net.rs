@@ -889,7 +889,7 @@ fn is_ipv4_documentation(ip: Ipv4Addr) -> bool {
 }
 
 fn is_ipv4_metadata_endpoint(ip: Ipv4Addr) -> bool {
-    ip.octets() == [169, 254, 169, 254]
+    matches!(ip.octets(), [169, 254, 169, 254] | [169, 254, 170, 2])
 }
 
 fn is_ipv6_metadata_endpoint(ip: Ipv6Addr) -> bool {
@@ -1194,14 +1194,18 @@ mod tests {
     #[test]
     fn target_policy_never_allows_metadata_or_special_ranges() {
         let metadata = "169.254.169.254:80".parse::<SocketAddr>().unwrap();
+        let ecs_metadata = "169.254.170.2:80".parse::<SocketAddr>().unwrap();
         let mapped_metadata = "[::ffff:169.254.169.254]:80".parse::<SocketAddr>().unwrap();
+        let mapped_ecs_metadata = "[::ffff:169.254.170.2]:80".parse::<SocketAddr>().unwrap();
         let multicast = "224.0.0.1:80".parse::<SocketAddr>().unwrap();
         let documentation = "192.0.2.1:80".parse::<SocketAddr>().unwrap();
         let broadcast = "255.255.255.255:80".parse::<SocketAddr>().unwrap();
 
         for target in [
             metadata,
+            ecs_metadata,
             mapped_metadata,
+            mapped_ecs_metadata,
             multicast,
             documentation,
             broadcast,
