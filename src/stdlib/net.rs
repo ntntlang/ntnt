@@ -98,22 +98,24 @@ struct ParsedInput {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReachabilityMethod {
+enum PingMethod {
     Auto,
     Icmp,
-    Tcp,
 }
 
-impl ReachabilityMethod {
-    fn parse(value: Option<&Value>) -> Result<Self, String> {
+impl PingMethod {
+    fn parse_for_ping(value: Option<&Value>) -> Result<Self, String> {
         match value {
-            None => Ok(ReachabilityMethod::Auto),
+            None => Ok(PingMethod::Auto),
             Some(Value::String(method)) => match method.as_str() {
-                "auto" => Ok(ReachabilityMethod::Auto),
-                "icmp" => Ok(ReachabilityMethod::Icmp),
-                "tcp" => Ok(ReachabilityMethod::Tcp),
+                "auto" => Ok(PingMethod::Auto),
+                "icmp" => Ok(PingMethod::Icmp),
+                "tcp" => Err(
+                    "ping() does not perform TCP probes; use tcp_connect() for a TCP port check or reachable() for explicit fallback reachability"
+                        .to_string(),
+                ),
                 other => Err(format!(
-                    "ping() method must be 'auto', 'icmp', or 'tcp', got '{}'",
+                    "ping() method must be 'auto' or 'icmp', got '{}'",
                     other
                 )),
             },
@@ -259,12 +261,10 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt ping
     // @module std/net
     // @signature ping(host: String, opts?: Map) -> Result<Map, String>
-    // Performs a bounded host reachability probe. Phase 1 does not silently fall
-    // back from ICMP ping to TCP ports; apps that intentionally want TCP
-    // reachability must request method: "tcp" and provide tcp_ports explicitly.
-    // Private targets require both process and call-level opt-in; special-purpose
-    // targets such as cloud metadata, multicast, broadcast, unspecified, and
-    // documentation ranges are never allowed.
+    // Performs an ICMP ping when ICMP support is available. It is protocol-honest:
+    // ping() does not fall back to TCP ports. Apps that want TCP port checks should
+    // use tcp_connect(); apps that want explicit ICMP-then-TCP reachability should
+    // use reachable().
     // @since v0.4.10
     // @tags #network
     module.insert(
@@ -275,6 +275,53 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             requires: None,
             func: ping_fn,
+        },
+    );
+
+    // @ntnt tcp_connect
+    // @module std/net
+    // @signature tcp_connect(host: String, port: Int, opts?: Map) -> Result<Map, String>
+    // Performs a bounded TCP connect probe to one explicit port. Closed, refused,
+    // or timed-out ports return Ok(map { "connected": false, ... }); invalid input,
+    // policy denial, and resolver/system failures return Err(String).
+    // @param host Hostname or IP address to resolve and probe
+    // @param port TCP port from 1 to 65535
+    // @param opts Optional map with timeout_ms, count, interval_ms, and allow_private
+    // @returns Result containing connection status, latency summary, and per-attempt results
+    // @since v0.4.10
+    // @tags #network
+    // @example tcp_connect("example.com", 443) ~ "Check whether TCP 443 accepts connections"
+    module.insert(
+        "tcp_connect".to_string(),
+        Value::NativeFunction {
+            name: "tcp_connect".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: tcp_connect_fn,
+        },
+    );
+
+    // @ntnt reachable
+    // @module std/net
+    // @signature reachable(host: String, opts?: Map) -> Result<Map, String>
+    // Performs an explicit high-level reachability check. Phase 1 has no ICMP
+    // implementation, so TCP fallback requires caller-provided tcp_ports; the result
+    // records method and fallback_from instead of pretending TCP is ping.
+    // @param host Hostname or IP address to resolve and probe
+    // @param opts Optional map with tcp_ports, timeout_ms, count, interval_ms, and allow_private
+    // @returns Result containing reachability status, method used, fallback metadata, and attempt summary
+    // @since v0.4.10
+    // @tags #network
+    // @example reachable("example.com", map { "tcp_ports": [443], "count": 5 }) ~ "Check host reachability with explicit TCP fallback"
+    module.insert(
+        "reachable".to_string(),
+        Value::NativeFunction {
+            name: "reachable".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: reachable_fn,
         },
     );
 
@@ -548,39 +595,91 @@ fn ip_range_to_cidrs_fn(args: &[Value]) -> Result<Value, IntentError> {
 }
 
 fn ping_fn(args: &[Value]) -> Result<Value, IntentError> {
-    let host = string_arg(args, 0, "ping")?;
+    let _host = string_arg(args, 0, "ping")?;
     let opts = opts_arg(args, 1, "ping")?;
 
-    Ok(result_from((|| {
-        let method = ReachabilityMethod::parse(opts.and_then(|m| m.get("method")))?;
-        let allow_private = parse_bool_option(opts, "allow_private", false)?;
-        let timeout_ms = parse_u64_option(opts, "timeout_ms", DEFAULT_TIMEOUT_MS)?
-            .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
-        let count = parse_count_option(opts)?;
-        let interval_ms = parse_u64_option(opts, "interval_ms", DEFAULT_INTERVAL_MS)?
-            .clamp(DEFAULT_INTERVAL_MS, MAX_INTERVAL_MS);
+    Ok(result_from::<Value>((|| {
+        let _method = PingMethod::parse_for_ping(opts.and_then(|m| m.get("method")))?;
+        Err(icmp_unavailable_message())
+    })()))
+}
 
-        match method {
-            ReachabilityMethod::Auto | ReachabilityMethod::Icmp => Err(icmp_unavailable_message()),
-            ReachabilityMethod::Tcp => {
-                let tcp_ports = parse_tcp_ports(opts)?;
-                let attempts = tcp_reachability_attempts_for_host(
-                    host,
-                    &tcp_ports,
-                    Duration::from_millis(timeout_ms),
-                    count,
-                    Duration::from_millis(interval_ms),
-                    allow_private,
-                )?;
-                Ok(Value::Map(tcp_ping_result_map(host, &tcp_ports, &attempts)))
-            }
-        }
+fn tcp_connect_fn(args: &[Value]) -> Result<Value, IntentError> {
+    let host = string_arg(args, 0, "tcp_connect")?;
+    let raw_port = int_arg(args, 1, "tcp_connect")?;
+    let opts = opts_arg(args, 2, "tcp_connect")?;
+
+    Ok(result_from((|| {
+        let port = validate_tcp_port_arg(raw_port, "tcp_connect")?;
+        let options = parse_probe_options(opts)?;
+        let attempts = tcp_reachability_attempts_for_host(
+            host,
+            &[port],
+            options.timeout,
+            options.count,
+            options.interval,
+            options.allow_private,
+        )?;
+        Ok(Value::Map(tcp_connect_result_map(host, port, &attempts)))
+    })()))
+}
+
+fn reachable_fn(args: &[Value]) -> Result<Value, IntentError> {
+    let host = string_arg(args, 0, "reachable")?;
+    let opts = opts_arg(args, 1, "reachable")?;
+
+    Ok(result_from((|| {
+        let options = parse_probe_options(opts)?;
+        let tcp_ports = parse_tcp_ports(opts, "reachable")?;
+        let attempts = tcp_reachability_attempts_for_host(
+            host,
+            &tcp_ports,
+            options.timeout,
+            options.count,
+            options.interval,
+            options.allow_private,
+        )?;
+        Ok(Value::Map(reachable_result_map(
+            host, &tcp_ports, &attempts,
+        )))
     })()))
 }
 
 fn icmp_unavailable_message() -> String {
-    "ICMP ping unavailable: std/net does not fall back to TCP automatically. Use method: 'tcp' with explicit tcp_ports only when the app intentionally wants TCP reachability instead of ICMP ping."
+    "ICMP ping unavailable: std/net does not fall back to TCP automatically. Use tcp_connect() for explicit TCP port checks or reachable(..., map { 'tcp_ports': [...] }) for explicit reachability fallback."
         .to_string()
+}
+
+struct ProbeOptions {
+    timeout: Duration,
+    count: usize,
+    interval: Duration,
+    allow_private: bool,
+}
+
+fn parse_probe_options(opts: Option<&HashMap<String, Value>>) -> Result<ProbeOptions, String> {
+    let allow_private = parse_bool_option(opts, "allow_private", false)?;
+    let timeout_ms = parse_u64_option(opts, "timeout_ms", DEFAULT_TIMEOUT_MS)?
+        .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+    let count = parse_count_option(opts)?;
+    let interval_ms = parse_u64_option(opts, "interval_ms", DEFAULT_INTERVAL_MS)?
+        .clamp(DEFAULT_INTERVAL_MS, MAX_INTERVAL_MS);
+    Ok(ProbeOptions {
+        timeout: Duration::from_millis(timeout_ms),
+        count,
+        interval: Duration::from_millis(interval_ms),
+        allow_private,
+    })
+}
+
+fn validate_tcp_port_arg(port: i64, fn_name: &str) -> Result<u16, String> {
+    if !(1..=65_535).contains(&port) {
+        return Err(format!(
+            "{}() port must be between 1 and 65535, got {}",
+            fn_name, port
+        ));
+    }
+    Ok(port as u16)
 }
 
 #[derive(Debug)]
@@ -588,6 +687,8 @@ struct TcpProbeResult {
     reachable: bool,
     connected_port: Option<u16>,
     latency_ms: Option<f64>,
+    remote_addr: Option<String>,
+    local_addr: Option<String>,
     reason: String,
 }
 
@@ -628,6 +729,8 @@ fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> Tc
             reachable: false,
             connected_port: None,
             latency_ms: None,
+            remote_addr: None,
+            local_addr: None,
             reason: "no resolved addresses".to_string(),
         };
     }
@@ -637,11 +740,15 @@ fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> Tc
         let start = Instant::now();
         match TcpStream::connect_timeout(addr, timeout) {
             Ok(stream) => {
+                let remote_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
+                let local_addr = stream.local_addr().ok().map(|addr| addr.to_string());
                 drop(stream);
                 return TcpProbeResult {
                     reachable: true,
                     connected_port: Some(*port),
                     latency_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
+                    remote_addr,
+                    local_addr,
                     reason: "connected".to_string(),
                 };
             }
@@ -654,6 +761,8 @@ fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> Tc
         reachable: false,
         connected_port: None,
         latency_ms: None,
+        remote_addr: None,
+        local_addr: None,
         reason: last_reason,
     }
 }
@@ -680,7 +789,7 @@ fn enforce_resolved_target_policy(
     Ok(())
 }
 
-fn tcp_ping_result_map(
+fn tcp_reachability_result_map(
     host: &str,
     ports: &[u16],
     attempts: &[TcpProbeResult],
@@ -726,6 +835,20 @@ fn tcp_ping_result_map(
                 .map(|port| Value::Int(port as i64))
                 .unwrap_or_else(Value::none),
         );
+        result.insert(
+            "remote_addr".to_string(),
+            first_success
+                .remote_addr
+                .clone()
+                .map_or_else(Value::none, Value::String),
+        );
+        result.insert(
+            "local_addr".to_string(),
+            first_success
+                .local_addr
+                .clone()
+                .map_or_else(Value::none, Value::String),
+        );
     } else {
         result.insert("connected_port".to_string(), Value::none());
         if let Some(last_failure) = attempts.last() {
@@ -751,6 +874,32 @@ fn tcp_ping_result_map(
     result
 }
 
+fn tcp_connect_result_map(
+    host: &str,
+    port: u16,
+    attempts: &[TcpProbeResult],
+) -> HashMap<String, Value> {
+    let mut result = tcp_reachability_result_map(host, &[port], attempts);
+    let connected = attempts.iter().any(|attempt| attempt.reachable);
+    result.insert("port".to_string(), Value::Int(port as i64));
+    result.insert("connected".to_string(), Value::Bool(connected));
+    result
+}
+
+fn reachable_result_map(
+    host: &str,
+    ports: &[u16],
+    attempts: &[TcpProbeResult],
+) -> HashMap<String, Value> {
+    let mut result = tcp_reachability_result_map(host, ports, attempts);
+    result.insert(
+        "fallback_from".to_string(),
+        Value::String("icmp".to_string()),
+    );
+    result.insert("permission_limited".to_string(), Value::Bool(true));
+    result
+}
+
 fn tcp_attempt_to_value(attempt: &TcpProbeResult) -> Value {
     let mut map = HashMap::new();
     map.insert("reachable".to_string(), Value::Bool(attempt.reachable));
@@ -764,6 +913,15 @@ fn tcp_attempt_to_value(attempt: &TcpProbeResult) -> Value {
     );
     if let Some(latency_ms) = attempt.latency_ms {
         map.insert("latency_ms".to_string(), Value::Float(latency_ms));
+    }
+    if let Some(remote_addr) = &attempt.remote_addr {
+        map.insert(
+            "remote_addr".to_string(),
+            Value::String(remote_addr.clone()),
+        );
+    }
+    if let Some(local_addr) = &attempt.local_addr {
+        map.insert("local_addr".to_string(), Value::String(local_addr.clone()));
     }
     if !attempt.reachable {
         map.insert("reason".to_string(), Value::String(attempt.reason.clone()));
@@ -1109,31 +1267,40 @@ fn parse_count_option(opts: Option<&HashMap<String, Value>>) -> Result<usize, St
     }
 }
 
-fn parse_tcp_ports(opts: Option<&HashMap<String, Value>>) -> Result<Vec<u16>, String> {
+fn parse_tcp_ports(
+    opts: Option<&HashMap<String, Value>>,
+    fn_name: &str,
+) -> Result<Vec<u16>, String> {
     let Some(value) = opts.and_then(|m| m.get("tcp_ports")) else {
-        return Err("option 'tcp_ports' is required when ping method is 'tcp'".to_string());
+        return Err(format!(
+            "{}() option 'tcp_ports' is required for explicit TCP reachability fallback",
+            fn_name
+        ));
     };
     let Value::Array(values) = value else {
-        return Err("option 'tcp_ports' must be Array<Int>".to_string());
+        return Err(format!(
+            "{}() option 'tcp_ports' must be Array<Int>",
+            fn_name
+        ));
     };
     if values.is_empty() {
-        return Err("option 'tcp_ports' cannot be empty".to_string());
+        return Err(format!("{}() option 'tcp_ports' cannot be empty", fn_name));
     }
     if values.len() > MAX_TCP_PORTS {
         return Err(format!(
-            "option 'tcp_ports' supports at most {} ports",
-            MAX_TCP_PORTS
+            "{}() option 'tcp_ports' supports at most {} ports",
+            fn_name, MAX_TCP_PORTS
         ));
     }
     let mut ports = Vec::with_capacity(values.len());
     for value in values {
         let Value::Int(port) = value else {
-            return Err("option 'tcp_ports' must be Array<Int>".to_string());
+            return Err(format!(
+                "{}() option 'tcp_ports' must be Array<Int>",
+                fn_name
+            ));
         };
-        if *port < 1 || *port > 65_535 {
-            return Err(format!("invalid TCP port: {}", port));
-        }
-        let port = *port as u16;
+        let port = validate_tcp_port_arg(*port, fn_name)?;
         if !ports.contains(&port) {
             ports.push(port);
         }
@@ -1367,7 +1534,7 @@ mod tests {
     }
 
     #[test]
-    fn ping_tcp_requires_explicit_ports() {
+    fn ping_tcp_method_points_to_tcp_connect_or_reachable() {
         let result = ping_fn(&[
             Value::String("example.com".to_string()),
             Value::Map(HashMap::from([(
@@ -1377,7 +1544,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_result_err_contains(result, "tcp_ports");
+        assert_result_err_contains(result, "use tcp_connect()");
     }
 
     #[test]
@@ -1419,7 +1586,7 @@ mod tests {
         assert_eq!(attempts.len(), count);
         assert!(attempts.iter().all(|attempt| attempt.reachable));
 
-        let summary = tcp_ping_result_map("127.0.0.1", &[addr.port()], &attempts);
+        let summary = tcp_reachability_result_map("127.0.0.1", &[addr.port()], &attempts);
         assert!(matches!(summary.get("sent"), Some(Value::Int(3))));
         assert!(matches!(summary.get("received"), Some(Value::Int(3))));
         assert!(matches!(summary.get("failed"), Some(Value::Int(0))));

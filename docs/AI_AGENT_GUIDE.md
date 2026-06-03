@@ -972,31 +972,35 @@ Both `fetch(map { "url": url, ... })` and `fetch(url, map { ... })` work. The tw
 
 ### Network/IPAM Helpers (`std/net`)
 
-`std/net` provides deterministic IPv4/IPv6 CIDR helpers plus a first-shot reachability probe:
+`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, and a high-level reachability helper:
 
 ```ntnt
-import { ip_parse, subnet_contains, subnet_split, subnet_summarize, ping } from "std/net"
+import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, reachable } from "std/net"
 
 let info = unwrap(ip_parse("192.168.1.0/24"))
 let contains = unwrap(subnet_contains("10.0.0.0/8", "10.42.0.0/16"))
 let children = unwrap(subnet_split("192.168.1.0/24", 28))
 let summary = unwrap(subnet_summarize(["10.0.0.0/25", "10.0.0.128/25"]))
-let reachability = unwrap(ping("example.com"))
+let tcp = unwrap(tcp_connect("example.com", 443))
+let reachability = unwrap(reachable("example.com", map { "tcp_ports": [443] }))
 ```
 
 These helpers return `Result<..., String>`; use `unwrap(...)` for quick scripts/examples, or `match`/`otherwise` when the app should handle invalid input or policy denial.
 
 `ip_parse()` supports IPv4 and IPv6. Large IPv6 address counts are returned as strings so `/64` and larger networks do not overflow integer values.
 
-`ping()` defaults to `method: "auto"` and does **not** silently fall back to TCP ports. In Phase 1, unsupported ICMP returns `Err(String)` with guidance. If an app intentionally wants TCP reachability instead of ICMP ping, pass `method: "tcp"` with explicit `tcp_ports` and optional `count` (1-10) to get per-attempt results plus `sent`, `received`, `failed`, and `loss_percent` summary fields.
+`ping()` is ICMP-only and does **not** silently fall back to TCP ports. In Phase 1, unsupported ICMP returns `Err(String)` with guidance. If an app intentionally wants a TCP port check, use `tcp_connect(host, port, opts?)`. If it wants a high-level “is this host reachable somehow?” check, use `reachable(host, opts?)` with explicit `tcp_ports` so the result can honestly report `method: "tcp"` and `fallback_from: "icmp"`.
 
 ```ntnt
-let tcp_reachability = ping("example.com", map {
-    "method": "tcp",
+let tcp = tcp_connect("example.com", 443, map { "count": 5 })
+
+let reachability = reachable("example.com", map {
     "tcp_ports": [443],
     "count": 5
 })
 ```
+
+`tcp_connect()` and `reachable()` support optional `count` (1-10), `timeout_ms`, and `interval_ms`, returning per-attempt results plus `sent`, `received`, `failed`, and `loss_percent` summary fields.
 
 Private/internal targets are denied by default. Monitoring apps must opt in at process scope **and** call scope:
 
@@ -1005,7 +1009,7 @@ NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
 ```
 
 ```ntnt
-let result = ping("10.0.0.5", map { "allow_private": true })
+let result = tcp_connect("10.0.0.5", 443, map { "allow_private": true })
 ```
 
 Special-purpose and high-risk targets such as cloud metadata endpoints, multicast, broadcast, unspecified, and documentation ranges remain blocked even with private-network opt-in.

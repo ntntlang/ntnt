@@ -186,7 +186,7 @@ match subnet_split("2001:db8::/64", 128) {
 }
 
 #[test]
-fn ping_tcp_method_uses_explicit_ports_and_multiple_attempts() {
+fn tcp_connect_uses_explicit_port_and_multiple_attempts() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
     let port = listener.local_addr().unwrap().port();
     let count = 3;
@@ -198,13 +198,16 @@ fn ping_tcp_method_uses_explicit_ports_and_multiple_attempts() {
 
     let code = format!(
         r#"
-import {{ ping }} from "std/net"
+import {{ tcp_connect }} from "std/net"
 
-match ping("127.0.0.1", map {{ "method": "tcp", "allow_private": true, "tcp_ports": [{port}], "count": {count}, "timeout_ms": 1000 }}) {{
+match tcp_connect("127.0.0.1", {port}, map {{ "allow_private": true, "count": {count}, "timeout_ms": 1000 }}) {{
     Ok(info) => {{
-        print(info["reachable"])
+        print(info["connected"])
         print(info["method"])
+        print(info["port"])
         print(info["connected_port"])
+        print(info["remote_addr"])
+        print(info["local_addr"])
         print(info["sent"])
         print(info["received"])
         print(info["failed"])
@@ -220,17 +223,94 @@ match ping("127.0.0.1", map {{ "method": "tcp", "allow_private": true, "tcp_port
         run_ntnt_code_with_env(&code, &[("NTNT_NET_ALLOW_PRIVATE", "1")]);
     let _ = handle.join();
 
-    assert_eq!(exit_code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert_eq!(
+        exit_code, 0,
+        "stderr: {stderr}
+stdout: {stdout}"
+    );
     let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
     assert!(lines.contains(&"true"), "stdout: {stdout}");
     assert!(lines.contains(&"tcp"), "stdout: {stdout}");
     let port_string = port.to_string();
     assert!(lines.contains(&port_string.as_str()), "stdout: {stdout}");
     assert!(
+        stdout.contains(&format!("127.0.0.1:{port}")),
+        "stdout: {stdout}"
+    );
+    assert!(
         lines.iter().filter(|line| **line == "3").count() >= 3,
         "stdout: {stdout}"
     );
     assert!(lines.contains(&"0"), "stdout: {stdout}");
+}
+
+#[test]
+fn tcp_connect_closed_port_returns_connected_false() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let code = format!(
+        r#"
+import {{ tcp_connect }} from "std/net"
+
+match tcp_connect("127.0.0.1", {port}, map {{ "allow_private": true, "timeout_ms": 100 }}) {{
+    Ok(info) => {{
+        print(info["connected"])
+        print(info["reachable"])
+        print(info["reason"])
+    }},
+    Err(e) => print("ERR: " + e)
+}}
+"#
+    );
+
+    let (stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(&code, &[("NTNT_NET_ALLOW_PRIVATE", "1")]);
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
+    assert!(lines.contains(&"false"), "stdout: {stdout}");
+    assert!(!stdout.contains("ERR:"), "stdout: {stdout}");
+}
+
+#[test]
+fn reachable_uses_explicit_tcp_fallback_without_calling_it_ping() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        let _ = listener.accept();
+    });
+
+    let code = format!(
+        r#"
+import {{ reachable }} from "std/net"
+
+match reachable("127.0.0.1", map {{ "allow_private": true, "tcp_ports": [{port}], "timeout_ms": 1000 }}) {{
+    Ok(info) => {{
+        print(info["reachable"])
+        print(info["method"])
+        print(info["fallback_from"])
+        print(info["connected_port"])
+    }},
+    Err(e) => print("ERR: " + e)
+}}
+"#
+    );
+
+    let (stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(&code, &[("NTNT_NET_ALLOW_PRIVATE", "1")]);
+    let _ = handle.join();
+
+    assert_eq!(
+        exit_code, 0,
+        "stderr: {stderr}
+stdout: {stdout}"
+    );
+    assert!(stdout.contains("true"), "stdout: {stdout}");
+    assert!(stdout.contains("tcp"), "stdout: {stdout}");
+    assert!(stdout.contains("icmp"), "stdout: {stdout}");
+    assert!(stdout.contains(&port.to_string()), "stdout: {stdout}");
 }
 
 #[test]
@@ -254,12 +334,12 @@ match ping("example.com") {
 }
 
 #[test]
-fn ping_private_target_requires_process_level_opt_in() {
+fn tcp_connect_private_target_requires_process_level_opt_in() {
     let (stdout, stderr, code) = run_ntnt_code(
         r#"
-import { ping } from "std/net"
+import { tcp_connect } from "std/net"
 
-match ping("127.0.0.1", map { "allow_private": true, "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+match tcp_connect("127.0.0.1", 9, map { "allow_private": true, "timeout_ms": 100 }) {
     Ok(info) => print("unexpected"),
     Err(e) => print(e)
 }
@@ -274,32 +354,32 @@ match ping("127.0.0.1", map { "allow_private": true, "method": "tcp", "tcp_ports
 }
 
 #[test]
-fn ping_rejects_ipv4_mapped_and_special_ranges_by_default() {
+fn tcp_connect_rejects_ipv4_mapped_and_special_ranges_by_default() {
     let (stdout, stderr, code) = run_ntnt_code(
         r#"
-import { ping } from "std/net"
+import { tcp_connect } from "std/net"
 
-match ping("::ffff:127.0.0.1", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+match tcp_connect("::ffff:127.0.0.1", 9, map { "timeout_ms": 100 }) {
     Ok(info) => print("unexpected mapped"),
     Err(e) => print("mapped=" + e)
 }
 
-match ping("224.0.0.1", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+match tcp_connect("224.0.0.1", 9, map { "timeout_ms": 100 }) {
     Ok(info) => print("unexpected multicast"),
     Err(e) => print("multicast=" + e)
 }
 
-match ping("192.0.2.1", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+match tcp_connect("192.0.2.1", 9, map { "timeout_ms": 100 }) {
     Ok(info) => print("unexpected documentation"),
     Err(e) => print("documentation=" + e)
 }
 
-match ping("255.255.255.255", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+match tcp_connect("255.255.255.255", 9, map { "timeout_ms": 100 }) {
     Ok(info) => print("unexpected broadcast"),
     Err(e) => print("broadcast=" + e)
 }
 
-match ping("::ffff:255.255.255.255", map { "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+match tcp_connect("::ffff:255.255.255.255", 9, map { "timeout_ms": 100 }) {
     Ok(info) => print("unexpected mapped broadcast"),
     Err(e) => print("mapped_broadcast=" + e)
 }
@@ -330,37 +410,37 @@ match ping("::ffff:255.255.255.255", map { "method": "tcp", "tcp_ports": [9], "t
 }
 
 #[test]
-fn ping_rejects_never_allowed_targets_even_with_private_opt_in() {
+fn tcp_connect_rejects_never_allowed_targets_even_with_private_opt_in() {
     let (stdout, stderr, code) = run_ntnt_code_with_env(
         r#"
-import { ping } from "std/net"
+import { tcp_connect } from "std/net"
 
-match ping("169.254.169.254", map { "allow_private": true, "method": "tcp", "tcp_ports": [80], "timeout_ms": 100 }) {
+match tcp_connect("169.254.169.254", 80, map { "allow_private": true, "timeout_ms": 100 }) {
     Ok(info) => print("unexpected metadata"),
     Err(e) => print("metadata=" + e)
 }
 
-match ping("169.254.170.2", map { "allow_private": true, "method": "tcp", "tcp_ports": [80], "timeout_ms": 100 }) {
+match tcp_connect("169.254.170.2", 80, map { "allow_private": true, "timeout_ms": 100 }) {
     Ok(info) => print("unexpected ecs metadata"),
     Err(e) => print("ecs_metadata=" + e)
 }
 
-match ping("::ffff:169.254.169.254", map { "allow_private": true, "method": "tcp", "tcp_ports": [80], "timeout_ms": 100 }) {
+match tcp_connect("::ffff:169.254.169.254", 80, map { "allow_private": true, "timeout_ms": 100 }) {
     Ok(info) => print("unexpected mapped metadata"),
     Err(e) => print("mapped_metadata=" + e)
 }
 
-match ping("::ffff:169.254.170.2", map { "allow_private": true, "method": "tcp", "tcp_ports": [80], "timeout_ms": 100 }) {
+match tcp_connect("::ffff:169.254.170.2", 80, map { "allow_private": true, "timeout_ms": 100 }) {
     Ok(info) => print("unexpected mapped ecs metadata"),
     Err(e) => print("mapped_ecs_metadata=" + e)
 }
 
-match ping("224.0.0.1", map { "allow_private": true, "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+match tcp_connect("224.0.0.1", 9, map { "timeout_ms": 100 }) {
     Ok(info) => print("unexpected multicast"),
     Err(e) => print("multicast=" + e)
 }
 
-match ping("255.255.255.255", map { "allow_private": true, "method": "tcp", "tcp_ports": [9], "timeout_ms": 100 }) {
+match tcp_connect("255.255.255.255", 9, map { "timeout_ms": 100 }) {
     Ok(info) => print("unexpected broadcast"),
     Err(e) => print("broadcast=" + e)
 }

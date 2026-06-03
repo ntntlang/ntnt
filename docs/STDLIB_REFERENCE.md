@@ -9696,12 +9696,14 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 |----------|-------------|
 | [`ip_parse`](#ipparse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
 | [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
-| [`ping`](#ping) | Performs a bounded host reachability probe. Phase 1 does not silently fall back from ICMP ping to TCP ports; apps that intentionally want TCP reachability must request method: "tcp" and provide tcp_ports explicitly. Private targets require both process and call-level opt-in; special-purpose targets such as cloud metadata, multicast, broadcast, unspecified, and documentation ranges are never allowed. |
+| [`ping`](#ping) | Performs an ICMP ping when ICMP support is available. It is protocol-honest: ping() does not fall back to TCP ports. Apps that want TCP port checks should use tcp_connect(); apps that want explicit ICMP-then-TCP reachability should use reachable(). |
+| [`reachable`](#reachable) | Performs an explicit high-level reachability check. Phase 1 has no ICMP implementation, so TCP fallback requires caller-provided tcp_ports; the result records method and fallback_from instead of pretending TCP is ping. |
 | [`subnet_contains`](#subnetcontains) | Returns true when the parent CIDR contains the entire child address or subnet. |
 | [`subnet_overlaps`](#subnetoverlaps) | Returns true when two IPv4 or IPv6 CIDRs overlap. |
 | [`subnet_split`](#subnetsplit) | Splits a CIDR into child subnets with a longer prefix, enforcing result caps. |
 | [`subnet_summarize`](#subnetsummarize) | Summarizes adjacent or overlapping CIDRs into the shortest equivalent route list. |
 | [`subnet_supernet`](#subnetsupernet) | Returns the parent/supernet of a CIDR. Defaults to one bit shorter. |
+| [`tcp_connect`](#tcpconnect) | Performs a bounded TCP connect probe to one explicit port. Closed, refused, or timed-out ports return Ok(map { "connected": false, ... }); invalid input, policy denial, and resolver/system failures return Err(String). |
 
 #### `ip_parse`
 
@@ -9745,7 +9747,32 @@ Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover.
 ping(host: String, opts?: Map) -> Result<Map, String>
 ```
 
-Performs a bounded host reachability probe. Phase 1 does not silently fall back from ICMP ping to TCP ports; apps that intentionally want TCP reachability must request method: "tcp" and provide tcp_ports explicitly. Private targets require both process and call-level opt-in; special-purpose targets such as cloud metadata, multicast, broadcast, unspecified, and documentation ranges are never allowed.
+Performs an ICMP ping when ICMP support is available. It is protocol-honest: ping() does not fall back to TCP ports. Apps that want TCP port checks should use tcp_connect(); apps that want explicit ICMP-then-TCP reachability should use reachable().
+
+*Since v0.4.10*
+
+---
+
+#### `reachable`
+
+```ntnt
+reachable(host: String, opts?: Map) -> Result<Map, String>
+```
+
+Performs an explicit high-level reachability check. Phase 1 has no ICMP implementation, so TCP fallback requires caller-provided tcp_ports; the result records method and fallback_from instead of pretending TCP is ping.
+
+**Parameters:**
+
+- `host` — Hostname or IP address to resolve and probe
+- `opts` — Optional map with tcp_ports, timeout_ms, count, interval_ms, and allow_private
+
+**Returns:** Result containing reachability status, method used, fallback metadata, and attempt summary
+
+**Examples:**
+
+```ntnt
+reachable("example.com", map { "tcp_ports": [443], "count": 5 })  // Check host reachability with explicit TCP fallback
+```
 
 *Since v0.4.10*
 
@@ -9806,6 +9833,32 @@ subnet_supernet(cidr: String, new_prefix?: Int) -> Result<String, String>
 ```
 
 Returns the parent/supernet of a CIDR. Defaults to one bit shorter.
+
+*Since v0.4.10*
+
+---
+
+#### `tcp_connect`
+
+```ntnt
+tcp_connect(host: String, port: Int, opts?: Map) -> Result<Map, String>
+```
+
+Performs a bounded TCP connect probe to one explicit port. Closed, refused, or timed-out ports return Ok(map { "connected": false, ... }); invalid input, policy denial, and resolver/system failures return Err(String).
+
+**Parameters:**
+
+- `host` — Hostname or IP address to resolve and probe
+- `port` — TCP port from 1 to 65535
+- `opts` — Optional map with timeout_ms, count, interval_ms, and allow_private
+
+**Returns:** Result containing connection status, latency summary, and per-attempt results
+
+**Examples:**
+
+```ntnt
+tcp_connect("example.com", 443)  // Check whether TCP 443 accepts connections
+```
 
 *Since v0.4.10*
 
