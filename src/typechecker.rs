@@ -3820,9 +3820,8 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("tcp_connect", ["host" => Type::String, "port" => Type::Int, "opts" => opts.clone()], result_map.clone(), required(2));
             sig!("reachable", ["host" => Type::String, "opts" => opts.clone()], result_map.clone(), required(1));
             sig!("port_scan", ["host" => Type::String, "ports" => Type::Array(Box::new(Type::Int)), "opts" => opts.clone()], result_map_array.clone(), required(2));
-            sig!("dns_lookup", ["name" => Type::String, "record_type" => Type::String, "opts" => opts.clone()], result_map_array.clone(), required(1));
-            sig!("dns_reverse", ["ip" => Type::String, "opts" => opts.clone()], result_string_array, required(1));
-            sig!("ct_subdomains", ["domain" => Type::String, "opts" => opts], result_map_array, required(1));
+            sig!("dns_lookup", ["name" => Type::String, "record_type" => Type::String, "opts" => opts.clone()], result_map_array, required(1));
+            sig!("dns_reverse", ["ip" => Type::String, "opts" => opts], result_string_array, required(1));
         }
         "std/path" => {
             sig!("join_path", ["parts" => Type::String], Type::String, variadic);

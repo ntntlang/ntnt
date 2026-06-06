@@ -4,7 +4,7 @@
 // Run with: NTNT_NET_EXTERNAL_DNS_EXAMPLES=1 ntnt run examples/std_net_dns.tnt
 
 import { get_env } from "std/env"
-import { dns_lookup, dns_reverse, ct_subdomains } from "std/net"
+import { dns_lookup, dns_reverse } from "std/net"
 
 if (get_env("NTNT_NET_EXTERNAL_DNS_EXAMPLES") ?? "") == "1" {
     let a_records = dns_lookup("example.com", "A", map { "timeout_ms": 1000 })
@@ -12,14 +12,12 @@ if (get_env("NTNT_NET_EXTERNAL_DNS_EXAMPLES") ?? "") == "1" {
     let mx_records = dns_lookup("example.com", "MX", map { "timeout_ms": 1000 })
     let txt_records = dns_lookup("example.com", "TXT", map { "timeout_ms": 1000 })
     let ptr_names = dns_reverse("8.8.8.8", map { "timeout_ms": 1000 })
-    let subdomains = ct_subdomains("iana.org", map { "timeout_ms": 30000, "max_results": 25 })
 
     print(a_records)
     print(aaaa_records)
     print(mx_records)
     print(txt_records)
     print(ptr_names)
-    print(subdomains)
 } else {
     print("Set NTNT_NET_EXTERNAL_DNS_EXAMPLES=1 to run public DNS lookup examples")
 }

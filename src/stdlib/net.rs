@@ -8,7 +8,6 @@ use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::Resolver;
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::str::FromStr;
 use std::thread;
@@ -27,12 +26,6 @@ const MAX_TCP_PORTS: usize = 10;
 const MAX_PORT_SCAN_PORTS: usize = 128;
 const DEFAULT_PORT_SCAN_CONCURRENCY: usize = 20;
 const MAX_PORT_SCAN_CONCURRENCY: usize = 50;
-const DEFAULT_CT_SUBDOMAIN_MAX_RESULTS: usize = 500;
-const HARD_CT_SUBDOMAIN_MAX_RESULTS: usize = 5_000;
-const MAX_CT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const COMMON_TWO_LABEL_PUBLIC_SUFFIX_PREFIXES: &[&str] = &[
-    "ac", "co", "com", "edu", "go", "gov", "mil", "ne", "net", "or", "org", "sch",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Family {
@@ -183,19 +176,6 @@ struct DnsAnswer {
     name: String,
     value: String,
     ttl: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CtSubdomain {
-    name: String,
-    wildcard: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CtSubdomainOptions {
-    timeout: Duration,
-    max_results: usize,
-    include_wildcards: bool,
 }
 
 fn validate_ping_method(value: Option<&Value>) -> Result<(), String> {
@@ -485,28 +465,6 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             requires: None,
             func: dns_reverse_fn,
-        },
-    );
-
-    // @ntnt ct_subdomains
-    // @module std/net
-    // @signature ct_subdomains(domain: String, opts?: Map) -> Result<Array<Map>, String>
-    // Discovers public subdomain names from certificate transparency logs via crt.sh.
-    // This is not a DNS zone transfer, port scan, or liveness check; returned names may be stale.
-    // @param domain Domain suffix to search, usually a registrable domain such as "example.com". URLs, wildcards, and obvious public suffixes are rejected; pass IDNs as punycode.
-    // @param opts Optional map with timeout_ms, max_results, and include_wildcards. max_results caps returned records; very large crt.sh responses may still fail the response-size guard.
-    // @returns Result containing discovered names as maps with name, source, and wildcard fields
-    // @since v0.4.10
-    // @tags #network
-    // @example ct_subdomains("example.com", map { "max_results": 100 }) ~ "Find public certificate-transparency subdomains"
-    module.insert(
-        "ct_subdomains".to_string(),
-        Value::NativeFunction {
-            name: "ct_subdomains".to_string(),
-            arity: 1,
-            max_arity: 2,
-            requires: None,
-            func: ct_subdomains_fn,
         },
     );
 
@@ -873,18 +831,6 @@ fn dns_reverse_fn(args: &[Value]) -> Result<Value, IntentError> {
     })()))
 }
 
-fn ct_subdomains_fn(args: &[Value]) -> Result<Value, IntentError> {
-    let domain = string_arg(args, 0, "ct_subdomains")?;
-    let opts = opts_arg(args, 1, "ct_subdomains")?;
-
-    Ok(result_value((|| {
-        let domain = normalize_domain_arg(domain, "ct_subdomains")?;
-        let options = parse_ct_subdomain_options(opts)?;
-        let records = fetch_ct_subdomains(&domain, &options)?;
-        Ok(ct_subdomains_to_value(records))
-    })()))
-}
-
 fn dns_lookup_args(args: &[Value]) -> Result<(&str, Option<&HashMap<String, Value>>), IntentError> {
     if args.len() <= 1 {
         return Ok(("A", None));
@@ -981,233 +927,6 @@ fn dns_answers_to_value(answers: Vec<DnsAnswer>) -> Value {
                 map.insert("name".to_string(), Value::String(answer.name));
                 map.insert("value".to_string(), Value::String(answer.value));
                 map.insert("ttl".to_string(), Value::Int(answer.ttl as i64));
-                Value::Map(map)
-            })
-            .collect(),
-    )
-}
-
-fn parse_ct_subdomain_options(
-    opts: Option<&HashMap<String, Value>>,
-) -> Result<CtSubdomainOptions, String> {
-    let timeout_ms = parse_u64_option(opts, "timeout_ms", DEFAULT_TIMEOUT_MS)?
-        .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
-    let max_results = parse_ct_max_results(opts)?;
-    let include_wildcards = parse_bool_option(opts, "include_wildcards", false)?;
-
-    Ok(CtSubdomainOptions {
-        timeout: Duration::from_millis(timeout_ms),
-        max_results,
-        include_wildcards,
-    })
-}
-
-fn parse_ct_max_results(opts: Option<&HashMap<String, Value>>) -> Result<usize, String> {
-    match opts.and_then(|m| m.get("max_results")) {
-        None => Ok(DEFAULT_CT_SUBDOMAIN_MAX_RESULTS),
-        Some(Value::Int(value)) if *value > 0 => {
-            let requested =
-                usize::try_from(*value).map_err(|_| "ct_subdomains.max_results is too large")?;
-            if requested > HARD_CT_SUBDOMAIN_MAX_RESULTS {
-                return Err(format!(
-                    "ct_subdomains.max_results must be between 1 and {}",
-                    HARD_CT_SUBDOMAIN_MAX_RESULTS
-                ));
-            }
-            Ok(requested)
-        }
-        Some(Value::Int(_)) => Err(format!(
-            "ct_subdomains.max_results must be between 1 and {}",
-            HARD_CT_SUBDOMAIN_MAX_RESULTS
-        )),
-        Some(other) => Err(format!(
-            "ct_subdomains.max_results must be Int, got {}",
-            other.type_name()
-        )),
-    }
-}
-
-fn normalize_domain_arg(domain: &str, fn_name: &str) -> Result<String, String> {
-    let normalized = domain.trim().trim_end_matches('.').to_ascii_lowercase();
-    if normalized.is_empty()
-        || normalized.contains('/')
-        || normalized.contains(':')
-        || normalized.contains('*')
-        || normalized.len() > 253
-    {
-        return Err(format!(
-            "{}() argument 1 must be a valid domain name, got {}",
-            fn_name, domain
-        ));
-    }
-
-    let labels: Vec<&str> = normalized.split('.').collect();
-    if labels.len() < 2 || labels.iter().any(|label| !is_valid_dns_label(label)) {
-        return Err(format!(
-            "{}() argument 1 must be a valid domain name, got {}",
-            fn_name, domain
-        ));
-    }
-    if is_obvious_two_label_public_suffix(&labels) {
-        return Err(format!(
-            "{}() argument 1 must be a registrable domain or narrower DNS suffix, got public suffix-like {}",
-            fn_name, domain
-        ));
-    }
-
-    Ok(normalized)
-}
-
-fn is_obvious_two_label_public_suffix(labels: &[&str]) -> bool {
-    labels.len() == 2
-        && labels[1].len() == 2
-        && COMMON_TWO_LABEL_PUBLIC_SUFFIX_PREFIXES.contains(&labels[0])
-}
-
-fn is_valid_dns_label(label: &str) -> bool {
-    !label.is_empty()
-        && label.len() <= 63
-        && !label.starts_with('-')
-        && !label.ends_with('-')
-        && label
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-}
-
-fn fetch_ct_subdomains(
-    domain: &str,
-    options: &CtSubdomainOptions,
-) -> Result<Vec<CtSubdomain>, String> {
-    let url = format!("https://crt.sh/?q=%25.{}&output=json", domain);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(options.timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("ntnt std/net ct_subdomains")
-        .build()
-        .map_err(|e| format!("failed to initialize crt.sh client: {}", e))?;
-
-    let response = client
-        .get(&url)
-        .send()
-        .map_err(|e| format!("crt.sh subdomain lookup failed for {}: {}", domain, e))?;
-    let status = response.status();
-    // crt.sh returns 404 when the JSON query has no matching rows.
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return Ok(vec![]);
-    }
-    if !status.is_success() {
-        return Err(format!(
-            "crt.sh subdomain lookup failed for {}: HTTP {}",
-            domain, status
-        ));
-    }
-    let body = read_limited_response(response, MAX_CT_RESPONSE_BYTES)?;
-    extract_crtsh_subdomains_from_json(
-        domain,
-        &body,
-        options.include_wildcards,
-        options.max_results,
-    )
-}
-
-fn read_limited_response(
-    response: reqwest::blocking::Response,
-    max_bytes: usize,
-) -> Result<String, String> {
-    let mut body = Vec::new();
-    let mut limited = response.take((max_bytes + 1) as u64);
-    limited
-        .read_to_end(&mut body)
-        .map_err(|e| format!("failed to read crt.sh response: {}", e))?;
-    if body.len() > max_bytes {
-        return Err(format!(
-            "crt.sh response exceeded {} bytes; reduce scope or max_results",
-            max_bytes
-        ));
-    }
-    String::from_utf8(body).map_err(|e| format!("crt.sh response was not UTF-8: {}", e))
-}
-
-fn extract_crtsh_subdomains_from_json(
-    domain: &str,
-    body: &str,
-    include_wildcards: bool,
-    max_results: usize,
-) -> Result<Vec<CtSubdomain>, String> {
-    let json: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| format!("failed to parse crt.sh JSON response: {}", e))?;
-    let records = json
-        .as_array()
-        .ok_or_else(|| "crt.sh JSON response must be an array".to_string())?;
-
-    let mut seen = HashSet::new();
-    let mut subdomains = Vec::new();
-    for record in records {
-        for field in ["name_value", "common_name"] {
-            let Some(value) = record.get(field).and_then(|v| v.as_str()) else {
-                continue;
-            };
-            for raw_name in value.lines() {
-                if let Some(subdomain) = normalize_ct_subdomain(domain, raw_name, include_wildcards)
-                {
-                    if seen.insert((subdomain.name.clone(), subdomain.wildcard)) {
-                        subdomains.push(subdomain);
-                    }
-                }
-            }
-        }
-    }
-
-    subdomains.sort_by(|a, b| a.name.cmp(&b.name).then(a.wildcard.cmp(&b.wildcard)));
-    subdomains.truncate(max_results);
-    Ok(subdomains)
-}
-
-fn normalize_ct_subdomain(
-    domain: &str,
-    raw_name: &str,
-    include_wildcards: bool,
-) -> Option<CtSubdomain> {
-    let mut name = raw_name.trim().trim_end_matches('.').to_ascii_lowercase();
-    if name.is_empty() || name.contains('/') || name.contains(':') {
-        return None;
-    }
-
-    let wildcard = name.starts_with("*.");
-    let host = if wildcard {
-        if !include_wildcards {
-            return None;
-        }
-        name.trim_start_matches("*.")
-    } else {
-        name.as_str()
-    };
-
-    let suffix = format!(".{}", domain);
-    let belongs = if wildcard {
-        host == domain || host.ends_with(&suffix)
-    } else {
-        host != domain && host.ends_with(&suffix)
-    };
-    if !belongs || host.split('.').any(|label| !is_valid_dns_label(label)) {
-        return None;
-    }
-
-    if wildcard {
-        name = format!("*.{}", host);
-    }
-    Some(CtSubdomain { name, wildcard })
-}
-
-fn ct_subdomains_to_value(records: Vec<CtSubdomain>) -> Value {
-    Value::Array(
-        records
-            .into_iter()
-            .map(|record| {
-                let mut map = HashMap::new();
-                map.insert("name".to_string(), Value::String(record.name));
-                map.insert("source".to_string(), Value::String("crt.sh".to_string()));
-                map.insert("wildcard".to_string(), Value::Bool(record.wildcard));
                 Value::Map(map)
             })
             .collect(),
@@ -2440,42 +2159,6 @@ mod tests {
             matches!(record.get("value"), Some(Value::String(value)) if value == "10 mail.example.com.")
         );
         assert!(matches!(record.get("ttl"), Some(Value::Int(600))));
-    }
-
-    #[test]
-    fn ct_subdomain_extraction_dedupes_sorts_and_filters_to_child_names() {
-        let body = r#"[
-            {"name_value":"www.Example.com\n*.example.com\nexample.com\nbad.other.com\napi.example.com."},
-            {"common_name":"api.example.com"}
-        ]"#;
-
-        let records = extract_crtsh_subdomains_from_json("example.com", body, false, 10).unwrap();
-        assert_eq!(
-            records,
-            vec![
-                CtSubdomain {
-                    name: "api.example.com".to_string(),
-                    wildcard: false,
-                },
-                CtSubdomain {
-                    name: "www.example.com".to_string(),
-                    wildcard: false,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn ct_subdomain_extraction_can_include_wildcards_and_apply_max_results() {
-        let body = r#"[
-            {"name_value":"z.example.com\n*.example.com\na.example.com"}
-        ]"#;
-
-        let records = extract_crtsh_subdomains_from_json("example.com", body, true, 2).unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].name, "*.example.com");
-        assert!(records[0].wildcard);
-        assert_eq!(records[1].name, "a.example.com");
     }
 
     #[test]

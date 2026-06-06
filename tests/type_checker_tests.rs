@@ -1096,7 +1096,7 @@ let x: Int = first([1, 2, 3])
 #[test]
 fn test_std_net_phase1_signatures_accept_valid_usage() {
     let source = r#"
-import { ip_parse, subnet_contains, subnet_split, subnet_supernet, subnet_summarize, ip_range_to_cidrs, ping, tcp_connect, reachable, port_scan, dns_lookup, dns_reverse, ct_subdomains } from "std/net"
+import { ip_parse, subnet_contains, subnet_split, subnet_supernet, subnet_summarize, ip_range_to_cidrs, ping, tcp_connect, reachable, port_scan, dns_lookup, dns_reverse } from "std/net"
 
 let parsed = ip_parse("192.168.1.0/24")
 let contains = subnet_contains("10.0.0.0/8", "10.1.0.0/16")
@@ -1112,7 +1112,6 @@ let scan = port_scan("example.com", [80, 443], map { "timeout_ms": 1000, "concur
 let dns = dns_lookup("example.com", "A", map { "timeout_ms": 1000 })
 let mx_dns = dns_lookup("example.com", "MX", map { "timeout_ms": 1000 })
 let reverse_dns = dns_reverse("8.8.8.8", map { "timeout_ms": 1000 })
-let subdomains = ct_subdomains("example.com", map { "timeout_ms": 1000, "max_results": 10 })
 "#;
     let (stdout, _stderr, _exit_code) = lint_code(source);
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -1126,13 +1125,12 @@ let subdomains = ct_subdomains("example.com", map { "timeout_ms": 1000, "max_res
 #[test]
 fn test_std_net_phase1_signatures_reject_wrong_argument_types() {
     let source = r#"
-import { subnet_split, ping, port_scan, dns_lookup, ct_subdomains } from "std/net"
+import { subnet_split, ping, port_scan, dns_lookup } from "std/net"
 
 let split = subnet_split("192.168.1.0/24", "28")
 let reachability = ping(123)
 let scan = port_scan("example.com", ["80"])
 let dns = dns_lookup("example.com", map { "timeout_ms": 1000 })
-let subdomains = ct_subdomains(123)
 "#;
     let (stdout, _stderr, exit_code) = lint_code(source);
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
