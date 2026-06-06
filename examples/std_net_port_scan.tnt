@@ -1,0 +1,17 @@
+// std/net bounded port scan example
+//
+// Public TCP probes are opt-in so default example validation/runs stay offline-safe.
+// Run with: NTNT_NET_PORT_SCAN_EXAMPLES=1 ntnt run examples/std_net_port_scan.tnt
+
+import { get_env } from "std/env"
+import { port_scan } from "std/net"
+
+if (get_env("NTNT_NET_PORT_SCAN_EXAMPLES") ?? "") == "1" {
+    let results = port_scan("example.com", [80, 443], map {
+        "timeout_ms": 500,
+        "concurrency": 20
+    })
+    print(results)
+} else {
+    print("Set NTNT_NET_PORT_SCAN_EXAMPLES=1 to run public port scan examples")
+}

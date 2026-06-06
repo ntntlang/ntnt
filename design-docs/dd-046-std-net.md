@@ -790,11 +790,11 @@ SNMP is a real network-monitoring need, but it is its own protocol family. It sh
 
 ### Status Dashboard
 
-As of 2026-06-03:
+As of 2026-06-05:
 
 - [x] **PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability**: merged in [PR #113](https://github.com/ntntlang/ntnt/pull/113).
-- [ ] **PR 2 — DNS lookup types**: in progress on branch `feat/std-net-dns`; adds `dns_lookup` and `dns_reverse` with broad supported record types, deterministic tests, and opt-in external DNS smoke coverage.
-- [ ] **PR 3 — Bounded port scan**: planned after DNS.
+- [x] **PR 2 — DNS lookup types**: merged in [PR #114](https://github.com/ntntlang/ntnt/pull/114); adds `dns_lookup` and `dns_reverse` with broad supported record types, deterministic tests, and opt-in external DNS smoke coverage.
+- [ ] **PR 3 — Bounded port scan**: in progress on branch `feat/std-net-port-scan`; adds `port_scan` over explicit port arrays with bounded concurrency and shared target policy.
 - [ ] **PR 4 — TLS info**: planned after port scan/dependency decision.
 
 PR 1 shipped the core module registration, runtime functions, typechecker signatures, generated docs, deterministic examples, and tests for Phase 1. Review hardening added policy fixes for private, link-local, multicast, documentation, mapped-address, and broadcast-style targets.
@@ -834,7 +834,7 @@ Acceptance:
 
 ### PR 2 — DNS lookup types
 
-Status: **in progress on `feat/std-net-dns`.**
+Status: **merged in PR #114.**
 
 Scope:
 
@@ -851,17 +851,19 @@ Acceptance:
 
 ### PR 3 — Bounded port scan
 
+Status: **implemented on `feat/std-net-port-scan`; pending PR review.**
+
 Scope:
 
-- [ ] `port_scan` over explicit port arrays
-- [ ] bounds and cancellation checks
-- [ ] local open/closed test fixture
+- [x] `port_scan` over explicit port arrays
+- [x] bounds and bounded-concurrency batches
+- [x] local open/closed test fixture
 
 Acceptance:
 
-- [ ] rejects too many ports/concurrency/invalid ports
-- [ ] deterministic order
-- [ ] no unbounded scanning
+- [x] rejects too many ports/concurrency/invalid ports
+- [x] deterministic order
+- [x] no unbounded scanning
 
 ### PR 4 — TLS info
 

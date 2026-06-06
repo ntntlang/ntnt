@@ -562,3 +562,126 @@ match tcp_connect("255.255.255.255", 9, map { "timeout_ms": 100 }) {
         "stdout: {stdout}"
     );
 }
+
+#[test]
+fn port_scan_reports_open_and_closed_ports_sorted() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+    let open_port = listener.local_addr().unwrap().port();
+    let closed_listener = TcpListener::bind("127.0.0.1:0").expect("bind closed port");
+    let closed_port = closed_listener.local_addr().unwrap().port();
+    drop(closed_listener);
+
+    let handle = std::thread::spawn(move || {
+        let _ = listener.accept();
+    });
+
+    let code = format!(
+        r#"
+import {{ port_scan }} from "std/net"
+
+match port_scan("127.0.0.1", [{closed_port}, {open_port}], map {{ "allow_private": true, "timeout_ms": 1000, "concurrency": 200 }}) {{
+    Ok(results) => {{
+        for result in results {{
+            print(result["port"])
+            print(result["open"])
+            print(result["method"])
+        }}
+    }},
+    Err(e) => print("ERR: " + e)
+}}
+"#
+    );
+
+    let (stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(&code, &[("NTNT_NET_ALLOW_PRIVATE", "1")]);
+    let _ = handle.join();
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(!stdout.contains("ERR:"), "stdout: {stdout}");
+    let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
+    let open_port_line = open_port.to_string();
+    let closed_port_line = closed_port.to_string();
+    let port_lines: Vec<String> = lines
+        .iter()
+        .copied()
+        .filter(|line| *line == open_port_line || *line == closed_port_line)
+        .map(str::to_string)
+        .collect();
+    let mut expected_ports = [open_port, closed_port];
+    expected_ports.sort();
+    assert_eq!(
+        port_lines,
+        expected_ports
+            .iter()
+            .map(|port| port.to_string())
+            .collect::<Vec<_>>(),
+        "port_scan results must be sorted by port: {stdout}"
+    );
+    assert!(lines.contains(&"true"), "stdout: {stdout}");
+    assert!(lines.contains(&"false"), "stdout: {stdout}");
+    assert!(
+        lines.iter().filter(|line| **line == "tcp").count() >= 2,
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn port_scan_rejects_duplicate_invalid_and_too_many_ports() {
+    let too_many = (1..=129)
+        .map(|port| port.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let code = format!(
+        r#"
+import {{ port_scan }} from "std/net"
+
+match port_scan("example.com", [80, 80]) {{
+    Ok(info) => print("unexpected duplicate"),
+    Err(e) => print("duplicate=" + e)
+}}
+
+match port_scan("example.com", [0]) {{
+    Ok(info) => print("unexpected invalid"),
+    Err(e) => print("invalid=" + e)
+}}
+
+match port_scan("example.com", [{too_many}]) {{
+    Ok(info) => print("unexpected too many"),
+    Err(e) => print("too_many=" + e)
+}}
+"#
+    );
+
+    let (stdout, stderr, exit_code) = run_ntnt_code(&code);
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(stdout.contains("duplicate port 80"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("port must be between 1 and 65535"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("supports at most 128 ports"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn port_scan_private_target_requires_process_level_opt_in() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { port_scan } from "std/net"
+
+match port_scan("127.0.0.1", [9], map { "allow_private": true, "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected"),
+    Err(e) => print(e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("private targets require NTNT_NET_ALLOW_PRIVATE=1"),
+        "stdout: {stdout}"
+    );
+}

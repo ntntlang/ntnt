@@ -972,16 +972,17 @@ Both `fetch(map { "url": url, ... })` and `fetch(url, map { ... })` work. The tw
 
 ### Network/IPAM Helpers (`std/net`)
 
-`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, high-level reachability, and DNS lookups:
+`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, bounded port scans, high-level reachability, and DNS lookups:
 
 ```ntnt
-import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, reachable, dns_lookup, dns_reverse } from "std/net"
+import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, port_scan, reachable, dns_lookup, dns_reverse } from "std/net"
 
 let info = unwrap(ip_parse("192.168.1.0/24"))
 let contains = unwrap(subnet_contains("10.0.0.0/8", "10.42.0.0/16"))
 let children = unwrap(subnet_split("192.168.1.0/24", 28))
 let summary = unwrap(subnet_summarize(["10.0.0.0/25", "10.0.0.128/25"]))
 let tcp = unwrap(tcp_connect("example.com", 443))
+let ports = unwrap(port_scan("example.com", [80, 443], map { "timeout_ms": 500 }))
 let reachability = unwrap(reachable("example.com", map { "tcp_ports": [443] }))
 let records = unwrap(dns_lookup("example.com", "A"))
 let ptr_names = unwrap(dns_reverse("8.8.8.8"))
@@ -1003,6 +1004,16 @@ let reachability = reachable("example.com", map {
 ```
 
 `tcp_connect()` and `reachable()` support optional `count` (1-10), `timeout_ms`, and `interval_ms`, returning per-attempt results plus `sent`, `received`, `failed`, and `loss_percent` summary fields.
+
+`port_scan(host, ports, opts?)` scans an explicit `Array<Int>` of TCP ports. It rejects duplicate, invalid, or overly large port lists, clamps `concurrency`, applies the same private-target safety policy as `tcp_connect()`, and returns results sorted by port:
+
+```ntnt
+let scan = port_scan("example.com", [22, 80, 443], map {
+    "timeout_ms": 500,
+    "concurrency": 20
+})
+// Ok([map { "port": 22, "open": false, "reason": "connection refused" }, ...])
+```
 
 `dns_lookup(name, record_type?, opts?)` supports common data-bearing DNS record types, including `A`, `AAAA`, `MX`, `TXT`, `NS`, `CNAME`, `SOA`, `SRV`, `CAA`, `TLSA`, `HTTPS`, and `SVCB`. It returns `Ok([])` for ordinary no-answer DNS responses and `Err(String)` for invalid record types, invalid options, resolver configuration failures, or DNS transport failures. Record maps use the actual returned DNS type, so a resolver response that includes related records reports those records honestly instead of relabeling everything as the requested type. `dns_reverse(ip, opts?)` returns all PTR names as an array because PTR can legitimately have zero, one, or multiple names.
 

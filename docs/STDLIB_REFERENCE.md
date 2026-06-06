@@ -9699,6 +9699,7 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 | [`ip_parse`](#ipparse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
 | [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
 | [`ping`](#ping) | Performs an ICMP ping when ICMP support is available. It is protocol-honest: ping() does not fall back to TCP ports. Apps that want TCP port checks should use tcp_connect(); apps that want explicit ICMP-then-TCP reachability should use reachable(). |
+| [`port_scan`](#portscan) | Performs a bounded TCP scan of explicit ports for one host. Only explicit port arrays are accepted; ranges are intentionally not expanded. Results are sorted by port. |
 | [`reachable`](#reachable) | Performs an explicit high-level reachability check. Phase 1 has no ICMP implementation, so TCP fallback requires caller-provided tcp_ports; the result records method and fallback_from instead of pretending TCP is ping. |
 | [`subnet_contains`](#subnetcontains) | Returns true when the parent CIDR contains the entire child address or subnet. |
 | [`subnet_overlaps`](#subnetoverlaps) | Returns true when two IPv4 or IPv6 CIDRs overlap. |
@@ -9801,6 +9802,32 @@ ping(host: String, opts?: Map) -> Result<Map, String>
 ```
 
 Performs an ICMP ping when ICMP support is available. It is protocol-honest: ping() does not fall back to TCP ports. Apps that want TCP port checks should use tcp_connect(); apps that want explicit ICMP-then-TCP reachability should use reachable().
+
+*Since v0.4.10*
+
+---
+
+#### `port_scan`
+
+```ntnt
+port_scan(host: String, ports: Array<Int>, opts?: Map) -> Result<Array<Map>, String>
+```
+
+Performs a bounded TCP scan of explicit ports for one host. Only explicit port arrays are accepted; ranges are intentionally not expanded. Results are sorted by port.
+
+**Parameters:**
+
+- `host` — Hostname or IP address to resolve and scan
+- `ports` — Explicit array of TCP ports from 1 to 65535; duplicates are rejected
+- `opts` — Optional map with timeout_ms, concurrency, and allow_private
+
+**Returns:** Result containing one map per port with open, latency_ms, and reason fields
+
+**Examples:**
+
+```ntnt
+port_scan("example.com", [80, 443], map { "timeout_ms": 500 })  // Scan explicit TCP ports
+```
 
 *Since v0.4.10*
 

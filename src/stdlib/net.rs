@@ -7,7 +7,7 @@ use hickory_resolver::error::{ResolveError, ResolveErrorKind};
 use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::Resolver;
 use std::cmp::{max, min};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::str::FromStr;
 use std::thread;
@@ -23,6 +23,9 @@ const MAX_PROBE_COUNT: usize = 10;
 const DEFAULT_INTERVAL_MS: u64 = 0;
 const MAX_INTERVAL_MS: u64 = 5_000;
 const MAX_TCP_PORTS: usize = 10;
+const MAX_PORT_SCAN_PORTS: usize = 128;
+const DEFAULT_PORT_SCAN_CONCURRENCY: usize = 20;
+const MAX_PORT_SCAN_CONCURRENCY: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Family {
@@ -394,6 +397,29 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt port_scan
+    // @module std/net
+    // @signature port_scan(host: String, ports: Array<Int>, opts?: Map) -> Result<Array<Map>, String>
+    // Performs a bounded TCP scan of explicit ports for one host. Only explicit port arrays
+    // are accepted; ranges are intentionally not expanded. Results are sorted by port.
+    // @param host Hostname or IP address to resolve and scan
+    // @param ports Explicit array of TCP ports from 1 to 65535; duplicates are rejected
+    // @param opts Optional map with timeout_ms, concurrency, and allow_private
+    // @returns Result containing one map per port with open, latency_ms, and reason fields
+    // @since v0.4.10
+    // @tags #network
+    // @example port_scan("example.com", [80, 443], map { "timeout_ms": 500 }) ~ "Scan explicit TCP ports"
+    module.insert(
+        "port_scan".to_string(),
+        Value::NativeFunction {
+            name: "port_scan".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: port_scan_fn,
+        },
+    );
+
     // @ntnt dns_lookup
     // @module std/net
     // @signature dns_lookup(name: String, record_type?: String, opts?: Map) -> Result<Array<Map>, String>
@@ -747,6 +773,35 @@ fn reachable_fn(args: &[Value]) -> Result<Value, IntentError> {
     })()))
 }
 
+fn port_scan_fn(args: &[Value]) -> Result<Value, IntentError> {
+    let host = string_arg(args, 0, "port_scan")?;
+    let Value::Array(port_values) = &args[1] else {
+        return Err(IntentError::type_error(format!(
+            "port_scan() argument 2 must be Array<Int>, got {}",
+            args[1].type_name()
+        )));
+    };
+    let opts = opts_arg(args, 2, "port_scan")?;
+
+    Ok(result_value((|| {
+        let ports = parse_explicit_ports(port_values, "port_scan", "argument 2")?;
+        let timeout_ms = parse_u64_option(opts, "timeout_ms", DEFAULT_TIMEOUT_MS)?
+            .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+        let concurrency = parse_port_scan_concurrency(opts)?;
+        let allow_private = parse_bool_option(opts, "allow_private", false)?;
+        let results = port_scan_for_host(
+            host,
+            &ports,
+            Duration::from_millis(timeout_ms),
+            concurrency,
+            allow_private,
+        )?;
+        Ok(Value::Array(
+            results.into_iter().map(port_scan_result_to_value).collect(),
+        ))
+    })()))
+}
+
 fn dns_lookup_fn(args: &[Value]) -> Result<Value, IntentError> {
     let name = string_arg(args, 0, "dns_lookup")?;
     let (record_type, opts) = dns_lookup_args(args)?;
@@ -940,6 +995,99 @@ fn tcp_reachability_attempts_for_host(
     ))
 }
 
+#[derive(Debug)]
+struct PortScanResult {
+    port: u16,
+    open: bool,
+    latency_ms: Option<f64>,
+    remote_addr: Option<String>,
+    local_addr: Option<String>,
+    reason: String,
+}
+
+fn port_scan_for_host(
+    host: &str,
+    ports: &[u16],
+    timeout: Duration,
+    concurrency: usize,
+    allow_private: bool,
+) -> Result<Vec<PortScanResult>, String> {
+    let targets = resolve_tcp_targets(host, ports)?;
+    enforce_resolved_target_policy(&targets, allow_private)?;
+
+    let mut by_port: HashMap<u16, Vec<SocketAddr>> = HashMap::new();
+    for (port, addr) in targets {
+        by_port.entry(port).or_default().push(addr);
+    }
+
+    let mut results = Vec::with_capacity(ports.len());
+    for batch in ports.chunks(concurrency.max(1)) {
+        let mut handles = Vec::with_capacity(batch.len());
+        for port in batch {
+            let port = *port;
+            let addrs = by_port.remove(&port).unwrap_or_default();
+            handles.push(thread::spawn(move || {
+                scan_port_targets(port, addrs, timeout)
+            }));
+        }
+        for handle in handles {
+            results.push(
+                handle
+                    .join()
+                    .map_err(|_| "port_scan() worker panicked".to_string())?,
+            );
+        }
+    }
+
+    results.sort_by_key(|result| result.port);
+    Ok(results)
+}
+
+fn scan_port_targets(port: u16, targets: Vec<SocketAddr>, timeout: Duration) -> PortScanResult {
+    if targets.is_empty() {
+        return PortScanResult {
+            port,
+            open: false,
+            latency_ms: None,
+            remote_addr: None,
+            local_addr: None,
+            reason: "no resolved addresses".to_string(),
+        };
+    }
+
+    let mut last_reason = "unreachable".to_string();
+    for addr in targets {
+        let start = Instant::now();
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => {
+                let remote_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
+                let local_addr = stream.local_addr().ok().map(|addr| addr.to_string());
+                drop(stream);
+                return PortScanResult {
+                    port,
+                    open: true,
+                    latency_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
+                    remote_addr,
+                    local_addr,
+                    reason: "connected".to_string(),
+                };
+            }
+            Err(e) => {
+                last_reason = e.kind().to_string();
+            }
+        }
+    }
+
+    PortScanResult {
+        port,
+        open: false,
+        latency_ms: None,
+        remote_addr: None,
+        local_addr: None,
+        reason: last_reason,
+    }
+}
+
 fn tcp_reachability_attempts(
     targets: &[(u16, SocketAddr)],
     timeout: Duration,
@@ -1001,13 +1149,26 @@ fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> Tc
 }
 
 fn resolve_tcp_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, SocketAddr)>, String> {
-    let mut targets = Vec::new();
+    let Some(seed_port) = ports.first().copied() else {
+        return Ok(Vec::new());
+    };
+
+    let resolved: Vec<SocketAddr> = (host, seed_port)
+        .to_socket_addrs()
+        .map_err(|e| format!("failed to resolve {}:{}: {}", host, seed_port, e))?
+        .collect();
+
+    let mut ips = Vec::with_capacity(resolved.len());
+    let mut seen = HashSet::with_capacity(resolved.len());
+    for addr in resolved {
+        if seen.insert(addr.ip()) {
+            ips.push(addr.ip());
+        }
+    }
+
+    let mut targets = Vec::with_capacity(ports.len() * ips.len());
     for port in ports {
-        let addrs: Vec<SocketAddr> = (host, *port)
-            .to_socket_addrs()
-            .map_err(|e| format!("failed to resolve {}:{}: {}", host, port, e))?
-            .collect();
-        targets.extend(addrs.into_iter().map(|addr| (*port, addr)));
+        targets.extend(ips.iter().map(|ip| (*port, SocketAddr::new(*ip, *port))));
     }
     Ok(targets)
 }
@@ -1135,6 +1296,26 @@ fn reachable_result_map(
     );
     result.insert("permission_limited".to_string(), Value::Bool(true));
     result
+}
+
+fn port_scan_result_to_value(result: PortScanResult) -> Value {
+    let mut map = HashMap::new();
+    map.insert("port".to_string(), Value::Int(result.port as i64));
+    map.insert("open".to_string(), Value::Bool(result.open));
+    map.insert("method".to_string(), Value::String("tcp".to_string()));
+    if let Some(latency_ms) = result.latency_ms {
+        map.insert("latency_ms".to_string(), Value::Float(latency_ms));
+    }
+    if let Some(remote_addr) = result.remote_addr {
+        map.insert("remote_addr".to_string(), Value::String(remote_addr));
+    }
+    if let Some(local_addr) = result.local_addr {
+        map.insert("local_addr".to_string(), Value::String(local_addr));
+    }
+    if !result.open {
+        map.insert("reason".to_string(), Value::String(result.reason));
+    }
+    Value::Map(map)
 }
 
 fn tcp_attempt_to_value(attempt: &TcpProbeResult) -> Value {
@@ -1498,6 +1679,51 @@ fn parse_count_option(opts: Option<&HashMap<String, Value>>) -> Result<usize, St
     }
 }
 
+fn parse_port_scan_concurrency(opts: Option<&HashMap<String, Value>>) -> Result<usize, String> {
+    match opts.and_then(|m| m.get("concurrency")) {
+        None => Ok(DEFAULT_PORT_SCAN_CONCURRENCY),
+        Some(Value::Int(value)) if *value > 0 => {
+            let concurrency = usize::try_from(*value)
+                .map_err(|_| "option 'concurrency' is too large".to_string())?;
+            Ok(min(concurrency, MAX_PORT_SCAN_CONCURRENCY))
+        }
+        Some(Value::Int(_)) => Err("option 'concurrency' must be positive".to_string()),
+        Some(other) => Err(format!(
+            "option 'concurrency' must be Int, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn parse_explicit_ports(values: &[Value], fn_name: &str, label: &str) -> Result<Vec<u16>, String> {
+    if values.is_empty() {
+        return Err(format!("{}() {} cannot be empty", fn_name, label));
+    }
+    if values.len() > MAX_PORT_SCAN_PORTS {
+        return Err(format!(
+            "{}() {} supports at most {} ports",
+            fn_name, label, MAX_PORT_SCAN_PORTS
+        ));
+    }
+
+    let mut ports = Vec::with_capacity(values.len());
+    let mut seen = HashSet::with_capacity(values.len());
+    for value in values {
+        let Value::Int(port) = value else {
+            return Err(format!("{}() {} must be Array<Int>", fn_name, label));
+        };
+        let port = validate_tcp_port_arg(*port, fn_name)?;
+        if !seen.insert(port) {
+            return Err(format!(
+                "{}() duplicate port {} is not allowed",
+                fn_name, port
+            ));
+        }
+        ports.push(port);
+    }
+    Ok(ports)
+}
+
 fn parse_tcp_ports(
     opts: Option<&HashMap<String, Value>>,
     fn_name: &str,
@@ -1793,6 +2019,43 @@ mod tests {
             ("count".to_string(), Value::Int(0),)
         ])))
         .is_err());
+    }
+
+    #[test]
+    fn port_scan_concurrency_is_positive_and_clamped() {
+        assert_eq!(
+            parse_port_scan_concurrency(None).unwrap(),
+            DEFAULT_PORT_SCAN_CONCURRENCY
+        );
+        assert_eq!(
+            parse_port_scan_concurrency(Some(&HashMap::from([(
+                "concurrency".to_string(),
+                Value::Int((MAX_PORT_SCAN_CONCURRENCY as i64) + 99),
+            )])))
+            .unwrap(),
+            MAX_PORT_SCAN_CONCURRENCY
+        );
+        assert!(parse_port_scan_concurrency(Some(&HashMap::from([(
+            "concurrency".to_string(),
+            Value::Int(0),
+        )])))
+        .is_err());
+    }
+
+    #[test]
+    fn port_scan_ports_reject_duplicates_and_preserve_order() {
+        let ports = parse_explicit_ports(
+            &[Value::Int(443), Value::Int(80), Value::Int(22)],
+            "port_scan",
+            "argument 2",
+        )
+        .unwrap();
+        assert_eq!(ports, vec![443, 80, 22]);
+
+        let err =
+            parse_explicit_ports(&[Value::Int(80), Value::Int(80)], "port_scan", "argument 2")
+                .unwrap_err();
+        assert!(err.contains("duplicate port 80"));
     }
 
     #[test]
