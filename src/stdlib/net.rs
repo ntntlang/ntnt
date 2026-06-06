@@ -1012,7 +1012,7 @@ fn port_scan_for_host(
     concurrency: usize,
     allow_private: bool,
 ) -> Result<Vec<PortScanResult>, String> {
-    let targets = resolve_tcp_targets(host, ports)?;
+    let targets = resolve_port_scan_targets(host, ports)?;
     enforce_resolved_target_policy(&targets, allow_private)?;
 
     let mut by_port: HashMap<u16, Vec<SocketAddr>> = HashMap::new();
@@ -1149,6 +1149,18 @@ fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> Tc
 }
 
 fn resolve_tcp_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, SocketAddr)>, String> {
+    let mut targets = Vec::new();
+    for port in ports {
+        let addrs: Vec<SocketAddr> = (host, *port)
+            .to_socket_addrs()
+            .map_err(|e| format!("failed to resolve {}:{}: {}", host, port, e))?
+            .collect();
+        targets.extend(addrs.into_iter().map(|addr| (*port, addr)));
+    }
+    Ok(targets)
+}
+
+fn resolve_port_scan_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, SocketAddr)>, String> {
     let Some(seed_port) = ports.first().copied() else {
         return Ok(Vec::new());
     };
@@ -1312,9 +1324,7 @@ fn port_scan_result_to_value(result: PortScanResult) -> Value {
     if let Some(local_addr) = result.local_addr {
         map.insert("local_addr".to_string(), Value::String(local_addr));
     }
-    if !result.open {
-        map.insert("reason".to_string(), Value::String(result.reason));
-    }
+    map.insert("reason".to_string(), Value::String(result.reason));
     Value::Map(map)
 }
 

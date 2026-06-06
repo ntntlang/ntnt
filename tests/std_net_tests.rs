@@ -5,6 +5,7 @@ use std::io::Write;
 use std::net::TcpListener;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -571,8 +572,23 @@ fn port_scan_reports_open_and_closed_ports_sorted() {
     let closed_port = closed_listener.local_addr().unwrap().port();
     drop(closed_listener);
 
+    listener
+        .set_nonblocking(true)
+        .expect("make listener nonblocking");
     let handle = std::thread::spawn(move || {
-        let _ = listener.accept();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match listener.accept() {
+                Ok(_) => return true,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return false,
+            }
+        }
     });
 
     let code = format!(
@@ -585,6 +601,7 @@ match port_scan("127.0.0.1", [{closed_port}, {open_port}], map {{ "allow_private
             print(result["port"])
             print(result["open"])
             print(result["method"])
+            print(result["reason"])
         }}
     }},
     Err(e) => print("ERR: " + e)
@@ -594,9 +611,13 @@ match port_scan("127.0.0.1", [{closed_port}, {open_port}], map {{ "allow_private
 
     let (stdout, stderr, exit_code) =
         run_ntnt_code_with_env(&code, &[("NTNT_NET_ALLOW_PRIVATE", "1")]);
-    let _ = handle.join();
+    let accepted_open_connection = handle.join().expect("accept helper should not panic");
 
     assert_eq!(exit_code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        accepted_open_connection,
+        "accept helper timed out before port_scan connected; stdout: {stdout}"
+    );
     assert!(!stdout.contains("ERR:"), "stdout: {stdout}");
     let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
     let open_port_line = open_port.to_string();
@@ -618,6 +639,7 @@ match port_scan("127.0.0.1", [{closed_port}, {open_port}], map {{ "allow_private
         "port_scan results must be sorted by port: {stdout}"
     );
     assert!(lines.contains(&"true"), "stdout: {stdout}");
+    assert!(lines.contains(&"connected"), "stdout: {stdout}");
     assert!(lines.contains(&"false"), "stdout: {stdout}");
     assert!(
         lines.iter().filter(|line| **line == "tcp").count() >= 2,
