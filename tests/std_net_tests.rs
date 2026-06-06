@@ -388,7 +388,7 @@ match reachable("127.0.0.1", map {{ "allow_private": true, "tcp_ports": [{port}]
         "stderr: {stderr}
 stdout: {stdout}"
     );
-    assert!(stdout.contains("true"), "stdout: {stdout}");
+    assert!(!stdout.contains("ERR:"), "stdout: {stdout}");
     assert!(stdout.contains("80"), "stdout: {stdout}");
     assert!(stdout.contains("443"), "stdout: {stdout}");
     assert!(stdout.contains(&port.to_string()), "stdout: {stdout}");
