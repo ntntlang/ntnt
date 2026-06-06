@@ -183,6 +183,89 @@ match subnet_split("2001:db8::/64", 128) {
 }
 
 #[test]
+fn dns_lookup_rejects_unknown_record_types_as_result_error() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { dns_lookup } from "std/net"
+
+match dns_lookup("example.com", "BOGUS", map { "timeout_ms": 100 }) {
+    Ok(records) => print("unexpected"),
+    Err(e) => print(e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("record_type must be one of"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn dns_lookup_rejects_operational_meta_record_types_as_result_error() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { dns_lookup } from "std/net"
+
+for record_type in ["ANY", "AXFR", "IXFR", "OPT", "TSIG", "ZERO"] {
+    match dns_lookup("example.com", record_type, map { "timeout_ms": 100 }) {
+        Ok(records) => print("unexpected"),
+        Err(e) => print(contains(e, "record_type must be one of"))
+    }
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert_eq!(stdout.matches("true").count(), 6, "stdout: {stdout}");
+}
+
+#[test]
+fn dns_reverse_rejects_invalid_ip_as_result_error() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { dns_reverse } from "std/net"
+
+match dns_reverse("not-an-ip", map { "timeout_ms": 100 }) {
+    Ok(records) => print("unexpected"),
+    Err(e) => print(e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(stdout.contains("valid IP address"), "stdout: {stdout}");
+}
+
+#[test]
+fn dns_lookup_external_smoke_is_opt_in() {
+    if std::env::var("NTNT_NET_EXTERNAL_DNS_TESTS").as_deref() != Ok("1") {
+        return;
+    }
+
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { dns_lookup, dns_reverse } from "std/net"
+
+match dns_lookup("example.com", "A", map { "timeout_ms": 2000 }) {
+    Ok(records) => print(len(records) >= 0),
+    Err(e) => print("lookup=" + e)
+}
+
+match dns_reverse("8.8.8.8", map { "timeout_ms": 2000 }) {
+    Ok(names) => print(len(names) >= 0),
+    Err(e) => print("reverse=" + e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(!stdout.contains("lookup="), "stdout: {stdout}");
+    assert!(!stdout.contains("reverse="), "stdout: {stdout}");
+}
+
+#[test]
 fn tcp_connect_uses_explicit_port_and_multiple_attempts() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
     let port = listener.local_addr().unwrap().port();
