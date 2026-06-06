@@ -9,6 +9,7 @@ use hickory_resolver::Resolver;
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::process::Command;
 use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -723,12 +724,15 @@ fn ip_range_to_cidrs_fn(args: &[Value]) -> Result<Value, IntentError> {
 }
 
 fn ping_fn(args: &[Value]) -> Result<Value, IntentError> {
-    let _host = string_arg(args, 0, "ping")?;
+    let host = string_arg(args, 0, "ping")?;
     let opts = opts_arg(args, 1, "ping")?;
 
     Ok(result_value((|| {
         validate_ping_method(opts.and_then(|m| m.get("method")))?;
-        Err(icmp_unavailable_message())
+        let options = parse_probe_options(opts)?;
+        let targets = resolve_ping_targets(host)?;
+        enforce_resolved_target_policy(&targets, options.allow_private)?;
+        system_ping(host, options.timeout, options.count)
     })()))
 }
 
@@ -933,9 +937,262 @@ fn dns_answers_to_value(answers: Vec<DnsAnswer>) -> Value {
     )
 }
 
-fn icmp_unavailable_message() -> String {
-    "ICMP ping unavailable: std/net does not fall back to TCP automatically. Use tcp_connect() for explicit TCP port checks or reachable(..., map { 'tcp_ports': [...] }) for explicit reachability fallback."
-        .to_string()
+#[derive(Debug, Clone)]
+struct IcmpPingAttempt {
+    seq: Option<i64>,
+    reachable: bool,
+    from: Option<String>,
+    ttl: Option<i64>,
+    latency_ms: Option<f64>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct IcmpPingResult {
+    host: String,
+    target_addr: Option<String>,
+    sent: usize,
+    received: usize,
+    loss_percent: f64,
+    min_ms: Option<f64>,
+    avg_ms: Option<f64>,
+    max_ms: Option<f64>,
+    attempts: Vec<IcmpPingAttempt>,
+}
+
+fn resolve_ping_targets(host: &str) -> Result<Vec<(u16, SocketAddr)>, String> {
+    let resolved: Vec<SocketAddr> = format!("{}:0", host)
+        .to_socket_addrs()
+        .map_err(|e| format!("failed to resolve {}: {}", host, e))?
+        .collect();
+    Ok(resolved.into_iter().map(|addr| (0, addr)).collect())
+}
+
+fn system_ping(host: &str, timeout: Duration, count: usize) -> Result<Value, String> {
+    let timeout_secs = max(
+        1,
+        timeout
+            .as_secs()
+            .saturating_add(if timeout.subsec_millis() > 0 { 1 } else { 0 }),
+    );
+    let output = Command::new("ping")
+        .arg("-n")
+        .arg("-c")
+        .arg(count.to_string())
+        .arg("-W")
+        .arg(timeout_secs.to_string())
+        .arg("--")
+        .arg(host)
+        .output()
+        .map_err(|e| format!("ICMP ping unavailable: failed to run ping: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed = parse_linux_ping_output(host, &stdout, &stderr, count);
+    Ok(Value::Map(icmp_ping_result_map(parsed)))
+}
+
+fn parse_linux_ping_output(
+    host: &str,
+    stdout: &str,
+    stderr: &str,
+    requested_count: usize,
+) -> IcmpPingResult {
+    let mut target_addr = None;
+    let mut sent = requested_count;
+    let mut received = 0usize;
+    let mut loss_percent = 100.0;
+    let mut min_ms = None;
+    let mut avg_ms = None;
+    let mut max_ms = None;
+    let mut attempts = Vec::new();
+
+    for line in stdout.lines().chain(stderr.lines()) {
+        if line.starts_with("PING ") {
+            if let Some(addr) = text_between(line, "(", ")") {
+                target_addr = Some(addr.to_string());
+            }
+            continue;
+        }
+
+        if line.contains(" bytes from ") && line.contains("icmp_seq=") {
+            let from = text_after(line, "from ")
+                .and_then(|s| s.split(':').next())
+                .map(|s| s.trim().to_string());
+            attempts.push(IcmpPingAttempt {
+                seq: parse_i64_after(line, "icmp_seq="),
+                reachable: true,
+                from: from.clone(),
+                ttl: parse_i64_after(line, "ttl="),
+                latency_ms: parse_f64_after(line, "time="),
+                error: None,
+            });
+            if target_addr.is_none() {
+                target_addr = from;
+            }
+            continue;
+        }
+
+        if line.contains("icmp_seq=")
+            && (line.starts_with("From ") || line.contains(" unreachable"))
+        {
+            attempts.push(IcmpPingAttempt {
+                seq: parse_i64_after(line, "icmp_seq="),
+                reachable: false,
+                from: text_after(line, "From ")
+                    .and_then(|s| s.split_whitespace().next())
+                    .map(|s| s.trim_end_matches(':').to_string()),
+                ttl: None,
+                latency_ms: None,
+                error: Some(line.trim().to_string()),
+            });
+            continue;
+        }
+
+        if line.contains("packets transmitted") && line.contains("received") {
+            let parts: Vec<&str> = line.split(',').collect();
+            if let Some(value) = parts.get(0).and_then(|p| p.split_whitespace().next()) {
+                sent = value.parse::<usize>().unwrap_or(sent);
+            }
+            if let Some(part) = parts.iter().find(|p| p.contains("received")) {
+                if let Some(value) = part.trim().split_whitespace().next() {
+                    received = value.parse::<usize>().unwrap_or(received);
+                }
+            }
+            if let Some(part) = parts.iter().find(|p| p.contains("packet loss")) {
+                if let Some(value) = part.trim().split('%').next() {
+                    loss_percent = value.parse::<f64>().unwrap_or(loss_percent);
+                }
+            }
+            continue;
+        }
+
+        if line.contains("min/avg/max") && line.contains('=') {
+            if let Some(values) = line.split('=').nth(1) {
+                let numbers: Vec<f64> = values
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .split('/')
+                    .filter_map(|v| v.parse::<f64>().ok())
+                    .collect();
+                if numbers.len() >= 3 {
+                    min_ms = Some(numbers[0]);
+                    avg_ms = Some(numbers[1]);
+                    max_ms = Some(numbers[2]);
+                }
+            }
+        }
+    }
+
+    if received == 0 {
+        received = attempts.iter().filter(|attempt| attempt.reachable).count();
+    }
+    if sent == 0 {
+        sent = requested_count.max(attempts.len());
+    }
+    if loss_percent == 100.0 && sent > 0 && received > 0 {
+        loss_percent = ((sent.saturating_sub(received)) as f64 / sent as f64) * 100.0;
+    }
+
+    IcmpPingResult {
+        host: host.to_string(),
+        target_addr,
+        sent,
+        received,
+        loss_percent,
+        min_ms,
+        avg_ms,
+        max_ms,
+        attempts,
+    }
+}
+
+fn icmp_ping_result_map(result: IcmpPingResult) -> HashMap<String, Value> {
+    let mut map = HashMap::new();
+    map.insert("host".to_string(), Value::String(result.host));
+    map.insert("reachable".to_string(), Value::Bool(result.received > 0));
+    map.insert("method".to_string(), Value::String("icmp".to_string()));
+    map.insert("permission_limited".to_string(), Value::Bool(false));
+    map.insert("sent".to_string(), Value::Int(result.sent as i64));
+    map.insert("received".to_string(), Value::Int(result.received as i64));
+    map.insert(
+        "failed".to_string(),
+        Value::Int(result.sent.saturating_sub(result.received) as i64),
+    );
+    map.insert(
+        "loss_percent".to_string(),
+        Value::Float(result.loss_percent),
+    );
+    map.insert(
+        "target_addr".to_string(),
+        result.target_addr.map_or_else(Value::none, Value::String),
+    );
+    map.insert(
+        "attempts".to_string(),
+        Value::Array(result.attempts.iter().map(icmp_attempt_to_value).collect()),
+    );
+    if let Some(min_ms) = result.min_ms {
+        map.insert("min_ms".to_string(), Value::Float(min_ms));
+    }
+    if let Some(avg_ms) = result.avg_ms {
+        map.insert("avg_ms".to_string(), Value::Float(avg_ms));
+        if result.sent == 1 {
+            map.insert("latency_ms".to_string(), Value::Float(avg_ms));
+        }
+    }
+    if let Some(max_ms) = result.max_ms {
+        map.insert("max_ms".to_string(), Value::Float(max_ms));
+    }
+    map
+}
+
+fn icmp_attempt_to_value(attempt: &IcmpPingAttempt) -> Value {
+    let mut map = HashMap::new();
+    map.insert("reachable".to_string(), Value::Bool(attempt.reachable));
+    map.insert("method".to_string(), Value::String("icmp".to_string()));
+    if let Some(seq) = attempt.seq {
+        map.insert("seq".to_string(), Value::Int(seq));
+    }
+    if let Some(from) = &attempt.from {
+        map.insert("from".to_string(), Value::String(from.clone()));
+    }
+    if let Some(ttl) = attempt.ttl {
+        map.insert("ttl".to_string(), Value::Int(ttl));
+    }
+    if let Some(latency_ms) = attempt.latency_ms {
+        map.insert("latency_ms".to_string(), Value::Float(latency_ms));
+    }
+    if let Some(error) = &attempt.error {
+        map.insert("error".to_string(), Value::String(error.clone()));
+    }
+    Value::Map(map)
+}
+
+fn text_between<'a>(text: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let after = text_after(text, start)?;
+    after.split(end).next()
+}
+
+fn text_after<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
+    text.split_once(needle).map(|(_, rest)| rest)
+}
+
+fn parse_i64_after(text: &str, needle: &str) -> Option<i64> {
+    text_after(text, needle).and_then(|rest| {
+        rest.split(|ch: char| !ch.is_ascii_digit())
+            .next()
+            .and_then(|value| value.parse::<i64>().ok())
+    })
+}
+
+fn parse_f64_after(text: &str, needle: &str) -> Option<f64> {
+    text_after(text, needle).and_then(|rest| {
+        rest.split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+            .next()
+            .and_then(|value| value.parse::<f64>().ok())
+    })
 }
 
 struct ProbeOptions {
@@ -1167,7 +1424,7 @@ fn resolve_port_scan_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, Sock
 
     let resolved: Vec<SocketAddr> = (host, seed_port)
         .to_socket_addrs()
-        .map_err(|e| format!("failed to resolve {}:{}: {}", host, seed_port, e))?
+        .map_err(|e| format!("failed to resolve {}: {}", host, e))?
         .collect();
 
     let mut ips = Vec::with_capacity(resolved.len());
@@ -1936,6 +2193,20 @@ mod tests {
             }
             other => panic!("expected Result::Err, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_linux_ping_output() {
+        let output = "PING example.com (93.184.216.34) 56(84) bytes of data.\n64 bytes from 93.184.216.34: icmp_seq=1 ttl=58 time=12.3 ms\n\n--- example.com ping statistics ---\n1 packets transmitted, 1 received, 0% packet loss, time 0ms\nrtt min/avg/max/mdev = 12.300/12.300/12.300/0.000 ms\n";
+        let result = parse_linux_ping_output("example.com", output, "", 1);
+
+        assert_eq!(result.target_addr.as_deref(), Some("93.184.216.34"));
+        assert_eq!(result.sent, 1);
+        assert_eq!(result.received, 1);
+        assert_eq!(result.attempts.len(), 1);
+        assert!(result.attempts[0].reachable);
+        assert_eq!(result.attempts[0].ttl, Some(58));
+        assert_eq!(result.attempts[0].latency_ms, Some(12.3));
     }
 
     #[test]

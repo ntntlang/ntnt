@@ -395,23 +395,27 @@ stdout: {stdout}"
 }
 
 #[test]
-fn ping_auto_returns_icmp_unavailable_without_tcp_fallback() {
-    let (stdout, stderr, code) = run_ntnt_code(
+fn ping_auto_uses_icmp_without_tcp_fallback() {
+    let (stdout, stderr, code) = run_ntnt_code_with_env(
         r#"
 import { ping } from "std/net"
 
-match ping("example.com") {
-    Ok(info) => print("unexpected"),
+match ping("127.0.0.1", map { "count": 1, "timeout_ms": 1000, "allow_private": true }) {
+    Ok(info) => {
+        print(info["reachable"])
+        print(info["method"])
+        print(info["received"])
+    },
     Err(e) => print(e)
 }
 "#,
+        &[("NTNT_NET_ALLOW_PRIVATE", "1")],
     );
 
     assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
-    assert!(
-        stdout.contains("does not fall back to TCP automatically"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("true"), "stdout: {stdout}");
+    assert!(stdout.contains("icmp"), "stdout: {stdout}");
+    assert!(stdout.contains("1"), "stdout: {stdout}");
 }
 
 #[test]
@@ -685,6 +689,30 @@ match port_scan("example.com", [{too_many}]) {{
     assert!(
         stdout.contains("supports at most 128 ports"),
         "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn port_scan_unresolved_host_error_does_not_blame_first_port() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { port_scan } from "std/net"
+
+match port_scan("missing.invalid", [21, 80], map { "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected"),
+    Err(e) => print(e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("failed to resolve missing.invalid:"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("missing.invalid:21"),
+        "error should not look like it tried to resolve host:port as a hostname: {stdout}"
     );
 }
 
