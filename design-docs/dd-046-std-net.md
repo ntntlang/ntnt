@@ -456,7 +456,7 @@ If ICMP is unavailable in the runtime, `ping()` fails clearly instead of falling
 
 ```ntnt
 ping("example.com")
-// Err("ICMP ping unavailable: std/net does not fall back to TCP automatically. Use tcp_connect() for explicit TCP port checks or reachable(..., map { 'tcp_ports': [...] }) for explicit reachability fallback.")
+// Err("ICMP ping unavailable on this platform")
 ```
 
 Apps that intentionally want TCP reachability should use `tcp_connect()` for a single explicit port or `reachable()` for high-level ICMP-then-TCP fallback semantics:
@@ -499,7 +499,7 @@ Options:
 - `count`: default 1, clamped to `1..=10`
 - `timeout_ms`: default 2000, clamped to shared timeout bounds
 - `interval_ms`: default 0, clamped to `0..=5000`
-- `tcp_ports`: required for `reachable()` while Phase 1 has no ICMP implementation, max 10 explicit ports; no default/random ports
+- `tcp_ports`: optional explicit TCP fallback ports for `reachable()`, max 10 explicit ports; no default/random ports
 - `allow_private`: default false, requires process-level `NTNT_NET_ALLOW_PRIVATE=1`
 
 Semantics:

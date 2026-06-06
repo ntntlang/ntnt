@@ -9,6 +9,7 @@ use hickory_resolver::Resolver;
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
+#[cfg(target_os = "linux")]
 use std::process::Command;
 use std::str::FromStr;
 use std::thread;
@@ -184,10 +185,9 @@ fn validate_ping_method(value: Option<&Value>) -> Result<(), String> {
         None => Ok(()),
         Some(Value::String(method)) => match method.as_str() {
             "auto" | "icmp" => Ok(()),
-            "tcp" => Err(
-                "ping() does not perform TCP probes; use tcp_connect() for a TCP port check or reachable() for explicit fallback reachability"
-                    .to_string(),
-            ),
+            "tcp" => {
+                Err("ping() only supports ICMP; use tcp_connect() for TCP port checks".to_string())
+            }
             other => Err(format!(
                 "ping() method must be 'auto' or 'icmp', got '{}'",
                 other
@@ -334,10 +334,8 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt ping
     // @module std/net
     // @signature ping(host: String, opts?: Map) -> Result<Map, String>
-    // Performs an ICMP ping when ICMP support is available. It is protocol-honest:
-    // ping() does not fall back to TCP ports. Apps that want TCP port checks should
-    // use tcp_connect(); apps that want explicit ICMP-then-TCP reachability should
-    // use reachable().
+    // Performs an ICMP ping when ICMP support is available. Apps that want TCP port
+    // checks should use tcp_connect(); high-level reachability checks can use reachable().
     // @since v0.4.10
     // @tags #network
     module.insert(
@@ -378,9 +376,9 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt reachable
     // @module std/net
     // @signature reachable(host: String, opts?: Map) -> Result<Map, String>
-    // Performs an explicit high-level reachability check. Phase 1 has no ICMP
-    // implementation, so TCP fallback requires caller-provided tcp_ports; the result
-    // records method and fallback_from instead of pretending TCP is ping.
+    // Performs an explicit high-level reachability check. It tries ICMP first when
+    // available, then uses caller-provided tcp_ports for explicit TCP reachability.
+    // The result records method and fallback_from instead of pretending TCP is ping.
     // @param host Hostname or IP address to resolve and probe
     // @param opts Optional map with tcp_ports, timeout_ms, count, interval_ms, and allow_private
     // @returns Result containing reachability status, method used, fallback metadata, and attempt summary
@@ -961,13 +959,14 @@ struct IcmpPingResult {
 }
 
 fn resolve_ping_targets(host: &str) -> Result<Vec<(u16, SocketAddr)>, String> {
-    let resolved: Vec<SocketAddr> = format!("{}:0", host)
+    let resolved: Vec<SocketAddr> = (host, 0)
         .to_socket_addrs()
         .map_err(|e| format!("failed to resolve {}: {}", host, e))?
         .collect();
     Ok(resolved.into_iter().map(|addr| (0, addr)).collect())
 }
 
+#[cfg(target_os = "linux")]
 fn system_ping(host: &str, timeout: Duration, count: usize) -> Result<Value, String> {
     let timeout_secs = max(
         1,
@@ -988,8 +987,41 @@ fn system_ping(host: &str, timeout: Duration, count: usize) -> Result<Value, Str
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && !linux_ping_output_has_packet_summary(&stdout) {
+        return Err(format!(
+            "ICMP ping unavailable: system ping failed: {}",
+            ping_failure_message(&stdout, &stderr, output.status.code())
+        ));
+    }
+
     let parsed = parse_linux_ping_output(host, &stdout, &stderr, count);
     Ok(Value::Map(icmp_ping_result_map(parsed)))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn system_ping(_host: &str, _timeout: Duration, _count: usize) -> Result<Value, String> {
+    Err("ICMP ping unavailable on this platform".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ping_output_has_packet_summary(output: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.contains("packets transmitted") && line.contains("received"))
+}
+
+#[cfg(target_os = "linux")]
+fn ping_failure_message(stdout: &str, stderr: &str, status_code: Option<i32>) -> String {
+    stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| match status_code {
+            Some(code) => format!("exit status {}", code),
+            None => "terminated by signal".to_string(),
+        })
 }
 
 fn parse_linux_ping_output(
@@ -2265,14 +2297,21 @@ mod tests {
         assert!(err.contains("Network target denied by policy"));
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn ping_auto_reports_icmp_unavailable_without_tcp_fallback() {
+    fn ping_auto_reports_platform_icmp_unavailable() {
         let result = ping_fn(&[Value::String("example.com".to_string())]).unwrap();
-        assert_result_err_contains(result, "does not fall back to TCP automatically");
+        assert_result_err_contains(result, "ICMP ping unavailable on this platform");
     }
 
     #[test]
-    fn ping_tcp_method_points_to_tcp_connect_or_reachable() {
+    fn resolve_ping_targets_accepts_ipv6_literals() {
+        let targets = resolve_ping_targets("::1").unwrap();
+        assert!(targets.iter().any(|(_, addr)| addr.ip().is_ipv6()));
+    }
+
+    #[test]
+    fn ping_tcp_method_points_to_tcp_connect() {
         let result = ping_fn(&[
             Value::String("example.com".to_string()),
             Value::Map(HashMap::from([(

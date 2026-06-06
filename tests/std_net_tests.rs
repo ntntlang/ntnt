@@ -394,6 +394,7 @@ stdout: {stdout}"
     assert!(stdout.contains(&port.to_string()), "stdout: {stdout}");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn ping_auto_uses_icmp_without_tcp_fallback() {
     let (stdout, stderr, code) = run_ntnt_code_with_env(
