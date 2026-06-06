@@ -983,7 +983,7 @@ let children = unwrap(subnet_split("192.168.1.0/24", 28))
 let summary = unwrap(subnet_summarize(["10.0.0.0/25", "10.0.0.128/25"]))
 let tcp = unwrap(tcp_connect("example.com", 443))
 let ports = unwrap(port_scan("example.com", [80, 443], map { "timeout_ms": 500 }))
-let reachability = unwrap(reachable("example.com", map { "tcp_ports": [443] }))
+let reachability = unwrap(reachable("example.com", map { "tcp_ports": [8080] }))
 let records = unwrap(dns_lookup("example.com", "A"))
 let ptr_names = unwrap(dns_reverse("8.8.8.8"))
 ```
@@ -992,13 +992,13 @@ These helpers return `Result<..., String>`; use `unwrap(...)` for quick scripts/
 
 `ip_parse()` supports IPv4 and IPv6. Large IPv6 address counts are returned as strings so `/64` and larger networks do not overflow integer values.
 
-`ping()` is ICMP-only and does **not** silently fall back to TCP ports. In Phase 1, unsupported ICMP returns `Err(String)` with guidance. If an app intentionally wants a TCP port check, use `tcp_connect(host, port, opts?)`. If it wants a high-level “is this host reachable somehow?” check, use `reachable(host, opts?)` with explicit `tcp_ports` so the result can honestly report `method: "tcp"` and `fallback_from: "icmp"`.
+`ping()` is ICMP-only and does **not** silently fall back to TCP ports. Unsupported ICMP returns `Err(String)`. If an app intentionally wants a single TCP port check, use `tcp_connect(host, port, opts?)`. If it wants a high-level “is this host reachable somehow?” check, use `reachable(host, opts?)`; it probes ICMP plus TCP ports 80 and 443 by default, and `tcp_ports` adds more explicit TCP ports.
 
 ```ntnt
 let tcp = tcp_connect("example.com", 443, map { "count": 5 })
 
 let reachability = reachable("example.com", map {
-    "tcp_ports": [443],
+    "tcp_ports": [8080],
     "count": 5
 })
 ```

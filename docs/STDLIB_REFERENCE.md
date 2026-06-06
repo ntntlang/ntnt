@@ -9700,7 +9700,7 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 | [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
 | [`ping`](#ping) | Performs an ICMP ping when ICMP support is available. Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable(). |
 | [`port_scan`](#portscan) | Performs a bounded TCP scan of explicit ports for one host. Only explicit port arrays are accepted; ranges are intentionally not expanded. Results are sorted by port. |
-| [`reachable`](#reachable) | Performs an explicit high-level reachability check. It tries ICMP first when available, then uses caller-provided tcp_ports for explicit TCP reachability. The result records method and fallback_from instead of pretending TCP is ping. |
+| [`reachable`](#reachable) | Performs a high-level reachability check using ICMP plus TCP ports 80 and 443 by default. Caller-provided tcp_ports add extra explicit TCP ports. The result records the method that established reachability without pretending TCP is ping. |
 | [`subnet_contains`](#subnetcontains) | Returns true when the parent CIDR contains the entire child address or subnet. |
 | [`subnet_overlaps`](#subnetoverlaps) | Returns true when two IPv4 or IPv6 CIDRs overlap. |
 | [`subnet_split`](#subnetsplit) | Splits a CIDR into child subnets with a longer prefix, enforcing result caps. |
@@ -9839,19 +9839,19 @@ port_scan("example.com", [80, 443], map { "timeout_ms": 500 })  // Scan explicit
 reachable(host: String, opts?: Map) -> Result<Map, String>
 ```
 
-Performs an explicit high-level reachability check. It tries ICMP first when available, then uses caller-provided tcp_ports for explicit TCP reachability. The result records method and fallback_from instead of pretending TCP is ping.
+Performs a high-level reachability check using ICMP plus TCP ports 80 and 443 by default. Caller-provided tcp_ports add extra explicit TCP ports. The result records the method that established reachability without pretending TCP is ping.
 
 **Parameters:**
 
 - `host` — Hostname or IP address to resolve and probe
-- `opts` — Optional map with tcp_ports, timeout_ms, count, interval_ms, and allow_private
+- `opts` — Optional map with extra tcp_ports, timeout_ms, count, interval_ms, and allow_private
 
 **Returns:** Result containing reachability status, method used, fallback metadata, and attempt summary
 
 **Examples:**
 
 ```ntnt
-reachable("example.com", map { "tcp_ports": [443], "count": 5 })  // Check host reachability with explicit TCP fallback
+reachable("example.com", map { "tcp_ports": [8080], "count": 5 })  // Check ICMP plus TCP 80, 443, and 8080
 ```
 
 *Since v0.4.10*

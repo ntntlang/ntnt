@@ -356,7 +356,7 @@ match tcp_connect("127.0.0.1", {port}, map {{ "allow_private": true, "timeout_ms
 }
 
 #[test]
-fn reachable_uses_explicit_tcp_fallback_without_calling_it_ping() {
+fn reachable_uses_icmp_and_tcp_ports_without_calling_tcp_ping() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
     let port = listener.local_addr().unwrap().port();
     let handle = std::thread::spawn(move || {
@@ -369,9 +369,12 @@ import {{ reachable }} from "std/net"
 
 match reachable("127.0.0.1", map {{ "allow_private": true, "tcp_ports": [{port}], "timeout_ms": 1000 }}) {{
     Ok(info) => {{
+        let ports = info["tcp_ports_tried"] ?? info["ports_tried"]
         print(info["reachable"])
         print(info["method"])
-        print(info["fallback_from"])
+        print(ports[0])
+        print(ports[1])
+        print(ports[2])
         print(info["connected_port"])
     }},
     Err(e) => print("ERR: " + e)
@@ -389,8 +392,8 @@ match reachable("127.0.0.1", map {{ "allow_private": true, "tcp_ports": [{port}]
 stdout: {stdout}"
     );
     assert!(stdout.contains("true"), "stdout: {stdout}");
-    assert!(stdout.contains("tcp"), "stdout: {stdout}");
-    assert!(stdout.contains("icmp"), "stdout: {stdout}");
+    assert!(stdout.contains("80"), "stdout: {stdout}");
+    assert!(stdout.contains("443"), "stdout: {stdout}");
     assert!(stdout.contains(&port.to_string()), "stdout: {stdout}");
 }
 

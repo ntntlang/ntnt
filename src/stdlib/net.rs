@@ -24,6 +24,7 @@ const DEFAULT_PROBE_COUNT: usize = 1;
 const MAX_PROBE_COUNT: usize = 10;
 const DEFAULT_INTERVAL_MS: u64 = 0;
 const MAX_INTERVAL_MS: u64 = 5_000;
+const DEFAULT_REACHABLE_TCP_PORTS: [u16; 2] = [80, 443];
 const MAX_TCP_PORTS: usize = 10;
 const MAX_PORT_SCAN_PORTS: usize = 128;
 const DEFAULT_PORT_SCAN_CONCURRENCY: usize = 20;
@@ -376,15 +377,15 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt reachable
     // @module std/net
     // @signature reachable(host: String, opts?: Map) -> Result<Map, String>
-    // Performs an explicit high-level reachability check. It tries ICMP first when
-    // available, then uses caller-provided tcp_ports for explicit TCP reachability.
-    // The result records method and fallback_from instead of pretending TCP is ping.
+    // Performs a high-level reachability check using ICMP plus TCP ports 80 and 443
+    // by default. Caller-provided tcp_ports add extra explicit TCP ports.
+    // The result records the method that established reachability without pretending TCP is ping.
     // @param host Hostname or IP address to resolve and probe
-    // @param opts Optional map with tcp_ports, timeout_ms, count, interval_ms, and allow_private
+    // @param opts Optional map with extra tcp_ports, timeout_ms, count, interval_ms, and allow_private
     // @returns Result containing reachability status, method used, fallback metadata, and attempt summary
     // @since v0.4.10
     // @tags #network
-    // @example reachable("example.com", map { "tcp_ports": [443], "count": 5 }) ~ "Check host reachability with explicit TCP fallback"
+    // @example reachable("example.com", map { "tcp_ports": [8080], "count": 5 }) ~ "Check ICMP plus TCP 80, 443, and 8080"
     module.insert(
         "reachable".to_string(),
         Value::NativeFunction {
@@ -760,7 +761,8 @@ fn reachable_fn(args: &[Value]) -> Result<Value, IntentError> {
 
     Ok(result_value((|| {
         let options = parse_probe_options(opts)?;
-        let tcp_ports = parse_tcp_ports(opts, "reachable")?;
+        let icmp_result = icmp_ping_for_host(host, &options);
+        let tcp_ports = parse_reachable_tcp_ports(opts, "reachable")?;
         let attempts = tcp_reachability_attempts_for_host(
             host,
             &tcp_ports,
@@ -770,7 +772,10 @@ fn reachable_fn(args: &[Value]) -> Result<Value, IntentError> {
             options.allow_private,
         )?;
         Ok(Value::Map(reachable_result_map(
-            host, &tcp_ports, &attempts,
+            host,
+            &tcp_ports,
+            &attempts,
+            icmp_result,
         )))
     })()))
 }
@@ -1003,7 +1008,21 @@ fn system_ping(_host: &str, _timeout: Duration, _count: usize) -> Result<Value, 
     Err("ICMP ping unavailable on this platform".to_string())
 }
 
-#[cfg(target_os = "linux")]
+fn icmp_ping_for_host(
+    host: &str,
+    options: &ProbeOptions,
+) -> Result<HashMap<String, Value>, String> {
+    let targets = resolve_ping_targets(host)?;
+    enforce_resolved_target_policy(&targets, options.allow_private)?;
+    match system_ping(host, options.timeout, options.count)? {
+        Value::Map(map) => Ok(map),
+        other => Err(format!(
+            "ICMP ping unavailable: unexpected ping result {}",
+            other.type_name()
+        )),
+    }
+}
+
 fn linux_ping_output_has_packet_summary(output: &str) -> bool {
     output
         .lines()
@@ -1589,14 +1608,57 @@ fn reachable_result_map(
     host: &str,
     ports: &[u16],
     attempts: &[TcpProbeResult],
+    icmp_result: Result<HashMap<String, Value>, String>,
 ) -> HashMap<String, Value> {
-    let mut result = tcp_reachability_result_map(host, ports, attempts);
-    result.insert(
+    let tcp_reachable = attempts.iter().any(|attempt| attempt.reachable);
+    let mut tcp_result = tcp_reachability_result_map(host, ports, attempts);
+    tcp_result.insert(
         "fallback_from".to_string(),
         Value::String("icmp".to_string()),
     );
-    result.insert("permission_limited".to_string(), Value::Bool(true));
-    result
+
+    let tcp_ports = Value::Array(ports.iter().map(|p| Value::Int(*p as i64)).collect());
+    let tcp_attempts = Value::Array(attempts.iter().map(tcp_attempt_to_value).collect());
+
+    match icmp_result {
+        Ok(mut icmp_map) => {
+            let icmp_reachable = map_bool(&icmp_map, "reachable").unwrap_or(false);
+            if let Some(Value::Array(icmp_attempts)) = icmp_map.get("attempts").cloned() {
+                tcp_result.insert("icmp_attempts".to_string(), Value::Array(icmp_attempts));
+            }
+            tcp_result.insert("icmp_reachable".to_string(), Value::Bool(icmp_reachable));
+
+            if icmp_reachable {
+                icmp_map.insert("tcp_reachable".to_string(), Value::Bool(tcp_reachable));
+                icmp_map.insert("tcp_ports_tried".to_string(), tcp_ports);
+                icmp_map.insert("tcp_attempts".to_string(), tcp_attempts);
+                if let Some(first_success) = attempts.iter().find(|attempt| attempt.reachable) {
+                    icmp_map.insert(
+                        "connected_port".to_string(),
+                        first_success
+                            .connected_port
+                            .map(|port| Value::Int(port as i64))
+                            .unwrap_or_else(Value::none),
+                    );
+                }
+                icmp_map
+            } else {
+                tcp_result
+            }
+        }
+        Err(error) => {
+            tcp_result.insert("icmp_error".to_string(), Value::String(error));
+            tcp_result.insert("icmp_reachable".to_string(), Value::Bool(false));
+            tcp_result
+        }
+    }
+}
+
+fn map_bool(map: &HashMap<String, Value>, key: &str) -> Option<bool> {
+    match map.get(key) {
+        Some(Value::Bool(value)) => Some(*value),
+        _ => None,
+    }
 }
 
 fn port_scan_result_to_value(result: PortScanResult) -> Value {
@@ -2023,33 +2085,29 @@ fn parse_explicit_ports(values: &[Value], fn_name: &str, label: &str) -> Result<
     Ok(ports)
 }
 
-fn parse_tcp_ports(
+fn parse_reachable_tcp_ports(
     opts: Option<&HashMap<String, Value>>,
     fn_name: &str,
 ) -> Result<Vec<u16>, String> {
-    let Some(value) = opts.and_then(|m| m.get("tcp_ports")) else {
-        return Err(format!(
-            "{}() option 'tcp_ports' is required for explicit TCP reachability fallback",
-            fn_name
-        ));
+    let extra_ports: &[Value] = match opts.and_then(|m| m.get("tcp_ports")) {
+        Some(Value::Array(values)) => values.as_slice(),
+        Some(_) => {
+            return Err(format!(
+                "{}() option 'tcp_ports' must be Array<Int>",
+                fn_name
+            ));
+        }
+        None => &[],
     };
-    let Value::Array(values) = value else {
+
+    let mut ports = DEFAULT_REACHABLE_TCP_PORTS.to_vec();
+    if ports.len() + extra_ports.len() > MAX_TCP_PORTS {
         return Err(format!(
-            "{}() option 'tcp_ports' must be Array<Int>",
-            fn_name
-        ));
-    };
-    if values.is_empty() {
-        return Err(format!("{}() option 'tcp_ports' cannot be empty", fn_name));
-    }
-    if values.len() > MAX_TCP_PORTS {
-        return Err(format!(
-            "{}() option 'tcp_ports' supports at most {} ports",
+            "{}() option 'tcp_ports' supports at most {} total ports including defaults 80 and 443",
             fn_name, MAX_TCP_PORTS
         ));
     }
-    let mut ports = Vec::with_capacity(values.len());
-    for value in values {
+    for value in extra_ports {
         let Value::Int(port) = value else {
             return Err(format!(
                 "{}() option 'tcp_ports' must be Array<Int>",
@@ -2339,6 +2397,22 @@ mod tests {
             ("count".to_string(), Value::Int(0),)
         ])))
         .is_err());
+    }
+
+    #[test]
+    fn reachable_tcp_ports_default_to_http_https_and_append_extras() {
+        let defaults = parse_reachable_tcp_ports(None, "reachable").unwrap();
+        assert_eq!(defaults, vec![80, 443]);
+
+        let ports = parse_reachable_tcp_ports(
+            Some(&HashMap::from([(
+                "tcp_ports".to_string(),
+                Value::Array(vec![Value::Int(8080), Value::Int(443), Value::Int(8443)]),
+            )])),
+            "reachable",
+        )
+        .unwrap();
+        assert_eq!(ports, vec![80, 443, 8080, 8443]);
     }
 
     #[test]
