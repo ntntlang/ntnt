@@ -9694,6 +9694,7 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 
 | Function | Description |
 |----------|-------------|
+| [`ct_subdomains`](#ctsubdomains) | Discovers public subdomain names from certificate transparency logs via crt.sh. This is not a DNS zone transfer, port scan, or liveness check; returned names may be stale. |
 | [`dns_lookup`](#dnslookup) | Looks up DNS records for a name. Supports A, AAAA, ANAME, CAA, CDNSKEY, CDS, CNAME, CSYNC, DNSKEY, DS, HINFO, HTTPS, KEY, MX, NAPTR, NS, NSEC, NSEC3, NSEC3PARAM, NULL, OPENPGPKEY, PTR, RRSIG, SIG, SOA, SRV, SSHFP, SVCB, TLSA, and TXT records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
 | [`dns_reverse`](#dnsreverse) | Performs a reverse DNS/PTR lookup for an IPv4 or IPv6 address. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
 | [`ip_parse`](#ipparse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
@@ -9707,6 +9708,31 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 | [`subnet_summarize`](#subnetsummarize) | Summarizes adjacent or overlapping CIDRs into the shortest equivalent route list. |
 | [`subnet_supernet`](#subnetsupernet) | Returns the parent/supernet of a CIDR. Defaults to one bit shorter. |
 | [`tcp_connect`](#tcpconnect) | Performs a bounded TCP connect probe to one explicit port. Closed, refused, or timed-out ports return Ok(map { "connected": false, ... }); invalid input, policy denial, and resolver/system failures return Err(String). |
+
+#### `ct_subdomains`
+
+```ntnt
+ct_subdomains(domain: String, opts?: Map) -> Result<Array<Map>, String>
+```
+
+Discovers public subdomain names from certificate transparency logs via crt.sh. This is not a DNS zone transfer, port scan, or liveness check; returned names may be stale.
+
+**Parameters:**
+
+- `domain` — Domain suffix to search, usually a registrable domain such as "example.com". URLs, wildcards, and obvious public suffixes are rejected; pass IDNs as punycode.
+- `opts` — Optional map with timeout_ms, max_results, and include_wildcards. max_results caps returned records; very large crt.sh responses may still fail the response-size guard.
+
+**Returns:** Result containing discovered names as maps with name, source, and wildcard fields
+
+**Examples:**
+
+```ntnt
+ct_subdomains("example.com", map { "max_results": 100 })  // Find public certificate-transparency subdomains
+```
+
+*Since v0.4.10*
+
+---
 
 #### `dns_lookup`
 

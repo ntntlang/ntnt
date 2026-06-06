@@ -1,9 +1,9 @@
 # DD-046: `std/net` — Safe Network Primitives for ntnt
 
-**Status:** PR 1 merged; PR 2 DNS lookup types in progress; scan/TLS slices planned
+**Status:** PRs 1-2 merged; bounded port scan in review; CT subdomain discovery in progress; TLS slice planned
 **Author:** Larri
 **Created:** 2026-03-22
-**Updated:** 2026-06-03
+**Updated:** 2026-06-05
 **Target baseline:** v0.4.10 (`std/net` track)
 
 ---
@@ -27,6 +27,7 @@ Initial scope:
 - `tcp_connect(host, port, opts?)`
 - `dns_lookup(name, record_type?, opts?)`
 - `dns_reverse(ip, opts?)`
+- `ct_subdomains(domain, opts?)`
 - `port_scan(host, ports, opts?)` with strict bounds
 - `tls_info(host, opts?)`
 
@@ -793,8 +794,8 @@ SNMP is a real network-monitoring need, but it is its own protocol family. It sh
 As of 2026-06-05:
 
 - [x] **PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability**: merged in [PR #113](https://github.com/ntntlang/ntnt/pull/113).
-- [x] **PR 2 — DNS lookup types**: merged in [PR #114](https://github.com/ntntlang/ntnt/pull/114); adds `dns_lookup` and `dns_reverse` with broad supported record types, deterministic tests, and opt-in external DNS smoke coverage.
-- [ ] **PR 3 — Bounded port scan**: in progress on branch `feat/std-net-port-scan`; adds `port_scan` over explicit port arrays with bounded concurrency and shared target policy.
+- [x] **PR 2 — DNS lookup types**: merged in [PR #114](https://github.com/ntntlang/ntnt/pull/114); added `dns_lookup` and `dns_reverse` with broad supported record types, deterministic tests, and opt-in external DNS smoke coverage.
+- [ ] **PR 3 — Bounded port scan + CT subdomain discovery**: in review in [PR #115](https://github.com/ntntlang/ntnt/pull/115); adds `port_scan` over explicit port arrays plus `ct_subdomains` via crt.sh.
 - [ ] **PR 4 — TLS info**: planned after port scan/dependency decision.
 
 PR 1 shipped the core module registration, runtime functions, typechecker signatures, generated docs, deterministic examples, and tests for Phase 1. Review hardening added policy fixes for private, link-local, multicast, documentation, mapped-address, and broadcast-style targets.
@@ -849,9 +850,28 @@ Acceptance:
 - [x] no public DNS dependency by default
 - [x] operational/meta records (`ANY`, `AXFR`, `IXFR`, `OPT`, `TSIG`, `ZERO`) rejected rather than treated as ordinary lookup records
 
+### PR 2B — CT subdomain discovery
+
+Status: **included in PR #115 on `feat/std-net-port-scan`.**
+
+Scope:
+
+- [x] `ct_subdomains(domain, opts?)` as certificate-transparency subdomain discovery through crt.sh
+- [x] direct crt.sh JSON lookup (`https://crt.sh/?q=%.domain&output=json`)
+- [x] deterministic filtering/deduping/sorting of `name_value` and `common_name` JSON fields
+- [x] invalid domain and option errors return `Result::Err(String)` without network calls
+- [x] offline-safe example gating; external crt.sh calls remain opt-in for examples/tests
+
+Acceptance:
+
+- [x] returned maps include `name`, `source`, and `wildcard`
+- [x] docs call out that CT discovery is not DNS resolution, liveness proof, or a port scan
+- [x] wildcard certificate names are excluded by default and only included with `include_wildcards: true`
+- [x] `max_results` and `timeout_ms` are bounded
+
 ### PR 3 — Bounded port scan
 
-Status: **implemented on `feat/std-net-port-scan`; pending PR review.**
+Status: **implemented in PR #115 on `feat/std-net-port-scan`; now also carries CT subdomain discovery.**
 
 Scope:
 

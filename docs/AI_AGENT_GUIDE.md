@@ -972,10 +972,10 @@ Both `fetch(map { "url": url, ... })` and `fetch(url, map { ... })` work. The tw
 
 ### Network/IPAM Helpers (`std/net`)
 
-`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, bounded port scans, high-level reachability, and DNS lookups:
+`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, bounded port scans, high-level reachability, DNS lookups, and certificate-transparency subdomain discovery:
 
 ```ntnt
-import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, port_scan, reachable, dns_lookup, dns_reverse } from "std/net"
+import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, port_scan, reachable, dns_lookup, dns_reverse, ct_subdomains } from "std/net"
 
 let info = unwrap(ip_parse("192.168.1.0/24"))
 let contains = unwrap(subnet_contains("10.0.0.0/8", "10.42.0.0/16"))
@@ -986,6 +986,7 @@ let ports = unwrap(port_scan("example.com", [80, 443], map { "timeout_ms": 500 }
 let reachability = unwrap(reachable("example.com", map { "tcp_ports": [443] }))
 let records = unwrap(dns_lookup("example.com", "A"))
 let ptr_names = unwrap(dns_reverse("8.8.8.8"))
+let public_subdomains = unwrap(ct_subdomains("example.com", map { "max_results": 100 }))
 ```
 
 These helpers return `Result<..., String>`; use `unwrap(...)` for quick scripts/examples, or `match`/`otherwise` when the app should handle invalid input or policy denial.
@@ -1022,7 +1023,10 @@ let a_records = dns_lookup("example.com", "A", map { "timeout_ms": 1000 })
 let mx_records = dns_lookup("example.com", "MX", map { "timeout_ms": 1000 })
 let txt_records = dns_lookup("example.com", "TXT", map { "timeout_ms": 1000 })
 let ptr_names = dns_reverse("8.8.8.8", map { "timeout_ms": 1000 })
+let subdomains = ct_subdomains("example.com", map { "timeout_ms": 30000, "max_results": 100 })
 ```
+
+`ct_subdomains(domain, opts?)` queries public certificate transparency data through `crt.sh` and returns maps with `name`, `source`, and `wildcard`. Treat it as subdomain discovery, not proof that a hostname currently resolves or serves traffic: CT data can be stale, wildcard certificates do not enumerate concrete hosts, and liveness checks should use `dns_lookup`, `tcp_connect`, or `reachable` afterward. Options include `timeout_ms`, `max_results`, and `include_wildcards`. `max_results` caps returned records, while `timeout_ms` and the built-in response-size guard bound the external crt.sh request. Pass IDNs as punycode.
 
 When passing `dns_lookup` options, include the record type explicitly: `dns_lookup(name, "A", opts)`. The shorter `dns_lookup(name)` form defaults to `A`; `dns_lookup(name, opts)` is intentionally rejected so the call shape stays unambiguous.
 
