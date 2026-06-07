@@ -12,6 +12,7 @@ use std::io::Write;
 use std::net::TcpListener;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -121,7 +122,7 @@ fn start_local_tls_server() -> (u16, thread::JoinHandle<bool>) {
     acceptor
         .check_private_key()
         .expect("check test TLS private key");
-    let acceptor = acceptor.build();
+    let acceptor = Arc::new(acceptor.build());
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local TLS listener");
     listener
@@ -129,23 +130,30 @@ fn start_local_tls_server() -> (u16, thread::JoinHandle<bool>) {
         .expect("make local TLS listener nonblocking");
     let port = listener.local_addr().unwrap().port();
     let handle = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut accepted = false;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let (tx, rx) = mpsc::channel();
         loop {
+            if rx.try_iter().any(|accepted| accepted) {
+                return true;
+            }
+
             match listener.accept() {
                 Ok((stream, _)) => {
-                    accepted |= acceptor.accept(stream).is_ok();
-                    if accepted {
-                        return true;
-                    }
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                    let acceptor = Arc::clone(&acceptor);
+                    let tx = tx.clone();
+                    thread::spawn(move || {
+                        let _ = tx.send(acceptor.accept(stream).is_ok());
+                    });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
-                        return accepted;
+                        return rx.try_iter().any(|accepted| accepted);
                     }
                     thread::sleep(Duration::from_millis(10));
                 }
-                Err(_) => return accepted,
+                Err(_) => return rx.try_iter().any(|accepted| accepted),
             }
         }
     });
