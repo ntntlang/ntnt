@@ -93,7 +93,7 @@ As of the v0.4.9 baseline:
 
 5. **No shellouts.** The implementation should not invoke `ping`, `dig`, `nmap`, `openssl`, `whois`, or `ssh`. If a capability requires a large/privileged dependency, defer it rather than pretending it is simple.
 
-6. **No permission hell, no silent protocol switch.** Default APIs should not require root, `CAP_NET_RAW`, Docker `cap_add`, or sysctl tuning. If ICMP is unavailable in the current runtime, `ping()` should return a clear `Err(String)` rather than quietly trying TCP ports. TCP reachability is available as an explicit developer choice through `tcp_connect()`, or through `reachable()` when the app intentionally wants high-level fallback semantics with caller-provided `tcp_ports`.
+6. **No permission hell, no silent protocol switch.** Default APIs should not require root, `CAP_NET_RAW`, Docker `cap_add`, or sysctl tuning. If ICMP is unavailable in the current runtime, `ping()` should return a clear `Err(String)` rather than quietly trying TCP ports. TCP reachability is available as an explicit developer choice through `tcp_connect()`, or through `reachable()` when the app intentionally wants high-level reachability semantics with default TCP 80/443 plus optional extra `tcp_ports`.
 
 7. **CI-safe by default.** Tests should not require public internet, raw socket capabilities, root, or Docker privileges. External-network and raw-socket tests are opt-in.
 
@@ -208,7 +208,7 @@ Use these rules consistently:
 - `Ok(map { ... "connected": false ... })` for ordinary TCP refused/timeout results.
 - `Ok([])` for DNS names that have no records of the requested type when the resolver returns a clean no-answer response.
 - `Err(String)` for invalid host/port/options, resolver/system errors, policy denial, or permission/capability failure.
-- `ping(..., map { "method": "icmp" })` and default `ping()` may return `Err` when ICMP is unavailable or denied. They must not silently fall back to TCP. Apps that intentionally want TCP reachability should use `tcp_connect()`; apps that intentionally want high-level fallback semantics should use `reachable()` with explicit `tcp_ports`.
+- `ping(..., map { "method": "icmp" })` and default `ping()` may return `Err` when ICMP is unavailable or denied. They must not silently fall back to TCP. Apps that intentionally want TCP reachability should use `tcp_connect()`; apps that intentionally want high-level reachability should use `reachable()`, which probes ICMP plus default TCP 80/443 and optional extra `tcp_ports`.
 - `Ok(map { "valid": false, "validation_error": ... })` for TLS certificates that connect but fail validation.
 - `Err(String)` for TLS handshake/connect failures where no certificate information can be obtained.
 
@@ -456,10 +456,10 @@ If ICMP is unavailable in the runtime, `ping()` fails clearly instead of falling
 
 ```ntnt
 ping("example.com")
-// Err("ICMP ping unavailable: std/net does not fall back to TCP automatically. Use tcp_connect() for explicit TCP port checks or reachable(..., map { 'tcp_ports': [...] }) for explicit reachability fallback.")
+// Err("ICMP ping unavailable on this platform")
 ```
 
-Apps that intentionally want TCP reachability should use `tcp_connect()` for a single explicit port or `reachable()` for high-level ICMP-then-TCP fallback semantics:
+Apps that intentionally want TCP reachability should use `tcp_connect()` for a single explicit port or `reachable()` for a high-level check that tries ICMP plus TCP ports 80 and 443 by default. Extra `tcp_ports` add more explicit TCP ports:
 
 ```ntnt
 tcp_connect("example.com", 443, map {
@@ -481,16 +481,15 @@ tcp_connect("example.com", 443, map {
 // })
 
 reachable("example.com", map {
-  "tcp_ports": [443],
+  "tcp_ports": [8080],
   "count": 5
 })
 // Ok(map {
 //   "host": "example.com",
 //   "reachable": true,
-//   "method": "tcp",
-//   "fallback_from": "icmp",
-//   "ports_tried": [443],
-//   "attempts": [...]
+//   "method": "icmp", // or "tcp" when TCP establishes reachability
+//   "tcp_ports_tried": [80, 443, 8080],
+//   "tcp_attempts": [...]
 // })
 ```
 
@@ -499,7 +498,7 @@ Options:
 - `count`: default 1, clamped to `1..=10`
 - `timeout_ms`: default 2000, clamped to shared timeout bounds
 - `interval_ms`: default 0, clamped to `0..=5000`
-- `tcp_ports`: required for `reachable()` while Phase 1 has no ICMP implementation, max 10 explicit ports; no default/random ports
+- `tcp_ports`: optional extra TCP ports for `reachable()`; defaults 80 and 443 are always included, max 10 total ports; no random ports
 - `allow_private`: default false, requires process-level `NTNT_NET_ALLOW_PRIVATE=1`
 
 Semantics:
@@ -507,7 +506,7 @@ Semantics:
 - `ping()` means ICMP ping. If ICMP is unavailable/unsupported, return `Err("ICMP ping unavailable: ...")` with actionable guidance.
 - `ping(..., map { "method": "tcp" })` is rejected; TCP checks belong to `tcp_connect()` or `reachable()`.
 - `tcp_connect(host, port, opts?)` performs TCP connect probes only and returns `connected: true` if the configured port connects.
-- `reachable(host, opts?)` is the explicit high-level fallback API. In Phase 1 it requires caller-provided `tcp_ports`, performs TCP connect probes, and records `method: "tcp"` plus `fallback_from: "icmp"` instead of pretending TCP is ping.
+- `reachable(host, opts?)` is the high-level reachability API. It probes ICMP and TCP ports 80/443 by default, adds caller-provided `tcp_ports`, and records whether reachability was established by `method: "icmp"` or `method: "tcp"`.
 - `reachable: false` / `connected: false` is an ordinary probe result, not an `Err`, once the selected method is actually available and permitted.
 - Include `resolved_addrs` only if doing so does not leak denied/private resolved targets in policy errors.
 
@@ -526,7 +525,7 @@ Tests:
 - default `ping()` returns a clear ICMP-unavailable `Err` rather than TCP fallback when ICMP is unsupported
 - `ping(..., map { "method": "tcp" })` rejects with guidance to use `tcp_connect()` or `reachable()`
 - `tcp_connect()` can run multiple bounded attempts and returns per-attempt plus aggregate summary fields
-- `reachable()` requires explicit `tcp_ports`, uses TCP fallback honestly, and records `fallback_from: "icmp"`
+- `reachable()` probes ICMP plus default TCP ports 80/443, appends extra `tcp_ports`, and reports the method that established reachability.
 - forced `method: "icmp"` maps missing capability to clear `Err` in an opt-in/unit-testable path
 - policy-denied private/loopback target unless explicitly allowed by config/test override
 
@@ -790,11 +789,11 @@ SNMP is a real network-monitoring need, but it is its own protocol family. It sh
 
 ### Status Dashboard
 
-As of 2026-06-03:
+As of 2026-06-05:
 
 - [x] **PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability**: merged in [PR #113](https://github.com/ntntlang/ntnt/pull/113).
-- [ ] **PR 2 — DNS lookup types**: in progress on branch `feat/std-net-dns`; adds `dns_lookup` and `dns_reverse` with broad supported record types, deterministic tests, and opt-in external DNS smoke coverage.
-- [ ] **PR 3 — Bounded port scan**: planned after DNS.
+- [x] **PR 2 — DNS lookup types**: merged in [PR #114](https://github.com/ntntlang/ntnt/pull/114); adds `dns_lookup` and `dns_reverse` with broad supported record types, deterministic tests, and opt-in external DNS smoke coverage.
+- [ ] **PR 3 — Bounded port scan**: in progress on branch `feat/std-net-port-scan`; adds `port_scan` over explicit port arrays with bounded concurrency and shared target policy.
 - [ ] **PR 4 — TLS info**: planned after port scan/dependency decision.
 
 PR 1 shipped the core module registration, runtime functions, typechecker signatures, generated docs, deterministic examples, and tests for Phase 1. Review hardening added policy fixes for private, link-local, multicast, documentation, mapped-address, and broadcast-style targets.
@@ -834,7 +833,7 @@ Acceptance:
 
 ### PR 2 — DNS lookup types
 
-Status: **in progress on `feat/std-net-dns`.**
+Status: **merged in PR #114.**
 
 Scope:
 
@@ -851,17 +850,19 @@ Acceptance:
 
 ### PR 3 — Bounded port scan
 
+Status: **implemented on `feat/std-net-port-scan`; pending PR review.**
+
 Scope:
 
-- [ ] `port_scan` over explicit port arrays
-- [ ] bounds and cancellation checks
-- [ ] local open/closed test fixture
+- [x] `port_scan` over explicit port arrays
+- [x] bounds and bounded-concurrency batches
+- [x] local open/closed test fixture
 
 Acceptance:
 
-- [ ] rejects too many ports/concurrency/invalid ports
-- [ ] deterministic order
-- [ ] no unbounded scanning
+- [x] rejects too many ports/concurrency/invalid ports
+- [x] deterministic order
+- [x] no unbounded scanning
 
 ### PR 4 — TLS info
 
@@ -989,7 +990,7 @@ What changed:
 
 1. `ping(host, opts?)` stays protocol-honest: ICMP only, with a clear error when ICMP is unavailable.
 2. TCP probing is explicit via `tcp_connect(host, port, opts?)`, so the caller must name the port and own the semantics.
-3. High-level reachability uses `reachable(host, opts?)`, with explicit `tcp_ports`, so fallback behavior is useful but not surprising.
+3. High-level reachability uses `reachable(host, opts?)`, which probes ICMP plus TCP 80/443 by default and accepts optional extra `tcp_ports`, so fallback behavior is useful but not surprising.
 4. The safety model stays layered: per-call `allow_private: true` plus process-level `NTNT_NET_ALLOW_PRIVATE=1` for private/internal targets; special-purpose targets remain denied.
 5. The typechecker, generated stdlib reference, agent guide, examples, and tests were updated to document and enforce the split.
 

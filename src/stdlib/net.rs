@@ -7,8 +7,10 @@ use hickory_resolver::error::{ResolveError, ResolveErrorKind};
 use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::Resolver;
 use std::cmp::{max, min};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
+#[cfg(target_os = "linux")]
+use std::process::Command;
 use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,7 +24,11 @@ const DEFAULT_PROBE_COUNT: usize = 1;
 const MAX_PROBE_COUNT: usize = 10;
 const DEFAULT_INTERVAL_MS: u64 = 0;
 const MAX_INTERVAL_MS: u64 = 5_000;
+const DEFAULT_REACHABLE_TCP_PORTS: [u16; 2] = [80, 443];
 const MAX_TCP_PORTS: usize = 10;
+const MAX_PORT_SCAN_PORTS: usize = 128;
+const DEFAULT_PORT_SCAN_CONCURRENCY: usize = 20;
+const MAX_PORT_SCAN_CONCURRENCY: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Family {
@@ -180,10 +186,9 @@ fn validate_ping_method(value: Option<&Value>) -> Result<(), String> {
         None => Ok(()),
         Some(Value::String(method)) => match method.as_str() {
             "auto" | "icmp" => Ok(()),
-            "tcp" => Err(
-                "ping() does not perform TCP probes; use tcp_connect() for a TCP port check or reachable() for explicit fallback reachability"
-                    .to_string(),
-            ),
+            "tcp" => {
+                Err("ping() only supports ICMP; use tcp_connect() for TCP port checks".to_string())
+            }
             other => Err(format!(
                 "ping() method must be 'auto' or 'icmp', got '{}'",
                 other
@@ -330,10 +335,8 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt ping
     // @module std/net
     // @signature ping(host: String, opts?: Map) -> Result<Map, String>
-    // Performs an ICMP ping when ICMP support is available. It is protocol-honest:
-    // ping() does not fall back to TCP ports. Apps that want TCP port checks should
-    // use tcp_connect(); apps that want explicit ICMP-then-TCP reachability should
-    // use reachable().
+    // Performs an ICMP ping when ICMP support is available. Apps that want TCP port
+    // checks should use tcp_connect(); high-level reachability checks can use reachable().
     // @since v0.4.10
     // @tags #network
     module.insert(
@@ -374,15 +377,15 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt reachable
     // @module std/net
     // @signature reachable(host: String, opts?: Map) -> Result<Map, String>
-    // Performs an explicit high-level reachability check. Phase 1 has no ICMP
-    // implementation, so TCP fallback requires caller-provided tcp_ports; the result
-    // records method and fallback_from instead of pretending TCP is ping.
+    // Performs a high-level reachability check using ICMP plus TCP ports 80 and 443
+    // by default. Caller-provided tcp_ports add extra explicit TCP ports.
+    // The result records the method that established reachability without pretending TCP is ping.
     // @param host Hostname or IP address to resolve and probe
-    // @param opts Optional map with tcp_ports, timeout_ms, count, interval_ms, and allow_private
+    // @param opts Optional map with extra tcp_ports, timeout_ms, count, interval_ms, and allow_private
     // @returns Result containing reachability status, method used, fallback metadata, and attempt summary
     // @since v0.4.10
     // @tags #network
-    // @example reachable("example.com", map { "tcp_ports": [443], "count": 5 }) ~ "Check host reachability with explicit TCP fallback"
+    // @example reachable("example.com", map { "tcp_ports": [8080], "count": 5 }) ~ "Check ICMP plus TCP 80, 443, and 8080"
     module.insert(
         "reachable".to_string(),
         Value::NativeFunction {
@@ -391,6 +394,29 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             requires: None,
             func: reachable_fn,
+        },
+    );
+
+    // @ntnt port_scan
+    // @module std/net
+    // @signature port_scan(host: String, ports: Array<Int>, opts?: Map) -> Result<Array<Map>, String>
+    // Performs a bounded TCP scan of explicit ports for one host. Only explicit port arrays
+    // are accepted; ranges are intentionally not expanded. Results are sorted by port.
+    // @param host Hostname or IP address to resolve and scan
+    // @param ports Explicit array of TCP ports from 1 to 65535; duplicates are rejected
+    // @param opts Optional map with timeout_ms, concurrency, and allow_private
+    // @returns Result containing one map per port with open, latency_ms, and reason fields
+    // @since v0.4.10
+    // @tags #network
+    // @example port_scan("example.com", [80, 443], map { "timeout_ms": 500 }) ~ "Scan explicit TCP ports"
+    module.insert(
+        "port_scan".to_string(),
+        Value::NativeFunction {
+            name: "port_scan".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: port_scan_fn,
         },
     );
 
@@ -697,12 +723,15 @@ fn ip_range_to_cidrs_fn(args: &[Value]) -> Result<Value, IntentError> {
 }
 
 fn ping_fn(args: &[Value]) -> Result<Value, IntentError> {
-    let _host = string_arg(args, 0, "ping")?;
+    let host = string_arg(args, 0, "ping")?;
     let opts = opts_arg(args, 1, "ping")?;
 
     Ok(result_value((|| {
         validate_ping_method(opts.and_then(|m| m.get("method")))?;
-        Err(icmp_unavailable_message())
+        let options = parse_probe_options(opts)?;
+        let targets = resolve_ping_targets(host)?;
+        enforce_resolved_target_policy(&targets, options.allow_private)?;
+        system_ping(host, options.timeout, options.count)
     })()))
 }
 
@@ -732,7 +761,8 @@ fn reachable_fn(args: &[Value]) -> Result<Value, IntentError> {
 
     Ok(result_value((|| {
         let options = parse_probe_options(opts)?;
-        let tcp_ports = parse_tcp_ports(opts, "reachable")?;
+        let icmp_result = icmp_ping_for_host(host, &options);
+        let tcp_ports = parse_reachable_tcp_ports(opts, "reachable")?;
         let attempts = tcp_reachability_attempts_for_host(
             host,
             &tcp_ports,
@@ -742,8 +772,40 @@ fn reachable_fn(args: &[Value]) -> Result<Value, IntentError> {
             options.allow_private,
         )?;
         Ok(Value::Map(reachable_result_map(
-            host, &tcp_ports, &attempts,
+            host,
+            &tcp_ports,
+            &attempts,
+            icmp_result,
         )))
+    })()))
+}
+
+fn port_scan_fn(args: &[Value]) -> Result<Value, IntentError> {
+    let host = string_arg(args, 0, "port_scan")?;
+    let Value::Array(port_values) = &args[1] else {
+        return Err(IntentError::type_error(format!(
+            "port_scan() argument 2 must be Array<Int>, got {}",
+            args[1].type_name()
+        )));
+    };
+    let opts = opts_arg(args, 2, "port_scan")?;
+
+    Ok(result_value((|| {
+        let ports = parse_explicit_ports(port_values, "port_scan", "argument 2")?;
+        let timeout_ms = parse_u64_option(opts, "timeout_ms", DEFAULT_TIMEOUT_MS)?
+            .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+        let concurrency = parse_port_scan_concurrency(opts)?;
+        let allow_private = parse_bool_option(opts, "allow_private", false)?;
+        let results = port_scan_for_host(
+            host,
+            &ports,
+            Duration::from_millis(timeout_ms),
+            concurrency,
+            allow_private,
+        )?;
+        Ok(Value::Array(
+            results.into_iter().map(port_scan_result_to_value).collect(),
+        ))
     })()))
 }
 
@@ -878,9 +940,310 @@ fn dns_answers_to_value(answers: Vec<DnsAnswer>) -> Value {
     )
 }
 
-fn icmp_unavailable_message() -> String {
-    "ICMP ping unavailable: std/net does not fall back to TCP automatically. Use tcp_connect() for explicit TCP port checks or reachable(..., map { 'tcp_ports': [...] }) for explicit reachability fallback."
-        .to_string()
+#[derive(Debug, Clone)]
+struct IcmpPingAttempt {
+    seq: Option<i64>,
+    reachable: bool,
+    from: Option<String>,
+    ttl: Option<i64>,
+    latency_ms: Option<f64>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct IcmpPingResult {
+    host: String,
+    target_addr: Option<String>,
+    sent: usize,
+    received: usize,
+    loss_percent: f64,
+    min_ms: Option<f64>,
+    avg_ms: Option<f64>,
+    max_ms: Option<f64>,
+    attempts: Vec<IcmpPingAttempt>,
+}
+
+fn resolve_ping_targets(host: &str) -> Result<Vec<(u16, SocketAddr)>, String> {
+    let resolved: Vec<SocketAddr> = (host, 0)
+        .to_socket_addrs()
+        .map_err(|e| format!("failed to resolve {}: {}", host, e))?
+        .collect();
+    Ok(resolved.into_iter().map(|addr| (0, addr)).collect())
+}
+
+#[cfg(target_os = "linux")]
+fn system_ping(host: &str, timeout: Duration, count: usize) -> Result<Value, String> {
+    let timeout_secs = max(
+        1,
+        timeout
+            .as_secs()
+            .saturating_add(if timeout.subsec_millis() > 0 { 1 } else { 0 }),
+    );
+    let output = Command::new("ping")
+        .arg("-n")
+        .arg("-c")
+        .arg(count.to_string())
+        .arg("-W")
+        .arg(timeout_secs.to_string())
+        .arg("--")
+        .arg(host)
+        .output()
+        .map_err(|e| format!("ICMP ping unavailable: failed to run ping: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && !linux_ping_output_has_packet_summary(&stdout) {
+        return Err(format!(
+            "ICMP ping unavailable: system ping failed: {}",
+            ping_failure_message(&stdout, &stderr, output.status.code())
+        ));
+    }
+
+    let parsed = parse_linux_ping_output(host, &stdout, &stderr, count);
+    Ok(Value::Map(icmp_ping_result_map(parsed)))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn system_ping(_host: &str, _timeout: Duration, _count: usize) -> Result<Value, String> {
+    Err("ICMP ping unavailable on this platform".to_string())
+}
+
+fn icmp_ping_for_host(
+    host: &str,
+    options: &ProbeOptions,
+) -> Result<HashMap<String, Value>, String> {
+    let targets = resolve_ping_targets(host)?;
+    enforce_resolved_target_policy(&targets, options.allow_private)?;
+    match system_ping(host, options.timeout, options.count)? {
+        Value::Map(map) => Ok(map),
+        other => Err(format!(
+            "ICMP ping unavailable: unexpected ping result {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn linux_ping_output_has_packet_summary(output: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.contains("packets transmitted") && line.contains("received"))
+}
+
+#[cfg(target_os = "linux")]
+fn ping_failure_message(stdout: &str, stderr: &str, status_code: Option<i32>) -> String {
+    stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| match status_code {
+            Some(code) => format!("exit status {}", code),
+            None => "terminated by signal".to_string(),
+        })
+}
+
+fn parse_linux_ping_output(
+    host: &str,
+    stdout: &str,
+    stderr: &str,
+    requested_count: usize,
+) -> IcmpPingResult {
+    let mut target_addr = None;
+    let mut sent = requested_count;
+    let mut received = 0usize;
+    let mut loss_percent = 100.0;
+    let mut min_ms = None;
+    let mut avg_ms = None;
+    let mut max_ms = None;
+    let mut attempts = Vec::new();
+
+    for line in stdout.lines().chain(stderr.lines()) {
+        if line.starts_with("PING ") {
+            if let Some(addr) = text_between(line, "(", ")") {
+                target_addr = Some(addr.to_string());
+            }
+            continue;
+        }
+
+        if line.contains(" bytes from ") && line.contains("icmp_seq=") {
+            let from = text_after(line, "from ")
+                .and_then(|s| s.split(':').next())
+                .map(|s| s.trim().to_string());
+            attempts.push(IcmpPingAttempt {
+                seq: parse_i64_after(line, "icmp_seq="),
+                reachable: true,
+                from: from.clone(),
+                ttl: parse_i64_after(line, "ttl="),
+                latency_ms: parse_f64_after(line, "time="),
+                error: None,
+            });
+            if target_addr.is_none() {
+                target_addr = from;
+            }
+            continue;
+        }
+
+        if line.contains("icmp_seq=")
+            && (line.starts_with("From ") || line.contains(" unreachable"))
+        {
+            attempts.push(IcmpPingAttempt {
+                seq: parse_i64_after(line, "icmp_seq="),
+                reachable: false,
+                from: text_after(line, "From ")
+                    .and_then(|s| s.split_whitespace().next())
+                    .map(|s| s.trim_end_matches(':').to_string()),
+                ttl: None,
+                latency_ms: None,
+                error: Some(line.trim().to_string()),
+            });
+            continue;
+        }
+
+        if line.contains("packets transmitted") && line.contains("received") {
+            let parts: Vec<&str> = line.split(',').collect();
+            if let Some(value) = parts.get(0).and_then(|p| p.split_whitespace().next()) {
+                sent = value.parse::<usize>().unwrap_or(sent);
+            }
+            if let Some(part) = parts.iter().find(|p| p.contains("received")) {
+                if let Some(value) = part.trim().split_whitespace().next() {
+                    received = value.parse::<usize>().unwrap_or(received);
+                }
+            }
+            if let Some(part) = parts.iter().find(|p| p.contains("packet loss")) {
+                if let Some(value) = part.trim().split('%').next() {
+                    loss_percent = value.parse::<f64>().unwrap_or(loss_percent);
+                }
+            }
+            continue;
+        }
+
+        if line.contains("min/avg/max") && line.contains('=') {
+            if let Some(values) = line.split('=').nth(1) {
+                let numbers: Vec<f64> = values
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .split('/')
+                    .filter_map(|v| v.parse::<f64>().ok())
+                    .collect();
+                if numbers.len() >= 3 {
+                    min_ms = Some(numbers[0]);
+                    avg_ms = Some(numbers[1]);
+                    max_ms = Some(numbers[2]);
+                }
+            }
+        }
+    }
+
+    if received == 0 {
+        received = attempts.iter().filter(|attempt| attempt.reachable).count();
+    }
+    if sent == 0 {
+        sent = requested_count.max(attempts.len());
+    }
+    if loss_percent == 100.0 && sent > 0 && received > 0 {
+        loss_percent = ((sent.saturating_sub(received)) as f64 / sent as f64) * 100.0;
+    }
+
+    IcmpPingResult {
+        host: host.to_string(),
+        target_addr,
+        sent,
+        received,
+        loss_percent,
+        min_ms,
+        avg_ms,
+        max_ms,
+        attempts,
+    }
+}
+
+fn icmp_ping_result_map(result: IcmpPingResult) -> HashMap<String, Value> {
+    let mut map = HashMap::new();
+    map.insert("host".to_string(), Value::String(result.host));
+    map.insert("reachable".to_string(), Value::Bool(result.received > 0));
+    map.insert("method".to_string(), Value::String("icmp".to_string()));
+    map.insert("permission_limited".to_string(), Value::Bool(false));
+    map.insert("sent".to_string(), Value::Int(result.sent as i64));
+    map.insert("received".to_string(), Value::Int(result.received as i64));
+    map.insert(
+        "failed".to_string(),
+        Value::Int(result.sent.saturating_sub(result.received) as i64),
+    );
+    map.insert(
+        "loss_percent".to_string(),
+        Value::Float(result.loss_percent),
+    );
+    map.insert(
+        "target_addr".to_string(),
+        result.target_addr.map_or_else(Value::none, Value::String),
+    );
+    map.insert(
+        "attempts".to_string(),
+        Value::Array(result.attempts.iter().map(icmp_attempt_to_value).collect()),
+    );
+    if let Some(min_ms) = result.min_ms {
+        map.insert("min_ms".to_string(), Value::Float(min_ms));
+    }
+    if let Some(avg_ms) = result.avg_ms {
+        map.insert("avg_ms".to_string(), Value::Float(avg_ms));
+        if result.sent == 1 {
+            map.insert("latency_ms".to_string(), Value::Float(avg_ms));
+        }
+    }
+    if let Some(max_ms) = result.max_ms {
+        map.insert("max_ms".to_string(), Value::Float(max_ms));
+    }
+    map
+}
+
+fn icmp_attempt_to_value(attempt: &IcmpPingAttempt) -> Value {
+    let mut map = HashMap::new();
+    map.insert("reachable".to_string(), Value::Bool(attempt.reachable));
+    map.insert("method".to_string(), Value::String("icmp".to_string()));
+    if let Some(seq) = attempt.seq {
+        map.insert("seq".to_string(), Value::Int(seq));
+    }
+    if let Some(from) = &attempt.from {
+        map.insert("from".to_string(), Value::String(from.clone()));
+    }
+    if let Some(ttl) = attempt.ttl {
+        map.insert("ttl".to_string(), Value::Int(ttl));
+    }
+    if let Some(latency_ms) = attempt.latency_ms {
+        map.insert("latency_ms".to_string(), Value::Float(latency_ms));
+    }
+    if let Some(error) = &attempt.error {
+        map.insert("error".to_string(), Value::String(error.clone()));
+    }
+    Value::Map(map)
+}
+
+fn text_between<'a>(text: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let after = text_after(text, start)?;
+    after.split(end).next()
+}
+
+fn text_after<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
+    text.split_once(needle).map(|(_, rest)| rest)
+}
+
+fn parse_i64_after(text: &str, needle: &str) -> Option<i64> {
+    text_after(text, needle).and_then(|rest| {
+        rest.split(|ch: char| !ch.is_ascii_digit())
+            .next()
+            .and_then(|value| value.parse::<i64>().ok())
+    })
+}
+
+fn parse_f64_after(text: &str, needle: &str) -> Option<f64> {
+    text_after(text, needle).and_then(|rest| {
+        rest.split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+            .next()
+            .and_then(|value| value.parse::<f64>().ok())
+    })
 }
 
 struct ProbeOptions {
@@ -938,6 +1301,99 @@ fn tcp_reachability_attempts_for_host(
     Ok(tcp_reachability_attempts(
         &targets, timeout, count, interval,
     ))
+}
+
+#[derive(Debug)]
+struct PortScanResult {
+    port: u16,
+    open: bool,
+    latency_ms: Option<f64>,
+    remote_addr: Option<String>,
+    local_addr: Option<String>,
+    reason: String,
+}
+
+fn port_scan_for_host(
+    host: &str,
+    ports: &[u16],
+    timeout: Duration,
+    concurrency: usize,
+    allow_private: bool,
+) -> Result<Vec<PortScanResult>, String> {
+    let targets = resolve_port_scan_targets(host, ports)?;
+    enforce_resolved_target_policy(&targets, allow_private)?;
+
+    let mut by_port: HashMap<u16, Vec<SocketAddr>> = HashMap::new();
+    for (port, addr) in targets {
+        by_port.entry(port).or_default().push(addr);
+    }
+
+    let mut results = Vec::with_capacity(ports.len());
+    for batch in ports.chunks(concurrency.max(1)) {
+        let mut handles = Vec::with_capacity(batch.len());
+        for port in batch {
+            let port = *port;
+            let addrs = by_port.remove(&port).unwrap_or_default();
+            handles.push(thread::spawn(move || {
+                scan_port_targets(port, addrs, timeout)
+            }));
+        }
+        for handle in handles {
+            results.push(
+                handle
+                    .join()
+                    .map_err(|_| "port_scan() worker panicked".to_string())?,
+            );
+        }
+    }
+
+    results.sort_by_key(|result| result.port);
+    Ok(results)
+}
+
+fn scan_port_targets(port: u16, targets: Vec<SocketAddr>, timeout: Duration) -> PortScanResult {
+    if targets.is_empty() {
+        return PortScanResult {
+            port,
+            open: false,
+            latency_ms: None,
+            remote_addr: None,
+            local_addr: None,
+            reason: "no resolved addresses".to_string(),
+        };
+    }
+
+    let mut last_reason = "unreachable".to_string();
+    for addr in targets {
+        let start = Instant::now();
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => {
+                let remote_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
+                let local_addr = stream.local_addr().ok().map(|addr| addr.to_string());
+                drop(stream);
+                return PortScanResult {
+                    port,
+                    open: true,
+                    latency_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
+                    remote_addr,
+                    local_addr,
+                    reason: "connected".to_string(),
+                };
+            }
+            Err(e) => {
+                last_reason = e.kind().to_string();
+            }
+        }
+    }
+
+    PortScanResult {
+        port,
+        open: false,
+        latency_ms: None,
+        remote_addr: None,
+        local_addr: None,
+        reason: last_reason,
+    }
 }
 
 fn tcp_reachability_attempts(
@@ -1008,6 +1464,31 @@ fn resolve_tcp_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, SocketAddr
             .map_err(|e| format!("failed to resolve {}:{}: {}", host, port, e))?
             .collect();
         targets.extend(addrs.into_iter().map(|addr| (*port, addr)));
+    }
+    Ok(targets)
+}
+
+fn resolve_port_scan_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, SocketAddr)>, String> {
+    let Some(seed_port) = ports.first().copied() else {
+        return Ok(Vec::new());
+    };
+
+    let resolved: Vec<SocketAddr> = (host, seed_port)
+        .to_socket_addrs()
+        .map_err(|e| format!("failed to resolve {}: {}", host, e))?
+        .collect();
+
+    let mut ips = Vec::with_capacity(resolved.len());
+    let mut seen = HashSet::with_capacity(resolved.len());
+    for addr in resolved {
+        if seen.insert(addr.ip()) {
+            ips.push(addr.ip());
+        }
+    }
+
+    let mut targets = Vec::with_capacity(ports.len() * ips.len());
+    for port in ports {
+        targets.extend(ips.iter().map(|ip| (*port, SocketAddr::new(*ip, *port))));
     }
     Ok(targets)
 }
@@ -1127,14 +1608,75 @@ fn reachable_result_map(
     host: &str,
     ports: &[u16],
     attempts: &[TcpProbeResult],
+    icmp_result: Result<HashMap<String, Value>, String>,
 ) -> HashMap<String, Value> {
-    let mut result = tcp_reachability_result_map(host, ports, attempts);
-    result.insert(
+    let tcp_reachable = attempts.iter().any(|attempt| attempt.reachable);
+    let mut tcp_result = tcp_reachability_result_map(host, ports, attempts);
+    tcp_result.insert(
         "fallback_from".to_string(),
         Value::String("icmp".to_string()),
     );
-    result.insert("permission_limited".to_string(), Value::Bool(true));
-    result
+
+    let tcp_ports = Value::Array(ports.iter().map(|p| Value::Int(*p as i64)).collect());
+    let tcp_attempts = Value::Array(attempts.iter().map(tcp_attempt_to_value).collect());
+
+    match icmp_result {
+        Ok(mut icmp_map) => {
+            let icmp_reachable = map_bool(&icmp_map, "reachable").unwrap_or(false);
+            if let Some(Value::Array(icmp_attempts)) = icmp_map.get("attempts").cloned() {
+                tcp_result.insert("icmp_attempts".to_string(), Value::Array(icmp_attempts));
+            }
+            tcp_result.insert("icmp_reachable".to_string(), Value::Bool(icmp_reachable));
+
+            if icmp_reachable {
+                icmp_map.insert("tcp_reachable".to_string(), Value::Bool(tcp_reachable));
+                icmp_map.insert("tcp_ports_tried".to_string(), tcp_ports);
+                icmp_map.insert("tcp_attempts".to_string(), tcp_attempts);
+                if let Some(first_success) = attempts.iter().find(|attempt| attempt.reachable) {
+                    icmp_map.insert(
+                        "connected_port".to_string(),
+                        first_success
+                            .connected_port
+                            .map(|port| Value::Int(port as i64))
+                            .unwrap_or_else(Value::none),
+                    );
+                }
+                icmp_map
+            } else {
+                tcp_result
+            }
+        }
+        Err(error) => {
+            tcp_result.insert("icmp_error".to_string(), Value::String(error));
+            tcp_result.insert("icmp_reachable".to_string(), Value::Bool(false));
+            tcp_result
+        }
+    }
+}
+
+fn map_bool(map: &HashMap<String, Value>, key: &str) -> Option<bool> {
+    match map.get(key) {
+        Some(Value::Bool(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn port_scan_result_to_value(result: PortScanResult) -> Value {
+    let mut map = HashMap::new();
+    map.insert("port".to_string(), Value::Int(result.port as i64));
+    map.insert("open".to_string(), Value::Bool(result.open));
+    map.insert("method".to_string(), Value::String("tcp".to_string()));
+    if let Some(latency_ms) = result.latency_ms {
+        map.insert("latency_ms".to_string(), Value::Float(latency_ms));
+    }
+    if let Some(remote_addr) = result.remote_addr {
+        map.insert("remote_addr".to_string(), Value::String(remote_addr));
+    }
+    if let Some(local_addr) = result.local_addr {
+        map.insert("local_addr".to_string(), Value::String(local_addr));
+    }
+    map.insert("reason".to_string(), Value::String(result.reason));
+    Value::Map(map)
 }
 
 fn tcp_attempt_to_value(attempt: &TcpProbeResult) -> Value {
@@ -1498,33 +2040,74 @@ fn parse_count_option(opts: Option<&HashMap<String, Value>>) -> Result<usize, St
     }
 }
 
-fn parse_tcp_ports(
+fn parse_port_scan_concurrency(opts: Option<&HashMap<String, Value>>) -> Result<usize, String> {
+    match opts.and_then(|m| m.get("concurrency")) {
+        None => Ok(DEFAULT_PORT_SCAN_CONCURRENCY),
+        Some(Value::Int(value)) if *value > 0 => {
+            let concurrency = usize::try_from(*value)
+                .map_err(|_| "option 'concurrency' is too large".to_string())?;
+            Ok(min(concurrency, MAX_PORT_SCAN_CONCURRENCY))
+        }
+        Some(Value::Int(_)) => Err("option 'concurrency' must be positive".to_string()),
+        Some(other) => Err(format!(
+            "option 'concurrency' must be Int, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn parse_explicit_ports(values: &[Value], fn_name: &str, label: &str) -> Result<Vec<u16>, String> {
+    if values.is_empty() {
+        return Err(format!("{}() {} cannot be empty", fn_name, label));
+    }
+    if values.len() > MAX_PORT_SCAN_PORTS {
+        return Err(format!(
+            "{}() {} supports at most {} ports",
+            fn_name, label, MAX_PORT_SCAN_PORTS
+        ));
+    }
+
+    let mut ports = Vec::with_capacity(values.len());
+    let mut seen = HashSet::with_capacity(values.len());
+    for value in values {
+        let Value::Int(port) = value else {
+            return Err(format!("{}() {} must be Array<Int>", fn_name, label));
+        };
+        let port = validate_tcp_port_arg(*port, fn_name)?;
+        if !seen.insert(port) {
+            return Err(format!(
+                "{}() duplicate port {} is not allowed",
+                fn_name, port
+            ));
+        }
+        ports.push(port);
+    }
+    Ok(ports)
+}
+
+fn parse_reachable_tcp_ports(
     opts: Option<&HashMap<String, Value>>,
     fn_name: &str,
 ) -> Result<Vec<u16>, String> {
-    let Some(value) = opts.and_then(|m| m.get("tcp_ports")) else {
-        return Err(format!(
-            "{}() option 'tcp_ports' is required for explicit TCP reachability fallback",
-            fn_name
-        ));
+    let extra_ports: &[Value] = match opts.and_then(|m| m.get("tcp_ports")) {
+        Some(Value::Array(values)) => values.as_slice(),
+        Some(_) => {
+            return Err(format!(
+                "{}() option 'tcp_ports' must be Array<Int>",
+                fn_name
+            ));
+        }
+        None => &[],
     };
-    let Value::Array(values) = value else {
+
+    let mut ports = DEFAULT_REACHABLE_TCP_PORTS.to_vec();
+    if ports.len() + extra_ports.len() > MAX_TCP_PORTS {
         return Err(format!(
-            "{}() option 'tcp_ports' must be Array<Int>",
-            fn_name
-        ));
-    };
-    if values.is_empty() {
-        return Err(format!("{}() option 'tcp_ports' cannot be empty", fn_name));
-    }
-    if values.len() > MAX_TCP_PORTS {
-        return Err(format!(
-            "{}() option 'tcp_ports' supports at most {} ports",
+            "{}() option 'tcp_ports' supports at most {} total ports including defaults 80 and 443",
             fn_name, MAX_TCP_PORTS
         ));
     }
-    let mut ports = Vec::with_capacity(values.len());
-    for value in values {
+    for value in extra_ports {
         let Value::Int(port) = value else {
             return Err(format!(
                 "{}() option 'tcp_ports' must be Array<Int>",
@@ -1703,6 +2286,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_linux_ping_output() {
+        let output = "PING example.com (93.184.216.34) 56(84) bytes of data.\n64 bytes from 93.184.216.34: icmp_seq=1 ttl=58 time=12.3 ms\n\n--- example.com ping statistics ---\n1 packets transmitted, 1 received, 0% packet loss, time 0ms\nrtt min/avg/max/mdev = 12.300/12.300/12.300/0.000 ms\n";
+        let result = parse_linux_ping_output("example.com", output, "", 1);
+
+        assert_eq!(result.target_addr.as_deref(), Some("93.184.216.34"));
+        assert_eq!(result.sent, 1);
+        assert_eq!(result.received, 1);
+        assert_eq!(result.attempts.len(), 1);
+        assert!(result.attempts[0].reachable);
+        assert_eq!(result.attempts[0].ttl, Some(58));
+        assert_eq!(result.attempts[0].latency_ms, Some(12.3));
+    }
+
+    #[test]
     fn target_policy_classifies_ipv4_mapped_ipv6_by_embedded_address() {
         let mapped_loopback = "[::ffff:127.0.0.1]:80".parse::<SocketAddr>().unwrap();
         let mapped_metadata = "[::ffff:169.254.169.254]:80".parse::<SocketAddr>().unwrap();
@@ -1758,14 +2355,21 @@ mod tests {
         assert!(err.contains("Network target denied by policy"));
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn ping_auto_reports_icmp_unavailable_without_tcp_fallback() {
+    fn ping_auto_reports_platform_icmp_unavailable() {
         let result = ping_fn(&[Value::String("example.com".to_string())]).unwrap();
-        assert_result_err_contains(result, "does not fall back to TCP automatically");
+        assert_result_err_contains(result, "ICMP ping unavailable on this platform");
     }
 
     #[test]
-    fn ping_tcp_method_points_to_tcp_connect_or_reachable() {
+    fn resolve_ping_targets_accepts_ipv6_literals() {
+        let targets = resolve_ping_targets("::1").unwrap();
+        assert!(targets.iter().any(|(_, addr)| addr.ip().is_ipv6()));
+    }
+
+    #[test]
+    fn ping_tcp_method_points_to_tcp_connect() {
         let result = ping_fn(&[
             Value::String("example.com".to_string()),
             Value::Map(HashMap::from([(
@@ -1793,6 +2397,59 @@ mod tests {
             ("count".to_string(), Value::Int(0),)
         ])))
         .is_err());
+    }
+
+    #[test]
+    fn reachable_tcp_ports_default_to_http_https_and_append_extras() {
+        let defaults = parse_reachable_tcp_ports(None, "reachable").unwrap();
+        assert_eq!(defaults, vec![80, 443]);
+
+        let ports = parse_reachable_tcp_ports(
+            Some(&HashMap::from([(
+                "tcp_ports".to_string(),
+                Value::Array(vec![Value::Int(8080), Value::Int(443), Value::Int(8443)]),
+            )])),
+            "reachable",
+        )
+        .unwrap();
+        assert_eq!(ports, vec![80, 443, 8080, 8443]);
+    }
+
+    #[test]
+    fn port_scan_concurrency_is_positive_and_clamped() {
+        assert_eq!(
+            parse_port_scan_concurrency(None).unwrap(),
+            DEFAULT_PORT_SCAN_CONCURRENCY
+        );
+        assert_eq!(
+            parse_port_scan_concurrency(Some(&HashMap::from([(
+                "concurrency".to_string(),
+                Value::Int((MAX_PORT_SCAN_CONCURRENCY as i64) + 99),
+            )])))
+            .unwrap(),
+            MAX_PORT_SCAN_CONCURRENCY
+        );
+        assert!(parse_port_scan_concurrency(Some(&HashMap::from([(
+            "concurrency".to_string(),
+            Value::Int(0),
+        )])))
+        .is_err());
+    }
+
+    #[test]
+    fn port_scan_ports_reject_duplicates_and_preserve_order() {
+        let ports = parse_explicit_ports(
+            &[Value::Int(443), Value::Int(80), Value::Int(22)],
+            "port_scan",
+            "argument 2",
+        )
+        .unwrap();
+        assert_eq!(ports, vec![443, 80, 22]);
+
+        let err =
+            parse_explicit_ports(&[Value::Int(80), Value::Int(80)], "port_scan", "argument 2")
+                .unwrap_err();
+        assert!(err.contains("duplicate port 80"));
     }
 
     #[test]
