@@ -9,7 +9,7 @@ use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::Resolver;
 use openssl::asn1::{Asn1Time, Asn1TimeRef};
 use openssl::nid::Nid;
-use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+use openssl::ssl::{SslConnector, SslMethod, SslStream, SslVerifyMode};
 use openssl::x509::{X509NameRef, X509Ref, X509VerifyResult};
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
@@ -1019,47 +1019,35 @@ fn tls_info_for_addr(
     addr: SocketAddr,
     timeout: Duration,
 ) -> Result<HashMap<String, Value>, String> {
-    let validation_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-    let mut builder = SslConnector::builder(SslMethod::tls())
-        .map_err(|e| format!("failed to initialize TLS connector: {}", e))?;
-    let callback_error = validation_error.clone();
-    builder.set_verify_callback(SslVerifyMode::PEER, move |preverify_ok, ctx| {
-        if !preverify_ok {
-            let message = ctx.error().error_string().to_string();
-            if let Ok(mut slot) = callback_error.lock() {
-                *slot = Some(message);
-            }
+    let verified = connect_tls_stream(host, server_name, port, addr, timeout, true);
+    let (stream, local_addr, validation_message) = match verified {
+        Ok((stream, local_addr)) => (stream, local_addr, None),
+        Err(validation_error) => {
+            let (stream, local_addr) =
+                connect_tls_stream(host, server_name, port, addr, timeout, false).map_err(|e| {
+                    format!(
+                        "{}; certificate metadata fallback also failed: {}",
+                        validation_error, e
+                    )
+                })?;
+            (stream, local_addr, Some(validation_error))
         }
-        true
-    });
-    let connector = builder.build();
+    };
 
-    let stream = TcpStream::connect_timeout(&addr, timeout)
-        .map_err(|e| format!("TLS connect failed for {}:{} ({}): {}", host, port, addr, e))?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|e| format!("failed to set TLS read timeout: {}", e))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|e| format!("failed to set TLS write timeout: {}", e))?;
-    let local_addr = stream.local_addr().ok().map(|a| a.to_string());
-
-    let stream = connector
-        .connect(server_name, stream)
-        .map_err(|e| format!("TLS handshake failed for {}:{}: {}", host, port, e))?;
     let ssl = stream.ssl();
     let cert = ssl
         .peer_certificate()
         .ok_or_else(|| format!("TLS peer {}:{} did not present a certificate", host, port))?;
     let mut result = tls_cert_to_map(&cert)?;
 
-    let verify_result = ssl.verify_result();
-    let callback_error = validation_error.lock().ok().and_then(|slot| slot.clone());
-    let validation_message = if verify_result == X509VerifyResult::OK {
-        callback_error
-    } else {
-        Some(verify_result.error_string().to_string())
-    };
+    let validation_message = validation_message.or_else(|| {
+        let verify_result = ssl.verify_result();
+        if verify_result == X509VerifyResult::OK {
+            None
+        } else {
+            Some(verify_result.error_string().to_string())
+        }
+    });
     let valid = validation_message.is_none();
 
     result.insert("host".to_string(), Value::String(host.to_string()));
@@ -1089,6 +1077,37 @@ fn tls_info_for_addr(
     );
 
     Ok(result)
+}
+
+fn connect_tls_stream(
+    host: &str,
+    server_name: &str,
+    port: u16,
+    addr: SocketAddr,
+    timeout: Duration,
+    verify_peer: bool,
+) -> Result<(SslStream<TcpStream>, Option<String>), String> {
+    let mut builder = SslConnector::builder(SslMethod::tls())
+        .map_err(|e| format!("failed to initialize TLS connector: {}", e))?;
+    if !verify_peer {
+        builder.set_verify(SslVerifyMode::NONE);
+    }
+    let connector = builder.build();
+
+    let stream = TcpStream::connect_timeout(&addr, timeout)
+        .map_err(|e| format!("TLS connect failed for {}:{} ({}): {}", host, port, addr, e))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| format!("failed to set TLS read timeout: {}", e))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| format!("failed to set TLS write timeout: {}", e))?;
+    let local_addr = stream.local_addr().ok().map(|a| a.to_string());
+
+    let stream = connector
+        .connect(server_name, stream)
+        .map_err(|e| format!("TLS handshake failed for {}:{}: {}", host, port, e))?;
+    Ok((stream, local_addr))
 }
 
 fn tls_cert_to_map(cert: &X509Ref) -> Result<HashMap<String, Value>, String> {

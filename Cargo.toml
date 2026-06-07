@@ -54,7 +54,7 @@ urlencoding = "2.1"
 reqwest = { version = "0.11", features = ["blocking", "json", "multipart", "cookies"] }
 
 # TLS certificate inspection
-openssl = "0.10"
+openssl = { version = "0.10", features = ["vendored"] }
 
 # HTTP Server (Axum + Tokio for high-concurrency in production)
 tokio = { version = "1", features = ["full"] }

@@ -130,16 +130,22 @@ fn start_local_tls_server() -> (u16, thread::JoinHandle<bool>) {
     let port = listener.local_addr().unwrap().port();
     let handle = thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(2);
+        let mut accepted = false;
         loop {
             match listener.accept() {
-                Ok((stream, _)) => return acceptor.accept(stream).is_ok(),
+                Ok((stream, _)) => {
+                    accepted |= acceptor.accept(stream).is_ok();
+                    if accepted {
+                        return true;
+                    }
+                }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
-                        return false;
+                        return accepted;
                     }
                     thread::sleep(Duration::from_millis(10));
                 }
-                Err(_) => return false,
+                Err(_) => return accepted,
             }
         }
     });
