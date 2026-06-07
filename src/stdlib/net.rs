@@ -2,18 +2,27 @@
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
+use chrono::{DateTime, SecondsFormat, Utc};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::error::{ResolveError, ResolveErrorKind};
 use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::Resolver;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::{
+    ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, SignatureScheme,
+};
+use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 #[cfg(target_os = "linux")]
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+use x509_parser::extensions::GeneralName;
+use x509_parser::prelude::*;
 
 const DEFAULT_MAX_RESULTS: usize = 4096;
 const HARD_MAX_RESULTS: usize = 65_536;
@@ -468,6 +477,28 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt tls_info
+    // @module std/net
+    // @signature tls_info(host: String, opts?: Map) -> Result<Map, String>
+    // Opens a bounded TLS connection and returns certificate metadata. Validation
+    // failures still return Ok(map { "valid": false, ... }) when a certificate is available.
+    // @param host Hostname or IP address to connect to
+    // @param opts Optional map with port, timeout_ms, server_name, and allow_private
+    // @returns Result containing certificate subject, issuer, validity window, SANs, serial, protocol, and validation status
+    // @since v0.4.10
+    // @tags #network
+    // @example tls_info("example.com") ~ "Inspect the HTTPS certificate for example.com"
+    module.insert(
+        "tls_info".to_string(),
+        Value::NativeFunction {
+            name: "tls_info".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: tls_info_fn,
+        },
+    );
+
     module
 }
 
@@ -836,6 +867,305 @@ fn dns_reverse_fn(args: &[Value]) -> Result<Value, IntentError> {
         let names = dns_reverse_names(&resolver, ip)?;
         Ok(Value::Array(names.into_iter().map(Value::String).collect()))
     })()))
+}
+
+fn tls_info_fn(args: &[Value]) -> Result<Value, IntentError> {
+    let host = string_arg(args, 0, "tls_info")?;
+    let opts = opts_arg(args, 1, "tls_info")?;
+
+    Ok(result_value((|| {
+        let port = parse_tls_port(opts)?;
+        let timeout_ms = parse_u64_option(opts, "timeout_ms", DEFAULT_TIMEOUT_MS)?
+            .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+        let server_name = parse_string_option(opts, "server_name")?.unwrap_or(host);
+        let allow_private = parse_bool_option(opts, "allow_private", false)?;
+        let targets = resolve_tcp_targets(host, &[port])?;
+        enforce_resolved_target_policy(&targets, allow_private)?;
+        let mut last_error = None;
+        for (_, addr) in targets {
+            match tls_info_for_addr(
+                host,
+                server_name,
+                port,
+                addr,
+                Duration::from_millis(timeout_ms),
+            ) {
+                Ok(info) => return Ok(Value::Map(info)),
+                Err(err) => last_error = Some(err),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| format!("failed to resolve {}:{}", host, port)))
+    })()))
+}
+
+#[derive(Debug)]
+struct MetadataVerifier;
+
+impl ServerCertVerifier for MetadataVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+        ]
+    }
+}
+
+fn tls_info_for_addr(
+    host: &str,
+    server_name: &str,
+    port: u16,
+    addr: SocketAddr,
+    timeout: Duration,
+) -> Result<HashMap<String, Value>, String> {
+    let metadata_config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(MetadataVerifier))
+        .with_no_client_auth();
+    let metadata = connect_tls(
+        host,
+        server_name,
+        port,
+        addr,
+        timeout,
+        Arc::new(metadata_config),
+    )?;
+
+    let cert = metadata
+        .certificates
+        .first()
+        .ok_or_else(|| format!("TLS peer {}:{} did not present a certificate", host, port))?;
+    let mut result = tls_cert_to_map(cert.as_ref())?;
+    result.insert("host".to_string(), Value::String(host.to_string()));
+    result.insert(
+        "server_name".to_string(),
+        Value::String(server_name.to_string()),
+    );
+    result.insert("port".to_string(), Value::Int(port as i64));
+    result.insert("remote_addr".to_string(), Value::String(addr.to_string()));
+    result.insert("local_addr".to_string(), Value::String(metadata.local_addr));
+    result.insert("protocol".to_string(), Value::String(metadata.protocol));
+    result.insert("cipher".to_string(), Value::String(metadata.cipher));
+    result.insert(
+        "chain_len".to_string(),
+        Value::Int(metadata.certificates.len() as i64),
+    );
+
+    let validation_error = match verified_tls_config() {
+        Ok(config) => connect_tls(host, server_name, port, addr, timeout, Arc::new(config))
+            .err()
+            .map(|err| validation_probe_error(&err)),
+        Err(e) => Some(format!("certificate validation unavailable: {}", e)),
+    };
+    let valid = validation_error.is_none();
+    result.insert("valid".to_string(), Value::Bool(valid));
+    result.insert(
+        "validation_error".to_string(),
+        validation_error.map_or_else(Value::none, Value::String),
+    );
+
+    Ok(result)
+}
+
+struct TlsConnectionMetadata {
+    local_addr: String,
+    protocol: String,
+    cipher: String,
+    certificates: Vec<CertificateDer<'static>>,
+}
+
+fn verified_tls_config() -> Result<ClientConfig, String> {
+    let mut roots = RootCertStore::empty();
+    let (added, _) =
+        roots.add_parsable_certificates(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned());
+    if added == 0 {
+        return Err("no TLS trust roots available".to_string());
+    }
+    Ok(ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth())
+}
+
+fn validation_probe_error(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("certificate") || lower.contains("cert") || lower.contains("unknownissuer") {
+        format!("certificate validation failed: {}", err)
+    } else {
+        format!("TLS validation probe failed: {}", err)
+    }
+}
+
+fn connect_tls(
+    host: &str,
+    server_name: &str,
+    port: u16,
+    addr: SocketAddr,
+    timeout: Duration,
+    config: Arc<ClientConfig>,
+) -> Result<TlsConnectionMetadata, String> {
+    let name = ServerName::try_from(server_name.to_string()).map_err(|_| {
+        format!(
+            "tls_info() server_name must be a valid DNS name or IP address, got {}",
+            server_name
+        )
+    })?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout)
+        .map_err(|e| format!("TLS TCP connect failed for {}:{}: {}", host, port, e))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| format!("failed to set TLS read timeout: {}", e))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| format!("failed to set TLS write timeout: {}", e))?;
+    let local_addr = stream
+        .local_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_default();
+    let mut conn = ClientConnection::new(config, name)
+        .map_err(|e| format!("failed to create TLS client: {}", e))?;
+    let deadline = Instant::now() + timeout;
+    while conn.is_handshaking() {
+        conn.complete_io(&mut stream)
+            .map_err(|e| format!("TLS handshake failed for {}:{}: {}", host, port, e))?;
+        if Instant::now() >= deadline {
+            return Err(format!("TLS handshake timed out for {}:{}", host, port));
+        }
+    }
+
+    Ok(TlsConnectionMetadata {
+        local_addr,
+        protocol: conn
+            .protocol_version()
+            .map(|version| format!("{:?}", version))
+            .unwrap_or_else(|| "unknown".to_string()),
+        cipher: conn
+            .negotiated_cipher_suite()
+            .map(|suite| format!("{:?}", suite.suite()))
+            .unwrap_or_else(|| "unknown".to_string()),
+        certificates: conn.peer_certificates().unwrap_or(&[]).to_vec(),
+    })
+}
+
+fn tls_cert_to_map(cert_der: &[u8]) -> Result<HashMap<String, Value>, String> {
+    let (_, cert) = X509Certificate::from_der(cert_der)
+        .map_err(|e| format!("failed to parse TLS certificate: {}", e))?;
+    let mut map = HashMap::new();
+    let subject = cert.subject().to_string();
+    let issuer = cert.issuer().to_string();
+    map.insert("subject".to_string(), Value::String(subject));
+    map.insert("issuer".to_string(), Value::String(issuer));
+    map.insert(
+        "subject_common_name".to_string(),
+        x509_common_name(cert.subject()).map_or_else(Value::none, Value::String),
+    );
+    map.insert(
+        "issuer_common_name".to_string(),
+        x509_common_name(cert.issuer()).map_or_else(Value::none, Value::String),
+    );
+    map.insert(
+        "not_before".to_string(),
+        Value::String(asn1_time_to_rfc3339(cert.validity().not_before.timestamp())),
+    );
+    map.insert(
+        "not_after".to_string(),
+        Value::String(asn1_time_to_rfc3339(cert.validity().not_after.timestamp())),
+    );
+    let now = Utc::now().timestamp();
+    let days_left = ((cert.validity().not_after.timestamp() - now) / 86_400).max(0);
+    map.insert("days_left".to_string(), Value::Int(days_left));
+    map.insert(
+        "serial".to_string(),
+        Value::String(cert.raw_serial_as_string()),
+    );
+    map.insert(
+        "signature_algorithm".to_string(),
+        Value::String(cert.signature_algorithm.algorithm.to_string()),
+    );
+    map.insert(
+        "san".to_string(),
+        Value::Array(
+            cert_subject_alt_names(&cert)
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    Ok(map)
+}
+
+fn x509_common_name(name: &X509Name<'_>) -> Option<String> {
+    name.iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .map(str::to_string)
+}
+
+fn cert_subject_alt_names(cert: &X509Certificate<'_>) -> Vec<String> {
+    let Ok(Some(san)) = cert.subject_alternative_name() else {
+        return Vec::new();
+    };
+    san.value
+        .general_names
+        .iter()
+        .filter_map(|name| match name {
+            GeneralName::DNSName(value) => Some((*value).to_string()),
+            GeneralName::IPAddress(bytes) => ip_address_from_san(bytes),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ip_address_from_san(bytes: &[u8]) -> Option<String> {
+    match bytes.len() {
+        4 => Some(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]).to_string()),
+        16 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(bytes);
+            Some(Ipv6Addr::from(octets).to_string())
+        }
+        _ => None,
+    }
+}
+
+fn asn1_time_to_rfc3339(timestamp: i64) -> String {
+    DateTime::<Utc>::from_timestamp(timestamp, 0)
+        .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Secs, true))
+        .unwrap_or_else(|| timestamp.to_string())
 }
 
 fn dns_lookup_args(args: &[Value]) -> Result<(&str, Option<&HashMap<String, Value>>), IntentError> {
@@ -2003,6 +2333,32 @@ fn parse_bool_option(
         Some(other) => Err(format!(
             "option '{}' must be Bool, got {}",
             key,
+            other.type_name()
+        )),
+    }
+}
+
+fn parse_string_option<'a>(
+    opts: Option<&'a HashMap<String, Value>>,
+    key: &str,
+) -> Result<Option<&'a str>, String> {
+    match opts.and_then(|m| m.get(key)) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        Some(other) => Err(format!(
+            "option '{}' must be String, got {}",
+            key,
+            other.type_name()
+        )),
+    }
+}
+
+fn parse_tls_port(opts: Option<&HashMap<String, Value>>) -> Result<u16, String> {
+    match opts.and_then(|m| m.get("port")) {
+        None => Ok(443),
+        Some(Value::Int(port)) => validate_tcp_port_arg(*port, "tls_info"),
+        Some(other) => Err(format!(
+            "option 'port' must be Int, got {}",
             other.type_name()
         )),
     }

@@ -972,10 +972,10 @@ Both `fetch(map { "url": url, ... })` and `fetch(url, map { ... })` work. The tw
 
 ### Network/IPAM Helpers (`std/net`)
 
-`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, bounded port scans, high-level reachability, and DNS lookups:
+`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, bounded port scans, high-level reachability, DNS lookups, and TLS certificate inspection:
 
 ```ntnt
-import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, port_scan, reachable, dns_lookup, dns_reverse } from "std/net"
+import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, port_scan, reachable, dns_lookup, dns_reverse, tls_info } from "std/net"
 
 let info = unwrap(ip_parse("192.168.1.0/24"))
 let contains = unwrap(subnet_contains("10.0.0.0/8", "10.42.0.0/16"))
@@ -986,6 +986,7 @@ let ports = unwrap(port_scan("example.com", [80, 443], map { "timeout_ms": 500 }
 let reachability = unwrap(reachable("example.com", map { "tcp_ports": [8080] }))
 let records = unwrap(dns_lookup("example.com", "A"))
 let ptr_names = unwrap(dns_reverse("8.8.8.8"))
+let cert = unwrap(tls_info("example.com"))
 ```
 
 These helpers return `Result<..., String>`; use `unwrap(...)` for quick scripts/examples, or `match`/`otherwise` when the app should handle invalid input or policy denial.
@@ -1025,6 +1026,17 @@ let ptr_names = dns_reverse("8.8.8.8", map { "timeout_ms": 1000 })
 ```
 
 When passing `dns_lookup` options, include the record type explicitly: `dns_lookup(name, "A", opts)`. The shorter `dns_lookup(name)` form defaults to `A`; `dns_lookup(name, opts)` is intentionally rejected so the call shape stays unambiguous.
+
+`tls_info(host, opts?)` opens a bounded TLS connection, returns the peer certificate metadata, and separately reports validation status. The result includes `subject`, `issuer`, common names, RFC3339 `not_before`/`not_after`, `days_left`, `san`, `serial`, `signature_algorithm`, `protocol`, `cipher`, `chain_len`, `valid`, and `validation_error`. Use `server_name` to override SNI/hostname verification when connecting by IP, and `port` for non-443 services:
+
+```ntnt
+let cert = tls_info("example.com", map { "timeout_ms": 1000 })
+let by_ip = tls_info("93.184.216.34", map {
+    "server_name": "example.com",
+    "port": 443,
+    "timeout_ms": 1000
+})
+```
 
 Private/internal targets are denied by default. Monitoring apps must opt in at process scope **and** call scope:
 
