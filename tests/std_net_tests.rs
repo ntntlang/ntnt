@@ -834,8 +834,8 @@ match port_scan("127.0.0.1", [9], map { "allow_private": true, "timeout_ms": 100
 
 #[test]
 #[cfg_attr(
-    target_os = "macos",
-    ignore = "macOS CI's TLS stack aborts the local self-signed fixture before metadata fallback can inspect it"
+    any(target_os = "macos", target_os = "windows"),
+    ignore = "macOS/Windows CI aborts the local self-signed fixture before metadata fallback can inspect it"
 )]
 fn tls_info_returns_certificate_metadata_even_when_validation_fails() {
     let (port, handle) = start_local_tls_server();
