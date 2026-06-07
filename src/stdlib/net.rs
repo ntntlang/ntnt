@@ -1040,6 +1040,12 @@ fn verify_certificate_chain(
         .map(|err| format!("certificate validation failed: {}", err)))
 }
 
+fn sleep_until_tls_deadline(deadline: Instant) {
+    if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        thread::sleep(min(remaining, Duration::from_millis(10)));
+    }
+}
+
 fn connect_tls(
     host: &str,
     server_name: &str,
@@ -1054,26 +1060,33 @@ fn connect_tls(
             server_name
         )
     })?;
+    let deadline = Instant::now() + timeout;
     let mut stream = TcpStream::connect_timeout(&addr, timeout)
         .map_err(|e| format!("TLS TCP connect failed for {}:{}: {}", host, port, e))?;
+    if Instant::now() >= deadline {
+        return Err(format!("TLS handshake timed out for {}:{}", host, port));
+    }
     stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|e| format!("failed to set TLS read timeout: {}", e))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|e| format!("failed to set TLS write timeout: {}", e))?;
+        .set_nonblocking(true)
+        .map_err(|e| format!("failed to set TLS socket nonblocking mode: {}", e))?;
     let local_addr = stream
         .local_addr()
         .map(|addr| addr.to_string())
         .unwrap_or_default();
     let mut conn = ClientConnection::new(config, name)
         .map_err(|e| format!("failed to create TLS client: {}", e))?;
-    let deadline = Instant::now() + timeout;
     while conn.is_handshaking() {
-        conn.complete_io(&mut stream)
-            .map_err(|e| format!("TLS handshake failed for {}:{}: {}", host, port, e))?;
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             return Err(format!("TLS handshake timed out for {}:{}", host, port));
+        }
+        match conn.complete_io(&mut stream) {
+            Ok((0, 0)) => sleep_until_tls_deadline(deadline),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                sleep_until_tls_deadline(deadline)
+            }
+            Err(e) => return Err(format!("TLS handshake failed for {}:{}: {}", host, port, e)),
         }
     }
 
