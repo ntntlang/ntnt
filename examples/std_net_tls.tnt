@@ -1,0 +1,28 @@
+// std/net TLS certificate inspection example
+//
+// Public TLS connections are opt-in so default example validation/runs stay offline-safe.
+// Run with: NTNT_NET_TLS_EXAMPLES=1 ntnt run examples/std_net_tls.tnt
+
+import { get_env } from "std/env"
+import { tls_info } from "std/net"
+
+if (get_env("NTNT_NET_TLS_EXAMPLES") ?? "") == "1" {
+    let cert = tls_info("example.com", map {
+        "port": 443,
+        "timeout_ms": 2000,
+        "server_name": "example.com"
+    })
+
+    match cert {
+        Ok(info) => {
+            print("subject=" + info["subject"])
+            print("issuer=" + info["issuer"])
+            print("valid=" + str(info["valid"]))
+            print("days_left=" + str(info["days_left"] ?? 0))
+            print("protocol=" + info["protocol"])
+        },
+        Err(e) => print("tls_info failed: " + e)
+    }
+} else {
+    print("Set NTNT_NET_TLS_EXAMPLES=1 to run public TLS examples")
+}

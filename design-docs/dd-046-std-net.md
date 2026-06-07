@@ -740,10 +740,11 @@ Ok(map {
 })
 ```
 
-Implementation decision required before coding:
+Implementation notes:
 
-- Either use `native-tls` / platform cert store and an X.509 parser, or explicitly add `rustls`, roots, and `x509-parser`.
-- Do not claim `rustls` is already available via `reqwest`; current dependency state does not justify that.
+- Use `openssl` intentionally for the initial implementation: it provides the TLS connector, platform/system verification behavior, and X.509 field extraction without pretending `rustls` is already available through `reqwest`.
+- `tls_info()` should return certificate fields even when validation fails. Handshake/transport failures remain `Err(String)`.
+- Apply the same resolved-target safety policy used by `tcp_connect()` and `port_scan()`.
 
 Tests:
 
@@ -789,12 +790,12 @@ SNMP is a real network-monitoring need, but it is its own protocol family. It sh
 
 ### Status Dashboard
 
-As of 2026-06-05:
+As of 2026-06-06:
 
 - [x] **PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability**: merged in [PR #113](https://github.com/ntntlang/ntnt/pull/113).
 - [x] **PR 2 — DNS lookup types**: merged in [PR #114](https://github.com/ntntlang/ntnt/pull/114); adds `dns_lookup` and `dns_reverse` with broad supported record types, deterministic tests, and opt-in external DNS smoke coverage.
-- [ ] **PR 3 — Bounded port scan**: in progress on branch `feat/std-net-port-scan`; adds `port_scan` over explicit port arrays with bounded concurrency and shared target policy.
-- [ ] **PR 4 — TLS info**: planned after port scan/dependency decision.
+- [x] **PR 3 — Bounded port scan**: merged in [PR #115](https://github.com/ntntlang/ntnt/pull/115); adds `port_scan` over explicit port arrays with bounded concurrency and shared target policy, and updates `reachable()` to try ICMP plus TCP 80/443 by default with additive `tcp_ports`.
+- [ ] **PR 4 — TLS info**: in progress on branch `feat/std-net-tls-info`; adds `tls_info` using OpenSSL-backed TLS/certificate inspection.
 
 PR 1 shipped the core module registration, runtime functions, typechecker signatures, generated docs, deterministic examples, and tests for Phase 1. Review hardening added policy fixes for private, link-local, multicast, documentation, mapped-address, and broadcast-style targets.
 
@@ -811,7 +812,7 @@ Scope:
 - [x] `ip_parse`, `subnet_contains`, `subnet_overlaps`, `subnet_split`, `subnet_supernet`, `subnet_summarize`, `ip_range_to_cidrs`
 - [x] `ping(host, opts?)` with strict no-implicit-TCP-fallback semantics
 - [x] `tcp_connect(host, port, opts?)` for explicit TCP port probes
-- [x] `reachable(host, opts?)` for explicit high-level ICMP-then-TCP fallback semantics using caller-provided `tcp_ports`
+- [x] `reachable(host, opts?)` for high-level ICMP-plus-TCP reachability using default TCP ports 80/443 and additive caller-provided `tcp_ports`
 - [x] shared target safety checks used by `tcp_connect`, `reachable`, and future network functions
 - [x] generated docs for all Phase 1 functions
 - [x] AI guide coverage for `ping`, `tcp_connect`, `reachable`, and private-target opt-in
@@ -823,7 +824,7 @@ Acceptance:
 - [x] IPv6 parsing, containment, overlap, splitting, supernet, summarization, and range conversion are supported and tested.
 - [x] Large IPv6 counts/results do not overflow or generate unbounded arrays.
 - [x] `ping("example.com")` has documented protocol-honest failure when ICMP support is unavailable.
-- [x] Missing ICMP capability does not silently fall back to TCP; explicit TCP reachability uses `tcp_connect()` or `reachable(..., map { "tcp_ports": [...] })`.
+- [x] Missing ICMP capability does not make `ping()` silently fall back to TCP; explicit TCP reachability uses `tcp_connect()` or `reachable()`, which probes TCP 80/443 plus additive `tcp_ports`.
 - [x] local open/closed TCP port tests pass
 - [x] private/loopback policy behavior is explicit and tested
 - [x] `Err` vs `Ok(map { "connected": false })` semantics are documented and tested
@@ -850,7 +851,7 @@ Acceptance:
 
 ### PR 3 — Bounded port scan
 
-Status: **implemented on `feat/std-net-port-scan`; pending PR review.**
+Status: **merged in PR #115.**
 
 Scope:
 
@@ -868,16 +869,16 @@ Acceptance:
 
 Scope:
 
-- [ ] dependency choice
-- [ ] `tls_info`
-- [ ] local TLS test server
-- [ ] generated docs and examples
+- [x] dependency choice (`openssl`)
+- [x] `tls_info`
+- [x] local TLS test server
+- [x] generated docs and examples
 
 Acceptance:
 
-- [ ] returns certificate details for valid and validation-failing certs
-- [ ] no dependency claim mismatch
-- [ ] no public internet dependency by default
+- [x] returns certificate details when validation fails
+- [x] no dependency claim mismatch
+- [x] no public internet dependency by default
 
 ---
 
@@ -954,13 +955,13 @@ For network-specific PRs:
 
    Recommendation: no. Start with explicit arrays; add ranges only after runtime/typechecker handling is confirmed.
 
-5. Should TLS inspection use `native-tls` or `rustls`?
+5. Should TLS inspection use `native-tls`, `rustls`, or OpenSSL?
 
-   Recommendation: decide in the TLS PR based on cert-chain extraction quality and dependency weight. Do not block IP/TCP/DNS on this.
+   Decision: use `openssl` for the initial TLS PR. The crate is already present transitively, provides TLS connection/verification and X.509 field extraction directly, and avoids adding a separate rustls/root/x509 stack before the API shape is proven.
 
 6. Should `ping()` mean strict ICMP or pragmatic reachability?
 
-   Decision: strict/protocol-honest by default. `method: "auto"` should use ICMP when available and return a clear `Err` when unavailable. It must not fall back to TCP automatically. Developers should use `tcp_connect(host, port, opts?)` for explicit TCP port checks, or `reachable(host, map { "tcp_ports": [...] })` when they want a high-level reachability helper with explicit TCP fallback.
+   Decision: strict/protocol-honest for `ping()`. `method: "auto"` should use ICMP when available and return a clear `Err` when unavailable. It must not fall back to TCP automatically. Developers should use `tcp_connect(host, port, opts?)` for explicit single TCP port checks, or `reachable(host, opts?)` when they want a high-level reachability helper that probes ICMP plus TCP 80/443 by default and appends extra `tcp_ports`.
 
 7. Should internal targets be easy to enable for monitoring?
 

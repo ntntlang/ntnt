@@ -2,10 +2,15 @@
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::error::{ResolveError, ResolveErrorKind};
 use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::Resolver;
+use openssl::asn1::{Asn1Time, Asn1TimeRef};
+use openssl::nid::Nid;
+use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+use openssl::x509::{X509NameRef, X509Ref, X509VerifyResult};
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
@@ -468,6 +473,28 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt tls_info
+    // @module std/net
+    // @signature tls_info(host: String, opts?: Map) -> Result<Map, String>
+    // Opens a bounded TLS connection and returns certificate metadata. Validation
+    // failures still return Ok(map { "valid": false, ... }) when a certificate is available.
+    // @param host Hostname or IP address to connect to
+    // @param opts Optional map with port, timeout_ms, server_name, and allow_private
+    // @returns Result containing certificate subject, issuer, validity window, SANs, serial, protocol, and validation status
+    // @since v0.4.10
+    // @tags #network
+    // @example tls_info("example.com") ~ "Inspect the HTTPS certificate for example.com"
+    module.insert(
+        "tls_info".to_string(),
+        Value::NativeFunction {
+            name: "tls_info".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: tls_info_fn,
+        },
+    );
+
     module
 }
 
@@ -838,6 +865,30 @@ fn dns_reverse_fn(args: &[Value]) -> Result<Value, IntentError> {
     })()))
 }
 
+fn tls_info_fn(args: &[Value]) -> Result<Value, IntentError> {
+    let host = string_arg(args, 0, "tls_info")?;
+    let opts = opts_arg(args, 1, "tls_info")?;
+
+    Ok(result_value((|| {
+        let port = parse_tls_port(opts)?;
+        let timeout_ms = parse_u64_option(opts, "timeout_ms", DEFAULT_TIMEOUT_MS)?
+            .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+        let allow_private = parse_bool_option(opts, "allow_private", false)?;
+        let server_name = parse_string_option(opts, "server_name")?
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(host);
+        let info = tls_info_for_host(
+            host,
+            server_name,
+            port,
+            Duration::from_millis(timeout_ms),
+            allow_private,
+        )?;
+        Ok(Value::Map(info))
+    })()))
+}
+
 fn dns_lookup_args(args: &[Value]) -> Result<(&str, Option<&HashMap<String, Value>>), IntentError> {
     if args.len() <= 1 {
         return Ok(("A", None));
@@ -938,6 +989,209 @@ fn dns_answers_to_value(answers: Vec<DnsAnswer>) -> Value {
             })
             .collect(),
     )
+}
+
+fn tls_info_for_host(
+    host: &str,
+    server_name: &str,
+    port: u16,
+    timeout: Duration,
+    allow_private: bool,
+) -> Result<HashMap<String, Value>, String> {
+    let targets = resolve_tcp_targets(host, &[port])?;
+    enforce_resolved_target_policy(&targets, allow_private)?;
+
+    let mut last_error = None;
+    for (_, addr) in targets {
+        match tls_info_for_addr(host, server_name, port, addr, timeout) {
+            Ok(info) => return Ok(info),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| format!("tls_info() could not resolve {}:{}", host, port)))
+}
+
+fn tls_info_for_addr(
+    host: &str,
+    server_name: &str,
+    port: u16,
+    addr: SocketAddr,
+    timeout: Duration,
+) -> Result<HashMap<String, Value>, String> {
+    let validation_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let mut builder = SslConnector::builder(SslMethod::tls())
+        .map_err(|e| format!("failed to initialize TLS connector: {}", e))?;
+    let callback_error = validation_error.clone();
+    builder.set_verify_callback(SslVerifyMode::PEER, move |preverify_ok, ctx| {
+        if !preverify_ok {
+            let message = ctx.error().error_string().to_string();
+            if let Ok(mut slot) = callback_error.lock() {
+                *slot = Some(message);
+            }
+        }
+        true
+    });
+    let connector = builder.build();
+
+    let stream = TcpStream::connect_timeout(&addr, timeout)
+        .map_err(|e| format!("TLS connect failed for {}:{} ({}): {}", host, port, addr, e))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| format!("failed to set TLS read timeout: {}", e))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| format!("failed to set TLS write timeout: {}", e))?;
+    let local_addr = stream.local_addr().ok().map(|a| a.to_string());
+
+    let stream = connector
+        .connect(server_name, stream)
+        .map_err(|e| format!("TLS handshake failed for {}:{}: {}", host, port, e))?;
+    let ssl = stream.ssl();
+    let cert = ssl
+        .peer_certificate()
+        .ok_or_else(|| format!("TLS peer {}:{} did not present a certificate", host, port))?;
+    let mut result = tls_cert_to_map(&cert)?;
+
+    let verify_result = ssl.verify_result();
+    let callback_error = validation_error.lock().ok().and_then(|slot| slot.clone());
+    let validation_message = if verify_result == X509VerifyResult::OK {
+        callback_error
+    } else {
+        Some(verify_result.error_string().to_string())
+    };
+    let valid = validation_message.is_none();
+
+    result.insert("host".to_string(), Value::String(host.to_string()));
+    result.insert("port".to_string(), Value::Int(port as i64));
+    result.insert(
+        "server_name".to_string(),
+        Value::String(server_name.to_string()),
+    );
+    result.insert("remote_addr".to_string(), Value::String(addr.to_string()));
+    if let Some(local_addr) = local_addr {
+        result.insert("local_addr".to_string(), Value::String(local_addr));
+    }
+    result.insert(
+        "protocol".to_string(),
+        Value::String(ssl.version_str().to_string()),
+    );
+    if let Some(cipher) = ssl.current_cipher() {
+        result.insert(
+            "cipher".to_string(),
+            Value::String(cipher.name().to_string()),
+        );
+    }
+    result.insert("valid".to_string(), Value::Bool(valid));
+    result.insert(
+        "validation_error".to_string(),
+        validation_message.map_or_else(Value::none, Value::String),
+    );
+
+    Ok(result)
+}
+
+fn tls_cert_to_map(cert: &X509Ref) -> Result<HashMap<String, Value>, String> {
+    let mut map = HashMap::new();
+    let subject = x509_name_to_string(cert.subject_name());
+    let issuer = x509_name_to_string(cert.issuer_name());
+    map.insert("subject".to_string(), Value::String(subject));
+    map.insert("issuer".to_string(), Value::String(issuer));
+    map.insert(
+        "subject_common_name".to_string(),
+        x509_common_name(cert.subject_name()).map_or_else(Value::none, Value::String),
+    );
+    map.insert(
+        "issuer_common_name".to_string(),
+        x509_common_name(cert.issuer_name()).map_or_else(Value::none, Value::String),
+    );
+    map.insert(
+        "not_before".to_string(),
+        Value::String(asn1_time_to_rfc3339(cert.not_before())),
+    );
+    map.insert(
+        "not_after".to_string(),
+        Value::String(asn1_time_to_rfc3339(cert.not_after())),
+    );
+    if let Some(days_left) = cert_days_left(cert) {
+        map.insert("days_left".to_string(), Value::Int(days_left));
+    }
+    let serial = cert
+        .serial_number()
+        .to_bn()
+        .and_then(|bn| bn.to_hex_str())
+        .map_err(|e| format!("failed to read certificate serial: {}", e))?
+        .to_string();
+    map.insert("serial".to_string(), Value::String(serial));
+    map.insert(
+        "san".to_string(),
+        Value::Array(
+            cert_subject_alt_names(cert)
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    Ok(map)
+}
+
+fn x509_name_to_string(name: &X509NameRef) -> String {
+    let mut parts = Vec::new();
+    for entry in name.entries() {
+        let key = entry.object().nid().short_name().unwrap_or("OID");
+        let value = entry
+            .data()
+            .as_utf8()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|_| hex::encode(entry.data().as_slice()));
+        parts.push(format!("{}={}", key, value));
+    }
+    parts.join(", ")
+}
+
+fn x509_common_name(name: &X509NameRef) -> Option<String> {
+    name.entries_by_nid(Nid::COMMONNAME)
+        .next()
+        .and_then(|entry| entry.data().as_utf8().ok().map(|value| value.to_string()))
+}
+
+fn cert_subject_alt_names(cert: &X509Ref) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(sans) = cert.subject_alt_names() {
+        for name in sans {
+            if let Some(dns) = name.dnsname() {
+                names.push(dns.to_string());
+            } else if let Some(ip) = name.ipaddress() {
+                match ip.len() {
+                    4 => names
+                        .push(IpAddr::V4(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3])).to_string()),
+                    16 => {
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(ip);
+                        names.push(IpAddr::V6(Ipv6Addr::from(octets)).to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    names
+}
+
+fn asn1_time_to_rfc3339(time: &Asn1TimeRef) -> String {
+    let raw = time.to_string();
+    NaiveDateTime::parse_from_str(&raw, "%b %e %H:%M:%S %Y GMT")
+        .map(|parsed| {
+            DateTime::<Utc>::from_naive_utc_and_offset(parsed, Utc)
+                .to_rfc3339_opts(SecondsFormat::Secs, true)
+        })
+        .unwrap_or(raw)
+}
+
+fn cert_days_left(cert: &X509Ref) -> Option<i64> {
+    let now = Asn1Time::days_from_now(0).ok()?;
+    let diff = now.diff(cert.not_after()).ok()?;
+    Some(diff.days as i64)
 }
 
 #[derive(Debug, Clone)]
@@ -2008,6 +2262,21 @@ fn parse_bool_option(
     }
 }
 
+fn parse_string_option<'a>(
+    opts: Option<&'a HashMap<String, Value>>,
+    key: &str,
+) -> Result<Option<&'a str>, String> {
+    match opts.and_then(|m| m.get(key)) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        Some(other) => Err(format!(
+            "option '{}' must be String, got {}",
+            key,
+            other.type_name()
+        )),
+    }
+}
+
 fn parse_u64_option(
     opts: Option<&HashMap<String, Value>>,
     key: &str,
@@ -2051,6 +2320,17 @@ fn parse_port_scan_concurrency(opts: Option<&HashMap<String, Value>>) -> Result<
         Some(Value::Int(_)) => Err("option 'concurrency' must be positive".to_string()),
         Some(other) => Err(format!(
             "option 'concurrency' must be Int, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn parse_tls_port(opts: Option<&HashMap<String, Value>>) -> Result<u16, String> {
+    match opts.and_then(|m| m.get("port")) {
+        None => Ok(443),
+        Some(Value::Int(value)) => validate_tcp_port_arg(*value, "tls_info"),
+        Some(other) => Err(format!(
+            "option 'port' must be Int, got {}",
             other.type_name()
         )),
     }

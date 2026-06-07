@@ -972,10 +972,10 @@ Both `fetch(map { "url": url, ... })` and `fetch(url, map { ... })` work. The tw
 
 ### Network/IPAM Helpers (`std/net`)
 
-`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, bounded port scans, high-level reachability, and DNS lookups:
+`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, bounded port scans, high-level reachability, DNS lookups, and TLS certificate inspection:
 
 ```ntnt
-import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, port_scan, reachable, dns_lookup, dns_reverse } from "std/net"
+import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, port_scan, reachable, dns_lookup, dns_reverse, tls_info } from "std/net"
 
 let info = unwrap(ip_parse("192.168.1.0/24"))
 let contains = unwrap(subnet_contains("10.0.0.0/8", "10.42.0.0/16"))
@@ -986,6 +986,7 @@ let ports = unwrap(port_scan("example.com", [80, 443], map { "timeout_ms": 500 }
 let reachability = unwrap(reachable("example.com", map { "tcp_ports": [8080] }))
 let records = unwrap(dns_lookup("example.com", "A"))
 let ptr_names = unwrap(dns_reverse("8.8.8.8"))
+let cert = unwrap(tls_info("example.com"))
 ```
 
 These helpers return `Result<..., String>`; use `unwrap(...)` for quick scripts/examples, or `match`/`otherwise` when the app should handle invalid input or policy denial.
@@ -1018,13 +1019,27 @@ let scan = port_scan("example.com", [22, 80, 443], map {
 `dns_lookup(name, record_type?, opts?)` supports common data-bearing DNS record types, including `A`, `AAAA`, `MX`, `TXT`, `NS`, `CNAME`, `SOA`, `SRV`, `CAA`, `TLSA`, `HTTPS`, and `SVCB`. It returns `Ok([])` for ordinary no-answer DNS responses and `Err(String)` for invalid record types, invalid options, resolver configuration failures, or DNS transport failures. Record maps use the actual returned DNS type, so a resolver response that includes related records reports those records honestly instead of relabeling everything as the requested type. `dns_reverse(ip, opts?)` returns all PTR names as an array because PTR can legitimately have zero, one, or multiple names.
 
 ```ntnt
-let a_records = dns_lookup("example.com", "A", map { "timeout_ms": 1000 })
+let a_records = dns_lookup("example.com", "A")
 let mx_records = dns_lookup("example.com", "MX", map { "timeout_ms": 1000 })
 let txt_records = dns_lookup("example.com", "TXT", map { "timeout_ms": 1000 })
 let ptr_names = dns_reverse("8.8.8.8", map { "timeout_ms": 1000 })
 ```
 
 When passing `dns_lookup` options, include the record type explicitly: `dns_lookup(name, "A", opts)`. The shorter `dns_lookup(name)` form defaults to `A`; `dns_lookup(name, opts)` is intentionally rejected so the call shape stays unambiguous.
+
+`tls_info(host, opts?)` opens a bounded TLS connection, inspects the peer certificate, and returns certificate metadata even when validation fails. Use `server_name` to override SNI/hostname verification and `port` to inspect non-443 TLS services. The `san` array currently includes DNS and IP subject alternative names. Private-target policy is the same as TCP probes.
+
+```ntnt
+let cert = tls_info("example.com", map {
+    "port": 443,
+    "timeout_ms": 2000,
+    "server_name": "example.com"
+})
+```
+
+Result maps include `subject`, `issuer`, `subject_common_name`, `issuer_common_name`, `not_before`, `not_after`, `days_left`, `serial`, `san`, `protocol`, `cipher`, `valid`, and `validation_error`.
+
+All active network probes (`ping`, `tcp_connect`, `reachable`, `port_scan`, and `tls_info`) apply target safety checks:
 
 Private/internal targets are denied by default. Monitoring apps must opt in at process scope **and** call scope:
 

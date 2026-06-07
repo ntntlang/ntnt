@@ -1801,6 +1801,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "num_cpus",
+ "openssl",
  "postgres",
  "pretty_assertions",
  "pulldown-cmark",

@@ -1,10 +1,18 @@
 //! Integration tests for std/net Phase 1 public behavior.
 
+use openssl::asn1::Asn1Time;
+use openssl::hash::MessageDigest;
+use openssl::pkey::PKey;
+use openssl::rsa::Rsa;
+use openssl::ssl::{SslAcceptor, SslMethod};
+use openssl::x509::extension::{BasicConstraints, SubjectAlternativeName};
+use openssl::x509::{X509NameBuilder, X509};
 use std::fs;
 use std::io::Write;
 use std::net::TcpListener;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -64,6 +72,79 @@ fn run_ntnt_code_with_env(code: &str, envs: &[(&str, &str)]) -> (String, String,
         String::from_utf8_lossy(&output.stderr).to_string(),
         output.status.code().unwrap_or(-1),
     )
+}
+
+fn start_local_tls_server() -> (u16, thread::JoinHandle<bool>) {
+    let rsa = Rsa::generate(2048).expect("generate test RSA key");
+    let key = PKey::from_rsa(rsa).expect("build test private key");
+
+    let mut name = X509NameBuilder::new().expect("create test cert name");
+    name.append_entry_by_text("CN", "localhost")
+        .expect("set test cert CN");
+    let name = name.build();
+
+    let mut cert = X509::builder().expect("create test certificate");
+    cert.set_version(2).expect("set test cert version");
+    cert.set_subject_name(&name).expect("set test cert subject");
+    cert.set_issuer_name(&name).expect("set test cert issuer");
+    cert.set_pubkey(&key).expect("set test cert public key");
+    cert.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+        .expect("set test cert not_before");
+    cert.set_not_after(Asn1Time::days_from_now(30).unwrap().as_ref())
+        .expect("set test cert not_after");
+    cert.append_extension(
+        BasicConstraints::new()
+            .critical()
+            .ca()
+            .build()
+            .expect("build basic constraints"),
+    )
+    .expect("append basic constraints");
+    let san = SubjectAlternativeName::new()
+        .dns("localhost")
+        .ip("127.0.0.1")
+        .build(&cert.x509v3_context(None, None))
+        .expect("build SAN extension");
+    cert.append_extension(san).expect("append SAN extension");
+    cert.sign(&key, MessageDigest::sha256())
+        .expect("sign test certificate");
+    let cert = cert.build();
+
+    let mut acceptor =
+        SslAcceptor::mozilla_intermediate(SslMethod::tls()).expect("create test TLS acceptor");
+    acceptor
+        .set_private_key(&key)
+        .expect("set test TLS private key");
+    acceptor
+        .set_certificate(&cert)
+        .expect("set test TLS certificate");
+    acceptor
+        .check_private_key()
+        .expect("check test TLS private key");
+    let acceptor = acceptor.build();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local TLS listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make local TLS listener nonblocking");
+    let port = listener.local_addr().unwrap().port();
+    let handle = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return acceptor.accept(stream).is_ok(),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return false,
+            }
+        }
+    });
+
+    (port, handle)
 }
 
 #[test]
@@ -728,6 +809,98 @@ match port_scan("127.0.0.1", [9], map { "allow_private": true, "timeout_ms": 100
     Err(e) => print(e)
 }
 "#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("private targets require NTNT_NET_ALLOW_PRIVATE=1"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn tls_info_returns_certificate_metadata_even_when_validation_fails() {
+    let (port, handle) = start_local_tls_server();
+    let code = format!(
+        r#"
+import {{ tls_info }} from "std/net"
+
+match tls_info("127.0.0.1", map {{
+    "allow_private": true,
+    "port": {port},
+    "server_name": "localhost",
+    "timeout_ms": 2000
+}}) {{
+    Ok(info) => {{
+        print(info["host"])
+        print(info["port"])
+        print(info["server_name"])
+        print(info["subject_common_name"])
+        print(info["issuer_common_name"])
+        print(info["not_before"])
+        print(info["not_after"])
+        print(join(info["san"], ","))
+        print(info["valid"])
+        print(info["validation_error"] ?? "none")
+        print(info["protocol"])
+    }},
+    Err(e) => print("ERR:" + e)
+}}
+"#
+    );
+
+    let (stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(&code, &[("NTNT_NET_ALLOW_PRIVATE", "1")]);
+    let accepted_tls_connection = handle.join().expect("TLS helper should not panic");
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        accepted_tls_connection,
+        "TLS helper did not complete a handshake; stdout: {stdout}"
+    );
+    assert!(!stdout.contains("ERR:"), "stdout: {stdout}");
+    assert!(stdout.contains("127.0.0.1"), "stdout: {stdout}");
+    assert!(stdout.contains(&port.to_string()), "stdout: {stdout}");
+    assert!(stdout.contains("localhost"), "stdout: {stdout}");
+    assert!(stdout.contains("T"), "stdout: {stdout}");
+    assert!(stdout.contains("Z"), "stdout: {stdout}");
+    assert!(stdout.contains("false"), "stdout: {stdout}");
+    assert!(!stdout.contains("none"), "stdout: {stdout}");
+    assert!(stdout.contains("TLS"), "stdout: {stdout}");
+}
+
+#[test]
+fn tls_info_private_target_requires_process_level_opt_in() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { tls_info } from "std/net"
+
+match tls_info("127.0.0.1", map { "allow_private": true, "port": 443, "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected"),
+    Err(e) => print(e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("private targets require NTNT_NET_ALLOW_PRIVATE=1"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn tls_info_private_target_still_requires_call_level_opt_in() {
+    let (stdout, stderr, code) = run_ntnt_code_with_env(
+        r#"
+import { tls_info } from "std/net"
+
+match tls_info("127.0.0.1", map { "port": 443, "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected"),
+    Err(e) => print(e)
+}
+"#,
+        &[("NTNT_NET_ALLOW_PRIVATE", "1")],
     );
 
     assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");

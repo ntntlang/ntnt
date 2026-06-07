@@ -53,6 +53,9 @@ urlencoding = "2.1"
 # HTTP Client
 reqwest = { version = "0.11", features = ["blocking", "json", "multipart", "cookies"] }
 
+# TLS certificate inspection
+openssl = "0.10"
+
 # HTTP Server (Axum + Tokio for high-concurrency in production)
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
