@@ -791,7 +791,7 @@ match port_scan("127.0.0.1", [9], map { "allow_private": true, "timeout_ms": 100
 
 #[test]
 fn tls_info_returns_certificate_metadata_when_validation_fails() {
-    let (port, handle) = start_local_tls_server(2);
+    let (port, handle) = start_local_tls_server(1);
     let code = format!(
         r#"
 import {{ join }} from "std/string"
@@ -820,9 +820,9 @@ match tls_info("127.0.0.1", map {{ "port": {port}, "server_name": "localhost", "
     let accepted = handle.join().expect("TLS helper should not panic");
 
     assert_eq!(exit_code, 0, "stderr: {stderr}\nstdout: {stdout}");
-    assert!(
-        accepted >= 1,
-        "TLS helper did not accept a connection; stdout: {stdout}"
+    assert_eq!(
+        accepted, 1,
+        "TLS helper did not accept the metadata connection; stdout: {stdout}"
     );
     assert!(!stdout.contains("ERR:"), "stdout: {stdout}");
     assert!(stdout.contains("localhost"), "stdout: {stdout}");

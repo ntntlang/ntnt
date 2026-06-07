@@ -8,6 +8,7 @@ use hickory_resolver::error::{ResolveError, ResolveErrorKind};
 use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::Resolver;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::WebPkiServerVerifier;
 use rustls::{
     ClientConfig, ClientConnection, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
@@ -881,20 +882,21 @@ fn tls_info_fn(args: &[Value]) -> Result<Value, IntentError> {
         let allow_private = parse_bool_option(opts, "allow_private", false)?;
         let targets = resolve_tcp_targets(host, &[port])?;
         enforce_resolved_target_policy(&targets, allow_private)?;
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let mut last_error = None;
         for (_, addr) in targets {
-            match tls_info_for_addr(
-                host,
-                server_name,
-                port,
-                addr,
-                Duration::from_millis(timeout_ms),
-            ) {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+            match tls_info_for_addr(host, server_name, port, addr, remaining) {
                 Ok(info) => return Ok(Value::Map(info)),
                 Err(err) => last_error = Some(err),
             }
         }
-        Err(last_error.unwrap_or_else(|| format!("failed to resolve {}:{}", host, port)))
+        Err(last_error.unwrap_or_else(|| format!("TLS inspection timed out for {}:{}", host, port)))
     })()))
 }
 
@@ -986,12 +988,7 @@ fn tls_info_for_addr(
         Value::Int(metadata.certificates.len() as i64),
     );
 
-    let validation_error = match verified_tls_config() {
-        Ok(config) => connect_tls(host, server_name, port, addr, timeout, Arc::new(config))
-            .err()
-            .map(|err| validation_probe_error(&err)),
-        Err(e) => Some(format!("certificate validation unavailable: {}", e)),
-    };
+    let validation_error = verify_certificate_chain(server_name, &metadata.certificates)?;
     let valid = validation_error.is_none();
     result.insert("valid".to_string(), Value::Bool(valid));
     result.insert(
@@ -1009,25 +1006,38 @@ struct TlsConnectionMetadata {
     certificates: Vec<CertificateDer<'static>>,
 }
 
-fn verified_tls_config() -> Result<ClientConfig, String> {
+fn tls_root_store() -> Result<RootCertStore, String> {
     let mut roots = RootCertStore::empty();
     let (added, _) =
         roots.add_parsable_certificates(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned());
     if added == 0 {
         return Err("no TLS trust roots available".to_string());
     }
-    Ok(ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth())
+    Ok(roots)
 }
 
-fn validation_probe_error(err: &str) -> String {
-    let lower = err.to_ascii_lowercase();
-    if lower.contains("certificate") || lower.contains("cert") || lower.contains("unknownissuer") {
-        format!("certificate validation failed: {}", err)
-    } else {
-        format!("TLS validation probe failed: {}", err)
-    }
+fn verify_certificate_chain(
+    server_name: &str,
+    certificates: &[CertificateDer<'static>],
+) -> Result<Option<String>, String> {
+    let Some((end_entity, intermediates)) = certificates.split_first() else {
+        return Ok(Some(
+            "certificate validation failed: peer did not present a certificate".to_string(),
+        ));
+    };
+    let name = ServerName::try_from(server_name.to_string()).map_err(|_| {
+        format!(
+            "tls_info() server_name must be a valid DNS name or IP address, got {}",
+            server_name
+        )
+    })?;
+    let verifier = WebPkiServerVerifier::builder(Arc::new(tls_root_store()?))
+        .build()
+        .map_err(|e| format!("certificate validation unavailable: {}", e))?;
+    Ok(verifier
+        .verify_server_cert(end_entity, intermediates, &name, &[], UnixTime::now())
+        .err()
+        .map(|err| format!("certificate validation failed: {}", err)))
 }
 
 fn connect_tls(

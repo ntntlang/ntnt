@@ -975,7 +975,7 @@ Both `fetch(map { "url": url, ... })` and `fetch(url, map { ... })` work. The tw
 `std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, bounded port scans, high-level reachability, DNS lookups, and TLS certificate inspection:
 
 ```ntnt
-import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, port_scan, reachable, dns_lookup, dns_reverse, tls_info } from "std/net"
+import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, port_scan, reachable, dns_lookup, dns_reverse } from "std/net"
 
 let info = unwrap(ip_parse("192.168.1.0/24"))
 let contains = unwrap(subnet_contains("10.0.0.0/8", "10.42.0.0/16"))
@@ -986,7 +986,8 @@ let ports = unwrap(port_scan("example.com", [80, 443], map { "timeout_ms": 500 }
 let reachability = unwrap(reachable("example.com", map { "tcp_ports": [8080] }))
 let records = unwrap(dns_lookup("example.com", "A"))
 let ptr_names = unwrap(dns_reverse("8.8.8.8"))
-let cert = unwrap(tls_info("example.com"))
+// TLS inspection performs a network connection; use it in opt-in examples.
+// let cert = unwrap(tls_info("example.com"))
 ```
 
 These helpers return `Result<..., String>`; use `unwrap(...)` for quick scripts/examples, or `match`/`otherwise` when the app should handle invalid input or policy denial.
