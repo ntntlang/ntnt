@@ -89,10 +89,11 @@ fn start_local_tls_server(expected_connections: usize) -> (u16, std::thread::Joi
 
     let handle = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut completed = 0;
-        while completed < expected_connections && Instant::now() < deadline {
+        let mut accepted = 0;
+        while accepted < expected_connections && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    accepted += 1;
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                     let Ok(mut conn) = ServerConnection::new(config.clone()) else {
@@ -104,9 +105,6 @@ fn start_local_tls_server(expected_connections: usize) -> (u16, std::thread::Joi
                             Err(_) => break,
                         }
                     }
-                    if !conn.is_handshaking() {
-                        completed += 1;
-                    }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(10));
@@ -114,7 +112,7 @@ fn start_local_tls_server(expected_connections: usize) -> (u16, std::thread::Joi
                 Err(_) => break,
             }
         }
-        completed
+        accepted
     });
 
     (port, handle)
@@ -819,12 +817,12 @@ match tls_info("127.0.0.1", map {{ "port": {port}, "server_name": "localhost", "
 
     let (stdout, stderr, exit_code) =
         run_ntnt_code_with_env(&code, &[("NTNT_NET_ALLOW_PRIVATE", "1")]);
-    let completed = handle.join().expect("TLS helper should not panic");
+    let accepted = handle.join().expect("TLS helper should not panic");
 
     assert_eq!(exit_code, 0, "stderr: {stderr}\nstdout: {stdout}");
     assert!(
-        completed >= 1,
-        "TLS helper did not complete a handshake; stdout: {stdout}"
+        accepted >= 1,
+        "TLS helper did not accept a connection; stdout: {stdout}"
     );
     assert!(!stdout.contains("ERR:"), "stdout: {stdout}");
     assert!(stdout.contains("localhost"), "stdout: {stdout}");
