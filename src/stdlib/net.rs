@@ -10,7 +10,7 @@ use hickory_resolver::Resolver;
 use openssl::asn1::{Asn1Time, Asn1TimeRef};
 use openssl::nid::Nid;
 use openssl::ssl::{SslConnector, SslMethod, SslStream, SslVerifyMode};
-use openssl::x509::{X509NameRef, X509Ref, X509VerifyResult};
+use openssl::x509::{X509NameRef, X509Ref};
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
@@ -1019,20 +1019,7 @@ fn tls_info_for_addr(
     addr: SocketAddr,
     timeout: Duration,
 ) -> Result<HashMap<String, Value>, String> {
-    let verified = connect_tls_stream(host, server_name, port, addr, timeout, true);
-    let (stream, local_addr, validation_message) = match verified {
-        Ok((stream, local_addr)) => (stream, local_addr, None),
-        Err(validation_error) => {
-            let (stream, local_addr) =
-                connect_tls_stream(host, server_name, port, addr, timeout, false).map_err(|e| {
-                    format!(
-                        "{}; certificate metadata fallback also failed: {}",
-                        validation_error, e
-                    )
-                })?;
-            (stream, local_addr, Some(validation_error))
-        }
-    };
+    let (stream, local_addr) = connect_tls_stream(host, server_name, port, addr, timeout, false)?;
 
     let ssl = stream.ssl();
     let cert = ssl
@@ -1040,14 +1027,7 @@ fn tls_info_for_addr(
         .ok_or_else(|| format!("TLS peer {}:{} did not present a certificate", host, port))?;
     let mut result = tls_cert_to_map(&cert)?;
 
-    let validation_message = validation_message.or_else(|| {
-        let verify_result = ssl.verify_result();
-        if verify_result == X509VerifyResult::OK {
-            None
-        } else {
-            Some(verify_result.error_string().to_string())
-        }
-    });
+    let validation_message = validate_tls_peer(host, server_name, port, addr, timeout).err();
     let valid = validation_message.is_none();
 
     result.insert("host".to_string(), Value::String(host.to_string()));
@@ -1077,6 +1057,16 @@ fn tls_info_for_addr(
     );
 
     Ok(result)
+}
+
+fn validate_tls_peer(
+    host: &str,
+    server_name: &str,
+    port: u16,
+    addr: SocketAddr,
+    timeout: Duration,
+) -> Result<(), String> {
+    connect_tls_stream(host, server_name, port, addr, timeout, true).map(|_| ())
 }
 
 fn connect_tls_stream(
