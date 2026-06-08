@@ -19,6 +19,7 @@ This folder contains planning and design documents for NTNT features.
 | [dd-059-auth-crypto-boundary.md](dd-059-auth-crypto-boundary.md) | ✅ Complete | `std/auth` / `std/crypto` helper boundary in the v0.4.9 auth baseline |
 | [dd-060-ai-native-developer-experience.md](dd-060-ai-native-developer-experience.md) | 📋 Draft | AI-native developer experience roadmap |
 | [dd-061-interpreter-performance-roadmap.md](dd-061-interpreter-performance-roadmap.md) | 🔶 In Review | Interpreter-native performance roadmap |
+| [dd-062-secure-compiled-extension-libraries.md](dd-062-secure-compiled-extension-libraries.md) | 📋 Draft | Secure compiled extension libraries: stdlib-grade Rust modules, signed module universes, build provenance, and app-enforced trust requirements |
 | [language_comparison.md](language_comparison.md) | ✅ Complete | NTNT vs other languages |
 | [INTENT_DRIVEN_DEVELOPMENT.md](INTENT_DRIVEN_DEVELOPMENT.md) | ✅ Complete | IDD philosophy and workflow |
 | [INTENT_ASSERTION_LANGUAGE.md](INTENT_ASSERTION_LANGUAGE.md) | ✅ Complete | IAL spec v1.0.0 |
