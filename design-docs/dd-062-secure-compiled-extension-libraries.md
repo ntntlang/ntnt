@@ -689,6 +689,63 @@ namespaces = ["org/larri/*"]
 
 TUF-style delegation lets keys rotate and lets different authorities sign different namespaces. One key should not rule the entire kingdom. That way lies screaming.
 
+### Key custody and rotation
+
+Private signing keys must never live in the ntnt source repo, app repos, build artifacts, Docker images, or ordinary developer laptops.
+
+Use separate keys for separate jobs:
+
+| Key / authority | Where the private key lives | Online? | What it signs |
+|---|---|---:|---|
+| Root trust key | Offline hardware token or HSM, held by maintainers; ideally threshold-controlled | no | Delegates other authorities and rotates/revokes keys |
+| Release/artifact authority | Sigstore keyless identity or CI-backed KMS/HSM signing key | limited | Binary artifact digests and release metadata |
+| Provenance authority | CI workload identity / OIDC-backed keyless signing | yes, ephemeral | in-toto/SLSA provenance for a specific build |
+| `std/*` module authority | Offline or semi-offline hardware-backed key; used only for module identity/version approvals | rarely | Official module manifests/namespace claims |
+| Certified extension authority | Publisher/certification key, delegated in trust metadata | limited | Certified extension manifests |
+| Organization authority | Organization KMS/HSM or hardware token | org-defined | `org/<org>/*` extension manifests and org distributions |
+| Local-dev/test key | Fixture key in tests only, clearly marked untrusted | yes/test | Test artifacts only |
+
+Recommended shape:
+
+1. **Offline root, online delegates.** The root key signs only trust metadata: which release/module keys are valid, which namespaces they control, and when metadata expires. Day-to-day releases do not use the root key.
+2. **Short-lived release identity.** Prefer Sigstore keyless/OIDC for public release signing when possible. CI gets a short-lived certificate tied to repository/workflow identity rather than a long-lived secret sitting in Actions secrets like a raccoon in a pantry.
+3. **Hardware-backed fallback.** If keyless signing is not available, use KMS/HSM/YubiKey-backed signing. Never plaintext private keys on disk.
+4. **Threshold for high-impact changes.** Root metadata changes, `std/*` authority changes, and namespace delegation changes should require threshold signing, e.g. 2-of-3 or 3-of-5 maintainers.
+5. **Expiring metadata.** Trust-root and delegated metadata should expire. Verifiers reject stale metadata in strict/release mode.
+6. **Deterministic public key distribution.** Public keys and trust metadata can live in the verifier, release channels, and published metadata. Private keys stay out of the codebase.
+
+### Preventing unauthorized key changes
+
+Key changes are just as sensitive as code changes. The system should treat them like releases of the trust root:
+
+- trust metadata is versioned and signed;
+- new root/delegation metadata must be signed by the previous valid root or by threshold recovery keys;
+- metadata has monotonically increasing versions to prevent rollback;
+- metadata has expiry timestamps to prevent indefinite use of old keys;
+- transparency logging records key/delegation changes;
+- CI blocks unsigned or unexpectedly changed trust metadata;
+- production verifiers pin an initial root trust identity and only accept valid signed rotations.
+
+This prevents an attacker from simply editing `trusted_keys.toml` and declaring themselves the new emperor of `std/*`.
+
+### If a key is compromised
+
+Have an explicit compromise playbook:
+
+1. Publish signed revocation metadata with a higher version number.
+2. Remove the compromised key from active delegations.
+3. Add replacement keys through threshold/root signing.
+4. Mark affected artifacts/modules as revoked or suspicious in transparency/trust metadata.
+5. Rebuild and re-sign clean artifacts from reviewed source.
+6. Force `ntnt verify` strict mode to reject artifacts signed only by the revoked key after the revocation timestamp.
+7. Publish incident notes with affected versions, digests, and remediation.
+
+A stolen online release key should not let an attacker rewrite `std/*` authority, alter the root trust set, or silently ship forever. Delegation and expiry are the point.
+
+### Core-dev impact
+
+None of this should be required for local core development. Developer machines use unsigned `local-dev` manifests. Real signing keys are only needed by release/certification workflows. If a contributor cannot build ntnt because they lack a signing key, the design is wrong.
+
 ### Verification algorithm
 
 External verification before deploy should do this:
