@@ -599,6 +599,112 @@ This manifest is used by:
 - deployment inspection;
 - crash reports/diagnostics.
 
+
+---
+
+## How Signatures Actually Work
+
+There should not be one magical signature that tries to mean everything. Use several small attestations that bind together into one verifiable chain.
+
+### Artifact signature
+
+The release binary is hashed and signed:
+
+```text
+sha256(ntnt-linux-x86_64) -> artifact_digest
+sign(artifact_digest, ntnt-release-key)
+```
+
+This answers: **is this exact binary an artifact signed by an allowed release authority?**
+
+It does not answer what source produced it. That is provenance's job.
+
+### Module-universe signature
+
+The embedded module-universe manifest is canonicalized, hashed, and signed:
+
+```text
+sha256(canonical_json(module-universe.json)) -> module_universe_digest
+sign(module_universe_digest, distribution-authority-key)
+```
+
+This answers: **which modules, versions, tiers, publishers, and capabilities does this distribution claim to include, and did an allowed authority sign that claim?**
+
+The binary's artifact signature should also bind to the module-universe digest, either directly in release metadata or via provenance, so an attacker cannot pair a legitimate binary with a different manifest.
+
+### Build provenance signature
+
+The builder signs an in-toto/SLSA-style statement:
+
+```text
+subject: artifact_digest
+materials:
+  - ntnt source repo + commit
+  - extension source repos + commits
+  - Cargo.lock digest
+  - distribution manifest digest
+  - module-universe digest
+builder:
+  - CI workflow identity
+  - build image/toolchain digest
+```
+
+This answers: **was this binary produced by the expected build system from the expected inputs?**
+
+### Extension authority signature
+
+Each extension identity has a namespace authority:
+
+```text
+std/netmon -> ntnt official module authority
+org/larri/netops -> Larri organization authority
+x/acme/units -> Acme publisher authority
+```
+
+For official/certified/organization extensions, the module spec or extension manifest is signed by the relevant authority and included as build material. This prevents a random crate from claiming to be `std/netmon` or an org module.
+
+### Transparency log entry
+
+Official and certified artifacts should be entered into an append-only transparency log. The verifier checks inclusion when policy requires it.
+
+This answers: **is this release visible and auditable, or did someone create a secret one-off signed thing?**
+
+### Trust root
+
+Verification starts from a small local trust root:
+
+```toml
+[authorities.ntnt-release]
+keys = ["..."]
+allowed_channels = ["community", "official-full"]
+
+[authorities.ntnt-std]
+keys = ["..."]
+namespaces = ["std/*"]
+
+[authorities.larri]
+keys = ["..."]
+namespaces = ["org/larri/*"]
+```
+
+TUF-style delegation lets keys rotate and lets different authorities sign different namespaces. One key should not rule the entire kingdom. That way lies screaming.
+
+### Verification algorithm
+
+External verification before deploy should do this:
+
+1. Hash the candidate binary.
+2. Verify the artifact signature against the allowed release authority.
+3. Extract/read the module-universe manifest and verify its canonical digest.
+4. Verify the provenance signature and confirm the artifact digest is the signed subject.
+5. Confirm provenance materials match the embedded manifest, distribution manifest, Cargo.lock digest, source commits, and extension manifests.
+6. Verify namespace authority signatures for every non-core extension.
+7. Check transparency-log inclusion if required.
+8. Check the app policy: required modules, versions, trust tiers, denied capabilities, unsigned-extension policy.
+9. Only then run the binary.
+
+Runtime self-checks can repeat pieces of this for diagnostics, but deployment security should use an external verifier so a malicious swapped binary cannot simply lie about itself.
+
 ---
 
 ## Verification and Supply-Chain Security
@@ -673,6 +779,27 @@ Builds for official/certified extensions require:
 #### Layer 7: Reproducible build checks
 
 Where practical, official releases should support reproducible or independently corroborated builds. SLSA describes “verified reproducible” as independent build systems corroborating provenance. ntnt can aim for this for release binaries even if early versions are not perfectly bit-for-bit reproducible.
+
+
+### How this stops real supply-chain attacks
+
+This design reduces attack surface by refusing the most dangerous premise: app deploys do not dynamically fetch and execute extension code.
+
+| Attack | Defense |
+|---|---|
+| Typosquatting, e.g. `std/netm0n` | Reserved namespaces and module authority signatures. Unknown modules fail; community namespaces are scoped. |
+| Dependency confusion | Extension sources are explicit build materials; official builds use pinned lockfiles, vetted dependencies, and approved registries. |
+| Malicious transitive update | Release builds use `Cargo.lock`, SBOMs, `cargo vet`, `cargo deny`, provenance, and review gates before dependency changes enter official/certified builds. |
+| Maintainer takeover of a community extension | App policy can reject community tiers; official/certified promotion requires separate authority signatures and review. |
+| App update silently adding a new package | There is no app-time package install. New native capability requires a different signed binary/module universe. |
+| Binary swap on server | External verifier checks binary digest, artifact signature, provenance subject, module universe, and transparency-log entry before deployment. |
+| Extension pretending to be stdlib | `std/*` is signed only by ntnt std/module authority. Other publishers cannot claim it. |
+| AI agent importing plausible malicious package | `ntnt check` fails unless the module exists in the compiled universe and satisfies app policy. |
+| Secret one-off release | Transparency-log policy can reject artifacts that are signed but not publicly/organizationally logged. |
+
+This does **not** make supply-chain attacks impossible. It makes them explicit, reviewable, and much harder to smuggle in through normal app edits.
+
+The remaining hard cases are governance failures: compromised signing keys, compromised official CI, or reviewed-but-malicious code. Those require key rotation, delegated trust, CI hardening, human review, reproducible/corroborated builds, and incident response. No language design gets to skip those. Anyone claiming otherwise is selling laminated hope.
 
 ---
 
@@ -834,6 +961,97 @@ ntnt dist verify target/release/ntnt
 ```
 
 This could start as scripts/CI templates before becoming a first-class CLI command.
+
+---
+
+## Core Developer Experience: Keep It Boring
+
+The security machinery must not make everyday ntnt development brittle. The default core-dev workflow stays:
+
+```bash
+cargo fmt
+cargo build --profile dev-release
+cargo test
+./target/dev-release/ntnt docs --generate
+```
+
+No signing keys. No network transparency lookups. No provenance upload. No ceremony. Core dev should not become a haunted compliance carnival.
+
+### Development mode
+
+Local/dev builds embed a local manifest like:
+
+```json
+{
+  "channel": "local-dev",
+  "signed": false,
+  "trust": "local-dev",
+  "modules": [...]
+}
+```
+
+Rules:
+
+- dev builds are allowed for local tests;
+- `ntnt modules` works;
+- typechecker/runtime/docs still use the registry;
+- `ntnt verify` reports unsigned/local-dev clearly;
+- production app policies reject local-dev unless explicitly allowed.
+
+### Release mode
+
+Only release/distribution pipelines perform strict signing and provenance:
+
+```bash
+ntnt dist build ntnt-dist.toml
+ntnt dist sign target/release/ntnt
+ntnt verify --binary target/release/ntnt --require official
+```
+
+This keeps the expensive/security-sensitive work in CI/CD and release automation, not in every contributor's editor loop.
+
+### No magical source discovery
+
+Extension inclusion must be explicit in a distribution manifest or distribution crate. Do not auto-detect local source files and silently alter the binary. That would be convenient for about six minutes and then become a ghost story.
+
+### Incremental implementation rule
+
+Do not implement DD-062 as one giant security monolith. The safe order is:
+
+1. module registry with no behavior change;
+2. `ntnt modules` listing;
+3. app requirement checks using unsigned local manifests;
+4. extension hook with test-only extension;
+5. embedded manifest;
+6. signing/verification in release pipeline;
+7. transparency/provenance hardening.
+
+Each step should leave normal core dev green.
+
+### Anti-brittleness requirements
+
+- Existing default binary must build without extension crates.
+- Existing tests must not require signing keys.
+- Missing signing tools must not break `cargo build --profile dev-release`.
+- Manifest generation must be deterministic: sorted modules, stable JSON schema, stable capability names.
+- Verification tests should use fixture keys and fixture artifacts, not real release keys.
+- Release signing should live behind explicit commands/CI jobs, not implicit build scripts that fail mysteriously.
+- If the trust metadata is unavailable, dev commands warn; release verification fails closed.
+- The registry must be the single source of truth so runtime/typechecker/docs cannot drift.
+
+### Practical policy defaults
+
+| Context | Unsigned local builds | Extension modules | Network verification | Failure behavior |
+|---|---:|---:|---:|---|
+| `cargo build --profile dev-release` | allowed | explicit local/dev only | no | never fail due to signing |
+| `cargo test` | allowed | test fixtures allowed | no | never fail due to signing |
+| `ntnt run` local app | allowed unless app forbids | allowed if compiled | no | app policy can fail |
+| `ntnt check` | allowed unless app forbids | checked against manifest | no | fail on policy mismatch |
+| `ntnt verify` | reported/rejected depending flags | checked | optional/yes | fail on verification mismatch |
+| release CI | rejected | signed/approved only | yes | fail closed |
+| production deploy | rejected by default | signed/approved only | yes | fail closed |
+
+This preserves a fast contributor loop while making production verification strict.
 
 ---
 
@@ -1036,6 +1254,8 @@ A successful first implementation should make all of these true:
 8. Official builds can be externally verified against a signed digest/provenance trail.
 9. Unsigned/local-dev extensions are impossible to hide from diagnostics.
 10. Community/org extensions cannot silently impersonate official `std/*` modules.
+11. Normal core development still uses `cargo build --profile dev-release`, `cargo test`, and docs generation without signing keys, network verification, or release tooling.
+12. Release-only verification failures cannot make ordinary local development brittle; dev commands warn/report local-dev trust, while release/deploy verification fails closed.
 
 ---
 
