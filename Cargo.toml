@@ -53,6 +53,12 @@ urlencoding = "2.1"
 # HTTP Client
 reqwest = { version = "0.11", features = ["blocking", "json", "multipart", "cookies"] }
 
+# TLS certificate inspection
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-pki-types = "1"
+webpki-root-certs = "1"
+x509-parser = "0.18"
+
 # HTTP Server (Axum + Tokio for high-concurrency in production)
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -102,6 +108,7 @@ pretty_assertions = "1.4"
 serde_json = "1.0"
 reqwest = { version = "0.11", features = ["blocking"] }
 libc = "0.2"
+rcgen = "0.13"
 
 [[bin]]
 name = "ntnt"

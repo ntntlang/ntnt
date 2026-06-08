@@ -9707,6 +9707,7 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 | [`subnet_summarize`](#subnetsummarize) | Summarizes adjacent or overlapping CIDRs into the shortest equivalent route list. |
 | [`subnet_supernet`](#subnetsupernet) | Returns the parent/supernet of a CIDR. Defaults to one bit shorter. |
 | [`tcp_connect`](#tcpconnect) | Performs a bounded TCP connect probe to one explicit port. Closed, refused, or timed-out ports return Ok(map { "connected": false, ... }); invalid input, policy denial, and resolver/system failures return Err(String). |
+| [`tls_info`](#tlsinfo) | Opens a bounded TLS connection and returns certificate metadata. Validation failures still return Ok(map { "valid": false, ... }) when a certificate is available. |
 
 #### `dns_lookup`
 
@@ -9938,6 +9939,31 @@ Performs a bounded TCP connect probe to one explicit port. Closed, refused, or t
 
 ```ntnt
 tcp_connect("example.com", 443)  // Check whether TCP 443 accepts connections
+```
+
+*Since v0.4.10*
+
+---
+
+#### `tls_info`
+
+```ntnt
+tls_info(host: String, opts?: Map) -> Result<Map, String>
+```
+
+Opens a bounded TLS connection and returns certificate metadata. Validation failures still return Ok(map { "valid": false, ... }) when a certificate is available.
+
+**Parameters:**
+
+- `host` — Hostname or IP address to connect to
+- `opts` — Optional map with port, timeout_ms, server_name, and allow_private
+
+**Returns:** Result containing certificate subject, issuer, validity window, SANs, serial, protocol, and validation status
+
+**Examples:**
+
+```ntnt
+tls_info("example.com")  // Inspect the HTTPS certificate for example.com
 ```
 
 *Since v0.4.10*

@@ -1,10 +1,14 @@
 //! Integration tests for std/net Phase 1 public behavior.
 
+use rcgen::generate_simple_self_signed;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::{ServerConfig, ServerConnection};
 use std::fs;
 use std::io::Write;
 use std::net::TcpListener;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -64,6 +68,54 @@ fn run_ntnt_code_with_env(code: &str, envs: &[(&str, &str)]) -> (String, String,
         String::from_utf8_lossy(&output.stderr).to_string(),
         output.status.code().unwrap_or(-1),
     )
+}
+
+fn start_local_tls_server(expected_connections: usize) -> (u16, std::thread::JoinHandle<usize>) {
+    let certified = generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("generate local TLS certificate");
+    let cert = CertificateDer::from(certified.cert.der().to_vec());
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
+    let config = Arc::new(
+        ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .expect("build local TLS server config"),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local TLS listener");
+    listener
+        .set_nonblocking(true)
+        .expect("make local TLS listener nonblocking");
+    let port = listener.local_addr().unwrap().port();
+
+    let handle = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut accepted = 0;
+        while accepted < expected_connections && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    accepted += 1;
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                    let Ok(mut conn) = ServerConnection::new(config.clone()) else {
+                        continue;
+                    };
+                    while conn.is_handshaking() && Instant::now() < deadline {
+                        match conn.complete_io(&mut stream) {
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        accepted
+    });
+
+    (port, handle)
 }
 
 #[test]
@@ -724,6 +776,73 @@ fn port_scan_private_target_requires_process_level_opt_in() {
 import { port_scan } from "std/net"
 
 match port_scan("127.0.0.1", [9], map { "allow_private": true, "timeout_ms": 100 }) {
+    Ok(info) => print("unexpected"),
+    Err(e) => print(e)
+}
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("private targets require NTNT_NET_ALLOW_PRIVATE=1"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn tls_info_returns_certificate_metadata_when_validation_fails() {
+    let (port, handle) = start_local_tls_server(1);
+    let code = format!(
+        r#"
+import {{ join }} from "std/string"
+import {{ tls_info }} from "std/net"
+
+match tls_info("127.0.0.1", map {{ "port": {port}, "server_name": "localhost", "allow_private": true, "timeout_ms": 2000 }}) {{
+    Ok(info) => {{
+        print(info["subject"])
+        print(info["issuer"])
+        print(info["subject_common_name"])
+        print(info["not_before"])
+        print(info["not_after"])
+        print(join(info["san"], ","))
+        print(info["valid"])
+        print(info["validation_error"])
+        print(info["protocol"])
+        print(info["cipher"])
+    }},
+    Err(e) => print("ERR:" + e)
+}}
+"#
+    );
+
+    let (stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(&code, &[("NTNT_NET_ALLOW_PRIVATE", "1")]);
+    let accepted = handle.join().expect("TLS helper should not panic");
+
+    assert_eq!(exit_code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert_eq!(
+        accepted, 1,
+        "TLS helper did not accept the metadata connection; stdout: {stdout}"
+    );
+    assert!(!stdout.contains("ERR:"), "stdout: {stdout}");
+    assert!(stdout.contains("localhost"), "stdout: {stdout}");
+    assert!(stdout.contains("T"), "stdout: {stdout}");
+    assert!(stdout.contains("Z"), "stdout: {stdout}");
+    assert!(stdout.contains("false"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("certificate validation failed"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("TLS"), "stdout: {stdout}");
+}
+
+#[test]
+fn tls_info_private_target_requires_process_level_opt_in() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { tls_info } from "std/net"
+
+match tls_info("127.0.0.1", map { "allow_private": true, "timeout_ms": 100 }) {
     Ok(info) => print("unexpected"),
     Err(e) => print(e)
 }

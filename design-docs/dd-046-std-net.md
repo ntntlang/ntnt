@@ -91,7 +91,7 @@ As of the v0.4.9 baseline:
 
 4. **Synchronous first, honest about it.** Current stdlib native functions are synchronous. Do not claim async/non-blocking behavior unless the implementation actually has an async execution model. Long-running checks belong in `std/jobs` or `std/concurrent`, not inline in latency-sensitive route handlers.
 
-5. **No shellouts.** The implementation should not invoke `ping`, `dig`, `nmap`, `openssl`, `whois`, or `ssh`. If a capability requires a large/privileged dependency, defer it rather than pretending it is simple.
+5. **No shellouts.** The implementation should not invoke external command-line network tools. If a capability requires a large/privileged dependency, defer it rather than pretending it is simple.
 
 6. **No permission hell, no silent protocol switch.** Default APIs should not require root, `CAP_NET_RAW`, Docker `cap_add`, or sysctl tuning. If ICMP is unavailable in the current runtime, `ping()` should return a clear `Err(String)` rather than quietly trying TCP ports. TCP reachability is available as an explicit developer choice through `tcp_connect()`, or through `reachable()` when the app intentionally wants high-level reachability semantics with default TCP 80/443 plus optional extra `tcp_ports`.
 
@@ -740,10 +740,9 @@ Ok(map {
 })
 ```
 
-Implementation decision required before coding:
+Implementation decision:
 
-- Either use `native-tls` / platform cert store and an X.509 parser, or explicitly add `rustls`, roots, and `x509-parser`.
-- Do not claim `rustls` is already available via `reqwest`; current dependency state does not justify that.
+- Use `rustls`, roots, and `x509-parser`.
 
 Tests:
 
@@ -850,8 +849,6 @@ Acceptance:
 
 ### PR 3 — Bounded port scan
 
-Status: **implemented on `feat/std-net-port-scan`; pending PR review.**
-
 Scope:
 
 - [x] `port_scan` over explicit port arrays
@@ -868,16 +865,16 @@ Acceptance:
 
 Scope:
 
-- [ ] dependency choice
-- [ ] `tls_info`
-- [ ] local TLS test server
-- [ ] generated docs and examples
+- [x] Rustls-based TLS connection and certificate validation
+- [x] `tls_info`
+- [x] local TLS test server
+- [x] generated docs and examples
 
 Acceptance:
 
-- [ ] returns certificate details for valid and validation-failing certs
-- [ ] no dependency claim mismatch
-- [ ] no public internet dependency by default
+- [x] returns certificate details for valid and validation-failing certs
+- [x] no dependency claim mismatch
+- [x] no public internet dependency by default
 
 ---
 
@@ -954,9 +951,9 @@ For network-specific PRs:
 
    Recommendation: no. Start with explicit arrays; add ranges only after runtime/typechecker handling is confirmed.
 
-5. Should TLS inspection use `native-tls` or `rustls`?
+5. Should TLS inspection use Rustls?
 
-   Recommendation: decide in the TLS PR based on cert-chain extraction quality and dependency weight. Do not block IP/TCP/DNS on this.
+   Decision: yes. `tls_info` uses Rustls for the TLS connection and validation probe, while keeping metadata extraction available for diagnostic failures.
 
 6. Should `ping()` mean strict ICMP or pragmatic reachability?
 
