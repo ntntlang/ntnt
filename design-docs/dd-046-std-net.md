@@ -1,9 +1,9 @@
 # DD-046: `std/net` — Safe Network Primitives for ntnt
 
-**Status:** PR 1 merged; PR 2 DNS lookup types in progress; scan/TLS slices planned
+**Status:** Complete — shipped across PRs [#113](https://github.com/ntntlang/ntnt/pull/113), [#114](https://github.com/ntntlang/ntnt/pull/114), [#115](https://github.com/ntntlang/ntnt/pull/115), and [#117](https://github.com/ntntlang/ntnt/pull/117)
 **Author:** Larri
 **Created:** 2026-03-22
-**Updated:** 2026-06-03
+**Updated:** 2026-06-07
 **Target baseline:** v0.4.10 (`std/net` track)
 
 ---
@@ -68,16 +68,17 @@ The important product idea: `std/net` should make ntnt good at **bounded, audita
 
 ---
 
-## Current State
+## Implemented State
 
-As of the v0.4.9 baseline:
+As of the merged PR #117 baseline:
 
-- There is no `src/stdlib/net.rs`.
-- `src/stdlib/mod.rs` has no `std/net` registry entry.
-- `src/typechecker.rs` has no `std/net` module signatures.
-- `docs/STDLIB_REFERENCE.md` and `docs/AI_AGENT_GUIDE.md` do not document `std/net`.
-- `std/http::fetch()` already has SSRF/private-IP policy logic. `std/net` must not silently bypass that posture.
-- `Cargo.toml` uses `reqwest` with its current native TLS dependency path. `rustls` / `webpki` should not be assumed available unless explicitly added.
+- `src/stdlib/net.rs` exists and registers safe `std/net` primitives.
+- `src/stdlib/mod.rs` exposes the `std/net` module.
+- `src/typechecker.rs` includes `std/net` signatures.
+- `docs/STDLIB_REFERENCE.md` is generated from the `// @ntnt` docs, and `docs/AI_AGENT_GUIDE.md` includes practical `std/net` examples.
+- `examples/std_net_ipam.tnt`, `examples/std_net_ping.tnt`, `examples/std_net_dns.tnt`, `examples/std_net_scan.tnt`, and `examples/std_net_tls.tnt` cover the shipped slices.
+- `std/net` uses a dedicated outbound safety posture: public targets are easy, private/internal targets require process-level `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true`.
+- TLS inspection deliberately added `rustls`, `rustls-pki-types`, `webpki-roots`, and `x509-parser`; it does not depend on `reqwest`'s TLS stack.
 
 ---
 
@@ -122,11 +123,11 @@ This is conservative. The use case for `std/net` includes internal monitoring, b
 
 Internal/private network checks should require explicit configuration, but the happy path for monitoring apps must be a single process-level setting, not a scavenger hunt through OS capabilities and per-call flags.
 
-Preferred approach:
+Implemented approach:
 
-- Reuse `NTNT_ALLOW_PRIVATE_IPS` if we decide it should govern all outbound network access.
-- Or introduce `NTNT_NET_ALLOW_PRIVATE=1` if `std/net` needs a separate monitoring-specific opt-in.
-- Document the blessed monitoring setup as:
+- `std/net` uses `NTNT_NET_ALLOW_PRIVATE=1` as the process-level monitoring opt-in.
+- Apps still pass `allow_private: true` per call, so user-controlled option maps cannot disable policy by themselves.
+- The blessed monitoring setup is:
 
   ```bash
   NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
@@ -134,9 +135,7 @@ Preferred approach:
 
 - For Docker examples, set the env var only. Do **not** require `cap_add: [NET_RAW]` for the default `ping()` path.
 
-The implementation plan should decide this in PR 0, not scatter policy choices per function.
-
-Recommended decision: introduce `NTNT_NET_ALLOW_PRIVATE=1` for `std/net`, while allowing a future shared outbound policy helper to read both names. `std/http` and `std/net` have related SSRF risks, but `std/net` is much more likely to be intentionally used for internal monitoring. A dedicated env var makes that intent auditable.
+The dedicated env var keeps monitoring intent auditable. `std/http` and `std/net` have related SSRF risks, but `std/net` is much more likely to be intentionally used for internal monitoring, so this DD keeps the knobs separate unless a future shared outbound-policy helper is designed explicitly.
 
 ### Per-call options
 
@@ -647,7 +646,7 @@ Implementation notes:
 - Do not rely on public DNS in CI.
 - Build a resolver abstraction or local/mock DNS test fixture before adding many record types.
 - `dns_lookup` uses the system resolver and does not expose custom nameserver configuration in this slice.
-- DNS answers are returned as DNS data; target probing/safety policy still applies to connect-style functions (`tcp_connect`, `reachable`, future `port_scan`) rather than filtering A/AAAA answers from lookup results.
+- DNS answers are returned as DNS data; target probing/safety policy applies to connect-style functions (`tcp_connect`, `reachable`, `port_scan`, `tls_info`) rather than filtering A/AAAA answers from lookup results.
 - Record maps report the actual returned DNS record type. If a resolver includes related records in a response, those records are not relabeled as the requested type.
 - Custom nameserver support is deferred until safety implications are explicit. A `server` option can bypass enterprise DNS policy and should not be a casual Phase 1 feature.
 
@@ -784,18 +783,19 @@ SNMP is a real network-monitoring need, but it is its own protocol family. It sh
 
 ---
 
-## Implementation Plan
+## Implementation Record
 
 ### Status Dashboard
 
-As of 2026-06-05:
+As of 2026-06-07:
 
 - [x] **PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability**: merged in [PR #113](https://github.com/ntntlang/ntnt/pull/113).
-- [x] **PR 2 — DNS lookup types**: merged in [PR #114](https://github.com/ntntlang/ntnt/pull/114); adds `dns_lookup` and `dns_reverse` with broad supported record types, deterministic tests, and opt-in external DNS smoke coverage.
-- [ ] **PR 3 — Bounded port scan**: in progress on branch `feat/std-net-port-scan`; adds `port_scan` over explicit port arrays with bounded concurrency and shared target policy.
-- [ ] **PR 4 — TLS info**: planned after port scan/dependency decision.
+- [x] **PR 2 — DNS lookup types**: merged in [PR #114](https://github.com/ntntlang/ntnt/pull/114).
+- [x] **PR 3 — Bounded port scan**: merged in [PR #115](https://github.com/ntntlang/ntnt/pull/115).
+- [x] **PR 4 — TLS certificate inspection**: merged in [PR #117](https://github.com/ntntlang/ntnt/pull/117).
+- [x] **Superseded PR**: [PR #116](https://github.com/ntntlang/ntnt/pull/116) was closed in favor of the cleaner PR #117 branch.
 
-PR 1 shipped the core module registration, runtime functions, typechecker signatures, generated docs, deterministic examples, and tests for Phase 1. Review hardening added policy fixes for private, link-local, multicast, documentation, mapped-address, and broadcast-style targets.
+The DD-046 initial scope is complete. The merged implementation includes runtime registration, typechecker signatures, generated stdlib docs, AI guide coverage, deterministic examples, CI-safe tests, public-network smoke tests gated behind environment variables, and review hardening for target policy, bounded scans, and TLS validation behavior.
 
 ### PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability
 
@@ -811,7 +811,7 @@ Scope:
 - [x] `ping(host, opts?)` with strict no-implicit-TCP-fallback semantics
 - [x] `tcp_connect(host, port, opts?)` for explicit TCP port probes
 - [x] `reachable(host, opts?)` for explicit high-level ICMP-then-TCP fallback semantics using caller-provided `tcp_ports`
-- [x] shared target safety checks used by `tcp_connect`, `reachable`, and future network functions
+- [x] shared target safety checks used by `tcp_connect`, `reachable`, `port_scan`, and `tls_info`
 - [x] generated docs for all Phase 1 functions
 - [x] AI guide coverage for `ping`, `tcp_connect`, `reachable`, and private-target opt-in
 - [x] IPAM examples for IPv4 subnet splitting and IPv6 parsing/summarization
@@ -849,6 +849,8 @@ Acceptance:
 
 ### PR 3 — Bounded port scan
 
+Status: **merged in PR #115.**
+
 Scope:
 
 - [x] `port_scan` over explicit port arrays
@@ -863,18 +865,28 @@ Acceptance:
 
 ### PR 4 — TLS info
 
+Status: **merged in PR #117.**
+
 Scope:
 
 - [x] Rustls-based TLS connection and certificate validation
 - [x] `tls_info`
-- [x] local TLS test server
+- [x] local TLS test server with deterministic self-signed certificate
 - [x] generated docs and examples
+- [x] SNI via `server_name` option with host default
+- [x] certificate metadata is returned even when validation fails
+- [x] validation uses the observed handshake certificate chain rather than a second probe
+- [x] `timeout_ms` is enforced as an overall connection/handshake budget across resolved addresses
+- [x] private-target policy requires both process-level and per-call opt-in
 
 Acceptance:
 
 - [x] returns certificate details for valid and validation-failing certs
+- [x] reports subject/common name, issuer/common name, not-before/not-after, days left, serial, SANs, protocol, cipher, remote/local address, and chain length
 - [x] no dependency claim mismatch
 - [x] no public internet dependency by default
+- [x] local CI fixture accepts exactly the intended metadata connection
+- [x] TLS example validates/lints/runs with public-network behavior gated behind `NTNT_NET_TLS_EXAMPLES=1`
 
 ---
 
@@ -933,49 +945,34 @@ For network-specific PRs:
 
 ---
 
-## Open Decisions Before Coding
+## Decisions Made
 
-1. Should private/internal targets be governed by existing `NTNT_ALLOW_PRIVATE_IPS`, or should `std/net` introduce `NTNT_NET_ALLOW_PRIVATE`?
+1. Private/internal targets are governed by `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true`. The std/net knob is intentionally separate and auditable for monitoring-style deployments.
 
-   Recommendation: introduce `NTNT_NET_ALLOW_PRIVATE=1` for `std/net`, while implementing the check through a shared outbound-policy helper that can also honor `NTNT_ALLOW_PRIVATE_IPS` if we later want one global knob. Dedicated monitoring intent beats making `std/http` and `std/net` quietly share a footgun drawer.
+2. `tcp_connect` returns `Ok(map { "connected": false, ... })` for ordinary refused/timeout outcomes. Invalid input and policy denial remain `Err`.
 
-2. Should `tcp_connect` return `Ok({ connected: false })` for all ordinary connect failures?
+3. `dns_reverse` returns `Result<Array<String>, String>` so multiple PTR answers are preserved and no-answer is `Ok([])`.
 
-   Recommendation: yes. It is a diagnostic probe. Invalid input and policy denial remain `Err`.
+4. `port_scan` accepts explicit integer arrays in stdlib. Range parsing remains an app-layer/UI concern unless a future language-level range contract is designed.
 
-3. Should `dns_reverse` return one string or all PTR hostnames?
+5. `tls_info` uses Rustls for the TLS connection and validation, x509-parser for metadata extraction, and webpki-roots for root trust.
 
-   Recommendation: return `Result<Array<String>, String>`.
+6. `ping()` is strict/protocol-honest ICMP by default. It does not fall back to TCP automatically. Developers use `tcp_connect(host, port, opts?)` for explicit TCP checks or `reachable(host, map { "tcp_ports": [...] })` for high-level reachability with explicit TCP fallback.
 
-4. Should `port_scan` accept range values in the first PR?
-
-   Recommendation: no. Start with explicit arrays; add ranges only after runtime/typechecker handling is confirmed.
-
-5. Should TLS inspection use Rustls?
-
-   Decision: yes. `tls_info` uses Rustls for the TLS connection and validation probe, while keeping metadata extraction available for diagnostic failures.
-
-6. Should `ping()` mean strict ICMP or pragmatic reachability?
-
-   Decision: strict/protocol-honest by default. `method: "auto"` should use ICMP when available and return a clear `Err` when unavailable. It must not fall back to TCP automatically. Developers should use `tcp_connect(host, port, opts?)` for explicit TCP port checks, or `reachable(host, map { "tcp_ports": [...] })` when they want a high-level reachability helper with explicit TCP fallback.
-
-7. Should internal targets be easy to enable for monitoring?
-
-   Recommendation: yes, but at process scope. Use `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true`. That makes a monitoring app easy to launch while preventing a random request body from flipping the SSRF guard off.
+7. Internal targets are easy to enable for monitoring, but only as an explicit deployment choice: `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true`.
 
 ---
 
 ## Bottom Line
 
-The refined `std/net` path is smaller and much safer:
+The refined `std/net` path shipped as four reviewable PRs:
 
-1. deterministic IP helpers plus first-shot `ping()`
-2. dedicated TCP probe with explicit safety policy
-3. DNS with mockable tests
-4. bounded port scan
-5. TLS inspection after dependency choice
+1. deterministic IP helpers plus protocol-honest `ping()`
+2. dedicated TCP and high-level reachability probes with explicit safety policy
+3. DNS lookup/reverse lookup with CI-safe tests
+4. bounded port scan and TLS certificate inspection
 
-That gets ntnt real network-monitoring capability without making the first user trip over `CAP_NET_RAW`, and without smuggling in traceroute, SSH, SNMP, scanners, public-network CI flakes, and SSRF footguns in one heroic PR. Heroic PRs are where bugs go to get tenure.
+That gives ntnt real network-diagnostic capability without making users trip over `CAP_NET_RAW`, and without smuggling in traceroute, SSH, SNMP, broad scanners, public-network CI flakes, or SSRF footguns in one heroic PR. Heroic PRs are where bugs go to get tenure.
 
 ---
 
