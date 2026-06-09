@@ -3,7 +3,7 @@
 **Status:** Complete — shipped across PRs [#113](https://github.com/ntntlang/ntnt/pull/113), [#114](https://github.com/ntntlang/ntnt/pull/114), [#115](https://github.com/ntntlang/ntnt/pull/115), and [#117](https://github.com/ntntlang/ntnt/pull/117)
 **Author:** Larri
 **Created:** 2026-03-22
-**Updated:** 2026-06-07
+**Updated:** 2026-06-08
 **Target baseline:** v0.4.10 (`std/net` track)
 
 ---
@@ -12,7 +12,7 @@
 
 Add a focused `std/net` module for safe, bounded network primitives: IP/CIDR utilities, first-shot host reachability checks, TCP connectivity probes, DNS lookup, limited port scanning, and TLS certificate inspection.
 
-This is **not** a grab-bag for every network-adjacent operation. The first version should make common monitoring and diagnostics possible without shelling out, while preserving ntnt's safety posture for apps that run on the public web.
+This is **not** a grab-bag for every network-adjacent operation. The first version made common monitoring and diagnostics possible while preserving ntnt's safety posture for apps that run on the public web. The next version should replace the tactical Linux `ping` bridge with a Rust-native probe backend that can support ICMP ping, traceroute, and richer TCP/UDP probes without depending on external binaries.
 
 Initial scope:
 
@@ -32,7 +32,7 @@ Initial scope:
 
 Explicitly deferred:
 
-- `traceroute` and other raw packet path-discovery tools
+- raw-packet traceroute and path-discovery tools until the Rust-native probe backend follow-up lands
 - SSH remote command execution
 - SNMP polling/walking
 - WHOIS
@@ -753,11 +753,129 @@ Tests:
 
 ---
 
+## Follow-up Track — Rust-Native Probe Backend
+
+The shipped `std/net` surface is useful, but the implementation should not stay a pile of per-function probes forever. If NetBacon/ntnt is going to become a real network monitoring substrate, the next `std/net` work should refactor around a shared Rust-native probe backend.
+
+Strategic dependency direction:
+
+- Use `socket2` as the low-level socket foundation. It is much more widely adopted than ping-specific crates and gives control over socket options, TTL/hop-limit, bind/source address, and raw/datagram sockets.
+- Use `pnet_packet` for packet encode/decode when constructing or parsing ICMP packets manually.
+- Treat `surge-ping` as useful reference material or a temporary spike, not the strategic foundation, because traceroute and richer probes will push below a ping-only abstraction.
+
+### Phase 6 — Probe Backend Foundation
+
+Goal: introduce shared internals without changing public APIs yet.
+
+Files:
+
+- Split or carve internals out of `src/stdlib/net.rs` only when the diff justifies it. Candidate modules:
+  - `src/stdlib/net/probe.rs` — shared options, target policy, timing, result structs, capability errors
+  - `src/stdlib/net/tcp.rs` — TCP connect primitive
+  - `src/stdlib/net/icmp.rs` — ICMP socket primitive
+  - `src/stdlib/net/traceroute.rs` — later path discovery
+- Keep `src/stdlib/net.rs` as the public ntnt binding/registration layer if possible.
+
+Work:
+
+- Define a shared internal `ProbeOptions` / `ProbeError` model that preserves current public result shapes.
+- Add capability detection/errors for ICMP/raw socket support: permission denied, unsupported platform, missing socket family, and policy-denied target should be distinct internally and mapped to clear `Err(String)` externally.
+- Keep the existing target safety policy: process-level `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true`.
+- Add deterministic unit tests for option parsing, error mapping, and target-policy behavior before touching packet I/O.
+
+Acceptance:
+
+- No public API behavior changes.
+- Existing `std/net` tests continue to pass.
+- The backend is small enough to review. If the split creates abstraction theater, stop. We already own enough haunted furniture.
+
+### Phase 7 — Replace `ping()` With Rust-Native ICMP
+
+Goal: delete and replace the current Linux system `ping` bridge with Rust ICMP packet I/O.
+
+Work:
+
+- Remove `Command::new("ping")` from `std/net`.
+- Implement ICMP echo request/reply using `socket2` plus `pnet_packet` or a deliberately chosen ICMP crate if the spike proves it is cleaner.
+- Preserve public `ping(host, opts?)` semantics:
+  - ICMP only
+  - no TCP fallback
+  - `method: "icmp"`
+  - `sent`, `received`, `loss_percent`, `min_ms`, `avg_ms`, `max_ms`, `attempts`
+  - clear `Err` when ICMP permissions/capabilities are unavailable
+- Support IPv4 first; add IPv6 in the same PR only if it stays small and testable.
+
+Acceptance:
+
+- No dependency on `/bin/ping` or `iputils-ping`.
+- Linux capability failures return actionable errors.
+- CI-safe tests use mocked/parsing/unit paths by default; raw-socket smoke tests are gated behind `NTNT_RUN_RAW_NET_TESTS=1`.
+- NetBacon Docker docs can drop `iputils-ping`, but still need `NET_RAW` or equivalent when ICMP is enabled.
+
+### Phase 8 — Rebase TCP Probes on the Shared Backend
+
+Goal: decide whether `tcp_connect()`, `reachable()`, and `port_scan()` should keep current `std::net` implementation details or move to the shared `socket2` substrate.
+
+Work:
+
+- Keep public APIs stable.
+- Refactor only if `socket2` buys real capability:
+  - source address binding
+  - local interface/source selection
+  - TTL/hop-limit control
+  - consistent timeout behavior across connect/scan/reachability
+  - reusable result/error mapping
+- Preserve ordinary probe outcomes as `Ok(map { "connected": false ... })`, not `Err`.
+- Keep port-scan bounds and concurrency limits unchanged.
+
+Acceptance:
+
+- Existing TCP/scan behavior does not regress.
+- Any new options are explicit and documented; no surprise broad scanning, no hidden fallback behavior.
+- If `std::net::TcpStream::connect_timeout` remains simpler for the basic case, keep it and only use `socket2` for advanced options. Boring code is allowed to win.
+
+### Phase 9 — Add `traceroute(host, opts?)`
+
+Goal: add path discovery only after the ICMP/backend foundation is real.
+
+Initial public shape:
+
+```ntnt
+import { traceroute } from "std/net"
+
+traceroute("8.8.8.8", map {
+  "max_hops": 30,
+  "probes": 3,
+  "timeout_ms": 2000,
+  "method": "icmp"
+})
+// Ok([
+//   map { "hop": 1, "ip": "192.168.1.1", "hostname": "router.local", "rtt_ms": 1.2, "responded": true },
+//   map { "hop": 2, "ip": None, "hostname": None, "rtt_ms": None, "responded": false },
+//   ...
+// ])
+```
+
+Work:
+
+- Start with ICMP traceroute using TTL/hop-limit increments and ICMP Time Exceeded replies.
+- Add reverse DNS per hop only as an option, default off or bounded, because traceroute should not become surprise DNS latency soup.
+- Consider UDP or TCP traceroute modes after ICMP mode is correct.
+- Return `*`-style non-responses as structured hop maps, not string output.
+
+Acceptance:
+
+- Requires capability detection and clear errors when raw/ICMP sockets are unavailable.
+- Tests do not require public internet or raw sockets by default.
+- Public docs clearly separate `ping`, `tcp_connect`, `reachable`, and `traceroute` semantics.
+
+---
+
 ## Deferred / Out of Scope for Initial `std/net`
 
-### `traceroute` and raw packet tooling
+### Raw packet tooling beyond traceroute
 
-Traceroute and other raw packet path-discovery tools require a separate capability story:
+Traceroute is now included in the Rust-native probe backend follow-up above. Other raw packet/path-discovery tools remain deferred until the backend proves itself:
 
 - runtime capability detection or `net_capabilities()` helper
 - clear Docker docs (`cap_add: [NET_RAW]`) for APIs that truly require raw sockets
@@ -765,7 +883,7 @@ Traceroute and other raw packet path-discovery tools require a separate capabili
 - graceful `Err` when unavailable
 - no default CI dependency on raw sockets
 
-`ping()` is **not** deferred. It belongs in Phase 1, but its default `auto` method must avoid lying: when ICMP is unavailable, return a clear `Err` rather than falling back to TCP reachability. TCP reachability remains explicit app/developer intent.
+`ping()` already exists, but the shipped implementation should be replaced by the Phase 7 Rust-native ICMP backend. It must stay protocol-honest: when ICMP is unavailable, return a clear `Err` rather than falling back to TCP reachability. TCP reachability remains explicit app/developer intent.
 
 ### WHOIS
 
@@ -794,6 +912,10 @@ As of 2026-06-07:
 - [x] **PR 3 — Bounded port scan**: merged in [PR #115](https://github.com/ntntlang/ntnt/pull/115).
 - [x] **PR 4 — TLS certificate inspection**: merged in [PR #117](https://github.com/ntntlang/ntnt/pull/117).
 - [x] **Superseded PR**: [PR #116](https://github.com/ntntlang/ntnt/pull/116) was closed in favor of the cleaner PR #117 branch.
+- [ ] **Follow-up PR 5 — Rust-native probe backend foundation**: split shared probe internals and capability/error handling without public API changes.
+- [ ] **Follow-up PR 6 — Replace `ping()` implementation**: delete the Linux system `ping` bridge and implement ICMP echo with `socket2` + `pnet_packet` or a proven Rust ICMP backend.
+- [ ] **Follow-up PR 7 — Rebase TCP probes if useful**: move `tcp_connect`, `reachable`, and `port_scan` onto shared socket/probe internals only where it buys source binding, TTL/hop-limit, or cleaner timeout/error behavior.
+- [ ] **Follow-up PR 8 — `traceroute`**: add structured ICMP traceroute after the shared backend and ICMP implementation are real.
 
 The DD-046 initial scope is complete. The merged implementation includes runtime registration, typechecker signatures, generated stdlib docs, AI guide coverage, deterministic examples, CI-safe tests, public-network smoke tests gated behind environment variables, and review hardening for target policy, bounded scans, and TLS validation behavior.
 
@@ -961,6 +1083,12 @@ For network-specific PRs:
 
 7. Internal targets are easy to enable for monitoring, but only as an explicit deployment choice: `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true`.
 
+8. The follow-up network-monitoring direction is a shared Rust-native probe backend, not more per-function subprocesses. Prefer `socket2` as the strategic low-level foundation and `pnet_packet` for packet construction/parsing; use `surge-ping` only if a spike proves it stays cleaner than owning the ICMP logic directly.
+
+9. The current `ping()` implementation should be deleted/replaced, not decorated. The replacement must remove the Linux `ping` binary dependency while preserving public `ping()` semantics.
+
+10. `tcp_connect()`, `reachable()`, and `port_scan()` should be refactored only where shared socket internals buy concrete capability or simpler correctness. Do not replace boring working TCP code with ceremonial abstraction.
+
 ---
 
 ## Bottom Line
@@ -972,7 +1100,7 @@ The refined `std/net` path shipped as four reviewable PRs:
 3. DNS lookup/reverse lookup with CI-safe tests
 4. bounded port scan and TLS certificate inspection
 
-That gives ntnt real network-diagnostic capability without making users trip over `CAP_NET_RAW`, and without smuggling in traceroute, SSH, SNMP, broad scanners, public-network CI flakes, or SSRF footguns in one heroic PR. Heroic PRs are where bugs go to get tenure.
+That gives ntnt real network-diagnostic capability without smuggling in SSH, SNMP, broad scanners, public-network CI flakes, or SSRF footguns in one heroic PR. The next DD-046 track is deliberately narrower: build the probe substrate, replace `ping()` properly, refactor TCP only where it earns its keep, then add traceroute. Heroic PRs are where bugs go to get tenure.
 
 ---
 

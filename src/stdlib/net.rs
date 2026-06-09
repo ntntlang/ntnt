@@ -1,5 +1,8 @@
 //! std/net module - IPAM-grade IP/CIDR helpers and reachability probes.
 
+mod probe;
+
+use self::probe::{ProbeError, ProbeOptions, ProbeProtocol};
 use crate::error::IntentError;
 use crate::interpreter::Value;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -763,7 +766,8 @@ fn ping_fn(args: &[Value]) -> Result<Value, IntentError> {
         let options = parse_probe_options(opts)?;
         let targets = resolve_ping_targets(host)?;
         enforce_resolved_target_policy(&targets, options.allow_private)?;
-        system_ping(host, options.timeout, options.count)
+        let command_target = validated_probe_ip(&targets)?;
+        system_ping(host, command_target, options.timeout, options.count)
     })()))
 }
 
@@ -1319,13 +1323,21 @@ struct IcmpPingResult {
 fn resolve_ping_targets(host: &str) -> Result<Vec<(u16, SocketAddr)>, String> {
     let resolved: Vec<SocketAddr> = (host, 0)
         .to_socket_addrs()
-        .map_err(|e| format!("failed to resolve {}: {}", host, e))?
+        .map_err(|e| {
+            ProbeError::resolve_failed(host, format!("failed to resolve {}: {}", host, e))
+                .to_string()
+        })?
         .collect();
     Ok(resolved.into_iter().map(|addr| (0, addr)).collect())
 }
 
 #[cfg(target_os = "linux")]
-fn system_ping(host: &str, timeout: Duration, count: usize) -> Result<Value, String> {
+fn system_ping(
+    display_host: &str,
+    command_target: IpAddr,
+    timeout: Duration,
+    count: usize,
+) -> Result<Value, String> {
     let timeout_secs = max(
         1,
         timeout
@@ -1339,26 +1351,42 @@ fn system_ping(host: &str, timeout: Duration, count: usize) -> Result<Value, Str
         .arg("-W")
         .arg(timeout_secs.to_string())
         .arg("--")
-        .arg(host)
+        .arg(command_target.to_string())
         .output()
-        .map_err(|e| format!("ICMP ping unavailable: failed to run ping: {}", e))?;
+        .map_err(|e| {
+            ProbeError::capability_unavailable(
+                ProbeProtocol::Icmp,
+                format!("ICMP ping unavailable: failed to run ping: {}", e),
+            )
+            .to_string()
+        })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() && !linux_ping_output_has_packet_summary(&stdout) {
-        return Err(format!(
+        let message = format!(
             "ICMP ping unavailable: system ping failed: {}",
             ping_failure_message(&stdout, &stderr, output.status.code())
-        ));
+        );
+        return Err(icmp_ping_process_error(message).to_string());
     }
 
-    let parsed = parse_linux_ping_output(host, &stdout, &stderr, count);
+    let parsed = parse_linux_ping_output(display_host, &stdout, &stderr, count);
     Ok(Value::Map(icmp_ping_result_map(parsed)))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn system_ping(_host: &str, _timeout: Duration, _count: usize) -> Result<Value, String> {
-    Err("ICMP ping unavailable on this platform".to_string())
+fn system_ping(
+    _display_host: &str,
+    _command_target: IpAddr,
+    _timeout: Duration,
+    _count: usize,
+) -> Result<Value, String> {
+    Err(ProbeError::unsupported_platform(
+        ProbeProtocol::Icmp,
+        "ICMP ping unavailable on this platform",
+    )
+    .to_string())
 }
 
 fn icmp_ping_for_host(
@@ -1367,13 +1395,28 @@ fn icmp_ping_for_host(
 ) -> Result<HashMap<String, Value>, String> {
     let targets = resolve_ping_targets(host)?;
     enforce_resolved_target_policy(&targets, options.allow_private)?;
-    match system_ping(host, options.timeout, options.count)? {
+    let command_target = validated_probe_ip(&targets)?;
+    match system_ping(host, command_target, options.timeout, options.count)? {
         Value::Map(map) => Ok(map),
-        other => Err(format!(
-            "ICMP ping unavailable: unexpected ping result {}",
-            other.type_name()
-        )),
+        other => Err(ProbeError::unexpected_result(
+            ProbeProtocol::Icmp,
+            format!(
+                "ICMP ping unavailable: unexpected ping result {}",
+                other.type_name()
+            ),
+        )
+        .to_string()),
     }
+}
+
+fn validated_probe_ip(targets: &[(u16, SocketAddr)]) -> Result<IpAddr, String> {
+    targets.first().map(|(_, addr)| addr.ip()).ok_or_else(|| {
+        ProbeError::resolve_failed(
+            "",
+            "failed to resolve target: resolver returned no usable addresses",
+        )
+        .to_string()
+    })
 }
 
 fn linux_ping_output_has_packet_summary(output: &str) -> bool {
@@ -1394,6 +1437,19 @@ fn ping_failure_message(stdout: &str, stderr: &str, status_code: Option<i32>) ->
             Some(code) => format!("exit status {}", code),
             None => "terminated by signal".to_string(),
         })
+}
+
+#[cfg(target_os = "linux")]
+fn icmp_ping_process_error(message: String) -> ProbeError {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("operation not permitted")
+        || lower.contains("permission denied")
+        || lower.contains("cap_net_raw")
+    {
+        ProbeError::permission_denied(ProbeProtocol::Icmp, message)
+    } else {
+        ProbeError::system_failure(ProbeProtocol::Icmp, message)
+    }
 }
 
 fn parse_linux_ping_output(
@@ -1517,7 +1573,10 @@ fn icmp_ping_result_map(result: IcmpPingResult) -> HashMap<String, Value> {
     let mut map = HashMap::new();
     map.insert("host".to_string(), Value::String(result.host));
     map.insert("reachable".to_string(), Value::Bool(result.received > 0));
-    map.insert("method".to_string(), Value::String("icmp".to_string()));
+    map.insert(
+        "method".to_string(),
+        Value::String(ProbeProtocol::Icmp.as_str().to_string()),
+    );
     map.insert("permission_limited".to_string(), Value::Bool(false));
     map.insert("sent".to_string(), Value::Int(result.sent as i64));
     map.insert("received".to_string(), Value::Int(result.received as i64));
@@ -1555,7 +1614,10 @@ fn icmp_ping_result_map(result: IcmpPingResult) -> HashMap<String, Value> {
 fn icmp_attempt_to_value(attempt: &IcmpPingAttempt) -> Value {
     let mut map = HashMap::new();
     map.insert("reachable".to_string(), Value::Bool(attempt.reachable));
-    map.insert("method".to_string(), Value::String("icmp".to_string()));
+    map.insert(
+        "method".to_string(),
+        Value::String(ProbeProtocol::Icmp.as_str().to_string()),
+    );
     if let Some(seq) = attempt.seq {
         map.insert("seq".to_string(), Value::Int(seq));
     }
@@ -1597,13 +1659,6 @@ fn parse_f64_after(text: &str, needle: &str) -> Option<f64> {
             .next()
             .and_then(|value| value.parse::<f64>().ok())
     })
-}
-
-struct ProbeOptions {
-    timeout: Duration,
-    count: usize,
-    interval: Duration,
-    allow_private: bool,
 }
 
 fn parse_probe_options(opts: Option<&HashMap<String, Value>>) -> Result<ProbeOptions, String> {
@@ -1812,9 +1867,16 @@ fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> Tc
 fn resolve_tcp_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, SocketAddr)>, String> {
     let mut targets = Vec::new();
     for port in ports {
+        let target = format!("{}:{}", host, port);
         let addrs: Vec<SocketAddr> = (host, *port)
             .to_socket_addrs()
-            .map_err(|e| format!("failed to resolve {}:{}: {}", host, port, e))?
+            .map_err(|e| {
+                ProbeError::resolve_failed(
+                    target.clone(),
+                    format!("failed to resolve {}:{}: {}", host, port, e),
+                )
+                .to_string()
+            })?
             .collect();
         targets.extend(addrs.into_iter().map(|addr| (*port, addr)));
     }
@@ -1828,7 +1890,10 @@ fn resolve_port_scan_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, Sock
 
     let resolved: Vec<SocketAddr> = (host, seed_port)
         .to_socket_addrs()
-        .map_err(|e| format!("failed to resolve {}: {}", host, e))?
+        .map_err(|e| {
+            ProbeError::resolve_failed(host, format!("failed to resolve {}: {}", host, e))
+                .to_string()
+        })?
         .collect();
 
     let mut ips = Vec::with_capacity(resolved.len());
@@ -1850,8 +1915,15 @@ fn enforce_resolved_target_policy(
     targets: &[(u16, SocketAddr)],
     allow_private: bool,
 ) -> Result<(), String> {
+    enforce_resolved_target_policy_error(targets, allow_private).map_err(|err| err.to_string())
+}
+
+fn enforce_resolved_target_policy_error(
+    targets: &[(u16, SocketAddr)],
+    allow_private: bool,
+) -> Result<(), ProbeError> {
     for (_, addr) in targets {
-        enforce_target_policy(addr.ip(), allow_private)?;
+        enforce_target_policy_error(addr.ip(), allow_private)?;
     }
     Ok(())
 }
@@ -1878,7 +1950,10 @@ fn tcp_reachability_result_map(
     let mut result = HashMap::new();
     result.insert("host".to_string(), Value::String(host.to_string()));
     result.insert("reachable".to_string(), Value::Bool(received > 0));
-    result.insert("method".to_string(), Value::String("tcp".to_string()));
+    result.insert(
+        "method".to_string(),
+        Value::String(ProbeProtocol::Tcp.as_str().to_string()),
+    );
     result.insert("permission_limited".to_string(), Value::Bool(false));
     result.insert("sent".to_string(), Value::Int(sent as i64));
     result.insert("received".to_string(), Value::Int(received as i64));
@@ -1967,7 +2042,7 @@ fn reachable_result_map(
     let mut tcp_result = tcp_reachability_result_map(host, ports, attempts);
     tcp_result.insert(
         "fallback_from".to_string(),
-        Value::String("icmp".to_string()),
+        Value::String(ProbeProtocol::Icmp.as_str().to_string()),
     );
 
     let tcp_ports = Value::Array(ports.iter().map(|p| Value::Int(*p as i64)).collect());
@@ -2018,7 +2093,10 @@ fn port_scan_result_to_value(result: PortScanResult) -> Value {
     let mut map = HashMap::new();
     map.insert("port".to_string(), Value::Int(result.port as i64));
     map.insert("open".to_string(), Value::Bool(result.open));
-    map.insert("method".to_string(), Value::String("tcp".to_string()));
+    map.insert(
+        "method".to_string(),
+        Value::String(ProbeProtocol::Tcp.as_str().to_string()),
+    );
     if let Some(latency_ms) = result.latency_ms {
         map.insert("latency_ms".to_string(), Value::Float(latency_ms));
     }
@@ -2035,7 +2113,10 @@ fn port_scan_result_to_value(result: PortScanResult) -> Value {
 fn tcp_attempt_to_value(attempt: &TcpProbeResult) -> Value {
     let mut map = HashMap::new();
     map.insert("reachable".to_string(), Value::Bool(attempt.reachable));
-    map.insert("method".to_string(), Value::String("tcp".to_string()));
+    map.insert(
+        "method".to_string(),
+        Value::String(ProbeProtocol::Tcp.as_str().to_string()),
+    );
     map.insert(
         "connected_port".to_string(),
         attempt
@@ -2282,7 +2363,7 @@ fn is_ipv6_metadata_endpoint(ip: Ipv6Addr) -> bool {
     ip.segments() == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254]
 }
 
-fn enforce_target_policy(ip: IpAddr, allow_private: bool) -> Result<(), String> {
+fn enforce_target_policy_error(ip: IpAddr, allow_private: bool) -> Result<(), ProbeError> {
     let classification = classify_ip(ip);
     let never_allowed = classification.is_metadata_endpoint
         || classification.is_unspecified
@@ -2290,9 +2371,10 @@ fn enforce_target_policy(ip: IpAddr, allow_private: bool) -> Result<(), String> 
         || classification.is_documentation
         || classification.is_broadcast;
     if never_allowed {
-        return Err(
-            "Network target denied by policy: special-purpose targets are not allowed".to_string(),
-        );
+        return Err(ProbeError::policy_denied(
+            ip.to_string(),
+            "Network target denied by policy: special-purpose targets are not allowed",
+        ));
     }
 
     let private_target = classification.is_private
@@ -2303,10 +2385,10 @@ fn enforce_target_policy(ip: IpAddr, allow_private: bool) -> Result<(), String> 
         return Ok(());
     }
     if !allow_private || !process_allows_private_targets() {
-        return Err(
-            "Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1"
-                .to_string(),
-        );
+        return Err(ProbeError::policy_denied(
+            ip.to_string(),
+            "Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1",
+        ));
     }
     Ok(())
 }
@@ -2644,6 +2726,7 @@ fn floor_log2(value: u128) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use super::probe::{ProbeError, ProbeErrorKind, ProbeProtocol};
     use super::*;
 
     fn assert_result_err_contains(value: Value, expected: &str) {
@@ -2732,6 +2815,55 @@ mod tests {
 
         let err = enforce_resolved_target_policy(&targets, false).unwrap_err();
         assert!(err.contains("Network target denied by policy"));
+    }
+
+    #[test]
+    fn ping_uses_policy_validated_ip_as_command_target() {
+        let public = "93.184.216.34:0".parse::<SocketAddr>().unwrap();
+        let targets = [(0, public)];
+
+        assert_eq!(
+            validated_probe_ip(&targets).unwrap(),
+            "93.184.216.34".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn ping_command_target_rejects_empty_resolution_set() {
+        let err = validated_probe_ip(&[]).unwrap_err();
+
+        assert_eq!(
+            err,
+            "failed to resolve target: resolver returned no usable addresses"
+        );
+    }
+
+    #[test]
+    fn target_policy_errors_keep_structured_kind_and_stable_public_message() {
+        let metadata = "169.254.169.254:80".parse::<SocketAddr>().unwrap();
+        let err = enforce_resolved_target_policy_error(&[(80, metadata)], true).unwrap_err();
+
+        assert_eq!(err.kind(), ProbeErrorKind::PolicyDenied);
+        assert_eq!(err.protocol(), None);
+        assert_eq!(
+            err.to_string(),
+            "Network target denied by policy: special-purpose targets are not allowed"
+        );
+    }
+
+    #[test]
+    fn probe_capability_errors_carry_protocol_without_changing_display_text() {
+        let err = ProbeError::permission_denied(
+            ProbeProtocol::Icmp,
+            "ICMP ping unavailable: raw socket permission denied",
+        );
+
+        assert_eq!(err.kind(), ProbeErrorKind::PermissionDenied);
+        assert_eq!(err.protocol(), Some(ProbeProtocol::Icmp));
+        assert_eq!(
+            err.to_string(),
+            "ICMP ping unavailable: raw socket permission denied"
+        );
     }
 
     #[cfg(not(target_os = "linux"))]
