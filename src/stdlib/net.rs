@@ -1384,44 +1384,45 @@ fn system_ping(
     timeout: Duration,
     count: usize,
 ) -> Result<Value, String> {
-    let deadline = Instant::now() + timeout;
+    if command_targets.len() == 1 {
+        let result = run_linux_ping(
+            display_host,
+            command_targets[0],
+            ping_timeout_secs(timeout),
+            count,
+        )
+        .map_err(|err| err.to_string())?;
+        return Ok(Value::Map(icmp_ping_result_map(result)));
+    }
+
+    let started = Instant::now();
+    let discovery_timeout_secs = ping_timeout_slice_secs(timeout, command_targets.len());
     let mut results = Vec::new();
-    let mut sent = 0usize;
     let mut last_error = None;
 
     for command_target in command_targets {
-        if sent >= count {
-            break;
-        }
-        let Some(timeout_secs) = ping_remaining_timeout_secs(deadline) else {
-            break;
-        };
-        let probe_count = ping_probe_count_for_target(command_targets.len(), sent, count);
-        match run_linux_ping(display_host, *command_target, timeout_secs, probe_count) {
+        match run_linux_ping(display_host, *command_target, discovery_timeout_secs, 1) {
             Ok(result) if result.received > 0 => {
-                sent += result.sent;
                 results.push(result);
+                let sent: usize = results.iter().map(|result| result.sent).sum();
                 let remaining_count = count.saturating_sub(sent);
                 if remaining_count > 0 {
-                    if let Some(timeout_secs) = ping_remaining_timeout_secs(deadline) {
-                        if let Ok(result) = run_linux_ping(
+                    if let Some(remaining_timeout) = timeout.checked_sub(started.elapsed()) {
+                        let result = run_linux_ping(
                             display_host,
                             *command_target,
-                            timeout_secs,
+                            ping_timeout_secs(remaining_timeout),
                             remaining_count,
-                        ) {
-                            results.push(result);
-                        }
+                        )
+                        .map_err(|err| err.to_string())?;
+                        results.push(result);
                     }
                 }
                 return Ok(Value::Map(icmp_ping_result_map(
                     merge_icmp_ping_results(display_host, results).expect("ping result recorded"),
                 )));
             }
-            Ok(result) => {
-                sent += result.sent;
-                results.push(result);
-            }
+            Ok(result) => results.push(result),
             Err(err) => last_error = Some(err),
         }
     }
@@ -1441,27 +1442,21 @@ fn system_ping(
 }
 
 #[cfg(target_os = "linux")]
-fn ping_probe_count_for_target(target_count: usize, sent: usize, requested_count: usize) -> usize {
-    let remaining = requested_count.saturating_sub(sent);
-    if target_count <= 1 {
-        remaining
-    } else {
-        remaining.min(1)
-    }
+fn ping_timeout_secs(timeout: Duration) -> u64 {
+    max(
+        1,
+        timeout
+            .as_secs()
+            .saturating_add(if timeout.subsec_millis() > 0 { 1 } else { 0 }),
+    )
 }
 
 #[cfg(target_os = "linux")]
-fn ping_remaining_timeout_secs(deadline: Instant) -> Option<u64> {
-    let remaining = deadline.checked_duration_since(Instant::now())?;
-    if remaining.is_zero() {
-        return None;
-    }
-    Some(max(
-        1,
-        remaining
-            .as_secs()
-            .saturating_add(if remaining.subsec_millis() > 0 { 1 } else { 0 }),
-    ))
+fn ping_timeout_slice_secs(timeout: Duration, target_count: usize) -> u64 {
+    let target_count = target_count.max(1) as u128;
+    let timeout_ms = timeout.as_millis();
+    let slice_ms = timeout_ms.saturating_add(target_count - 1) / target_count;
+    ping_timeout_secs(Duration::from_millis(slice_ms.min(u64::MAX as u128) as u64))
 }
 
 #[cfg(target_os = "linux")]
@@ -2985,11 +2980,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn ping_probe_count_shares_requested_count_across_targets() {
-        assert_eq!(ping_probe_count_for_target(1, 0, 3), 3);
-        assert_eq!(ping_probe_count_for_target(2, 0, 3), 1);
-        assert_eq!(ping_probe_count_for_target(2, 2, 3), 1);
-        assert_eq!(ping_probe_count_for_target(2, 3, 3), 0);
+    fn ping_timeout_slice_shares_discovery_timeout_across_targets() {
+        assert_eq!(ping_timeout_secs(Duration::from_millis(2_000)), 2);
+        assert_eq!(ping_timeout_slice_secs(Duration::from_millis(2_000), 1), 2);
+        assert_eq!(ping_timeout_slice_secs(Duration::from_millis(2_000), 2), 1);
+        assert_eq!(ping_timeout_slice_secs(Duration::from_millis(3_500), 2), 2);
+        assert_eq!(ping_timeout_slice_secs(Duration::from_millis(2_000), 0), 2);
     }
 
     #[test]
