@@ -18,9 +18,11 @@ use rustls::{
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "linux")]
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 #[cfg(target_os = "linux")]
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
@@ -1319,10 +1321,39 @@ struct IcmpPingResult {
 #[cfg(target_os = "linux")]
 fn icmp_ping(
     display_host: &str,
-    target_ip: IpAddr,
+    target_ips: &[IpAddr],
     options: &ProbeOptions,
 ) -> Result<IcmpPingResult, ProbeError> {
-    run_linux_ping(display_host, target_ip, options.timeout, options.count)
+    let deadline = Instant::now() + options.timeout;
+    let mut results = Vec::new();
+
+    for (index, target_ip) in target_ips.iter().enumerate() {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        let target_budget = ping_target_budget(remaining, target_ips.len() - index);
+        let target_deadline = Instant::now() + target_budget;
+        let result = run_linux_ping(display_host, *target_ip, target_deadline, options.count)?;
+        let reachable = result.received > 0;
+        results.push(result);
+        if reachable {
+            break;
+        }
+    }
+
+    Ok(combine_icmp_ping_attempts(display_host, results))
+}
+
+#[cfg(target_os = "linux")]
+fn ping_target_budget(remaining: Duration, remaining_targets: usize) -> Duration {
+    if remaining_targets <= 1 {
+        return remaining;
+    }
+    let slice_ms = max(
+        1,
+        (remaining.as_millis() / remaining_targets as u128) as u64,
+    );
+    min(Duration::from_millis(slice_ms), remaining)
 }
 
 #[cfg(target_os = "linux")]
@@ -1339,11 +1370,15 @@ fn ping_timeout_secs(timeout: Duration) -> u64 {
 fn run_linux_ping(
     display_host: &str,
     target_ip: IpAddr,
-    timeout: Duration,
+    deadline: Instant,
     count: usize,
 ) -> Result<IcmpPingResult, ProbeError> {
+    let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+        return Ok(timeout_ping_result(display_host, target_ip));
+    };
     let timeout_secs = ping_timeout_secs(timeout);
-    let output = Command::new("ping")
+    let mut command = Command::new("ping");
+    command
         .arg("-n")
         .arg("-c")
         .arg(count.to_string())
@@ -1352,19 +1387,26 @@ fn run_linux_ping(
         .arg("-w")
         .arg(timeout_secs.to_string())
         .arg("--")
-        .arg(target_ip.to_string())
-        .output()
-        .map_err(|e| {
-            ProbeError::capability_unavailable(
-                ProbeProtocol::Icmp,
-                format!("ICMP ping unavailable: failed to run ping: {}", e),
-            )
-        })?;
+        .arg(target_ip.to_string());
+
+    let (output, timed_out) = run_command_with_deadline(command, deadline).map_err(|e| {
+        ProbeError::capability_unavailable(
+            ProbeProtocol::Icmp,
+            format!("ICMP ping unavailable: failed to run ping: {}", e),
+        )
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let has_packet_summary = linux_ping_output_has_packet_summary(&stdout);
-    if !output.status.success() && !has_packet_summary {
+    let mut result = parse_linux_ping_output(display_host, &stdout, &stderr, count);
+    if result.target_addr.is_none() {
+        result.target_addr = Some(target_ip.to_string());
+    }
+    if timed_out && !has_packet_summary {
+        normalize_timed_out_ping_result(&mut result);
+    }
+    if !output.status.success() && !has_packet_summary && result.received == 0 && !timed_out {
         let message = format!(
             "ICMP ping unavailable: system ping failed: {}",
             ping_failure_message(&stdout, &stderr, output.status.code())
@@ -1372,18 +1414,85 @@ fn run_linux_ping(
         return Err(icmp_ping_process_error(message));
     }
 
-    Ok(parse_linux_ping_output(
-        display_host,
-        &stdout,
-        &stderr,
-        count,
+    Ok(result)
+}
+
+#[cfg(target_os = "linux")]
+fn run_command_with_deadline(
+    mut command: Command,
+    deadline: Instant,
+) -> std::io::Result<(Output, bool)> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut timed_out = false;
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            timed_out = true;
+            let _ = child.kill();
+            break;
+        };
+        thread::sleep(min(Duration::from_millis(5), remaining));
+    }
+
+    let status = child.wait()?;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        pipe.read_to_end(&mut stdout)?;
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_end(&mut stderr)?;
+    }
+
+    Ok((
+        Output {
+            status,
+            stdout,
+            stderr,
+        },
+        timed_out,
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_timed_out_ping_result(result: &mut IcmpPingResult) {
+    result.sent = result.attempts.len().max(1);
+    result.received = result
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.reachable)
+        .count();
+    result.loss_percent = if result.sent == 0 {
+        0.0
+    } else {
+        ((result.sent.saturating_sub(result.received)) as f64 / result.sent as f64) * 100.0
+    };
+}
+
+#[cfg(target_os = "linux")]
+fn timeout_ping_result(host: &str, target_ip: IpAddr) -> IcmpPingResult {
+    IcmpPingResult {
+        host: host.to_string(),
+        target_addr: Some(target_ip.to_string()),
+        sent: 0,
+        received: 0,
+        loss_percent: 100.0,
+        min_ms: None,
+        avg_ms: None,
+        max_ms: None,
+        attempts: Vec::new(),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
 fn icmp_ping(
     _display_host: &str,
-    _target_ip: IpAddr,
+    _target_ips: &[IpAddr],
     _options: &ProbeOptions,
 ) -> Result<IcmpPingResult, ProbeError> {
     Err(ProbeError::unsupported_platform(
@@ -1397,11 +1506,8 @@ fn icmp_ping_for_host(
     options: &ProbeOptions,
 ) -> Result<HashMap<String, Value>, String> {
     let targets = resolve_probe_targets(host, &[0], options.allow_private)?;
-    let target_ip = unique_target_ips(&targets)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| empty_probe_targets_error().to_string())?;
-    let result = icmp_ping(host, target_ip, options).map_err(|err| err.to_string())?;
+    let target_ips = unique_target_ips(&targets)?;
+    let result = icmp_ping(host, &target_ips, options).map_err(|err| err.to_string())?;
     Ok(icmp_ping_result_map(result))
 }
 
@@ -1421,6 +1527,58 @@ fn unique_target_ips(targets: &[(u16, SocketAddr)]) -> Result<Vec<IpAddr>, Strin
         return Err(empty_probe_targets_error().to_string());
     }
     Ok(ips)
+}
+
+fn combine_icmp_ping_attempts(host: &str, results: Vec<IcmpPingResult>) -> IcmpPingResult {
+    let mut sent = 0usize;
+    let mut received = 0usize;
+    let mut target_addr = results
+        .iter()
+        .find(|result| result.received > 0)
+        .and_then(|result| result.target_addr.clone())
+        .or_else(|| {
+            results
+                .first()
+                .and_then(|result| result.target_addr.clone())
+        });
+    let mut attempts = Vec::new();
+    for mut result in results {
+        sent = sent.saturating_add(result.sent);
+        received = received.saturating_add(result.received);
+        attempts.append(&mut result.attempts);
+        if target_addr.is_none() {
+            target_addr = result.target_addr;
+        }
+    }
+
+    let mut min_ms: Option<f64> = None;
+    let mut max_ms: Option<f64> = None;
+    let mut latency_total = 0.0;
+    let mut latency_count = 0usize;
+    for latency_ms in attempts.iter().filter_map(|attempt| attempt.latency_ms) {
+        min_ms = Some(min_ms.map_or(latency_ms, |current| current.min(latency_ms)));
+        max_ms = Some(max_ms.map_or(latency_ms, |current| current.max(latency_ms)));
+        latency_total += latency_ms;
+        latency_count += 1;
+    }
+    let avg_ms = (latency_count > 0).then(|| latency_total / latency_count as f64);
+    let loss_percent = if sent == 0 {
+        100.0
+    } else {
+        ((sent.saturating_sub(received)) as f64 / sent as f64) * 100.0
+    };
+
+    IcmpPingResult {
+        host: host.to_string(),
+        target_addr,
+        sent,
+        received,
+        loss_percent,
+        min_ms,
+        avg_ms,
+        max_ms,
+        attempts,
+    }
 }
 
 fn linux_ping_output_has_packet_summary(output: &str) -> bool {
@@ -2776,6 +2934,86 @@ mod tests {
         assert_eq!(result.received, 1);
         assert_eq!(result.loss_percent, 50.0);
         assert_eq!(result.attempts.len(), 1);
+        assert!(result.attempts[0].reachable);
+    }
+
+    #[test]
+    fn combine_icmp_ping_attempts_aggregates_multi_address_fallback() {
+        let unreachable = IcmpPingResult {
+            host: "example.com".to_string(),
+            target_addr: Some("2001:db8::1".to_string()),
+            sent: 1,
+            received: 0,
+            loss_percent: 100.0,
+            min_ms: None,
+            avg_ms: None,
+            max_ms: None,
+            attempts: vec![IcmpPingAttempt {
+                seq: Some(1),
+                reachable: false,
+                from: Some("2001:db8::1".to_string()),
+                ttl: None,
+                latency_ms: None,
+                error: Some("Destination unreachable".to_string()),
+            }],
+        };
+        let reachable = IcmpPingResult {
+            host: "example.com".to_string(),
+            target_addr: Some("93.184.216.34".to_string()),
+            sent: 1,
+            received: 1,
+            loss_percent: 0.0,
+            min_ms: Some(12.0),
+            avg_ms: Some(12.0),
+            max_ms: Some(12.0),
+            attempts: vec![IcmpPingAttempt {
+                seq: Some(1),
+                reachable: true,
+                from: Some("93.184.216.34".to_string()),
+                ttl: Some(58),
+                latency_ms: Some(12.0),
+                error: None,
+            }],
+        };
+
+        let result = combine_icmp_ping_attempts("example.com", vec![unreachable, reachable]);
+
+        assert_eq!(result.target_addr.as_deref(), Some("93.184.216.34"));
+        assert_eq!(result.sent, 2);
+        assert_eq!(result.received, 1);
+        assert_eq!(result.loss_percent, 50.0);
+        assert_eq!(result.attempts.len(), 2);
+        assert_eq!(result.avg_ms, Some(12.0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ping_target_budget_splits_short_deadlines_across_addresses() {
+        assert_eq!(
+            ping_target_budget(Duration::from_millis(50), 4),
+            Duration::from_millis(12)
+        );
+        assert_eq!(
+            ping_target_budget(Duration::from_millis(50), 1),
+            Duration::from_millis(50)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timed_out_ping_result_keeps_partial_replies_reachable() {
+        let mut result = parse_linux_ping_output(
+            "example.com",
+            "64 bytes from 93.184.216.34: icmp_seq=1 ttl=58 time=12.3 ms\n",
+            "",
+            2,
+        );
+
+        normalize_timed_out_ping_result(&mut result);
+
+        assert_eq!(result.sent, 1);
+        assert_eq!(result.received, 1);
+        assert_eq!(result.loss_percent, 0.0);
         assert!(result.attempts[0].reachable);
     }
 
