@@ -449,6 +449,11 @@ stdout: {stdout}"
 #[cfg(target_os = "linux")]
 #[test]
 fn ping_auto_uses_icmp_without_tcp_fallback() {
+    if std::env::var("NTNT_TEST_ICMP_RAW").ok().as_deref() != Some("1") {
+        eprintln!("skipping raw ICMP integration test; set NTNT_TEST_ICMP_RAW=1 to run");
+        return;
+    }
+
     let (stdout, stderr, code) = run_ntnt_code_with_env(
         r#"
 import { ping } from "std/net"

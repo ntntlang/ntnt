@@ -455,7 +455,7 @@ If ICMP is unavailable in the runtime, `ping()` fails clearly instead of falling
 
 ```ntnt
 ping("example.com")
-// Err("ICMP ping unavailable on this platform")
+// Err("ICMP ping unavailable: native socket failed: permission denied")
 ```
 
 Apps that intentionally want TCP reachability should use `tcp_connect()` for a single explicit port or `reachable()` for a high-level check that tries ICMP plus TCP ports 80 and 443 by default. Extra `tcp_ports` add more explicit TCP ports:

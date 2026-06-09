@@ -97,6 +97,7 @@ redis = "0.27"
 jsonwebtoken = "9"
 pulldown-cmark = "0.13.0"
 hickory-resolver = "0.24.4"
+socket2 = "0.6"
 
 [build-dependencies]
 # Doc comment scanner (build.rs extracts /// @ntnt blocks)
