@@ -20,7 +20,7 @@ use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 #[cfg(target_os = "linux")]
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
@@ -1385,23 +1385,18 @@ fn system_ping(
     count: usize,
 ) -> Result<Value, String> {
     if command_targets.len() == 1 {
-        let result = run_linux_ping(
-            display_host,
-            command_targets[0],
-            ping_timeout_secs(timeout),
-            count,
-        )
-        .map_err(|err| err.to_string())?;
+        let result = run_linux_ping(display_host, command_targets[0], timeout, count)
+            .map_err(|err| err.to_string())?;
         return Ok(Value::Map(icmp_ping_result_map(result)));
     }
 
     let started = Instant::now();
-    let discovery_timeout_secs = ping_timeout_slice_secs(timeout, command_targets.len());
+    let discovery_timeout = ping_timeout_slice(timeout, command_targets.len());
     let mut results = Vec::new();
     let mut last_error = None;
 
     for command_target in command_targets {
-        match run_linux_ping(display_host, *command_target, discovery_timeout_secs, 1) {
+        match run_linux_ping(display_host, *command_target, discovery_timeout, 1) {
             Ok(result) if result.received > 0 => {
                 results.push(result);
                 let sent: usize = results.iter().map(|result| result.sent).sum();
@@ -1411,7 +1406,7 @@ fn system_ping(
                         let result = run_linux_ping(
                             display_host,
                             *command_target,
-                            ping_timeout_secs(remaining_timeout),
+                            remaining_timeout,
                             remaining_count,
                         )
                         .map_err(|err| err.to_string())?;
@@ -1452,21 +1447,88 @@ fn ping_timeout_secs(timeout: Duration) -> u64 {
 }
 
 #[cfg(target_os = "linux")]
-fn ping_timeout_slice_secs(timeout: Duration, target_count: usize) -> u64 {
+fn ping_timeout_slice(timeout: Duration, target_count: usize) -> Duration {
     let target_count = target_count.max(1) as u128;
-    let timeout_ms = timeout.as_millis();
+    let timeout_ms = timeout.as_millis().max(1);
     let slice_ms = timeout_ms.saturating_add(target_count - 1) / target_count;
-    ping_timeout_secs(Duration::from_millis(slice_ms.min(u64::MAX as u128) as u64))
+    Duration::from_millis(slice_ms.min(u64::MAX as u128) as u64)
+}
+
+#[cfg(target_os = "linux")]
+struct TimedCommandOutput {
+    output: std::process::Output,
+    timed_out: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn wait_with_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Result<TimedCommandOutput, std::io::Error> {
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map(|output| TimedCommandOutput {
+                output,
+                timed_out: false,
+            });
+        }
+        if started.elapsed() >= timeout {
+            match child.kill() {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => {}
+                Err(err) => return Err(err),
+            }
+            return child.wait_with_output().map(|output| TimedCommandOutput {
+                output,
+                timed_out: true,
+            });
+        }
+        let remaining = timeout
+            .checked_sub(started.elapsed())
+            .unwrap_or_else(|| Duration::from_millis(1));
+        thread::sleep(min(Duration::from_millis(5), remaining));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ping_timeout_result(
+    display_host: &str,
+    command_target: IpAddr,
+    count: usize,
+) -> IcmpPingResult {
+    let attempts = (1..=count)
+        .map(|seq| IcmpPingAttempt {
+            seq: Some(seq as i64),
+            reachable: false,
+            from: None,
+            ttl: None,
+            latency_ms: None,
+            error: Some("timeout".to_string()),
+        })
+        .collect();
+    IcmpPingResult {
+        host: display_host.to_string(),
+        target_addr: Some(command_target.to_string()),
+        sent: count,
+        received: 0,
+        loss_percent: 100.0,
+        min_ms: None,
+        avg_ms: None,
+        max_ms: None,
+        attempts,
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn run_linux_ping(
     display_host: &str,
     command_target: IpAddr,
-    timeout_secs: u64,
+    timeout: Duration,
     count: usize,
 ) -> Result<IcmpPingResult, ProbeError> {
-    let output = Command::new("ping")
+    let timeout_secs = ping_timeout_secs(timeout);
+    let child = Command::new("ping")
         .arg("-n")
         .arg("-c")
         .arg(count.to_string())
@@ -1476,8 +1538,17 @@ fn run_linux_ping(
         .arg(timeout_secs.to_string())
         .arg("--")
         .arg(command_target.to_string())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| {
+            ProbeError::capability_unavailable(
+                ProbeProtocol::Icmp,
+                format!("ICMP ping unavailable: failed to run ping: {}", e),
+            )
+        })?;
+    let TimedCommandOutput { output, timed_out } =
+        wait_with_timeout(child, timeout).map_err(|e| {
             ProbeError::capability_unavailable(
                 ProbeProtocol::Icmp,
                 format!("ICMP ping unavailable: failed to run ping: {}", e),
@@ -1486,6 +1557,13 @@ fn run_linux_ping(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if timed_out && !linux_ping_output_has_packet_summary(&stdout) {
+        return Ok(linux_ping_timeout_result(
+            display_host,
+            command_target,
+            count,
+        ));
+    }
     if !output.status.success() && !linux_ping_output_has_packet_summary(&stdout) {
         let message = format!(
             "ICMP ping unavailable: system ping failed: {}",
@@ -2982,10 +3060,40 @@ mod tests {
     #[test]
     fn ping_timeout_slice_shares_discovery_timeout_across_targets() {
         assert_eq!(ping_timeout_secs(Duration::from_millis(2_000)), 2);
-        assert_eq!(ping_timeout_slice_secs(Duration::from_millis(2_000), 1), 2);
-        assert_eq!(ping_timeout_slice_secs(Duration::from_millis(2_000), 2), 1);
-        assert_eq!(ping_timeout_slice_secs(Duration::from_millis(3_500), 2), 2);
-        assert_eq!(ping_timeout_slice_secs(Duration::from_millis(2_000), 0), 2);
+        assert_eq!(
+            ping_timeout_slice(Duration::from_millis(2_000), 1),
+            Duration::from_millis(2_000)
+        );
+        assert_eq!(
+            ping_timeout_slice(Duration::from_millis(2_000), 2),
+            Duration::from_millis(1_000)
+        );
+        assert_eq!(
+            ping_timeout_slice(Duration::from_millis(3_500), 2),
+            Duration::from_millis(1_750)
+        );
+        assert_eq!(
+            ping_timeout_slice(Duration::from_millis(50), 4),
+            Duration::from_millis(13)
+        );
+        assert_eq!(
+            ping_timeout_slice(Duration::from_millis(2_000), 0),
+            Duration::from_millis(2_000)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_ping_timeout_result_reports_attempt_timeout() {
+        let result =
+            linux_ping_timeout_result("example.com", "93.184.216.34".parse::<IpAddr>().unwrap(), 2);
+
+        assert_eq!(result.sent, 2);
+        assert_eq!(result.received, 0);
+        assert_eq!(result.loss_percent, 100.0);
+        assert_eq!(result.target_addr.as_deref(), Some("93.184.216.34"));
+        assert_eq!(result.attempts.len(), 2);
+        assert_eq!(result.attempts[0].error.as_deref(), Some("timeout"));
     }
 
     #[test]
