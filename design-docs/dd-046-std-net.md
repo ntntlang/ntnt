@@ -189,8 +189,8 @@ Clamp rather than trust unbounded inputs:
 - minimum timeout: 50ms
 - default timeout: 2000ms for TCP/scan, 5000ms for DNS/TLS
 - maximum timeout: 30000ms unless a future API justifies more
-- `ping.count`: default 4, hard maximum 10
-- `ping.interval_ms`: default 250ms, hard minimum 100ms, hard maximum 5000ms
+- `ping.count`: default 1, hard maximum 10
+- `ping.interval_ms`: default 0ms, hard maximum 5000ms
 - `subnet_split.max_results`: default 4096, hard maximum 65536 unless streaming/iterator support exists
 - `subnet_summarize.max_inputs`: default/hard maximum 4096 for first implementation
 - `ip_range_to_cidrs.max_results`: default 4096, hard maximum 65536
@@ -441,8 +441,8 @@ let result = ping("example.com")
 //   "host": "example.com",
 //   "reachable": true,
 //   "method": "icmp",
-//   "sent": 4,
-//   "received": 4,
+//   "sent": 1,
+//   "received": 1,
 //   "loss_percent": 0,
 //   "min_ms": 12.4,
 //   "avg_ms": 14.1,
@@ -514,7 +514,7 @@ Implementation approach:
 - Keep `ping()` ICMP-only and protocol-honest.
 - Share the lower-level TCP probe substrate between `tcp_connect()` and `reachable()`.
 - Do not implement automatic TCP fallback inside `ping()`; protocol fallback belongs in `reachable()` or app code.
-- Add ICMP support only through a crate/path that supports unprivileged operation where the OS allows it. Linux may use datagram ICMP sockets when `/proc/sys/net/ipv4/ping_group_range` permits the process group; raw sockets still require `CAP_NET_RAW` and must be optional.
+- Add ICMP support through the native socket path. Try datagram ICMP first so Linux can use unprivileged ping sockets when `/proc/sys/net/ipv4/ping_group_range` permits the process group; fall back to raw sockets where datagram ICMP is unavailable. Raw sockets still require `CAP_NET_RAW`/root/admin depending on OS.
 - Do not shell out to system `ping`.
 - Do not require Docker `cap_add` for app code that deliberately chooses TCP reachability; ICMP-specific deployment docs belong to the ICMP path.
 

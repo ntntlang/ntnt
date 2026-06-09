@@ -1330,19 +1330,14 @@ fn icmp_ping(
     target_ips: &[IpAddr],
     options: &ProbeOptions,
 ) -> Result<IcmpPingResult, String> {
-    let deadline = Instant::now() + options.timeout;
     let mut results = Vec::new();
     let mut first_fatal_error = None;
 
-    for (index, target_ip) in target_ips.iter().enumerate() {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            break;
-        };
-        let target_budget = ping_attempt_budget(remaining, target_ips.len() - index);
+    for target_ip in target_ips {
         let result = run_native_ping(
             display_host,
             *target_ip,
-            target_budget,
+            options.timeout,
             options.count,
             options.interval,
         );
@@ -1366,23 +1361,12 @@ fn icmp_ping(
     }
 
     if results.is_empty() {
-        if let Some(err) = first_fatal_error {
-            return Err(err);
-        }
+        return Err(first_fatal_error.unwrap_or_else(|| {
+            format!("ICMP ping unavailable: no probe could be sent for {display_host}")
+        }));
     }
 
     Ok(combine_icmp_ping_attempts(display_host, results))
-}
-
-fn ping_attempt_budget(remaining: Duration, remaining_targets: usize) -> Duration {
-    if remaining_targets <= 1 {
-        return remaining;
-    }
-    let slice_ms = max(
-        1,
-        (remaining.as_millis() / remaining_targets as u128) as u64,
-    );
-    min(Duration::from_millis(slice_ms), remaining)
 }
 
 fn run_native_ping(
@@ -1403,33 +1387,21 @@ fn run_native_ping(
         }
         Err(err) => return Err(native_ping_socket_error(err)),
     };
-    let deadline = Instant::now() + timeout;
     let local_ip = socket
         .local_addr()
         .ok()
         .and_then(|addr| addr.as_socket())
         .map(|addr| addr.ip());
-    let ident = next_icmp_ident();
+    let ident = icmp_ident_for_socket(&socket).unwrap_or_else(next_icmp_ident);
     let count = count.max(1);
     let payload = [0u8; 56];
     let mut attempts = Vec::new();
     let mut latencies = Vec::new();
 
     for seq in 1..=count {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            break;
-        };
         let sequence = (seq.min(u16::MAX as usize)) as u16;
-        let per_attempt_timeout =
-            ping_attempt_budget(remaining, count.saturating_sub(seq).saturating_add(1));
         match send_ping_attempt(
-            &socket,
-            target_ip,
-            local_ip,
-            ident,
-            sequence,
-            &payload,
-            per_attempt_timeout,
+            &socket, target_ip, local_ip, ident, sequence, &payload, timeout,
         ) {
             Ok(Some(reply)) => {
                 latencies.push(reply.latency_ms);
@@ -1464,14 +1436,7 @@ fn run_native_ping(
         }
 
         if seq < count && !interval.is_zero() {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                break;
-            };
-            thread::sleep(min(interval, remaining));
-        }
-
-        if Instant::now() >= deadline {
-            break;
+            thread::sleep(interval);
         }
     }
 
@@ -1493,11 +1458,44 @@ fn create_icmp_socket(target_ip: IpAddr, timeout: Duration) -> std::io::Result<S
         IpAddr::V4(_) => (Domain::IPV4, Protocol::ICMPV4),
         IpAddr::V6(_) => (Domain::IPV6, Protocol::ICMPV6),
     };
-    let socket = Socket::new(domain, Type::RAW, Some(protocol))?;
+    let dgram_error =
+        match open_connected_icmp_socket(domain, Type::DGRAM, protocol, target_ip, timeout) {
+            Ok(socket) => return Ok(socket),
+            Err(err) => err,
+        };
+    match open_connected_icmp_socket(domain, Type::RAW, protocol, target_ip, timeout) {
+        Ok(socket) => Ok(socket),
+        Err(raw_error) => {
+            if dgram_error.kind() == ErrorKind::PermissionDenied {
+                Err(dgram_error)
+            } else {
+                Err(raw_error)
+            }
+        }
+    }
+}
+
+fn open_connected_icmp_socket(
+    domain: Domain,
+    socket_type: Type,
+    protocol: Protocol,
+    target_ip: IpAddr,
+    timeout: Duration,
+) -> std::io::Result<Socket> {
+    let socket = Socket::new(domain, socket_type, Some(protocol))?;
     socket.set_read_timeout(Some(timeout))?;
     socket.set_write_timeout(Some(timeout))?;
     socket.connect(&SockAddr::from(SocketAddr::new(target_ip, 0)))?;
     Ok(socket)
+}
+
+fn icmp_ident_for_socket(socket: &Socket) -> Option<u16> {
+    socket
+        .local_addr()
+        .ok()
+        .and_then(|addr| addr.as_socket())
+        .map(|addr| addr.port())
+        .filter(|port| *port != 0)
 }
 
 fn send_ping_attempt(
@@ -1675,7 +1673,7 @@ fn parse_icmpv6_probe_event(
         elapsed,
         IcmpFamily::V6,
         129,
-        &[1, 3],
+        &[1, 2, 3, 4],
     )
 }
 
@@ -3126,6 +3124,51 @@ mod tests {
         let err =
             build_icmp_echo_request(IpAddr::V6(Ipv6Addr::LOCALHOST), None, 1, 1, &[]).unwrap_err();
         assert!(err.contains("local IPv6 address"));
+    }
+
+    #[test]
+    fn parses_icmpv6_error_types_that_quote_probe() {
+        let ident: u16 = 0x5555;
+        let sequence: u16 = 9;
+        let mut quoted = vec![0u8; 40];
+        quoted[0] = 0x60;
+        quoted[6] = 58;
+        quoted.extend_from_slice(&[128, 0, 0, 0]);
+        quoted.extend_from_slice(&ident.to_be_bytes());
+        quoted.extend_from_slice(&sequence.to_be_bytes());
+
+        for icmp_type in [1, 2, 3, 4] {
+            let mut packet = vec![icmp_type, 0, 0, 0, 0, 0, 0, 0];
+            packet.extend_from_slice(&quoted);
+            let event = parse_icmp_probe_event(
+                &packet,
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                ident,
+                sequence,
+                Duration::from_millis(12),
+            );
+
+            match event {
+                Some(IcmpProbeEvent::TargetFailure(message)) => {
+                    assert!(message.contains(&format!("type {icmp_type}")));
+                }
+                other => panic!("expected ICMPv6 type {icmp_type} target failure, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn icmp_ping_errors_when_no_probe_can_be_sent() {
+        let options = ProbeOptions {
+            timeout: Duration::from_millis(50),
+            count: 1,
+            interval: Duration::ZERO,
+            allow_private: false,
+        };
+
+        let err = icmp_ping("example.com", &[], &options).unwrap_err();
+        assert!(err.contains("no probe could be sent"));
     }
 
     #[test]

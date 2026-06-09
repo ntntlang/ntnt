@@ -105,6 +105,11 @@ fn start_local_tls_server(expected_connections: usize) -> (u16, std::thread::Joi
                             Err(_) => break,
                         }
                     }
+                    if !conn.is_handshaking() {
+                        let _ = conn.writer().write_all(b"ok");
+                        let _ = conn.complete_io(&mut stream);
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(10));
