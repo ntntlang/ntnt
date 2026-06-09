@@ -1330,14 +1330,21 @@ fn icmp_ping(
     target_ips: &[IpAddr],
     options: &ProbeOptions,
 ) -> Result<IcmpPingResult, String> {
+    let deadline = Instant::now() + options.timeout;
     let mut results = Vec::new();
     let mut first_fatal_error = None;
 
     for target_ip in target_ips {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        if remaining.is_zero() {
+            break;
+        }
         let result = run_native_ping(
             display_host,
             *target_ip,
-            options.timeout,
+            remaining,
             options.count,
             options.interval,
         );
@@ -1518,6 +1525,9 @@ fn create_icmp_socket(target_ip: IpAddr, timeout: Duration) -> std::io::Result<S
             Ok(socket) => return Ok(socket),
             Err(err) => err,
         };
+    if icmp_io_error_is_target_failure(&dgram_error) {
+        return Err(dgram_error);
+    }
     match open_connected_icmp_socket(domain, Type::RAW, protocol, target_ip, timeout) {
         Ok(socket) => Ok(socket),
         Err(raw_error) => {
