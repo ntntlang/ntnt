@@ -1557,14 +1557,19 @@ fn run_linux_ping(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if timed_out && !linux_ping_output_has_packet_summary(&stdout) {
-        return Ok(linux_ping_timeout_result(
-            display_host,
-            command_target,
-            count,
-        ));
+    let has_packet_summary = linux_ping_output_has_packet_summary(&stdout);
+    let parsed = parse_linux_ping_output(display_host, &stdout, &stderr, count);
+    if timed_out && !has_packet_summary {
+        if parsed.attempts.is_empty() {
+            return Ok(linux_ping_timeout_result(
+                display_host,
+                command_target,
+                count,
+            ));
+        }
+        return Ok(parsed);
     }
-    if !output.status.success() && !linux_ping_output_has_packet_summary(&stdout) {
+    if !output.status.success() && !has_packet_summary {
         let message = format!(
             "ICMP ping unavailable: system ping failed: {}",
             ping_failure_message(&stdout, &stderr, output.status.code())
@@ -1572,12 +1577,7 @@ fn run_linux_ping(
         return Err(icmp_ping_process_error(message));
     }
 
-    Ok(parse_linux_ping_output(
-        display_host,
-        &stdout,
-        &stderr,
-        count,
-    ))
+    Ok(parsed)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -2972,6 +2972,19 @@ mod tests {
         assert!(result.attempts[0].reachable);
         assert_eq!(result.attempts[0].ttl, Some(58));
         assert_eq!(result.attempts[0].latency_ms, Some(12.3));
+    }
+
+    #[test]
+    fn parses_linux_ping_partial_output_without_summary() {
+        let output = "PING example.com (93.184.216.34) 56(84) bytes of data.\n64 bytes from 93.184.216.34: icmp_seq=1 ttl=58 time=12.3 ms\n";
+        let result = parse_linux_ping_output("example.com", output, "", 2);
+
+        assert_eq!(result.target_addr.as_deref(), Some("93.184.216.34"));
+        assert_eq!(result.sent, 2);
+        assert_eq!(result.received, 1);
+        assert_eq!(result.loss_percent, 50.0);
+        assert_eq!(result.attempts.len(), 1);
+        assert!(result.attempts[0].reachable);
     }
 
     #[test]
