@@ -20,7 +20,7 @@ use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 #[cfg(target_os = "linux")]
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
@@ -764,10 +764,7 @@ fn ping_fn(args: &[Value]) -> Result<Value, IntentError> {
     Ok(result_value((|| {
         validate_ping_method(opts.and_then(|m| m.get("method")))?;
         let options = parse_probe_options(opts)?;
-        let targets = resolve_ping_targets(host)?;
-        enforce_resolved_target_policy(&targets, options.allow_private)?;
-        let command_targets = validated_probe_ips(&targets)?;
-        system_ping(host, &command_targets, options.timeout, options.count)
+        Ok(Value::Map(icmp_ping_for_host(host, &options)?))
     })()))
 }
 
@@ -884,8 +881,7 @@ fn tls_info_fn(args: &[Value]) -> Result<Value, IntentError> {
             .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
         let server_name = parse_string_option(opts, "server_name")?.unwrap_or(host);
         let allow_private = parse_bool_option(opts, "allow_private", false)?;
-        let targets = resolve_tcp_targets(host, &[port])?;
-        enforce_resolved_target_policy(&targets, allow_private)?;
+        let targets = resolve_probe_targets(host, &[port], allow_private)?;
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let mut last_error = None;
         for (_, addr) in targets {
@@ -1320,120 +1316,13 @@ struct IcmpPingResult {
     attempts: Vec<IcmpPingAttempt>,
 }
 
-fn merge_icmp_ping_results(host: &str, results: Vec<IcmpPingResult>) -> Option<IcmpPingResult> {
-    if results.is_empty() {
-        return None;
-    }
-
-    let sent: usize = results.iter().map(|result| result.sent).sum();
-    let received: usize = results.iter().map(|result| result.received).sum();
-    let target_addr = results
-        .iter()
-        .find(|result| result.received > 0)
-        .and_then(|result| result.target_addr.clone())
-        .or_else(|| results.iter().find_map(|result| result.target_addr.clone()));
-    let attempts: Vec<IcmpPingAttempt> = results
-        .into_iter()
-        .flat_map(|result| result.attempts)
-        .collect();
-    let latencies: Vec<f64> = attempts
-        .iter()
-        .filter_map(|attempt| attempt.latency_ms)
-        .collect();
-    let min_ms = latencies.iter().copied().reduce(f64::min);
-    let max_ms = latencies.iter().copied().reduce(f64::max);
-    let avg_ms = if latencies.is_empty() {
-        None
-    } else {
-        Some(latencies.iter().sum::<f64>() / latencies.len() as f64)
-    };
-    let loss_percent = if sent == 0 {
-        100.0
-    } else {
-        ((sent.saturating_sub(received)) as f64 / sent as f64) * 100.0
-    };
-
-    Some(IcmpPingResult {
-        host: host.to_string(),
-        target_addr,
-        sent,
-        received,
-        loss_percent,
-        min_ms,
-        avg_ms,
-        max_ms,
-        attempts,
-    })
-}
-
-fn resolve_ping_targets(host: &str) -> Result<Vec<(u16, SocketAddr)>, String> {
-    let resolved: Vec<SocketAddr> = (host, 0)
-        .to_socket_addrs()
-        .map_err(|e| {
-            ProbeError::resolve_failed(host, format!("failed to resolve {}: {}", host, e))
-                .to_string()
-        })?
-        .collect();
-    Ok(resolved.into_iter().map(|addr| (0, addr)).collect())
-}
-
 #[cfg(target_os = "linux")]
-fn system_ping(
+fn icmp_ping(
     display_host: &str,
-    command_targets: &[IpAddr],
-    timeout: Duration,
-    count: usize,
-) -> Result<Value, String> {
-    if command_targets.len() == 1 {
-        let result = run_linux_ping(display_host, command_targets[0], timeout, count)
-            .map_err(|err| err.to_string())?;
-        return Ok(Value::Map(icmp_ping_result_map(result)));
-    }
-
-    let started = Instant::now();
-    let discovery_timeout = ping_timeout_slice(timeout, command_targets.len());
-    let mut results = Vec::new();
-    let mut last_error = None;
-
-    for command_target in command_targets {
-        match run_linux_ping(display_host, *command_target, discovery_timeout, 1) {
-            Ok(result) if result.received > 0 => {
-                results.push(result);
-                let sent: usize = results.iter().map(|result| result.sent).sum();
-                let remaining_count = count.saturating_sub(sent);
-                if remaining_count > 0 {
-                    if let Some(remaining_timeout) = timeout.checked_sub(started.elapsed()) {
-                        let result = run_linux_ping(
-                            display_host,
-                            *command_target,
-                            remaining_timeout,
-                            remaining_count,
-                        )
-                        .map_err(|err| err.to_string())?;
-                        results.push(result);
-                    }
-                }
-                return Ok(Value::Map(icmp_ping_result_map(
-                    merge_icmp_ping_results(display_host, results).expect("ping result recorded"),
-                )));
-            }
-            Ok(result) => results.push(result),
-            Err(err) => last_error = Some(err),
-        }
-    }
-
-    if let Some(result) = merge_icmp_ping_results(display_host, results) {
-        return Ok(Value::Map(icmp_ping_result_map(result)));
-    }
-
-    Err(last_error
-        .unwrap_or_else(|| {
-            ProbeError::resolve_failed(
-                display_host,
-                "failed to resolve target: resolver returned no usable addresses",
-            )
-        })
-        .to_string())
+    target_ip: IpAddr,
+    options: &ProbeOptions,
+) -> Result<IcmpPingResult, ProbeError> {
+    run_linux_ping(display_host, target_ip, options.timeout, options.count)
 }
 
 #[cfg(target_os = "linux")]
@@ -1447,88 +1336,14 @@ fn ping_timeout_secs(timeout: Duration) -> u64 {
 }
 
 #[cfg(target_os = "linux")]
-fn ping_timeout_slice(timeout: Duration, target_count: usize) -> Duration {
-    let target_count = target_count.max(1) as u128;
-    let timeout_ms = timeout.as_millis().max(1);
-    let slice_ms = timeout_ms.saturating_add(target_count - 1) / target_count;
-    Duration::from_millis(slice_ms.min(u64::MAX as u128) as u64)
-}
-
-#[cfg(target_os = "linux")]
-struct TimedCommandOutput {
-    output: std::process::Output,
-    timed_out: bool,
-}
-
-#[cfg(target_os = "linux")]
-fn wait_with_timeout(
-    mut child: std::process::Child,
-    timeout: Duration,
-) -> Result<TimedCommandOutput, std::io::Error> {
-    let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output().map(|output| TimedCommandOutput {
-                output,
-                timed_out: false,
-            });
-        }
-        if started.elapsed() >= timeout {
-            match child.kill() {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => {}
-                Err(err) => return Err(err),
-            }
-            return child.wait_with_output().map(|output| TimedCommandOutput {
-                output,
-                timed_out: true,
-            });
-        }
-        let remaining = timeout
-            .checked_sub(started.elapsed())
-            .unwrap_or_else(|| Duration::from_millis(1));
-        thread::sleep(min(Duration::from_millis(5), remaining));
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn linux_ping_timeout_result(
-    display_host: &str,
-    command_target: IpAddr,
-    count: usize,
-) -> IcmpPingResult {
-    let attempts = (1..=count)
-        .map(|seq| IcmpPingAttempt {
-            seq: Some(seq as i64),
-            reachable: false,
-            from: None,
-            ttl: None,
-            latency_ms: None,
-            error: Some("timeout".to_string()),
-        })
-        .collect();
-    IcmpPingResult {
-        host: display_host.to_string(),
-        target_addr: Some(command_target.to_string()),
-        sent: count,
-        received: 0,
-        loss_percent: 100.0,
-        min_ms: None,
-        avg_ms: None,
-        max_ms: None,
-        attempts,
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn run_linux_ping(
     display_host: &str,
-    command_target: IpAddr,
+    target_ip: IpAddr,
     timeout: Duration,
     count: usize,
 ) -> Result<IcmpPingResult, ProbeError> {
     let timeout_secs = ping_timeout_secs(timeout);
-    let child = Command::new("ping")
+    let output = Command::new("ping")
         .arg("-n")
         .arg("-c")
         .arg(count.to_string())
@@ -1537,18 +1352,9 @@ fn run_linux_ping(
         .arg("-w")
         .arg(timeout_secs.to_string())
         .arg("--")
-        .arg(command_target.to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .arg(target_ip.to_string())
+        .output()
         .map_err(|e| {
-            ProbeError::capability_unavailable(
-                ProbeProtocol::Icmp,
-                format!("ICMP ping unavailable: failed to run ping: {}", e),
-            )
-        })?;
-    let TimedCommandOutput { output, timed_out } =
-        wait_with_timeout(child, timeout).map_err(|e| {
             ProbeError::capability_unavailable(
                 ProbeProtocol::Icmp,
                 format!("ICMP ping unavailable: failed to run ping: {}", e),
@@ -1558,17 +1364,6 @@ fn run_linux_ping(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let has_packet_summary = linux_ping_output_has_packet_summary(&stdout);
-    let parsed = parse_linux_ping_output(display_host, &stdout, &stderr, count);
-    if timed_out && !has_packet_summary {
-        if parsed.attempts.is_empty() {
-            return Ok(linux_ping_timeout_result(
-                display_host,
-                command_target,
-                count,
-            ));
-        }
-        return Ok(parsed);
-    }
     if !output.status.success() && !has_packet_summary {
         let message = format!(
             "ICMP ping unavailable: system ping failed: {}",
@@ -1577,44 +1372,44 @@ fn run_linux_ping(
         return Err(icmp_ping_process_error(message));
     }
 
-    Ok(parsed)
+    Ok(parse_linux_ping_output(
+        display_host,
+        &stdout,
+        &stderr,
+        count,
+    ))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn system_ping(
+fn icmp_ping(
     _display_host: &str,
-    _command_targets: &[IpAddr],
-    _timeout: Duration,
-    _count: usize,
-) -> Result<Value, String> {
+    _target_ip: IpAddr,
+    _options: &ProbeOptions,
+) -> Result<IcmpPingResult, ProbeError> {
     Err(ProbeError::unsupported_platform(
         ProbeProtocol::Icmp,
         "ICMP ping unavailable on this platform",
-    )
-    .to_string())
+    ))
 }
 
 fn icmp_ping_for_host(
     host: &str,
     options: &ProbeOptions,
 ) -> Result<HashMap<String, Value>, String> {
-    let targets = resolve_ping_targets(host)?;
-    enforce_resolved_target_policy(&targets, options.allow_private)?;
-    let command_targets = validated_probe_ips(&targets)?;
-    match system_ping(host, &command_targets, options.timeout, options.count)? {
-        Value::Map(map) => Ok(map),
-        other => Err(ProbeError::unexpected_result(
-            ProbeProtocol::Icmp,
-            format!(
-                "ICMP ping unavailable: unexpected ping result {}",
-                other.type_name()
-            ),
-        )
-        .to_string()),
-    }
+    let targets = resolve_probe_targets(host, &[0], options.allow_private)?;
+    let target_ip = unique_target_ips(&targets)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| empty_probe_targets_error().to_string())?;
+    let result = icmp_ping(host, target_ip, options).map_err(|err| err.to_string())?;
+    Ok(icmp_ping_result_map(result))
 }
 
-fn validated_probe_ips(targets: &[(u16, SocketAddr)]) -> Result<Vec<IpAddr>, String> {
+fn empty_probe_targets_error() -> ProbeError {
+    ProbeError::resolve_failed("failed to resolve target: resolver returned no usable addresses")
+}
+
+fn unique_target_ips(targets: &[(u16, SocketAddr)]) -> Result<Vec<IpAddr>, String> {
     let mut ips = Vec::new();
     for (_, addr) in targets {
         let ip = addr.ip();
@@ -1623,11 +1418,7 @@ fn validated_probe_ips(targets: &[(u16, SocketAddr)]) -> Result<Vec<IpAddr>, Str
         }
     }
     if ips.is_empty() {
-        return Err(ProbeError::resolve_failed(
-            "",
-            "failed to resolve target: resolver returned no usable addresses",
-        )
-        .to_string());
+        return Err(empty_probe_targets_error().to_string());
     }
     Ok(ips)
 }
@@ -1917,8 +1708,7 @@ fn tcp_reachability_attempts_for_host(
     interval: Duration,
     allow_private: bool,
 ) -> Result<Vec<TcpProbeResult>, String> {
-    let targets = resolve_tcp_targets(host, ports)?;
-    enforce_resolved_target_policy(&targets, allow_private)?;
+    let targets = resolve_probe_targets(host, ports, allow_private)?;
     Ok(tcp_reachability_attempts(
         &targets, timeout, count, interval,
     ))
@@ -2077,22 +1867,27 @@ fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> Tc
     }
 }
 
-fn resolve_tcp_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, SocketAddr)>, String> {
+fn resolve_probe_targets(
+    host: &str,
+    ports: &[u16],
+    allow_private: bool,
+) -> Result<Vec<(u16, SocketAddr)>, String> {
     let mut targets = Vec::new();
     for port in ports {
-        let target = format!("{}:{}", host, port);
         let addrs: Vec<SocketAddr> = (host, *port)
             .to_socket_addrs()
             .map_err(|e| {
-                ProbeError::resolve_failed(
-                    target.clone(),
-                    format!("failed to resolve {}:{}: {}", host, port, e),
-                )
-                .to_string()
+                let message = if *port == 0 {
+                    format!("failed to resolve {}: {}", host, e)
+                } else {
+                    format!("failed to resolve {}:{}: {}", host, port, e)
+                };
+                ProbeError::resolve_failed(message).to_string()
             })?
             .collect();
         targets.extend(addrs.into_iter().map(|addr| (*port, addr)));
     }
+    enforce_resolved_target_policy(&targets, allow_private)?;
     Ok(targets)
 }
 
@@ -2104,8 +1899,7 @@ fn resolve_port_scan_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, Sock
     let resolved: Vec<SocketAddr> = (host, seed_port)
         .to_socket_addrs()
         .map_err(|e| {
-            ProbeError::resolve_failed(host, format!("failed to resolve {}: {}", host, e))
-                .to_string()
+            ProbeError::resolve_failed(format!("failed to resolve {}: {}", host, e)).to_string()
         })?
         .collect();
 
@@ -2585,7 +2379,6 @@ fn enforce_target_policy_error(ip: IpAddr, allow_private: bool) -> Result<(), Pr
         || classification.is_broadcast;
     if never_allowed {
         return Err(ProbeError::policy_denied(
-            ip.to_string(),
             "Network target denied by policy: special-purpose targets are not allowed",
         ));
     }
@@ -2599,7 +2392,6 @@ fn enforce_target_policy_error(ip: IpAddr, allow_private: bool) -> Result<(), Pr
     }
     if !allow_private || !process_allows_private_targets() {
         return Err(ProbeError::policy_denied(
-            ip.to_string(),
             "Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1",
         ));
     }
@@ -3044,14 +2836,14 @@ mod tests {
     }
 
     #[test]
-    fn ping_uses_policy_validated_ips_as_command_targets() {
+    fn unique_target_ips_preserves_resolver_order_without_duplicates() {
         let public_v6 = "[2001:4860:4860::8888]:0".parse::<SocketAddr>().unwrap();
         let public_v4 = "93.184.216.34:0".parse::<SocketAddr>().unwrap();
         let duplicate_v4 = "93.184.216.34:0".parse::<SocketAddr>().unwrap();
         let targets = [(0, public_v6), (0, public_v4), (0, duplicate_v4)];
 
         assert_eq!(
-            validated_probe_ips(&targets).unwrap(),
+            unique_target_ips(&targets).unwrap(),
             vec![
                 "2001:4860:4860::8888".parse::<IpAddr>().unwrap(),
                 "93.184.216.34".parse::<IpAddr>().unwrap(),
@@ -3060,114 +2852,13 @@ mod tests {
     }
 
     #[test]
-    fn ping_command_targets_reject_empty_resolution_set() {
-        let err = validated_probe_ips(&[]).unwrap_err();
+    fn unique_target_ips_rejects_empty_resolution_set() {
+        let err = unique_target_ips(&[]).unwrap_err();
 
         assert_eq!(
             err,
             "failed to resolve target: resolver returned no usable addresses"
         );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn ping_timeout_slice_shares_discovery_timeout_across_targets() {
-        assert_eq!(ping_timeout_secs(Duration::from_millis(2_000)), 2);
-        assert_eq!(
-            ping_timeout_slice(Duration::from_millis(2_000), 1),
-            Duration::from_millis(2_000)
-        );
-        assert_eq!(
-            ping_timeout_slice(Duration::from_millis(2_000), 2),
-            Duration::from_millis(1_000)
-        );
-        assert_eq!(
-            ping_timeout_slice(Duration::from_millis(3_500), 2),
-            Duration::from_millis(1_750)
-        );
-        assert_eq!(
-            ping_timeout_slice(Duration::from_millis(50), 4),
-            Duration::from_millis(13)
-        );
-        assert_eq!(
-            ping_timeout_slice(Duration::from_millis(2_000), 0),
-            Duration::from_millis(2_000)
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_ping_timeout_result_reports_attempt_timeout() {
-        let result =
-            linux_ping_timeout_result("example.com", "93.184.216.34".parse::<IpAddr>().unwrap(), 2);
-
-        assert_eq!(result.sent, 2);
-        assert_eq!(result.received, 0);
-        assert_eq!(result.loss_percent, 100.0);
-        assert_eq!(result.target_addr.as_deref(), Some("93.184.216.34"));
-        assert_eq!(result.attempts.len(), 2);
-        assert_eq!(result.attempts[0].error.as_deref(), Some("timeout"));
-    }
-
-    #[test]
-    fn merged_ping_results_report_aggregate_attempts_and_reachable_target() {
-        let first = IcmpPingResult {
-            host: "example.com".to_string(),
-            target_addr: Some("2001:db8::1".to_string()),
-            sent: 1,
-            received: 0,
-            loss_percent: 100.0,
-            min_ms: None,
-            avg_ms: None,
-            max_ms: None,
-            attempts: vec![IcmpPingAttempt {
-                seq: Some(1),
-                reachable: false,
-                from: None,
-                ttl: None,
-                latency_ms: None,
-                error: Some("timeout".to_string()),
-            }],
-        };
-        let second = IcmpPingResult {
-            host: "example.com".to_string(),
-            target_addr: Some("93.184.216.34".to_string()),
-            sent: 2,
-            received: 2,
-            loss_percent: 0.0,
-            min_ms: Some(10.0),
-            avg_ms: Some(12.0),
-            max_ms: Some(14.0),
-            attempts: vec![
-                IcmpPingAttempt {
-                    seq: Some(1),
-                    reachable: true,
-                    from: Some("93.184.216.34".to_string()),
-                    ttl: Some(57),
-                    latency_ms: Some(10.0),
-                    error: None,
-                },
-                IcmpPingAttempt {
-                    seq: Some(2),
-                    reachable: true,
-                    from: Some("93.184.216.34".to_string()),
-                    ttl: Some(57),
-                    latency_ms: Some(14.0),
-                    error: None,
-                },
-            ],
-        };
-
-        let merged = merge_icmp_ping_results("example.com", vec![first, second]).unwrap();
-
-        assert_eq!(merged.sent, 3);
-        assert_eq!(merged.received, 2);
-        assert!((merged.loss_percent - (100.0 / 3.0)).abs() < 1e-9);
-        assert_eq!(merged.target_addr.as_deref(), Some("93.184.216.34"));
-        assert_eq!(merged.attempts.len(), 3);
-        assert_eq!(merged.min_ms, Some(10.0));
-        assert_eq!(merged.avg_ms, Some(12.0));
-        assert_eq!(merged.max_ms, Some(14.0));
     }
 
     #[test]
@@ -3206,8 +2897,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_ping_targets_accepts_ipv6_literals() {
-        let targets = resolve_ping_targets("::1").unwrap();
+    fn resolve_probe_targets_accepts_ipv6_literals() {
+        let targets = resolve_probe_targets("2001:4860:4860::8888", &[0], false).unwrap();
         assert!(targets.iter().any(|(_, addr)| addr.ip().is_ipv6()));
     }
 

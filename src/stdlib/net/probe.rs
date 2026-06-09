@@ -25,14 +25,12 @@ pub(super) enum ProbeErrorKind {
     #[cfg(not(target_os = "linux"))]
     UnsupportedPlatform,
     SystemFailure,
-    UnexpectedResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ProbeError {
     kind: ProbeErrorKind,
     protocol: Option<ProbeProtocol>,
-    target: Option<String>,
     message: String,
 }
 
@@ -40,33 +38,21 @@ impl ProbeError {
     pub(super) fn new(
         kind: ProbeErrorKind,
         protocol: Option<ProbeProtocol>,
-        target: Option<String>,
         message: impl Into<String>,
     ) -> Self {
         Self {
             kind,
             protocol,
-            target,
             message: message.into(),
         }
     }
 
-    pub(super) fn resolve_failed(target: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(
-            ProbeErrorKind::ResolveFailed,
-            None,
-            Some(target.into()),
-            message,
-        )
+    pub(super) fn resolve_failed(message: impl Into<String>) -> Self {
+        Self::new(ProbeErrorKind::ResolveFailed, None, message)
     }
 
-    pub(super) fn policy_denied(target: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(
-            ProbeErrorKind::PolicyDenied,
-            None,
-            Some(target.into()),
-            message,
-        )
+    pub(super) fn policy_denied(message: impl Into<String>) -> Self {
+        Self::new(ProbeErrorKind::PolicyDenied, None, message)
     }
 
     pub(super) fn capability_unavailable(
@@ -76,18 +62,12 @@ impl ProbeError {
         Self::new(
             ProbeErrorKind::CapabilityUnavailable,
             Some(protocol),
-            None,
             message,
         )
     }
 
     pub(super) fn permission_denied(protocol: ProbeProtocol, message: impl Into<String>) -> Self {
-        Self::new(
-            ProbeErrorKind::PermissionDenied,
-            Some(protocol),
-            None,
-            message,
-        )
+        Self::new(ProbeErrorKind::PermissionDenied, Some(protocol), message)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -95,25 +75,11 @@ impl ProbeError {
         protocol: ProbeProtocol,
         message: impl Into<String>,
     ) -> Self {
-        Self::new(
-            ProbeErrorKind::UnsupportedPlatform,
-            Some(protocol),
-            None,
-            message,
-        )
+        Self::new(ProbeErrorKind::UnsupportedPlatform, Some(protocol), message)
     }
 
     pub(super) fn system_failure(protocol: ProbeProtocol, message: impl Into<String>) -> Self {
-        Self::new(ProbeErrorKind::SystemFailure, Some(protocol), None, message)
-    }
-
-    pub(super) fn unexpected_result(protocol: ProbeProtocol, message: impl Into<String>) -> Self {
-        Self::new(
-            ProbeErrorKind::UnexpectedResult,
-            Some(protocol),
-            None,
-            message,
-        )
+        Self::new(ProbeErrorKind::SystemFailure, Some(protocol), message)
     }
 
     #[cfg(test)]
