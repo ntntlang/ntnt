@@ -1347,6 +1347,7 @@ fn icmp_ping(
                 display_host,
                 *target_ip,
                 format!("ICMP ping failed: {}", err),
+                options.count,
             ),
             Err(err) => {
                 first_fatal_error.get_or_insert(err);
@@ -1383,6 +1384,7 @@ fn run_native_ping(
                 display_host,
                 target_ip,
                 format!("ICMP ping failed: {}", err),
+                count,
             ));
         }
         Err(err) => return Err(native_ping_socket_error(err)),
@@ -1394,14 +1396,30 @@ fn run_native_ping(
         .map(|addr| addr.ip());
     let ident = icmp_ident_for_socket(&socket).unwrap_or_else(next_icmp_ident);
     let count = count.max(1);
+    let deadline = Instant::now() + timeout;
     let payload = [0u8; 56];
     let mut attempts = Vec::new();
     let mut latencies = Vec::new();
 
     for seq in 1..=count {
         let sequence = (seq.min(u16::MAX as usize)) as u16;
+        let remaining_attempts = count.saturating_sub(seq).saturating_add(1);
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(format!(
+                "ICMP ping timed out before completing requested count: sent {} of {}",
+                attempts.len(),
+                count
+            ));
+        };
+        let per_attempt_timeout = ping_attempt_budget(remaining, remaining_attempts, interval)?;
         match send_ping_attempt(
-            &socket, target_ip, local_ip, ident, sequence, &payload, timeout,
+            &socket,
+            target_ip,
+            local_ip,
+            ident,
+            sequence,
+            &payload,
+            per_attempt_timeout,
         ) {
             Ok(Some(reply)) => {
                 latencies.push(reply.latency_ms);
@@ -1436,6 +1454,20 @@ fn run_native_ping(
         }
 
         if seq < count && !interval.is_zero() {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(format!(
+                    "ICMP ping timed out before completing requested count: sent {} of {}",
+                    attempts.len(),
+                    count
+                ));
+            };
+            if remaining < interval {
+                return Err(format!(
+                    "ICMP ping timeout_ms is too small for count {} and interval_ms {}",
+                    count,
+                    interval.as_millis()
+                ));
+            }
             thread::sleep(interval);
         }
     }
@@ -1446,6 +1478,29 @@ fn run_native_ping(
         attempts,
         latencies,
     ))
+}
+
+fn ping_attempt_budget(
+    remaining: Duration,
+    remaining_attempts: usize,
+    interval: Duration,
+) -> Result<Duration, String> {
+    let attempts = remaining_attempts.max(1);
+    let future_intervals = interval
+        .checked_mul(attempts.saturating_sub(1) as u32)
+        .ok_or_else(|| "ICMP ping interval budget overflowed".to_string())?;
+    if remaining <= future_intervals {
+        return Err(format!(
+            "ICMP ping timeout_ms is too small for count {} and interval_ms {}",
+            remaining_attempts,
+            interval.as_millis()
+        ));
+    }
+    let probe_budget = (remaining - future_intervals) / (attempts as u32);
+    if probe_budget.is_zero() {
+        return Err("ICMP ping timeout_ms is too small to send requested probes".to_string());
+    }
+    Ok(probe_budget)
 }
 
 fn next_icmp_ident() -> u16 {
@@ -1844,24 +1899,33 @@ fn icmp_target_failure(message: &str) -> bool {
         || lower.contains("icmp error from")
 }
 
-fn failed_ping_result(host: &str, target_ip: IpAddr, message: String) -> IcmpPingResult {
+fn failed_ping_result(
+    host: &str,
+    target_ip: IpAddr,
+    message: String,
+    count: usize,
+) -> IcmpPingResult {
+    let count = count.max(1);
+    let attempts = (1..=count)
+        .map(|seq| IcmpPingAttempt {
+            seq: Some(seq as i64),
+            reachable: false,
+            from: Some(target_ip.to_string()),
+            ttl: None,
+            latency_ms: None,
+            error: Some(message.clone()),
+        })
+        .collect();
     IcmpPingResult {
         host: host.to_string(),
         target_addr: Some(target_ip.to_string()),
-        sent: 1,
+        sent: count,
         received: 0,
         loss_percent: 100.0,
         min_ms: None,
         avg_ms: None,
         max_ms: None,
-        attempts: vec![IcmpPingAttempt {
-            seq: None,
-            reachable: false,
-            from: Some(target_ip.to_string()),
-            ttl: None,
-            latency_ms: None,
-            error: Some(message),
-        }],
+        attempts,
     }
 }
 
@@ -3215,11 +3279,34 @@ mod tests {
     }
 
     #[test]
+    fn failed_ping_result_preserves_requested_count() {
+        let result = failed_ping_result(
+            "example.com",
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            "ICMP ping failed: Network is unreachable".to_string(),
+            3,
+        );
+
+        assert_eq!(result.sent, 3);
+        assert_eq!(result.received, 0);
+        assert_eq!(result.attempts.len(), 3);
+        assert_eq!(result.attempts[2].seq, Some(3));
+    }
+
+    #[test]
+    fn ping_attempt_budget_rejects_impossible_count_interval() {
+        let err = ping_attempt_budget(Duration::from_millis(100), 3, Duration::from_millis(60))
+            .unwrap_err();
+        assert!(err.contains("timeout_ms is too small"));
+    }
+
+    #[test]
     fn target_ping_failure_can_be_aggregated_with_later_success() {
         let failed = failed_ping_result(
             "example.com",
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             "ICMP ping failed: Network is unreachable".to_string(),
+            1,
         );
         let success = finish_icmp_ping_result(
             "example.com",
