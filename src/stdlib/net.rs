@@ -766,8 +766,8 @@ fn ping_fn(args: &[Value]) -> Result<Value, IntentError> {
         let options = parse_probe_options(opts)?;
         let targets = resolve_ping_targets(host)?;
         enforce_resolved_target_policy(&targets, options.allow_private)?;
-        let command_target = validated_probe_ip(&targets)?;
-        system_ping(host, command_target, options.timeout, options.count)
+        let command_targets = validated_probe_ips(&targets)?;
+        system_ping(host, &command_targets, options.timeout, options.count)
     })()))
 }
 
@@ -1334,7 +1334,7 @@ fn resolve_ping_targets(host: &str) -> Result<Vec<(u16, SocketAddr)>, String> {
 #[cfg(target_os = "linux")]
 fn system_ping(
     display_host: &str,
-    command_target: IpAddr,
+    command_targets: &[IpAddr],
     timeout: Duration,
     count: usize,
 ) -> Result<Value, String> {
@@ -1344,6 +1344,40 @@ fn system_ping(
             .as_secs()
             .saturating_add(if timeout.subsec_millis() > 0 { 1 } else { 0 }),
     );
+
+    let mut last_result = None;
+    let mut last_error = None;
+    for command_target in command_targets {
+        match run_linux_ping(display_host, *command_target, timeout_secs, count) {
+            Ok(result) if result.received > 0 => {
+                return Ok(Value::Map(icmp_ping_result_map(result)))
+            }
+            Ok(result) => last_result = Some(result),
+            Err(err) => last_error = Some(err),
+        }
+    }
+
+    if let Some(result) = last_result {
+        return Ok(Value::Map(icmp_ping_result_map(result)));
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| {
+            ProbeError::resolve_failed(
+                display_host,
+                "failed to resolve target: resolver returned no usable addresses",
+            )
+        })
+        .to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_ping(
+    display_host: &str,
+    command_target: IpAddr,
+    timeout_secs: u64,
+    count: usize,
+) -> Result<IcmpPingResult, ProbeError> {
     let output = Command::new("ping")
         .arg("-n")
         .arg("-c")
@@ -1358,7 +1392,6 @@ fn system_ping(
                 ProbeProtocol::Icmp,
                 format!("ICMP ping unavailable: failed to run ping: {}", e),
             )
-            .to_string()
         })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1368,17 +1401,21 @@ fn system_ping(
             "ICMP ping unavailable: system ping failed: {}",
             ping_failure_message(&stdout, &stderr, output.status.code())
         );
-        return Err(icmp_ping_process_error(message).to_string());
+        return Err(icmp_ping_process_error(message));
     }
 
-    let parsed = parse_linux_ping_output(display_host, &stdout, &stderr, count);
-    Ok(Value::Map(icmp_ping_result_map(parsed)))
+    Ok(parse_linux_ping_output(
+        display_host,
+        &stdout,
+        &stderr,
+        count,
+    ))
 }
 
 #[cfg(not(target_os = "linux"))]
 fn system_ping(
     _display_host: &str,
-    _command_target: IpAddr,
+    _command_targets: &[IpAddr],
     _timeout: Duration,
     _count: usize,
 ) -> Result<Value, String> {
@@ -1395,8 +1432,8 @@ fn icmp_ping_for_host(
 ) -> Result<HashMap<String, Value>, String> {
     let targets = resolve_ping_targets(host)?;
     enforce_resolved_target_policy(&targets, options.allow_private)?;
-    let command_target = validated_probe_ip(&targets)?;
-    match system_ping(host, command_target, options.timeout, options.count)? {
+    let command_targets = validated_probe_ips(&targets)?;
+    match system_ping(host, &command_targets, options.timeout, options.count)? {
         Value::Map(map) => Ok(map),
         other => Err(ProbeError::unexpected_result(
             ProbeProtocol::Icmp,
@@ -1409,14 +1446,22 @@ fn icmp_ping_for_host(
     }
 }
 
-fn validated_probe_ip(targets: &[(u16, SocketAddr)]) -> Result<IpAddr, String> {
-    targets.first().map(|(_, addr)| addr.ip()).ok_or_else(|| {
-        ProbeError::resolve_failed(
+fn validated_probe_ips(targets: &[(u16, SocketAddr)]) -> Result<Vec<IpAddr>, String> {
+    let mut ips = Vec::new();
+    for (_, addr) in targets {
+        let ip = addr.ip();
+        if !ips.contains(&ip) {
+            ips.push(ip);
+        }
+    }
+    if ips.is_empty() {
+        return Err(ProbeError::resolve_failed(
             "",
             "failed to resolve target: resolver returned no usable addresses",
         )
-        .to_string()
-    })
+        .to_string());
+    }
+    Ok(ips)
 }
 
 fn linux_ping_output_has_packet_summary(output: &str) -> bool {
@@ -2818,19 +2863,24 @@ mod tests {
     }
 
     #[test]
-    fn ping_uses_policy_validated_ip_as_command_target() {
-        let public = "93.184.216.34:0".parse::<SocketAddr>().unwrap();
-        let targets = [(0, public)];
+    fn ping_uses_policy_validated_ips_as_command_targets() {
+        let public_v6 = "[2001:4860:4860::8888]:0".parse::<SocketAddr>().unwrap();
+        let public_v4 = "93.184.216.34:0".parse::<SocketAddr>().unwrap();
+        let duplicate_v4 = "93.184.216.34:0".parse::<SocketAddr>().unwrap();
+        let targets = [(0, public_v6), (0, public_v4), (0, duplicate_v4)];
 
         assert_eq!(
-            validated_probe_ip(&targets).unwrap(),
-            "93.184.216.34".parse::<IpAddr>().unwrap()
+            validated_probe_ips(&targets).unwrap(),
+            vec![
+                "2001:4860:4860::8888".parse::<IpAddr>().unwrap(),
+                "93.184.216.34".parse::<IpAddr>().unwrap(),
+            ]
         );
     }
 
     #[test]
-    fn ping_command_target_rejects_empty_resolution_set() {
-        let err = validated_probe_ip(&[]).unwrap_err();
+    fn ping_command_targets_reject_empty_resolution_set() {
+        let err = validated_probe_ips(&[]).unwrap_err();
 
         assert_eq!(
             err,
