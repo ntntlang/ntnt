@@ -1320,6 +1320,52 @@ struct IcmpPingResult {
     attempts: Vec<IcmpPingAttempt>,
 }
 
+fn merge_icmp_ping_results(host: &str, results: Vec<IcmpPingResult>) -> Option<IcmpPingResult> {
+    if results.is_empty() {
+        return None;
+    }
+
+    let sent: usize = results.iter().map(|result| result.sent).sum();
+    let received: usize = results.iter().map(|result| result.received).sum();
+    let target_addr = results
+        .iter()
+        .find(|result| result.received > 0)
+        .and_then(|result| result.target_addr.clone())
+        .or_else(|| results.iter().find_map(|result| result.target_addr.clone()));
+    let attempts: Vec<IcmpPingAttempt> = results
+        .into_iter()
+        .flat_map(|result| result.attempts)
+        .collect();
+    let latencies: Vec<f64> = attempts
+        .iter()
+        .filter_map(|attempt| attempt.latency_ms)
+        .collect();
+    let min_ms = latencies.iter().copied().reduce(f64::min);
+    let max_ms = latencies.iter().copied().reduce(f64::max);
+    let avg_ms = if latencies.is_empty() {
+        None
+    } else {
+        Some(latencies.iter().sum::<f64>() / latencies.len() as f64)
+    };
+    let loss_percent = if sent == 0 {
+        100.0
+    } else {
+        ((sent.saturating_sub(received)) as f64 / sent as f64) * 100.0
+    };
+
+    Some(IcmpPingResult {
+        host: host.to_string(),
+        target_addr,
+        sent,
+        received,
+        loss_percent,
+        min_ms,
+        avg_ms,
+        max_ms,
+        attempts,
+    })
+}
+
 fn resolve_ping_targets(host: &str) -> Result<Vec<(u16, SocketAddr)>, String> {
     let resolved: Vec<SocketAddr> = (host, 0)
         .to_socket_addrs()
@@ -1338,26 +1384,49 @@ fn system_ping(
     timeout: Duration,
     count: usize,
 ) -> Result<Value, String> {
-    let timeout_secs = max(
-        1,
-        timeout
-            .as_secs()
-            .saturating_add(if timeout.subsec_millis() > 0 { 1 } else { 0 }),
-    );
-
-    let mut last_result = None;
+    let deadline = Instant::now() + timeout;
+    let mut results = Vec::new();
+    let mut sent = 0usize;
     let mut last_error = None;
+
     for command_target in command_targets {
-        match run_linux_ping(display_host, *command_target, timeout_secs, count) {
+        if sent >= count {
+            break;
+        }
+        let Some(timeout_secs) = ping_remaining_timeout_secs(deadline) else {
+            break;
+        };
+        let probe_count = ping_probe_count_for_target(command_targets.len(), sent, count);
+        match run_linux_ping(display_host, *command_target, timeout_secs, probe_count) {
             Ok(result) if result.received > 0 => {
-                return Ok(Value::Map(icmp_ping_result_map(result)))
+                sent += result.sent;
+                results.push(result);
+                let remaining_count = count.saturating_sub(sent);
+                if remaining_count > 0 {
+                    if let Some(timeout_secs) = ping_remaining_timeout_secs(deadline) {
+                        if let Ok(result) = run_linux_ping(
+                            display_host,
+                            *command_target,
+                            timeout_secs,
+                            remaining_count,
+                        ) {
+                            results.push(result);
+                        }
+                    }
+                }
+                return Ok(Value::Map(icmp_ping_result_map(
+                    merge_icmp_ping_results(display_host, results).expect("ping result recorded"),
+                )));
             }
-            Ok(result) => last_result = Some(result),
+            Ok(result) => {
+                sent += result.sent;
+                results.push(result);
+            }
             Err(err) => last_error = Some(err),
         }
     }
 
-    if let Some(result) = last_result {
+    if let Some(result) = merge_icmp_ping_results(display_host, results) {
         return Ok(Value::Map(icmp_ping_result_map(result)));
     }
 
@@ -1372,6 +1441,30 @@ fn system_ping(
 }
 
 #[cfg(target_os = "linux")]
+fn ping_probe_count_for_target(target_count: usize, sent: usize, requested_count: usize) -> usize {
+    let remaining = requested_count.saturating_sub(sent);
+    if target_count <= 1 {
+        remaining
+    } else {
+        remaining.min(1)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ping_remaining_timeout_secs(deadline: Instant) -> Option<u64> {
+    let remaining = deadline.checked_duration_since(Instant::now())?;
+    if remaining.is_zero() {
+        return None;
+    }
+    Some(max(
+        1,
+        remaining
+            .as_secs()
+            .saturating_add(if remaining.subsec_millis() > 0 { 1 } else { 0 }),
+    ))
+}
+
+#[cfg(target_os = "linux")]
 fn run_linux_ping(
     display_host: &str,
     command_target: IpAddr,
@@ -1383,6 +1476,8 @@ fn run_linux_ping(
         .arg("-c")
         .arg(count.to_string())
         .arg("-W")
+        .arg(timeout_secs.to_string())
+        .arg("-w")
         .arg(timeout_secs.to_string())
         .arg("--")
         .arg(command_target.to_string())
@@ -2886,6 +2981,76 @@ mod tests {
             err,
             "failed to resolve target: resolver returned no usable addresses"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ping_probe_count_shares_requested_count_across_targets() {
+        assert_eq!(ping_probe_count_for_target(1, 0, 3), 3);
+        assert_eq!(ping_probe_count_for_target(2, 0, 3), 1);
+        assert_eq!(ping_probe_count_for_target(2, 2, 3), 1);
+        assert_eq!(ping_probe_count_for_target(2, 3, 3), 0);
+    }
+
+    #[test]
+    fn merged_ping_results_report_aggregate_attempts_and_reachable_target() {
+        let first = IcmpPingResult {
+            host: "example.com".to_string(),
+            target_addr: Some("2001:db8::1".to_string()),
+            sent: 1,
+            received: 0,
+            loss_percent: 100.0,
+            min_ms: None,
+            avg_ms: None,
+            max_ms: None,
+            attempts: vec![IcmpPingAttempt {
+                seq: Some(1),
+                reachable: false,
+                from: None,
+                ttl: None,
+                latency_ms: None,
+                error: Some("timeout".to_string()),
+            }],
+        };
+        let second = IcmpPingResult {
+            host: "example.com".to_string(),
+            target_addr: Some("93.184.216.34".to_string()),
+            sent: 2,
+            received: 2,
+            loss_percent: 0.0,
+            min_ms: Some(10.0),
+            avg_ms: Some(12.0),
+            max_ms: Some(14.0),
+            attempts: vec![
+                IcmpPingAttempt {
+                    seq: Some(1),
+                    reachable: true,
+                    from: Some("93.184.216.34".to_string()),
+                    ttl: Some(57),
+                    latency_ms: Some(10.0),
+                    error: None,
+                },
+                IcmpPingAttempt {
+                    seq: Some(2),
+                    reachable: true,
+                    from: Some("93.184.216.34".to_string()),
+                    ttl: Some(57),
+                    latency_ms: Some(14.0),
+                    error: None,
+                },
+            ],
+        };
+
+        let merged = merge_icmp_ping_results("example.com", vec![first, second]).unwrap();
+
+        assert_eq!(merged.sent, 3);
+        assert_eq!(merged.received, 2);
+        assert!((merged.loss_percent - (100.0 / 3.0)).abs() < 1e-9);
+        assert_eq!(merged.target_addr.as_deref(), Some("93.184.216.34"));
+        assert_eq!(merged.attempts.len(), 3);
+        assert_eq!(merged.min_ms, Some(10.0));
+        assert_eq!(merged.avg_ms, Some(12.0));
+        assert_eq!(merged.max_ms, Some(14.0));
     }
 
     #[test]
