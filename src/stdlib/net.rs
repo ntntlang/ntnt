@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 #[cfg(target_os = "linux")]
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
@@ -1430,8 +1430,10 @@ fn run_command_with_deadline(
         .stderr(Stdio::piped())
         .spawn()?;
     let mut timed_out = false;
+    let mut status: Option<ExitStatus> = None;
     loop {
-        if child.try_wait()?.is_some() {
+        if let Some(child_status) = child.try_wait()? {
+            status = Some(child_status);
             break;
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -1442,7 +1444,10 @@ fn run_command_with_deadline(
         thread::sleep(min(Duration::from_millis(5), remaining));
     }
 
-    let status = child.wait()?;
+    let status = match status {
+        Some(child_status) => child_status,
+        None => child.wait()?,
+    };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     if let Some(mut pipe) = child.stdout.take() {
@@ -2068,20 +2073,33 @@ fn resolve_probe_targets(
     ports: &[u16],
     allow_private: bool,
 ) -> Result<Vec<(u16, SocketAddr)>, String> {
-    let mut targets = Vec::new();
+    let Some(seed_port) = ports.first().copied() else {
+        return Ok(Vec::new());
+    };
+
+    let resolved: Vec<SocketAddr> = (host, seed_port)
+        .to_socket_addrs()
+        .map_err(|e| {
+            let message = if seed_port == 0 {
+                format!("failed to resolve {}: {}", host, e)
+            } else {
+                format!("failed to resolve {}:{}: {}", host, seed_port, e)
+            };
+            ProbeError::resolve_failed(message).to_string()
+        })?
+        .collect();
+
+    let mut ips = Vec::with_capacity(resolved.len());
+    let mut seen = HashSet::with_capacity(resolved.len());
+    for addr in resolved {
+        if seen.insert(addr.ip()) {
+            ips.push(addr.ip());
+        }
+    }
+
+    let mut targets = Vec::with_capacity(ports.len() * ips.len());
     for port in ports {
-        let addrs: Vec<SocketAddr> = (host, *port)
-            .to_socket_addrs()
-            .map_err(|e| {
-                let message = if *port == 0 {
-                    format!("failed to resolve {}: {}", host, e)
-                } else {
-                    format!("failed to resolve {}:{}: {}", host, port, e)
-                };
-                ProbeError::resolve_failed(message).to_string()
-            })?
-            .collect();
-        targets.extend(addrs.into_iter().map(|addr| (*port, addr)));
+        targets.extend(ips.iter().map(|ip| (*port, SocketAddr::new(*ip, *port))));
     }
     enforce_resolved_target_policy(&targets, allow_private)?;
     Ok(targets)
@@ -3220,6 +3238,19 @@ mod tests {
     fn resolve_probe_targets_accepts_ipv6_literals() {
         let targets = resolve_probe_targets("2001:4860:4860::8888", &[0], false).unwrap();
         assert!(targets.iter().any(|(_, addr)| addr.ip().is_ipv6()));
+    }
+
+    #[test]
+    fn resolve_probe_targets_resolves_once_then_pairs_ports() {
+        let targets = resolve_probe_targets("93.184.216.34", &[80, 443], false).unwrap();
+
+        assert_eq!(
+            targets,
+            vec![
+                (80, "93.184.216.34:80".parse::<SocketAddr>().unwrap()),
+                (443, "93.184.216.34:443".parse::<SocketAddr>().unwrap()),
+            ]
+        );
     }
 
     #[test]
