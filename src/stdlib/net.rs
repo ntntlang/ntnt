@@ -1411,10 +1411,10 @@ fn run_linux_ping(
             "ICMP ping unavailable: system ping failed: {}",
             ping_failure_message(&stdout, &stderr, output.status.code())
         );
-        if linux_ping_permission_error(&message) {
-            return Err(icmp_ping_process_error(message));
+        if linux_ping_target_failure(&message) {
+            return Ok(failed_ping_result(display_host, target_ip, message));
         }
-        return Ok(failed_ping_result(display_host, target_ip, message));
+        return Err(icmp_ping_process_error(message));
     }
 
     Ok(result)
@@ -1632,6 +1632,15 @@ fn linux_ping_permission_error(message: &str) -> bool {
     lower.contains("operation not permitted")
         || lower.contains("permission denied")
         || lower.contains("cap_net_raw")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ping_target_failure(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("network is unreachable")
+        || lower.contains("no route to host")
+        || lower.contains("destination host unreachable")
+        || lower.contains("destination net unreachable")
 }
 
 #[cfg(target_os = "linux")]
@@ -3070,6 +3079,23 @@ mod tests {
         assert!(matches!(
             result.attempts.first().and_then(|attempt| attempt.error.as_deref()),
             Some(message) if message.contains("Network is unreachable")
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_ping_failure_classifier_separates_target_from_backend_errors() {
+        assert!(linux_ping_target_failure(
+            "ICMP ping unavailable: system ping failed: connect: Network is unreachable"
+        ));
+        assert!(linux_ping_target_failure(
+            "ICMP ping unavailable: system ping failed: connect: No route to host"
+        ));
+        assert!(!linux_ping_target_failure(
+            "ICMP ping unavailable: system ping failed: ping: invalid option -- '-'"
+        ));
+        assert!(!linux_ping_target_failure(
+            "ICMP ping unavailable: system ping failed: usage: ping [-aAbBdDfhLnOqrRUvV64]"
         ));
     }
 
