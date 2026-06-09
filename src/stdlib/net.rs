@@ -1411,7 +1411,10 @@ fn run_linux_ping(
             "ICMP ping unavailable: system ping failed: {}",
             ping_failure_message(&stdout, &stderr, output.status.code())
         );
-        return Err(icmp_ping_process_error(message));
+        if linux_ping_permission_error(&message) {
+            return Err(icmp_ping_process_error(message));
+        }
+        return Ok(failed_ping_result(display_host, target_ip, message));
     }
 
     Ok(result)
@@ -1486,6 +1489,28 @@ fn timeout_ping_result(host: &str, target_ip: IpAddr) -> IcmpPingResult {
         avg_ms: None,
         max_ms: None,
         attempts: Vec::new(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn failed_ping_result(host: &str, target_ip: IpAddr, message: String) -> IcmpPingResult {
+    IcmpPingResult {
+        host: host.to_string(),
+        target_addr: Some(target_ip.to_string()),
+        sent: 1,
+        received: 0,
+        loss_percent: 100.0,
+        min_ms: None,
+        avg_ms: None,
+        max_ms: None,
+        attempts: vec![IcmpPingAttempt {
+            seq: None,
+            reachable: false,
+            from: Some(target_ip.to_string()),
+            ttl: None,
+            latency_ms: None,
+            error: Some(message),
+        }],
     }
 }
 
@@ -1602,12 +1627,16 @@ fn ping_failure_message(stdout: &str, stderr: &str, status_code: Option<i32>) ->
 }
 
 #[cfg(target_os = "linux")]
-fn icmp_ping_process_error(message: String) -> ProbeError {
+fn linux_ping_permission_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    if lower.contains("operation not permitted")
+    lower.contains("operation not permitted")
         || lower.contains("permission denied")
         || lower.contains("cap_net_raw")
-    {
+}
+
+#[cfg(target_os = "linux")]
+fn icmp_ping_process_error(message: String) -> ProbeError {
+    if linux_ping_permission_error(&message) {
         ProbeError::permission_denied(ProbeProtocol::Icmp, message)
     } else {
         ProbeError::system_failure(ProbeProtocol::Icmp, message)
@@ -3015,6 +3044,33 @@ mod tests {
         assert_eq!(result.received, 1);
         assert_eq!(result.loss_percent, 0.0);
         assert!(result.attempts[0].reachable);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn target_ping_failure_can_be_aggregated_with_later_success() {
+        let failed = failed_ping_result(
+            "example.com",
+            "2001:db8::1".parse::<IpAddr>().unwrap(),
+            "ICMP ping unavailable: system ping failed: connect: Network is unreachable"
+                .to_string(),
+        );
+        let success = parse_linux_ping_output(
+            "example.com",
+            "PING example.com (93.184.216.34) 56(84) bytes of data.\n64 bytes from 93.184.216.34: icmp_seq=1 ttl=58 time=12.3 ms\n\n--- example.com ping statistics ---\n1 packets transmitted, 1 received, 0% packet loss, time 0ms\nrtt min/avg/max/mdev = 12.300/12.300/12.300/0.000 ms\n",
+            "",
+            1,
+        );
+
+        let result = combine_icmp_ping_attempts("example.com", vec![failed, success]);
+
+        assert_eq!(result.target_addr.as_deref(), Some("93.184.216.34"));
+        assert_eq!(result.sent, 2);
+        assert_eq!(result.received, 1);
+        assert!(matches!(
+            result.attempts.first().and_then(|attempt| attempt.error.as_deref()),
+            Some(message) if message.contains("Network is unreachable")
+        ));
     }
 
     #[test]
