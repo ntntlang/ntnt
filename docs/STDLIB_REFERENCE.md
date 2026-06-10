@@ -9698,6 +9698,7 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 | [`dns_reverse`](#dnsreverse) | Performs a reverse DNS/PTR lookup for an IPv4 or IPv6 address. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
 | [`ip_parse`](#ipparse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
 | [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
+| [`net_capabilities`](#netcapabilities) | Reports which network probe capabilities are available to the current process without sending any traffic. The ICMP flags reflect whether the probe socket setup that ping() uses (create, configure, connect to loopback) succeeds: datagram ICMP is unprivileged where the OS allows it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW). ping is true when any ICMP echo path is available. |
 | [`ping`](#ping) | Performs an ICMP ping using native sockets (unprivileged datagram ICMP when available, raw ICMP as fallback). Unreachable targets return Ok with failed attempts; missing socket permissions and resolver/system failures return Err(String). Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable(). |
 | [`port_scan`](#portscan) | Performs a bounded TCP scan of explicit ports for one host. Only explicit port arrays are accepted; ranges are intentionally not expanded. Results are sorted by port. |
 | [`reachable`](#reachable) | Performs a high-level reachability check using ICMP plus TCP ports 80 and 443 by default. Caller-provided tcp_ports add extra explicit TCP ports. The result records the method that established reachability without pretending TCP is ping. |
@@ -9791,6 +9792,26 @@ ip_range_to_cidrs(start_ip: String, end_ip: String) -> Result<Array<String>, Str
 ```
 
 Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover.
+
+*Since v0.4.10*
+
+---
+
+#### `net_capabilities`
+
+```ntnt
+net_capabilities() -> Map
+```
+
+Reports which network probe capabilities are available to the current process without sending any traffic. The ICMP flags reflect whether the probe socket setup that ping() uses (create, configure, connect to loopback) succeeds: datagram ICMP is unprivileged where the OS allows it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW). ping is true when any ICMP echo path is available.
+
+**Returns:** Map with ping, icmpv4_datagram, icmpv4_raw, icmpv6_datagram, icmpv6_raw, and tcp booleans
+
+**Examples:**
+
+```ntnt
+net_capabilities()  // Check whether ping() can work before probing
+```
 
 *Since v0.4.10*
 

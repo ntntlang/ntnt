@@ -865,3 +865,29 @@ match tls_info("127.0.0.1", map { "allow_private": true, "timeout_ms": 100 }) {
         "stdout: {stdout}"
     );
 }
+
+#[test]
+fn net_capabilities_reports_probe_support_without_traffic() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { net_capabilities } from "std/net"
+import { has_key } from "std/collections"
+
+let caps = net_capabilities()
+print(has_key(caps, "ping"))
+print(has_key(caps, "icmpv4_datagram"))
+print(has_key(caps, "icmpv4_raw"))
+print(has_key(caps, "icmpv6_datagram"))
+print(has_key(caps, "icmpv6_raw"))
+print(caps.tcp)
+"#,
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["true", "true", "true", "true", "true", "true"],
+        "stdout: {stdout}"
+    );
+}

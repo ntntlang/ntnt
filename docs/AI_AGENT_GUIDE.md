@@ -996,6 +996,21 @@ These helpers return `Result<..., String>`; use `unwrap(...)` for quick scripts/
 
 `ping()` is ICMP-only and does **not** silently fall back to TCP ports. It uses native ICMP sockets (unprivileged datagram ICMP when the OS allows it, raw ICMP as fallback); when no ICMP socket can be opened (e.g. missing permissions) it returns `Err(String)`, while unreachable targets return `Ok` with failed attempts. Defaults: `count` 1 (max 10), `timeout_ms` 2000, `interval_ms` 0 (max 5000). If an app intentionally wants a single TCP port check, use `tcp_connect(host, port, opts?)`. If it wants a high-level “is this host reachable somehow?” check, use `reachable(host, opts?)`; it probes ICMP plus TCP ports 80 and 443 by default, and `tcp_ports` adds more explicit TCP ports.
 
+`net_capabilities()` reports which probe paths the current process can use without sending any traffic — useful to check whether `ping()` can work before probing:
+
+```ntnt
+import { net_capabilities } from "std/net"
+
+let caps = net_capabilities()
+if caps.ping {
+    print("ICMP echo available")
+} else {
+    print("use tcp_connect()/reachable(), or grant CAP_NET_RAW")
+}
+```
+
+The map contains `ping` (true when any ICMP echo path is available), `icmpv4_datagram`, `icmpv4_raw`, `icmpv6_datagram`, `icmpv6_raw`, and `tcp` booleans. It returns a plain `Map` rather than a `Result` because detection itself cannot fail.
+
 ```ntnt
 let tcp = tcp_connect("example.com", 443, map { "count": 5 })
 
