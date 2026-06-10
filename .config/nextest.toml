@@ -1,0 +1,19 @@
+# Nextest configuration.
+#
+# Tests run fully parallel by default (process-per-test isolation). The
+# std_net_tests binary spawns local network fixtures (TLS test server,
+# loopback listeners) that are sensitive to parallel load — especially on
+# Windows, where saturated loopback accept queues surface as connection
+# aborts (os error 10053). Running that binary's tests one at a time avoids
+# the contention.
+#
+# Serialization alone is sufficient: a 25x-per-OS burn-in (ubuntu, macOS,
+# Windows) with retries disabled passed cleanly, so no retries are configured
+# here — a retry would only mask a future regression rather than surface it.
+
+[test-groups]
+net-fixtures = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(std_net_tests)'
+test-group = 'net-fixtures'

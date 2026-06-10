@@ -1,8 +1,28 @@
 # DD-059: Jobs Test Parallelism
 
-**Status:** draft
+**Status:** resolved — superseded by cargo-nextest (process-per-test isolation), CI PR `ci/faster-pr-validation`
 **Author:** larri
 **Created:** 2026-04-02
+**Resolved:** 2026-06-10
+
+## Resolution
+
+CI now runs the suite with `cargo-nextest`, which executes **each test in its
+own process**. This eliminates both documented root causes of the parallel
+races without any of the per-test code changes proposed below:
+
+- `std::env` mutation across test threads (eb9f77d, macOS SIGABRT): every
+  test process has its own environment, so cross-test env races cannot occur.
+- Shared `JOB_RUNTIME`/`BATCH_RUNTIME` `LazyLock` state and leaked background
+  worker threads from prior tests (ef3d79d): every test process has its own
+  statics; a test's worker threads die with its process.
+
+`TEST_LOCK`/`with_clean_runtime` remain useful *within* a single test and are
+unchanged. The one genuinely cross-process shared resource — local network
+fixtures in `tests/std_net_tests.rs` (loopback TLS server, listeners) — is
+serialized via a `net-fixtures` test group in `.config/nextest.toml` with
+retries for OS-level loopback flakiness under load. Options A–C below are
+retained for historical context; none are needed.
 
 ## Problem
 
