@@ -1,0 +1,72 @@
+name: Test Burn-in
+
+# Manually-dispatched validation that the parallel (nextest) test run is
+# reliable across the OS matrix. Runs the full suite many times with retries
+# DISABLED so any intermittent failure surfaces instead of being masked.
+# Use this to gain confidence before trusting parallel test execution, or to
+# investigate a suspected flake. Not part of normal PR CI.
+#
+# Safe to delete once parallel execution is trusted.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Full-suite runs per OS (numeric)"
+        default: "25"
+  # Auto-runs on the throwaway trial branch so burn-in can validate the
+  # parallel test config before it is on the default branch (where
+  # workflow_dispatch would otherwise require the file to live). Remove this
+  # push trigger — or the whole file — once parallel execution is trusted.
+  push:
+    branches: [ci/burn-in-trial]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  burn-in:
+    name: Burn-in (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Build
+        run: cargo build --locked
+
+      # Untrusted workflow input is passed via env and validated as numeric
+      # before use; never interpolated directly into the run script.
+      - name: Run suite repeatedly (retries disabled)
+        shell: bash
+        env:
+          RUST_MIN_STACK: 8388608
+          ITERATIONS: ${{ github.event.inputs.iterations }}
+        run: |
+          n="${ITERATIONS:-25}"
+          if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ]; then
+            echo "::error::iterations must be a positive integer, got '$n'"
+            exit 1
+          fi
+          echo "Burn-in: $n full-suite runs on ${{ matrix.os }}, --retries 0"
+          for i in $(seq 1 "$n"); do
+            echo "::group::Run $i / $n"
+            if ! cargo nextest run --locked --retries 0; then
+              echo "::error::Flake detected on run $i of $n (${{ matrix.os }})"
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
+          echo "✅ $n/$n runs passed on ${{ matrix.os }} with retries disabled"
