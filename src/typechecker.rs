@@ -3825,6 +3825,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 }
             );
             sig!("ping", ["host" => Type::String, "opts" => opts.clone()], result_map.clone(), required(1));
+            sig!("traceroute", ["host" => Type::String, "opts" => opts.clone()], result_map.clone(), required(1));
             sig!("tcp_connect", ["host" => Type::String, "port" => Type::Int, "opts" => opts.clone()], result_map.clone(), required(2));
             sig!("reachable", ["host" => Type::String, "opts" => opts.clone()], result_map.clone(), required(1));
             sig!("port_scan", ["host" => Type::String, "ports" => Type::Array(Box::new(Type::Int)), "opts" => opts.clone()], result_map_array.clone(), required(2));

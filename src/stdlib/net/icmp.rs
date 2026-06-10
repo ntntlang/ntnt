@@ -45,6 +45,12 @@ impl IcmpCapabilities {
     pub(super) fn ping_available(&self) -> bool {
         self.v4_datagram || self.v4_raw || self.v6_datagram || self.v6_raw
     }
+
+    /// Traceroute needs raw ICMP: only raw sockets deliver Time Exceeded
+    /// packets with the reporting router's address.
+    pub(super) fn traceroute_available(&self) -> bool {
+        self.v4_raw || self.v6_raw
+    }
 }
 
 pub(super) fn detect_icmp_capabilities() -> IcmpCapabilities {
@@ -94,15 +100,12 @@ fn icmp_path_available(domain: Domain, socket_type: Type, protocol: Protocol) ->
 // Failure classification (io boundary only)
 // ---------------------------------------------------------------------------
 
-fn ping_socket_unavailable(err: std::io::Error) -> ProbeFailure {
-    ProbeFailure::Backend(format!(
-        "ICMP ping unavailable: native socket failed: {}",
-        err
-    ))
+pub(super) fn probe_socket_unavailable(label: &str, err: std::io::Error) -> ProbeFailure {
+    ProbeFailure::Backend(format!("{label} unavailable: native socket failed: {err}"))
 }
 
-fn ping_io_failure(err: std::io::Error) -> ProbeFailure {
-    let message = format!("ICMP ping failed: {}", err);
+pub(super) fn probe_io_failure(label: &str, err: std::io::Error) -> ProbeFailure {
+    let message = format!("{label} failed: {err}");
     if io_error_indicates_target_failure(&err) {
         ProbeFailure::Target(message)
     } else {
@@ -110,7 +113,7 @@ fn ping_io_failure(err: std::io::Error) -> ProbeFailure {
     }
 }
 
-fn io_error_indicates_target_failure(err: &std::io::Error) -> bool {
+pub(super) fn io_error_indicates_target_failure(err: &std::io::Error) -> bool {
     // ECONNREFUSED is how Linux DGRAM ICMP sockets surface a pending ICMP
     // destination-unreachable error on send/recv.
     if err.kind() == ErrorKind::ConnectionRefused {
@@ -129,7 +132,7 @@ fn io_error_indicates_target_failure(err: &std::io::Error) -> bool {
 // Socket substrate
 // ---------------------------------------------------------------------------
 
-fn next_icmp_ident() -> u16 {
+pub(super) fn next_icmp_ident() -> u16 {
     let counter = ICMP_IDENT_COUNTER.fetch_add(1, Ordering::Relaxed);
     (std::process::id() as u16) ^ counter.wrapping_mul(0x9e37)
 }
@@ -157,6 +160,21 @@ fn create_icmp_socket(target_ip: IpAddr, timeout: Duration) -> std::io::Result<S
             }
         }
     }
+}
+
+/// Opens a connected RAW ICMP socket to the target. Traceroute requires raw
+/// sockets: only they deliver Time Exceeded packets with the reporting
+/// router's address; datagram ICMP sockets surface such errors as bare
+/// errno values without the offender. Usually needs CAP_NET_RAW.
+pub(super) fn create_raw_icmp_socket(
+    target_ip: IpAddr,
+    timeout: Duration,
+) -> std::io::Result<Socket> {
+    let (domain, protocol) = match target_ip {
+        IpAddr::V4(_) => (Domain::IPV4, Protocol::ICMPV4),
+        IpAddr::V6(_) => (Domain::IPV6, Protocol::ICMPV6),
+    };
+    open_connected_icmp_socket(domain, Type::RAW, protocol, target_ip, timeout)
 }
 
 fn open_connected_icmp_socket(
@@ -187,6 +205,7 @@ fn icmp_ident_for_socket(socket: &Socket) -> Option<u16> {
 // ---------------------------------------------------------------------------
 
 fn build_icmp_echo_request(
+    label: &str,
     target_ip: IpAddr,
     local_ip: Option<IpAddr>,
     ident: u16,
@@ -207,9 +226,9 @@ fn build_icmp_echo_request(
         (IpAddr::V4(_), _) => internet_checksum(&packet),
         (IpAddr::V6(dst), Some(IpAddr::V6(src))) => icmpv6_checksum(src, dst, &packet),
         (IpAddr::V6(_), _) => {
-            return Err(ProbeFailure::Backend(
-                "ICMP ping failed: could not determine local IPv6 address for checksum".to_string(),
-            ));
+            return Err(ProbeFailure::Backend(format!(
+                "{label} failed: could not determine local IPv6 address for checksum"
+            )));
         }
     };
     packet[2..4].copy_from_slice(&checksum.to_be_bytes());
@@ -246,17 +265,47 @@ fn icmpv6_checksum(source: Ipv6Addr, destination: Ipv6Addr, icmp: &[u8]) -> u16 
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-struct IcmpProbeReply {
-    source: IpAddr,
-    ttl: Option<i64>,
-    sequence: u16,
-    latency_ms: f64,
+pub(super) struct IcmpProbeReply {
+    pub(super) source: IpAddr,
+    pub(super) ttl: Option<i64>,
+    pub(super) sequence: u16,
+    pub(super) latency_ms: f64,
+}
+
+/// An ICMP error that quotes our probe (destination unreachable, time
+/// exceeded, ...). Carried structurally so each driver can interpret it:
+/// ping records every variant as a failed attempt, while traceroute treats
+/// Time Exceeded as a hop report.
+#[derive(Debug, Clone)]
+pub(super) struct IcmpProbeError {
+    pub(super) source: IpAddr,
+    pub(super) icmp_type: u8,
+    pub(super) icmp_code: u8,
+    pub(super) latency_ms: f64,
+}
+
+impl IcmpProbeError {
+    pub(super) fn message(&self) -> String {
+        format!(
+            "ICMP error from {}: type {} code {}",
+            self.source, self.icmp_type, self.icmp_code
+        )
+    }
+
+    /// Time Exceeded is ICMPv4 type 11 / ICMPv6 type 3 — the signal a
+    /// TTL-stepped probe uses to identify an intermediate hop.
+    pub(super) fn is_time_exceeded(&self) -> bool {
+        match self.source {
+            IpAddr::V4(_) => self.icmp_type == 11,
+            IpAddr::V6(_) => self.icmp_type == 3,
+        }
+    }
 }
 
 #[derive(Debug)]
-enum IcmpProbeEvent {
+pub(super) enum IcmpProbeEvent {
     Reply(IcmpProbeReply),
-    TargetFailure(String),
+    Error(IcmpProbeError),
 }
 
 #[derive(Clone, Copy)]
@@ -361,10 +410,12 @@ fn parse_icmp_payload(
     }
     if failure_types.contains(&icmp_type) && icmp_error_quotes_probe(family, icmp, ident, sequence)
     {
-        return Some(IcmpProbeEvent::TargetFailure(format!(
-            "ICMP error from {}: type {} code {}",
-            source, icmp_type, icmp_code
-        )));
+        return Some(IcmpProbeEvent::Error(IcmpProbeError {
+            source,
+            icmp_type,
+            icmp_code,
+            latency_ms: elapsed.as_secs_f64() * 1000.0,
+        }));
     }
     None
 }
@@ -439,7 +490,12 @@ fn quoted_icmpv6_payload(quoted: &[u8]) -> Option<&[u8]> {
 // Probe send/receive
 // ---------------------------------------------------------------------------
 
-fn send_ping_attempt(
+/// Sends one ICMP echo request and waits for the matching event: a reply,
+/// an ICMP error quoting the probe, or `None` on timeout. Shared by ping
+/// and traceroute; `label` names the calling probe in failure messages.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn send_echo_probe(
+    label: &str,
     socket: &Socket,
     target_ip: IpAddr,
     local_ip: Option<IpAddr>,
@@ -447,35 +503,39 @@ fn send_ping_attempt(
     sequence: u16,
     payload: &[u8],
     timeout: Duration,
-) -> Result<Option<IcmpProbeReply>, ProbeFailure> {
+) -> Result<Option<IcmpProbeEvent>, ProbeFailure> {
     let deadline = Instant::now() + timeout;
     socket
         .set_read_timeout(Some(timeout))
-        .map_err(ping_socket_unavailable)?;
+        .map_err(|err| probe_socket_unavailable(label, err))?;
     socket
         .set_write_timeout(Some(timeout))
-        .map_err(ping_socket_unavailable)?;
-    let packet = build_icmp_echo_request(target_ip, local_ip, ident, sequence, payload)?;
+        .map_err(|err| probe_socket_unavailable(label, err))?;
+    let packet = build_icmp_echo_request(label, target_ip, local_ip, ident, sequence, payload)?;
     let sent_at = Instant::now();
-    socket.send(&packet).map_err(ping_io_failure)?;
-    wait_for_icmp_reply(socket, target_ip, ident, sequence, deadline, sent_at)
+    socket
+        .send(&packet)
+        .map_err(|err| probe_io_failure(label, err))?;
+    wait_for_icmp_event(label, socket, target_ip, ident, sequence, deadline, sent_at)
 }
 
-fn wait_for_icmp_reply(
+#[allow(clippy::too_many_arguments)]
+fn wait_for_icmp_event(
+    label: &str,
     socket: &Socket,
     target_ip: IpAddr,
     ident: u16,
     sequence: u16,
     deadline: Instant,
     sent_at: Instant,
-) -> Result<Option<IcmpProbeReply>, ProbeFailure> {
+) -> Result<Option<IcmpProbeEvent>, ProbeFailure> {
     loop {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return Ok(None);
         };
         socket
             .set_read_timeout(Some(remaining))
-            .map_err(ping_socket_unavailable)?;
+            .map_err(|err| probe_socket_unavailable(label, err))?;
         let mut buffer = [MaybeUninit::<u8>::uninit(); 2048];
         let (len, from) = match socket.recv_from(&mut buffer) {
             Ok(received) => received,
@@ -483,16 +543,13 @@ fn wait_for_icmp_reply(
             Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 return Ok(None);
             }
-            Err(err) => return Err(ping_io_failure(err)),
+            Err(err) => return Err(probe_io_failure(label, err)),
         };
         let received_elapsed = sent_at.elapsed();
         let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), len) };
         let source = from.as_socket().map(|addr| addr.ip()).unwrap_or(target_ip);
         match parse_icmp_probe_event(bytes, source, target_ip, ident, sequence, received_elapsed) {
-            Some(IcmpProbeEvent::Reply(reply)) => return Ok(Some(reply)),
-            Some(IcmpProbeEvent::TargetFailure(message)) => {
-                return Err(ProbeFailure::Target(message));
-            }
+            Some(event) => return Ok(Some(event)),
             None => continue,
         }
     }
@@ -529,14 +586,14 @@ pub(super) fn icmp_ping_for_host(
     host: &str,
     options: &ProbeOptions,
 ) -> Result<HashMap<String, Value>, String> {
-    let targets = resolve_ping_targets(host)?;
+    let targets = resolve_probe_targets(host)?;
     enforce_resolved_target_policy(&targets, options.allow_private)?;
     let target_ips = unique_target_ips(&targets)?;
     let result = icmp_ping(host, &target_ips, options)?;
     Ok(icmp_ping_result_map(result))
 }
 
-fn resolve_ping_targets(host: &str) -> Result<Vec<(u16, SocketAddr)>, String> {
+pub(super) fn resolve_probe_targets(host: &str) -> Result<Vec<(u16, SocketAddr)>, String> {
     let resolved: Vec<SocketAddr> = (host, 0)
         .to_socket_addrs()
         .map_err(|e| format!("failed to resolve {}: {}", host, e))?
@@ -544,7 +601,7 @@ fn resolve_ping_targets(host: &str) -> Result<Vec<(u16, SocketAddr)>, String> {
     Ok(resolved.into_iter().map(|addr| (0, addr)).collect())
 }
 
-fn unique_target_ips(targets: &[(u16, SocketAddr)]) -> Result<Vec<IpAddr>, String> {
+pub(super) fn unique_target_ips(targets: &[(u16, SocketAddr)]) -> Result<Vec<IpAddr>, String> {
     let mut ips = Vec::new();
     for (_, addr) in targets {
         let ip = addr.ip();
@@ -627,7 +684,7 @@ fn run_native_ping(
                 count,
             ));
         }
-        Err(err) => return Err(ping_socket_unavailable(err)),
+        Err(err) => return Err(probe_socket_unavailable(PING_LABEL, err)),
     };
     let local_ip = socket
         .local_addr()
@@ -673,7 +730,8 @@ fn run_native_ping(
                 break;
             }
         };
-        match send_ping_attempt(
+        match send_echo_probe(
+            PING_LABEL,
             &socket,
             target_ip,
             local_ip,
@@ -682,7 +740,7 @@ fn run_native_ping(
             &payload,
             per_attempt_timeout,
         ) {
-            Ok(Some(reply)) => {
+            Ok(Some(IcmpProbeEvent::Reply(reply))) => {
                 latencies.push(reply.latency_ms);
                 attempts.push(IcmpPingAttempt {
                     seq: Some(reply.sequence as i64),
@@ -693,6 +751,15 @@ fn run_native_ping(
                     error: None,
                 });
             }
+            // Any ICMP error quoting our probe is a target failure for ping.
+            Ok(Some(IcmpProbeEvent::Error(error))) => attempts.push(IcmpPingAttempt {
+                seq: Some(sequence as i64),
+                reachable: false,
+                from: Some(target_ip.to_string()),
+                ttl: None,
+                latency_ms: None,
+                error: Some(error.message()),
+            }),
             Ok(None) => attempts.push(IcmpPingAttempt {
                 seq: Some(sequence as i64),
                 reachable: false,
@@ -947,6 +1014,7 @@ mod tests {
     #[test]
     fn icmp_echo_request_sets_checksum_and_identifiers() {
         let packet = build_icmp_echo_request(
+            PING_LABEL,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
             None,
             0x1234,
@@ -964,7 +1032,8 @@ mod tests {
     #[test]
     fn icmpv6_echo_request_requires_local_address_for_checksum() {
         let failure =
-            build_icmp_echo_request(IpAddr::V6(Ipv6Addr::LOCALHOST), None, 1, 1, &[]).unwrap_err();
+            build_icmp_echo_request(PING_LABEL, IpAddr::V6(Ipv6Addr::LOCALHOST), None, 1, 1, &[])
+                .unwrap_err();
         assert!(!failure.is_target());
         assert!(failure.into_message().contains("local IPv6 address"));
     }
@@ -993,10 +1062,14 @@ mod tests {
             );
 
             match event {
-                Some(IcmpProbeEvent::TargetFailure(message)) => {
-                    assert!(message.contains(&format!("type {icmp_type}")));
+                Some(IcmpProbeEvent::Error(error)) => {
+                    assert_eq!(error.icmp_type, icmp_type);
+                    assert_eq!(error.source, IpAddr::V6(Ipv6Addr::LOCALHOST));
+                    assert!(error.message().contains(&format!("type {icmp_type}")));
+                    // ICMPv6 Time Exceeded is type 3 — the traceroute hop signal.
+                    assert_eq!(error.is_time_exceeded(), icmp_type == 3);
                 }
-                other => panic!("expected ICMPv6 type {icmp_type} target failure, got {other:?}"),
+                other => panic!("expected ICMPv6 type {icmp_type} probe error, got {other:?}"),
             }
         }
     }
@@ -1078,14 +1151,14 @@ mod tests {
         // error on recv as ECONNREFUSED; it must classify as a target failure.
         let io_err = std::io::Error::from(ErrorKind::ConnectionRefused);
         assert!(io_error_indicates_target_failure(&io_err));
-        assert!(ping_io_failure(io_err).is_target());
+        assert!(probe_io_failure(PING_LABEL, io_err).is_target());
     }
 
     #[test]
     fn icmp_permission_denied_is_backend_failure() {
         let io_err = std::io::Error::from(ErrorKind::PermissionDenied);
         assert!(!io_error_indicates_target_failure(&io_err));
-        let failure = ping_io_failure(io_err);
+        let failure = probe_io_failure(PING_LABEL, io_err);
         assert!(!failure.is_target());
         assert!(failure.into_message().starts_with("ICMP ping failed:"));
     }
@@ -1145,8 +1218,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_ping_targets_accepts_ipv6_literals() {
-        let targets = resolve_ping_targets("::1").unwrap();
+    fn resolve_probe_targets_accepts_ipv6_literals() {
+        let targets = resolve_probe_targets("::1").unwrap();
         assert!(targets.iter().any(|(_, addr)| addr.ip().is_ipv6()));
     }
 

@@ -2,6 +2,7 @@
 
 mod icmp;
 mod probe;
+mod traceroute;
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
@@ -40,6 +41,9 @@ const MAX_TCP_PORTS: usize = 10;
 const MAX_PORT_SCAN_PORTS: usize = 128;
 const DEFAULT_PORT_SCAN_CONCURRENCY: usize = 20;
 const MAX_PORT_SCAN_CONCURRENCY: usize = 50;
+const DEFAULT_TRACEROUTE_TIMEOUT_MS: u64 = 8_000;
+const DEFAULT_TRACEROUTE_MAX_HOPS: usize = 30;
+const MAX_TRACEROUTE_MAX_HOPS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Family {
@@ -351,9 +355,10 @@ pub fn init() -> HashMap<String, Value> {
     // probe socket setup that ping() uses (create, configure, connect to
     // loopback) succeeds: datagram ICMP is unprivileged where the OS allows
     // it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW).
-    // ping is true when any ICMP echo path is available.
-    // @returns Map with ping, icmpv4_datagram, icmpv4_raw, icmpv6_datagram, icmpv6_raw, and tcp booleans
-    // @example net_capabilities() ~ "Check whether ping() can work before probing"
+    // ping is true when any ICMP echo path is available; traceroute is true
+    // when a raw ICMP path is available (traceroute requires raw sockets).
+    // @returns Map with ping, traceroute, icmpv4_datagram, icmpv4_raw, icmpv6_datagram, icmpv6_raw, and tcp booleans
+    // @example net_capabilities() ~ "Check whether ping() and traceroute() can work before probing"
     // @since v0.4.10
     // @tags #network
     module.insert(
@@ -389,6 +394,33 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             requires: None,
             func: ping_fn,
+        },
+    );
+
+    // @ntnt traceroute
+    // @module std/net
+    // @signature traceroute(host: String, opts?: Map) -> Result<Map, String>
+    // Traces the network path to a host using TTL-stepped native ICMP echo
+    // probes. Requires a raw ICMP socket (usually CAP_NET_RAW; Docker:
+    // cap_add: [NET_RAW]); when unavailable it returns Err(String) rather
+    // than degrading. Check net_capabilities().traceroute before probing.
+    // Each hop reports the responding router, latency, or a timeout; the
+    // trace stops at the destination, on a terminal ICMP error, or at
+    // max_hops.
+    // @param host Hostname or IP address to resolve and trace
+    // @param opts Optional map with max_hops (default 30, max 64), timeout_ms (default 8000, global budget), and allow_private
+    // @returns Result containing reached, target_addr, hop_count, and per-hop results
+    // @since v0.4.10
+    // @tags #network
+    // @example traceroute("example.com", map { "max_hops": 16 }) ~ "Trace up to 16 hops toward example.com"
+    module.insert(
+        "traceroute".to_string(),
+        Value::NativeFunction {
+            name: "traceroute".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: traceroute_fn,
         },
     );
 
@@ -790,6 +822,10 @@ fn net_capabilities_fn(_args: &[Value]) -> Result<Value, IntentError> {
     let caps = icmp::detect_icmp_capabilities();
     let mut map = HashMap::new();
     map.insert("ping".to_string(), Value::Bool(caps.ping_available()));
+    map.insert(
+        "traceroute".to_string(),
+        Value::Bool(caps.traceroute_available()),
+    );
     map.insert("icmpv4_datagram".to_string(), Value::Bool(caps.v4_datagram));
     map.insert("icmpv4_raw".to_string(), Value::Bool(caps.v4_raw));
     map.insert("icmpv6_datagram".to_string(), Value::Bool(caps.v6_datagram));
@@ -797,6 +833,43 @@ fn net_capabilities_fn(_args: &[Value]) -> Result<Value, IntentError> {
     // TCP connect probes use ordinary sockets available to every process.
     map.insert("tcp".to_string(), Value::Bool(true));
     Ok(Value::Map(map))
+}
+
+fn traceroute_fn(args: &[Value]) -> Result<Value, IntentError> {
+    let host = string_arg(args, 0, "traceroute")?;
+    let opts = opts_arg(args, 1, "traceroute")?;
+
+    Ok(result_value((|| {
+        let options = parse_traceroute_options(opts)?;
+        Ok(Value::Map(traceroute::traceroute_for_host(host, &options)?))
+    })()))
+}
+
+fn parse_traceroute_options(
+    opts: Option<&HashMap<String, Value>>,
+) -> Result<traceroute::TracerouteOptions, String> {
+    let timeout_ms = parse_u64_option(opts, "timeout_ms", DEFAULT_TRACEROUTE_TIMEOUT_MS)?
+        .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+    let max_hops = match opts.and_then(|m| m.get("max_hops")) {
+        None => DEFAULT_TRACEROUTE_MAX_HOPS,
+        Some(Value::Int(value)) if *value > 0 => {
+            let hops = usize::try_from(*value).map_err(|_| "option 'max_hops' is too large")?;
+            min(hops, MAX_TRACEROUTE_MAX_HOPS)
+        }
+        Some(Value::Int(_)) => return Err("option 'max_hops' must be positive".to_string()),
+        Some(other) => {
+            return Err(format!(
+                "option 'max_hops' must be Int, got {}",
+                other.type_name()
+            ));
+        }
+    };
+    let allow_private = parse_bool_option(opts, "allow_private", false)?;
+    Ok(traceroute::TracerouteOptions {
+        timeout: Duration::from_millis(timeout_ms),
+        max_hops,
+        allow_private,
+    })
 }
 
 fn ping_fn(args: &[Value]) -> Result<Value, IntentError> {
@@ -2485,6 +2558,35 @@ mod tests {
         assert!(parse_count_option(Some(&HashMap::from([
             ("count".to_string(), Value::Int(0),)
         ])))
+        .is_err());
+    }
+
+    #[test]
+    fn traceroute_options_use_defaults_and_clamp_max_hops() {
+        let defaults = parse_traceroute_options(None).unwrap();
+        assert_eq!(defaults.max_hops, DEFAULT_TRACEROUTE_MAX_HOPS);
+        assert_eq!(
+            defaults.timeout,
+            Duration::from_millis(DEFAULT_TRACEROUTE_TIMEOUT_MS)
+        );
+        assert!(!defaults.allow_private);
+
+        let clamped = parse_traceroute_options(Some(&HashMap::from([(
+            "max_hops".to_string(),
+            Value::Int((MAX_TRACEROUTE_MAX_HOPS as i64) + 100),
+        )])))
+        .unwrap();
+        assert_eq!(clamped.max_hops, MAX_TRACEROUTE_MAX_HOPS);
+
+        assert!(parse_traceroute_options(Some(&HashMap::from([(
+            "max_hops".to_string(),
+            Value::Int(0),
+        )])))
+        .is_err());
+        assert!(parse_traceroute_options(Some(&HashMap::from([(
+            "max_hops".to_string(),
+            Value::String("ten".to_string()),
+        )])))
         .is_err());
     }
 

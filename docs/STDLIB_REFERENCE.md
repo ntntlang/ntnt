@@ -9698,7 +9698,7 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 | [`dns_reverse`](#dnsreverse) | Performs a reverse DNS/PTR lookup for an IPv4 or IPv6 address. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
 | [`ip_parse`](#ipparse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
 | [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
-| [`net_capabilities`](#netcapabilities) | Reports which network probe capabilities are available to the current process without sending any traffic. The ICMP flags reflect whether the probe socket setup that ping() uses (create, configure, connect to loopback) succeeds: datagram ICMP is unprivileged where the OS allows it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW). ping is true when any ICMP echo path is available. |
+| [`net_capabilities`](#netcapabilities) | Reports which network probe capabilities are available to the current process without sending any traffic. The ICMP flags reflect whether the probe socket setup that ping() uses (create, configure, connect to loopback) succeeds: datagram ICMP is unprivileged where the OS allows it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW). ping is true when any ICMP echo path is available; traceroute is true when a raw ICMP path is available (traceroute requires raw sockets). |
 | [`ping`](#ping) | Performs an ICMP ping using native sockets (unprivileged datagram ICMP when available, raw ICMP as fallback). Unreachable targets return Ok with failed attempts; missing socket permissions and resolver/system failures return Err(String). Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable(). |
 | [`port_scan`](#portscan) | Performs a bounded TCP scan of explicit ports for one host. Only explicit port arrays are accepted; ranges are intentionally not expanded. Results are sorted by port. |
 | [`reachable`](#reachable) | Performs a high-level reachability check using ICMP plus TCP ports 80 and 443 by default. Caller-provided tcp_ports add extra explicit TCP ports. The result records the method that established reachability without pretending TCP is ping. |
@@ -9709,6 +9709,7 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 | [`subnet_supernet`](#subnetsupernet) | Returns the parent/supernet of a CIDR. Defaults to one bit shorter. |
 | [`tcp_connect`](#tcpconnect) | Performs a bounded TCP connect probe to one explicit port. Closed, refused, or timed-out ports return Ok(map { "connected": false, ... }); invalid input, policy denial, and resolver/system failures return Err(String). |
 | [`tls_info`](#tlsinfo) | Opens a bounded TLS connection and returns certificate metadata. Validation failures still return Ok(map { "valid": false, ... }) when a certificate is available. |
+| [`traceroute`](#traceroute) | Traces the network path to a host using TTL-stepped native ICMP echo probes. Requires a raw ICMP socket (usually CAP_NET_RAW; Docker: cap_add: [NET_RAW]); when unavailable it returns Err(String) rather than degrading. Check net_capabilities().traceroute before probing. Each hop reports the responding router, latency, or a timeout; the trace stops at the destination, on a terminal ICMP error, or at max_hops. |
 
 #### `dns_lookup`
 
@@ -9803,14 +9804,14 @@ Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover.
 net_capabilities() -> Map
 ```
 
-Reports which network probe capabilities are available to the current process without sending any traffic. The ICMP flags reflect whether the probe socket setup that ping() uses (create, configure, connect to loopback) succeeds: datagram ICMP is unprivileged where the OS allows it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW). ping is true when any ICMP echo path is available.
+Reports which network probe capabilities are available to the current process without sending any traffic. The ICMP flags reflect whether the probe socket setup that ping() uses (create, configure, connect to loopback) succeeds: datagram ICMP is unprivileged where the OS allows it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW). ping is true when any ICMP echo path is available; traceroute is true when a raw ICMP path is available (traceroute requires raw sockets).
 
-**Returns:** Map with ping, icmpv4_datagram, icmpv4_raw, icmpv6_datagram, icmpv6_raw, and tcp booleans
+**Returns:** Map with ping, traceroute, icmpv4_datagram, icmpv4_raw, icmpv6_datagram, icmpv6_raw, and tcp booleans
 
 **Examples:**
 
 ```ntnt
-net_capabilities()  // Check whether ping() can work before probing
+net_capabilities()  // Check whether ping() and traceroute() can work before probing
 ```
 
 *Since v0.4.10*
@@ -9998,6 +9999,31 @@ Opens a bounded TLS connection and returns certificate metadata. Validation fail
 
 ```ntnt
 tls_info("example.com")  // Inspect the HTTPS certificate for example.com
+```
+
+*Since v0.4.10*
+
+---
+
+#### `traceroute`
+
+```ntnt
+traceroute(host: String, opts?: Map) -> Result<Map, String>
+```
+
+Traces the network path to a host using TTL-stepped native ICMP echo probes. Requires a raw ICMP socket (usually CAP_NET_RAW; Docker: cap_add: [NET_RAW]); when unavailable it returns Err(String) rather than degrading. Check net_capabilities().traceroute before probing. Each hop reports the responding router, latency, or a timeout; the trace stops at the destination, on a terminal ICMP error, or at max_hops.
+
+**Parameters:**
+
+- `host` — Hostname or IP address to resolve and trace
+- `opts` — Optional map with max_hops (default 30, max 64), timeout_ms (default 8000, global budget), and allow_private
+
+**Returns:** Result containing reached, target_addr, hop_count, and per-hop results
+
+**Examples:**
+
+```ntnt
+traceroute("example.com", map { "max_hops": 16 })  // Trace up to 16 hops toward example.com
 ```
 
 *Since v0.4.10*
