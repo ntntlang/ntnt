@@ -923,6 +923,18 @@ fn parse_traceroute_options(
             "traceroute",
         )?,
     };
+    // UDP traceroute uses port + (hop - 1) as the per-hop destination so each
+    // hop's quoted UDP header is distinguishable. Reject a base port that
+    // can't fit max_hops distinct ports rather than silently colliding near
+    // the top of the range.
+    if method == traceroute::ProbeMethod::Udp
+        && usize::from(port) + max_hops - 1 > usize::from(u16::MAX)
+    {
+        return Err(format!(
+            "option 'port' {port} is too high for {max_hops} UDP hops: \
+             port + max_hops - 1 must not exceed 65535 (lower 'port' or 'max_hops')"
+        ));
+    }
     Ok(traceroute::TracerouteOptions {
         timeout: Duration::from_millis(timeout_ms),
         max_hops,
@@ -2689,6 +2701,22 @@ mod tests {
             Value::Int(70000),
         )])))
         .is_err());
+
+        // A UDP base port too high to fit max_hops distinct per-hop ports is
+        // rejected (otherwise per-hop destination ports would collide at 65535).
+        assert!(parse_traceroute_options(Some(&HashMap::from([
+            ("method".to_string(), Value::String("udp".to_string())),
+            ("port".to_string(), Value::Int(65500)),
+            ("max_hops".to_string(), Value::Int(64)),
+        ])))
+        .is_err());
+        // The same high base port is fine for TCP (fixed destination port).
+        assert!(parse_traceroute_options(Some(&HashMap::from([
+            ("method".to_string(), Value::String("tcp".to_string())),
+            ("port".to_string(), Value::Int(65500)),
+            ("max_hops".to_string(), Value::Int(64)),
+        ])))
+        .is_ok());
     }
 
     #[test]
