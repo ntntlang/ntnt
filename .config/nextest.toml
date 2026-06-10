@@ -1,0 +1,16 @@
+# Nextest configuration.
+#
+# Tests run fully parallel by default (process-per-test isolation). The
+# std_net_tests binary spawns local network fixtures (TLS test server,
+# loopback listeners) that are sensitive to parallel load — especially on
+# Windows, where saturated loopback accept queues surface as connection
+# aborts (os error 10053). Run that binary's tests one at a time and retry
+# transient network flakes.
+
+[test-groups]
+net-fixtures = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(std_net_tests)'
+test-group = 'net-fixtures'
+retries = 2

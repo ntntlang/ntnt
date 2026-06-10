@@ -37,6 +37,7 @@ jobs:
               - 'Cargo.lock'
               - 'build.rs'
               - '.github/workflows/ci.yml'
+              - '.config/nextest.toml'
             examples:
               - 'examples/**'
               - 'src/**'
@@ -71,12 +72,21 @@ jobs:
       - name: Build
         run: cargo build --locked
 
-      # nextest runs each test in its own process, so the suite parallelizes
-      # safely without the cross-test interference that forced --test-threads=1.
+      # nextest runs each test in its own process, which removes the two
+      # documented causes of the old parallel-test races (std::env mutation
+      # across threads, eb9f77d; shared JOB_RUNTIME state, ef3d79d/DD-059) —
+      # every process gets its own environment and its own globals. Local
+      # network fixtures are grouped/serialized via .config/nextest.toml.
       - name: Run tests
         run: cargo nextest run --locked
         env:
           RUST_MIN_STACK: 8388608
+
+      # nextest does not run doctests; keep them covered (currently zero,
+      # this guards any future additions).
+      - name: Run doctests
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --doc --locked
 
   auth-backends:
     name: Auth Backend Contracts
