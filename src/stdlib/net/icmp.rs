@@ -196,6 +196,35 @@ fn open_connected_icmp_socket(
     Ok(socket)
 }
 
+/// Determines the local source address the kernel would use to reach
+/// `target_ip`, by connecting a throwaway UDP socket. A UDP `connect()` sends
+/// no packets — it only makes the kernel select a route and source address,
+/// which we then read back. Ping does not need this (its ICMP socket is
+/// connected, so its own `local_addr()` is populated), but traceroute's raw
+/// socket is intentionally unconnected and would otherwise report the
+/// unspecified address, producing a wrong ICMPv6 pseudo-header checksum.
+pub(super) fn local_source_address_for(target_ip: IpAddr) -> Option<IpAddr> {
+    let domain = match target_ip {
+        IpAddr::V4(_) => Domain::IPV4,
+        IpAddr::V6(_) => Domain::IPV6,
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).ok()?;
+    // Port is arbitrary and unused; UDP connect does not transmit.
+    socket
+        .connect(&SockAddr::from(SocketAddr::new(target_ip, 53)))
+        .ok()?;
+    let ip = socket
+        .local_addr()
+        .ok()?
+        .as_socket()
+        .map(|addr| addr.ip())?;
+    if ip.is_unspecified() {
+        None
+    } else {
+        Some(ip)
+    }
+}
+
 fn icmp_ident_for_socket(socket: &Socket) -> Option<u16> {
     socket
         .local_addr()
@@ -1267,5 +1296,20 @@ mod tests {
         let socket_path_works =
             create_icmp_socket(IpAddr::V4(Ipv4Addr::LOCALHOST), Duration::from_millis(50)).is_ok();
         assert_eq!(caps.v4_datagram || caps.v4_raw, socket_path_works);
+    }
+
+    #[test]
+    fn local_source_address_for_returns_concrete_non_unspecified_address() {
+        // For loopback the kernel selects loopback as the source; the helper
+        // must never hand back the unspecified address, which would corrupt
+        // the ICMPv6 checksum for traceroute's unconnected socket.
+        let v4 = local_source_address_for(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert!(matches!(v4, Some(ip) if ip.is_ipv4() && !ip.is_unspecified()));
+
+        // IPv6 loopback may be unavailable in some sandboxes; when present the
+        // source must be a concrete IPv6 address suitable for the checksum.
+        if let Some(ip) = local_source_address_for(IpAddr::V6(Ipv6Addr::LOCALHOST)) {
+            assert!(ip.is_ipv6() && !ip.is_unspecified());
+        }
     }
 }

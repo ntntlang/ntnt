@@ -15,8 +15,8 @@
 
 use super::enforce_resolved_target_policy;
 use super::icmp::{
-    create_raw_icmp_socket, next_icmp_ident, probe_socket_unavailable, resolve_probe_targets,
-    send_echo_probe, unique_target_ips, IcmpProbeEvent, ProbeDelivery,
+    create_raw_icmp_socket, local_source_address_for, next_icmp_ident, probe_socket_unavailable,
+    resolve_probe_targets, send_echo_probe, unique_target_ips, IcmpProbeEvent, ProbeDelivery,
 };
 use super::probe::{probe_attempt_budget, ProbeFailure};
 use crate::interpreter::Value;
@@ -79,11 +79,11 @@ fn run_traceroute(
             probe_socket_unavailable(TRACEROUTE_LABEL, err)
         }
     })?;
-    let local_ip = socket
-        .local_addr()
-        .ok()
-        .and_then(|addr| addr.as_socket())
-        .map(|addr| addr.ip());
+    // The raw socket is unconnected (so it can receive Time Exceeded from any
+    // hop), so its own local_addr() is the unspecified address. Derive the
+    // real source the kernel would use for this target — required for the
+    // ICMPv6 pseudo-header checksum.
+    let local_ip = local_source_address_for(target_ip);
     let ident = next_icmp_ident();
     let deadline = Instant::now() + options.timeout;
     let payload = [0u8; 32];
