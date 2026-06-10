@@ -356,7 +356,11 @@ pub fn init() -> HashMap<String, Value> {
     // loopback) succeeds: datagram ICMP is unprivileged where the OS allows
     // it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW).
     // ping is true when any ICMP echo path is available; traceroute is true
-    // when a raw ICMP path is available (traceroute requires raw sockets).
+    // when a raw ICMP path is available for either family (traceroute requires
+    // raw sockets). These are convenience aggregates: a caller targeting a
+    // specific family should check the per-family flags (e.g. icmpv6_raw),
+    // since a host may resolve only to a family whose raw socket is
+    // unavailable — in that case the probe call still returns a clear Err.
     // @returns Map with ping, traceroute, icmpv4_datagram, icmpv4_raw, icmpv6_datagram, icmpv6_raw, and tcp booleans
     // @example net_capabilities() ~ "Check whether ping() and traceroute() can work before probing"
     // @since v0.4.10

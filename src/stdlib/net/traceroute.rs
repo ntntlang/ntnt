@@ -16,7 +16,7 @@
 use super::enforce_resolved_target_policy;
 use super::icmp::{
     create_raw_icmp_socket, next_icmp_ident, probe_socket_unavailable, resolve_probe_targets,
-    send_echo_probe, unique_target_ips, IcmpProbeEvent,
+    send_echo_probe, unique_target_ips, IcmpProbeEvent, ProbeDelivery,
 };
 use super::probe::{probe_attempt_budget, ProbeFailure};
 use crate::interpreter::Value;
@@ -111,7 +111,15 @@ fn run_traceroute(
             // result reports reached=false with the partial path.
             Err(_) => break,
         };
-        set_hop_limit(&socket, target_ip, hop)?;
+        // A setsockopt failure mid-trace must not discard the path already
+        // discovered: before the first hop it is a hard error, otherwise it
+        // ends the trace with the partial result (mirrors the budget arms).
+        if let Err(failure) = set_hop_limit(&socket, target_ip, hop) {
+            if hops.is_empty() {
+                return Err(failure);
+            }
+            break;
+        }
         let sequence = hop.min(u16::MAX as usize) as u16;
         match send_echo_probe(
             TRACEROUTE_LABEL,
@@ -122,6 +130,8 @@ fn run_traceroute(
             sequence,
             &payload,
             per_hop_timeout,
+            // Unconnected raw socket: receive Time Exceeded from every hop.
+            ProbeDelivery::Unconnected,
         ) {
             Ok(Some(IcmpProbeEvent::Reply(reply))) => {
                 hops.push(TracerouteHop {

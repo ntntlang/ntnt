@@ -162,10 +162,12 @@ fn create_icmp_socket(target_ip: IpAddr, timeout: Duration) -> std::io::Result<S
     }
 }
 
-/// Opens a connected RAW ICMP socket to the target. Traceroute requires raw
-/// sockets: only they deliver Time Exceeded packets with the reporting
-/// router's address; datagram ICMP sockets surface such errors as bare
-/// errno values without the offender. Usually needs CAP_NET_RAW.
+/// Opens an UNCONNECTED raw ICMP socket for the target's family. Traceroute
+/// requires raw sockets (only they deliver Time Exceeded with the reporting
+/// router's address) and must NOT connect: a connected raw socket would make
+/// the kernel drop replies from intermediate routers, which are exactly the
+/// hops traceroute needs. The caller sends with `ProbeDelivery::Unconnected`.
+/// Usually needs CAP_NET_RAW.
 pub(super) fn create_raw_icmp_socket(
     target_ip: IpAddr,
     timeout: Duration,
@@ -174,7 +176,10 @@ pub(super) fn create_raw_icmp_socket(
         IpAddr::V4(_) => (Domain::IPV4, Protocol::ICMPV4),
         IpAddr::V6(_) => (Domain::IPV6, Protocol::ICMPV6),
     };
-    open_connected_icmp_socket(domain, Type::RAW, protocol, target_ip, timeout)
+    let socket = Socket::new(domain, Type::RAW, Some(protocol))?;
+    socket.set_read_timeout(Some(timeout))?;
+    socket.set_write_timeout(Some(timeout))?;
+    Ok(socket)
 }
 
 fn open_connected_icmp_socket(
@@ -490,6 +495,20 @@ fn quoted_icmpv6_payload(quoted: &[u8]) -> Option<&[u8]> {
 // Probe send/receive
 // ---------------------------------------------------------------------------
 
+/// How an echo probe reaches the target.
+///
+/// Ping connects its socket and uses `send()`. Traceroute must NOT connect:
+/// a connected raw ICMP socket makes the kernel drop datagrams whose source
+/// is not the connected peer, which is exactly the intermediate-router Time
+/// Exceeded replies traceroute depends on. It uses `send_to` on an
+/// unconnected socket so replies from any hop are received.
+pub(super) enum ProbeDelivery {
+    /// Socket is connected to the target; send with `send()`.
+    Connected,
+    /// Socket is unconnected; send to the target with `send_to()`.
+    Unconnected,
+}
+
 /// Sends one ICMP echo request and waits for the matching event: a reply,
 /// an ICMP error quoting the probe, or `None` on timeout. Shared by ping
 /// and traceroute; `label` names the calling probe in failure messages.
@@ -503,6 +522,7 @@ pub(super) fn send_echo_probe(
     sequence: u16,
     payload: &[u8],
     timeout: Duration,
+    delivery: ProbeDelivery,
 ) -> Result<Option<IcmpProbeEvent>, ProbeFailure> {
     let deadline = Instant::now() + timeout;
     socket
@@ -513,9 +533,13 @@ pub(super) fn send_echo_probe(
         .map_err(|err| probe_socket_unavailable(label, err))?;
     let packet = build_icmp_echo_request(label, target_ip, local_ip, ident, sequence, payload)?;
     let sent_at = Instant::now();
-    socket
-        .send(&packet)
-        .map_err(|err| probe_io_failure(label, err))?;
+    let send_result = match delivery {
+        ProbeDelivery::Connected => socket.send(&packet),
+        ProbeDelivery::Unconnected => {
+            socket.send_to(&packet, &SockAddr::from(SocketAddr::new(target_ip, 0)))
+        }
+    };
+    send_result.map_err(|err| probe_io_failure(label, err))?;
     wait_for_icmp_event(label, socket, target_ip, ident, sequence, deadline, sent_at)
 }
 
@@ -739,6 +763,8 @@ fn run_native_ping(
             sequence,
             &payload,
             per_attempt_timeout,
+            // Ping's socket (datagram or raw) is connected to the target.
+            ProbeDelivery::Connected,
         ) {
             Ok(Some(IcmpProbeEvent::Reply(reply))) => {
                 latencies.push(reply.latency_ms);
