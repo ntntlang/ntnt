@@ -824,6 +824,112 @@ reachability remains explicit app/developer intent.
 
 ---
 
+## Phase 3 — Multi-Protocol Traceroute & mtr-style Diagnostics (planned)
+
+Phase 2's `traceroute()` probes with ICMP echo. Phase 3 extends path discovery
+to UDP and TCP probes and adds the continuous, per-hop statistics that make
+`mtr` useful. None of this requires rethinking the substrate: the hard part of
+traceroute — receiving and matching the ICMP Time Exceeded messages that
+intermediate routers emit — is **independent of the probe protocol**, because a
+router whose TTL/hop-limit reaches zero sends Time Exceeded regardless of what
+the expiring packet contained. The receive side built in PR 7
+(`create_raw_icmp_socket`, the TTL-stepping driver, `probe_attempt_budget`,
+target policy, capability detection, per-hop result shaping) is reused as-is.
+
+### Core refactor: `ProbeMethod` abstraction
+
+What varies per protocol is only (1) how a probe is sent at a given TTL and
+(2) how "the destination was reached" is recognized. Introduce a small
+`ProbeMethod` (Icmp | Udp | Tcp) responsible for exactly three things:
+
+- create/configure its send socket,
+- send one probe to the target at TTL *n*,
+- classify a received packet as `Hop` (Time Exceeded quoting our probe),
+  `Reached` (destination response), or `Other`.
+
+The one substrate change this requires: the matcher that confirms a Time
+Exceeded *quotes our probe* currently matches the embedded ICMP echo header
+(ident + sequence). It must generalize to match an embedded **UDP** header
+(src/dst ports) or **TCP** header (ports + sequence). The shared driver loop,
+budgeting, and result assembly stay unchanged. `traceroute()` gains a
+`method` option (`"icmp"` default).
+
+### `traceroute(..., method: "udp")` (PR 8)
+
+Classic Unix traceroute. Send a UDP datagram to a high, unused port
+(33434+) with stepped TTL; intermediate hops yield Time Exceeded (already
+handled), and the destination yields ICMP **Port Unreachable** (type 3 /
+code 3), which is the "reached" signal. Reuses the raw ICMP recv socket; the
+only new pieces are a UDP send socket with `set_ttl`/`set_unicast_hops_v6`
+and a quoted-UDP matcher. UDP *send* is unprivileged, but the raw ICMP recv
+keeps the same `CAP_NET_RAW` requirement.
+
+*Estimated effort: ~1 day.*
+
+### `traceroute(..., method: "tcp")` (PR 9)
+
+The highest-value mode: `mtr --tcp` / `tcptraceroute`. Firewalls that drop
+ICMP and UDP commonly pass TCP SYN to 80/443, so TCP traceroute reaches paths
+the other methods cannot. Send a raw TCP SYN to a real port with stepped TTL;
+intermediate hops yield Time Exceeded (quoting the TCP header), and the
+destination yields SYN-ACK (open) or RST (closed) — either means "reached".
+New work: raw TCP SYN construction with a pseudo-header checksum (same shape
+as the existing ICMPv6 checksum), quoted-TCP matching, and reading the
+SYN-ACK/RST. Raw TCP send is privileged (`CAP_NET_RAW`).
+
+*Estimated effort: ~2–3 days.*
+
+### Parallel hop probing (PR 10)
+
+`mtr` sends all TTLs concurrently rather than waiting hop-by-hop, turning a
+30-hop trace from sum-of-per-hop-timeouts into roughly a single timeout. This
+is a driver-loop change: emit probes for TTL `1..max` up front, then collect
+replies and demultiplex by sequence→TTL. High value once traces are long or
+run in cycles.
+
+*Estimated effort: ~1–2 days.*
+
+### mtr-style continuous statistics (PR 11)
+
+`mtr` is traceroute in a loop with per-hop accumulation: sent, received,
+loss%, and last/avg/best/worst/stddev RTT per hop. Single-pass already emits
+per-hop latency; this adds a `cycles` (and `probes_per_hop`) option and an
+aggregation layer keyed by hop index. The synchronous stdlib model fits
+"run N cycles, return aggregated stats" (`traceroute(host, map { "cycles": 10 })`);
+a live/streaming TUI does not map to a `Result`-returning call and would need
+a channel/callback variant if ever wanted — out of scope here.
+
+*Estimated effort: ~1–2 days.*
+
+### Per-hop reverse DNS (PR 12, optional)
+
+`mtr` shows router hostnames. `std/net` already has `dns_reverse()`; add an
+opt-in `resolve_hops: true` that annotates each hop with its PTR name. Off by
+default because it adds latency. ASN/AS-name annotation is a separate data
+source and stays deferred.
+
+*Estimated effort: ~half day.*
+
+### Capability & security continuity
+
+Every method still relies on the raw ICMP **receive** socket for intermediate
+hops, so the `CAP_NET_RAW` / Docker `cap_add` story and `net_capabilities()`
+plumbing from Phase 2 carry over unchanged. As methods land,
+`net_capabilities()` can grow per-method flags (`traceroute_udp`,
+`traceroute_tcp`) using the same creation-only detection pattern. Target
+policy (private/loopback/metadata denial with the two-level opt-in) applies to
+every method exactly as it does to ICMP traceroute.
+
+### Suggested sequencing
+
+TCP first (PR 9 — highest real-world value, works through firewalls), then
+parallel hops (PR 10 — makes multi-cycle traces bearable), then mtr stats
+(PR 11), then UDP (PR 8) and reverse DNS (PR 12) to round out. Each is an
+independent, reviewable PR on the shared substrate; the `ProbeMethod` refactor
+lands with the first method that needs it.
+
+---
+
 ## Deferred / Out of Scope
 
 ### WHOIS
@@ -855,6 +961,11 @@ As of 2026-06-09:
 - [x] **PR 5 — Native ICMP sockets**: merged in [PR #119](https://github.com/ntntlang/ntnt/pull/119). Replaced the Linux `ping` subprocess backend with in-tree datagram-first/raw-fallback ICMP sockets via `socket2`. `std/net` now has zero shellouts.
 - [x] **PR 6 — Probe substrate + `net_capabilities()`**: typed `ProbeFailure` classification, `src/stdlib/net/` module split (`probe.rs`, `icmp.rs`), and capability detection — groundwork for traceroute.
 - [x] **PR 7 — `traceroute()`**: TTL-stepped echo probes on the shared substrate (raw ICMP only, graceful `Err` otherwise), `traceroute` capability flag, Docker `cap_add` deployment docs; see Phase 2 above.
+- [ ] **PR 8 — UDP traceroute** (`method: "udp"`): UDP send + Port Unreachable arrival; needs the `ProbeMethod` refactor + quoted-UDP matcher. See Phase 3.
+- [ ] **PR 9 — TCP traceroute** (`method: "tcp"`): raw TCP SYN + SYN-ACK/RST arrival; highest real-world value (firewall traversal). See Phase 3.
+- [ ] **PR 10 — Parallel hop probing**: concurrent TTL emission, demux by sequence→TTL. See Phase 3.
+- [ ] **PR 11 — mtr-style cycle statistics**: `cycles`/`probes_per_hop` with per-hop loss% and last/avg/best/worst/stddev RTT. See Phase 3.
+- [ ] **PR 12 — Per-hop reverse DNS** (optional): opt-in `resolve_hops` via existing `dns_reverse()`. See Phase 3.
 - [x] **Superseded PRs**: [PR #116](https://github.com/ntntlang/ntnt/pull/116) was closed in favor of the cleaner PR #117 branch; [PR #118](https://github.com/ntntlang/ntnt/pull/118) was closed in favor of the cleaner PR #119 branch.
 
 The DD-046 initial scope is complete and Phase 2 is underway. The merged implementation includes runtime registration, typechecker signatures, generated stdlib docs, AI guide coverage, deterministic examples, CI-safe tests, public-network smoke tests gated behind environment variables, and review hardening for target policy, bounded scans, and TLS validation behavior.
