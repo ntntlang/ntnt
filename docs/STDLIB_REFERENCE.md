@@ -9698,7 +9698,7 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 | [`dns_reverse`](#dnsreverse) | Performs a reverse DNS/PTR lookup for an IPv4 or IPv6 address. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
 | [`ip_parse`](#ipparse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
 | [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
-| [`ping`](#ping) | Performs an ICMP ping when ICMP support is available. Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable(). |
+| [`ping`](#ping) | Performs an ICMP ping using native sockets (unprivileged datagram ICMP when available, raw ICMP as fallback). Unreachable targets return Ok with failed attempts; missing socket permissions and resolver/system failures return Err(String). Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable(). |
 | [`port_scan`](#portscan) | Performs a bounded TCP scan of explicit ports for one host. Only explicit port arrays are accepted; ranges are intentionally not expanded. Results are sorted by port. |
 | [`reachable`](#reachable) | Performs a high-level reachability check using ICMP plus TCP ports 80 and 443 by default. Caller-provided tcp_ports add extra explicit TCP ports. The result records the method that established reachability without pretending TCP is ping. |
 | [`subnet_contains`](#subnetcontains) | Returns true when the parent CIDR contains the entire child address or subnet. |
@@ -9802,7 +9802,20 @@ Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover.
 ping(host: String, opts?: Map) -> Result<Map, String>
 ```
 
-Performs an ICMP ping when ICMP support is available. Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable().
+Performs an ICMP ping using native sockets (unprivileged datagram ICMP when available, raw ICMP as fallback). Unreachable targets return Ok with failed attempts; missing socket permissions and resolver/system failures return Err(String). Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable().
+
+**Parameters:**
+
+- `host` — Hostname or IP address to resolve and probe
+- `opts` — Optional map with count (default 1, max 10), timeout_ms (default 2000), interval_ms (default 0, max 5000), and allow_private
+
+**Returns:** Result containing reachability status, latency summary, and per-attempt results
+
+**Examples:**
+
+```ntnt
+ping("example.com", map { "count": 3 })  // Send three ICMP echo requests
+```
 
 *Since v0.4.10*
 

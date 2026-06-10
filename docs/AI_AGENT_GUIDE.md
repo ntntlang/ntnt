@@ -994,7 +994,7 @@ These helpers return `Result<..., String>`; use `unwrap(...)` for quick scripts/
 
 `ip_parse()` supports IPv4 and IPv6. Large IPv6 address counts are returned as strings so `/64` and larger networks do not overflow integer values.
 
-`ping()` is ICMP-only and does **not** silently fall back to TCP ports. Unsupported ICMP returns `Err(String)`. If an app intentionally wants a single TCP port check, use `tcp_connect(host, port, opts?)`. If it wants a high-level “is this host reachable somehow?” check, use `reachable(host, opts?)`; it probes ICMP plus TCP ports 80 and 443 by default, and `tcp_ports` adds more explicit TCP ports.
+`ping()` is ICMP-only and does **not** silently fall back to TCP ports. It uses native ICMP sockets (unprivileged datagram ICMP when the OS allows it, raw ICMP as fallback); when no ICMP socket can be opened (e.g. missing permissions) it returns `Err(String)`, while unreachable targets return `Ok` with failed attempts. Defaults: `count` 1 (max 10), `timeout_ms` 2000, `interval_ms` 0 (max 5000). If an app intentionally wants a single TCP port check, use `tcp_connect(host, port, opts?)`. If it wants a high-level “is this host reachable somehow?” check, use `reachable(host, opts?)`; it probes ICMP plus TCP ports 80 and 443 by default, and `tcp_ports` adds more explicit TCP ports.
 
 ```ntnt
 let tcp = tcp_connect("example.com", 443, map { "count": 5 })

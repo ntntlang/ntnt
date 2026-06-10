@@ -105,6 +105,11 @@ fn start_local_tls_server(expected_connections: usize) -> (u16, std::thread::Joi
                             Err(_) => break,
                         }
                     }
+                    if !conn.is_handshaking() {
+                        let _ = conn.writer().write_all(b"ok");
+                        let _ = conn.complete_io(&mut stream);
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(10));
@@ -449,6 +454,11 @@ stdout: {stdout}"
 #[cfg(target_os = "linux")]
 #[test]
 fn ping_auto_uses_icmp_without_tcp_fallback() {
+    if std::env::var("NTNT_TEST_ICMP_RAW").ok().as_deref() != Some("1") {
+        eprintln!("skipping raw ICMP integration test; set NTNT_TEST_ICMP_RAW=1 to run");
+        return;
+    }
+
     let (stdout, stderr, code) = run_ntnt_code_with_env(
         r#"
 import { ping } from "std/net"
