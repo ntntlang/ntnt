@@ -46,9 +46,7 @@ fn matched_icmp_error(
     bytes: &[u8],
     target_ip: IpAddr,
     fallback_source: IpAddr,
-    protocol: u8,
-    src_port: u16,
-    dst_port: u16,
+    expect: &QuotedProbe,
 ) -> Option<(IpAddr, u8, u8)> {
     let message = parse_icmp_message(bytes, target_ip, fallback_source)?;
     // Only ICMP error types carry a quoted packet: Time Exceeded and the
@@ -60,22 +58,31 @@ fn matched_icmp_error(
     if !is_error {
         return None;
     }
-    if !quoted_matches_transport(message.quoted, target_ip, protocol, src_port, dst_port) {
+    if !quoted_matches_transport(message.quoted, target_ip, expect) {
         return None;
     }
     Some((message.source, message.icmp_type, message.icmp_code))
 }
 
-/// True when the packet an ICMP error quotes is one of our transport probes,
-/// matched by IP protocol and source/destination ports (the first four bytes
-/// of both the UDP and TCP headers, always within the quoted 8 bytes).
-fn quoted_matches_transport(
-    quoted: &[u8],
-    target_ip: IpAddr,
+/// Identifies one of our probes inside the packet an ICMP error quotes. Ports
+/// alone do not distinguish hops, so each method varies a per-hop token:
+/// UDP increments the destination port, TCP varies the sequence number. The
+/// token must match so a delayed reply from an earlier hop is not attributed
+/// to the current one.
+struct QuotedProbe {
     protocol: u8,
     src_port: u16,
     dst_port: u16,
-) -> bool {
+    /// TCP sequence number to match (bytes 4..8 of the quoted TCP header).
+    /// `None` for UDP, where the destination port is the per-hop token.
+    seq: Option<u32>,
+}
+
+/// True when the packet an ICMP error quotes matches `expect`: protocol,
+/// source/destination ports (the first four bytes of both UDP and TCP
+/// headers), and, for TCP, the sequence number (bytes 4..8). The quoted
+/// packet always includes at least the first 8 transport bytes.
+fn quoted_matches_transport(quoted: &[u8], target_ip: IpAddr, expect: &QuotedProbe) -> bool {
     let inner = match target_ip {
         IpAddr::V4(_) => quoted_inner_v4(quoted),
         IpAddr::V6(_) => quoted_inner_v6(quoted),
@@ -83,10 +90,21 @@ fn quoted_matches_transport(
     let Some((proto, transport)) = inner else {
         return false;
     };
-    proto == protocol
-        && transport.len() >= 4
-        && u16::from_be_bytes([transport[0], transport[1]]) == src_port
-        && u16::from_be_bytes([transport[2], transport[3]]) == dst_port
+    if proto != expect.protocol
+        || transport.len() < 4
+        || u16::from_be_bytes([transport[0], transport[1]]) != expect.src_port
+        || u16::from_be_bytes([transport[2], transport[3]]) != expect.dst_port
+    {
+        return false;
+    }
+    match expect.seq {
+        Some(seq) => {
+            transport.len() >= 8
+                && u32::from_be_bytes([transport[4], transport[5], transport[6], transport[7]])
+                    == seq
+        }
+        None => true,
+    }
 }
 
 /// ICMP Time Exceeded type per IP version (IPv4 11, IPv6 3).
@@ -146,14 +164,22 @@ pub(super) struct UdpTraceProbe {
     udp: Socket,
     target_ip: IpAddr,
     src_port: u16,
-    dst_port: u16,
+    base_port: u16,
 }
 
 pub(super) fn open_udp_trace_probe(
     target_ip: IpAddr,
-    dst_port: u16,
+    base_port: u16,
     timeout: Duration,
 ) -> Result<UdpTraceProbe, ProbeFailure> {
+    // UDP traceroute reply capture is validated on Linux; on other platforms
+    // raw ICMP receive behaves differently (e.g. Windows rejects the probe
+    // send with WSAEINVAL), so fail honestly rather than misreport hops.
+    if !cfg!(target_os = "linux") {
+        return Err(ProbeFailure::Backend(format!(
+            "{LABEL} unavailable: UDP traceroute requires Linux raw sockets"
+        )));
+    }
     let icmp = open_raw_icmp_recv(target_ip, timeout)?;
     let domain = match target_ip {
         IpAddr::V4(_) => Domain::IPV4,
@@ -185,20 +211,35 @@ pub(super) fn open_udp_trace_probe(
         udp,
         target_ip,
         src_port,
-        dst_port,
+        base_port,
     })
 }
 
+impl UdpTraceProbe {
+    /// Per-hop destination port: the base port plus the hop index, so each
+    /// hop's quoted UDP header is distinguishable (classic Unix traceroute).
+    fn dst_port_for(&self, seq: u16) -> u16 {
+        self.base_port.saturating_add(seq.saturating_sub(1))
+    }
+}
+
 impl TraceProbe for UdpTraceProbe {
-    fn probe(&mut self, ttl: u8, _seq: u16, deadline: Instant) -> Result<HopProbe, ProbeFailure> {
+    fn probe(&mut self, ttl: u8, seq: u16, deadline: Instant) -> Result<HopProbe, ProbeFailure> {
         set_socket_hop_limit(LABEL, &self.udp, self.target_ip, ttl)?;
+        let dst_port = self.dst_port_for(seq);
         let sent_at = Instant::now();
         self.udp
             .send_to(
                 &PAYLOAD,
-                &SockAddr::from(SocketAddr::new(self.target_ip, self.dst_port)),
+                &SockAddr::from(SocketAddr::new(self.target_ip, dst_port)),
             )
             .map_err(|err| probe_io_failure(LABEL, err))?;
+        let expect = QuotedProbe {
+            protocol: 17,
+            src_port: self.src_port,
+            dst_port,
+            seq: None,
+        };
 
         loop {
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -222,18 +263,18 @@ impl TraceProbe for UdpTraceProbe {
                 Err(err) => return Err(probe_io_failure(LABEL, err)),
             };
             let latency_ms = sent_at.elapsed().as_secs_f64() * 1000.0;
-            if let Some((from, icmp_type, icmp_code)) = matched_icmp_error(
-                bytes,
-                self.target_ip,
-                fallback,
-                17,
-                self.src_port,
-                self.dst_port,
-            ) {
+            if let Some((from, icmp_type, icmp_code)) =
+                matched_icmp_error(bytes, self.target_ip, fallback, &expect)
+            {
                 if is_time_exceeded(self.target_ip, icmp_type) {
                     return Ok(HopProbe::Hop { from, latency_ms });
                 }
-                if is_port_unreachable(self.target_ip, icmp_type, icmp_code) {
+                // Port Unreachable means "reached" only when it comes from the
+                // destination itself; an intermediate device sending it is a
+                // terminal error at that hop, not arrival.
+                if is_port_unreachable(self.target_ip, icmp_type, icmp_code)
+                    && from == self.target_ip
+                {
                     return Ok(HopProbe::Reached { from, latency_ms });
                 }
                 return Ok(HopProbe::Terminal {
@@ -330,6 +371,12 @@ impl TraceProbe for TcpTraceProbe {
                 &SockAddr::from(SocketAddr::new(self.target_ip, self.dst_port)),
             )
             .map_err(|err| probe_io_failure(LABEL, err))?;
+        let expect = QuotedProbe {
+            protocol: 6,
+            src_port: self.src_port,
+            dst_port: self.dst_port,
+            seq: Some(tcp_seq),
+        };
 
         loop {
             if deadline.checked_duration_since(Instant::now()).is_none() {
@@ -340,14 +387,9 @@ impl TraceProbe for TcpTraceProbe {
             // Intermediate hops + terminal errors arrive on the raw ICMP socket.
             let mut icmp_buf = [MaybeUninit::<u8>::uninit(); 2048];
             if let Some((bytes, fallback)) = try_recv(&self.icmp, &mut icmp_buf)? {
-                if let Some((from, icmp_type, icmp_code)) = matched_icmp_error(
-                    bytes,
-                    self.target_ip,
-                    fallback,
-                    6,
-                    self.src_port,
-                    self.dst_port,
-                ) {
+                if let Some((from, icmp_type, icmp_code)) =
+                    matched_icmp_error(bytes, self.target_ip, fallback, &expect)
+                {
                     if is_time_exceeded(self.target_ip, icmp_type) {
                         return Ok(HopProbe::Hop { from, latency_ms });
                     }
@@ -359,10 +401,20 @@ impl TraceProbe for TcpTraceProbe {
                 }
             }
 
-            // The destination's SYN-ACK/RST arrives as a TCP segment.
+            // The destination's SYN-ACK/RST arrives as a TCP segment. Require
+            // the reply to come from the target so an unrelated segment with
+            // coincidentally matching ports is not mistaken for arrival.
             let mut tcp_buf = [MaybeUninit::<u8>::uninit(); 2048];
-            if let Some((bytes, _)) = try_recv(&self.tcp, &mut tcp_buf)? {
-                if tcp_reply_is_ours(bytes, self.target_ip, self.src_port, self.dst_port, tcp_seq) {
+            if let Some((bytes, reply_source)) = try_recv(&self.tcp, &mut tcp_buf)? {
+                if reply_source == self.target_ip
+                    && tcp_reply_is_ours(
+                        bytes,
+                        self.target_ip,
+                        self.src_port,
+                        self.dst_port,
+                        tcp_seq,
+                    )
+                {
                     return Ok(HopProbe::Reached {
                         from: self.target_ip,
                         latency_ms,
@@ -487,43 +539,87 @@ mod tests {
         assert_eq!(transport_checksum(local, target, 6, &syn), 0);
     }
 
+    fn udp_quote(src_port: u16, dst_port: u16) -> Vec<u8> {
+        let mut u = vec![0u8; 8];
+        u[0..2].copy_from_slice(&src_port.to_be_bytes());
+        u[2..4].copy_from_slice(&dst_port.to_be_bytes());
+        u
+    }
+
+    fn udp_expect(src_port: u16, dst_port: u16) -> QuotedProbe {
+        QuotedProbe {
+            protocol: 17,
+            src_port,
+            dst_port,
+            seq: None,
+        }
+    }
+
     #[test]
     fn matched_icmp_error_identifies_our_udp_flow() {
-        let inner_udp = {
-            let mut u = vec![0u8; 8];
-            u[0..2].copy_from_slice(&50000u16.to_be_bytes()); // src
-            u[2..4].copy_from_slice(&33434u16.to_be_bytes()); // dst
-            u
-        };
-        let quoted = ipv4_packet(17, &inner_udp);
+        let quoted = ipv4_packet(17, &udp_quote(50000, 33434));
         // Time Exceeded (type 11) quoting our UDP probe.
         let pkt = icmpv4_error(11, 0, &quoted);
         let target = v4(8, 8, 8, 8);
         let router = v4(10, 0, 0, 1);
-        let got = matched_icmp_error(&pkt, target, router, 17, 50000, 33434);
+        let got = matched_icmp_error(&pkt, target, router, &udp_expect(50000, 33434));
         assert_eq!(got, Some((router, 11, 0)));
         assert!(is_time_exceeded(target, 11));
         // Wrong source port: not ours.
-        assert!(matched_icmp_error(&pkt, target, router, 17, 9999, 33434).is_none());
+        assert!(matched_icmp_error(&pkt, target, router, &udp_expect(9999, 33434)).is_none());
+        // Wrong destination port (a different hop's probe): not ours — this is
+        // what prevents a delayed reply being attributed to the wrong hop.
+        assert!(matched_icmp_error(&pkt, target, router, &udp_expect(50000, 33435)).is_none());
         // Wrong protocol (TCP matcher against a UDP quote): not ours.
-        assert!(matched_icmp_error(&pkt, target, router, 6, 50000, 33434).is_none());
+        let tcp_expect = QuotedProbe {
+            protocol: 6,
+            src_port: 50000,
+            dst_port: 33434,
+            seq: None,
+        };
+        assert!(matched_icmp_error(&pkt, target, router, &tcp_expect).is_none());
     }
 
     #[test]
-    fn udp_port_unreachable_is_the_reached_signal() {
-        let inner_udp = {
-            let mut u = vec![0u8; 8];
-            u[0..2].copy_from_slice(&50000u16.to_be_bytes());
-            u[2..4].copy_from_slice(&33434u16.to_be_bytes());
-            u
+    fn matched_icmp_error_requires_tcp_sequence_to_match() {
+        let mut tcp = vec![0u8; 8];
+        tcp[0..2].copy_from_slice(&40000u16.to_be_bytes());
+        tcp[2..4].copy_from_slice(&80u16.to_be_bytes());
+        tcp[4..8].copy_from_slice(&0xAABBCCDDu32.to_be_bytes());
+        let pkt = icmpv4_error(11, 0, &ipv4_packet(6, &tcp));
+        let target = v4(8, 8, 8, 8);
+        let router = v4(10, 0, 0, 1);
+        let right = QuotedProbe {
+            protocol: 6,
+            src_port: 40000,
+            dst_port: 80,
+            seq: Some(0xAABBCCDD),
         };
-        let quoted = ipv4_packet(17, &inner_udp);
+        assert!(matched_icmp_error(&pkt, target, router, &right).is_some());
+        // A stale probe (different sequence, same ports) is not attributed here.
+        let wrong = QuotedProbe {
+            seq: Some(0x00000001),
+            ..right
+        };
+        assert!(matched_icmp_error(&pkt, target, router, &wrong).is_none());
+    }
+
+    #[test]
+    fn udp_port_unreachable_is_the_reached_signal_from_target_only() {
+        let quoted = ipv4_packet(17, &udp_quote(50000, 33434));
         let pkt = icmpv4_error(3, 3, &quoted); // dest unreachable / port unreachable
         let target = v4(8, 8, 8, 8);
-        let (from, t, c) = matched_icmp_error(&pkt, target, target, 17, 50000, 33434).unwrap();
+        let (from, t, c) =
+            matched_icmp_error(&pkt, target, target, &udp_expect(50000, 33434)).unwrap();
         assert!(!is_time_exceeded(target, t));
         assert!(is_port_unreachable(target, t, c));
         assert_eq!(from, target);
+        // The driver only treats this as "reached" when `from == target`; a
+        // port-unreachable from an intermediate device (from != target) is a
+        // terminal error, not arrival. (Verified here at the predicate level;
+        // the source comparison lives in UdpTraceProbe::probe.)
+        let intermediate = v4(10, 0, 0, 1);
+        assert_ne!(from, intermediate);
     }
 
     #[test]

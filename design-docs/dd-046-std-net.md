@@ -867,13 +867,17 @@ tests). UDP/TCP packet construction, the quoted-transport matcher, and their
 
 ### `traceroute(..., method: "udp")` (PR 8) — shipped
 
-Classic Unix traceroute. Sends a UDP datagram to a high, unused port (33434
-default) with stepped TTL; intermediate hops yield Time Exceeded (already
-handled), and the destination yields ICMP **Port Unreachable** (IPv4 type 3 /
-code 3, IPv6 type 1 / code 4), the "reached" signal. Reuses the raw ICMP recv
-socket; the new pieces are an (unprivileged) UDP send socket bound to a known
-source port and a quoted-UDP matcher. Capability mirrors ICMP traceroute
-(`traceroute_udp`).
+Classic Unix traceroute. Sends a UDP datagram with stepped TTL; intermediate
+hops yield Time Exceeded, and the destination yields ICMP **Port Unreachable**
+(IPv4 type 3 / code 3, IPv6 type 1 / code 4) — but only when it comes *from the
+target* (a Port Unreachable from an intermediate device is recorded as a
+terminal error, not arrival). The destination port increments per hop from the
+base (`port`, default 33434) so each hop's quoted UDP header is distinguishable
+— without that, a delayed Time Exceeded from an earlier hop could be
+mis-attributed. Reuses the raw ICMP recv socket plus a UDP send socket bound to
+a known source port. `traceroute_udp` is gated to Linux: although UDP send is
+unprivileged, the probe send + raw-ICMP reply handling are validated there
+(Windows rejects the send with WSAEINVAL).
 
 ### `traceroute(..., method: "tcp")` (PR 9) — shipped
 
@@ -881,8 +885,10 @@ The highest-value mode (`mtr --tcp` / `tcptraceroute`): firewalls that drop
 ICMP and UDP commonly pass TCP SYN to 80/443. Sends a raw TCP SYN (default
 port 80) with stepped TTL; intermediate hops yield Time Exceeded quoting the
 TCP header, and the destination yields SYN-ACK or RST — either means
-"reached". The hop is encoded in the TCP sequence number, so a SYN-ACK's ack
-number self-identifies the probe. Because the destination reply is a TCP
+"reached". The hop is encoded in the TCP sequence number, which is matched in
+the quoted TCP header (so a delayed reply is attributed to the right hop) and
+in a SYN-ACK's ack number; the reply must also come *from the target* to count
+as reached. Because the destination reply is a TCP
 segment (not ICMP), the TCP method watches two sockets — the raw ICMP socket
 for hops and a raw TCP socket for the reply — with a dependency-free
 round-robin poll. Raw TCP reply capture only works on **Linux** (BSD/Windows

@@ -362,9 +362,9 @@ pub fn init() -> HashMap<String, Value> {
     // specific family should check the per-family flags (e.g. icmpv6_raw),
     // since a host may resolve only to a family whose raw socket is
     // unavailable — in that case the probe call still returns a clear Err.
-    // traceroute_udp mirrors traceroute (UDP send is unprivileged, only the
-    // raw ICMP receive is needed); traceroute_tcp also needs a raw TCP socket
-    // and is true only on Linux, where raw TCP reply capture works.
+    // traceroute_udp and traceroute_tcp are reported true only on Linux, where
+    // their probe send and reply handling are validated; traceroute_tcp also
+    // requires a raw TCP socket. ICMP traceroute remains cross-platform.
     // @returns Map with ping, traceroute, traceroute_udp, traceroute_tcp, icmpv4_datagram, icmpv4_raw, icmpv6_datagram, icmpv6_raw, and tcp booleans
     // @example net_capabilities() ~ "Check whether ping() and traceroute() can work before probing"
     // @since v0.4.10
@@ -414,9 +414,10 @@ pub fn init() -> HashMap<String, Value> {
     // on ICMP Port Unreachable), and "tcp" sends SYNs to a real port
     // (reached on SYN-ACK/RST — the variant most likely to traverse
     // firewalls). All methods need a raw ICMP socket for intermediate hops
-    // (usually CAP_NET_RAW; Docker: cap_add: [NET_RAW]); "tcp" additionally
-    // needs a raw TCP socket and is supported on Linux. When the required
-    // capability is missing it returns Err(String) rather than degrading —
+    // (usually CAP_NET_RAW; Docker: cap_add: [NET_RAW]). "icmp" is
+    // cross-platform; "udp" and "tcp" are Linux-only ("tcp" additionally needs
+    // a raw TCP socket). When the required capability is missing it returns
+    // Err(String) rather than degrading —
     // check net_capabilities() (traceroute / traceroute_udp / traceroute_tcp)
     // before probing. Each hop reports the responding router, latency, or a
     // timeout; the trace stops at the destination, on a terminal ICMP error,
@@ -840,11 +841,11 @@ fn net_capabilities_fn(_args: &[Value]) -> Result<Value, IntentError> {
         "traceroute".to_string(),
         Value::Bool(caps.traceroute_available()),
     );
-    // UDP traceroute needs only the raw ICMP receive path (UDP send is
-    // unprivileged), so it mirrors ICMP traceroute availability.
+    // UDP traceroute relies on the raw ICMP receive path; its probe send and
+    // reply handling are validated on Linux.
     map.insert(
         "traceroute_udp".to_string(),
-        Value::Bool(caps.traceroute_available()),
+        Value::Bool(caps.traceroute_udp_available()),
     );
     // TCP traceroute additionally needs a raw TCP socket, and raw TCP reply
     // capture only works on Linux.

@@ -49,10 +49,17 @@ impl IcmpCapabilities {
         self.v4_datagram || self.v4_raw || self.v6_datagram || self.v6_raw
     }
 
-    /// Traceroute needs raw ICMP: only raw sockets deliver Time Exceeded
-    /// packets with the reporting router's address.
+    /// ICMP-echo traceroute needs raw ICMP: only raw sockets deliver Time
+    /// Exceeded packets with the reporting router's address.
     pub(super) fn traceroute_available(&self) -> bool {
         self.v4_raw || self.v6_raw
+    }
+
+    /// UDP traceroute also relies on the raw ICMP receive path, but its probe
+    /// send + reply handling are validated only on Linux (Windows rejects the
+    /// send with WSAEINVAL), so report it there.
+    pub(super) fn traceroute_udp_available(&self) -> bool {
+        cfg!(target_os = "linux") && self.traceroute_available()
     }
 
     /// TCP traceroute additionally needs a raw TCP socket, and raw TCP reply

@@ -547,9 +547,9 @@ sudo systemctl start ntnt-web ntnt-worker
 `ping()` works unprivileged on most Linux hosts via datagram ICMP sockets, but
 containers often disable them (`net.ipv4.ping_group_range` is empty in many
 base images). `traceroute()` always requires a **raw** ICMP socket for
-intermediate hops, regardless of method (`icmp`/`udp`/`tcp`); the `tcp` method
-additionally needs a raw TCP socket and is Linux-only. `NET_RAW` covers all of
-these.
+intermediate hops, regardless of method (`icmp`/`udp`/`tcp`). The `icmp` method
+is cross-platform; the `udp` and `tcp` methods are **Linux-only** (and `tcp`
+additionally needs a raw TCP socket). `NET_RAW` covers all of these.
 
 To enable ICMP probes in Docker, grant `NET_RAW` to the service:
 
