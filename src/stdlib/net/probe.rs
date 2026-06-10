@@ -15,7 +15,9 @@
 //!    divides the remaining budget so a requested count either completes or
 //!    fails loudly — it never silently shrinks.
 
-use std::time::Duration;
+use socket2::Socket;
+use std::net::IpAddr;
+use std::time::{Duration, Instant};
 
 /// Why a probe failed, preserved as a type across all probe layers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,9 +84,201 @@ pub(crate) fn probe_attempt_budget(
     Ok(attempt_budget)
 }
 
+// ---------------------------------------------------------------------------
+// Checksums (shared by ICMP echo, ICMPv6, and TCP/UDP probe packets)
+// ---------------------------------------------------------------------------
+
+/// RFC 1071 one's-complement Internet checksum over `data`.
+pub(super) fn internet_checksum(data: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    let mut chunks = data.chunks_exact(2);
+    for chunk in &mut chunks {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    if let Some(&byte) = chunks.remainder().first() {
+        sum += u16::from_be_bytes([byte, 0]) as u32;
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Transport checksum over the IPv4/IPv6 pseudo-header followed by the
+/// transport bytes. `protocol` is the IP protocol number (6 TCP, 17 UDP,
+/// 58 ICMPv6). `src` and `dst` must be the same family; mismatches return 0
+/// (callers guard family before calling).
+pub(super) fn transport_checksum(src: IpAddr, dst: IpAddr, protocol: u8, transport: &[u8]) -> u16 {
+    let mut pseudo = Vec::with_capacity(40 + transport.len());
+    match (src, dst) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            pseudo.extend_from_slice(&s.octets());
+            pseudo.extend_from_slice(&d.octets());
+            pseudo.push(0);
+            pseudo.push(protocol);
+            pseudo.extend_from_slice(&(transport.len() as u16).to_be_bytes());
+        }
+        (IpAddr::V6(s), IpAddr::V6(d)) => {
+            pseudo.extend_from_slice(&s.octets());
+            pseudo.extend_from_slice(&d.octets());
+            pseudo.extend_from_slice(&(transport.len() as u32).to_be_bytes());
+            pseudo.extend_from_slice(&[0, 0, 0, protocol]);
+        }
+        _ => return 0,
+    }
+    pseudo.extend_from_slice(transport);
+    internet_checksum(&pseudo)
+}
+
+// ---------------------------------------------------------------------------
+// Quoted-packet extraction (the inner packet an ICMP error echoes back)
+// ---------------------------------------------------------------------------
+
+/// From the bytes an ICMP error quotes (an IPv4 packet: IP header + at least
+/// 8 bytes of its payload), return the inner IP protocol number and the start
+/// of the upper-layer header. Used to confirm an ICMP error refers to one of
+/// our probes regardless of probe protocol (ICMP/UDP/TCP).
+pub(super) fn quoted_inner_v4(quoted: &[u8]) -> Option<(u8, &[u8])> {
+    if quoted.len() < 20 || quoted[0] >> 4 != 4 {
+        return None;
+    }
+    let header_len = usize::from(quoted[0] & 0x0f) * 4;
+    if header_len < 20 || quoted.len() < header_len + 8 {
+        return None;
+    }
+    Some((quoted[9], &quoted[header_len..]))
+}
+
+/// IPv6 variant: walk hop-by-hop/routing/fragment/destination extension
+/// headers to the upper-layer header, returning its protocol number and bytes.
+pub(super) fn quoted_inner_v6(quoted: &[u8]) -> Option<(u8, &[u8])> {
+    if quoted.len() < 40 || quoted[0] >> 4 != 6 {
+        return None;
+    }
+    let mut next_header = quoted[6];
+    let mut offset = 40usize;
+    loop {
+        // Not an extension header => this is the upper-layer protocol.
+        if !matches!(next_header, 0 | 43 | 44 | 60) {
+            let inner = quoted.get(offset..).filter(|payload| payload.len() >= 8)?;
+            return Some((next_header, inner));
+        }
+        let ext_len = if next_header == 44 {
+            8
+        } else {
+            (usize::from(*quoted.get(offset + 1)?) + 1) * 8
+        };
+        next_header = *quoted.get(offset)?;
+        offset = offset.checked_add(ext_len)?;
+        if quoted.len() < offset + 8 {
+            return None;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TTL / hop-limit
+// ---------------------------------------------------------------------------
+
+/// Sets the outgoing TTL (IPv4) or unicast hop limit (IPv6) on a probe socket.
+pub(super) fn set_socket_hop_limit(
+    label: &str,
+    socket: &Socket,
+    target_ip: IpAddr,
+    hop: u8,
+) -> Result<(), ProbeFailure> {
+    let limit = u32::from(hop);
+    match target_ip {
+        IpAddr::V4(_) => socket.set_ttl_v4(limit),
+        IpAddr::V6(_) => socket.set_unicast_hops_v6(limit),
+    }
+    .map_err(|err| ProbeFailure::Backend(format!("{label} failed: could not set hop limit: {err}")))
+}
+
+// ---------------------------------------------------------------------------
+// Traceroute probe abstraction (one TraceProbe per protocol method)
+// ---------------------------------------------------------------------------
+
+/// The outcome of a single TTL-stepped probe, independent of probe protocol.
+#[derive(Debug)]
+pub(super) enum HopProbe {
+    /// A router reported TTL/hop-limit expiry: an intermediate hop.
+    Hop { from: IpAddr, latency_ms: f64 },
+    /// The destination responded (echo reply / port unreachable / SYN-ACK /
+    /// RST depending on method): the trace is complete.
+    Reached { from: IpAddr, latency_ms: f64 },
+    /// A terminal ICMP error other than TTL expiry (e.g. net/host
+    /// unreachable, administratively prohibited): records the hop and stops.
+    Terminal {
+        from: IpAddr,
+        latency_ms: f64,
+        message: String,
+    },
+    /// No matching reply arrived within the per-hop budget.
+    TimedOut,
+}
+
+/// A protocol-specific traceroute prober. Implementations own their send and
+/// receive sockets; the shared driver only steps the TTL and interprets the
+/// returned [`HopProbe`]. `seq` is a per-hop correlation token (carried in the
+/// echo sequence, UDP/TCP ports, or TCP sequence number as appropriate).
+pub(super) trait TraceProbe {
+    fn probe(&mut self, ttl: u8, seq: u16, deadline: Instant) -> Result<HopProbe, ProbeFailure>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internet_checksum_of_self_checksummed_packet_is_zero() {
+        // type 8 echo, ident 0x1234, seq 7, checksum field filled in.
+        let mut pkt = vec![8u8, 0, 0, 0, 0x12, 0x34, 0, 7];
+        let cksum = internet_checksum(&pkt);
+        pkt[2..4].copy_from_slice(&cksum.to_be_bytes());
+        assert_eq!(internet_checksum(&pkt), 0);
+    }
+
+    #[test]
+    fn quoted_inner_v4_extracts_protocol_and_payload() {
+        // Minimal IPv4 header (IHL=5) with protocol=6 (TCP) and 8 payload bytes.
+        let mut quoted = vec![0u8; 20];
+        quoted[0] = 0x45;
+        quoted[9] = 6;
+        quoted.extend_from_slice(&[0xAA; 8]);
+        let (proto, inner) = quoted_inner_v4(&quoted).unwrap();
+        assert_eq!(proto, 6);
+        assert_eq!(inner, &[0xAA; 8]);
+        // Truncated payload (<8 bytes after header) is rejected.
+        assert!(quoted_inner_v4(&quoted[..24]).is_none());
+    }
+
+    #[test]
+    fn quoted_inner_v6_walks_to_upper_layer() {
+        // IPv6 header, next-header = 17 (UDP), 8 UDP bytes.
+        let mut quoted = vec![0u8; 40];
+        quoted[0] = 0x60;
+        quoted[6] = 17;
+        quoted.extend_from_slice(&[0xBB; 8]);
+        let (proto, inner) = quoted_inner_v6(&quoted).unwrap();
+        assert_eq!(proto, 17);
+        assert_eq!(inner, &[0xBB; 8]);
+    }
+
+    #[test]
+    fn transport_checksum_matches_known_pseudo_header() {
+        use std::net::Ipv4Addr;
+        let src = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+        let mut seg = vec![0u8; 20];
+        // ports + seq so it isn't all zero
+        seg[0..2].copy_from_slice(&12345u16.to_be_bytes());
+        seg[2..4].copy_from_slice(&80u16.to_be_bytes());
+        let cksum = transport_checksum(src, dst, 6, &seg);
+        seg[16..18].copy_from_slice(&cksum.to_be_bytes());
+        // Recomputing over the now-checksummed segment yields zero.
+        assert_eq!(transport_checksum(src, dst, 6, &seg), 0);
+    }
 
     #[test]
     fn probe_attempt_budget_rejects_impossible_count_interval() {

@@ -824,11 +824,11 @@ reachability remains explicit app/developer intent.
 
 ---
 
-## Phase 3 — Multi-Protocol Traceroute & mtr-style Diagnostics (planned)
+## Phase 3 — Multi-Protocol Traceroute & mtr-style Diagnostics (in progress)
 
 Phase 2's `traceroute()` probes with ICMP echo. Phase 3 extends path discovery
-to UDP and TCP probes and adds the continuous, per-hop statistics that make
-`mtr` useful. None of this requires rethinking the substrate: the hard part of
+to UDP and TCP probes (shipped) and adds the continuous, per-hop statistics
+that make `mtr` useful (planned). None of this requires rethinking the substrate: the hard part of
 traceroute — receiving and matching the ICMP Time Exceeded messages that
 intermediate routers emit — is **independent of the probe protocol**, because a
 router whose TTL/hop-limit reaches zero sends Time Exceeded regardless of what
@@ -854,30 +854,47 @@ Exceeded *quotes our probe* currently matches the embedded ICMP echo header
 budgeting, and result assembly stay unchanged. `traceroute()` gains a
 `method` option (`"icmp"` default).
 
-### `traceroute(..., method: "udp")` (PR 8)
+**Shipped (PR 8/9).** The abstraction is a `TraceProbe` trait (one
+implementation per method) plus a shared `HopProbe` outcome enum, both in
+`net/probe.rs`. The IP-header-walking that finds the quoted transport header
+(`quoted_inner_v4`/`quoted_inner_v6`) and the checksums
+(`internet_checksum`/`transport_checksum`) were lifted into `net/probe.rs` and
+are now shared by ICMP, UDP, and TCP. The ICMP echo matcher was refactored
+onto these shared helpers (behaviour unchanged, guarded by its existing
+tests). UDP/TCP packet construction, the quoted-transport matcher, and their
+`TraceProbe` impls live in `net/transport.rs`; the driver in
+`net/traceroute.rs` is generic over `Box<dyn TraceProbe>`.
 
-Classic Unix traceroute. Send a UDP datagram to a high, unused port
-(33434+) with stepped TTL; intermediate hops yield Time Exceeded (already
-handled), and the destination yields ICMP **Port Unreachable** (type 3 /
-code 3), which is the "reached" signal. Reuses the raw ICMP recv socket; the
-only new pieces are a UDP send socket with `set_ttl`/`set_unicast_hops_v6`
-and a quoted-UDP matcher. UDP *send* is unprivileged, but the raw ICMP recv
-keeps the same `CAP_NET_RAW` requirement.
+### `traceroute(..., method: "udp")` (PR 8) — shipped
 
-*Estimated effort: ~1 day.*
+Classic Unix traceroute. Sends a UDP datagram to a high, unused port (33434
+default) with stepped TTL; intermediate hops yield Time Exceeded (already
+handled), and the destination yields ICMP **Port Unreachable** (IPv4 type 3 /
+code 3, IPv6 type 1 / code 4), the "reached" signal. Reuses the raw ICMP recv
+socket; the new pieces are an (unprivileged) UDP send socket bound to a known
+source port and a quoted-UDP matcher. Capability mirrors ICMP traceroute
+(`traceroute_udp`).
 
-### `traceroute(..., method: "tcp")` (PR 9)
+### `traceroute(..., method: "tcp")` (PR 9) — shipped
 
-The highest-value mode: `mtr --tcp` / `tcptraceroute`. Firewalls that drop
-ICMP and UDP commonly pass TCP SYN to 80/443, so TCP traceroute reaches paths
-the other methods cannot. Send a raw TCP SYN to a real port with stepped TTL;
-intermediate hops yield Time Exceeded (quoting the TCP header), and the
-destination yields SYN-ACK (open) or RST (closed) — either means "reached".
-New work: raw TCP SYN construction with a pseudo-header checksum (same shape
-as the existing ICMPv6 checksum), quoted-TCP matching, and reading the
-SYN-ACK/RST. Raw TCP send is privileged (`CAP_NET_RAW`).
+The highest-value mode (`mtr --tcp` / `tcptraceroute`): firewalls that drop
+ICMP and UDP commonly pass TCP SYN to 80/443. Sends a raw TCP SYN (default
+port 80) with stepped TTL; intermediate hops yield Time Exceeded quoting the
+TCP header, and the destination yields SYN-ACK or RST — either means
+"reached". The hop is encoded in the TCP sequence number, so a SYN-ACK's ack
+number self-identifies the probe. Because the destination reply is a TCP
+segment (not ICMP), the TCP method watches two sockets — the raw ICMP socket
+for hops and a raw TCP socket for the reply — with a dependency-free
+round-robin poll. Raw TCP reply capture only works on **Linux** (BSD/Windows
+do not deliver TCP to raw sockets), so `traceroute_tcp` is reported true only
+there, and a `method: "tcp"` call elsewhere returns a clear `Err`. Raw TCP
+send/recv is privileged (`CAP_NET_RAW`).
 
-*Estimated effort: ~2–3 days.*
+**Not verifiable in CI.** Like ICMP traceroute, the raw-socket happy path
+needs `CAP_NET_RAW`, which CI does not grant. Correctness rests on unit tests
+of packet construction, checksums, and the quoted/​reply matchers; the
+integration test asserts each method's outcome matches its capability flag.
+End-to-end validation is a manual run on a capable host.
 
 ### Parallel hop probing (PR 10)
 
@@ -961,8 +978,7 @@ As of 2026-06-09:
 - [x] **PR 5 — Native ICMP sockets**: merged in [PR #119](https://github.com/ntntlang/ntnt/pull/119). Replaced the Linux `ping` subprocess backend with in-tree datagram-first/raw-fallback ICMP sockets via `socket2`. `std/net` now has zero shellouts.
 - [x] **PR 6 — Probe substrate + `net_capabilities()`**: typed `ProbeFailure` classification, `src/stdlib/net/` module split (`probe.rs`, `icmp.rs`), and capability detection — groundwork for traceroute.
 - [x] **PR 7 — `traceroute()`**: TTL-stepped echo probes on the shared substrate (raw ICMP only, graceful `Err` otherwise), `traceroute` capability flag, Docker `cap_add` deployment docs; see Phase 2 above.
-- [ ] **PR 8 — UDP traceroute** (`method: "udp"`): UDP send + Port Unreachable arrival; needs the `ProbeMethod` refactor + quoted-UDP matcher. See Phase 3.
-- [ ] **PR 9 — TCP traceroute** (`method: "tcp"`): raw TCP SYN + SYN-ACK/RST arrival; highest real-world value (firewall traversal). See Phase 3.
+- [x] **PR 8/9 — UDP + TCP traceroute** (`method: "udp"`/`"tcp"`): shared `TraceProbe`/`HopProbe` abstraction, generalized quoted-transport matcher, UDP (Port Unreachable arrival) and raw TCP SYN (SYN-ACK/RST arrival, Linux), plus `traceroute_udp`/`traceroute_tcp` capability flags. See Phase 3.
 - [ ] **PR 10 — Parallel hop probing**: concurrent TTL emission, demux by sequence→TTL. See Phase 3.
 - [ ] **PR 11 — mtr-style cycle statistics**: `cycles`/`probes_per_hop` with per-hop loss% and last/avg/best/worst/stddev RTT. See Phase 3.
 - [ ] **PR 12 — Per-hop reverse DNS** (optional): opt-in `resolve_hops` via existing `dns_reverse()`. See Phase 3.

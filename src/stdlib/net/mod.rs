@@ -3,6 +3,7 @@
 mod icmp;
 mod probe;
 mod traceroute;
+mod transport;
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
@@ -361,7 +362,10 @@ pub fn init() -> HashMap<String, Value> {
     // specific family should check the per-family flags (e.g. icmpv6_raw),
     // since a host may resolve only to a family whose raw socket is
     // unavailable — in that case the probe call still returns a clear Err.
-    // @returns Map with ping, traceroute, icmpv4_datagram, icmpv4_raw, icmpv6_datagram, icmpv6_raw, and tcp booleans
+    // traceroute_udp mirrors traceroute (UDP send is unprivileged, only the
+    // raw ICMP receive is needed); traceroute_tcp also needs a raw TCP socket
+    // and is true only on Linux, where raw TCP reply capture works.
+    // @returns Map with ping, traceroute, traceroute_udp, traceroute_tcp, icmpv4_datagram, icmpv4_raw, icmpv6_datagram, icmpv6_raw, and tcp booleans
     // @example net_capabilities() ~ "Check whether ping() and traceroute() can work before probing"
     // @since v0.4.10
     // @tags #network
@@ -404,19 +408,25 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt traceroute
     // @module std/net
     // @signature traceroute(host: String, opts?: Map) -> Result<Map, String>
-    // Traces the network path to a host using TTL-stepped native ICMP echo
-    // probes. Requires a raw ICMP socket (usually CAP_NET_RAW; Docker:
-    // cap_add: [NET_RAW]); when unavailable it returns Err(String) rather
-    // than degrading. Check net_capabilities().traceroute before probing.
-    // Each hop reports the responding router, latency, or a timeout; the
-    // trace stops at the destination, on a terminal ICMP error, or at
-    // max_hops.
+    // Traces the network path to a host using TTL-stepped native probes. The
+    // method option selects the probe protocol: "icmp" (default) sends echo
+    // requests, "udp" sends datagrams to an unused port (destination reached
+    // on ICMP Port Unreachable), and "tcp" sends SYNs to a real port
+    // (reached on SYN-ACK/RST — the variant most likely to traverse
+    // firewalls). All methods need a raw ICMP socket for intermediate hops
+    // (usually CAP_NET_RAW; Docker: cap_add: [NET_RAW]); "tcp" additionally
+    // needs a raw TCP socket and is supported on Linux. When the required
+    // capability is missing it returns Err(String) rather than degrading —
+    // check net_capabilities() (traceroute / traceroute_udp / traceroute_tcp)
+    // before probing. Each hop reports the responding router, latency, or a
+    // timeout; the trace stops at the destination, on a terminal ICMP error,
+    // or at max_hops.
     // @param host Hostname or IP address to resolve and trace
-    // @param opts Optional map with max_hops (default 30, max 64), timeout_ms (default 8000, global budget), and allow_private
-    // @returns Result containing reached, target_addr, hop_count, and per-hop results
+    // @param opts Optional map with method ("icmp"|"udp"|"tcp", default "icmp"), port (default TCP 80 / UDP 33434), max_hops (default 30, max 64), timeout_ms (default 8000, global budget), and allow_private
+    // @returns Result containing reached, target_addr, method, hop_count, and per-hop results
     // @since v0.4.10
     // @tags #network
-    // @example traceroute("example.com", map { "max_hops": 16 }) ~ "Trace up to 16 hops toward example.com"
+    // @example traceroute("example.com", map { "method": "tcp", "port": 443 }) ~ "TCP-SYN trace to example.com:443"
     module.insert(
         "traceroute".to_string(),
         Value::NativeFunction {
@@ -830,6 +840,18 @@ fn net_capabilities_fn(_args: &[Value]) -> Result<Value, IntentError> {
         "traceroute".to_string(),
         Value::Bool(caps.traceroute_available()),
     );
+    // UDP traceroute needs only the raw ICMP receive path (UDP send is
+    // unprivileged), so it mirrors ICMP traceroute availability.
+    map.insert(
+        "traceroute_udp".to_string(),
+        Value::Bool(caps.traceroute_available()),
+    );
+    // TCP traceroute additionally needs a raw TCP socket, and raw TCP reply
+    // capture only works on Linux.
+    map.insert(
+        "traceroute_tcp".to_string(),
+        Value::Bool(caps.traceroute_tcp_available()),
+    );
     map.insert("icmpv4_datagram".to_string(), Value::Bool(caps.v4_datagram));
     map.insert("icmpv4_raw".to_string(), Value::Bool(caps.v4_raw));
     map.insert("icmpv6_datagram".to_string(), Value::Bool(caps.v6_datagram));
@@ -869,10 +891,43 @@ fn parse_traceroute_options(
         }
     };
     let allow_private = parse_bool_option(opts, "allow_private", false)?;
+    let method = match opts.and_then(|m| m.get("method")) {
+        None => traceroute::ProbeMethod::Icmp,
+        Some(Value::String(value)) => traceroute::ProbeMethod::parse(value)?,
+        Some(other) => {
+            return Err(format!(
+                "option 'method' must be String, got {}",
+                other.type_name()
+            ));
+        }
+    };
+    // Default destination port: TCP 80 (commonly firewall-open), UDP 33434
+    // (the classic traceroute base port). Unused for ICMP.
+    let default_port = match method {
+        traceroute::ProbeMethod::Tcp => 80,
+        _ => 33434,
+    };
+    let port = match opts.and_then(|m| m.get("port")) {
+        None => default_port,
+        Some(value) => validate_tcp_port_arg(
+            match value {
+                Value::Int(port) => *port,
+                other => {
+                    return Err(format!(
+                        "option 'port' must be Int, got {}",
+                        other.type_name()
+                    ));
+                }
+            },
+            "traceroute",
+        )?,
+    };
     Ok(traceroute::TracerouteOptions {
         timeout: Duration::from_millis(timeout_ms),
         max_hops,
         allow_private,
+        method,
+        port,
     })
 }
 
@@ -2574,6 +2629,7 @@ mod tests {
             Duration::from_millis(DEFAULT_TRACEROUTE_TIMEOUT_MS)
         );
         assert!(!defaults.allow_private);
+        assert_eq!(defaults.method, traceroute::ProbeMethod::Icmp);
 
         let clamped = parse_traceroute_options(Some(&HashMap::from([(
             "max_hops".to_string(),
@@ -2590,6 +2646,46 @@ mod tests {
         assert!(parse_traceroute_options(Some(&HashMap::from([(
             "max_hops".to_string(),
             Value::String("ten".to_string()),
+        )])))
+        .is_err());
+    }
+
+    #[test]
+    fn traceroute_method_and_port_defaults_and_validation() {
+        // TCP defaults to port 80, UDP to 33434, ICMP carries no meaningful port.
+        let tcp = parse_traceroute_options(Some(&HashMap::from([(
+            "method".to_string(),
+            Value::String("tcp".to_string()),
+        )])))
+        .unwrap();
+        assert_eq!(tcp.method, traceroute::ProbeMethod::Tcp);
+        assert_eq!(tcp.port, 80);
+
+        let udp = parse_traceroute_options(Some(&HashMap::from([(
+            "method".to_string(),
+            Value::String("udp".to_string()),
+        )])))
+        .unwrap();
+        assert_eq!(udp.method, traceroute::ProbeMethod::Udp);
+        assert_eq!(udp.port, 33434);
+
+        // Explicit port overrides the default.
+        let custom = parse_traceroute_options(Some(&HashMap::from([
+            ("method".to_string(), Value::String("tcp".to_string())),
+            ("port".to_string(), Value::Int(443)),
+        ])))
+        .unwrap();
+        assert_eq!(custom.port, 443);
+
+        // Unknown method and out-of-range port are rejected.
+        assert!(parse_traceroute_options(Some(&HashMap::from([(
+            "method".to_string(),
+            Value::String("bogus".to_string()),
+        )])))
+        .is_err());
+        assert!(parse_traceroute_options(Some(&HashMap::from([(
+            "port".to_string(),
+            Value::Int(70000),
         )])))
         .is_err());
     }
