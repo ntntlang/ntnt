@@ -538,6 +538,46 @@ sudo systemctl start ntnt-web ntnt-worker
 | `NTNT_SSRF_PROTECTION` | `true` (prod) | Block SSRF in `fetch()` |
 | `NTNT_DB_POOL_SIZE` | `5` | Database connections per pool per worker |
 | `NTNT_DETAILED_ERRORS` | `true` (dev) | Show stack traces in error responses |
+| `NTNT_NET_ALLOW_PRIVATE` | unset | Process-level opt-in for `std/net` probes against private/loopback targets (each call must also pass `allow_private: true`) |
+
+---
+
+## Network Probe Capabilities (std/net)
+
+`ping()` works unprivileged on most Linux hosts via datagram ICMP sockets, but
+containers often disable them (`net.ipv4.ping_group_range` is empty in many
+base images). `traceroute()` always requires a **raw** ICMP socket.
+
+To enable ICMP probes in Docker, grant `NET_RAW` to the service:
+
+```yaml
+services:
+  app:
+    image: your-ntnt-app
+    cap_add:
+      - NET_RAW
+```
+
+Alternatively, for `ping()` only, widen the unprivileged ping group range
+instead of granting a capability:
+
+```yaml
+    sysctls:
+      net.ipv4.ping_group_range: "0 2147483647"
+```
+
+Apps can check what is actually available at runtime — without sending any
+traffic — via `net_capabilities()`:
+
+```ntnt
+import { net_capabilities } from "std/net"
+
+let caps = net_capabilities()
+// caps.ping, caps.traceroute, caps.icmpv4_datagram, caps.icmpv4_raw, ...
+```
+
+When a capability is missing, `ping()` and `traceroute()` return a clear
+`Err(String)` naming the problem instead of degrading silently.
 
 ---
 

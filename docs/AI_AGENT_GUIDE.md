@@ -972,7 +972,7 @@ Both `fetch(map { "url": url, ... })` and `fetch(url, map { ... })` work. The tw
 
 ### Network/IPAM Helpers (`std/net`)
 
-`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, explicit TCP connect probes, bounded port scans, high-level reachability, DNS lookups, and TLS certificate inspection:
+`std/net` provides deterministic IPv4/IPv6 CIDR helpers, protocol-honest ICMP ping, TTL-stepped traceroute, explicit TCP connect probes, bounded port scans, high-level reachability, DNS lookups, and TLS certificate inspection:
 
 ```ntnt
 import { ip_parse, subnet_contains, subnet_split, subnet_summarize, tcp_connect, port_scan, reachable, dns_lookup, dns_reverse } from "std/net"
@@ -1009,7 +1009,25 @@ if caps.ping {
 }
 ```
 
-The map contains `ping` (true when any ICMP echo path is available), `icmpv4_datagram`, `icmpv4_raw`, `icmpv6_datagram`, `icmpv6_raw`, and `tcp` booleans. It returns a plain `Map` rather than a `Result` because detection itself cannot fail.
+The map contains `ping` (true when any ICMP echo path is available), `traceroute` (true when a raw ICMP path is available for either family), `icmpv4_datagram`, `icmpv4_raw`, `icmpv6_datagram`, `icmpv6_raw`, and `tcp` booleans. It returns a plain `Map` rather than a `Result` because detection itself cannot fail. The `ping`/`traceroute` flags are convenience aggregates; if you target a specific family check the per-family flag (e.g. `icmpv6_raw`), since a host may resolve only to a family whose raw socket is unavailable — the probe call then returns a clear `Err` naming the missing capability.
+
+`traceroute(host, opts?)` traces the network path to a host with TTL-stepped native ICMP echo probes. It **requires a raw ICMP socket** (usually `CAP_NET_RAW`; in Docker add `cap_add: [NET_RAW]` to the service) and returns `Err(String)` when raw sockets are unavailable rather than degrading — check `net_capabilities().traceroute` first. Options: `max_hops` (default 30, max 64), `timeout_ms` (default 8000, a global budget across all hops), `allow_private`.
+
+```ntnt
+import { net_capabilities, traceroute } from "std/net"
+
+let caps = net_capabilities()
+if caps.traceroute {
+    let trace = unwrap(traceroute("example.com", map { "max_hops": 16 }))
+    // trace.reached, trace.target_addr, trace.hop_count
+    for hop in trace.hops {
+        // hop.hop, hop.reached, hop.timed_out, and optional hop.from / hop.latency_ms / hop.error
+        print(hop)
+    }
+}
+```
+
+Each hop reports the responding router (`from`, `latency_ms`), a timeout (`timed_out: true`), or a terminal ICMP error (`error`); the trace stops at the destination (`reached: true`), on a terminal error, or at `max_hops`.
 
 ```ntnt
 let tcp = tcp_connect("example.com", 443, map { "count": 5 })

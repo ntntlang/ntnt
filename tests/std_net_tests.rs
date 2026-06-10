@@ -875,6 +875,7 @@ import { has_key } from "std/collections"
 
 let caps = net_capabilities()
 print(has_key(caps, "ping"))
+print(has_key(caps, "traceroute"))
 print(has_key(caps, "icmpv4_datagram"))
 print(has_key(caps, "icmpv4_raw"))
 print(has_key(caps, "icmpv6_datagram"))
@@ -887,7 +888,55 @@ print(caps.tcp)
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
         lines,
-        vec!["true", "true", "true", "true", "true", "true"],
+        vec!["true", "true", "true", "true", "true", "true", "true"],
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn traceroute_is_honest_about_raw_socket_capability() {
+    // CI-safe on any host: where raw ICMP is unavailable traceroute must
+    // return a clear Err naming the capability, and where it is available a
+    // loopback trace must produce hops. The branch taken always matches what
+    // net_capabilities() reported.
+    let (stdout, stderr, code) = run_ntnt_code_with_env(
+        r#"
+import { net_capabilities, traceroute } from "std/net"
+import { contains } from "std/string"
+
+let caps = net_capabilities()
+match traceroute("127.0.0.1", map { "max_hops": 2, "timeout_ms": 500, "allow_private": true }) {
+    Ok(result) => {
+        if caps.traceroute {
+            if result.hop_count > 0 {
+                print("ok-with-capability")
+            } else {
+                print("ok-but-empty")
+            }
+        } else {
+            print("unexpected-ok-without-capability")
+        }
+    },
+    Err(e) => {
+        if caps.traceroute {
+            print("unexpected-err-with-capability: #{e}")
+        } else {
+            if contains(e, "traceroute unavailable") {
+                print("err-without-capability")
+            } else {
+                print("unexpected-err-message: #{e}")
+            }
+        }
+    }
+}
+"#,
+        &[("NTNT_NET_ALLOW_PRIVATE", "1")],
+    );
+
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    let line = stdout.trim();
+    assert!(
+        line == "ok-with-capability" || line == "err-without-capability",
         "stdout: {stdout}"
     );
 }
