@@ -348,10 +348,17 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt ping
     // @module std/net
     // @signature ping(host: String, opts?: Map) -> Result<Map, String>
-    // Performs an ICMP ping when ICMP support is available. Apps that want TCP port
-    // checks should use tcp_connect(); high-level reachability checks can use reachable().
+    // Performs an ICMP ping using native sockets (unprivileged datagram ICMP when
+    // available, raw ICMP as fallback). Unreachable targets return Ok with failed
+    // attempts; missing socket permissions and resolver/system failures return
+    // Err(String). Apps that want TCP port checks should use tcp_connect();
+    // high-level reachability checks can use reachable().
+    // @param host Hostname or IP address to resolve and probe
+    // @param opts Optional map with count (default 1, max 10), timeout_ms (default 2000), interval_ms (default 0, max 5000), and allow_private
+    // @returns Result containing reachability status, latency summary, and per-attempt results
     // @since v0.4.10
     // @tags #network
+    // @example ping("example.com", map { "count": 3 }) ~ "Send three ICMP echo requests"
     module.insert(
         "ping".to_string(),
         Value::NativeFunction {
@@ -1411,14 +1418,33 @@ fn run_native_ping(
     for seq in 1..=count {
         let sequence = (seq.min(u16::MAX as usize)) as u16;
         let remaining_attempts = count.saturating_sub(seq).saturating_add(1);
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return Err(format!(
+        let budget = match deadline.checked_duration_since(Instant::now()) {
+            Some(remaining) => ping_attempt_budget(remaining, remaining_attempts, interval),
+            None => Err(format!(
                 "ICMP ping timed out before completing requested count: sent {} of {}",
                 attempts.len(),
                 count
-            ));
+            )),
         };
-        let per_attempt_timeout = ping_attempt_budget(remaining, remaining_attempts, interval)?;
+        let per_attempt_timeout = match budget {
+            Ok(value) => value,
+            // A budget failure before the first probe means timeout_ms cannot
+            // fit the requested count/interval at all: surface it as an error.
+            Err(err) if attempts.is_empty() => return Err(err),
+            // Mid-sequence exhaustion keeps the probes already completed and
+            // records the unsent remainder as failed attempts so the caller
+            // still sees the full requested count.
+            Err(_) => {
+                push_unsent_ping_attempts(
+                    &mut attempts,
+                    target_ip,
+                    seq,
+                    count,
+                    "ICMP ping deadline exhausted before probe could be sent",
+                );
+                break;
+            }
+        };
         match send_ping_attempt(
             &socket,
             target_ip,
@@ -1461,19 +1487,18 @@ fn run_native_ping(
         }
 
         if seq < count && !interval.is_zero() {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                return Err(format!(
-                    "ICMP ping timed out before completing requested count: sent {} of {}",
-                    attempts.len(),
-                    count
-                ));
-            };
-            if remaining < interval {
-                return Err(format!(
-                    "ICMP ping timeout_ms is too small for count {} and interval_ms {}",
+            let interval_fits = deadline
+                .checked_duration_since(Instant::now())
+                .is_some_and(|remaining| remaining >= interval);
+            if !interval_fits {
+                push_unsent_ping_attempts(
+                    &mut attempts,
+                    target_ip,
+                    seq + 1,
                     count,
-                    interval.as_millis()
-                ));
+                    "ICMP ping deadline exhausted before probe could be sent",
+                );
+                break;
             }
             thread::sleep(interval);
         }
@@ -1580,8 +1605,9 @@ fn send_ping_attempt(
         .set_write_timeout(Some(timeout))
         .map_err(native_ping_socket_error)?;
     let packet = build_icmp_echo_request(target_ip, local_ip, ident, sequence, payload)?;
+    let sent_at = Instant::now();
     socket.send(&packet).map_err(native_ping_send_error)?;
-    wait_for_icmp_reply(socket, target_ip, ident, sequence, deadline)
+    wait_for_icmp_reply(socket, target_ip, ident, sequence, deadline, sent_at)
 }
 
 #[derive(Debug, Clone)]
@@ -1604,8 +1630,8 @@ fn wait_for_icmp_reply(
     ident: u16,
     sequence: u16,
     deadline: Instant,
+    sent_at: Instant,
 ) -> Result<Option<IcmpProbeReply>, String> {
-    let sent_at = Instant::now();
     loop {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return Ok(None);
@@ -1901,12 +1927,35 @@ fn icmp_probe_error_is_target_failure(err: &str) -> bool {
 
 fn icmp_target_failure(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    lower.contains("network is unreachable")
+    // "connection refused" is how Linux DGRAM ICMP sockets surface a pending
+    // ICMP destination-unreachable error on recv; keep this list in sync with
+    // icmp_io_error_is_target_failure, which checks the same condition by kind.
+    lower.contains("connection refused")
+        || lower.contains("network is unreachable")
         || lower.contains("no route to host")
         || lower.contains("destination host unreachable")
         || lower.contains("destination net unreachable")
         || lower.contains("host is down")
         || lower.contains("icmp error from")
+}
+
+fn push_unsent_ping_attempts(
+    attempts: &mut Vec<IcmpPingAttempt>,
+    target_ip: IpAddr,
+    from_seq: usize,
+    count: usize,
+    message: &str,
+) {
+    for seq in from_seq..=count {
+        attempts.push(IcmpPingAttempt {
+            seq: Some(seq as i64),
+            reachable: false,
+            from: Some(target_ip.to_string()),
+            ttl: None,
+            latency_ms: None,
+            error: Some(message.to_string()),
+        });
+    }
 }
 
 fn failed_ping_result(
@@ -3308,6 +3357,45 @@ mod tests {
         let err = ping_attempt_budget(Duration::from_millis(100), 3, Duration::from_millis(60))
             .unwrap_err();
         assert!(err.contains("timeout_ms is too small"));
+    }
+
+    #[test]
+    fn icmp_connection_refused_is_target_failure() {
+        // Linux DGRAM ICMP sockets surface a pending destination-unreachable
+        // error on recv as ECONNREFUSED; it must classify as a target failure
+        // both as a typed io::Error and after being stringified.
+        let io_err = std::io::Error::from(ErrorKind::ConnectionRefused);
+        assert!(icmp_io_error_is_target_failure(&io_err));
+        assert!(icmp_probe_error_is_target_failure(&format!(
+            "ICMP ping failed: {}",
+            io_err
+        )));
+    }
+
+    #[test]
+    fn push_unsent_ping_attempts_fills_remaining_count() {
+        let target_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let mut attempts = vec![IcmpPingAttempt {
+            seq: Some(1),
+            reachable: true,
+            from: Some(target_ip.to_string()),
+            ttl: Some(56),
+            latency_ms: Some(10.0),
+            error: None,
+        }];
+
+        push_unsent_ping_attempts(&mut attempts, target_ip, 2, 4, "deadline exhausted");
+
+        assert_eq!(attempts.len(), 4);
+        assert_eq!(attempts[1].seq, Some(2));
+        assert_eq!(attempts[3].seq, Some(4));
+        assert!(attempts[1..]
+            .iter()
+            .all(|a| !a.reachable && a.error.as_deref() == Some("deadline exhausted")));
+
+        let result = finish_icmp_ping_result("example.com", target_ip, attempts, vec![10.0]);
+        assert_eq!(result.sent, 4);
+        assert_eq!(result.received, 1);
     }
 
     #[test]
