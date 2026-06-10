@@ -75,26 +75,35 @@ struct ErrorDoc {
 // ---------------------------------------------------------------------------
 
 /// Discover source files to scan for `// @ntnt` blocks.
-/// Automatically finds all .rs files in src/stdlib/ plus src/interpreter.rs.
-fn discover_source_files() -> Vec<String> {
+/// Recursively finds all .rs files in src/stdlib/ (directory modules like
+/// src/stdlib/net/ keep their docs scanned) plus src/interpreter.rs.
+/// Returns (files, directories); directories feed rerun-if-changed so adding
+/// a file inside a nested module triggers a doc rebuild.
+fn discover_source_files() -> (Vec<String>, Vec<String>) {
     let mut files: Vec<String> = Vec::new();
-
-    // Scan all .rs files in src/stdlib/
-    let stdlib_dir = Path::new("src/stdlib");
-    if let Ok(entries) = fs::read_dir(stdlib_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map(|e| e == "rs").unwrap_or(false) {
-                files.push(path.to_string_lossy().to_string());
-            }
-        }
-    }
+    let mut dirs: Vec<String> = Vec::new();
+    collect_rs_files(Path::new("src/stdlib"), &mut files, &mut dirs);
 
     // Always include interpreter.rs (global builtins)
     files.push("src/interpreter.rs".to_string());
 
     files.sort();
-    files
+    dirs.sort();
+    (files, dirs)
+}
+
+fn collect_rs_files(dir: &Path, files: &mut Vec<String>, dirs: &mut Vec<String>) {
+    dirs.push(dir.to_string_lossy().to_string());
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, files, dirs);
+            } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+                files.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
 }
 
 fn main() {
@@ -104,14 +113,17 @@ fn main() {
     #[cfg(target_os = "windows")]
     println!("cargo:rustc-link-arg=/STACK:8388608");
 
-    let source_files = discover_source_files();
+    let (source_files, source_dirs) = discover_source_files();
 
     // Re-run when scanned source files change or new files are added
     for file in &source_files {
         println!("cargo:rerun-if-changed={}", file);
     }
-    // Re-run when the stdlib directory itself changes (new files added/removed)
-    println!("cargo:rerun-if-changed=src/stdlib");
+    // Re-run when any scanned directory changes (new files added/removed),
+    // including nested module directories like src/stdlib/net/
+    for dir in &source_dirs {
+        println!("cargo:rerun-if-changed={}", dir);
+    }
 
     let mut all_docs: Vec<DocEntry> = Vec::new();
     let mut had_errors = false;

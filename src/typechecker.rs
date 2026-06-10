@@ -3816,6 +3816,14 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("subnet_supernet", ["cidr" => Type::String, "new_prefix" => Type::Int], result_string, required(1));
             sig!("subnet_summarize", ["cidrs" => Type::Array(Box::new(Type::String))], result_string_array.clone());
             sig!("ip_range_to_cidrs", ["start_ip" => Type::String, "end_ip" => Type::String], result_string_array.clone());
+            sig!(
+                "net_capabilities",
+                [],
+                Type::Map {
+                    key_type: Box::new(Type::String),
+                    value_type: Box::new(Type::Bool),
+                }
+            );
             sig!("ping", ["host" => Type::String, "opts" => opts.clone()], result_map.clone(), required(1));
             sig!("tcp_connect", ["host" => Type::String, "port" => Type::Int, "opts" => opts.clone()], result_map.clone(), required(2));
             sig!("reachable", ["host" => Type::String, "opts" => opts.clone()], result_map.clone(), required(1));

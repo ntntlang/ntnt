@@ -753,19 +753,54 @@ Tests:
 
 ---
 
-## Deferred / Out of Scope for Initial `std/net`
+## Phase 2 — Native Probe Toolset
 
-### `traceroute` and raw packet tooling
+Phase 1 shipped `std/net` with no shellouts except the original `ping` subprocess
+backend, which Phase 2 replaced with native ICMP sockets. Phase 2 continues the
+same direction: every probe is native Rust, no external tools, and the probe
+substrate is shared so each new diagnostic builds on classified failure
+semantics instead of reinventing them.
 
-Traceroute and other raw packet path-discovery tools require a separate capability story:
+### Probe substrate (PR 6)
 
-- runtime capability detection or `net_capabilities()` helper
-- clear Docker docs (`cap_add: [NET_RAW]`) for APIs that truly require raw sockets
-- CI opt-in via something like `NTNT_RUN_RAW_NET_TESTS=1`
-- graceful `Err` when unavailable
-- no default CI dependency on raw sockets
+The ICMP work is structured as a reusable substrate under `src/stdlib/net/`:
 
-`ping()` is **not** deferred. It belongs in Phase 1, but its default `auto` method must avoid lying: when ICMP is unavailable, return a clear `Err` rather than falling back to TCP reachability. TCP reachability remains explicit app/developer intent.
+- `net/probe.rs` — `ProbeFailure { Target, Backend }` carries the
+  target-failure vs backend-failure distinction as a type through every probe
+  layer. Classification happens once at the io boundary; string sniffing on
+  composed error messages is not allowed. Shared deadline budgeting
+  (`probe_attempt_budget`) divides one global timeout across attempts and
+  intervals so a requested count either completes or fails loudly.
+- `net/icmp.rs` — socket creation (datagram-first, raw fallback), echo packet
+  construction, checksums, reply/error parsing, capability detection, and the
+  `ping()` driver. Traceroute reuses everything except the driver loop.
+- `net_capabilities()` — reports which probe paths the current process can use
+  (datagram/raw ICMP per family, TCP) without sending any traffic, so apps and
+  deploy docs can check before probing instead of parsing `Err` strings.
+
+### `traceroute` (planned)
+
+Traceroute is the existing echo substrate with a stepped TTL
+(`IP_TTL`/`IPV6_UNICAST_HOPS`) and Time Exceeded treated as a hop report
+rather than a failure. Remaining requirements before it ships:
+
+- [x] runtime capability detection via `net_capabilities()`
+- [x] graceful `Err` when unavailable (shared `ProbeFailure::Backend` path)
+- [x] no default CI dependency on raw sockets (capability detection is
+      creation-only; raw probe tests stay env-gated)
+- [ ] per-hop TTL stepping and hop aggregation driver
+- [ ] clear Docker docs (`cap_add: [NET_RAW]`) for environments without
+      unprivileged datagram ICMP
+- [ ] CI opt-in for live path-discovery tests (e.g. `NTNT_TEST_ICMP_RAW=1`,
+      matching the existing ping gate)
+
+`ping()` shipped in Phase 1 and is protocol-honest: when ICMP is unavailable it
+returns a clear `Err` rather than falling back to TCP reachability. TCP
+reachability remains explicit app/developer intent.
+
+---
+
+## Deferred / Out of Scope
 
 ### WHOIS
 
@@ -787,15 +822,18 @@ SNMP is a real network-monitoring need, but it is its own protocol family. It sh
 
 ### Status Dashboard
 
-As of 2026-06-07:
+As of 2026-06-09:
 
 - [x] **PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability**: merged in [PR #113](https://github.com/ntntlang/ntnt/pull/113).
 - [x] **PR 2 — DNS lookup types**: merged in [PR #114](https://github.com/ntntlang/ntnt/pull/114).
 - [x] **PR 3 — Bounded port scan**: merged in [PR #115](https://github.com/ntntlang/ntnt/pull/115).
 - [x] **PR 4 — TLS certificate inspection**: merged in [PR #117](https://github.com/ntntlang/ntnt/pull/117).
-- [x] **Superseded PR**: [PR #116](https://github.com/ntntlang/ntnt/pull/116) was closed in favor of the cleaner PR #117 branch.
+- [x] **PR 5 — Native ICMP sockets**: merged in [PR #119](https://github.com/ntntlang/ntnt/pull/119). Replaced the Linux `ping` subprocess backend with in-tree datagram-first/raw-fallback ICMP sockets via `socket2`. `std/net` now has zero shellouts.
+- [x] **PR 6 — Probe substrate + `net_capabilities()`**: typed `ProbeFailure` classification, `src/stdlib/net/` module split (`probe.rs`, `icmp.rs`), and capability detection — groundwork for traceroute.
+- [ ] **PR 7 — `traceroute` (planned)**: TTL-stepped echo probes on the shared substrate; see Phase 2 above.
+- [x] **Superseded PRs**: [PR #116](https://github.com/ntntlang/ntnt/pull/116) was closed in favor of the cleaner PR #117 branch; [PR #118](https://github.com/ntntlang/ntnt/pull/118) was closed in favor of the cleaner PR #119 branch.
 
-The DD-046 initial scope is complete. The merged implementation includes runtime registration, typechecker signatures, generated stdlib docs, AI guide coverage, deterministic examples, CI-safe tests, public-network smoke tests gated behind environment variables, and review hardening for target policy, bounded scans, and TLS validation behavior.
+The DD-046 initial scope is complete and Phase 2 is underway. The merged implementation includes runtime registration, typechecker signatures, generated stdlib docs, AI guide coverage, deterministic examples, CI-safe tests, public-network smoke tests gated behind environment variables, and review hardening for target policy, bounded scans, and TLS validation behavior.
 
 ### PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability
 
