@@ -348,9 +348,10 @@ pub fn init() -> HashMap<String, Value> {
     // @signature net_capabilities() -> Map
     // Reports which network probe capabilities are available to the current
     // process without sending any traffic. The ICMP flags reflect whether the
-    // corresponding socket type can be created: datagram ICMP is unprivileged
-    // where the OS allows it, raw ICMP usually requires elevated privileges
-    // (e.g. CAP_NET_RAW). ping is true when any ICMP echo path is available.
+    // probe socket setup that ping() uses (create, configure, connect to
+    // loopback) succeeds: datagram ICMP is unprivileged where the OS allows
+    // it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW).
+    // ping is true when any ICMP echo path is available.
     // @returns Map with ping, icmpv4_datagram, icmpv4_raw, icmpv6_datagram, icmpv6_raw, and tcp booleans
     // @example net_capabilities() ~ "Check whether ping() can work before probing"
     // @since v0.4.10

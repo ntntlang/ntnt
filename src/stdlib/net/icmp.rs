@@ -49,17 +49,45 @@ impl IcmpCapabilities {
 
 pub(super) fn detect_icmp_capabilities() -> IcmpCapabilities {
     IcmpCapabilities {
-        v4_datagram: icmp_socket_creatable(Domain::IPV4, Type::DGRAM, Protocol::ICMPV4),
-        v4_raw: icmp_socket_creatable(Domain::IPV4, Type::RAW, Protocol::ICMPV4),
-        v6_datagram: icmp_socket_creatable(Domain::IPV6, Type::DGRAM, Protocol::ICMPV6),
-        v6_raw: icmp_socket_creatable(Domain::IPV6, Type::RAW, Protocol::ICMPV6),
+        v4_datagram: icmp_path_available(Domain::IPV4, Type::DGRAM, Protocol::ICMPV4),
+        v4_raw: icmp_path_available(Domain::IPV4, Type::RAW, Protocol::ICMPV4),
+        v6_datagram: icmp_path_available(Domain::IPV6, Type::DGRAM, Protocol::ICMPV6),
+        v6_raw: icmp_path_available(Domain::IPV6, Type::RAW, Protocol::ICMPV6),
     }
 }
 
-/// Capability detection only creates the socket; it never connects, binds to
-/// a remote address, or sends traffic.
-fn icmp_socket_creatable(domain: Domain, socket_type: Type, protocol: Protocol) -> bool {
-    Socket::new(domain, socket_type, Some(protocol)).is_ok()
+const CAPABILITY_PROBE_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Capability detection exercises the same socket setup path `ping()` uses —
+/// create, set timeouts, connect — against loopback, so a reported capability
+/// means an echo request could actually be built and sent. `connect()` on a
+/// datagram/raw socket only sets the default destination locally; detection
+/// never sends any traffic.
+fn icmp_path_available(domain: Domain, socket_type: Type, protocol: Protocol) -> bool {
+    let loopback = match domain {
+        Domain::IPV6 => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        _ => IpAddr::V4(Ipv4Addr::LOCALHOST),
+    };
+    let Ok(socket) = open_connected_icmp_socket(
+        domain,
+        socket_type,
+        protocol,
+        loopback,
+        CAPABILITY_PROBE_TIMEOUT,
+    ) else {
+        return false;
+    };
+    match loopback {
+        // ICMPv6 echo construction needs a local IPv6 address for the
+        // pseudo-header checksum; require it just like build_icmp_echo_request.
+        IpAddr::V6(_) => socket
+            .local_addr()
+            .ok()
+            .and_then(|addr| addr.as_socket())
+            .map(|addr| addr.ip().is_ipv6())
+            .unwrap_or(false),
+        IpAddr::V4(_) => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,5 +1157,16 @@ mod tests {
             caps.ping_available(),
             caps.v4_datagram || caps.v4_raw || caps.v6_datagram || caps.v6_raw
         );
+    }
+
+    #[test]
+    fn capability_detection_matches_ping_socket_setup_path() {
+        // Whatever this environment permits, the reported IPv4 capability must
+        // agree with what create_icmp_socket (the path ping() actually takes)
+        // can do against loopback — capabilities must not overstate ping.
+        let caps = detect_icmp_capabilities();
+        let socket_path_works =
+            create_icmp_socket(IpAddr::V4(Ipv4Addr::LOCALHOST), Duration::from_millis(50)).is_ok();
+        assert_eq!(caps.v4_datagram || caps.v4_raw, socket_path_works);
     }
 }
