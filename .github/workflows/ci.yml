@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel superseded runs on rapid pushes to the same PR; never cancel main.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -32,6 +37,7 @@ jobs:
               - 'Cargo.lock'
               - 'build.rs'
               - '.github/workflows/ci.yml'
+              - '.config/nextest.toml'
             examples:
               - 'examples/**'
               - 'src/**'
@@ -58,24 +64,29 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Build
         run: cargo build --locked
 
+      # nextest runs each test in its own process, which removes the two
+      # documented causes of the old parallel-test races (std::env mutation
+      # across threads, eb9f77d; shared JOB_RUNTIME state, ef3d79d/DD-059) —
+      # every process gets its own environment and its own globals. Local
+      # network fixtures are grouped/serialized via .config/nextest.toml.
       - name: Run tests
-        run: cargo test --locked -- --test-threads=1
+        run: cargo nextest run --locked
         env:
           RUST_MIN_STACK: 8388608
+
+      # nextest does not run doctests; keep them covered (currently zero,
+      # this guards any future additions).
+      - name: Run doctests
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --doc --locked
 
   auth-backends:
     name: Auth Backend Contracts
@@ -112,16 +123,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-auth-backends-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-auth-backends-cargo-
+          key: auth-backends
 
       - name: Run auth storage contract tests against Postgres and Redis
         run: |
@@ -148,10 +152,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  examples:
-    name: Validate Examples
+  # One release build serves both example linting and doc validation.
+  # The release target/ gets its own cache key so it never collides with
+  # the debug artifacts cached by the test job.
+  docs-and-examples:
+    name: Validate Docs & Examples
     needs: changes
-    if: needs.changes.outputs.examples == 'true' || github.event_name == 'push'
+    if: needs.changes.outputs.examples == 'true' || needs.changes.outputs.docs == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -160,48 +167,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: release
 
       - name: Build release
         run: cargo build --release --locked
 
       - name: Lint examples
         run: ./target/release/ntnt lint examples/
-
-  docs:
-    name: Validate Documentation
-    needs: changes
-    if: needs.changes.outputs.docs == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Build release
-        run: cargo build --release --locked
 
       - name: Validate stdlib.toml
         run: ./target/release/ntnt docs --validate
@@ -226,12 +200,12 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [test, auth-backends, lint, examples, docs]
+    needs: [test, auth-backends, lint, docs-and-examples]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI results
         run: |
-          results=("${{ needs.test.result }}" "${{ needs['auth-backends'].result }}" "${{ needs.lint.result }}" "${{ needs.examples.result }}" "${{ needs.docs.result }}")
+          results=("${{ needs.test.result }}" "${{ needs['auth-backends'].result }}" "${{ needs.lint.result }}" "${{ needs['docs-and-examples'].result }}")
           for result in "${results[@]}"; do
             if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
               echo "::error::CI job failed or was cancelled: $result"
