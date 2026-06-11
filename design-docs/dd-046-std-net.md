@@ -902,54 +902,82 @@ of packet construction, checksums, and the quoted/​reply matchers; the
 integration test asserts each method's outcome matches its capability flag.
 End-to-end validation is a manual run on a capable host.
 
-### Parallel hop probing (PR 10)
+### The stdlib/app boundary (decided 2026-06-10)
 
-`mtr` sends all TTLs concurrently rather than waiting hop-by-hop, turning a
-30-hop trace from sum-of-per-hop-timeouts into roughly a single timeout. This
-is a driver-loop change: emit probes for TTL `1..max` up front, then collect
-replies and demultiplex by sequence→TTL. High value once traces are long or
-run in cycles.
+Phase 2 + PR 8/9 ship the primitive: a single traceroute pass. Before building
+further, a design question was resolved — **what belongs in the stdlib vs. the
+application?** The rule that fell out, consistent with this DD's "primitives,
+not a grab-bag" stance:
 
-*Estimated effort: ~1–2 days.*
+- **Stdlib provides only what the stdlib alone can**: raw-socket access
+  (privileged, native) and anything *internal to a single trace* — because each
+  `traceroute()` call is one complete trace, an app cannot reach inside it.
+- **The application composes the rest**: looping and aggregating across traces
+  is pure data math over the primitive's output — no privilege, no native code.
 
-### mtr-style continuous statistics (PR 11)
+This reclassifies two previously-planned items as **out of stdlib scope**:
 
-`mtr` is traceroute in a loop with per-hop accumulation: sent, received,
-loss%, and last/avg/best/worst/stddev RTT per hop. Single-pass already emits
-per-hop latency; this adds a `cycles` (and `probes_per_hop`) option and an
-aggregation layer keyed by hop index. The synchronous stdlib model fits
-"run N cycles, return aggregated stats" (`traceroute(host, map { "cycles": 10 })`);
-a live/streaming TUI does not map to a `Result`-returning call and would need
-a channel/callback variant if ever wanted — out of scope here.
+- **mtr-style cycle statistics** (loss%, last/avg/best/worst/stddev per hop):
+  this is `for _ in 0..n { traceroute(host) }` plus arithmetic — a handful of
+  lines of `.tnt` (or a small ntnt helper library). Baking a fixed stats shape
+  into Rust bloats the privileged surface to wrap a loop, and is less flexible
+  than letting the app accumulate. Left to application code.
+- **Per-hop reverse DNS**: `dns_reverse(hop.from)` over the result — already
+  composable from a primitive we ship (`dns_reverse`). Left to application code.
 
-*Estimated effort: ~1–2 days.*
+What *does* belong in the stdlib is anything internal to one trace, which an app
+cannot do: parallel hop probing (below), and future per-trace options like
+`probes_per_hop`, source/interface binding, and packet-size/DF controls.
 
-### Per-hop reverse DNS (PR 12, optional)
+### Parallel hop probing (PR 10) — in progress
 
-`mtr` shows router hostnames. `std/net` already has `dns_reverse()`; add an
-opt-in `resolve_hops: true` that annotates each hop with its PTR name. Off by
-default because it adds latency. ASN/AS-name annotation is a separate data
-source and stays deferred.
+`mtr` sends all TTLs concurrently rather than waiting hop-by-hop. The win is not
+the happy path (a short path where every router answers is already fast); it is
+the common slow cases — **silent hops** (routers that drop/limit ICMP Time
+Exceeded) and **unreached destinations**, which today each cost a full per-hop
+timeout *serially*. Sending TTL `1..max` up front and collecting replies turns
+sum-of-timeouts into roughly a single timeout — a 5–30× wall-clock win on
+exactly the traces a live/polling consumer hits, and something an app cannot do
+itself (it is internal to one trace).
 
-*Estimated effort: ~half day.*
+Design: decouple send from receive in the `TraceProbe` trait (`send(ttl, seq)` +
+`recv(deadline) -> Option<HopReply>`), demultiplex replies back to their hop by
+the per-hop correlation token added in PR 8/9 (echo sequence / UDP destination
+port / TCP sequence number), and assemble the ordered hop list from the
+collected replies (silent hops → timed out, trim beyond the first hop that
+reached the destination). Parallel becomes the trace engine; the result shape is
+unchanged. Bounded by `max_hops` (≤64), so the up-front burst is small.
+
+### `probes_per_hop` (PR 11) — immediate follow-up
+
+Sending K probes per hop *within one trace* improves the odds of eliciting a
+reply from a lossy hop and yields per-hop min-RTT. It rides directly on PR 10's
+send/recv split and per-probe token map (token → hop), so it is a small,
+focused follow-up rather than part of the parallel-hops change.
+
+### Future per-trace primitives (candidates)
+
+Genuinely primitive (native/privileged, internal to a probe, not
+app-composable), in rough priority:
+
+- **`path_mtu(host)`** — PMTU discovery: increasing packet sizes with
+  Don't-Fragment set, find the smallest "fragmentation needed" ICMP. A distinct,
+  useful primitive reusing the raw-ICMP substrate; not app-composable.
+- **Source / interface binding** — bind probes to a specific local IP/egress
+  (multi-homed hosts, monitoring a specific path).
+- **DSCP/ToS marking** — trace QoS-differentiated paths via a setsockopt (niche).
+
+Explicitly *not* stdlib: cycle stats, per-hop rDNS (both app-level above), and
+ASN/AS-path annotation (needs an external BGP/whois data source — not a network
+primitive).
 
 ### Capability & security continuity
 
 Every method still relies on the raw ICMP **receive** socket for intermediate
 hops, so the `CAP_NET_RAW` / Docker `cap_add` story and `net_capabilities()`
-plumbing from Phase 2 carry over unchanged. As methods land,
-`net_capabilities()` can grow per-method flags (`traceroute_udp`,
-`traceroute_tcp`) using the same creation-only detection pattern. Target
-policy (private/loopback/metadata denial with the two-level opt-in) applies to
-every method exactly as it does to ICMP traceroute.
-
-### Suggested sequencing
-
-TCP first (PR 9 — highest real-world value, works through firewalls), then
-parallel hops (PR 10 — makes multi-cycle traces bearable), then mtr stats
-(PR 11), then UDP (PR 8) and reverse DNS (PR 12) to round out. Each is an
-independent, reviewable PR on the shared substrate; the `ProbeMethod` refactor
-lands with the first method that needs it.
+plumbing from Phase 2 carry over unchanged. Target policy (private/loopback/
+metadata denial with the two-level opt-in) applies to every method exactly as
+it does to ICMP traceroute.
 
 ---
 
@@ -985,9 +1013,11 @@ As of 2026-06-09:
 - [x] **PR 6 — Probe substrate + `net_capabilities()`**: typed `ProbeFailure` classification, `src/stdlib/net/` module split (`probe.rs`, `icmp.rs`), and capability detection — groundwork for traceroute.
 - [x] **PR 7 — `traceroute()`**: TTL-stepped echo probes on the shared substrate (raw ICMP only, graceful `Err` otherwise), `traceroute` capability flag, Docker `cap_add` deployment docs; see Phase 2 above.
 - [x] **PR 8/9 — UDP + TCP traceroute** (`method: "udp"`/`"tcp"`): shared `TraceProbe`/`HopProbe` abstraction, generalized quoted-transport matcher, UDP (Port Unreachable arrival) and raw TCP SYN (SYN-ACK/RST arrival, Linux), plus `traceroute_udp`/`traceroute_tcp` capability flags. See Phase 3.
-- [ ] **PR 10 — Parallel hop probing**: concurrent TTL emission, demux by sequence→TTL. See Phase 3.
-- [ ] **PR 11 — mtr-style cycle statistics**: `cycles`/`probes_per_hop` with per-hop loss% and last/avg/best/worst/stddev RTT. See Phase 3.
-- [ ] **PR 12 — Per-hop reverse DNS** (optional): opt-in `resolve_hops` via existing `dns_reverse()`. See Phase 3.
+- [ ] **PR 10 — Parallel hop probing**: send/recv split, concurrent TTL emission, demux by per-hop token, pure assembly. See Phase 3.
+- [ ] **PR 11 — `probes_per_hop`**: K probes per hop on PR 10's token map. See Phase 3.
+- [x] ~~**mtr-style cycle statistics**~~ — moved to application level (composition over the primitive); not stdlib scope. See "The stdlib/app boundary".
+- [x] ~~**Per-hop reverse DNS**~~ — moved to application level (`dns_reverse(hop.from)` over the result); not stdlib scope.
+- [ ] **Future primitives** (candidates): `path_mtu(host)` PMTU discovery, source/interface binding, DSCP marking. See Phase 3.
 - [x] **Superseded PRs**: [PR #116](https://github.com/ntntlang/ntnt/pull/116) was closed in favor of the cleaner PR #117 branch; [PR #118](https://github.com/ntntlang/ntnt/pull/118) was closed in favor of the cleaner PR #119 branch.
 
 The DD-046 initial scope is complete and Phase 2 is underway. The merged implementation includes runtime registration, typechecker signatures, generated stdlib docs, AI guide coverage, deterministic examples, CI-safe tests, public-network smoke tests gated behind environment variables, and review hardening for target policy, bounded scans, and TLS validation behavior.

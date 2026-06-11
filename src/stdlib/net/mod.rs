@@ -419,7 +419,9 @@ pub fn init() -> HashMap<String, Value> {
     // a raw TCP socket). When the required capability is missing it returns
     // Err(String) rather than degrading —
     // check net_capabilities() (traceroute / traceroute_udp / traceroute_tcp)
-    // before probing. Each hop reports the responding router, latency, or a
+    // before probing. All hops are probed concurrently and collected within
+    // the timeout budget, so a trace costs about one timeout rather than one
+    // per silent hop. Each hop reports the responding router, latency, or a
     // timeout; the trace stops at the destination, on a terminal ICMP error,
     // or at max_hops.
     // @param host Hostname or IP address to resolve and trace

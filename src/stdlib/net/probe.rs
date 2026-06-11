@@ -199,31 +199,43 @@ pub(super) fn set_socket_hop_limit(
 // Traceroute probe abstraction (one TraceProbe per protocol method)
 // ---------------------------------------------------------------------------
 
-/// The outcome of a single TTL-stepped probe, independent of probe protocol.
-#[derive(Debug)]
-pub(super) enum HopProbe {
+/// What a received reply says about the hop it answers.
+#[derive(Debug, PartialEq)]
+pub(super) enum HopKind {
     /// A router reported TTL/hop-limit expiry: an intermediate hop.
-    Hop { from: IpAddr, latency_ms: f64 },
+    Hop,
     /// The destination responded (echo reply / port unreachable / SYN-ACK /
-    /// RST depending on method): the trace is complete.
-    Reached { from: IpAddr, latency_ms: f64 },
+    /// RST depending on method): the trace reaches here.
+    Reached,
     /// A terminal ICMP error other than TTL expiry (e.g. net/host
     /// unreachable, administratively prohibited): records the hop and stops.
-    Terminal {
-        from: IpAddr,
-        latency_ms: f64,
-        message: String,
-    },
-    /// No matching reply arrived within the per-hop budget.
-    TimedOut,
+    Terminal(String),
 }
 
-/// A protocol-specific traceroute prober. Implementations own their send and
-/// receive sockets; the shared driver only steps the TTL and interprets the
-/// returned [`HopProbe`]. `seq` is a per-hop correlation token (carried in the
-/// echo sequence, UDP/TCP ports, or TCP sequence number as appropriate).
+/// A reply matched back to the probe (hop) that elicited it. Returned by
+/// [`TraceProbe::recv`]; `seq` is the per-hop correlation token the driver
+/// sent, recovered from the reply so concurrent probes demultiplex correctly.
+#[derive(Debug)]
+pub(super) struct HopReply {
+    pub(super) seq: u16,
+    pub(super) from: IpAddr,
+    pub(super) latency_ms: f64,
+    pub(super) kind: HopKind,
+}
+
+/// A protocol-specific traceroute prober with send decoupled from receive so
+/// the driver can emit a whole TTL burst before collecting replies.
+/// Implementations own their sockets and track each probe's send time (keyed
+/// by `seq`) for accurate per-hop latency.
 pub(super) trait TraceProbe {
-    fn probe(&mut self, ttl: u8, seq: u16, deadline: Instant) -> Result<HopProbe, ProbeFailure>;
+    /// Set the hop limit and send one probe carrying correlation token `seq`.
+    /// Records the send time; returns immediately without waiting.
+    fn send(&mut self, ttl: u8, seq: u16) -> Result<(), ProbeFailure>;
+
+    /// Wait up to `deadline` for the next reply matching one of our
+    /// outstanding probes, recovering which hop (`seq`) it answers.
+    /// `Ok(None)` on timeout. Called repeatedly to drain a burst.
+    fn recv(&mut self, deadline: Instant) -> Result<Option<HopReply>, ProbeFailure>;
 }
 
 #[cfg(test)]

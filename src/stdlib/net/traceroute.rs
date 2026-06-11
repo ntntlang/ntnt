@@ -1,11 +1,14 @@
-//! TTL-stepped traceroute driver, generic over probe method.
+//! Parallel TTL-stepped traceroute driver, generic over probe method.
 //!
-//! The driver steps the TTL/hop-limit and interprets each [`HopProbe`]: a
-//! `Hop` names the router at that distance, `Reached` means the destination
-//! answered, `Terminal` records a terminal ICMP error and stops, and
-//! `TimedOut` records a silent hop. How a probe is sent and how "reached" is
-//! detected is owned by the per-method [`TraceProbe`] implementations
-//! (ICMP echo in `icmp`, UDP and TCP in `transport`).
+//! The driver emits a probe for every TTL `1..max_hops` up front, then collects
+//! replies and demultiplexes each back to its hop by the per-hop token the
+//! [`TraceProbe`] implementations carry (ICMP echo sequence, UDP destination
+//! port, TCP sequence number). Sending the whole burst at once turns the slow
+//! cases — silent hops and unreached destinations, which would otherwise each
+//! cost a full per-hop timeout in series — into roughly a single timeout. The
+//! ordered hop list is then assembled from the collected replies: silent hops
+//! become `timed_out`, and hops beyond the one that reached the destination are
+//! trimmed.
 //!
 //! Every method needs a raw ICMP receive socket for intermediate hops, so all
 //! require CAP_NET_RAW; when it is unavailable the driver returns a clear
@@ -13,14 +16,12 @@
 
 use super::enforce_resolved_target_policy;
 use super::icmp::{open_icmp_trace_probe, resolve_probe_targets, unique_target_ips};
-use super::probe::{probe_attempt_budget, HopProbe, ProbeFailure, TraceProbe};
+use super::probe::{HopKind, HopReply, ProbeFailure, TraceProbe};
 use super::transport::{open_tcp_trace_probe, open_udp_trace_probe};
 use crate::interpreter::Value;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
-
-const TRACEROUTE_LABEL: &str = "traceroute";
 
 /// Which probe protocol a traceroute uses.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -119,94 +120,102 @@ fn run_traceroute(
 ) -> Result<TraceOutcome, ProbeFailure> {
     let mut probe = open_method_probe(target_ip, options)?;
     let deadline = Instant::now() + options.timeout;
-    let mut hops: Vec<TracerouteHop> = Vec::new();
-    let mut reached = false;
 
+    // Emit one probe per TTL up front. A send failure on the very first hop is
+    // fatal (nothing usable was sent); after that it just bounds the burst to
+    // the hops we managed to send.
+    let mut sent_hops = 0usize;
     for hop in 1..=options.max_hops {
-        let remaining_hops = options.max_hops.saturating_sub(hop).saturating_add(1);
-        let budget = match deadline.checked_duration_since(Instant::now()) {
-            Some(remaining) => {
-                probe_attempt_budget(TRACEROUTE_LABEL, remaining, remaining_hops, Duration::ZERO)
-            }
-            None => Err(ProbeFailure::Backend(format!(
-                "traceroute timed out after {} of {} hops",
-                hops.len(),
-                options.max_hops
-            ))),
-        };
-        let hop_deadline = match budget {
-            Ok(value) => Instant::now() + value,
-            // No budget before the first hop means timeout_ms cannot fit the
-            // requested max_hops at all: surface it as an error.
-            Err(failure) if hops.is_empty() => return Err(failure),
-            // Mid-trace exhaustion keeps the hops already discovered.
-            Err(_) => break,
-        };
-
         let ttl = hop.min(u8::MAX as usize) as u8;
-        let seq = hop.min(u16::MAX as usize) as u16;
-        match probe.probe(ttl, seq, hop_deadline) {
-            Ok(HopProbe::Reached { from, latency_ms }) => {
-                hops.push(TracerouteHop {
+        let seq = hop as u16;
+        match probe.send(ttl, seq) {
+            Ok(()) => sent_hops = hop,
+            Err(failure) if sent_hops == 0 => return Err(failure),
+            Err(_) => break,
+        }
+    }
+
+    // Collect replies until the deadline, or until everything up to the hop
+    // that stops the trace (reached / terminal error) has answered.
+    let mut replies: Vec<HopReply> = Vec::new();
+    while let Some(reply) = probe.recv(deadline)? {
+        replies.push(reply);
+        if collection_complete(&replies, sent_hops) {
+            break;
+        }
+    }
+
+    Ok(assemble_trace(replies, sent_hops))
+}
+
+/// The hop a trace stops at: the lowest hop that reached the destination or
+/// returned a terminal error. `None` while the trace is still open.
+fn stop_hop(replies: &[HopReply]) -> Option<u16> {
+    replies
+        .iter()
+        .filter(|r| matches!(r.kind, HopKind::Reached | HopKind::Terminal(_)))
+        .map(|r| r.seq)
+        .min()
+}
+
+/// Whether collection can stop early: a stopping hop is known and every hop
+/// below it has already answered (nothing further can change the result).
+fn collection_complete(replies: &[HopReply], sent_hops: usize) -> bool {
+    let Some(stop) = stop_hop(replies) else {
+        return sent_hops == 0;
+    };
+    (1..stop).all(|hop| replies.iter().any(|r| r.seq == hop))
+}
+
+/// Builds the ordered hop list from the collected replies. Hops with no reply
+/// are silent (`timed_out`); hops beyond the one that stops the trace are
+/// trimmed. A later reply for a hop wins (last write), matching the burst
+/// arrival order.
+fn assemble_trace(replies: Vec<HopReply>, sent_hops: usize) -> TraceOutcome {
+    let mut by_hop: HashMap<u16, HopReply> = HashMap::new();
+    for reply in replies {
+        by_hop.insert(reply.seq, reply);
+    }
+    let stop = by_hop
+        .values()
+        .filter(|r| matches!(r.kind, HopKind::Reached | HopKind::Terminal(_)))
+        .map(|r| r.seq)
+        .min();
+    let reached =
+        stop.is_some_and(|s| matches!(by_hop.get(&s).map(|r| &r.kind), Some(HopKind::Reached)));
+    let upper = stop.map_or(sent_hops, usize::from);
+
+    let mut hops = Vec::with_capacity(upper);
+    for hop in 1..=upper {
+        let entry = by_hop.get(&(hop as u16));
+        hops.push(match entry {
+            Some(reply) => {
+                let (reached_here, error) = match &reply.kind {
+                    HopKind::Reached => (true, None),
+                    HopKind::Hop => (false, None),
+                    HopKind::Terminal(message) => (false, Some(message.clone())),
+                };
+                TracerouteHop {
                     hop,
-                    from: Some(from.to_string()),
-                    latency_ms: Some(latency_ms),
-                    reached: true,
+                    from: Some(reply.from.to_string()),
+                    latency_ms: Some(reply.latency_ms),
+                    reached: reached_here,
                     timed_out: false,
-                    error: None,
-                });
-                reached = true;
-                break;
+                    error,
+                }
             }
-            Ok(HopProbe::Hop { from, latency_ms }) => hops.push(TracerouteHop {
-                hop,
-                from: Some(from.to_string()),
-                latency_ms: Some(latency_ms),
-                reached: false,
-                timed_out: false,
-                error: None,
-            }),
-            Ok(HopProbe::Terminal {
-                from,
-                latency_ms,
-                message,
-            }) => {
-                hops.push(TracerouteHop {
-                    hop,
-                    from: Some(from.to_string()),
-                    latency_ms: Some(latency_ms),
-                    reached: false,
-                    timed_out: false,
-                    error: Some(message),
-                });
-                break;
-            }
-            Ok(HopProbe::TimedOut) => hops.push(TracerouteHop {
+            None => TracerouteHop {
                 hop,
                 from: None,
                 latency_ms: None,
                 reached: false,
                 timed_out: true,
                 error: None,
-            }),
-            // A backend failure before the first hop is fatal; mid-trace it
-            // records the hop where it happened and keeps the partial path.
-            Err(failure) if hops.is_empty() => return Err(failure),
-            Err(failure) => {
-                hops.push(TracerouteHop {
-                    hop,
-                    from: None,
-                    latency_ms: None,
-                    reached: false,
-                    timed_out: false,
-                    error: Some(failure.into_message()),
-                });
-                break;
-            }
-        }
+            },
+        });
     }
 
-    Ok(TraceOutcome { hops, reached })
+    TraceOutcome { hops, reached }
 }
 
 fn traceroute_result_map(
@@ -388,5 +397,91 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- assembly logic (the part that can't run in CI without raw sockets) ---
+
+    fn reply(seq: u16, last_octet: u8, kind: HopKind) -> HopReply {
+        HopReply {
+            seq,
+            from: IpAddr::V4(Ipv4Addr::new(10, 0, 0, last_octet)),
+            latency_ms: f64::from(seq),
+            kind,
+        }
+    }
+
+    #[test]
+    fn assemble_orders_hops_and_marks_silent_ones_timed_out() {
+        // Hops 1 and 3 answered, hop 2 silent, destination reached at hop 3.
+        let replies = vec![
+            reply(1, 1, HopKind::Hop),
+            reply(3, 9, HopKind::Reached),
+            // a stray reply for a hop beyond the destination — must be trimmed
+            reply(4, 9, HopKind::Reached),
+        ];
+        let outcome = assemble_trace(replies, 30);
+        assert!(outcome.reached);
+        assert_eq!(outcome.hops.len(), 3, "trimmed at the reached hop");
+        assert_eq!(outcome.hops[0].hop, 1);
+        assert!(!outcome.hops[0].timed_out);
+        // hop 2 was silent
+        assert_eq!(outcome.hops[1].hop, 2);
+        assert!(outcome.hops[1].timed_out);
+        assert!(outcome.hops[1].from.is_none());
+        // hop 3 reached
+        assert!(outcome.hops[2].reached);
+    }
+
+    #[test]
+    fn assemble_stops_at_earliest_of_reached_and_terminal() {
+        // Terminal at hop 2 stops the trace even though hop 4 reached later.
+        let replies = vec![
+            reply(1, 1, HopKind::Hop),
+            reply(2, 2, HopKind::Terminal("prohibited".to_string())),
+            reply(4, 9, HopKind::Reached),
+        ];
+        let outcome = assemble_trace(replies, 30);
+        assert!(!outcome.reached);
+        assert_eq!(outcome.hops.len(), 2);
+        assert_eq!(outcome.hops[1].error.as_deref(), Some("prohibited"));
+
+        // Reached earlier than a later terminal: reached wins.
+        let replies = vec![
+            reply(3, 3, HopKind::Reached),
+            reply(7, 7, HopKind::Terminal("x".to_string())),
+        ];
+        let outcome = assemble_trace(replies, 30);
+        assert!(outcome.reached);
+        assert_eq!(outcome.hops.len(), 3);
+    }
+
+    #[test]
+    fn assemble_unreached_trace_runs_to_sent_hops() {
+        // No reply reaches the destination: report all probed hops, silent ones
+        // timed out.
+        let replies = vec![reply(1, 1, HopKind::Hop), reply(2, 2, HopKind::Hop)];
+        let outcome = assemble_trace(replies, 5);
+        assert!(!outcome.reached);
+        assert_eq!(outcome.hops.len(), 5);
+        assert!(outcome.hops[2].timed_out);
+        assert!(outcome.hops[4].timed_out);
+    }
+
+    #[test]
+    fn collection_completes_only_when_everything_below_the_stop_is_in() {
+        let with_gap = vec![reply(1, 1, HopKind::Hop), reply(3, 9, HopKind::Reached)];
+        // Hop 2 is still missing, so collection must keep waiting.
+        assert!(!collection_complete(&with_gap, 30));
+
+        let filled = vec![
+            reply(1, 1, HopKind::Hop),
+            reply(2, 2, HopKind::Hop),
+            reply(3, 9, HopKind::Reached),
+        ];
+        assert!(collection_complete(&filled, 30));
+
+        // No stop hop yet: keep collecting (unless nothing was sent).
+        assert!(!collection_complete(&[reply(1, 1, HopKind::Hop)], 30));
+        assert!(collection_complete(&[], 0));
     }
 }

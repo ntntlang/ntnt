@@ -15,7 +15,7 @@
 
 use super::probe::{
     internet_checksum, probe_attempt_budget, quoted_inner_v4, quoted_inner_v6,
-    set_socket_hop_limit, transport_checksum, HopProbe, ProbeFailure, TraceProbe,
+    set_socket_hop_limit, transport_checksum, HopKind, HopReply, ProbeFailure, TraceProbe,
 };
 use super::{enforce_resolved_target_policy, ProbeOptions};
 use crate::interpreter::Value;
@@ -364,7 +364,6 @@ pub(super) struct IcmpProbeError {
     pub(super) source: IpAddr,
     pub(super) icmp_type: u8,
     pub(super) icmp_code: u8,
-    pub(super) latency_ms: f64,
 }
 
 impl IcmpProbeError {
@@ -373,15 +372,6 @@ impl IcmpProbeError {
             "ICMP error from {}: type {} code {}",
             self.source, self.icmp_type, self.icmp_code
         )
-    }
-
-    /// Time Exceeded is ICMPv4 type 11 / ICMPv6 type 3 — the signal a
-    /// TTL-stepped probe uses to identify an intermediate hop.
-    pub(super) fn is_time_exceeded(&self) -> bool {
-        match self.source {
-            IpAddr::V4(_) => self.icmp_type == 11,
-            IpAddr::V6(_) => self.icmp_type == 3,
-        }
     }
 }
 
@@ -425,7 +415,6 @@ fn parse_icmp_probe_event(
             source: message.source,
             icmp_type: message.icmp_type,
             icmp_code: message.icmp_code,
-            latency_ms,
         }));
     }
     None
@@ -433,22 +422,24 @@ fn parse_icmp_probe_event(
 
 /// True when the packet an ICMP error quotes is one of our echo requests.
 fn echo_error_quotes_probe(quoted: &[u8], target_ip: IpAddr, ident: u16, sequence: u16) -> bool {
-    let (icmp_protocol, echo_type, inner) = match target_ip {
-        IpAddr::V4(_) => match quoted_inner_v4(quoted) {
-            Some((proto, inner)) => (1u8, 8u8, (proto, inner)),
-            None => return false,
-        },
-        IpAddr::V6(_) => match quoted_inner_v6(quoted) {
-            Some((proto, inner)) => (58u8, 128u8, (proto, inner)),
-            None => return false,
-        },
+    recover_quoted_echo(quoted, target_ip) == Some((ident, sequence))
+}
+
+/// Recovers the (ident, sequence) of the echo request an ICMP error quotes,
+/// or `None` if the quoted packet is not one of our echo requests. Used by the
+/// traceroute receiver to demultiplex a burst of probes back to their hops.
+fn recover_quoted_echo(quoted: &[u8], target_ip: IpAddr) -> Option<(u16, u16)> {
+    let (icmp_protocol, echo_type, (proto, inner)) = match target_ip {
+        IpAddr::V4(_) => (1u8, 8u8, quoted_inner_v4(quoted)?),
+        IpAddr::V6(_) => (58u8, 128u8, quoted_inner_v6(quoted)?),
     };
-    let (proto, inner) = inner;
-    proto == icmp_protocol
-        && inner.len() >= 8
-        && inner[0] == echo_type
-        && u16::from_be_bytes([inner[4], inner[5]]) == ident
-        && u16::from_be_bytes([inner[6], inner[7]]) == sequence
+    if proto != icmp_protocol || inner.len() < 8 || inner[0] != echo_type {
+        return None;
+    }
+    Some((
+        u16::from_be_bytes([inner[4], inner[5]]),
+        u16::from_be_bytes([inner[6], inner[7]]),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -457,22 +448,9 @@ fn echo_error_quotes_probe(quoted: &[u8], target_ip: IpAddr, ident: u16, sequenc
 
 /// How an echo probe reaches the target.
 ///
-/// Ping connects its socket and uses `send()`. Traceroute must NOT connect:
-/// a connected raw ICMP socket makes the kernel drop datagrams whose source
-/// is not the connected peer, which is exactly the intermediate-router Time
-/// Exceeded replies traceroute depends on. It uses `send_to` on an
-/// unconnected socket so replies from any hop are received.
-pub(super) enum ProbeDelivery {
-    /// Socket is connected to the target; send with `send()`.
-    Connected,
-    /// Socket is unconnected; send to the target with `send_to()`.
-    Unconnected,
-}
-
-/// Sends one ICMP echo request and waits for the matching event: a reply,
-/// an ICMP error quoting the probe, or `None` on timeout. Shared by ping
-/// and traceroute; `label` names the calling probe in failure messages.
-#[allow(clippy::too_many_arguments)]
+/// Sends one ICMP echo request on ping's connected socket and waits for the
+/// matching event: a reply, an ICMP error quoting the probe, or `None` on
+/// timeout. (Traceroute uses its own unconnected send/recv split.)
 pub(super) fn send_echo_probe(
     label: &str,
     socket: &Socket,
@@ -482,7 +460,6 @@ pub(super) fn send_echo_probe(
     sequence: u16,
     payload: &[u8],
     timeout: Duration,
-    delivery: ProbeDelivery,
 ) -> Result<Option<IcmpProbeEvent>, ProbeFailure> {
     let deadline = Instant::now() + timeout;
     socket
@@ -493,13 +470,9 @@ pub(super) fn send_echo_probe(
         .map_err(|err| probe_socket_unavailable(label, err))?;
     let packet = build_icmp_echo_request(label, target_ip, local_ip, ident, sequence, payload)?;
     let sent_at = Instant::now();
-    let send_result = match delivery {
-        ProbeDelivery::Connected => socket.send(&packet),
-        ProbeDelivery::Unconnected => {
-            socket.send_to(&packet, &SockAddr::from(SocketAddr::new(target_ip, 0)))
-        }
-    };
-    send_result.map_err(|err| probe_io_failure(label, err))?;
+    socket
+        .send(&packet)
+        .map_err(|err| probe_io_failure(label, err))?;
     wait_for_icmp_event(label, socket, target_ip, ident, sequence, deadline, sent_at)
 }
 
@@ -566,13 +539,16 @@ pub(super) fn open_raw_icmp_recv(
     create_raw_icmp_socket(target_ip, timeout).map_err(raw_icmp_socket_denied)
 }
 
-/// ICMP echo traceroute method: send + receive both happen on one raw ICMP
-/// socket, so this simply wraps the shared echo probe.
+/// ICMP echo traceroute method: send and receive share one unconnected raw
+/// ICMP socket. Echo requests carry our ident and the per-hop sequence as the
+/// correlation token, recovered from the reply (or the echo an ICMP error
+/// quotes) so a burst of probes demultiplexes back to its hops.
 pub(super) struct IcmpTraceProbe {
     socket: Socket,
     target_ip: IpAddr,
     local_ip: Option<IpAddr>,
     ident: u16,
+    sent_at: HashMap<u16, Instant>,
 }
 
 pub(super) fn open_icmp_trace_probe(
@@ -587,43 +563,104 @@ pub(super) fn open_icmp_trace_probe(
         target_ip,
         local_ip,
         ident,
+        sent_at: HashMap::new(),
     })
 }
 
-impl TraceProbe for IcmpTraceProbe {
-    fn probe(&mut self, ttl: u8, seq: u16, deadline: Instant) -> Result<HopProbe, ProbeFailure> {
-        set_socket_hop_limit("traceroute", &self.socket, self.target_ip, ttl)?;
-        let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
-            return Ok(HopProbe::TimedOut);
+/// Classifies an ICMP datagram for the traceroute receiver, recovering which
+/// of our echo probes (by sequence) it answers and what it means.
+fn classify_icmp_hop(
+    bytes: &[u8],
+    target_ip: IpAddr,
+    our_ident: u16,
+) -> Option<(u16, IpAddr, HopKind)> {
+    let message = parse_icmp_message(bytes, target_ip, target_ip)?;
+    let (reply_type, failure_types): (u8, &[u8]) = match target_ip {
+        IpAddr::V4(_) => (0, &[3, 11]),
+        IpAddr::V6(_) => (129, &[1, 2, 3, 4]),
+    };
+    // Echo reply: ident + sequence are in the reply's own header.
+    if message.icmp_type == reply_type
+        && u16::from_be_bytes([message.rest[0], message.rest[1]]) == our_ident
+    {
+        let seq = u16::from_be_bytes([message.rest[2], message.rest[3]]);
+        return Some((seq, message.source, HopKind::Reached));
+    }
+    // ICMP error: recover ident + sequence from the echo it quotes.
+    if failure_types.contains(&message.icmp_type) {
+        let (ident, seq) = recover_quoted_echo(message.quoted, target_ip)?;
+        if ident != our_ident {
+            return None;
+        }
+        let time_exceeded = match target_ip {
+            IpAddr::V4(_) => message.icmp_type == 11,
+            IpAddr::V6(_) => message.icmp_type == 3,
         };
+        let kind = if time_exceeded {
+            HopKind::Hop
+        } else {
+            HopKind::Terminal(format!(
+                "ICMP error from {}: type {} code {}",
+                message.source, message.icmp_type, message.icmp_code
+            ))
+        };
+        return Some((seq, message.source, kind));
+    }
+    None
+}
+
+impl TraceProbe for IcmpTraceProbe {
+    fn send(&mut self, ttl: u8, seq: u16) -> Result<(), ProbeFailure> {
+        set_socket_hop_limit("traceroute", &self.socket, self.target_ip, ttl)?;
         let payload = [0u8; 32];
-        let event = send_echo_probe(
+        let packet = build_icmp_echo_request(
             "traceroute",
-            &self.socket,
             self.target_ip,
             self.local_ip,
             self.ident,
             seq,
             &payload,
-            timeout,
-            ProbeDelivery::Unconnected,
         )?;
-        Ok(match event {
-            Some(IcmpProbeEvent::Reply(reply)) => HopProbe::Reached {
-                from: reply.source,
-                latency_ms: reply.latency_ms,
-            },
-            Some(IcmpProbeEvent::Error(error)) if error.is_time_exceeded() => HopProbe::Hop {
-                from: error.source,
-                latency_ms: error.latency_ms,
-            },
-            Some(IcmpProbeEvent::Error(error)) => HopProbe::Terminal {
-                from: error.source,
-                latency_ms: error.latency_ms,
-                message: error.message(),
-            },
-            None => HopProbe::TimedOut,
-        })
+        self.sent_at.insert(seq, Instant::now());
+        self.socket
+            .send_to(&packet, &SockAddr::from(SocketAddr::new(self.target_ip, 0)))
+            .map_err(|err| probe_io_failure("traceroute", err))?;
+        Ok(())
+    }
+
+    fn recv(&mut self, deadline: Instant) -> Result<Option<HopReply>, ProbeFailure> {
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Ok(None);
+            };
+            self.socket
+                .set_read_timeout(Some(remaining))
+                .map_err(|err| probe_socket_unavailable("traceroute", err))?;
+            let mut buffer = [MaybeUninit::<u8>::uninit(); 2048];
+            let len = match self.socket.recv_from(&mut buffer) {
+                Ok((len, _)) => len,
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return Ok(None);
+                }
+                Err(err) => return Err(probe_io_failure("traceroute", err)),
+            };
+            let received_at = Instant::now();
+            let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), len) };
+            if let Some((seq, from, kind)) = classify_icmp_hop(bytes, self.target_ip, self.ident) {
+                if let Some(sent) = self.sent_at.get(&seq) {
+                    let latency_ms =
+                        received_at.saturating_duration_since(*sent).as_secs_f64() * 1000.0;
+                    return Ok(Some(HopReply {
+                        seq,
+                        from,
+                        latency_ms,
+                        kind,
+                    }));
+                }
+            }
+            // Not one of our outstanding probes: keep waiting within budget.
+        }
     }
 }
 
@@ -811,8 +848,6 @@ fn run_native_ping(
             sequence,
             &payload,
             per_attempt_timeout,
-            // Ping's socket (datagram or raw) is connected to the target.
-            ProbeDelivery::Connected,
         ) {
             Ok(Some(IcmpProbeEvent::Reply(reply))) => {
                 latencies.push(reply.latency_ms);
@@ -1140,8 +1175,6 @@ mod tests {
                     assert_eq!(error.icmp_type, icmp_type);
                     assert_eq!(error.source, IpAddr::V6(Ipv6Addr::LOCALHOST));
                     assert!(error.message().contains(&format!("type {icmp_type}")));
-                    // ICMPv6 Time Exceeded is type 3 — the traceroute hop signal.
-                    assert_eq!(error.is_time_exceeded(), icmp_type == 3);
                 }
                 other => panic!("expected ICMPv6 type {icmp_type} probe error, got {other:?}"),
             }
