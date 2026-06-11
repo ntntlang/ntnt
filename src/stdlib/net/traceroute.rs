@@ -1,37 +1,67 @@
-//! TTL-stepped traceroute driver on the shared ICMP substrate.
+//! TTL-stepped traceroute driver, generic over probe method.
 //!
-//! Each hop sends one echo request with an incremented TTL/hop-limit and
-//! interprets the resulting [`IcmpProbeEvent`]: a Time Exceeded error names
-//! the router at that hop, an echo reply means the destination was reached,
-//! and any other ICMP error (destination unreachable, administratively
-//! prohibited, ...) terminates the trace with that hop recorded.
+//! The driver steps the TTL/hop-limit and interprets each [`HopProbe`]: a
+//! `Hop` names the router at that distance, `Reached` means the destination
+//! answered, `Terminal` records a terminal ICMP error and stops, and
+//! `TimedOut` records a silent hop. How a probe is sent and how "reached" is
+//! detected is owned by the per-method [`TraceProbe`] implementations
+//! (ICMP echo in `icmp`, UDP and TCP in `transport`).
 //!
-//! Traceroute requires a RAW ICMP socket: only raw sockets deliver Time
-//! Exceeded packets with the reporting router's source address. Datagram
-//! ICMP sockets surface those errors as bare errno values without the
-//! offender, which would produce a hop list with no addresses. When raw
-//! sockets are unavailable the driver returns a clear backend error; apps
-//! can check `net_capabilities().traceroute` first.
+//! Every method needs a raw ICMP receive socket for intermediate hops, so all
+//! require CAP_NET_RAW; when it is unavailable the driver returns a clear
+//! backend error. Apps can check `net_capabilities()` first.
 
 use super::enforce_resolved_target_policy;
-use super::icmp::{
-    create_raw_icmp_socket, local_source_address_for, next_icmp_ident, probe_socket_unavailable,
-    resolve_probe_targets, send_echo_probe, unique_target_ips, IcmpProbeEvent, ProbeDelivery,
-};
-use super::probe::{probe_attempt_budget, ProbeFailure};
+use super::icmp::{open_icmp_trace_probe, resolve_probe_targets, unique_target_ips};
+use super::probe::{probe_attempt_budget, HopProbe, ProbeFailure, TraceProbe};
+use super::transport::{open_tcp_trace_probe, open_udp_trace_probe};
 use crate::interpreter::Value;
-use socket2::Socket;
 use std::collections::HashMap;
-use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 const TRACEROUTE_LABEL: &str = "traceroute";
 
+/// Which probe protocol a traceroute uses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ProbeMethod {
+    Icmp,
+    Udp,
+    Tcp,
+}
+
+impl ProbeMethod {
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "icmp" => Ok(ProbeMethod::Icmp),
+            "udp" => Ok(ProbeMethod::Udp),
+            "tcp" => Ok(ProbeMethod::Tcp),
+            other => Err(format!(
+                "option 'method' must be \"icmp\", \"udp\", or \"tcp\", got {other:?}"
+            )),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ProbeMethod::Icmp => "icmp",
+            ProbeMethod::Udp => "udp",
+            ProbeMethod::Tcp => "tcp",
+        }
+    }
+
+    /// Whether this method targets a destination port (UDP/TCP) or not (ICMP).
+    fn uses_port(self) -> bool {
+        matches!(self, ProbeMethod::Udp | ProbeMethod::Tcp)
+    }
+}
+
 pub(super) struct TracerouteOptions {
     pub(super) timeout: Duration,
     pub(super) max_hops: usize,
     pub(super) allow_private: bool,
+    pub(super) method: ProbeMethod,
+    pub(super) port: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -60,33 +90,35 @@ pub(super) fn traceroute_for_host(
     // Traceroute traces a single path: use the first resolved address, in
     // resolver preference order.
     let target_ip = target_ips[0];
-    let outcome =
-        run_traceroute(target_ip, options).map_err(super::probe::ProbeFailure::into_message)?;
+    let outcome = run_traceroute(target_ip, options).map_err(ProbeFailure::into_message)?;
     Ok(traceroute_result_map(host, target_ip, options, outcome))
+}
+
+fn open_method_probe(
+    target_ip: IpAddr,
+    options: &TracerouteOptions,
+) -> Result<Box<dyn TraceProbe>, ProbeFailure> {
+    Ok(match options.method {
+        ProbeMethod::Icmp => Box::new(open_icmp_trace_probe(target_ip, options.timeout)?),
+        ProbeMethod::Udp => Box::new(open_udp_trace_probe(
+            target_ip,
+            options.port,
+            options.timeout,
+        )?),
+        ProbeMethod::Tcp => Box::new(open_tcp_trace_probe(
+            target_ip,
+            options.port,
+            options.timeout,
+        )?),
+    })
 }
 
 fn run_traceroute(
     target_ip: IpAddr,
     options: &TracerouteOptions,
 ) -> Result<TraceOutcome, ProbeFailure> {
-    let socket = create_raw_icmp_socket(target_ip, options.timeout).map_err(|err| {
-        if err.kind() == ErrorKind::PermissionDenied {
-            ProbeFailure::Backend(format!(
-                "traceroute unavailable: raw ICMP socket denied: {err}. \
-                 Grant CAP_NET_RAW (Docker: cap_add: [NET_RAW]) or run with elevated privileges"
-            ))
-        } else {
-            probe_socket_unavailable(TRACEROUTE_LABEL, err)
-        }
-    })?;
-    // The raw socket is unconnected (so it can receive Time Exceeded from any
-    // hop), so its own local_addr() is the unspecified address. Derive the
-    // real source the kernel would use for this target — required for the
-    // ICMPv6 pseudo-header checksum.
-    let local_ip = local_source_address_for(target_ip);
-    let ident = next_icmp_ident();
+    let mut probe = open_method_probe(target_ip, options)?;
     let deadline = Instant::now() + options.timeout;
-    let payload = [0u8; 32];
     let mut hops: Vec<TracerouteHop> = Vec::new();
     let mut reached = false;
 
@@ -102,42 +134,23 @@ fn run_traceroute(
                 options.max_hops
             ))),
         };
-        let per_hop_timeout = match budget {
-            Ok(value) => value,
+        let hop_deadline = match budget {
+            Ok(value) => Instant::now() + value,
             // No budget before the first hop means timeout_ms cannot fit the
             // requested max_hops at all: surface it as an error.
             Err(failure) if hops.is_empty() => return Err(failure),
-            // Mid-trace exhaustion keeps the hops already discovered; the
-            // result reports reached=false with the partial path.
+            // Mid-trace exhaustion keeps the hops already discovered.
             Err(_) => break,
         };
-        // A setsockopt failure mid-trace must not discard the path already
-        // discovered: before the first hop it is a hard error, otherwise it
-        // ends the trace with the partial result (mirrors the budget arms).
-        if let Err(failure) = set_hop_limit(&socket, target_ip, hop) {
-            if hops.is_empty() {
-                return Err(failure);
-            }
-            break;
-        }
-        let sequence = hop.min(u16::MAX as usize) as u16;
-        match send_echo_probe(
-            TRACEROUTE_LABEL,
-            &socket,
-            target_ip,
-            local_ip,
-            ident,
-            sequence,
-            &payload,
-            per_hop_timeout,
-            // Unconnected raw socket: receive Time Exceeded from every hop.
-            ProbeDelivery::Unconnected,
-        ) {
-            Ok(Some(IcmpProbeEvent::Reply(reply))) => {
+
+        let ttl = hop.min(u8::MAX as usize) as u8;
+        let seq = hop.min(u16::MAX as usize) as u16;
+        match probe.probe(ttl, seq, hop_deadline) {
+            Ok(HopProbe::Reached { from, latency_ms }) => {
                 hops.push(TracerouteHop {
                     hop,
-                    from: Some(reply.source.to_string()),
-                    latency_ms: Some(reply.latency_ms),
+                    from: Some(from.to_string()),
+                    latency_ms: Some(latency_ms),
                     reached: true,
                     timed_out: false,
                     error: None,
@@ -145,30 +158,30 @@ fn run_traceroute(
                 reached = true;
                 break;
             }
-            Ok(Some(IcmpProbeEvent::Error(error))) if error.is_time_exceeded() => {
-                // TTL expired in transit: this is the router at the current hop.
+            Ok(HopProbe::Hop { from, latency_ms }) => hops.push(TracerouteHop {
+                hop,
+                from: Some(from.to_string()),
+                latency_ms: Some(latency_ms),
+                reached: false,
+                timed_out: false,
+                error: None,
+            }),
+            Ok(HopProbe::Terminal {
+                from,
+                latency_ms,
+                message,
+            }) => {
                 hops.push(TracerouteHop {
                     hop,
-                    from: Some(error.source.to_string()),
-                    latency_ms: Some(error.latency_ms),
+                    from: Some(from.to_string()),
+                    latency_ms: Some(latency_ms),
                     reached: false,
                     timed_out: false,
-                    error: None,
-                });
-            }
-            Ok(Some(IcmpProbeEvent::Error(error))) => {
-                // Destination unreachable and friends terminate the trace.
-                hops.push(TracerouteHop {
-                    hop,
-                    from: Some(error.source.to_string()),
-                    latency_ms: Some(error.latency_ms),
-                    reached: false,
-                    timed_out: false,
-                    error: Some(error.message()),
+                    error: Some(message),
                 });
                 break;
             }
-            Ok(None) => hops.push(TracerouteHop {
+            Ok(HopProbe::TimedOut) => hops.push(TracerouteHop {
                 hop,
                 from: None,
                 latency_ms: None,
@@ -176,20 +189,9 @@ fn run_traceroute(
                 timed_out: true,
                 error: None,
             }),
-            Err(failure) if failure.is_target() => {
-                hops.push(TracerouteHop {
-                    hop,
-                    from: None,
-                    latency_ms: None,
-                    reached: false,
-                    timed_out: false,
-                    error: Some(failure.into_message()),
-                });
-                break;
-            }
+            // A backend failure before the first hop is fatal; mid-trace it
+            // records the hop where it happened and keeps the partial path.
             Err(failure) if hops.is_empty() => return Err(failure),
-            // Mid-trace backend failure: keep the hops already discovered and
-            // record the failure on the hop where it happened.
             Err(failure) => {
                 hops.push(TracerouteHop {
                     hop,
@@ -207,15 +209,6 @@ fn run_traceroute(
     Ok(TraceOutcome { hops, reached })
 }
 
-fn set_hop_limit(socket: &Socket, target_ip: IpAddr, hop: usize) -> Result<(), ProbeFailure> {
-    let limit = hop.min(255) as u32;
-    match target_ip {
-        IpAddr::V4(_) => socket.set_ttl_v4(limit),
-        IpAddr::V6(_) => socket.set_unicast_hops_v6(limit),
-    }
-    .map_err(|err| probe_socket_unavailable(TRACEROUTE_LABEL, err))
-}
-
 fn traceroute_result_map(
     host: &str,
     target_ip: IpAddr,
@@ -228,7 +221,13 @@ fn traceroute_result_map(
         "target_addr".to_string(),
         Value::String(target_ip.to_string()),
     );
-    map.insert("method".to_string(), Value::String("icmp".to_string()));
+    map.insert(
+        "method".to_string(),
+        Value::String(options.method.label().to_string()),
+    );
+    if options.method.uses_port() {
+        map.insert("port".to_string(), Value::Int(i64::from(options.port)));
+    }
     map.insert("reached".to_string(), Value::Bool(outcome.reached));
     map.insert("max_hops".to_string(), Value::Int(options.max_hops as i64));
     map.insert(
@@ -264,6 +263,16 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
+    fn options(method: ProbeMethod, port: u16) -> TracerouteOptions {
+        TracerouteOptions {
+            timeout: Duration::from_millis(1000),
+            max_hops: 30,
+            allow_private: false,
+            method,
+            port,
+        }
+    }
+
     fn sample_outcome() -> TraceOutcome {
         TraceOutcome {
             hops: vec![
@@ -297,16 +306,19 @@ mod tests {
     }
 
     #[test]
+    fn method_parse_accepts_known_and_rejects_unknown() {
+        assert_eq!(ProbeMethod::parse("icmp"), Ok(ProbeMethod::Icmp));
+        assert_eq!(ProbeMethod::parse("udp"), Ok(ProbeMethod::Udp));
+        assert_eq!(ProbeMethod::parse("tcp"), Ok(ProbeMethod::Tcp));
+        assert!(ProbeMethod::parse("bogus").is_err());
+    }
+
+    #[test]
     fn traceroute_result_map_reports_path_and_reachability() {
-        let options = TracerouteOptions {
-            timeout: Duration::from_millis(1000),
-            max_hops: 30,
-            allow_private: false,
-        };
         let map = traceroute_result_map(
             "example.com",
             IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
-            &options,
+            &options(ProbeMethod::Icmp, 0),
             sample_outcome(),
         );
 
@@ -314,6 +326,8 @@ mod tests {
         assert!(matches!(map.get("hop_count"), Some(Value::Int(3))));
         assert!(matches!(map.get("max_hops"), Some(Value::Int(30))));
         assert!(matches!(map.get("method"), Some(Value::String(m)) if m == "icmp"));
+        // ICMP traceroute carries no port field.
+        assert!(!map.contains_key("port"));
         let Some(Value::Array(hops)) = map.get("hops") else {
             panic!("expected hops array");
         };
@@ -328,10 +342,27 @@ mod tests {
         };
         assert!(matches!(second.get("timed_out"), Some(Value::Bool(true))));
         assert!(!second.contains_key("from"));
-        let Value::Map(last) = &hops[2] else {
-            panic!("expected hop map");
-        };
-        assert!(matches!(last.get("reached"), Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn tcp_and_udp_result_maps_echo_method_and_port() {
+        let target = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let tcp = traceroute_result_map(
+            "example.com",
+            target,
+            &options(ProbeMethod::Tcp, 443),
+            sample_outcome(),
+        );
+        assert!(matches!(tcp.get("method"), Some(Value::String(m)) if m == "tcp"));
+        assert!(matches!(tcp.get("port"), Some(Value::Int(443))));
+        let udp = traceroute_result_map(
+            "example.com",
+            target,
+            &options(ProbeMethod::Udp, 33434),
+            sample_outcome(),
+        );
+        assert!(matches!(udp.get("method"), Some(Value::String(m)) if m == "udp"));
+        assert!(matches!(udp.get("port"), Some(Value::Int(33434))));
     }
 
     #[test]
@@ -339,12 +370,14 @@ mod tests {
         // Only meaningful where raw ICMP is unavailable (default CI and dev
         // machines); where raw sockets work this asserts the success path
         // classification instead.
-        let options = TracerouteOptions {
+        let opts = TracerouteOptions {
             timeout: Duration::from_millis(200),
             max_hops: 1,
             allow_private: true,
+            method: ProbeMethod::Icmp,
+            port: 0,
         };
-        match run_traceroute(IpAddr::V4(Ipv4Addr::LOCALHOST), &options) {
+        match run_traceroute(IpAddr::V4(Ipv4Addr::LOCALHOST), &opts) {
             Ok(outcome) => assert!(!outcome.hops.is_empty()),
             Err(failure) => {
                 assert!(!failure.is_target());

@@ -13,7 +13,10 @@
 //! as `Err` to the caller. Classification happens once, at the io boundary —
 //! never by sniffing composed message strings.
 
-use super::probe::{probe_attempt_budget, ProbeFailure};
+use super::probe::{
+    internet_checksum, probe_attempt_budget, quoted_inner_v4, quoted_inner_v6,
+    set_socket_hop_limit, transport_checksum, HopProbe, ProbeFailure, TraceProbe,
+};
 use super::{enforce_resolved_target_policy, ProbeOptions};
 use crate::interpreter::Value;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -46,11 +49,32 @@ impl IcmpCapabilities {
         self.v4_datagram || self.v4_raw || self.v6_datagram || self.v6_raw
     }
 
-    /// Traceroute needs raw ICMP: only raw sockets deliver Time Exceeded
-    /// packets with the reporting router's address.
+    /// ICMP-echo traceroute needs raw ICMP: only raw sockets deliver Time
+    /// Exceeded packets with the reporting router's address.
     pub(super) fn traceroute_available(&self) -> bool {
         self.v4_raw || self.v6_raw
     }
+
+    /// UDP traceroute also relies on the raw ICMP receive path, but its probe
+    /// send + reply handling are validated only on Linux (Windows rejects the
+    /// send with WSAEINVAL), so report it there.
+    pub(super) fn traceroute_udp_available(&self) -> bool {
+        cfg!(target_os = "linux") && self.traceroute_available()
+    }
+
+    /// TCP traceroute additionally needs a raw TCP socket, and raw TCP reply
+    /// capture only works on Linux (BSD/Windows do not deliver TCP to raw
+    /// sockets), so report it only where it can actually function.
+    pub(super) fn traceroute_tcp_available(&self) -> bool {
+        cfg!(target_os = "linux") && self.traceroute_available() && raw_tcp_socket_creatable()
+    }
+}
+
+/// Whether a raw TCP socket can be created by this process (creation only —
+/// no traffic). Used to keep the `traceroute_tcp` capability flag honest.
+fn raw_tcp_socket_creatable() -> bool {
+    let creatable = |domain| Socket::new(domain, Type::RAW, Some(Protocol::TCP)).is_ok();
+    creatable(Domain::IPV4) || creatable(Domain::IPV6)
 }
 
 pub(super) fn detect_icmp_capabilities() -> IcmpCapabilities {
@@ -258,7 +282,10 @@ fn build_icmp_echo_request(
 
     let checksum = match (target_ip, local_ip) {
         (IpAddr::V4(_), _) => internet_checksum(&packet),
-        (IpAddr::V6(dst), Some(IpAddr::V6(src))) => icmpv6_checksum(src, dst, &packet),
+        // ICMPv6 uses protocol 58 in its pseudo-header checksum.
+        (IpAddr::V6(_), Some(src @ IpAddr::V6(_))) => {
+            transport_checksum(src, target_ip, 58, &packet)
+        }
         (IpAddr::V6(_), _) => {
             return Err(ProbeFailure::Backend(format!(
                 "{label} failed: could not determine local IPv6 address for checksum"
@@ -269,34 +296,56 @@ fn build_icmp_echo_request(
     Ok(packet)
 }
 
-fn internet_checksum(data: &[u8]) -> u16 {
-    let mut sum = 0u32;
-    let mut chunks = data.chunks_exact(2);
-    for chunk in &mut chunks {
-        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
-    }
-    if let Some(&byte) = chunks.remainder().first() {
-        sum += u16::from_be_bytes([byte, 0]) as u32;
-    }
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(sum as u16)
-}
-
-fn icmpv6_checksum(source: Ipv6Addr, destination: Ipv6Addr, icmp: &[u8]) -> u16 {
-    let mut pseudo_packet = Vec::with_capacity(40 + icmp.len());
-    pseudo_packet.extend_from_slice(&source.octets());
-    pseudo_packet.extend_from_slice(&destination.octets());
-    pseudo_packet.extend_from_slice(&(icmp.len() as u32).to_be_bytes());
-    pseudo_packet.extend_from_slice(&[0, 0, 0, 58]);
-    pseudo_packet.extend_from_slice(icmp);
-    internet_checksum(&pseudo_packet)
-}
-
 // ---------------------------------------------------------------------------
 // Reply parsing substrate
 // ---------------------------------------------------------------------------
+
+/// An ICMP message lifted out of a raw-socket datagram: the outer IPv4 header
+/// (if present) is stripped, leaving the responder's address, the ICMP
+/// type/code, and the bytes the ICMP error quotes from the original packet.
+/// Shared by every probe method that listens on the raw ICMP socket.
+pub(super) struct IcmpMessage<'a> {
+    pub(super) source: IpAddr,
+    pub(super) ttl: Option<i64>,
+    pub(super) icmp_type: u8,
+    pub(super) icmp_code: u8,
+    /// The 4 bytes after type/code/checksum — ident+sequence for an echo reply.
+    pub(super) rest: [u8; 4],
+    /// Bytes after the 8-byte ICMP header — for an error, the quoted packet.
+    pub(super) quoted: &'a [u8],
+}
+
+/// Parses a datagram read from a raw ICMP socket. IPv4 raw sockets prepend the
+/// outer IP header (giving the responder address and TTL); IPv6 raw sockets do
+/// not, so the responder address comes from `recvfrom` via `fallback_source`.
+pub(super) fn parse_icmp_message(
+    bytes: &[u8],
+    target_ip: IpAddr,
+    fallback_source: IpAddr,
+) -> Option<IcmpMessage<'_>> {
+    let (icmp, ttl, source) = match target_ip {
+        IpAddr::V4(_) if bytes.len() >= 20 && bytes[0] >> 4 == 4 => {
+            let header_len = usize::from(bytes[0] & 0x0f) * 4;
+            if header_len < 20 || bytes.len() < header_len + 8 {
+                return None;
+            }
+            let source = IpAddr::V4(Ipv4Addr::new(bytes[12], bytes[13], bytes[14], bytes[15]));
+            (&bytes[header_len..], Some(i64::from(bytes[8])), source)
+        }
+        _ => (bytes, None, fallback_source),
+    };
+    if icmp.len() < 8 {
+        return None;
+    }
+    Some(IcmpMessage {
+        source,
+        ttl,
+        icmp_type: icmp[0],
+        icmp_code: icmp[1],
+        rest: [icmp[4], icmp[5], icmp[6], icmp[7]],
+        quoted: &icmp[8..],
+    })
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct IcmpProbeReply {
@@ -342,12 +391,6 @@ pub(super) enum IcmpProbeEvent {
     Error(IcmpProbeError),
 }
 
-#[derive(Clone, Copy)]
-enum IcmpFamily {
-    V4,
-    V6,
-}
-
 fn parse_icmp_probe_event(
     bytes: &[u8],
     fallback_source: IpAddr,
@@ -356,168 +399,56 @@ fn parse_icmp_probe_event(
     sequence: u16,
     elapsed: Duration,
 ) -> Option<IcmpProbeEvent> {
-    match target_ip {
-        IpAddr::V4(_) => parse_icmpv4_probe_event(bytes, fallback_source, ident, sequence, elapsed),
-        IpAddr::V6(_) => parse_icmpv6_probe_event(bytes, fallback_source, ident, sequence, elapsed),
-    }
-}
-
-fn parse_icmpv4_probe_event(
-    bytes: &[u8],
-    fallback_source: IpAddr,
-    ident: u16,
-    sequence: u16,
-    elapsed: Duration,
-) -> Option<IcmpProbeEvent> {
-    let (icmp, ttl, source) = if bytes.len() >= 20 && bytes[0] >> 4 == 4 {
-        let header_len = usize::from(bytes[0] & 0x0f) * 4;
-        if header_len < 20 || bytes.len() < header_len + 8 {
-            return None;
-        }
-        let source = IpAddr::V4(Ipv4Addr::new(bytes[12], bytes[13], bytes[14], bytes[15]));
-        (&bytes[header_len..], Some(i64::from(bytes[8])), source)
-    } else {
-        (bytes, None, fallback_source)
+    let message = parse_icmp_message(bytes, target_ip, fallback_source)?;
+    let (reply_type, failure_types): (u8, &[u8]) = match target_ip {
+        IpAddr::V4(_) => (0, &[3, 11]),
+        IpAddr::V6(_) => (129, &[1, 2, 3, 4]),
     };
-    parse_icmp_payload(
-        icmp,
-        source,
-        ttl,
-        ident,
-        sequence,
-        elapsed,
-        IcmpFamily::V4,
-        0,
-        &[3, 11],
-    )
-}
+    let latency_ms = elapsed.as_secs_f64() * 1000.0;
 
-fn parse_icmpv6_probe_event(
-    bytes: &[u8],
-    fallback_source: IpAddr,
-    ident: u16,
-    sequence: u16,
-    elapsed: Duration,
-) -> Option<IcmpProbeEvent> {
-    // Raw ICMPv6 sockets on mainstream platforms deliver the ICMPv6 payload
-    // without the outer IPv6 header. Hop-limit is therefore unavailable here
-    // unless this path grows recvmsg ancillary-data support later.
-    parse_icmp_payload(
-        bytes,
-        fallback_source,
-        None,
-        ident,
-        sequence,
-        elapsed,
-        IcmpFamily::V6,
-        129,
-        &[1, 2, 3, 4],
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn parse_icmp_payload(
-    icmp: &[u8],
-    source: IpAddr,
-    ttl: Option<i64>,
-    ident: u16,
-    sequence: u16,
-    elapsed: Duration,
-    family: IcmpFamily,
-    reply_type: u8,
-    failure_types: &[u8],
-) -> Option<IcmpProbeEvent> {
-    if icmp.len() < 8 {
-        return None;
-    }
-    let icmp_type = icmp[0];
-    let icmp_code = icmp[1];
-    let packet_ident = u16::from_be_bytes([icmp[4], icmp[5]]);
-    let packet_sequence = u16::from_be_bytes([icmp[6], icmp[7]]);
-    if icmp_type == reply_type && packet_ident == ident && packet_sequence == sequence {
+    if message.icmp_type == reply_type
+        && u16::from_be_bytes([message.rest[0], message.rest[1]]) == ident
+        && u16::from_be_bytes([message.rest[2], message.rest[3]]) == sequence
+    {
         return Some(IcmpProbeEvent::Reply(IcmpProbeReply {
-            source,
-            ttl,
-            sequence: packet_sequence,
-            latency_ms: elapsed.as_secs_f64() * 1000.0,
+            source: message.source,
+            ttl: message.ttl,
+            sequence,
+            latency_ms,
         }));
     }
-    if failure_types.contains(&icmp_type) && icmp_error_quotes_probe(family, icmp, ident, sequence)
+
+    if failure_types.contains(&message.icmp_type)
+        && echo_error_quotes_probe(message.quoted, target_ip, ident, sequence)
     {
         return Some(IcmpProbeEvent::Error(IcmpProbeError {
-            source,
-            icmp_type,
-            icmp_code,
-            latency_ms: elapsed.as_secs_f64() * 1000.0,
+            source: message.source,
+            icmp_type: message.icmp_type,
+            icmp_code: message.icmp_code,
+            latency_ms,
         }));
     }
     None
 }
 
-fn icmp_error_quotes_probe(family: IcmpFamily, icmp: &[u8], ident: u16, sequence: u16) -> bool {
-    match family {
-        IcmpFamily::V4 => icmpv4_error_quotes_probe(icmp, ident, sequence),
-        IcmpFamily::V6 => icmpv6_error_quotes_probe(icmp, ident, sequence),
-    }
-}
-
-fn icmpv4_error_quotes_probe(icmp: &[u8], ident: u16, sequence: u16) -> bool {
-    let quoted = match icmp.get(8..) {
-        Some(quoted) => quoted,
-        None => return false,
+/// True when the packet an ICMP error quotes is one of our echo requests.
+fn echo_error_quotes_probe(quoted: &[u8], target_ip: IpAddr, ident: u16, sequence: u16) -> bool {
+    let (icmp_protocol, echo_type, inner) = match target_ip {
+        IpAddr::V4(_) => match quoted_inner_v4(quoted) {
+            Some((proto, inner)) => (1u8, 8u8, (proto, inner)),
+            None => return false,
+        },
+        IpAddr::V6(_) => match quoted_inner_v6(quoted) {
+            Some((proto, inner)) => (58u8, 128u8, (proto, inner)),
+            None => return false,
+        },
     };
-    if quoted.len() < 28 || quoted[0] >> 4 != 4 {
-        return false;
-    }
-    let header_len = usize::from(quoted[0] & 0x0f) * 4;
-    if header_len < 20 || quoted.len() < header_len + 8 || quoted[9] != 1 {
-        return false;
-    }
-    let embedded_icmp = &quoted[header_len..];
-    embedded_icmp[0] == 8
-        && embedded_icmp[1] == 0
-        && u16::from_be_bytes([embedded_icmp[4], embedded_icmp[5]]) == ident
-        && u16::from_be_bytes([embedded_icmp[6], embedded_icmp[7]]) == sequence
-}
-
-fn icmpv6_error_quotes_probe(icmp: &[u8], ident: u16, sequence: u16) -> bool {
-    let quoted = match icmp.get(8..) {
-        Some(quoted) => quoted,
-        None => return false,
-    };
-    if quoted.len() < 48 || quoted[0] >> 4 != 6 {
-        return false;
-    }
-    let Some(embedded_icmp) = quoted_icmpv6_payload(quoted) else {
-        return false;
-    };
-    embedded_icmp[0] == 128
-        && embedded_icmp[1] == 0
-        && u16::from_be_bytes([embedded_icmp[4], embedded_icmp[5]]) == ident
-        && u16::from_be_bytes([embedded_icmp[6], embedded_icmp[7]]) == sequence
-}
-
-fn quoted_icmpv6_payload(quoted: &[u8]) -> Option<&[u8]> {
-    let mut next_header = *quoted.get(6)?;
-    let mut offset = 40usize;
-    loop {
-        if next_header == 58 {
-            return quoted.get(offset..).filter(|payload| payload.len() >= 8);
-        }
-        if !matches!(next_header, 0 | 43 | 44 | 60) {
-            return None;
-        }
-        let ext_len = if next_header == 44 {
-            8
-        } else {
-            (usize::from(*quoted.get(offset + 1)?) + 1) * 8
-        };
-        next_header = *quoted.get(offset)?;
-        offset = offset.checked_add(ext_len)?;
-        if quoted.len() < offset + 8 {
-            return None;
-        }
-    }
+    let (proto, inner) = inner;
+    proto == icmp_protocol
+        && inner.len() >= 8
+        && inner[0] == echo_type
+        && u16::from_be_bytes([inner[4], inner[5]]) == ident
+        && u16::from_be_bytes([inner[6], inner[7]]) == sequence
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +536,94 @@ fn wait_for_icmp_event(
             Some(event) => return Ok(Some(event)),
             None => continue,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Traceroute: shared raw-ICMP receive socket + ICMP echo probe method
+// ---------------------------------------------------------------------------
+
+/// Maps a raw-ICMP-socket creation error to traceroute's user-facing failure,
+/// turning a permission error into the CAP_NET_RAW guidance every method
+/// shares (all traceroute methods need the raw ICMP receive path for hops).
+pub(super) fn raw_icmp_socket_denied(err: std::io::Error) -> ProbeFailure {
+    if err.kind() == ErrorKind::PermissionDenied {
+        ProbeFailure::Backend(format!(
+            "traceroute unavailable: raw ICMP socket denied: {err}. \
+             Grant CAP_NET_RAW (Docker: cap_add: [NET_RAW]) or run with elevated privileges"
+        ))
+    } else {
+        probe_socket_unavailable("traceroute", err)
+    }
+}
+
+/// Opens the unconnected raw ICMP socket every traceroute method listens on
+/// for Time Exceeded (intermediate hops) and ICMP errors from the target.
+pub(super) fn open_raw_icmp_recv(
+    target_ip: IpAddr,
+    timeout: Duration,
+) -> Result<Socket, ProbeFailure> {
+    create_raw_icmp_socket(target_ip, timeout).map_err(raw_icmp_socket_denied)
+}
+
+/// ICMP echo traceroute method: send + receive both happen on one raw ICMP
+/// socket, so this simply wraps the shared echo probe.
+pub(super) struct IcmpTraceProbe {
+    socket: Socket,
+    target_ip: IpAddr,
+    local_ip: Option<IpAddr>,
+    ident: u16,
+}
+
+pub(super) fn open_icmp_trace_probe(
+    target_ip: IpAddr,
+    timeout: Duration,
+) -> Result<IcmpTraceProbe, ProbeFailure> {
+    let socket = open_raw_icmp_recv(target_ip, timeout)?;
+    let local_ip = local_source_address_for(target_ip);
+    let ident = next_icmp_ident();
+    Ok(IcmpTraceProbe {
+        socket,
+        target_ip,
+        local_ip,
+        ident,
+    })
+}
+
+impl TraceProbe for IcmpTraceProbe {
+    fn probe(&mut self, ttl: u8, seq: u16, deadline: Instant) -> Result<HopProbe, ProbeFailure> {
+        set_socket_hop_limit("traceroute", &self.socket, self.target_ip, ttl)?;
+        let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+            return Ok(HopProbe::TimedOut);
+        };
+        let payload = [0u8; 32];
+        let event = send_echo_probe(
+            "traceroute",
+            &self.socket,
+            self.target_ip,
+            self.local_ip,
+            self.ident,
+            seq,
+            &payload,
+            timeout,
+            ProbeDelivery::Unconnected,
+        )?;
+        Ok(match event {
+            Some(IcmpProbeEvent::Reply(reply)) => HopProbe::Reached {
+                from: reply.source,
+                latency_ms: reply.latency_ms,
+            },
+            Some(IcmpProbeEvent::Error(error)) if error.is_time_exceeded() => HopProbe::Hop {
+                from: error.source,
+                latency_ms: error.latency_ms,
+            },
+            Some(IcmpProbeEvent::Error(error)) => HopProbe::Terminal {
+                from: error.source,
+                latency_ms: error.latency_ms,
+                message: error.message(),
+            },
+            None => HopProbe::TimedOut,
+        })
     }
 }
 
