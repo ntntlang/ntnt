@@ -411,7 +411,7 @@ impl TraceProbe for TcpTraceProbe {
     // (full send buffer) means the probe was not transmitted, so it surfaces
     // as a send failure (recorded by the driver as an explicit error hop)
     // rather than being silently counted as a sent-but-timed-out probe.
-    fn send(&mut self, ttl: u8, seq: u16, _deadline: Instant) -> Result<(), ProbeFailure> {
+    fn send(&mut self, ttl: u8, seq: u16, deadline: Instant) -> Result<(), ProbeFailure> {
         set_socket_hop_limit(LABEL, &self.tcp, self.target_ip, ttl)?;
         let src_port = self.src_port_for(seq);
         let syn = build_tcp_syn(
@@ -423,21 +423,28 @@ impl TraceProbe for TcpTraceProbe {
             // is), so a fixed value suffices.
             0x5354_5230,
         );
-        match self.tcp.send_to(
-            &syn,
-            &SockAddr::from(SocketAddr::new(self.target_ip, self.dst_port)),
-        ) {
-            Ok(_) => {
-                self.sent_at.insert(seq, Instant::now());
-                Ok(())
+        let dest = SockAddr::from(SocketAddr::new(self.target_ip, self.dst_port));
+        loop {
+            match self.tcp.send_to(&syn, &dest) {
+                Ok(_) => {
+                    self.sent_at.insert(seq, Instant::now());
+                    return Ok(());
+                }
+                // The non-blocking raw socket's send buffer is momentarily
+                // full. Yield briefly and retry within the deadline so the
+                // probe is actually transmitted; a tiny SYN never stays
+                // unsendable, so this resolves immediately in practice. Only an
+                // exhausted deadline turns it into a (fatal) backend failure.
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return Err(ProbeFailure::Backend(format!(
+                            "{LABEL} failed: TCP send buffer full"
+                        )));
+                    };
+                    thread::sleep(TCP_POLL_SLICE.min(remaining));
+                }
+                Err(err) => return Err(probe_io_failure(LABEL, err)),
             }
-            // A full send buffer means this probe was not transmitted: a
-            // recoverable per-hop condition (recorded as an error hop), not a
-            // machinery failure that should abort the whole trace.
-            Err(err) if err.kind() == ErrorKind::WouldBlock => Err(ProbeFailure::Target(format!(
-                "{LABEL} failed: TCP send buffer full, probe not sent"
-            ))),
-            Err(err) => Err(probe_io_failure(LABEL, err)),
         }
     }
 
