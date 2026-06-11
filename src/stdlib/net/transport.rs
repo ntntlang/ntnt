@@ -407,7 +407,10 @@ impl TcpTraceProbe {
 
 impl TraceProbe for TcpTraceProbe {
     // The raw TCP socket is non-blocking, so the send returns immediately and
-    // cannot overrun the deadline; the parameter is unused here.
+    // cannot overrun the deadline; the parameter is unused here. A WouldBlock
+    // (full send buffer) means the probe was not transmitted, so it surfaces
+    // as a send failure (recorded by the driver as an explicit error hop)
+    // rather than being silently counted as a sent-but-timed-out probe.
     fn send(&mut self, ttl: u8, seq: u16, _deadline: Instant) -> Result<(), ProbeFailure> {
         set_socket_hop_limit(LABEL, &self.tcp, self.target_ip, ttl)?;
         let src_port = self.src_port_for(seq);
@@ -420,17 +423,14 @@ impl TraceProbe for TcpTraceProbe {
             // is), so a fixed value suffices.
             0x5354_5230,
         );
+        self.tcp
+            .send_to(
+                &syn,
+                &SockAddr::from(SocketAddr::new(self.target_ip, self.dst_port)),
+            )
+            .map_err(|err| probe_io_failure(LABEL, err))?;
         self.sent_at.insert(seq, Instant::now());
-        match self.tcp.send_to(
-            &syn,
-            &SockAddr::from(SocketAddr::new(self.target_ip, self.dst_port)),
-        ) {
-            Ok(_) => Ok(()),
-            // A full send buffer on the non-blocking socket means this probe
-            // was not sent; treat it as a silent hop rather than a fatal error.
-            Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(()),
-            Err(err) => Err(probe_io_failure(LABEL, err)),
-        }
+        Ok(())
     }
 
     fn recv(&mut self, deadline: Instant) -> Result<Option<HopReply>, ProbeFailure> {
