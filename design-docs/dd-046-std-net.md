@@ -885,13 +885,14 @@ The highest-value mode (`mtr --tcp` / `tcptraceroute`): firewalls that drop
 ICMP and UDP commonly pass TCP SYN to 80/443. Sends a raw TCP SYN (default
 port 80) with stepped TTL; intermediate hops yield Time Exceeded quoting the
 TCP header, and the destination yields SYN-ACK or RST — either means
-"reached". The hop is encoded in the TCP sequence number, which is matched in
-the quoted TCP header (so a delayed reply is attributed to the right hop) and
-in a SYN-ACK's ack number; the reply must also come *from the target* to count
-as reached. Because the destination reply is a TCP
-segment (not ICMP), the TCP method watches two sockets — the raw ICMP socket
-for hops and a raw TCP socket for the reply — with a dependency-free
-round-robin poll. Raw TCP reply capture only works on **Linux** (BSD/Windows
+"reached". Each hop sends from a distinct **source port** (base + hop), which
+is recovered from the quoted TCP header on an ICMP error and from the
+destination port of the target's reply — so a delayed reply is attributed to
+the right hop, and the reply is matched for *any* flag combination (SYN-ACK and
+every RST variant, including firewall RSTs that carry no ACK). The reply must
+also come *from the target*. Because the destination reply is a TCP segment
+(not ICMP), the TCP method watches two sockets — the raw ICMP socket for hops
+and a raw TCP socket for the reply — with a dependency-free round-robin poll. Raw TCP reply capture only works on **Linux** (BSD/Windows
 do not deliver TCP to raw sockets), so `traceroute_tcp` is reported true only
 there, and a `method: "tcp"` call elsewhere returns a clear `Err`. Raw TCP
 send/recv is privileged (`CAP_NET_RAW`).

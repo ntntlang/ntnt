@@ -3,7 +3,7 @@
 //! The driver emits a probe for every TTL `1..max_hops` up front, then collects
 //! replies and demultiplexes each back to its hop by the per-hop token the
 //! [`TraceProbe`] implementations carry (ICMP echo sequence, UDP destination
-//! port, TCP sequence number). Sending the whole burst at once turns the slow
+//! port, TCP source port). Sending the whole burst at once turns the slow
 //! cases — silent hops and unreached destinations, which would otherwise each
 //! cost a full per-hop timeout in series — into roughly a single timeout. The
 //! ordered hop list is then assembled from the collected replies: silent hops
@@ -121,16 +121,20 @@ fn run_traceroute(
     let mut probe = open_method_probe(target_ip, options)?;
     let deadline = Instant::now() + options.timeout;
 
-    // Emit one probe per TTL up front. A send failure on the very first hop is
-    // fatal (nothing usable was sent); after that it just bounds the burst to
-    // the hops we managed to send.
+    // Emit one probe per TTL up front, never past the global deadline so the
+    // burst alone cannot blow the timeout budget. A send failure on the first
+    // hop, or any backend (machinery) failure, is fatal; a target failure
+    // mid-burst (e.g. no route) just bounds the burst to the hops we sent.
     let mut sent_hops = 0usize;
     for hop in 1..=options.max_hops {
+        if deadline.checked_duration_since(Instant::now()).is_none() {
+            break;
+        }
         let ttl = hop.min(u8::MAX as usize) as u8;
         let seq = hop as u16;
         match probe.send(ttl, seq) {
             Ok(()) => sent_hops = hop,
-            Err(failure) if sent_hops == 0 => return Err(failure),
+            Err(failure) if sent_hops == 0 || !failure.is_target() => return Err(failure),
             Err(_) => break,
         }
     }
@@ -167,14 +171,27 @@ fn collection_complete(replies: &[HopReply], sent_hops: usize) -> bool {
     (1..stop).all(|hop| replies.iter().any(|r| r.seq == hop))
 }
 
+/// Whether a reply kind stops the trace at its hop (reached the destination or
+/// a terminal error), as opposed to an intermediate hop report.
+fn is_stop_kind(kind: &HopKind) -> bool {
+    matches!(kind, HopKind::Reached | HopKind::Terminal(_))
+}
+
 /// Builds the ordered hop list from the collected replies. Hops with no reply
 /// are silent (`timed_out`); hops beyond the one that stops the trace are
-/// trimmed. A later reply for a hop wins (last write), matching the burst
-/// arrival order.
+/// trimmed. For a given hop the first reply is kept (its latency is the true
+/// RTT), except that a later reached/terminal reply upgrades an earlier plain
+/// hop — so a duplicate or stray hop report can never overwrite a stop.
 fn assemble_trace(replies: Vec<HopReply>, sent_hops: usize) -> TraceOutcome {
     let mut by_hop: HashMap<u16, HopReply> = HashMap::new();
     for reply in replies {
-        by_hop.insert(reply.seq, reply);
+        let keep = match by_hop.get(&reply.seq) {
+            None => true,
+            Some(existing) => is_stop_kind(&reply.kind) && !is_stop_kind(&existing.kind),
+        };
+        if keep {
+            by_hop.insert(reply.seq, reply);
+        }
     }
     let stop = by_hop
         .values()
@@ -465,6 +482,26 @@ mod tests {
         assert_eq!(outcome.hops.len(), 5);
         assert!(outcome.hops[2].timed_out);
         assert!(outcome.hops[4].timed_out);
+    }
+
+    #[test]
+    fn assemble_does_not_let_a_stray_hop_overwrite_a_reached_or_terminal() {
+        // A reached reply followed by a duplicate plain-hop reply for the same
+        // hop must keep the reached classification.
+        let replies = vec![reply(2, 5, HopKind::Reached), reply(2, 9, HopKind::Hop)];
+        let outcome = assemble_trace(replies, 30);
+        assert!(outcome.reached);
+        assert!(outcome.hops[1].reached);
+        // The first reply's latency is kept (the true RTT), not the later one.
+        assert_eq!(outcome.hops[1].latency_ms, Some(2.0));
+
+        // A terminal hop is likewise not downgraded by a later hop report.
+        let replies = vec![
+            reply(1, 1, HopKind::Terminal("blocked".to_string())),
+            reply(1, 2, HopKind::Hop),
+        ];
+        let outcome = assemble_trace(replies, 30);
+        assert_eq!(outcome.hops[0].error.as_deref(), Some("blocked"));
     }
 
     #[test]

@@ -15,8 +15,8 @@
 //!
 //! Send is decoupled from receive (the [`TraceProbe`] trait) so the driver can
 //! emit a whole TTL burst and then collect. Each reply is demultiplexed back
-//! to its hop by a per-hop token: UDP encodes the hop in the destination port,
-//! TCP in the sequence number.
+//! to its hop by a per-hop port token: UDP varies the destination port, TCP
+//! the source port (recovered from the quoted header and the target's reply).
 
 use super::icmp::{
     local_source_address_for, next_icmp_ident, open_raw_icmp_recv, parse_icmp_message,
@@ -80,37 +80,21 @@ fn unspecified_for(target_ip: IpAddr) -> IpAddr {
     }
 }
 
-/// The transport header of the packet an ICMP error quotes, if it is ours by
-/// protocol and source port. Returns `(dst_port, tcp_seq)`; `tcp_seq` is
-/// present only for TCP (protocol 6), where it carries the per-hop token.
-fn recover_quoted_transport(
-    quoted: &[u8],
-    target_ip: IpAddr,
-    protocol: u8,
-    our_src_port: u16,
-) -> Option<(u16, Option<u32>)> {
+/// The (source, destination) ports of the transport header the packet an ICMP
+/// error quotes, if its protocol matches. The caller decides which port is the
+/// per-hop token: UDP varies the destination port, TCP the source port.
+fn recover_quoted_ports(quoted: &[u8], target_ip: IpAddr, protocol: u8) -> Option<(u16, u16)> {
     let (proto, transport) = match target_ip {
         IpAddr::V4(_) => quoted_inner_v4(quoted),
         IpAddr::V6(_) => quoted_inner_v6(quoted),
     }?;
-    if proto != protocol
-        || transport.len() < 4
-        || u16::from_be_bytes([transport[0], transport[1]]) != our_src_port
-    {
+    if proto != protocol || transport.len() < 4 {
         return None;
     }
-    let dst_port = u16::from_be_bytes([transport[2], transport[3]]);
-    let tcp_seq = if protocol == 6 && transport.len() >= 8 {
-        Some(u32::from_be_bytes([
-            transport[4],
-            transport[5],
-            transport[6],
-            transport[7],
-        ]))
-    } else {
-        None
-    };
-    Some((dst_port, tcp_seq))
+    Some((
+        u16::from_be_bytes([transport[0], transport[1]]),
+        u16::from_be_bytes([transport[2], transport[3]]),
+    ))
 }
 
 /// Reads one datagram from the raw ICMP socket with a deadline; `Ok(None)` on
@@ -269,12 +253,16 @@ impl TraceProbe for UdpTraceProbe {
             if !is_quoting_error(self.target_ip, message.icmp_type) {
                 continue;
             }
-            let Some((dst_port, _)) =
-                recover_quoted_transport(message.quoted, self.target_ip, 17, self.src_port)
+            let Some((quoted_src, quoted_dst)) =
+                recover_quoted_ports(message.quoted, self.target_ip, 17)
             else {
                 continue;
             };
-            let Some(seq) = self.seq_for(dst_port) else {
+            // UDP varies the destination port per hop; the source port is ours.
+            if quoted_src != self.src_port {
+                continue;
+            }
+            let Some(seq) = self.seq_for(quoted_dst) else {
                 continue;
             };
             let Some(sent) = self.sent_at.get(&seq) else {
@@ -315,7 +303,7 @@ pub(super) struct TcpTraceProbe {
     tcp: Socket,
     target_ip: IpAddr,
     local_ip: IpAddr,
-    src_port: u16,
+    base_src_port: u16,
     dst_port: u16,
     sent_at: HashMap<u16, Instant>,
 }
@@ -356,45 +344,47 @@ pub(super) fn open_tcp_trace_probe(
     })?;
     tcp.set_nonblocking(true)
         .map_err(|err| probe_socket_unavailable(LABEL, err))?;
-    // Source port: a stable ephemeral value for this trace. The kernel has no
-    // socket bound to it, so it will RST the target's SYN-ACK itself — which
-    // also tears down the half-open connection we would otherwise leave.
-    let src_port = 33000u16.wrapping_add(next_icmp_ident() % 20000);
+    // Base source port: each hop sends from base + (hop - 1) so the target's
+    // reply (whose destination port echoes our source) identifies the hop,
+    // robustly for SYN-ACK and every RST variant. The base is chosen with
+    // headroom for max_hops (<=64) below 65535. The kernel has no socket bound
+    // to these ports, so it RSTs the target's SYN-ACK itself, tearing down the
+    // half-open connection we would otherwise leave.
+    let base_src_port = 33000u16.wrapping_add(next_icmp_ident() % 20000);
     Ok(TcpTraceProbe {
         icmp,
         tcp,
         target_ip,
         local_ip,
-        src_port,
+        base_src_port,
         dst_port,
         sent_at: HashMap::new(),
     })
 }
 
-/// Encodes a hop into a TCP sequence number (low byte is a constant tag so a
-/// stray segment is unlikely to decode), and back.
-fn encode_tcp_seq(hop: u16) -> u32 {
-    (u32::from(hop) << 8) | 0x53
-}
-
-fn decode_tcp_seq(seq: u32) -> Option<u16> {
-    if seq & 0xff != 0x53 {
-        return None;
-    }
-    u16::try_from(seq >> 8).ok()
-}
-
 impl TcpTraceProbe {
+    /// Per-hop source port (base + hop index) and its inverse.
+    fn src_port_for(&self, seq: u16) -> u16 {
+        self.base_src_port.saturating_add(seq.saturating_sub(1))
+    }
+
+    fn seq_for_src(&self, src_port: u16) -> Option<u16> {
+        src_port.checked_sub(self.base_src_port)?.checked_add(1)
+    }
+
     /// Classifies an ICMP datagram (intermediate hop or terminal error),
-    /// recovering the hop from the quoted TCP sequence number.
+    /// recovering the hop from the quoted TCP source port. The quoted
+    /// destination port must be our fixed target port.
     fn classify_icmp(&self, bytes: &[u8], fallback: IpAddr) -> Option<(u16, IpAddr, HopKind)> {
         let message = parse_icmp_message(bytes, self.target_ip, fallback)?;
         if !is_quoting_error(self.target_ip, message.icmp_type) {
             return None;
         }
-        let (_, tcp_seq) =
-            recover_quoted_transport(message.quoted, self.target_ip, 6, self.src_port)?;
-        let seq = decode_tcp_seq(tcp_seq?)?;
+        let (quoted_src, quoted_dst) = recover_quoted_ports(message.quoted, self.target_ip, 6)?;
+        if quoted_dst != self.dst_port {
+            return None;
+        }
+        let seq = self.seq_for_src(quoted_src)?;
         let kind = if is_time_exceeded(self.target_ip, message.icmp_type) {
             HopKind::Hop
         } else {
@@ -411,13 +401,15 @@ impl TcpTraceProbe {
 impl TraceProbe for TcpTraceProbe {
     fn send(&mut self, ttl: u8, seq: u16) -> Result<(), ProbeFailure> {
         set_socket_hop_limit(LABEL, &self.tcp, self.target_ip, ttl)?;
-        let tcp_seq = encode_tcp_seq(seq);
+        let src_port = self.src_port_for(seq);
         let syn = build_tcp_syn(
             self.local_ip,
             self.target_ip,
-            self.src_port,
+            src_port,
             self.dst_port,
-            tcp_seq,
+            // The sequence number is not used for correlation (the source port
+            // is), so a fixed value suffices.
+            0x5354_5230,
         );
         self.sent_at.insert(seq, Instant::now());
         self.tcp
@@ -453,24 +445,28 @@ impl TraceProbe for TcpTraceProbe {
                 }
             }
 
-            // The destination's SYN-ACK/RST arrives as a TCP segment from the
-            // target; the hop is recovered from its acknowledgement number.
+            // The destination's SYN-ACK or RST arrives as a TCP segment from
+            // the target; its destination port is the per-hop source port we
+            // sent from, which recovers the hop for any reply flag combination.
             let mut tcp_buf = [MaybeUninit::<u8>::uninit(); 2048];
             if let Some((bytes, reply_source)) = try_recv(&self.tcp, &mut tcp_buf)? {
                 let received_at = Instant::now();
                 if reply_source == self.target_ip {
-                    if let Some(seq) =
-                        tcp_reply_hop(bytes, self.target_ip, self.src_port, self.dst_port)
+                    if let Some(our_src_port) =
+                        tcp_reply_src_port(bytes, self.target_ip, self.dst_port)
                     {
-                        if let Some(sent) = self.sent_at.get(&seq) {
-                            let latency_ms =
-                                received_at.saturating_duration_since(*sent).as_secs_f64() * 1000.0;
-                            return Ok(Some(HopReply {
-                                seq,
-                                from: self.target_ip,
-                                latency_ms,
-                                kind: HopKind::Reached,
-                            }));
+                        if let Some(seq) = self.seq_for_src(our_src_port) {
+                            if let Some(sent) = self.sent_at.get(&seq) {
+                                let latency_ms =
+                                    received_at.saturating_duration_since(*sent).as_secs_f64()
+                                        * 1000.0;
+                                return Ok(Some(HopReply {
+                                    seq,
+                                    from: self.target_ip,
+                                    latency_ms,
+                                    kind: HopKind::Reached,
+                                }));
+                            }
                         }
                     }
                 }
@@ -510,17 +506,12 @@ fn build_tcp_syn(
     tcp
 }
 
-/// If a TCP segment is the destination's reply to one of our SYNs — matching
-/// ports, an ACK flag, and SYN-ACK or RST — recovers the hop from its
-/// acknowledgement number (= our sequence + 1). The RST a closed port sends in
-/// response to a SYN is also RST+ACK acking our sequence, so both arrivals
-/// decode the same way.
-fn tcp_reply_hop(
-    bytes: &[u8],
-    target_ip: IpAddr,
-    our_src_port: u16,
-    target_port: u16,
-) -> Option<u16> {
+/// If a TCP segment is the destination's reply to one of our SYNs — coming
+/// from the target port and carrying SYN-ACK or RST — returns the segment's
+/// destination port, which is the per-hop source port we sent from. Unlike an
+/// acknowledgement-number scheme this accepts every RST variant (with or
+/// without ACK), which firewalls and closed ports both produce.
+fn tcp_reply_src_port(bytes: &[u8], target_ip: IpAddr, target_port: u16) -> Option<u16> {
     // IPv4 raw sockets prepend the outer IP header; IPv6 raw sockets do not.
     let tcp = match target_ip {
         IpAddr::V4(_) if bytes.len() >= 20 && bytes[0] >> 4 == 4 => {
@@ -538,18 +529,19 @@ fn tcp_reply_hop(
     }
     let source_port = u16::from_be_bytes([tcp[0], tcp[1]]);
     let dest_port = u16::from_be_bytes([tcp[2], tcp[3]]);
-    if source_port != target_port || dest_port != our_src_port {
+    if source_port != target_port {
         return None;
     }
     let flags = tcp[13];
     let syn = flags & 0x02 != 0;
     let ack = flags & 0x10 != 0;
     let rst = flags & 0x04 != 0;
-    if !ack || !(rst || syn) {
-        return None;
+    // A SYN-ACK (open) or any RST (closed/filtered) means the target answered.
+    if rst || (syn && ack) {
+        Some(dest_port)
+    } else {
+        None
     }
-    let ack_num = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]);
-    decode_tcp_seq(ack_num.wrapping_sub(1))
 }
 
 #[cfg(test)]
@@ -599,78 +591,58 @@ mod tests {
     }
 
     #[test]
-    fn tcp_seq_round_trips_through_encode_decode() {
-        for hop in [1u16, 2, 30, 64, 255] {
-            assert_eq!(decode_tcp_seq(encode_tcp_seq(hop)), Some(hop));
-        }
-        // A sequence without our tag does not decode to a hop.
-        assert_eq!(decode_tcp_seq(0x12345678), None);
-    }
-
-    #[test]
-    fn recover_quoted_transport_extracts_udp_dst_and_rejects_mismatches() {
+    fn recover_quoted_ports_extracts_both_ports_and_rejects_protocol_mismatch() {
         let quoted = ipv4_packet(17, &udp_quote(50000, 33436));
         let target = v4(8, 8, 8, 8);
         assert_eq!(
-            recover_quoted_transport(&quoted, target, 17, 50000),
-            Some((33436, None))
+            recover_quoted_ports(&quoted, target, 17),
+            Some((50000, 33436))
         );
-        // Wrong source port: not ours.
-        assert_eq!(recover_quoted_transport(&quoted, target, 17, 9999), None);
         // Wrong protocol (TCP against a UDP quote): not ours.
-        assert_eq!(recover_quoted_transport(&quoted, target, 6, 50000), None);
+        assert_eq!(recover_quoted_ports(&quoted, target, 6), None);
     }
 
     #[test]
-    fn recover_quoted_transport_extracts_tcp_sequence() {
-        let mut tcp = vec![0u8; 8];
-        tcp[0..2].copy_from_slice(&40000u16.to_be_bytes());
-        tcp[2..4].copy_from_slice(&80u16.to_be_bytes());
-        tcp[4..8].copy_from_slice(&encode_tcp_seq(7).to_be_bytes());
-        let quoted = ipv4_packet(6, &tcp);
-        let target = v4(8, 8, 8, 8);
-        let (dst, seq) = recover_quoted_transport(&quoted, target, 6, 40000).unwrap();
-        assert_eq!(dst, 80);
-        assert_eq!(decode_tcp_seq(seq.unwrap()), Some(7));
-    }
-
-    #[test]
-    fn tcp_reply_hop_recovers_hop_from_syn_ack_and_rst() {
+    fn tcp_reply_src_port_accepts_syn_ack_and_every_rst_variant() {
         let target = v4(93, 184, 216, 34);
-        let our_src = 40000u16;
+        let our_src = 40005u16; // the per-hop source port we sent from
         let target_port = 80u16;
-        let hop = 5u16;
-        let ack = encode_tcp_seq(hop).wrapping_add(1);
 
-        let mut synack = vec![0u8; 20];
-        synack[0..2].copy_from_slice(&target_port.to_be_bytes());
-        synack[2..4].copy_from_slice(&our_src.to_be_bytes());
-        synack[8..12].copy_from_slice(&ack.to_be_bytes());
-        synack[13] = 0x12; // SYN+ACK
+        let mut reply = vec![0u8; 20];
+        reply[0..2].copy_from_slice(&target_port.to_be_bytes()); // from target port
+        reply[2..4].copy_from_slice(&our_src.to_be_bytes()); // to our source port
+
+        // SYN-ACK (open).
+        reply[13] = 0x12;
         assert_eq!(
-            tcp_reply_hop(&ipv4_packet(6, &synack), target, our_src, target_port),
-            Some(hop)
+            tcp_reply_src_port(&ipv4_packet(6, &reply), target, target_port),
+            Some(our_src)
+        );
+        // RST+ACK (closed port, RFC response).
+        reply[13] = 0x14;
+        assert_eq!(
+            tcp_reply_src_port(&ipv4_packet(6, &reply), target, target_port),
+            Some(our_src)
+        );
+        // Bare RST (some firewalls) is still accepted — the prior ack-number
+        // scheme would have missed it.
+        reply[13] = 0x04;
+        assert_eq!(
+            tcp_reply_src_port(&ipv4_packet(6, &reply), target, target_port),
+            Some(our_src)
         );
 
-        // RST+ACK acking our sequence decodes the same hop.
-        let mut rst = synack.clone();
-        rst[13] = 0x14; // RST+ACK
+        // A SYN with no ACK is not a destination reply.
+        reply[13] = 0x02;
         assert_eq!(
-            tcp_reply_hop(&ipv4_packet(6, &rst), target, our_src, target_port),
-            Some(hop)
-        );
-
-        // Wrong port pair, or no ACK flag, is rejected.
-        let mut wrong_port = synack.clone();
-        wrong_port[2..4].copy_from_slice(&12345u16.to_be_bytes());
-        assert_eq!(
-            tcp_reply_hop(&ipv4_packet(6, &wrong_port), target, our_src, target_port),
+            tcp_reply_src_port(&ipv4_packet(6, &reply), target, target_port),
             None
         );
-        let mut no_ack = synack.clone();
-        no_ack[13] = 0x02; // SYN only
+        // A segment not from the target port is ignored.
+        reply[13] = 0x12;
+        reply[0..2].copy_from_slice(&12345u16.to_be_bytes());
         assert_eq!(
-            tcp_reply_hop(&ipv4_packet(6, &no_ack), target, our_src, target_port),
+            tcp_reply_src_port(&ipv4_packet(6, &reply), target, target_port),
             None
         );
     }
