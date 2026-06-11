@@ -610,8 +610,16 @@ fn classify_icmp_hop(
 }
 
 impl TraceProbe for IcmpTraceProbe {
-    fn send(&mut self, ttl: u8, seq: u16) -> Result<(), ProbeFailure> {
+    fn send(&mut self, ttl: u8, seq: u16, deadline: Instant) -> Result<(), ProbeFailure> {
         set_socket_hop_limit("traceroute", &self.socket, self.target_ip, ttl)?;
+        // Bound the send by the remaining budget so a blocking send (full
+        // socket buffer) cannot push the burst past the global deadline.
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Ok(());
+        };
+        self.socket
+            .set_write_timeout(Some(remaining))
+            .map_err(|err| probe_socket_unavailable("traceroute", err))?;
         let payload = [0u8; 32];
         let packet = build_icmp_echo_request(
             "traceroute",

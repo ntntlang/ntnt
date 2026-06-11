@@ -229,8 +229,9 @@ pub(super) struct HopReply {
 /// by `seq`) for accurate per-hop latency.
 pub(super) trait TraceProbe {
     /// Set the hop limit and send one probe carrying correlation token `seq`.
-    /// Records the send time; returns immediately without waiting.
-    fn send(&mut self, ttl: u8, seq: u16) -> Result<(), ProbeFailure>;
+    /// Records the send time; does not wait for a reply. `deadline` bounds the
+    /// send itself so a blocking send cannot push the trace past its timeout.
+    fn send(&mut self, ttl: u8, seq: u16, deadline: Instant) -> Result<(), ProbeFailure>;
 
     /// Wait up to `deadline` for the next reply matching one of our
     /// outstanding probes, recovering which hop (`seq`) it answers.

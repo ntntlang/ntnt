@@ -123,19 +123,24 @@ fn run_traceroute(
 
     // Emit one probe per TTL up front, never past the global deadline so the
     // burst alone cannot blow the timeout budget. A send failure on the first
-    // hop, or any backend (machinery) failure, is fatal; a target failure
-    // mid-burst (e.g. no route) just bounds the burst to the hops we sent.
+    // hop, or any backend (machinery) failure, is fatal. A target failure
+    // mid-burst (e.g. no route) bounds the burst and is recorded as a terminal
+    // hop so it is not silently dropped.
     let mut sent_hops = 0usize;
+    let mut send_terminal: Option<(usize, String)> = None;
     for hop in 1..=options.max_hops {
         if deadline.checked_duration_since(Instant::now()).is_none() {
             break;
         }
         let ttl = hop.min(u8::MAX as usize) as u8;
         let seq = hop as u16;
-        match probe.send(ttl, seq) {
+        match probe.send(ttl, seq, deadline) {
             Ok(()) => sent_hops = hop,
             Err(failure) if sent_hops == 0 || !failure.is_target() => return Err(failure),
-            Err(_) => break,
+            Err(failure) => {
+                send_terminal = Some((hop, failure.into_message()));
+                break;
+            }
         }
     }
 
@@ -149,7 +154,7 @@ fn run_traceroute(
         }
     }
 
-    Ok(assemble_trace(replies, sent_hops))
+    Ok(assemble_trace(replies, sent_hops, send_terminal))
 }
 
 /// The hop a trace stops at: the lowest hop that reached the destination or
@@ -182,7 +187,15 @@ fn is_stop_kind(kind: &HopKind) -> bool {
 /// trimmed. For a given hop the first reply is kept (its latency is the true
 /// RTT), except that a later reached/terminal reply upgrades an earlier plain
 /// hop — so a duplicate or stray hop report can never overwrite a stop.
-fn assemble_trace(replies: Vec<HopReply>, sent_hops: usize) -> TraceOutcome {
+///
+/// `send_terminal` records a hop whose probe could not be sent (a mid-burst
+/// target failure); it becomes a terminal hop unless an earlier reply already
+/// stopped the trace, so the failure is reported rather than dropped.
+fn assemble_trace(
+    replies: Vec<HopReply>,
+    sent_hops: usize,
+    send_terminal: Option<(usize, String)>,
+) -> TraceOutcome {
     let mut by_hop: HashMap<u16, HopReply> = HashMap::new();
     for reply in replies {
         let keep = match by_hop.get(&reply.seq) {
@@ -193,43 +206,66 @@ fn assemble_trace(replies: Vec<HopReply>, sent_hops: usize) -> TraceOutcome {
             by_hop.insert(reply.seq, reply);
         }
     }
-    let stop = by_hop
+    let reply_stop = by_hop
         .values()
         .filter(|r| matches!(r.kind, HopKind::Reached | HopKind::Terminal(_)))
         .map(|r| r.seq)
         .min();
-    let reached =
-        stop.is_some_and(|s| matches!(by_hop.get(&s).map(|r| &r.kind), Some(HopKind::Reached)));
-    let upper = stop.map_or(sent_hops, usize::from);
+    let reached = reply_stop
+        .is_some_and(|s| matches!(by_hop.get(&s).map(|r| &r.kind), Some(HopKind::Reached)));
+
+    // A send failure only matters if no earlier reply already stopped the trace.
+    let send_stop = send_terminal.as_ref().and_then(|(hop, _)| {
+        let within = reply_stop.is_none_or(|s| *hop < usize::from(s));
+        within.then_some(*hop)
+    });
+    let upper = match (reply_stop.map(usize::from), send_stop) {
+        (Some(r), Some(s)) => r.min(s),
+        (Some(r), None) => r,
+        (None, Some(s)) => s,
+        (None, None) => sent_hops,
+    };
 
     let mut hops = Vec::with_capacity(upper);
     for hop in 1..=upper {
-        let entry = by_hop.get(&(hop as u16));
-        hops.push(match entry {
-            Some(reply) => {
-                let (reached_here, error) = match &reply.kind {
-                    HopKind::Reached => (true, None),
-                    HopKind::Hop => (false, None),
-                    HopKind::Terminal(message) => (false, Some(message.clone())),
-                };
-                TracerouteHop {
-                    hop,
-                    from: Some(reply.from.to_string()),
-                    latency_ms: Some(reply.latency_ms),
-                    reached: reached_here,
-                    timed_out: false,
-                    error,
-                }
-            }
-            None => TracerouteHop {
+        if let Some(reply) = by_hop.get(&(hop as u16)) {
+            let (reached_here, error) = match &reply.kind {
+                HopKind::Reached => (true, None),
+                HopKind::Hop => (false, None),
+                HopKind::Terminal(message) => (false, Some(message.clone())),
+            };
+            hops.push(TracerouteHop {
+                hop,
+                from: Some(reply.from.to_string()),
+                latency_ms: Some(reply.latency_ms),
+                reached: reached_here,
+                timed_out: false,
+                error,
+            });
+        } else if send_stop == Some(hop) {
+            // The hop whose probe could not be sent.
+            let message = send_terminal
+                .as_ref()
+                .map(|(_, m)| m.clone())
+                .unwrap_or_default();
+            hops.push(TracerouteHop {
+                hop,
+                from: None,
+                latency_ms: None,
+                reached: false,
+                timed_out: false,
+                error: Some(message),
+            });
+        } else {
+            hops.push(TracerouteHop {
                 hop,
                 from: None,
                 latency_ms: None,
                 reached: false,
                 timed_out: true,
                 error: None,
-            },
-        });
+            });
+        }
     }
 
     TraceOutcome { hops, reached }
@@ -436,7 +472,7 @@ mod tests {
             // a stray reply for a hop beyond the destination — must be trimmed
             reply(4, 9, HopKind::Reached),
         ];
-        let outcome = assemble_trace(replies, 30);
+        let outcome = assemble_trace(replies, 30, None);
         assert!(outcome.reached);
         assert_eq!(outcome.hops.len(), 3, "trimmed at the reached hop");
         assert_eq!(outcome.hops[0].hop, 1);
@@ -457,7 +493,7 @@ mod tests {
             reply(2, 2, HopKind::Terminal("prohibited".to_string())),
             reply(4, 9, HopKind::Reached),
         ];
-        let outcome = assemble_trace(replies, 30);
+        let outcome = assemble_trace(replies, 30, None);
         assert!(!outcome.reached);
         assert_eq!(outcome.hops.len(), 2);
         assert_eq!(outcome.hops[1].error.as_deref(), Some("prohibited"));
@@ -467,7 +503,7 @@ mod tests {
             reply(3, 3, HopKind::Reached),
             reply(7, 7, HopKind::Terminal("x".to_string())),
         ];
-        let outcome = assemble_trace(replies, 30);
+        let outcome = assemble_trace(replies, 30, None);
         assert!(outcome.reached);
         assert_eq!(outcome.hops.len(), 3);
     }
@@ -477,7 +513,7 @@ mod tests {
         // No reply reaches the destination: report all probed hops, silent ones
         // timed out.
         let replies = vec![reply(1, 1, HopKind::Hop), reply(2, 2, HopKind::Hop)];
-        let outcome = assemble_trace(replies, 5);
+        let outcome = assemble_trace(replies, 5, None);
         assert!(!outcome.reached);
         assert_eq!(outcome.hops.len(), 5);
         assert!(outcome.hops[2].timed_out);
@@ -489,7 +525,7 @@ mod tests {
         // A reached reply followed by a duplicate plain-hop reply for the same
         // hop must keep the reached classification.
         let replies = vec![reply(2, 5, HopKind::Reached), reply(2, 9, HopKind::Hop)];
-        let outcome = assemble_trace(replies, 30);
+        let outcome = assemble_trace(replies, 30, None);
         assert!(outcome.reached);
         assert!(outcome.hops[1].reached);
         // The first reply's latency is kept (the true RTT), not the later one.
@@ -500,8 +536,25 @@ mod tests {
             reply(1, 1, HopKind::Terminal("blocked".to_string())),
             reply(1, 2, HopKind::Hop),
         ];
-        let outcome = assemble_trace(replies, 30);
+        let outcome = assemble_trace(replies, 30, None);
         assert_eq!(outcome.hops[0].error.as_deref(), Some("blocked"));
+    }
+
+    #[test]
+    fn assemble_records_a_mid_burst_send_failure_as_a_terminal_hop() {
+        // Hops 1 and 2 answered; the probe for hop 3 could not be sent.
+        let replies = vec![reply(1, 1, HopKind::Hop), reply(2, 2, HopKind::Hop)];
+        let outcome = assemble_trace(replies, 2, Some((3, "no route to host".to_string())));
+        assert!(!outcome.reached);
+        assert_eq!(outcome.hops.len(), 3);
+        assert!(!outcome.hops[2].timed_out);
+        assert_eq!(outcome.hops[2].error.as_deref(), Some("no route to host"));
+
+        // If an earlier reply already reached, the later send failure is moot.
+        let replies = vec![reply(1, 1, HopKind::Reached)];
+        let outcome = assemble_trace(replies, 1, Some((3, "no route".to_string())));
+        assert!(outcome.reached);
+        assert_eq!(outcome.hops.len(), 1);
     }
 
     #[test]
