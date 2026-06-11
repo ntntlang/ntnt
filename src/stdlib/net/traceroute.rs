@@ -123,9 +123,11 @@ fn run_traceroute(
 
     // Emit one probe per TTL up front, never past the global deadline so the
     // burst alone cannot blow the timeout budget. A send failure on the very
-    // first hop is fatal (nothing usable was sent). A failure mid-burst bounds
-    // the burst and is recorded as a terminal hop — so it is reported in the
-    // result rather than silently dropped or counted as a normal timeout.
+    // first hop, or any backend (machinery) failure, is fatal — it surfaces as
+    // an Err rather than masquerading as a trace result. A recoverable
+    // "couldn't deliver this probe" mid-burst (no route, or a full TCP send
+    // buffer) bounds the burst and is recorded as a terminal hop, so it is
+    // reported rather than silently dropped or counted as a normal timeout.
     let mut sent_hops = 0usize;
     let mut send_terminal: Option<(usize, String)> = None;
     for hop in 1..=options.max_hops {
@@ -136,7 +138,7 @@ fn run_traceroute(
         let seq = hop as u16;
         match probe.send(ttl, seq, deadline) {
             Ok(()) => sent_hops = hop,
-            Err(failure) if sent_hops == 0 => return Err(failure),
+            Err(failure) if sent_hops == 0 || !failure.is_target() => return Err(failure),
             Err(failure) => {
                 send_terminal = Some((hop, failure.into_message()));
                 break;

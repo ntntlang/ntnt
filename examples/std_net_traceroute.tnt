@@ -1,0 +1,47 @@
+// std/net traceroute example
+//
+// Traceroute needs a raw ICMP socket for intermediate hops (CAP_NET_RAW; in
+// Docker: cap_add: [NET_RAW]). Capability detection sends no traffic and is
+// always safe; running an actual trace is opt-in so default example
+// validation stays offline and unprivileged.
+//
+// Run a live trace with:
+//   NTNT_NET_TRACEROUTE_EXAMPLE=1 ntnt run examples/std_net_traceroute.tnt
+// Optionally choose host/method:
+//   NTNT_NET_TRACEROUTE_HOST=one.one.one.one NTNT_NET_TRACEROUTE_METHOD=tcp ...
+
+import { get_env } from "std/env"
+import { net_capabilities, traceroute } from "std/net"
+import { has_key } from "std/collections"
+
+let caps = net_capabilities()
+print("Probe capabilities: icmp=#{caps.traceroute} udp=#{caps.traceroute_udp} tcp=#{caps.traceroute_tcp}")
+
+if (get_env("NTNT_NET_TRACEROUTE_EXAMPLE") ?? "") != "1" {
+    print("Set NTNT_NET_TRACEROUTE_EXAMPLE=1 (with CAP_NET_RAW) to run a live trace.")
+} else {
+    let host = get_env("NTNT_NET_TRACEROUTE_HOST") ?? "1.1.1.1"
+    let method = get_env("NTNT_NET_TRACEROUTE_METHOD") ?? "icmp"
+
+    match traceroute(host, map { "method": method, "max_hops": 20, "timeout_ms": 5000 }) {
+        Ok(result) => {
+            print("traceroute to #{result.host} (#{result.target_addr}) via #{result.method} — reached=#{result.reached}, #{result.hop_count} hops")
+            for hop in result.hops {
+                // "from" is a reserved keyword, so index map keys with brackets.
+                let who = if hop.timed_out { "*" } else { hop["from"] ?? "?" }
+                let mut line = "  " + str(hop.hop) + "  " + who
+                if has_key(hop, "latency_ms") {
+                    line = line + " " + str(hop["latency_ms"]) + " ms"
+                }
+                if hop.reached {
+                    line = line + " (reached)"
+                }
+                if has_key(hop, "error") {
+                    line = line + " [" + str(hop["error"]) + "]"
+                }
+                print(line)
+            }
+        },
+        Err(e) => print("traceroute failed: #{e}")
+    }
+}

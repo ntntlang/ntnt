@@ -423,14 +423,22 @@ impl TraceProbe for TcpTraceProbe {
             // is), so a fixed value suffices.
             0x5354_5230,
         );
-        self.tcp
-            .send_to(
-                &syn,
-                &SockAddr::from(SocketAddr::new(self.target_ip, self.dst_port)),
-            )
-            .map_err(|err| probe_io_failure(LABEL, err))?;
-        self.sent_at.insert(seq, Instant::now());
-        Ok(())
+        match self.tcp.send_to(
+            &syn,
+            &SockAddr::from(SocketAddr::new(self.target_ip, self.dst_port)),
+        ) {
+            Ok(_) => {
+                self.sent_at.insert(seq, Instant::now());
+                Ok(())
+            }
+            // A full send buffer means this probe was not transmitted: a
+            // recoverable per-hop condition (recorded as an error hop), not a
+            // machinery failure that should abort the whole trace.
+            Err(err) if err.kind() == ErrorKind::WouldBlock => Err(ProbeFailure::Target(format!(
+                "{LABEL} failed: TCP send buffer full, probe not sent"
+            ))),
+            Err(err) => Err(probe_io_failure(LABEL, err)),
+        }
     }
 
     fn recv(&mut self, deadline: Instant) -> Result<Option<HopReply>, ProbeFailure> {
