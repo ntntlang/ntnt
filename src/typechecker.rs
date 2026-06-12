@@ -28,6 +28,9 @@ pub enum DiagnosticKind {
     MissingReturnAnnotation,
     /// Missing type annotation on lambda parameter
     MissingLambdaParamAnnotation,
+    /// JavaScript-style `${ident}` interpolation in a string literal where
+    /// `ident` is a variable in scope (NTNT interpolation is `#{expr}`)
+    JsStyleInterpolation,
     /// General type error (mismatch, undefined, etc.)
     General,
 }
@@ -102,6 +105,11 @@ pub struct TypeContext {
     resolving_files: Vec<String>,
     /// Detected circular import cycles (accumulated from nested contexts)
     detected_cycles: Vec<String>,
+    /// Last attributed line per `${...}` interpolation finding (snippet + ident).
+    /// Suppresses the double-visit of expression statements
+    /// (check_statement + infer_statement_terminal_type) while still
+    /// reporting genuinely distinct later sites of the same snippet.
+    js_interp_reported: HashMap<String, usize>,
 }
 
 /// Returns true if NTNT_STRICT mode is enabled.
@@ -204,6 +212,7 @@ pub fn check_program_with_lint_mode(
                     DiagnosticKind::MissingParamAnnotation
                         | DiagnosticKind::MissingReturnAnnotation
                         | DiagnosticKind::MissingLambdaParamAnnotation
+                        | DiagnosticKind::JsStyleInterpolation
                 )
             {
                 d.severity = Severity::Error;
@@ -282,6 +291,62 @@ fn binary_op_str(op: &BinaryOp) -> &'static str {
         BinaryOp::Or => "||",
         BinaryOp::NullCoalesce => "??",
     }
+}
+
+/// Find JavaScript-style `${ident...}` interpolation candidates in a string literal.
+///
+/// Returns `(head_ident, full_snippet)` pairs, e.g. `("name", "${name}")` or
+/// `("user", "${user.name}")`. Only sequences whose first character after `${`
+/// can start an identifier (Unicode, matching NTNT identifiers) and that close
+/// with `}` before the next newline are reported; `${}`, `${1}`, and `${{` are
+/// skipped. Callers decide relevance by resolving the head identifier against
+/// their scope/environment.
+pub fn find_js_interpolation_idents(s: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    let n = chars.len();
+    let mut i = 0;
+    while i + 1 < n {
+        if chars[i].1 != '$' || chars[i + 1].1 != '{' {
+            i += 1;
+            continue;
+        }
+        let start = chars[i].0;
+        let mut j = i + 2;
+        // The first character after `${` must start an identifier
+        if j >= n || !(chars[j].1.is_alphabetic() || chars[j].1 == '_') {
+            i += 2;
+            continue;
+        }
+        let ident_start = chars[j].0;
+        while j < n && (chars[j].1.is_alphanumeric() || chars[j].1 == '_') {
+            j += 1;
+        }
+        let ident_end = if j < n { chars[j].0 } else { s.len() };
+        // Require a closing `}` before the next newline
+        let mut close = None;
+        let mut k = j;
+        while k < n {
+            match chars[k].1 {
+                '}' => {
+                    close = Some(chars[k].0);
+                    break;
+                }
+                '\n' => break,
+                _ => k += 1,
+            }
+        }
+        if let Some(close) = close {
+            results.push((
+                s[ident_start..ident_end].to_string(),
+                s[start..=close].to_string(),
+            ));
+        }
+        // Resume right after the head identifier so a nested `${...}` inside
+        // the same span (e.g. "${PATH:-${name}}") is still examined.
+        i = j;
+    }
+    results
 }
 
 /// Extract a search-friendly string from an Expression AST node.
@@ -399,6 +464,7 @@ impl TypeContext {
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
             detected_cycles: Vec::new(),
+            js_interp_reported: HashMap::new(),
         }
     }
 
@@ -470,6 +536,52 @@ impl TypeContext {
 
     fn warning(&mut self, message: String, line: usize, hint: Option<String>) {
         self.emit(Severity::Warning, message, line, hint);
+    }
+
+    /// Warn when a string literal contains JavaScript-style `${ident}` and
+    /// `ident` is a variable in scope. NTNT interpolation is `#{expr}`, so
+    /// the `${...}` text would be output literally.
+    fn check_js_style_interpolation(&mut self, s: &str) {
+        if !s.contains("${") {
+            return;
+        }
+        for (ident, snippet) in find_js_interpolation_idents(s) {
+            if self.lookup(&ident).is_none() {
+                continue;
+            }
+            // Locate by the `${ident` prefix: identifiers cannot contain
+            // escape sequences, so the prefix appears verbatim in the source
+            // even when the parsed snippet was decoded (e.g. holds a real tab).
+            let needle = format!("${{{}", ident);
+            let key = format!("{}#{}", snippet, ident);
+            let line = match self.js_interp_reported.get(&key).copied() {
+                // Seen before: report again only for a genuinely later site.
+                // The re-visit of the same expression statement falls back to
+                // an already-attributed (or earlier) line and is skipped.
+                Some(last) => {
+                    let l = self.find_line_near_from(&needle, last + 1);
+                    if l == 0 || l <= last {
+                        continue;
+                    }
+                    l
+                }
+                None => self.find_line_near(&needle),
+            };
+            self.js_interp_reported.insert(key, line);
+            self.emit_with_kind(
+                Severity::Warning,
+                DiagnosticKind::JsStyleInterpolation,
+                format!(
+                    "String literal contains \"{}\" — NTNT interpolation is \"#{{{}}}\"; the \"${{...}}\" text will be output literally",
+                    snippet, ident
+                ),
+                line,
+                Some(format!(
+                    "Use \"#{{{}}}\". If literal ${{...}} output is intended (shell/JS content), build it with concatenation (\"$\" + \"{{...}}\") or a \"\"\"template string\"\"\".",
+                    ident
+                )),
+            );
+        }
     }
 
     // ── Line number lookup ────────────────────────────────────────────
@@ -1711,7 +1823,10 @@ impl TypeContext {
         match expr {
             Expression::Integer(_) => Type::Int,
             Expression::Float(_) => Type::Float,
-            Expression::String(_) => Type::String,
+            Expression::String(s) => {
+                self.check_js_style_interpolation(s);
+                Type::String
+            }
             Expression::Bool(_) => Type::Bool,
             Expression::Unit => Type::Unit,
 
@@ -1985,6 +2100,12 @@ impl TypeContext {
             }
 
             Expression::InterpolatedString(parts) => {
+                // Literal segments can still carry js-style `${...}` (e.g. "hi #{a} and ${b}")
+                for part in parts {
+                    if let StringPart::Literal(s) = part {
+                        self.check_js_style_interpolation(s);
+                    }
+                }
                 // In strict mode, warn when interpolating complex types
                 if self.strict_lint {
                     for part in parts {
@@ -4291,6 +4412,65 @@ mod tests {
     use super::*;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+
+    #[test]
+    fn js_interp_detector_extracts_simple_ident() {
+        let found = find_js_interpolation_idents("hello ${name}!");
+        assert_eq!(found, vec![("name".to_string(), "${name}".to_string())]);
+    }
+
+    #[test]
+    fn js_interp_detector_extracts_head_ident_from_complex_content() {
+        let found = find_js_interpolation_idents("a ${user.name} b ${VAR:-default} c");
+        assert_eq!(
+            found,
+            vec![
+                ("user".to_string(), "${user.name}".to_string()),
+                ("VAR".to_string(), "${VAR:-default}".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn js_interp_detector_rejects_non_identifier_starts() {
+        assert!(find_js_interpolation_idents("pos ${1} empty ${} brace ${{x}").is_empty());
+    }
+
+    #[test]
+    fn js_interp_detector_requires_close_before_newline() {
+        assert!(find_js_interpolation_idents("open ${name\nrest }").is_empty());
+    }
+
+    #[test]
+    fn js_interp_detector_handles_multiple_occurrences() {
+        let found = find_js_interpolation_idents("${a} and ${b}");
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].0, "a");
+        assert_eq!(found[1].0, "b");
+    }
+
+    #[test]
+    fn js_interp_detector_finds_nested_interpolation() {
+        let found = find_js_interpolation_idents("echo ${PATH:-${name}} done");
+        assert_eq!(
+            found,
+            vec![
+                ("PATH".to_string(), "${PATH:-${name}".to_string()),
+                ("name".to_string(), "${name}".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn js_interp_detector_supports_unicode_identifiers() {
+        let found = find_js_interpolation_idents("héllo ${naïve}!");
+        assert_eq!(found, vec![("naïve".to_string(), "${naïve}".to_string())]);
+    }
+
+    #[test]
+    fn js_interp_detector_ignores_plain_dollars_and_braces() {
+        assert!(find_js_interpolation_idents("cost: $5 {not interp} $ {gap}").is_empty());
+    }
 
     fn check(source: &str) -> Vec<TypeDiagnostic> {
         let lexer = Lexer::new(source);

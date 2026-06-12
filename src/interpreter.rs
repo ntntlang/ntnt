@@ -396,6 +396,20 @@ impl Environment {
         }
     }
 
+    /// True if `name` is bound to a non-function value, without cloning.
+    /// Used by the `${...}` interpolation warning: function and builtin
+    /// names (e.g. `${len}`, `${format}` in generated shell/JS content)
+    /// are skipped to match the lint rule, which only resolves variables.
+    pub fn has_data_binding(&self, name: &str) -> bool {
+        if let Some(value) = self.values.get(name) {
+            !matches!(value, Value::Function { .. } | Value::NativeFunction { .. })
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow().has_data_binding(name)
+        } else {
+            false
+        }
+    }
+
     /// Collect all bindings from this scope and parent scopes (child overrides parent)
     pub fn all_bindings(&self) -> HashMap<String, Value> {
         let mut bindings = if let Some(ref parent) = self.parent {
@@ -5653,11 +5667,45 @@ impl Interpreter {
         Ok(result)
     }
 
+    /// Warn (deduped per site) when a string literal contains JavaScript-style
+    /// `${ident}` and `ident` is a data variable in the live environment.
+    /// NTNT interpolation is `#{expr}` — the `${...}` text is output literally.
+    /// Function and builtin names are skipped (matches the lint rule, which
+    /// only resolves variables). Stays a WARN even in strict mode: a literal
+    /// string is type-valid, and the hard failure belongs to `lint --strict`.
+    fn warn_js_style_interpolation(&self, s: &str) {
+        if get_type_mode() == TypeMode::Forgiving {
+            return;
+        }
+        for (ident, snippet) in crate::typechecker::find_js_interpolation_idents(s) {
+            if self.environment.borrow().has_data_binding(&ident) {
+                let file = self.current_file.as_deref().unwrap_or("");
+                let location = if file.is_empty() {
+                    format!("line {}", self.current_line)
+                } else {
+                    format!("{}, line {}", file, self.current_line)
+                };
+                type_warn_dedup(
+                    &format!("js_interp:{}:{}:{}", file, self.current_line, snippet),
+                    &format!(
+                        "String literal contains \"{}\" — NTNT interpolation is \"#{{{}}}\"; printed literally ({})",
+                        snippet, ident, location
+                    ),
+                );
+            }
+        }
+    }
+
     fn eval_expression(&mut self, expr: &Expression) -> Result<Value> {
         match expr {
             Expression::Integer(n) => Ok(Value::Int(*n)),
             Expression::Float(n) => Ok(Value::Float(*n)),
-            Expression::String(s) => Ok(Value::String(s.clone())),
+            Expression::String(s) => {
+                if s.contains("${") {
+                    self.warn_js_style_interpolation(s);
+                }
+                Ok(Value::String(s.clone()))
+            }
             Expression::Bool(b) => Ok(Value::Bool(*b)),
             Expression::Unit => Ok(Value::Unit),
 
@@ -7199,7 +7247,12 @@ impl Interpreter {
                 let mut result = String::new();
                 for part in parts {
                     match part {
-                        StringPart::Literal(s) => result.push_str(s),
+                        StringPart::Literal(s) => {
+                            if s.contains("${") {
+                                self.warn_js_style_interpolation(s);
+                            }
+                            result.push_str(s)
+                        }
                         StringPart::Expr(expr) => {
                             let value = self.eval_expression(expr)?;
                             result.push_str(&value.to_string());

@@ -127,7 +127,7 @@ Scoping also surfaced **two additional doc drifts** beyond the v2 findings: CLAU
 
 ### Progress at a glance
 
-- [ ] **PR-1** — `${}` interpolation detection (Rec 1) — S
+- [x] **PR-1** — `${}` interpolation detection (Rec 1) — S
 - [ ] **PR-2** — Doc-claim regression tests, CLAUDE.md truth, UFCS embrace (Rec 2) — M
 - [ ] **PR-3** — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M
 - [ ] **PR-4** — Diagnostics II: method bridge hints, unknown-method lint, IAL suggestions, `ntnt intent lint` (Rec 4b) — M
@@ -138,13 +138,13 @@ Scoping also surfaced **two additional doc drifts** beyond the v2 findings: CLAU
 
 Scope-resolved detection in two layers: lint warns (error under `--strict`) when a string literal contains `${ident}` and `ident` resolves to a variable in scope — this keeps legitimate shell/JS content (`${HOME}`, `${1}`) clean while catching the actual bug with near-certainty; plus a deduped runtime `[WARN]` at string evaluation following the `type_warn_dedup` pattern. Emitted from the typechecker (which runs in all lint modes and has scopes + line attribution), structurally excluding template strings.
 
-- [ ] Shared detector `find_js_interpolation_idents()` in `src/typechecker.rs` + unit tests
-- [ ] `DiagnosticKind::JsStyleInterpolation` emitted from `infer_expression` for `Expression::String` and `InterpolatedString` literal parts, with double-visit dedup set (required: expression statements are inferred twice)
-- [ ] Strict-mode promotion in `check_program_with_lint_mode`; distinct rule name `javascript_style_interpolation` in lint JSON (`src/main.rs` ~3350)
-- [ ] Runtime hook in `eval_expression` (`${` pre-check, scope-checked, deduped, silent in forgiving mode; stays WARN even in strict — hard failure belongs to `lint --strict`)
-- [ ] Fix three stale lint messages claiming NTNT interpolation is `"{variable}"` instead of `#{variable}` (`src/main.rs` ~3454, ~3826-3830)
-- [ ] `tests/js_interpolation_tests.rs` (~12 integration cases) + `docs/AI_AGENT_GUIDE.md` interpolation section
-- [ ] Grep `examples/` and test fixtures for `${` before merging (strict promotion may surface existing hits)
+- [x] Shared detector `find_js_interpolation_idents()` in `src/typechecker.rs` + unit tests
+- [x] `DiagnosticKind::JsStyleInterpolation` emitted from `infer_expression` for `Expression::String` and `InterpolatedString` literal parts, with double-visit dedup set (required: expression statements are inferred twice)
+- [x] Strict-mode promotion in `check_program_with_lint_mode`; distinct rule name `javascript_style_interpolation` in lint JSON (`src/main.rs` ~3350)
+- [x] Runtime hook in `eval_expression` (`${` pre-check, scope-checked, deduped, silent in forgiving mode; stays WARN even in strict — hard failure belongs to `lint --strict`)
+- [x] Fix three stale lint messages claiming NTNT interpolation is `"{variable}"` instead of `#{variable}` (`src/main.rs` ~3454, ~3826-3830)
+- [x] `tests/js_interpolation_tests.rs` (~12 integration cases) + `docs/AI_AGENT_GUIDE.md` interpolation section
+- [x] Grep `examples/` and test fixtures for `${` before merging (strict promotion may surface existing hits)
 
 Defaults applied (object before implementation if wrong): strict promotion **yes**; raw-string `r"..."` false-positive class accepted for v1 (concat/template-string workarounds documented); no out-of-scope-ident detection (protects precision; typo'd `${nmae}` stays uncaught in v1).
 
