@@ -1,6 +1,6 @@
 # DD-063: NTNT Language Assessment — Strengths, Gaps, and Priorities
 
-## Status: draft (v2 — deep assessment)
+## Status: active — implementation tracking for v0.4.11 (v3; assessment finalized in v2)
 
 ## Problem
 
@@ -116,6 +116,102 @@ Deduplicated against existing DDs; items already covered elsewhere are deferred,
 8. **Separate shipped from aspirational in the whitepaper.** Lead with what exists (intent verification, contracts, secure-by-default stack — a strong story on its own); move effects/session types/structured edits/semver enforcement to an explicit future-work section.
 9. **Static contract lint (stretch).** Flag call sites that statically violate `requires` clauses with literal arguments. Narrows the vision gap cheaply; full verification stays out of scope.
 10. **Performance and ecosystem: execute existing DDs.** DD-061 Phase 1 (the fib(30) ≈ 35x-CPython baseline above gives it a benchmark to beat); DD-058 Priority 1 stdlib gaps; DD-062 extension model. No new design needed here — they're the right plans; this assessment just confirms their priority.
+
+## Implementation plan (v0.4.11)
+
+This is the tracking section: check items off as PRs land. v0.4.10 was tagged at `6374d95` (the commit carrying this assessment); everything below targets v0.4.11 (main bumped at `35c4c5f`). Each PR below was scoped at file level against v0.4.10 source — the full per-PR plans (step-by-step approach, exact functions, test lists, risk registers) live in [plans/dd-063-scoping-notes.md](../plans/dd-063-scoping-notes.md); this section is the condensed tracking view.
+
+**Why not one PR for Recs 1–4:** scoped totals are ~1,300 implementation + ~1,700 test LOC spanning the parser, typechecker, interpreter, IAL engine, and CLI, with one item (parser error recovery) carrying meaningfully higher regression risk than the rest. Split into four PRs with one risk profile each, plus a fifth gated on maintainer decisions. PR-1 and PR-2 are independent and can proceed in parallel; PR-3 and PR-4 should follow PR-2 (its doc-claim tests act as a behavioral safety net for parser/diagnostic changes).
+
+Scoping also surfaced **two additional doc drifts** beyond the v2 findings: CLAUDE.md rule 8 (`mut`) is only enforced for indexed/deep mutation — plain rebinding without `mut` succeeds; and rule 10 (module-level `let` can't use `map {}`) is stale — it works now. Both are folded into PR-2.
+
+### Progress at a glance
+
+- [ ] **PR-1** — `${}` interpolation detection (Rec 1) — S
+- [ ] **PR-2** — Doc-claim regression tests, CLAUDE.md truth, UFCS embrace (Rec 2) — M
+- [ ] **PR-3** — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M
+- [ ] **PR-4** — Diagnostics II: method bridge hints, unknown-method lint, IAL suggestions, `ntnt intent lint` (Rec 4b) — M
+- [ ] **PR-5** — Index out-of-bounds loudness (Rec 3) — M — **blocked on decisions**
+- [ ] Recs 5–10 — unscheduled, see end of section
+
+### PR-1 — `${}` interpolation detection (Rec 1) — S, ~150 impl + ~280 tests
+
+Scope-resolved detection in two layers: lint warns (error under `--strict`) when a string literal contains `${ident}` and `ident` resolves to a variable in scope — this keeps legitimate shell/JS content (`${HOME}`, `${1}`) clean while catching the actual bug with near-certainty; plus a deduped runtime `[WARN]` at string evaluation following the `type_warn_dedup` pattern. Emitted from the typechecker (which runs in all lint modes and has scopes + line attribution), structurally excluding template strings.
+
+- [ ] Shared detector `find_js_interpolation_idents()` in `src/typechecker.rs` + unit tests
+- [ ] `DiagnosticKind::JsStyleInterpolation` emitted from `infer_expression` for `Expression::String` and `InterpolatedString` literal parts, with double-visit dedup set (required: expression statements are inferred twice)
+- [ ] Strict-mode promotion in `check_program_with_lint_mode`; distinct rule name `javascript_style_interpolation` in lint JSON (`src/main.rs` ~3350)
+- [ ] Runtime hook in `eval_expression` (`${` pre-check, scope-checked, deduped, silent in forgiving mode; stays WARN even in strict — hard failure belongs to `lint --strict`)
+- [ ] Fix three stale lint messages claiming NTNT interpolation is `"{variable}"` instead of `#{variable}` (`src/main.rs` ~3454, ~3826-3830)
+- [ ] `tests/js_interpolation_tests.rs` (~12 integration cases) + `docs/AI_AGENT_GUIDE.md` interpolation section
+- [ ] Grep `examples/` and test fixtures for `${` before merging (strict promotion may surface existing hits)
+
+Defaults applied (object before implementation if wrong): strict promotion **yes**; raw-string `r"..."` false-positive class accepted for v1 (concat/template-string workarounds documented); no out-of-scope-ident detection (protects precision; typo'd `${nmae}` stays uncaught in v1).
+
+### PR-2 — Doc-claim regression tests, CLAUDE.md truth, UFCS embrace (Rec 2) — M, ~70 impl + ~500 tests + doc edits
+
+One regression test per behavioral claim in CLAUDE.md's 16 Critical Syntax Rules, locking *actual* binary behavior; rewrite the four wrong/stale rules; document UFCS as first-class sugar with its real gaps (map-stored closures not dot-callable; parens disambiguate call vs key lookup); make IAL_REFERENCE honest about unimplemented primitives.
+
+- [ ] `tests/doc_claims_tests.rs` (~26 tests; assert on error codes + short stable fragments, never full message lines)
+- [ ] CLAUDE.md corrections: rule 3 (UFCS works — reframe as "free functions are canonical, dot-call is sugar"), rule 5 (semicolons are lint warnings, not parser corruption), rule 8 (`mut` enforced only for indexed/deep mutation — document actual semantics), rule 10 (module-level `map {}` works — replace in place to keep rule numbering stable)
+- [ ] `docs/AI_AGENT_GUIDE.md` + `syntax.toml` UFCS documentation; review regenerated `.github/copilot-instructions.md` diff
+- [ ] Fix `collect_from_expr` unused-import lint bug exposed by UFCS embrace (dot-call method names are dropped, so imports used only via UFCS get flagged unused)
+- [ ] `ial.toml` status field for `sql`/`invariant_check` + Status column in `generate_ial_markdown` (and update the fixed key arrays in `src/main.rs`, or new rows silently render nothing)
+- [ ] Regenerate `docs/IAL_REFERENCE.md` / `STDLIB_REFERENCE.md` via `ntnt docs --generate`
+
+Maintainer decisions: **(a)** rule 8 — document current `mut` semantics (this plan) or fix enforcement for plain rebinding (breaking; would need its own DD)? **(b)** IAL `Sql` primitive — mark `not_implemented` in docs (this plan) or remove from `ial.toml` entirely until built?
+
+### PR-3 — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M, ~420 impl + ~380 tests
+
+New opt-in `Parser::parse_with_recovery() -> (Program, Vec<Error>)` with statement-level panic-mode synchronization (cap 5 errors/file, same-line dedup + token-gap cascade suppression); existing `parse()` keeps its exact signature and single-error behavior so all 18 call sites (run path, module imports, REPL, intent) are untouched — only `lint_project`/`validate_project` consume the multi-error path. E004 gains what every other error class has: per-clause line capture (`ast::ContractCondition { expression, line }`), a struct `ContractViolation { message, line, call_line, values }`, and parameter values read from the function environment *before* restore (`where: b = 0`), rendered with a real source frame. Display text stays byte-identical for existing consumers.
+
+- [ ] `parse_with_recovery` + private `recover` flag + `synchronize()` with guaranteed token advance
+- [ ] `lint_project`/`validate_project` report all recovered errors; semantic checks skipped on parse-error files
+- [ ] `ast::ContractCondition` + line capture in `parse_contract()`
+- [ ] `ContractViolation` struct variant; identifier-walking value capture (env lookups only — never expression re-evaluation, which could fire side effects during error construction); capture **before** env restore
+- [ ] `rich_display` source frame for E004; `error.rs` wiring
+- [ ] `tests/diagnostics_tests.rs`: multi-error lint, token-soup termination, run-path regression (run still aborts on first error), multi-param `where:` values
+- [ ] Lint all `examples/*.tnt` before/after as a recovery-regression sweep
+
+Defaults applied: run path stays first-error-only (lint is the multi-error surface); MAX_PARSE_ERRORS = 5; struct invariants get values but not clause lines in v1. Maintainer decision: `ntnt parse --json` contract-clause shape changes to `{expression, line}` objects — acceptable, or add a compatibility serializer?
+
+### PR-4 — Diagnostics II: bridge hints, unknown-method lint, IAL suggestions, `ntnt intent lint` (Rec 4b) — M, ~650 impl + ~500 tests
+
+Four self-contained commits in one PR: (1) method-call misses get Levenshtein suggestions over `Environment::keys()` plus a small alias table (`length→len`, …) and a UFCS bridge hint ("methods resolve to free functions: try `len(s)`"); (2) the typechecker warns on method names found in neither the function registry, builtin sigs, nor scope (gated to non-`Any` receivers; warning in default lint mode, error in strict); (3) `ResolveError` gains `kind` + `suggestions` computed over normalized vocabulary patterns, flowing to intent-check output automatically; (4) `ntnt intent lint` statically resolves every scenario assertion against glossary+standard vocabulary without executing primitives — reports unresolved terms (with suggestions), cycles, orphan glossary entries; exit 1 on unresolved/cycles, `--json` for CI.
+
+- [ ] Method-miss suggestions + alias table + `hint` field on `IntentError::UndefinedFunction` (`src/interpreter.rs` ~7044)
+- [ ] Typechecker unknown-method diagnostic + register the five runtime-global option/result helpers (`is_some`/`is_none`/`is_ok`/`is_err`/`unwrap_or`) in `builtin_sigs` (note: introduces arity checking on previously-unchecked calls — release-note item)
+- [ ] IAL `ResolveError.suggestions` via vocabulary-key Levenshtein with `normalize_term_for_cycle` normalization
+- [ ] `intent::lint_intent_file()` + clap subcommand + `--json`; orphan entries stay warnings (never exit-1 — legacy direct-pattern fallback makes orphan detection imperfect)
+- [ ] Visual check of Intent Studio error rendering (trace.error string changes)
+- [ ] Lint-run real .tnt projects to confirm unknown-method noise level before merging
+
+Defaults applied: unknown-method fires in default lint mode (that's the DD-063 complaint — `lint` passed clean on `s.length()`); `intent lint` accepts a `.tnt` path and auto-locates the paired `.intent`. Maintainer decision: approve/trim the alias table (`length→len, size→len, count→len, map→transform, to_string→str, to_str→str, append→push, upper→to_upper, lower→to_lower`).
+
+### PR-5 — Index out-of-bounds loudness (Rec 3) — M, ~120-160 impl + ~250 tests — **blocked on decisions**
+
+Scoping analysis recommends **staging**: ship runtime loudness for out-of-bounds **array/string read** access now (strict → E010 error; warn → deduped `[WARN]` + `None`; forgiving → silent), exactly mirroring the existing TypeMode gates in the same `Expression::Index` arm; **map missing-key stays silent-`None`** (documented intentional DX, 127 of 150 index usages in examples/ are map-key access, `has_key()` exists). `arr[i] ?? default` / `arr[i]?` / `otherwise` suppress both warn and strict error. Typechecker honesty (inferring `Option<T>`) is **deferred with cause**: the runtime's index result is a nullable union (`T | None`), not enum `Option<T>` — annotating `Option<T>` would be a new lie that crashes checker-blessed code on `unwrap`/`match`; unifying that representation needs its own DD first.
+
+Decisions required before this PR starts:
+- [ ] Confirm map missing-key (and `map.field`) stays silent in all modes
+- [ ] Confirm `??` / `?` / `otherwise` suppress the strict-mode error too (recommended: yes — `??` is the documented universal safety net)
+- [ ] Confirm `String[i]` OOB included alongside arrays (recommended: yes)
+- [ ] Confirm a strict-mode runtime behavior change is acceptable within 0.4.x (or needs 0.5 / a breaking-change release note)
+- [ ] Acknowledge the deferred-option-(a) constraint: any future `Option<T>` inference for index expressions requires the runtime-representation DD first
+
+Implementation (after decisions):
+- [ ] TypeMode-gated OOB handling in `Expression::Index` read path + suppression for guarded parents
+- [ ] Resolve the read/write asymmetry note (index *assignment* OOB already errors unconditionally)
+- [ ] Tests across all three modes + guarded-access suppression; update CLAUDE.md rule 15 area and AI_AGENT_GUIDE error-handling docs
+
+### Recs 5–10 — assessed, not yet scheduled
+
+- [ ] **Rec 5** — IAL stub completion: implement invariant execution (expansion already works); decide `Sql` primitive fate (PR-2 makes docs honest in the interim)
+- [ ] **Rec 6** — lint for silent block-binding (`let x = { 5 }` / `let e = {}`)
+- [ ] **Rec 7** — strict type mode in verification contexts (`intent check`, `ntnt test`)
+- [ ] **Rec 8** — whitepaper restructure: shipped vs aspirational
+- [ ] **Rec 9** — static contract lint for literal-argument violations (stretch)
+- [ ] **Rec 10** — execute existing DDs: DD-061 phase 1 (fib(30) ≈ 35x CPython baseline recorded above), DD-058 priority-1 stdlib gaps, DD-062 extension model
 
 ## Non-goals
 
