@@ -323,18 +323,26 @@ pub fn find_js_interpolation_idents(s: &str) -> Vec<(String, String)> {
             j += 1;
         }
         let ident_end = if j < n { chars[j].0 } else { s.len() };
-        // Require a closing `}` before the next newline
+        // Require a balanced closing `}` before the next newline, so nested
+        // content like "${PATH:-${name}}" yields the full outer span instead
+        // of a truncated "${PATH:-${name" snippet.
         let mut close = None;
         let mut k = j;
+        let mut depth = 1usize;
         while k < n {
             match chars[k].1 {
+                '{' => depth += 1,
                 '}' => {
-                    close = Some(chars[k].0);
-                    break;
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(chars[k].0);
+                        break;
+                    }
                 }
                 '\n' => break,
-                _ => k += 1,
+                _ => {}
             }
+            k += 1;
         }
         if let Some(close) = close {
             results.push((
@@ -4455,10 +4463,16 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                ("PATH".to_string(), "${PATH:-${name}".to_string()),
+                ("PATH".to_string(), "${PATH:-${name}}".to_string()),
                 ("name".to_string(), "${name}".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn js_interp_detector_balances_plain_braces() {
+        let found = find_js_interpolation_idents("v ${a{b}c} w");
+        assert_eq!(found, vec![("a".to_string(), "${a{b}c}".to_string())]);
     }
 
     #[test]
