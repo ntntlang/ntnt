@@ -156,9 +156,9 @@ A narrower guardrail than the original scoping: test only the syntax contracts w
 - [x] CLAUDE.md corrections: rule 3 (UFCS works — reframed as "free functions are canonical, dot-call is sugar"), rule 5 (semicolons are lint warnings, not parser corruption), rule 8 (`mut` enforced only for indexed/deep mutation — documented actual semantics), rule 10 (module-level `map {}` works — replaced in place with the map-closure caveat to keep rule numbering stable), rule 11 (warning is emitted, not silent)
 - [x] `docs/AI_AGENT_GUIDE.md` + `syntax.toml` UFCS documentation; also corrected the same drift in `.github/copilot-instructions.md` and `CODEX.md` (both are agent-facing surfaces carrying the identical stale claims)
 - [x] Fix `collect_from_expr` unused-import lint bug exposed by UFCS embrace (dot-call method names are dropped, so imports used only via UFCS get flagged unused)
-- [ ] IAL primitive status honesty deferred to the IAL stub-gap PR rather than bundled into this lighter Rec 2 slice
+- [x] Keep `IAL_REFERENCE.md` honest about primitive status: `Sql` is marked not implemented, and `InvariantCheck` is marked as resolver-marker-only/direct execution fails unless expanded
 
-Maintainer decision applied after review: PR-2 should not lock every current CLAUDE.md behavior. It locks only resounding yes contracts and leaves questionable current behavior available for future language improvements.
+Maintainer decision applied after review: PR-2 should not lock every current CLAUDE.md behavior. It locks only resounding yes contracts and leaves questionable current behavior available for future language improvements. Greptile follow-up kept the IAL status honesty because generated docs must not tell agents that stubs are supported.
 
 ### PR-3 — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M, ~420 impl + ~380 tests
 
