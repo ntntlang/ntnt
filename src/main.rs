@@ -2829,7 +2829,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
             "critical_rules": {
                 "map_literals": "Use `map { \"key\": value }` NOT `{ \"key\": value }` - bare {} creates blocks",
                 "route_patterns": "Route builtins auto-detect {param} patterns: `get(\"/users/{id}\", handler)` - raw strings optional",
-                "string_interpolation": "Use `\"{variable}\"` for interpolation, NOT `${variable}` or backticks",
+                "string_interpolation": "Use `\"#{variable}\"` for interpolation, NOT `${variable}` or backticks",
                 "ranges": "Use `0..10` (exclusive) or `0..=10` (inclusive), NOT range()",
                 "imports": "Use `import { x } from \"std/module\"` with `/` separator",
                 "contracts": "Place requires/ensures AFTER return type, BEFORE body",
@@ -3186,11 +3186,17 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
                     ntnt::typechecker::check_program_with_file(&ast, &source, &file_path_str);
                 let mut type_errors = Vec::new();
                 for diag in type_diagnostics {
+                    let rule = match diag.kind {
+                        ntnt::typechecker::DiagnosticKind::JsStyleInterpolation => {
+                            "javascript_style_interpolation"
+                        }
+                        _ => "type_check",
+                    };
                     let entry = json!({
                         "message": diag.message,
                         "line": if diag.line > 0 { Some(diag.line) } else { None::<usize> },
                         "hint": diag.hint,
-                        "rule": "type_check",
+                        "rule": rule,
                     });
                     match diag.severity {
                         ntnt::typechecker::Severity::Error => type_errors.push(entry),
@@ -3352,9 +3358,15 @@ fn lint_project(
                         ntnt::typechecker::Severity::Error => "error",
                         ntnt::typechecker::Severity::Warning => "warning",
                     };
+                    let rule = match diag.kind {
+                        ntnt::typechecker::DiagnosticKind::JsStyleInterpolation => {
+                            "javascript_style_interpolation"
+                        }
+                        _ => "type_check",
+                    };
                     issues.push(json!({
                         "severity": severity,
-                        "rule": "type_check",
+                        "rule": rule,
                         "message": diag.message,
                         "line": if diag.line > 0 { Some(diag.line) } else { None::<usize> },
                         "hint": diag.hint,
@@ -3378,21 +3390,39 @@ fn lint_project(
                     }));
 
                     if !quiet {
-                        let warn_str = if warning_count > 0 {
-                            format!("{} warnings", warning_count)
+                        // Per-file counts (the outer counters accumulate across files)
+                        let count_of = |sev: &str| {
+                            issues
+                                .iter()
+                                .filter(|i| i["severity"].as_str() == Some(sev))
+                                .count()
+                        };
+                        let (file_errors, file_warnings, file_suggestions) = (
+                            count_of("error"),
+                            count_of("warning"),
+                            count_of("suggestion"),
+                        );
+                        let err_str = if file_errors > 0 {
+                            format!("{} errors", file_errors)
                         } else {
                             String::new()
                         };
-                        let sug_str = if suggestion_count > 0 {
-                            format!("{} suggestions", suggestion_count)
+                        let warn_str = if file_warnings > 0 {
+                            format!("{} warnings", file_warnings)
                         } else {
                             String::new()
                         };
-                        let parts: Vec<&str> = [warn_str.as_str(), sug_str.as_str()]
-                            .iter()
-                            .filter(|s| !s.is_empty())
-                            .copied()
-                            .collect();
+                        let sug_str = if file_suggestions > 0 {
+                            format!("{} suggestions", file_suggestions)
+                        } else {
+                            String::new()
+                        };
+                        let parts: Vec<&str> =
+                            [err_str.as_str(), warn_str.as_str(), sug_str.as_str()]
+                                .iter()
+                                .filter(|s| !s.is_empty())
+                                .copied()
+                                .collect();
                         eprintln!("{} {} ({})", "⚠".yellow(), relative_path, parts.join(", "));
                     }
                 } else {
@@ -3451,7 +3481,7 @@ fn lint_project(
         output["syntax_hints"] = json!({
             "map_literals": "Use `map { \"key\": value }` not `{ \"key\": value }`",
             "route_patterns": "Route builtins auto-detect {param} patterns - raw strings are optional",
-            "string_interpolation": "Use `\"{variable}\"` not `\"${variable}\"`",
+            "string_interpolation": "Use `\"#{variable}\"` not `\"${variable}\"`",
             "ranges": "Use `0..10` (exclusive) or `0..=10` (inclusive), not `range()`",
             "imports": "Use `import { x } from \"std/module\"` with `/` path separator",
         });
@@ -3823,10 +3853,10 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
             issues.push(json!({
                 "severity": "warning",
                 "rule": "javascript_template_string",
-                "message": "Possible JavaScript-style template string detected. NTNT uses \"{variable}\" for interpolation, not `${variable}`.",
+                "message": "Possible JavaScript-style template string detected. NTNT uses \"#{variable}\" for interpolation, not `${variable}`.",
                 "line": line_num + 1,
                 "fix": {
-                    "description": "Replace `${var}` with \"{var}\" and remove backticks"
+                    "description": "Replace `${var}` with \"#{var}\" and remove backticks"
                 }
             }));
         }

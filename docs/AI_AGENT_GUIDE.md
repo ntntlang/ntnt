@@ -344,6 +344,20 @@ let msg = "Hello, {name}!"
 let msg = `Hello, ${name}!`
 ```
 
+A `${...}` in a regular string is output literally — it is not interpolation.
+When the identifier inside `${...}` is a variable in scope, the mistake is
+caught two ways:
+
+- `ntnt lint` reports rule `javascript_style_interpolation` (a warning; an
+  error under `lint --strict`)
+- `ntnt run` prints a deduplicated runtime `[WARN]` next to the literal output
+
+If you genuinely want literal `${...}` output (generating shell or JavaScript
+code), either build it with concatenation (`"$" + "{HOME}"`) or use a
+`"""template string"""` — template strings are never scanned for this rule.
+References to names that are *not* in scope (e.g. `"echo ${HOME}"`) are also
+left alone.
+
 ### 3. Route Patterns Auto-Detect `{param}`
 
 ```ntnt
