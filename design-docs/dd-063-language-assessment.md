@@ -107,7 +107,7 @@ The highest-leverage problems are now narrow and concrete: one truly silent synt
 Deduplicated against existing DDs; items already covered elsewhere are deferred, not repeated.
 
 1. **Catch `${...}` in all strings.** Drop the backtick requirement from `javascript_template_string`; add a runtime warn (warn mode) when a string literal containing `${identifier}` is constructed. Hours of work; eliminates the worst remaining silent failure.
-2. **Establish doc-claim regression tests, then fix the drift.** Every behavioral claim in CLAUDE.md's critical-rules list gets a test asserting the actual behavior (the DD-054 pattern, extended); CI fails when docs and implementation diverge. Immediately: correct the semicolon and method-call rules, and decide the UFCS story (recommend: embrace and document it — it works, it matches agent priors, and `req.params.id` property access coexists with it today).
+2. **Establish intentional syntax contract tests, then fix the drift.** Stable language/agent contracts get regression tests; current-but-questionable behavior is documented honestly but not frozen as a forever rule. Immediately: correct the semicolon and method-call rules, and decide the UFCS story (recommend: embrace and document it — it works, it matches agent priors, and `req.params.id` property access coexists with it today).
 3. **Resolve the index/`Option` type-reality mismatch.** Decide direction: typechecker infers `Option<T>` for index expressions (honest, but breaking), or strict mode errors on out-of-bounds at runtime, or at minimum lint warns on unguarded index results flowing into typed positions. Needs a maintainer call on breaking-change tolerance — flagging rather than prescribing.
 4. **Upgrade the repair loop to match the error infrastructure.** (a) Parser error recovery, 3–5 errors per pass; (b) E004 contract violations get line numbers, source frames, and actual argument values; (c) unknown-method errors suggest the free-function form; typechecker diagnoses unknown methods instead of silently typing `Any`; (d) IAL unknown terms get Levenshtein suggestions from the loaded vocabulary, plus an `ntnt intent lint` that validates glossaries before execution.
 5. **Close the IAL stub gap — in code or in docs.** Implement invariant execution (small: expansion already works) and either implement the SQL primitive or remove both from IAL_REFERENCE until real. The flagship feature should not document capabilities it doesn't have.
@@ -128,7 +128,7 @@ Scoping also surfaced **two additional doc drifts** beyond the v2 findings: CLAU
 ### Progress at a glance
 
 - [x] **PR-1** — `${}` interpolation detection (Rec 1) — S
-- [ ] **PR-2** — Doc-claim regression tests, CLAUDE.md truth, UFCS embrace (Rec 2) — M
+- [x] **PR-2** — Intentional syntax contract tests, CLAUDE.md truth, UFCS embrace (Rec 2) — S
 - [ ] **PR-3** — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M
 - [ ] **PR-4** — Diagnostics II: method bridge hints, unknown-method lint, IAL suggestions, `ntnt intent lint` (Rec 4b) — M
 - [ ] **PR-5** — Index out-of-bounds loudness (Rec 3) — M — **blocked on decisions**
@@ -148,18 +148,17 @@ Scope-resolved detection in two layers: lint warns (error under `--strict`) when
 
 Defaults applied (object before implementation if wrong): strict promotion **yes**; raw-string `r"..."` false-positive class accepted for v1 (concat/template-string workarounds documented); no out-of-scope-ident detection (protects precision; typo'd `${nmae}` stays uncaught in v1).
 
-### PR-2 — Doc-claim regression tests, CLAUDE.md truth, UFCS embrace (Rec 2) — M, ~70 impl + ~500 tests + doc edits
+### PR-2 — Intentional syntax contract tests, CLAUDE.md truth, UFCS embrace (Rec 2) — S, ~70 impl + ~170 tests + doc edits
 
-One regression test per behavioral claim in CLAUDE.md's 16 Critical Syntax Rules, locking *actual* binary behavior; rewrite the four wrong/stale rules; document UFCS as first-class sugar with its real gaps (map-stored closures not dot-callable; parens disambiguate call vs key lookup); make IAL_REFERENCE honest about unimplemented primitives.
+A narrower guardrail than the original scoping: test only the syntax contracts we are comfortable treating as stable language/agent behavior. Current-but-questionable behavior (partial `mut`, string iteration skip, route import limitations, semicolon permissiveness, etc.) is documented honestly where needed, but not frozen with regression tests. The PR still truth-syncs the stale agent-facing UFCS/semicolon docs and documents UFCS as first-class sugar.
 
-- [ ] `tests/doc_claims_tests.rs` (~26 tests; assert on error codes + short stable fragments, never full message lines)
-- [ ] CLAUDE.md corrections: rule 3 (UFCS works — reframe as "free functions are canonical, dot-call is sugar"), rule 5 (semicolons are lint warnings, not parser corruption), rule 8 (`mut` enforced only for indexed/deep mutation — document actual semantics), rule 10 (module-level `map {}` works — replace in place to keep rule numbering stable)
-- [ ] `docs/AI_AGENT_GUIDE.md` + `syntax.toml` UFCS documentation; review regenerated `.github/copilot-instructions.md` diff
-- [ ] Fix `collect_from_expr` unused-import lint bug exposed by UFCS embrace (dot-call method names are dropped, so imports used only via UFCS get flagged unused)
-- [ ] `ial.toml` status field for `sql`/`invariant_check` + Status column in `generate_ial_markdown` (and update the fixed key arrays in `src/main.rs`, or new rows silently render nothing)
-- [ ] Regenerate `docs/IAL_REFERENCE.md` / `STDLIB_REFERENCE.md` via `ntnt docs --generate`
+- [x] `tests/doc_claims_tests.rs` (8 intentional contract tests; assert on error codes, lint rule ids, and short stable fragments)
+- [x] CLAUDE.md corrections: rule 3 (UFCS works — reframed as "free functions are canonical, dot-call is sugar"), rule 5 (semicolons are lint warnings, not parser corruption), rule 8 (`mut` enforced only for indexed/deep mutation — documented actual semantics), rule 10 (module-level `map {}` works — replaced in place with the map-closure caveat to keep rule numbering stable), rule 11 (warning is emitted, not silent)
+- [x] `docs/AI_AGENT_GUIDE.md` + `syntax.toml` UFCS documentation; also corrected the same drift in `.github/copilot-instructions.md` and `CODEX.md` (both are agent-facing surfaces carrying the identical stale claims)
+- [x] Fix `collect_from_expr` unused-import lint bug exposed by UFCS embrace (dot-call method names are dropped, so imports used only via UFCS get flagged unused)
+- [x] Keep `IAL_REFERENCE.md` honest about primitive status: `Sql` is marked not implemented, and `InvariantCheck` is marked as resolver-marker-only/direct execution fails unless expanded
 
-Maintainer decisions: **(a)** rule 8 — document current `mut` semantics (this plan) or fix enforcement for plain rebinding (breaking; would need its own DD)? **(b)** IAL `Sql` primitive — mark `not_implemented` in docs (this plan) or remove from `ial.toml` entirely until built?
+Maintainer decision applied after review: PR-2 should not lock every current CLAUDE.md behavior. It locks only resounding yes contracts and leaves questionable current behavior available for future language improvements. Greptile follow-up kept the IAL status honesty because generated docs must not tell agents that stubs are supported.
 
 ### PR-3 — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M, ~420 impl + ~380 tests
 

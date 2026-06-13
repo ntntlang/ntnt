@@ -50,15 +50,18 @@ let msg = "Hello, #{name}!"    // CORRECT
 let msg = "Hello, ${name}!"    // WRONG
 ```
 
-### 3. Free functions, not methods — dot reads properties
+### 3. Free functions are canonical — dot-call is UFCS sugar
+
+`x.f(a)` resolves to `f(x, a)` for any builtin, imported, or user-defined function. Both styles work; prefer free functions.
 
 ```ntnt
-len(s)              // CORRECT — free function transforms data
-s.len()             // WRONG — dot is for reading properties only
-trim(input)         // CORRECT
-input.trim()        // WRONG
-req.method          // CORRECT — reading a property
-req.params.id       // CORRECT — reading a map key
+len(s)              // CANONICAL — free function transforms data
+s.len()             // ALSO WORKS — UFCS sugar for len(s)
+5.double()          // works for user-defined fn double(x) too
+req.method          // dot WITHOUT parens reads a property
+req.params.id       // reading a map key
+m.keys              // reads the map key "keys" (None if missing)
+m.keys()            // parens ALWAYS mean a call: keys(m), even if a "keys" key exists
 ```
 
 ### 4. Route functions are GLOBAL builtins — never import them
@@ -73,7 +76,7 @@ Only import response builders: `json`, `html`, `text`, `redirect`, `status`, `pa
 
 ### 5. No semicolons — use newlines
 
-`;` silently corrupts parser state. Never use semicolons.
+Semicolons parse fine but are unnecessary; `ntnt lint` warns (`unnecessary_semicolon`). Omit them.
 
 ### 6. `otherwise` blocks MUST diverge
 
@@ -84,13 +87,17 @@ let data = parse_json(req) otherwise { status(400, "Bad JSON") }                
 
 ### 7. Ranges: `0..10` — `range()` doesn't exist
 
-### 8. Mutable variables need `mut`: `let mut counter = 0`
+### 8. Declare `mut` for anything you reassign: `let mut counter = 0`
+
+`mut` is enforced for indexed mutation (`arr[0] = x`, `m["k"] = v` error without it). Plain rebinding (`x = x + 1`) currently succeeds without `mut` — still declare `mut` for clarity and forward compatibility.
 
 ### 9. Closures: `fn(x) { x * 2 }` — pipe-style `|x| x * 2` doesn't exist
 
-### 10. Module-level `let` can't use `map {}` — move maps inside functions
+### 10. Closures stored in map values are not dot-callable
 
-### 11. `for..in` on strings does nothing — use `chars(s)` from `std/string`
+`m.f(x)` fails with E007 when `f` is a closure stored in map `m` (parens make it a UFCS call to a function named `f`). Bind first: `let f = m.f` then `f(x)`.
+
+### 11. `for..in` on strings skips with a runtime warning — use `chars(s)` from `std/string`
 
 ### 12. Template strings: `"""..{{expr}}.."""` — double braces, not single
 
