@@ -6739,8 +6739,8 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             md.push_str(&format!("{}\n\n", desc));
         }
 
-        md.push_str("| Primitive | Description | Context Sets | Status |\n");
-        md.push_str("|-----------|-------------|---------------|--------|\n");
+        md.push_str("| Primitive | Description | Context Sets |\n");
+        md.push_str("|-----------|-------------|---------------|\n");
 
         let prim_names = [
             "http",
@@ -6768,14 +6768,7 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                             .join(", ")
                     })
                     .unwrap_or_default();
-                let status = p
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Implemented");
-                md.push_str(&format!(
-                    "| **{}** | {} | {} | {} |\n",
-                    name, desc, context, status
-                ));
+                md.push_str(&format!("| **{}** | {} | {} |\n", name, desc, context));
             }
         }
         md.push_str("\n---\n\n");

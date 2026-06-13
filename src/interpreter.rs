@@ -444,24 +444,6 @@ impl Environment {
         keys.dedup();
         keys
     }
-
-    /// Names of callable bindings (functions and builtins) in scope.
-    /// Used to suggest near-matches for a missed UFCS dot-call, so the hint
-    /// never points at a non-callable variable that would still fail.
-    pub fn function_names(&self) -> Vec<String> {
-        let mut names: Vec<_> = self
-            .values
-            .iter()
-            .filter(|(_, v)| matches!(v, Value::Function { .. } | Value::NativeFunction { .. }))
-            .map(|(k, _)| k.clone())
-            .collect();
-        if let Some(ref parent) = self.parent {
-            names.extend(parent.borrow().function_names());
-        }
-        names.sort();
-        names.dedup();
-        names
-    }
 }
 
 impl Default for Environment {
@@ -7107,14 +7089,9 @@ impl Interpreter {
 
                     Ok(result)
                 } else {
-                    // Dot-call is UFCS sugar (x.f() resolves to f(x)), so a miss
-                    // is a missing free function — suggest a near-match among
-                    // callable bindings only (never a non-callable variable).
-                    let candidates = self.environment.borrow().function_names();
-                    let suggestion = crate::error::find_suggestion(method, &candidates);
                     Err(IntentError::UndefinedFunction {
                         name: method.clone(),
-                        suggestion,
+                        suggestion: None,
                         line: 0,
                     })
                 }
