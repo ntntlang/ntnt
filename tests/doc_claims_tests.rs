@@ -222,6 +222,22 @@ print(5.doubl())"#;
     );
 }
 
+#[test]
+fn doc_rule03_ufcs_suggestion_skips_non_callable_binding() {
+    // A variable named `doubl` is an exact match for the typo, but it is not
+    // callable — the suggestion must point at the callable `double` instead.
+    let code = r#"let doubl = 5
+fn double(x: Int) -> Int { return x * 2 }
+print(7.doubl())"#;
+    let (_, stderr, exit_code) = run(code);
+    assert_ne!(exit_code, 0);
+    assert!(
+        stderr.contains("double"),
+        "suggestion must name the callable function, not the variable: {}",
+        stderr
+    );
+}
+
 // ── Rule 4: route functions are global builtins — never import them ────
 
 #[test]
