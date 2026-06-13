@@ -82,7 +82,7 @@ After trying NTNT, set up persistent agent knowledge so every future session wri
 - String interpolation: `#{expr}` — hash-brace syntax, never `${expr}` or bare `{expr}`
 - Template strings: `"""..{{expr}}.."""` — double braces inside triple quotes
 - Semicolons are supported as statement separators, but newlines are still the normal style.
-- Free functions, not methods: `len(s)` not `s.len()`, `trim(s)` not `s.trim()`
+- Free functions are canonical; dot-call sugar also works: `s.len()` ≡ `len(s)` (UFCS)
 - Dot notation reads properties: `req.params.id`, `user.name`
 - Mutable variables: `let mut x = 0`
 - Ranges: `0..10` — `range()` doesn't exist
@@ -421,12 +421,25 @@ split(text, ",")        // create a new array from a string
 trim(input)             // create a new string
 push(arr, item)         // create a new array with item added
 int(form.age) ?? 0      // convert a value to a new type, handling parse failure
-
-// WRONG - method-style calls on stdlib functions
-"hello".len()           // Use len("hello")
-arr.push(item)          // Use push(arr, item)
-text.split(",")         // Use split(text, ",")
 ```
+
+**Dot-call sugar (UFCS):** `x.f(a)` resolves to `f(x, a)` for any builtin,
+imported, or user-defined function, so method-style calls also work:
+
+```ntnt
+"hello".len()           // ≡ len("hello") — works
+text.split(",")         // ≡ split(text, ",") — works
+5.double()              // works for user-defined fn double(x) too
+```
+
+Two rules to know:
+
+- **Parens always mean a call.** `m.keys` (no parens) reads the map key
+  `"keys"` (None if missing); `m.keys()` always calls `keys(m)`, even when a
+  `"keys"` key exists in the map.
+- **Closures stored in map values are not dot-callable.** `m.f(10)` fails with
+  E007 `Undefined function: f` because the parens make it a UFCS lookup for a
+  function named `f`. Bind first: `let f = m.f` then `f(10)`.
 
 **When to use dot vs brackets on maps:**
 - **Dot notation** for static keys known at write time: `req.params.id`
@@ -3266,7 +3279,7 @@ NTNT error messages include error codes (E001-E012), source snippets, line numbe
 | `unexpected token '{'` | Using `{}` for map literal | Add `map` keyword: `map { "key": "value" }` |
 | `unexpected token '$'` | Using `${expr}` interpolation | Use `#{expr}` — hash-brace syntax |
 | `expected identifier` | Inline lambda in route | Use named function: `fn handler(req) { ... }` |
-| `unexpected token '.'` | Method-style call on stdlib function | Use function style: `len(s)` not `s.len()`. Dot notation is for reading properties, not calling stdlib functions. |
+| `E007 Undefined function: f` on `m.f(x)` | Dot-calling a closure stored in a map value | Parens make `.f()` a UFCS function lookup. Bind the closure to a local first: `let f = m.f` then `f(x)`. |
 | `Required parameter 'x' cannot follow a parameter with a default value` | Non-default param after default | Move all required params before defaulted ones: `fn f(a, b = 1)` not `fn f(a = 1, b)` |
 
 ### Common Runtime Errors

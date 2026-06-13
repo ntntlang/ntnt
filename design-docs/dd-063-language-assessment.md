@@ -128,7 +128,7 @@ Scoping also surfaced **two additional doc drifts** beyond the v2 findings: CLAU
 ### Progress at a glance
 
 - [x] **PR-1** — `${}` interpolation detection (Rec 1) — S
-- [ ] **PR-2** — Doc-claim regression tests, CLAUDE.md truth, UFCS embrace (Rec 2) — M
+- [x] **PR-2** — Doc-claim regression tests, CLAUDE.md truth, UFCS embrace (Rec 2) — M
 - [ ] **PR-3** — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M
 - [ ] **PR-4** — Diagnostics II: method bridge hints, unknown-method lint, IAL suggestions, `ntnt intent lint` (Rec 4b) — M
 - [ ] **PR-5** — Index out-of-bounds loudness (Rec 3) — M — **blocked on decisions**
@@ -152,14 +152,15 @@ Defaults applied (object before implementation if wrong): strict promotion **yes
 
 One regression test per behavioral claim in CLAUDE.md's 16 Critical Syntax Rules, locking *actual* binary behavior; rewrite the four wrong/stale rules; document UFCS as first-class sugar with its real gaps (map-stored closures not dot-callable; parens disambiguate call vs key lookup); make IAL_REFERENCE honest about unimplemented primitives.
 
-- [ ] `tests/doc_claims_tests.rs` (~26 tests; assert on error codes + short stable fragments, never full message lines)
-- [ ] CLAUDE.md corrections: rule 3 (UFCS works — reframe as "free functions are canonical, dot-call is sugar"), rule 5 (semicolons are lint warnings, not parser corruption), rule 8 (`mut` enforced only for indexed/deep mutation — document actual semantics), rule 10 (module-level `map {}` works — replace in place to keep rule numbering stable)
-- [ ] `docs/AI_AGENT_GUIDE.md` + `syntax.toml` UFCS documentation; review regenerated `.github/copilot-instructions.md` diff
-- [ ] Fix `collect_from_expr` unused-import lint bug exposed by UFCS embrace (dot-call method names are dropped, so imports used only via UFCS get flagged unused)
-- [ ] `ial.toml` status field for `sql`/`invariant_check` + Status column in `generate_ial_markdown` (and update the fixed key arrays in `src/main.rs`, or new rows silently render nothing)
-- [ ] Regenerate `docs/IAL_REFERENCE.md` / `STDLIB_REFERENCE.md` via `ntnt docs --generate`
+- [x] `tests/doc_claims_tests.rs` (32 tests; assert on error codes + short stable fragments, never full message lines)
+- [x] CLAUDE.md corrections: rule 3 (UFCS works — reframed as "free functions are canonical, dot-call is sugar"), rule 5 (semicolons are lint warnings, not parser corruption), rule 8 (`mut` enforced only for indexed/deep mutation — documented actual semantics), rule 10 (module-level `map {}` works — replaced in place with the map-closure caveat to keep rule numbering stable), rule 11 (warning is emitted, not silent)
+- [x] `docs/AI_AGENT_GUIDE.md` + `syntax.toml` UFCS documentation; also corrected the same drift in `.github/copilot-instructions.md` and `CODEX.md` (both are agent-facing surfaces carrying the identical stale claims)
+- [x] Fix `collect_from_expr` unused-import lint bug exposed by UFCS embrace (dot-call method names are dropped, so imports used only via UFCS get flagged unused)
+- [x] `ial.toml` status field for `sql`/`invariant_check` + Status column in `generate_ial_markdown`
+- [x] Regenerate `docs/IAL_REFERENCE.md` / `SYNTAX_REFERENCE.md` via `ntnt docs --generate`
+- [x] Optional Step 7: wire `find_suggestion` into the method-call E007 so dot-call typos (`5.doubl()`) get "did you mean" hints
 
-Maintainer decisions: **(a)** rule 8 — document current `mut` semantics (this plan) or fix enforcement for plain rebinding (breaking; would need its own DD)? **(b)** IAL `Sql` primitive — mark `not_implemented` in docs (this plan) or remove from `ial.toml` entirely until built?
+Maintainer decisions (defaults applied per plan; flagged in PR for confirmation): **(a)** rule 8 — documented current `mut` semantics (the `doc_rule08_plain_reassign_without_mut_succeeds` test locks the actual behavior; invert it in the same PR if enforcement is later added); **(b)** IAL `Sql` primitive — marked `not_implemented` in docs rather than removed.
 
 ### PR-3 — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M, ~420 impl + ~380 tests
 

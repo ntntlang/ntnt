@@ -4974,10 +4974,18 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                 }
             }
 
-            // Method calls - object and arguments (method name is not a used identifier)
+            // Method calls — dot-call is UFCS sugar (x.f(a) resolves to f(x, a)),
+            // so the method name counts as usage of an imported function.
+            // Accepted false-negative: an unrelated dot-call sharing the name of
+            // a genuinely unused import (e.g. builtin m.keys() vs `import { keys }`)
+            // suppresses the unused_import warning for that name.
             Expression::MethodCall {
-                object, arguments, ..
+                object,
+                method,
+                arguments,
+                ..
             } => {
+                names.insert(method.clone());
                 collect_from_expr(object, names);
                 for arg in arguments {
                     collect_from_expr(arg, names);
@@ -6258,6 +6266,7 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             "null_coalesce",
             "postfix",
             "member",
+            "method_call",
             "pipe",
         ];
 
@@ -6730,8 +6739,8 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             md.push_str(&format!("{}\n\n", desc));
         }
 
-        md.push_str("| Primitive | Description | Context Sets |\n");
-        md.push_str("|-----------|-------------|---------------|\n");
+        md.push_str("| Primitive | Description | Context Sets | Status |\n");
+        md.push_str("|-----------|-------------|---------------|--------|\n");
 
         let prim_names = [
             "http",
@@ -6759,7 +6768,14 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                             .join(", ")
                     })
                     .unwrap_or_default();
-                md.push_str(&format!("| **{}** | {} | {} |\n", name, desc, context));
+                let status = p
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Implemented");
+                md.push_str(&format!(
+                    "| **{}** | {} | {} | {} |\n",
+                    name, desc, context, status
+                ));
             }
         }
         md.push_str("\n---\n\n");

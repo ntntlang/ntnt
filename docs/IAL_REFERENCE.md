@@ -22,17 +22,17 @@ IAL is a term rewriting engine that translates natural language assertions into 
 
 IAL primitives are the leaf nodes of term resolution - they execute directly
 
-| Primitive | Description | Context Sets |
-|-----------|-------------|---------------|
-| **Http** | Execute an HTTP request and capture response in context | `response.status`, `response.body`, `response.headers.*`, `response.time_ms` |
-| **Cli** | Execute a CLI command and capture output | `cli.exit_code`, `cli.stdout`, `cli.stderr` |
-| **CodeQuality** | Run lint/validation checks on source files | `code.quality.passed`, `code.quality.error_count`, `code.quality.warning_count`, `code.quality.errors` |
-| **Sql** | Execute a SQL query with parameters | `sql.result`, `sql.rows` |
-| **ReadFile** | Read file contents into context | `file.content`, `file.exists` |
-| **FunctionCall** | Call an NTNT function for unit testing | `result` |
-| **PropertyCheck** | Verify a function property (deterministic, idempotent, round-trips) | `property.passed`, `property.failures` |
-| **InvariantCheck** | Verify a named invariant holds for a value | `invariant.passed`, `invariant.failures` |
-| **Check** | Universal assertion - compare context value against expected |  |
+| Primitive | Description | Context Sets | Status |
+|-----------|-------------|---------------|--------|
+| **Http** | Execute an HTTP request and capture response in context | `response.status`, `response.body`, `response.headers.*`, `response.time_ms` | Implemented |
+| **Cli** | Execute a CLI command and capture output | `cli.exit_code`, `cli.stdout`, `cli.stderr` | Implemented |
+| **CodeQuality** | Run lint/validation checks on source files | `code.quality.passed`, `code.quality.error_count`, `code.quality.warning_count`, `code.quality.errors` | Implemented |
+| **Sql** | Execute a SQL query with parameters | `sql.result`, `sql.rows` | Not implemented — execution always fails |
+| **ReadFile** | Read file contents into context | `file.content`, `file.exists` | Implemented |
+| **FunctionCall** | Call an NTNT function for unit testing | `result` | Implemented |
+| **PropertyCheck** | Verify a function property (deterministic, idempotent, round-trips) | `property.passed`, `property.failures` | Implemented |
+| **InvariantCheck** | Verify a named invariant holds for a value | `invariant.passed`, `invariant.failures` | Partial — invariants expand at resolution time; these context keys are never set |
+| **Check** | Universal assertion - compare context value against expected |  | Implemented |
 
 ---
 

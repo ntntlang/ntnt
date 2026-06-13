@@ -7089,9 +7089,13 @@ impl Interpreter {
 
                     Ok(result)
                 } else {
+                    // Dot-call is UFCS sugar (x.f() resolves to f(x)), so a miss
+                    // is a missing free function — suggest a near-match by name.
+                    let candidates = self.environment.borrow().keys();
+                    let suggestion = crate::error::find_suggestion(method, &candidates);
                     Err(IntentError::UndefinedFunction {
                         name: method.clone(),
-                        suggestion: None,
+                        suggestion,
                         line: 0,
                     })
                 }

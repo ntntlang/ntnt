@@ -92,6 +92,7 @@ NTNT operators by precedence (lowest to highest)
 | null coalesce | `??` | Null coalescing — unwraps Some(x) to x, returns right side for None | `map["key"] ?? "default", get_env("PORT") ?? "8080"` |
 | postfix | `?` | Try operator — unwraps Ok/Some or early-returns Err/None from enclosing function | `let data = parse_json(body)?, let row = pg_query_one(pg, sql, params)? ?` |
 | member | `.`, `[]` | Member access and indexing | `user.name, arr[0], map["key"]` |
+| method call | `.()` | Method-call sugar (UFCS): x.f(a) resolves to f(x, a) for any builtin, imported, or user function; parens distinguish a call from a property read | `s.len(), value.double(), m.keys()` |
 | pipe | `|>` | Pipeline operator (passes left as first arg to right) | `data |> transform |> validate` |
 
 ---

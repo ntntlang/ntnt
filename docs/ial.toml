@@ -61,6 +61,7 @@ description = "Execute a SQL query with parameters"
 parameters = ["query", "params"]
 context_sets = ["sql.result", "sql.rows"]
 example = "Sql(SELECT * FROM users WHERE id = $1, [42])"
+status = "Not implemented — execution always fails"
 
 [primitives.invariant_check]
 name = "InvariantCheck"
@@ -68,6 +69,7 @@ description = "Verify a named invariant holds for a value"
 parameters = ["invariant_id", "value"]
 context_sets = ["invariant.passed", "invariant.failures"]
 example = "InvariantCheck(invariant.url_slug, \"hello-world\")"
+status = "Partial — invariants expand at resolution time; these context keys are never set"
 
 [primitives.check]
 name = "Check"

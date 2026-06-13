@@ -102,6 +102,11 @@ symbols = [".", "[]"]
 description = "Member access and indexing"
 example = "user.name, arr[0], map[\"key\"]"
 
+[operators.method_call]
+symbols = [".()"]
+description = "Method-call sugar (UFCS): x.f(a) resolves to f(x, a) for any builtin, imported, or user function; parens distinguish a call from a property read"
+example = "s.len(), value.double(), m.keys()"
+
 [operators.pipe]
 symbols = ["|>"]
 description = "Pipeline operator (passes left as first arg to right)"
