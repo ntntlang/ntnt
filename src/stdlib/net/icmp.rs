@@ -17,7 +17,7 @@ use super::probe::{
     internet_checksum, probe_attempt_budget, quoted_inner_v4, quoted_inner_v6,
     set_socket_hop_limit, transport_checksum, HopProbe, ProbeFailure, TraceProbe,
 };
-use super::{enforce_resolved_target_policy, ProbeOptions};
+use super::{policy::enforce_resolved_target_policy, ProbeOptions};
 use crate::interpreter::Value;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::collections::HashMap;

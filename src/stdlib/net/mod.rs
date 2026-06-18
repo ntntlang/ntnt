@@ -1,6 +1,7 @@
 //! std/net module - IPAM-grade IP/CIDR helpers and reachability probes.
 
 mod icmp;
+mod policy;
 mod probe;
 mod traceroute;
 mod transport;
@@ -12,6 +13,7 @@ use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::error::{ResolveError, ResolveErrorKind};
 use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::Resolver;
+use policy::{classify_ip, enforce_resolved_target_policy};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
 use rustls::{
@@ -1598,10 +1600,20 @@ fn scan_port_targets(port: u16, targets: Vec<SocketAddr>, timeout: Duration) -> 
         };
     }
 
+    let deadline = Instant::now() + timeout;
     let mut last_reason = "unreachable".to_string();
     for addr in targets {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            last_reason = "timeout".to_string();
+            break;
+        };
+        if remaining.is_zero() {
+            last_reason = "timeout".to_string();
+            break;
+        }
+
         let start = Instant::now();
-        match TcpStream::connect_timeout(&addr, timeout) {
+        match TcpStream::connect_timeout(&addr, remaining) {
             Ok(stream) => {
                 let remote_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
                 let local_addr = stream.local_addr().ok().map(|addr| addr.to_string());
@@ -1659,10 +1671,20 @@ fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> Tc
         };
     }
 
+    let deadline = Instant::now() + timeout;
     let mut last_reason = "unreachable".to_string();
     for (port, addr) in targets {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            last_reason = "timeout".to_string();
+            break;
+        };
+        if remaining.is_zero() {
+            last_reason = "timeout".to_string();
+            break;
+        }
+
         let start = Instant::now();
-        match TcpStream::connect_timeout(addr, timeout) {
+        match TcpStream::connect_timeout(addr, remaining) {
             Ok(stream) => {
                 let remote_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
                 let local_addr = stream.local_addr().ok().map(|addr| addr.to_string());
@@ -1726,16 +1748,6 @@ fn resolve_port_scan_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, Sock
         targets.extend(ips.iter().map(|ip| (*port, SocketAddr::new(*ip, *port))));
     }
     Ok(targets)
-}
-
-fn enforce_resolved_target_policy(
-    targets: &[(u16, SocketAddr)],
-    allow_private: bool,
-) -> Result<(), String> {
-    for (_, addr) in targets {
-        enforce_target_policy(addr.ip(), allow_private)?;
-    }
-    Ok(())
 }
 
 fn tcp_reachability_result_map(
@@ -2099,110 +2111,6 @@ fn add_common_classification(map: &mut HashMap<String, Value>, ip: IpAddr) {
     );
 }
 
-#[derive(Debug)]
-struct IpClassification {
-    is_private: bool,
-    is_loopback: bool,
-    is_link_local: bool,
-    is_multicast: bool,
-    is_unspecified: bool,
-    is_documentation: bool,
-    is_broadcast: bool,
-    is_metadata_endpoint: bool,
-    is_unique_local: bool,
-}
-
-fn classify_ip(ip: IpAddr) -> IpClassification {
-    match ip {
-        IpAddr::V4(ip) => IpClassification {
-            is_private: ip.is_private(),
-            is_loopback: ip.is_loopback(),
-            is_link_local: ip.is_link_local(),
-            is_multicast: ip.is_multicast(),
-            is_unspecified: ip.is_unspecified(),
-            is_documentation: is_ipv4_documentation(ip),
-            is_broadcast: ip.is_broadcast(),
-            is_metadata_endpoint: is_ipv4_metadata_endpoint(ip),
-            is_unique_local: false,
-        },
-        IpAddr::V6(ip) => {
-            if let Some(mapped) = ip.to_ipv4_mapped() {
-                return classify_ip(IpAddr::V4(mapped));
-            }
-            let first_segment = ip.segments()[0];
-            let is_unique_local = (first_segment & 0xfe00) == 0xfc00;
-            let is_link_local = (first_segment & 0xffc0) == 0xfe80;
-            let is_documentation = ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8;
-            IpClassification {
-                is_private: is_unique_local,
-                is_loopback: ip.is_loopback(),
-                is_link_local,
-                is_multicast: ip.is_multicast(),
-                is_unspecified: ip.is_unspecified(),
-                is_documentation,
-                is_broadcast: false,
-                is_metadata_endpoint: is_ipv6_metadata_endpoint(ip),
-                is_unique_local,
-            }
-        }
-    }
-}
-
-fn is_ipv4_documentation(ip: Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    matches!(
-        octets,
-        [192, 0, 2, _] | [198, 51, 100, _] | [203, 0, 113, _]
-    )
-}
-
-fn is_ipv4_metadata_endpoint(ip: Ipv4Addr) -> bool {
-    matches!(ip.octets(), [169, 254, 169, 254] | [169, 254, 170, 2])
-}
-
-fn is_ipv6_metadata_endpoint(ip: Ipv6Addr) -> bool {
-    ip.segments() == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254]
-}
-
-fn enforce_target_policy(ip: IpAddr, allow_private: bool) -> Result<(), String> {
-    let classification = classify_ip(ip);
-    let never_allowed = classification.is_metadata_endpoint
-        || classification.is_unspecified
-        || classification.is_multicast
-        || classification.is_documentation
-        || classification.is_broadcast;
-    if never_allowed {
-        return Err(
-            "Network target denied by policy: special-purpose targets are not allowed".to_string(),
-        );
-    }
-
-    let private_target = classification.is_private
-        || classification.is_loopback
-        || classification.is_link_local
-        || classification.is_unique_local;
-    if !private_target {
-        return Ok(());
-    }
-    if !allow_private || !process_allows_private_targets() {
-        return Err(
-            "Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn process_allows_private_targets() -> bool {
-    matches!(
-        std::env::var("NTNT_NET_ALLOW_PRIVATE").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    ) || matches!(
-        std::env::var("NTNT_ALLOW_PRIVATE_IPS").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    )
-}
-
 fn ensure_same_family(a: &Network, b: &Network) -> Result<(), String> {
     if a.family != b.family {
         return Err("mixed IPv4/IPv6 families are not comparable".to_string());
@@ -2544,62 +2452,6 @@ mod tests {
             }
             other => panic!("expected Result::Err, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn target_policy_classifies_ipv4_mapped_ipv6_by_embedded_address() {
-        let mapped_loopback = "[::ffff:127.0.0.1]:80".parse::<SocketAddr>().unwrap();
-        let mapped_metadata = "[::ffff:169.254.169.254]:80".parse::<SocketAddr>().unwrap();
-
-        assert!(enforce_resolved_target_policy(&[(80, mapped_loopback)], false).is_err());
-        assert!(enforce_resolved_target_policy(&[(80, mapped_metadata)], false).is_err());
-    }
-
-    #[test]
-    fn target_policy_rejects_special_ranges_by_default() {
-        let multicast = "224.0.0.1:80".parse::<SocketAddr>().unwrap();
-        let documentation = "192.0.2.1:80".parse::<SocketAddr>().unwrap();
-        let broadcast = "255.255.255.255:80".parse::<SocketAddr>().unwrap();
-        let mapped_broadcast = "[::ffff:255.255.255.255]:80".parse::<SocketAddr>().unwrap();
-
-        assert!(enforce_resolved_target_policy(&[(80, multicast)], false).is_err());
-        assert!(enforce_resolved_target_policy(&[(80, documentation)], false).is_err());
-        assert!(enforce_resolved_target_policy(&[(80, broadcast)], false).is_err());
-        assert!(enforce_resolved_target_policy(&[(80, mapped_broadcast)], false).is_err());
-    }
-
-    #[test]
-    fn target_policy_never_allows_metadata_or_special_ranges() {
-        let metadata = "169.254.169.254:80".parse::<SocketAddr>().unwrap();
-        let ecs_metadata = "169.254.170.2:80".parse::<SocketAddr>().unwrap();
-        let mapped_metadata = "[::ffff:169.254.169.254]:80".parse::<SocketAddr>().unwrap();
-        let mapped_ecs_metadata = "[::ffff:169.254.170.2]:80".parse::<SocketAddr>().unwrap();
-        let multicast = "224.0.0.1:80".parse::<SocketAddr>().unwrap();
-        let documentation = "192.0.2.1:80".parse::<SocketAddr>().unwrap();
-        let broadcast = "255.255.255.255:80".parse::<SocketAddr>().unwrap();
-
-        for target in [
-            metadata,
-            ecs_metadata,
-            mapped_metadata,
-            mapped_ecs_metadata,
-            multicast,
-            documentation,
-            broadcast,
-        ] {
-            let err = enforce_resolved_target_policy(&[(80, target)], true).unwrap_err();
-            assert!(err.contains("special-purpose targets are not allowed"));
-        }
-    }
-
-    #[test]
-    fn target_policy_checks_all_resolved_addresses_before_probe() {
-        let public = "93.184.216.34:443".parse::<SocketAddr>().unwrap();
-        let private = "127.0.0.1:443".parse::<SocketAddr>().unwrap();
-        let targets = [(443, public), (443, private)];
-
-        let err = enforce_resolved_target_policy(&targets, false).unwrap_err();
-        assert!(err.contains("Network target denied by policy"));
     }
 
     #[test]

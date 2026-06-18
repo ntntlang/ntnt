@@ -824,17 +824,22 @@ reachability remains explicit app/developer intent.
 
 ---
 
-## Phase 3 — Multi-Protocol Traceroute & mtr-style Diagnostics (in progress)
+## Phase 3 — Multi-Protocol Traceroute (release scope complete)
 
-Phase 2's `traceroute()` probes with ICMP echo. Phase 3 extends path discovery
-to UDP and TCP probes (shipped) and adds the continuous, per-hop statistics
-that make `mtr` useful (planned). None of this requires rethinking the substrate: the hard part of
-traceroute — receiving and matching the ICMP Time Exceeded messages that
-intermediate routers emit — is **independent of the probe protocol**, because a
-router whose TTL/hop-limit reaches zero sends Time Exceeded regardless of what
-the expiring packet contained. The receive side built in PR 7
-(`create_raw_icmp_socket`, the TTL-stepping driver, `probe_attempt_budget`,
-target policy, capability detection, per-hop result shaping) is reused as-is.
+Phase 2's `traceroute()` probes with ICMP echo. Phase 3 extended path discovery
+to UDP and TCP probes (shipped). Continuous MTR-style statistics, parallel hop
+sweeps, and per-hop enrichment are intentionally **not** part of the `std/net`
+release surface; they are monitoring-product behavior and should live in a
+future/private monitoring layer only if a concrete app proves the shape.
+
+The shipped multi-protocol traceroute does not require rethinking the substrate:
+the hard part of traceroute — receiving and matching the ICMP Time Exceeded
+messages that intermediate routers emit — is **independent of the probe
+protocol**, because a router whose TTL/hop-limit reaches zero sends Time
+Exceeded regardless of what the expiring packet contained. The receive side
+built in PR 7 (`create_raw_icmp_socket`, the TTL-stepping driver,
+`probe_attempt_budget`, target policy, capability detection, per-hop result
+shaping) is reused as-is.
 
 ### Core refactor: `ProbeMethod` abstraction
 
@@ -902,36 +907,29 @@ of packet construction, checksums, and the quoted/​reply matchers; the
 integration test asserts each method's outcome matches its capability flag.
 End-to-end validation is a manual run on a capable host.
 
-### Parallel hop probing (PR 10)
+### Deferred from `std/net`: MTR-style diagnostics and hop enrichment
 
-`mtr` sends all TTLs concurrently rather than waiting hop-by-hop, turning a
-30-hop trace from sum-of-per-hop-timeouts into roughly a single timeout. This
-is a driver-loop change: emit probes for TTL `1..max` up front, then collect
-replies and demultiplex by sequence→TTL. High value once traces are long or
-run in cycles.
+The closed/unmerged follow-up work should not be revived as `std/net` release
+scope. The primitives are useful, but the product shape is monitoring-specific:
+run repeated traces, aggregate per-hop stats, resolve/router-enrich hops, store
+history, and present trends. That belongs in a future/private monitoring layer
+or app, not in the default stdlib's low-level safe primitives.
 
-*Estimated effort: ~1–2 days.*
+If this resurfaces, keep these as separate design work rather than queued
+`std/net` PRs:
 
-### mtr-style continuous statistics (PR 11)
+- **Parallel hop probing** — concurrent TTL emission and demux by sequence→TTL.
+  Useful for MTR-like tools, but it complicates the driver and is not required
+  for one-shot diagnostics.
+- **MTR-style cycle statistics** — `cycles`/`probes_per_hop` with per-hop loss%
+  and last/avg/best/worst/stddev RTT. This is monitoring state, not a primitive.
+- **Per-hop reverse DNS** — annotate hop IPs via `dns_reverse()`. Off by default
+  if ever added, because it adds latency and drags enrichment concerns into the
+  probe result.
 
-`mtr` is traceroute in a loop with per-hop accumulation: sent, received,
-loss%, and last/avg/best/worst/stddev RTT per hop. Single-pass already emits
-per-hop latency; this adds a `cycles` (and `probes_per_hop`) option and an
-aggregation layer keyed by hop index. The synchronous stdlib model fits
-"run N cycles, return aggregated stats" (`traceroute(host, map { "cycles": 10 })`);
-a live/streaming TUI does not map to a `Result`-returning call and would need
-a channel/callback variant if ever wanted — out of scope here.
-
-*Estimated effort: ~1–2 days.*
-
-### Per-hop reverse DNS (PR 12, optional)
-
-`mtr` shows router hostnames. `std/net` already has `dns_reverse()`; add an
-opt-in `resolve_hops: true` that annotates each hop with its PTR name. Off by
-default because it adds latency. ASN/AS-name annotation is a separate data
-source and stays deferred.
-
-*Estimated effort: ~half day.*
+`std/net` should release with one-shot `traceroute(method: "icmp"|"udp"|"tcp")`
+and leave repeated/aggregated/enriched path monitoring to a layer that can own
+storage, polling cadence, and UI expectations.
 
 ### Capability & security continuity
 
@@ -943,13 +941,23 @@ plumbing from Phase 2 carry over unchanged. As methods land,
 policy (private/loopback/metadata denial with the two-level opt-in) applies to
 every method exactly as it does to ICMP traceroute.
 
-### Suggested sequencing
+### Release boundary and follow-up posture
 
-TCP first (PR 9 — highest real-world value, works through firewalls), then
-parallel hops (PR 10 — makes multi-cycle traces bearable), then mtr stats
-(PR 11), then UDP (PR 8) and reverse DNS (PR 12) to round out. Each is an
-independent, reviewable PR on the shared substrate; the `ProbeMethod` refactor
-lands with the first method that needs it.
+Release `std/net` once the shipped primitives are documented, bounded, and
+verified. Do not queue more stdlib features just because the probe substrate can
+technically support them; that is how a clean network primitive library becomes
+a suspiciously enthusiastic appliance firmware menu.
+
+For follow-up work:
+
+1. Fix correctness/safety issues in existing primitives immediately.
+2. Keep SNMP, interface telemetry, alerting, and composite checks in DD-047 / a
+   private monitoring layer.
+3. Keep repeated/aggregated/enriched traceroute behavior out of `std/net` until
+   a concrete monitoring app proves a minimal, reusable API.
+4. Any future raw-socket feature needs the same capability reporting,
+   policy-denied target checks, CI-safe tests, and deployment docs as the
+   current traceroute methods.
 
 ---
 
@@ -985,12 +993,11 @@ As of 2026-06-09:
 - [x] **PR 6 — Probe substrate + `net_capabilities()`**: typed `ProbeFailure` classification, `src/stdlib/net/` module split (`probe.rs`, `icmp.rs`), and capability detection — groundwork for traceroute.
 - [x] **PR 7 — `traceroute()`**: TTL-stepped echo probes on the shared substrate (raw ICMP only, graceful `Err` otherwise), `traceroute` capability flag, Docker `cap_add` deployment docs; see Phase 2 above.
 - [x] **PR 8/9 — UDP + TCP traceroute** (`method: "udp"`/`"tcp"`): shared `TraceProbe`/`HopProbe` abstraction, generalized quoted-transport matcher, UDP (Port Unreachable arrival) and raw TCP SYN (SYN-ACK/RST arrival, Linux), plus `traceroute_udp`/`traceroute_tcp` capability flags. See Phase 3.
-- [ ] **PR 10 — Parallel hop probing**: concurrent TTL emission, demux by sequence→TTL. See Phase 3.
-- [ ] **PR 11 — mtr-style cycle statistics**: `cycles`/`probes_per_hop` with per-hop loss% and last/avg/best/worst/stddev RTT. See Phase 3.
-- [ ] **PR 12 — Per-hop reverse DNS** (optional): opt-in `resolve_hops` via existing `dns_reverse()`. See Phase 3.
+- [x] **Release-readiness cleanup**: target policy moved into `net/policy.rs`, duplicate policy tests consolidated, private-target opt-in narrowed to `NTNT_NET_ALLOW_PRIVATE=1`, and TCP/port-scan attempts now spend one timeout budget across resolved addresses rather than multiplying timeout by address count.
+- [ ] **Deferred — MTR-style traceroute statistics / parallel hop sweeps / hop enrichment**: not release scope for `std/net`; keep in a future/private monitoring layer if real app pressure proves the API.
 - [x] **Superseded PRs**: [PR #116](https://github.com/ntntlang/ntnt/pull/116) was closed in favor of the cleaner PR #117 branch; [PR #118](https://github.com/ntntlang/ntnt/pull/118) was closed in favor of the cleaner PR #119 branch.
 
-The DD-046 initial scope is complete and Phase 2 is underway. The merged implementation includes runtime registration, typechecker signatures, generated stdlib docs, AI guide coverage, deterministic examples, CI-safe tests, public-network smoke tests gated behind environment variables, and review hardening for target policy, bounded scans, and TLS validation behavior.
+The DD-046 initial scope is complete, and the stdlib release boundary is now the shipped safe primitives plus one-shot multi-protocol traceroute. The merged implementation includes runtime registration, typechecker signatures, generated stdlib docs, AI guide coverage, deterministic examples, CI-safe tests, public-network smoke tests gated behind environment variables, and review hardening for target policy, bounded scans, TLS validation behavior, and raw-socket capability reporting. MTR-style aggregation and monitoring enrichment are explicitly deferred out of `std/net`.
 
 ### PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability
 

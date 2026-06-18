@@ -11,8 +11,8 @@
 //! require CAP_NET_RAW; when it is unavailable the driver returns a clear
 //! backend error. Apps can check `net_capabilities()` first.
 
-use super::enforce_resolved_target_policy;
 use super::icmp::{open_icmp_trace_probe, resolve_probe_targets, unique_target_ips};
+use super::policy::enforce_resolved_target_policy;
 use super::probe::{probe_attempt_budget, HopProbe, ProbeFailure, TraceProbe};
 use super::transport::{open_tcp_trace_probe, open_udp_trace_probe};
 use crate::interpreter::Value;
