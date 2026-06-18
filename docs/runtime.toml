@@ -30,9 +30,16 @@ cli_override = "--timeout"
 [env_vars.NTNT_ALLOW_PRIVATE_IPS]
 values = ["true"]
 default = "unset (disabled — private IPs blocked)"
-description = "Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x). Required for Docker inter-container communication (e.g., calling a sidecar at 172.19.0.1). Disabled by default to prevent SSRF attacks."
+description = "Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x). Required for Docker inter-container communication (e.g., calling a sidecar at 172.19.0.1). Disabled by default to prevent SSRF attacks. This does not enable `std/net` probes; use `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true` for those."
 example = "NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt"
 affects = ["http-client", "security"]
+
+[env_vars.NTNT_NET_ALLOW_PRIVATE]
+values = ["1", "true", "yes"]
+default = "unset (disabled — private targets blocked)"
+description = "Process-level opt-in for `std/net` probes (`ping`, `tcp_connect`, `reachable`, `port_scan`, `tls_info`, `traceroute`) against private/internal targets. Each call must also pass `allow_private: true`. Special-purpose targets such as cloud metadata, multicast, broadcast, unspecified, and documentation ranges remain blocked. This is separate from `NTNT_ALLOW_PRIVATE_IPS`, which only applies to `fetch()`."
+example = "NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt"
+affects = ["std-net", "security"]
 
 [env_vars.NTNT_MAX_RECURSION]
 type = "integer"

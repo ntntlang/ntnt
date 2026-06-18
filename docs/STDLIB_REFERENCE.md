@@ -9855,7 +9855,7 @@ Performs a bounded TCP scan of explicit ports for one host. Only explicit port a
 
 - `host` — Hostname or IP address to resolve and scan
 - `ports` — Explicit array of TCP ports from 1 to 65535; duplicates are rejected
-- `opts` — Optional map with timeout_ms, concurrency, and allow_private
+- `opts` — Optional map with timeout_ms (per port across resolved addresses), concurrency, and allow_private
 
 **Returns:** Result containing one map per port with open, latency_ms, and reason fields
 
@@ -9880,7 +9880,7 @@ Performs a high-level reachability check using ICMP plus TCP ports 80 and 443 by
 **Parameters:**
 
 - `host` — Hostname or IP address to resolve and probe
-- `opts` — Optional map with extra tcp_ports, timeout_ms, count, interval_ms, and allow_private
+- `opts` — Optional map with extra tcp_ports, timeout_ms (per TCP port across resolved addresses), count, interval_ms, and allow_private
 
 **Returns:** Result containing reachability status, method used, fallback metadata, and attempt summary
 

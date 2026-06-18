@@ -89,7 +89,7 @@ fn enforce_target_policy(ip: IpAddr, allow_private: bool) -> Result<(), String> 
     }
     if !allow_private || !process_allows_private_targets() {
         return Err(
-            "Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1"
+            "Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1 for std/net probes (NTNT_ALLOW_PRIVATE_IPS only applies to fetch())"
                 .to_string(),
         );
     }
@@ -122,6 +122,55 @@ fn is_ipv6_metadata_endpoint(ip: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct PrivateOptInEnvGuard {
+        previous_net: Option<String>,
+        previous_legacy_fetch: Option<String>,
+    }
+
+    impl PrivateOptInEnvGuard {
+        fn legacy_fetch_only() -> Self {
+            let guard = Self {
+                previous_net: std::env::var("NTNT_NET_ALLOW_PRIVATE").ok(),
+                previous_legacy_fetch: std::env::var("NTNT_ALLOW_PRIVATE_IPS").ok(),
+            };
+            unsafe {
+                std::env::remove_var("NTNT_NET_ALLOW_PRIVATE");
+                std::env::set_var("NTNT_ALLOW_PRIVATE_IPS", "true");
+            }
+            guard
+        }
+
+        fn std_net_allowed() -> Self {
+            let guard = Self {
+                previous_net: std::env::var("NTNT_NET_ALLOW_PRIVATE").ok(),
+                previous_legacy_fetch: std::env::var("NTNT_ALLOW_PRIVATE_IPS").ok(),
+            };
+            unsafe {
+                std::env::set_var("NTNT_NET_ALLOW_PRIVATE", "1");
+                std::env::remove_var("NTNT_ALLOW_PRIVATE_IPS");
+            }
+            guard
+        }
+    }
+
+    impl Drop for PrivateOptInEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous_net {
+                    Some(value) => std::env::set_var("NTNT_NET_ALLOW_PRIVATE", value),
+                    None => std::env::remove_var("NTNT_NET_ALLOW_PRIVATE"),
+                }
+                match &self.previous_legacy_fetch {
+                    Some(value) => std::env::set_var("NTNT_ALLOW_PRIVATE_IPS", value),
+                    None => std::env::remove_var("NTNT_ALLOW_PRIVATE_IPS"),
+                }
+            }
+        }
+    }
 
     #[test]
     fn classifies_ipv4_mapped_ipv6_by_embedded_address() {
@@ -147,6 +196,41 @@ mod tests {
             let err = enforce_resolved_target_policy(&[(80, addr)], true).unwrap_err();
             assert!(err.contains("special-purpose targets are not allowed"));
         }
+    }
+
+    #[test]
+    fn policy_rejects_private_and_mapped_loopback_without_opt_in() {
+        for target in [
+            "127.0.0.1:80",
+            "[::1]:80",
+            "[::ffff:127.0.0.1]:80",
+            "10.0.0.1:80",
+            "[fc00::1]:80",
+        ] {
+            let addr = target.parse::<SocketAddr>().unwrap();
+            let err = enforce_resolved_target_policy(&[(80, addr)], false).unwrap_err();
+            assert!(err.contains("private targets require NTNT_NET_ALLOW_PRIVATE=1"));
+        }
+    }
+
+    #[test]
+    fn policy_rejects_legacy_fetch_env_var_for_std_net_private_targets() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_guard = PrivateOptInEnvGuard::legacy_fetch_only();
+        let private = "127.0.0.1:80".parse::<SocketAddr>().unwrap();
+
+        let err = enforce_resolved_target_policy(&[(80, private)], true).unwrap_err();
+
+        assert!(err.contains("private targets require NTNT_NET_ALLOW_PRIVATE=1"));
+    }
+
+    #[test]
+    fn policy_allows_private_targets_with_call_and_process_opt_in() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_guard = PrivateOptInEnvGuard::std_net_allowed();
+        let private = "127.0.0.1:80".parse::<SocketAddr>().unwrap();
+
+        assert!(enforce_resolved_target_policy(&[(80, private)], true).is_ok());
     }
 
     #[test]

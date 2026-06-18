@@ -898,6 +898,7 @@ server 8080 {
 | `NTNT_ENV` | `production`, `prod` | Disables hot-reload for better performance |
 | `NTNT_STRICT` | `1`, `true` | Blocks execution on type errors (runs type checker before `ntnt run`) |
 | `NTNT_ALLOW_PRIVATE_IPS` | `true` | Allows `fetch()` to connect to private/internal IPs (see below) |
+| `NTNT_NET_ALLOW_PRIVATE` | `1`, `true`, `yes` | Process-level opt-in for `std/net` probes (`ping`, `tcp_connect`, `reachable`, `port_scan`, `tls_info`, `traceroute`) to private/internal targets; calls still need `allow_private: true` |
 | `NTNT_WORKERS` | `1` (dev) / CPU cores (prod) | Number of interpreter worker threads. Auto-scales in production. |
 
 ```bash
@@ -913,11 +914,11 @@ NTNT_WORKERS=4 ntnt run server.tnt
 
 **Hot-reload** watches your `.tnt` files and imported modules for changes, automatically reloading on the next request. Disable in production for zero filesystem overhead per request.
 
-### SSRF Protection (Private IP Blocking)
+### SSRF Protection (`fetch()` Private IP Blocking)
 
 By default, `fetch()` blocks requests to private/internal IP ranges (`10.x`, `172.16-31.x`, `192.168.x`, `127.x`, `localhost`). This prevents Server-Side Request Forgery attacks.
 
-**In Docker**, this blocks inter-container communication (e.g., calling a sidecar service at `172.19.0.1:8889`). Set `NTNT_ALLOW_PRIVATE_IPS=true` to allow it:
+**In Docker**, this blocks inter-container HTTP calls made with `fetch()` (e.g., calling a sidecar service at `172.19.0.1:8889`). Set `NTNT_ALLOW_PRIVATE_IPS=true` to allow `fetch()` to call those targets:
 
 ```yaml
 # docker-compose.yml
@@ -1069,7 +1070,7 @@ let reachability = reachable("example.com", map {
 })
 ```
 
-`tcp_connect()` and `reachable()` support optional `count` (1-10), `timeout_ms`, and `interval_ms`, returning per-attempt results plus `sent`, `received`, `failed`, and `loss_percent` summary fields.
+`tcp_connect()` and `reachable()` support optional `count` (1-10), `timeout_ms`, and `interval_ms`, returning per-attempt results plus `sent`, `received`, `failed`, and `loss_percent` summary fields. For `reachable()`, `timeout_ms` is a per-TCP-port budget across that port's resolved addresses, so a multi-port check can spend up to `timeout_ms × number_of_tcp_ports` before declaring all TCP fallbacks failed.
 
 `port_scan(host, ports, opts?)` scans an explicit `Array<Int>` of TCP ports. It rejects duplicate, invalid, or overly large port lists, clamps `concurrency`, applies the same private-target safety policy as `tcp_connect()`, and returns results sorted by port:
 

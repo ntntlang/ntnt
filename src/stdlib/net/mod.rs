@@ -22,6 +22,7 @@ use rustls::{
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -472,7 +473,7 @@ pub fn init() -> HashMap<String, Value> {
     // by default. Caller-provided tcp_ports add extra explicit TCP ports.
     // The result records the method that established reachability without pretending TCP is ping.
     // @param host Hostname or IP address to resolve and probe
-    // @param opts Optional map with extra tcp_ports, timeout_ms, count, interval_ms, and allow_private
+    // @param opts Optional map with extra tcp_ports, timeout_ms (per TCP port across resolved addresses), count, interval_ms, and allow_private
     // @returns Result containing reachability status, method used, fallback metadata, and attempt summary
     // @since v0.4.10
     // @tags #network
@@ -495,7 +496,7 @@ pub fn init() -> HashMap<String, Value> {
     // are accepted; ranges are intentionally not expanded. Results are sorted by port.
     // @param host Hostname or IP address to resolve and scan
     // @param ports Explicit array of TCP ports from 1 to 65535; duplicates are rejected
-    // @param opts Optional map with timeout_ms, concurrency, and allow_private
+    // @param opts Optional map with timeout_ms (per port across resolved addresses), concurrency, and allow_private
     // @returns Result containing one map per port with open, latency_ms, and reason fields
     // @since v0.4.10
     // @tags #network
@@ -1525,6 +1526,12 @@ struct TcpProbeResult {
     reason: String,
 }
 
+#[derive(Debug)]
+struct TcpConnectInfo {
+    remote_addr: Option<String>,
+    local_addr: Option<String>,
+}
+
 fn tcp_reachability_attempts_for_host(
     host: &str,
     ports: &[u16],
@@ -1607,10 +1614,6 @@ fn scan_port_targets(port: u16, targets: Vec<SocketAddr>, timeout: Duration) -> 
             last_reason = "timeout".to_string();
             break;
         };
-        if remaining.is_zero() {
-            last_reason = "timeout".to_string();
-            break;
-        }
 
         let start = Instant::now();
         match TcpStream::connect_timeout(&addr, remaining) {
@@ -1660,6 +1663,25 @@ fn tcp_reachability_attempts(
 }
 
 fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> TcpProbeResult {
+    tcp_reachability_once_with(targets, timeout, |addr, remaining| {
+        let stream = TcpStream::connect_timeout(addr, remaining)?;
+        let info = TcpConnectInfo {
+            remote_addr: stream.peer_addr().ok().map(|addr| addr.to_string()),
+            local_addr: stream.local_addr().ok().map(|addr| addr.to_string()),
+        };
+        drop(stream);
+        Ok(info)
+    })
+}
+
+fn tcp_reachability_once_with<F>(
+    targets: &[(u16, SocketAddr)],
+    timeout: Duration,
+    mut connect: F,
+) -> TcpProbeResult
+where
+    F: FnMut(&SocketAddr, Duration) -> io::Result<TcpConnectInfo>,
+{
     if targets.is_empty() {
         return TcpProbeResult {
             reachable: false,
@@ -1671,35 +1693,43 @@ fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> Tc
         };
     }
 
-    let deadline = Instant::now() + timeout;
-    let mut last_reason = "unreachable".to_string();
+    let mut targets_by_port: Vec<(u16, Vec<SocketAddr>)> = Vec::new();
     for (port, addr) in targets {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            last_reason = "timeout".to_string();
-            break;
-        };
-        if remaining.is_zero() {
-            last_reason = "timeout".to_string();
-            break;
+        if let Some((_, addrs)) = targets_by_port
+            .iter_mut()
+            .find(|(existing_port, _)| existing_port == port)
+        {
+            addrs.push(*addr);
+        } else {
+            targets_by_port.push((*port, vec![*addr]));
         }
+    }
 
-        let start = Instant::now();
-        match TcpStream::connect_timeout(addr, remaining) {
-            Ok(stream) => {
-                let remote_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
-                let local_addr = stream.local_addr().ok().map(|addr| addr.to_string());
-                drop(stream);
-                return TcpProbeResult {
-                    reachable: true,
-                    connected_port: Some(*port),
-                    latency_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
-                    remote_addr,
-                    local_addr,
-                    reason: "connected".to_string(),
-                };
-            }
-            Err(e) => {
-                last_reason = e.kind().to_string();
+    let mut last_reason = "unreachable".to_string();
+    for (port, addrs) in targets_by_port {
+        let deadline = Instant::now() + timeout;
+        for addr in addrs {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                last_reason = "timeout".to_string();
+                break;
+            };
+
+            let start = Instant::now();
+            match connect(&addr, remaining) {
+                Ok(info) => {
+                    let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    return TcpProbeResult {
+                        reachable: true,
+                        connected_port: Some(port),
+                        latency_ms: Some(latency_ms),
+                        remote_addr: info.remote_addr,
+                        local_addr: info.local_addr,
+                        reason: "connected".to_string(),
+                    };
+                }
+                Err(e) => {
+                    last_reason = e.kind().to_string();
+                }
             }
         }
     }
@@ -2745,5 +2775,37 @@ mod tests {
         assert!(matches!(summary.get("failed"), Some(Value::Int(0))));
         assert!(matches!(summary.get("loss_percent"), Some(Value::Float(value)) if *value == 0.0));
         assert!(matches!(summary.get("attempts"), Some(Value::Array(values)) if values.len() == 3));
+    }
+
+    #[test]
+    fn tcp_reachability_attempts_give_each_port_its_own_address_budget() {
+        let first_port = 80;
+        let second_port = 443;
+        let first = SocketAddr::from(([127, 0, 0, 1], first_port));
+        let second = SocketAddr::from(([127, 0, 0, 1], second_port));
+        let mut tried = Vec::new();
+
+        let result = tcp_reachability_once_with(
+            &[(first_port, first), (second_port, second)],
+            Duration::from_millis(1),
+            |addr, remaining| {
+                tried.push(addr.port());
+                if addr.port() == first_port {
+                    thread::sleep(remaining + Duration::from_millis(5));
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "simulated filtered port",
+                    ));
+                }
+                Ok(TcpConnectInfo {
+                    remote_addr: Some(addr.to_string()),
+                    local_addr: Some("127.0.0.1:50000".to_string()),
+                })
+            },
+        );
+
+        assert!(result.reachable);
+        assert_eq!(result.connected_port, Some(second_port));
+        assert_eq!(tried, vec![first_port, second_port]);
     }
 }
