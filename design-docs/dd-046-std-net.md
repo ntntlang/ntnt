@@ -1,10 +1,10 @@
 # DD-046: `std/net` — Safe Network Primitives for ntnt
 
-**Status:** Complete — shipped across PRs [#113](https://github.com/ntntlang/ntnt/pull/113), [#114](https://github.com/ntntlang/ntnt/pull/114), [#115](https://github.com/ntntlang/ntnt/pull/115), and [#117](https://github.com/ntntlang/ntnt/pull/117)
+**Status:** Complete / release-ready — shipped across PRs [#113](https://github.com/ntntlang/ntnt/pull/113), [#114](https://github.com/ntntlang/ntnt/pull/114), [#115](https://github.com/ntntlang/ntnt/pull/115), [#117](https://github.com/ntntlang/ntnt/pull/117), [#119](https://github.com/ntntlang/ntnt/pull/119), plus follow-up traceroute/release-readiness PRs through [#127](https://github.com/ntntlang/ntnt/pull/127)
 **Author:** Larri
 **Created:** 2026-03-22
-**Updated:** 2026-06-07
-**Target baseline:** v0.4.10 (`std/net` track)
+**Updated:** 2026-06-18
+**Target baseline:** v0.4.11 (`std/net` track)
 
 ---
 
@@ -29,10 +29,13 @@ Initial scope:
 - `dns_reverse(ip, opts?)`
 - `port_scan(host, ports, opts?)` with strict bounds
 - `tls_info(host, opts?)`
+- `reachable(host, opts?)`
+- `net_capabilities()`
+- `traceroute(host, opts?)` with `method: "icmp" | "udp" | "tcp"`
 
 Explicitly deferred:
 
-- ~~`traceroute` and other raw packet path-discovery tools~~ — `traceroute()` shipped in Phase 2 (PR 7)
+- MTR-style continuous traceroute statistics, parallel hop sweeps, and per-hop enrichment — keep these out of `std/net` until a concrete monitoring app proves a minimal reusable API
 - SSH remote command execution
 - SNMP polling/walking
 - WHOIS
@@ -70,13 +73,13 @@ The important product idea: `std/net` should make ntnt good at **bounded, audita
 
 ## Implemented State
 
-As of the merged PR #117 baseline:
+As of the PR #127 release-readiness baseline:
 
-- `src/stdlib/net.rs` exists and registers safe `std/net` primitives.
+- `src/stdlib/net/` exists and registers safe `std/net` primitives, with IPAM/probe/policy/traceroute code split into focused modules.
 - `src/stdlib/mod.rs` exposes the `std/net` module.
 - `src/typechecker.rs` includes `std/net` signatures.
 - `docs/STDLIB_REFERENCE.md` is generated from the `// @ntnt` docs, and `docs/AI_AGENT_GUIDE.md` includes practical `std/net` examples.
-- `examples/std_net_ipam.tnt`, `examples/std_net_ping.tnt`, `examples/std_net_dns.tnt`, `examples/std_net_scan.tnt`, and `examples/std_net_tls.tnt` cover the shipped slices.
+- `examples/std_net_ipam.tnt`, `examples/std_net_ping.tnt`, `examples/std_net_dns.tnt`, `examples/std_net_scan.tnt`, `examples/std_net_tls.tnt`, and traceroute/probe docs cover the shipped slices.
 - `std/net` uses a dedicated outbound safety posture: public targets are easy, private/internal targets require process-level `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true`.
 - TLS inspection deliberately added `rustls`, `rustls-pki-types`, `webpki-roots`, and `x509-parser`; it does not depend on `reqwest`'s TLS stack.
 
@@ -221,7 +224,7 @@ Goal: create the module and safety foundation before exposing broad network beha
 
 Files:
 
-- Create: `src/stdlib/net.rs`
+- Create: `src/stdlib/net/` module directory
 - Modify: `src/stdlib/mod.rs`
 - Modify: `src/typechecker.rs`
 - Later generated: `docs/STDLIB_REFERENCE.md`
@@ -983,7 +986,7 @@ SNMP is a real network-monitoring need, but it is its own protocol family. It sh
 
 ### Status Dashboard
 
-As of 2026-06-09:
+As of 2026-06-18:
 
 - [x] **PR 1 — `std/net` shell + IPAM helpers + protocol-honest reachability**: merged in [PR #113](https://github.com/ntntlang/ntnt/pull/113).
 - [x] **PR 2 — DNS lookup types**: merged in [PR #114](https://github.com/ntntlang/ntnt/pull/114).
@@ -993,7 +996,7 @@ As of 2026-06-09:
 - [x] **PR 6 — Probe substrate + `net_capabilities()`**: typed `ProbeFailure` classification, `src/stdlib/net/` module split (`probe.rs`, `icmp.rs`), and capability detection — groundwork for traceroute.
 - [x] **PR 7 — `traceroute()`**: TTL-stepped echo probes on the shared substrate (raw ICMP only, graceful `Err` otherwise), `traceroute` capability flag, Docker `cap_add` deployment docs; see Phase 2 above.
 - [x] **PR 8/9 — UDP + TCP traceroute** (`method: "udp"`/`"tcp"`): shared `TraceProbe`/`HopProbe` abstraction, generalized quoted-transport matcher, UDP (Port Unreachable arrival) and raw TCP SYN (SYN-ACK/RST arrival, Linux), plus `traceroute_udp`/`traceroute_tcp` capability flags. See Phase 3.
-- [x] **Release-readiness cleanup**: target policy moved into `net/policy.rs`, duplicate policy tests consolidated, private-target opt-in narrowed to `NTNT_NET_ALLOW_PRIVATE=1`, and TCP/port-scan attempts now spend one timeout budget across resolved addresses rather than multiplying timeout by address count.
+- [x] **PR #127 — Release-readiness cleanup**: target policy moved into `net/policy.rs`, duplicate policy tests consolidated, private-target opt-in narrowed to `NTNT_NET_ALLOW_PRIVATE=1`, and TCP/port-scan attempts now spend one timeout budget across resolved addresses rather than multiplying timeout by address count.
 - [ ] **Deferred — MTR-style traceroute statistics / parallel hop sweeps / hop enrichment**: not release scope for `std/net`; keep in a future/private monitoring layer if real app pressure proves the API.
 - [x] **Superseded PRs**: [PR #116](https://github.com/ntntlang/ntnt/pull/116) was closed in favor of the cleaner PR #117 branch; [PR #118](https://github.com/ntntlang/ntnt/pull/118) was closed in favor of the cleaner PR #119 branch.
 
@@ -1005,7 +1008,7 @@ Status: **merged in PR #113.**
 
 Scope:
 
-- [x] `src/stdlib/net.rs`
+- [x] `src/stdlib/net/`
 - [x] `src/stdlib/mod.rs`
 - [x] `src/typechecker.rs`
 - [x] unit tests for helpers and IPv4/IPv6 IPAM behavior
@@ -1097,7 +1100,7 @@ Acceptance:
 Every public function must update all layers:
 
 1. Runtime module:
-   - `src/stdlib/net.rs`
+   - `src/stdlib/net/`
    - `Value::NativeFunction` arity/max_arity matching actual args
    - returns `Value::ok(...)` / `Value::err(...)` for documented `Result`
 
@@ -1167,14 +1170,16 @@ For network-specific PRs:
 
 ## Bottom Line
 
-The refined `std/net` path shipped as four reviewable PRs:
+The refined `std/net` release path is now complete/release-ready:
 
 1. deterministic IP helpers plus protocol-honest `ping()`
 2. dedicated TCP and high-level reachability probes with explicit safety policy
 3. DNS lookup/reverse lookup with CI-safe tests
 4. bounded port scan and TLS certificate inspection
+5. native ICMP, probe capability reporting, and one-shot multi-protocol traceroute
+6. release-readiness cleanup for target policy, timeout budgeting, and DD boundary clarity
 
-That gives ntnt real network-diagnostic capability without making users trip over `CAP_NET_RAW`, and without smuggling in traceroute, SSH, SNMP, broad scanners, public-network CI flakes, or SSRF footguns in one heroic PR. Heroic PRs are where bugs go to get tenure.
+That gives ntnt real network-diagnostic capability without making users trip over `CAP_NET_RAW` for the default paths, and without smuggling in SSH, SNMP, broad scanners, MTR-style monitoring state, public-network CI flakes, or SSRF footguns in one heroic PR. Heroic PRs are where bugs go to get tenure.
 
 ---
 
