@@ -200,12 +200,15 @@ mod tests {
 
     #[test]
     fn policy_rejects_private_and_mapped_loopback_without_opt_in() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
         for target in [
             "127.0.0.1:80",
             "[::1]:80",
             "[::ffff:127.0.0.1]:80",
             "10.0.0.1:80",
+            "169.254.1.1:80",
             "[fc00::1]:80",
+            "[fe80::1]:80",
         ] {
             let addr = target.parse::<SocketAddr>().unwrap();
             let err = enforce_resolved_target_policy(&[(80, addr)], false).unwrap_err();
@@ -228,9 +231,16 @@ mod tests {
     fn policy_allows_private_targets_with_call_and_process_opt_in() {
         let _env_lock = ENV_MUTEX.lock().unwrap();
         let _env_guard = PrivateOptInEnvGuard::std_net_allowed();
-        let private = "127.0.0.1:80".parse::<SocketAddr>().unwrap();
-
-        assert!(enforce_resolved_target_policy(&[(80, private)], true).is_ok());
+        for target in [
+            "127.0.0.1:80",
+            "10.0.0.1:80",
+            "169.254.1.1:80",
+            "[fc00::1]:80",
+            "[fe80::1]:80",
+        ] {
+            let private = target.parse::<SocketAddr>().unwrap();
+            assert!(enforce_resolved_target_policy(&[(80, private)], true).is_ok());
+        }
     }
 
     #[test]

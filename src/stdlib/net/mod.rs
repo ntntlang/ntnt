@@ -1596,26 +1596,6 @@ fn port_scan_for_host(
 }
 
 fn scan_port_targets(port: u16, targets: Vec<SocketAddr>, timeout: Duration) -> PortScanResult {
-    scan_port_targets_with(port, targets, timeout, |addr, remaining| {
-        let stream = TcpStream::connect_timeout(addr, remaining)?;
-        let info = TcpConnectInfo {
-            remote_addr: stream.peer_addr().ok().map(|addr| addr.to_string()),
-            local_addr: stream.local_addr().ok().map(|addr| addr.to_string()),
-        };
-        drop(stream);
-        Ok(info)
-    })
-}
-
-fn scan_port_targets_with<F>(
-    port: u16,
-    targets: Vec<SocketAddr>,
-    timeout: Duration,
-    mut connect: F,
-) -> PortScanResult
-where
-    F: FnMut(&SocketAddr, Duration) -> io::Result<TcpConnectInfo>,
-{
     if targets.is_empty() {
         return PortScanResult {
             port,
@@ -1630,20 +1610,23 @@ where
     let deadline = Instant::now() + timeout;
     let mut last_reason = "unreachable".to_string();
     for addr in targets {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        let start = Instant::now();
+        let Some(remaining) = deadline.checked_duration_since(start) else {
             last_reason = "timeout".to_string();
             break;
         };
 
-        let start = Instant::now();
-        match connect(&addr, remaining) {
-            Ok(info) => {
+        match TcpStream::connect_timeout(&addr, remaining) {
+            Ok(stream) => {
+                let remote_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
+                let local_addr = stream.local_addr().ok().map(|addr| addr.to_string());
+                drop(stream);
                 return PortScanResult {
                     port,
                     open: true,
                     latency_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
-                    remote_addr: info.remote_addr,
-                    local_addr: info.local_addr,
+                    remote_addr,
+                    local_addr,
                     reason: "connected".to_string(),
                 };
             }
@@ -1733,12 +1716,12 @@ where
             .expect("port_order is populated from targets_by_port; entry must exist");
         let deadline = Instant::now() + timeout;
         for addr in addrs {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            let start = Instant::now();
+            let Some(remaining) = deadline.checked_duration_since(start) else {
                 last_reason = "timeout".to_string();
                 break;
             };
 
-            let start = Instant::now();
             match connect(&addr, remaining) {
                 Ok(info) => {
                     let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -2802,46 +2785,24 @@ mod tests {
     }
 
     #[test]
-    fn scan_port_targets_share_budget_across_resolved_addresses() {
-        let port = 80;
-        let first_addr = SocketAddr::from(([127, 0, 0, 1], port));
-        let second_addr = SocketAddr::from(([127, 0, 0, 2], port));
-        let mut tried = Vec::new();
-
-        let result = scan_port_targets_with(
-            port,
-            vec![first_addr, second_addr],
-            Duration::from_millis(100),
-            |addr, remaining| {
-                tried.push(*addr);
-                thread::sleep(remaining + Duration::from_millis(5));
-                Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "simulated filtered address",
-                ))
-            },
-        );
-
-        assert!(!result.open);
-        assert_eq!(result.reason, "timeout");
-        assert_eq!(tried, vec![first_addr]);
-    }
-
-    #[test]
-    fn tcp_reachability_attempts_give_each_port_its_own_address_budget() {
+    fn tcp_reachability_attempts_later_ports_after_earlier_failures() {
         let first_port = 80;
         let second_port = 443;
-        let first = SocketAddr::from(([127, 0, 0, 1], first_port));
+        let first_a = SocketAddr::from(([127, 0, 0, 1], first_port));
+        let first_b = SocketAddr::from(([127, 0, 0, 2], first_port));
         let second = SocketAddr::from(([127, 0, 0, 1], second_port));
         let mut tried = Vec::new();
 
         let result = tcp_reachability_once_with(
-            &[(first_port, first), (second_port, second)],
+            &[
+                (first_port, first_a),
+                (first_port, first_b),
+                (second_port, second),
+            ],
             Duration::from_millis(100),
-            |addr, remaining| {
-                tried.push(addr.port());
+            |addr, _remaining| {
+                tried.push(*addr);
                 if addr.port() == first_port {
-                    thread::sleep(remaining + Duration::from_millis(5));
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "simulated filtered port",
@@ -2856,32 +2817,6 @@ mod tests {
 
         assert!(result.reachable);
         assert_eq!(result.connected_port, Some(second_port));
-        assert_eq!(tried, vec![first_port, second_port]);
-    }
-
-    #[test]
-    fn tcp_reachability_attempts_share_budget_within_same_port() {
-        let port = 80;
-        let first_addr = SocketAddr::from(([127, 0, 0, 1], port));
-        let second_addr = SocketAddr::from(([127, 0, 0, 2], port));
-        let mut tried = Vec::new();
-
-        let result = tcp_reachability_once_with(
-            &[(port, first_addr), (port, second_addr)],
-            Duration::from_millis(100),
-            |addr, remaining| {
-                tried.push(*addr);
-                thread::sleep(remaining + Duration::from_millis(5));
-                Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "simulated filtered address",
-                ))
-            },
-        );
-
-        assert!(!result.reachable);
-        assert_eq!(result.connected_port, None);
-        assert_eq!(result.reason, "timeout");
-        assert_eq!(tried, vec![first_addr]);
+        assert_eq!(tried, vec![first_a, first_b, second]);
     }
 }

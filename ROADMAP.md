@@ -1193,7 +1193,7 @@ Added 17 stdlib functions across 3 modules plus 1 global builtin to enable build
 | `NTNT_SSRF_PROTECTION` | `true` | Block requests to private IPs and cloud metadata |
 | `NTNT_ALLOW_LOCALHOST` | dev: `true`, prod: `false` | Allow fetch() to localhost |
 | `NTNT_ALLOW_PRIVATE_IPS` | `false` | Allow `fetch()` to private IP ranges |
-| `NTNT_NET_ALLOW_PRIVATE` | `false` | Allow `std/net` probes to private/internal targets when each call also passes `allow_private: true` |
+| `NTNT_NET_ALLOW_PRIVATE` | unset | Allow `std/net` probes to private/internal targets when each call also passes `allow_private: true` |
 | `NTNT_BLOCKED_HOSTS` | `` | Comma-separated list of blocked hostnames |
 
 **Request Body Limits:**
