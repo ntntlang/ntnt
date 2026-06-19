@@ -160,7 +160,7 @@ Recommended fields:
 Options:
 
 - `include_loopback`: default `false`
-- `family`: `"auto" | "ipv4" | "ipv6"`
+- `family`: `"all" | "ipv4" | "ipv6"`; default `"all"`, because this helper lists local addresses rather than choosing one address to probe
 
 Implementation notes:
 
@@ -217,6 +217,7 @@ map {
 
 Applicable functions:
 
+- `ping()`
 - `tcp_connect()`
 - `reachable()` TCP fallback path
 - `port_scan()`
@@ -255,6 +256,8 @@ Rules:
 
 - Default remains system resolver.
 - Explicit nameservers are bounded: max 3.
+- `strategy: "system"` ignores `nameservers` unless a future implementation deliberately supports fallback/override semantics.
+- `strategy: "explicit"` requires a non-empty `nameservers` array; absent or empty `nameservers` must return a clear `Err(String)`, never silently fall back to the system resolver.
 - Nameserver targets must pass the same target policy as outbound probes.
 - Private nameservers require `NTNT_NET_ALLOW_PRIVATE=1` plus `allow_private: true`.
 - DNS transport errors remain `Err(String)`; clean no-answer stays `Ok([])`.
@@ -267,17 +270,20 @@ Example:
 
 ```ntnt
 let records = dns_lookup_many("example.com", ["A", "AAAA", "MX", "TXT"], map {
-    "timeout_ms": 1000
+    "timeout_ms": 1000,
+    "strategy": "explicit",
+    "nameservers": ["1.1.1.1"]
 })
 // Ok(map { "A": [...], "AAAA": [...], "MX": [...], "TXT": [...] })
 ```
 
 Bounds:
 
+- `opts` inherits the same resolver controls as `dns_lookup()`, including `timeout_ms`, `strategy`, `nameservers`, and `allow_private` for private nameserver targets.
 - Max record types: 8.
 - Reject duplicate and unsupported record types.
 - Preserve per-type no-answer as an empty array.
-- If one record type has an operational resolver failure, decide before implementation whether the whole call is `Err` or the value is `map { "error": ... }`. Recommendation: whole-call `Err` for system failures, because mixed partial failure is surprising for a primitive. Apps needing partial behavior can call `dns_lookup()` individually.
+- If one record type has an operational resolver failure, the whole call returns `Err(String)`. Mixed partial failure maps are deliberately out of scope for this primitive; apps needing partial behavior can call `dns_lookup()` individually.
 
 Priority: high if current DNS usage feels repetitive; otherwise defer.
 
@@ -302,7 +308,6 @@ map {
 
 Candidate `reason_code` values:
 
-- `connected`
 - `timeout`
 - `connection_refused`
 - `dns_error`
@@ -338,7 +343,7 @@ let cert = tls_info("example.com", map {
 
 Additional result fields:
 
-- `expires_soon`: bool
+- `expires_soon`: bool, present whenever TLS policy options are requested; `true` when `min_days_left` is provided and `days_left < min_days_left`, otherwise `false`
 - `policy_ok`: bool
 - `policy_errors`: array of strings
 
@@ -380,7 +385,8 @@ Rules:
 
 - Default `max_bytes`: 512.
 - Hard cap: 4096.
-- No send payload in PR 1. Just read after connect.
+- No send payload in the initial `tcp_banner()` implementation. Just read after connect.
+- `timeout_ms` is a total deadline covering DNS resolution, TCP connect, and the banner read. A service that accepts the connection but sends no banner must return a bounded timeout result instead of blocking indefinitely.
 - Return both text and bytes only if there is an established stdlib convention for byte arrays; otherwise use lossy string plus `bytes_read` and document it.
 - Apply the same private-target policy as `tcp_connect()`.
 
@@ -576,7 +582,7 @@ If we want a tight release, ship only:
 
 1. Result consistency cleanup.
 2. `local_interfaces()`.
-3. Address-family controls for TCP/TLS/reachability.
+3. Address-family controls for `ping()`, TCP, TLS, reachability, and `port_scan()`.
 4. DNS `nameservers` option, if clean.
 
 Defer:
@@ -596,10 +602,9 @@ This gives v0.4.12 a clear theme: **make the existing primitives easier to use c
 1. Should `reason_code` be added in v0.4.12, or should we keep string-only reasons until a broader result-shape cleanup?
 2. Which crate, if any, should back `local_interfaces()`? Requirement: maintained, cross-platform, no excessive dependency tree.
 3. Should explicit DNS nameservers be allowed for public targets by default, or require an opt-in because custom resolvers can be used for internal discovery?
-4. Should `dns_lookup_many()` fail the whole call on one operational error, or return per-record-type error maps?
-5. Should `family` apply to DNS lookup itself, or only to functions that resolve and then connect/probe?
-6. Is `tls_check()` enough convenience to justify a separate public API, or should it remain options on `tls_info()`?
-7. Does `tcp_banner()` belong in default `std/net`, or is it better as a private monitoring helper until a real app proves the need?
+4. Should `family` apply to DNS lookup itself, or only to functions that resolve and then connect/probe?
+5. Is `tls_check()` enough convenience to justify a separate public API, or should it remain options on `tls_info()`?
+6. Does `tcp_banner()` belong in default `std/net`, or is it better as a private monitoring helper until a real app proves the need?
 
 ---
 
