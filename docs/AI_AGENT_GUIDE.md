@@ -1072,7 +1072,7 @@ let reachability = reachable("example.com", map {
 
 `tcp_connect()` and `reachable()` support optional `count` (1-10), `timeout_ms`, and `interval_ms`, returning per-attempt results plus `sent`, `received`, `failed`, and `loss_percent` summary fields. For `reachable()`, `timeout_ms` is a per-TCP-port budget across that port's resolved addresses, so a multi-port check can spend up to `timeout_ms × number_of_tcp_ports` before declaring all TCP fallbacks failed.
 
-`port_scan(host, ports, opts?)` scans an explicit `Array<Int>` of TCP ports. It rejects duplicate, invalid, or overly large port lists, clamps `concurrency`, applies the same private-target safety policy as `tcp_connect()`, and returns results sorted by port:
+`port_scan(host, ports, opts?)` scans an explicit `Array<Int>` of TCP ports. It rejects duplicate, invalid, or overly large port lists, clamps `concurrency`, applies the same private-target safety policy as `tcp_connect()`, and returns results sorted by port. Its `timeout_ms` is also a per-port budget across that port's resolved addresses; `concurrency` controls how many ports are probed at once, not how many resolved addresses get independent timeout budgets:
 
 ```ntnt
 let scan = port_scan("example.com", [22, 80, 443], map {
