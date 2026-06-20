@@ -987,6 +987,142 @@ print(page)
     );
 }
 
+/// DD-061 PR1: Non-undefined template condition errors must honor TypeMode.
+#[test]
+fn test_template_if_condition_errors_honor_type_mode() {
+    let code = r#"
+let page = """{{#if 1 / 0}}YES{{#else}}NO{{/if}}"""
+print(page)
+"#;
+
+    let (_, strict_stderr, strict_exit) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_ne!(
+        strict_exit, 0,
+        "strict mode should fail closed for template condition errors: {}",
+        strict_stderr
+    );
+
+    let (warn_stdout, warn_stderr, warn_exit) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "warn")]);
+    assert_eq!(warn_exit, 0, "warn mode should continue: {}", warn_stderr);
+    assert!(
+        warn_stderr.contains("[WARN]") && warn_stderr.contains("Template if condition failed"),
+        "warn mode should log through the template warning path: {}",
+        warn_stderr
+    );
+    assert!(
+        warn_stdout.contains("NO"),
+        "warn mode should treat the failed condition as false: {}",
+        warn_stdout
+    );
+    assert!(
+        warn_stdout.contains("TEMPLATE ERROR"),
+        "warn mode should include the normal template error comment: {}",
+        warn_stdout
+    );
+
+    let (forgiving_stdout, forgiving_stderr, forgiving_exit) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "forgiving")]);
+    assert_eq!(
+        forgiving_exit, 0,
+        "forgiving mode should continue: {}",
+        forgiving_stderr
+    );
+    assert!(
+        forgiving_stdout.contains("NO"),
+        "forgiving mode should treat the failed condition as false: {}",
+        forgiving_stdout
+    );
+    assert!(
+        !forgiving_stderr.contains("[WARN]") && !forgiving_stdout.contains("TEMPLATE ERROR"),
+        "forgiving mode should stay silent; stdout={}, stderr={}",
+        forgiving_stdout,
+        forgiving_stderr
+    );
+}
+
+/// DD-061 PR1: Elif condition errors use the same TypeMode policy as if conditions.
+#[test]
+fn test_template_elif_condition_errors_honor_type_mode() {
+    let code = r#"
+let page = """{{#if false}}NO{{#elif 1 / 0}}ELIF{{#else}}ELSE{{/if}}"""
+print(page)
+"#;
+
+    let (_, strict_stderr, strict_exit) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_ne!(
+        strict_exit, 0,
+        "strict mode should fail closed for elif condition errors: {}",
+        strict_stderr
+    );
+
+    let (warn_stdout, warn_stderr, warn_exit) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "warn")]);
+    assert_eq!(warn_exit, 0, "warn mode should continue: {}", warn_stderr);
+    assert!(
+        warn_stderr.contains("[WARN]") && warn_stderr.contains("Template elif condition failed"),
+        "warn mode should log elif errors through the template warning path: {}",
+        warn_stderr
+    );
+    assert!(
+        warn_stdout.contains("ELSE"),
+        "warn mode should fall through after failed elif condition: {}",
+        warn_stdout
+    );
+}
+
+/// DD-061 PR1: Filter errors should use the same TypeMode boundary as expressions.
+#[test]
+fn test_template_filter_errors_honor_type_mode() {
+    let code = r#"
+let page = """before {{"abcdef" | truncate("bad")}} after"""
+print(page)
+"#;
+
+    let (_, strict_stderr, strict_exit) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_ne!(
+        strict_exit, 0,
+        "strict mode should fail closed for filter errors: {}",
+        strict_stderr
+    );
+
+    let (warn_stdout, warn_stderr, warn_exit) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "warn")]);
+    assert_eq!(warn_exit, 0, "warn mode should continue: {}", warn_stderr);
+    assert!(
+        warn_stderr.contains("[WARN]") && warn_stderr.contains("Template filter failed"),
+        "warn mode should report filter errors through template warning path: {}",
+        warn_stderr
+    );
+    assert!(
+        warn_stdout.contains("before") && warn_stdout.contains("after"),
+        "warn mode should preserve surrounding template output: {}",
+        warn_stdout
+    );
+
+    let (forgiving_stdout, forgiving_stderr, forgiving_exit) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "forgiving")]);
+    assert_eq!(
+        forgiving_exit, 0,
+        "forgiving mode should continue: {}",
+        forgiving_stderr
+    );
+    assert!(
+        forgiving_stdout.contains("before") && forgiving_stdout.contains("after"),
+        "forgiving mode should preserve surrounding template output: {}",
+        forgiving_stdout
+    );
+    assert!(
+        !forgiving_stderr.contains("[WARN]") && !forgiving_stdout.contains("TEMPLATE ERROR"),
+        "forgiving mode should stay silent; stdout={}, stderr={}",
+        forgiving_stdout,
+        forgiving_stderr
+    );
+}
+
 /// @since v0.3.16
 /// Finding #36: Shared layout pattern with optional slots
 #[test]

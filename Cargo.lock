@@ -1844,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "ntnt"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "aes-gcm",
  "anyhow",

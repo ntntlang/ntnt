@@ -3691,13 +3691,17 @@ impl Interpreter {
         // @signature template(path: String, data: Map) -> String
         // Load and render an external HTML template with data.
         //
-        // Loads a `.html` template file and renders it using Mustache-style
-        // syntax. Templates use `{{var}}` for escaped output, `{{{var}}}` for
-        // raw/unescaped output, `{{#key}}...{{/key}}` for sections (conditionals
-        // and loops), and `{{> partial}}` for including other templates.
+        // Loads a `.html` template file and renders it using NTNT template
+        // syntax. Templates use `{{expr}}` for escaped output, `{{{expr}}}` for
+        // raw/unescaped output, explicit `{{#if cond}}...{{/if}}` conditionals,
+        // explicit `{{#for item in items}}...{{/for}}` loops, and `{{> partial}}`
+        // includes. Mustache-style ambiguous sections such as
+        // `{{#key}}...{{/key}}` are not supported; use `#if` or `#for` instead.
         //
         // Template paths are relative to the `.tnt` file's location.
-        // Partials are resolved from the same directory as the parent template.
+        // Partials are resolved from the project/script directory in this order:
+        // `views/partials/{name}.html`, `views/partials/{name}`,
+        // `views/{name}.html`, `{name}.html`, then `{name}`.
         //
         // Typically used with `html()` from `std/http/server`:
         // `return html(template("views/home.html", map { "title": "Home" }))`
@@ -3709,8 +3713,9 @@ impl Interpreter {
         // @since v0.2.0
         // @example template("views/home.html", map { "title": "Home" }) => "<html>..." ~ "Render a template"
         // @example template("views/user.html", map { "name": "Alice", "posts": [...] }) => "<html>..." ~ "Render with loop data"
-        // @gotcha Use {{var}} (double braces) for escaped output in templates — this is Mustache syntax, not NTNT string interpolation (#{var})
-        // @gotcha There is no escape syntax for literal {{ in templates. Workaround: pass the braces as a variable (e.g. map { "lb": "{{", "rb": "}}" }) and use {{lb}} in the template.
+        // @gotcha Use {{expr}} (double braces) for escaped output in external templates; use {{{expr}}} only for trusted raw HTML.
+        // @gotcha Use explicit {{#if cond}} and {{#for item in items}} blocks. Ambiguous Mustache-style {{#key}} sections are intentionally unsupported.
+        // @gotcha Use \{{ and \}} for literal template delimiters where supported.
         self.environment.borrow_mut().define(
             "template".to_string(),
             Value::NativeFunction {
@@ -7739,11 +7744,30 @@ impl Interpreter {
         }
     }
 
+    /// Evaluate a template condition expression.
+    /// Undefined variables are intentionally falsy for optional layout slots;
+    /// other errors flow through the normal template TypeMode boundary.
+    fn eval_template_condition(
+        &mut self,
+        condition: &crate::ast::Expression,
+        context: &str,
+        result: &mut String,
+    ) -> Result<bool> {
+        match self.eval_expression(condition) {
+            Ok(v) => Ok(v.is_truthy()),
+            Err(IntentError::UndefinedVariable { .. }) => Ok(false),
+            Err(e) => {
+                Self::handle_template_error(e, context, result)?;
+                Ok(false)
+            }
+        }
+    }
+
     /// Evaluate template string parts
     fn eval_template_parts(&mut self, parts: &[TemplatePart]) -> Result<Value> {
         let mut result = String::new();
 
-        for part in parts {
+        'parts: for part in parts {
             match part {
                 TemplatePart::Literal(s) => result.push_str(s),
                 TemplatePart::Expr(expr) => {
@@ -7756,7 +7780,7 @@ impl Interpreter {
                             let s = v.to_string();
                             result.push_str(&html_escape_string(&s));
                         }
-                        // Undefined variables render as empty string (standard Mustache behavior)
+                        // Undefined template variables render as empty string
                         Err(IntentError::UndefinedVariable { .. }) => {}
                         Err(e) => Self::handle_template_error(e, "expression", &mut result)?,
                     }
@@ -7767,7 +7791,7 @@ impl Interpreter {
                         Ok(v) => {
                             result.push_str(&v.to_string());
                         }
-                        // Undefined variables render as empty string (standard Mustache behavior)
+                        // Undefined template variables render as empty string
                         Err(IntentError::UndefinedVariable { .. }) => {}
                         Err(e) => Self::handle_template_error(e, "raw expression", &mut result)?,
                     }
@@ -7779,20 +7803,18 @@ impl Interpreter {
                     let mut value = match self.eval_expression(expr) {
                         Ok(v) => v,
                         Err(e) => {
-                            if has_default {
-                                // Log non-variable errors even with default filter
-                                if !matches!(e, IntentError::UndefinedVariable { .. })
-                                    && get_type_mode() == TypeMode::Warn
-                                {
-                                    eprintln!(
-                                        "[WARN] Template expression error (using default): {}",
-                                        e
-                                    );
-                                }
+                            if has_default && matches!(e, IntentError::UndefinedVariable { .. }) {
+                                Value::Unit
+                            } else if has_default {
+                                Self::handle_template_error(
+                                    e,
+                                    "filtered expression default source",
+                                    &mut result,
+                                )?;
                                 Value::Unit
                             } else {
                                 Self::handle_template_error(e, "filtered expression", &mut result)?;
-                                continue;
+                                continue 'parts;
                             }
                         }
                     };
@@ -7801,7 +7823,13 @@ impl Interpreter {
                         if filter.name == "safe" || filter.name == "raw" {
                             skip_escape = true;
                         }
-                        value = self.apply_template_filter(&value, filter)?;
+                        match self.apply_template_filter(&value, filter) {
+                            Ok(v) => value = v,
+                            Err(e) => {
+                                Self::handle_template_error(e, "filter", &mut result)?;
+                                continue 'parts;
+                            }
+                        }
                     }
                     let s = value.to_string();
                     if skip_escape {
@@ -7816,25 +7844,33 @@ impl Interpreter {
                     let mut value = match self.eval_expression(expr) {
                         Ok(v) => v,
                         Err(e) => {
-                            if has_default {
-                                // Log non-variable errors even with default filter
-                                if !matches!(e, IntentError::UndefinedVariable { .. })
-                                    && get_type_mode() == TypeMode::Warn
-                                {
-                                    eprintln!(
-                                        "[WARN] Template expression error (using default): {}",
-                                        e
-                                    );
-                                }
+                            if has_default && matches!(e, IntentError::UndefinedVariable { .. }) {
+                                Value::Unit
+                            } else if has_default {
+                                Self::handle_template_error(
+                                    e,
+                                    "raw filtered expression default source",
+                                    &mut result,
+                                )?;
                                 Value::Unit
                             } else {
-                                Self::handle_template_error(e, "filtered expression", &mut result)?;
-                                continue;
+                                Self::handle_template_error(
+                                    e,
+                                    "raw filtered expression",
+                                    &mut result,
+                                )?;
+                                continue 'parts;
                             }
                         }
                     };
                     for filter in filters {
-                        value = self.apply_template_filter(&value, filter)?;
+                        match self.apply_template_filter(&value, filter) {
+                            Ok(v) => value = v,
+                            Err(e) => {
+                                Self::handle_template_error(e, "raw filter", &mut result)?;
+                                continue 'parts;
+                            }
+                        }
                     }
                     result.push_str(&value.to_string());
                 }
@@ -7989,18 +8025,10 @@ impl Interpreter {
                     elif_chains,
                     else_parts,
                 } => {
-                    // Error boundary: any error in condition is treated as false
-                    let condition_value = match self.eval_expression(condition) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            if !matches!(&e, IntentError::UndefinedVariable { .. }) {
-                                eprintln!("[ERROR] Template if-condition failed: {}", e);
-                            }
-                            Value::Bool(false)
-                        }
-                    };
+                    let condition_truthy =
+                        self.eval_template_condition(condition, "if condition", &mut result)?;
 
-                    if condition_value.is_truthy() {
+                    if condition_truthy {
                         let then_result = self.eval_template_parts(then_parts)?;
                         if let Value::String(s) = then_result {
                             result.push_str(&s);
@@ -8009,16 +8037,12 @@ impl Interpreter {
                         // Check elif chains
                         let mut handled = false;
                         for (elif_condition, elif_body) in elif_chains {
-                            let elif_value = match self.eval_expression(elif_condition) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    if !matches!(&e, IntentError::UndefinedVariable { .. }) {
-                                        eprintln!("[ERROR] Template elif-condition failed: {}", e);
-                                    }
-                                    Value::Bool(false)
-                                }
-                            };
-                            if elif_value.is_truthy() {
+                            let elif_truthy = self.eval_template_condition(
+                                elif_condition,
+                                "elif condition",
+                                &mut result,
+                            )?;
+                            if elif_truthy {
                                 let elif_result = self.eval_template_parts(elif_body)?;
                                 if let Value::String(s) = elif_result {
                                     result.push_str(&s);

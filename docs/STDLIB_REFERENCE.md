@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.4.11
+> Last updated: v0.4.12
 
 ## Table of Contents
 
@@ -1551,9 +1551,9 @@ template(path: String, data: Map) -> String
 
 Load and render an external HTML template with data.
 
-Loads a `.html` template file and renders it using Mustache-style syntax. Templates use `{{var}}` for escaped output, `{{{var}}}` for raw/unescaped output, `{{#key}}...{{/key}}` for sections (conditionals and loops), and `{{> partial}}` for including other templates.
+Loads a `.html` template file and renders it using NTNT template syntax. Templates use `{{expr}}` for escaped output, `{{{expr}}}` for raw/unescaped output, explicit `{{#if cond}}...{{/if}}` conditionals, explicit `{{#for item in items}}...{{/for}}` loops, and `{{> partial}}` includes. Mustache-style ambiguous sections such as `{{#key}}...{{/key}}` are not supported; use `#if` or `#for` instead.
 
-Template paths are relative to the `.tnt` file's location. Partials are resolved from the same directory as the parent template.
+Template paths are relative to the `.tnt` file's location. Partials are resolved from the project/script directory in this order: `views/partials/{name}.html`, `views/partials/{name}`, `views/{name}.html`, `{name}.html`, then `{name}`.
 
 Typically used with `html()` from `std/http/server`: `return html(template("views/home.html", map { "title": "Home" }))`
 
@@ -1573,8 +1573,9 @@ template("views/user.html", map { "name": "Alice", "posts": [...] })  // => "<ht
 
 **Gotchas:**
 
-- Use {{var}} (double braces) for escaped output in templates — this is Mustache syntax, not NTNT string interpolation (#{var})
-- There is no escape syntax for literal {{ in templates. Workaround: pass the braces as a variable (e.g. map { "lb": "{{", "rb": "}}" }) and use {{lb}} in the template.
+- Use {{expr}} (double braces) for escaped output in external templates; use {{{expr}}} only for trusted raw HTML.
+- Use explicit {{#if cond}} and {{#for item in items}} blocks. Ambiguous Mustache-style {{#key}} sections are intentionally unsupported.
+- Use \{{ and \}} for literal template delimiters where supported.
 
 **See also:** `serve_static`, `html`, `get`
 
