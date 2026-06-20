@@ -152,10 +152,10 @@ Recommended fields:
 - `index` when available
 - `up`
 - `loopback`
-- `multicast`
-- `mac` when available
+- `multicast`: bool; `true` when the OS reports the interface supports multicast (for example `IFF_MULTICAST`), not a list of joined multicast groups
+- `mac` when available, formatted as lowercase colon-separated octets (`aa:bb:cc:dd:ee:ff`) regardless of platform convention
 - `mtu` when available
-- `addresses`: array of `{ ip, family, prefix_len? }`
+- `addresses`: array of `{ ip, family, prefix_len? }`; omit `prefix_len` when the OS does not report a prefix/netmask for that address, and callers must check key presence before using it for subnet math
 
 Options:
 
@@ -167,22 +167,28 @@ Implementation notes:
 - Prefer a cross-platform crate such as `if-addrs` or `network-interface` after checking maintenance and Windows/macOS behavior.
 - Do not expose private addresses as a security bypass issue: this is local process introspection, not outbound probing. Still document that public web apps should not dump this result to untrusted users.
 
-#### `default_route(opts?) -> Result<Map, String>`
+#### `default_routes(opts?) -> Result<Array<Map>, String>`
 
-Return the default route interface/gateway when available.
+Return default route interface/gateway entries when available.
 
 Example:
 
 ```ntnt
-let route = default_route()
-// Ok(map { "interface": "eth0", "gateway": "10.0.50.1", "family": "ipv4" })
+let routes = default_routes()
+// Ok([map { "interface": "eth0", "gateway": "10.0.50.1", "family": "ipv4" }])
 ```
+
+Options:
+
+- `family`: `"all" | "ipv4" | "ipv6"`; default `"all"`.
+
+Dual-stack hosts may return both IPv4 and IPv6 default routes. Return routes in deterministic order: IPv4 routes first, then IPv6 routes, preserving OS order within each family. `gateway` is optional: omit the key when the OS reports an interface-only/on-link default route with no next-hop IP; callers should check key presence with `has_key(route, "gateway")`. If the host has no default route for the requested family, return `Ok([])`. Reserve `Err(String)` for platform/API failures where route inspection itself could not be performed.
 
 This may be harder cross-platform than `local_interfaces()`. If the implementation gets ugly, defer it and ship `local_interfaces()` first.
 
-#### `local_addr_for(target, opts?) -> Result<Map, String>`
+#### `local_addr_for(ip, opts?) -> Result<Map, String>`
 
-Return the local source address the OS would use to reach a target, without sending application data.
+Return the local source address the OS would use to reach an IP literal, without sending application data.
 
 Example:
 
@@ -191,10 +197,18 @@ let src = local_addr_for("8.8.8.8")
 // Ok(map { "local_ip": "10.0.50.25", "family": "ipv4" })
 ```
 
+Options:
+
+- `allow_private`: default `false`; required with process-level `NTNT_NET_ALLOW_PRIVATE=1` for private/internal IP literals.
+
+No `family`, `address_order`, or `timeout_ms` options are accepted in the v0.4.12 version: the IP literal determines the address family, and the UDP connect trick is a local route-selection operation rather than a network probe. Unknown option keys should return `Err(String)` so callers do not think ignored controls are active.
+
 Implementation approach:
 
+- Accept only IPv4/IPv6 literals in v0.4.12. Hostnames return `Err("local_addr_for() requires an IP literal")` or equivalent; hostname resolution and address-family selection can be reconsidered after the shared resolver controls exist.
+- Reject IPv6 link-local literals (`fe80::/10`) in v0.4.12 with a clear `Err(String)` because correct routing requires a zone/interface identifier; zone-id syntax can be designed later instead of leaking OS-specific parse behavior.
 - Use UDP socket connect trick to determine the selected local address.
-- Apply `std/net` target policy to the target because it resolves/targets a remote address.
+- Apply `std/net` target policy to the target because it resolves/targets a remote address. This intentionally means `local_addr_for("192.168.1.1", ...)` still needs `NTNT_NET_ALLOW_PRIVATE=1` plus `allow_private: true`: no payload is sent, but the call is still a private-network routing probe and should be gated consistently with the rest of `std/net`.
 - No packet payload should be sent.
 
 Priority: medium. Useful, but less essential than `local_interfaces()`.
@@ -209,26 +223,34 @@ Add common option support to functions that resolve/connect:
 
 ```ntnt
 map {
-    "family": "auto",       // auto | ipv4 | ipv6
+    "family": "all",        // all | ipv4 | ipv6
     "address_order": "resolver", // resolver | ipv4_first | ipv6_first
     "max_addresses": 8
 }
 ```
 
-Applicable functions:
+Option semantics:
+
+- `max_addresses`: default 8, valid range 1-64. Caller-provided values outside that range return `Err(String)`. After filtering and ordering, keep the first `max_addresses` candidates; do not error merely because the resolver returned more addresses.
+- `address_order`: default `"resolver"`, preserving resolver order.
+
+Applicable functions for the v0.4.12 minimum slice:
 
 - `ping()`
 - `tcp_connect()`
-- `reachable()` TCP fallback path
+- `reachable()` including both ICMP primary path and TCP fallback path
 - `port_scan()`
 - `tls_info()`
-- `traceroute()` where method supports address selection
+
+`traceroute()` is deliberately deferred from the minimum address-family slice. It may adopt the same resolver helper in a later PR if that stays small and avoids reopening raw-socket/traceroute churn.
 
 Rules:
 
 - `family: "ipv4"` filters to A/IPv4 addresses.
 - `family: "ipv6"` filters to AAAA/IPv6 addresses.
-- `family: "auto"` preserves current behavior unless `address_order` is set.
+- `family: "all"` preserves current behavior unless `address_order` is set.
+- Filtering happens before ordering. With `family: "ipv4"`, `address_order: "ipv6_first"` is a harmless no-op over the remaining IPv4-only set, not an error; same for `family: "ipv6"` with `"ipv4_first"`.
+- Unrecognized `family` or `address_order` values return `Err(String)`; never silently fall back to defaults.
 - Empty address set after filtering returns `Err("No resolved addresses for requested family")` or equivalent clear message.
 - Policy is still enforced after filtering and before probing.
 
@@ -242,13 +264,13 @@ Do **not** add full Happy Eyeballs parallel racing in v0.4.12 unless there is a 
 
 #### Extend DNS options
 
-Support optional resolver controls:
+Support optional resolver controls for `dns_lookup()`, `dns_lookup_many()`, and `dns_reverse()`:
 
 ```ntnt
 dns_lookup("example.com", "A", map {
     "timeout_ms": 1000,
     "nameservers": ["1.1.1.1", "8.8.8.8"],
-    "strategy": "system" // system | explicit
+    "strategy": "explicit" // system | explicit
 })
 ```
 
@@ -256,11 +278,14 @@ Rules:
 
 - Default remains system resolver.
 - Explicit nameservers are bounded: max 3.
-- `strategy: "system"` ignores `nameservers` unless a future implementation deliberately supports fallback/override semantics.
+- If `nameservers` is non-empty and `strategy` is absent, treat it as `strategy: "explicit"`; this matches caller intent and avoids forcing boilerplate.
+- `strategy: "system"` requires `nameservers` to be absent or empty; passing explicit nameservers with the system strategy must return a clear `Err(String)` rather than silently discarding caller intent.
 - `strategy: "explicit"` requires a non-empty `nameservers` array; absent or empty `nameservers` must return a clear `Err(String)`, never silently fall back to the system resolver.
+- `nameservers` entries are bare IPv4/IPv6 IP literals on DNS port 53. Do not accept hostnames, bracketed IPv6, or `host:port` forms in v0.4.12; non-standard DNS ports are out of scope.
 - Nameserver targets must pass the same target policy as outbound probes.
 - Private nameservers require `NTNT_NET_ALLOW_PRIVATE=1` plus `allow_private: true`.
 - DNS transport errors remain `Err(String)`; clean no-answer stays `Ok([])`.
+- `dns_reverse(ip, opts?)` accepts the same resolver controls; split-DNS PTR records should not be forced through the system resolver when forward lookups support explicit nameservers.
 
 #### `dns_lookup_many(name, record_types, opts?) -> Result<Map, String>`
 
@@ -274,16 +299,19 @@ let records = dns_lookup_many("example.com", ["A", "AAAA", "MX", "TXT"], map {
     "strategy": "explicit",
     "nameservers": ["1.1.1.1"]
 })
-// Ok(map { "A": [...], "AAAA": [...], "MX": [...], "TXT": [...] })
+// Ok(map { "nxdomain": false, "records": map { "A": [...], "AAAA": [...], "MX": [...], "TXT": [...] } })
 ```
 
 Bounds:
 
 - `opts` inherits the same resolver controls as `dns_lookup()`, including `timeout_ms`, `strategy`, `nameservers`, and `allow_private` for private nameserver targets.
-- Max record types: 8.
-- Reject duplicate and unsupported record types.
-- Preserve per-type no-answer as an empty array.
-- If one record type has an operational resolver failure, the whole call returns `Err(String)`. Mixed partial failure maps are deliberately out of scope for this primitive; apps needing partial behavior can call `dns_lookup()` individually.
+- `timeout_ms` is a total wall-clock budget for the whole batch, not a per-record-type multiplier. The initial implementation should query record types sequentially in caller order using the remaining deadline for each query; a future parallel implementation must preserve the same total-budget contract and deterministic result map.
+- Minimum record types: 1; an empty `record_types` array returns `Err(String)`.
+- Maximum record types: 8.
+- Reject duplicate and unsupported record types. Supported types are exactly the same canonical set accepted by v0.4.11 `dns_lookup()`; `dns_lookup_many()` must not introduce a narrower or broader record-type list.
+- Preserve clean per-type no-answer as an empty array under `records[record_type]`.
+- Distinguish name-nonexistence from no-data: set top-level `nxdomain: true` when the resolver returns `NXDOMAIN` for the queried name; otherwise `nxdomain: false`. For `NXDOMAIN`, immediately stop the sequential batch without issuing further record-type queries, but still populate `records` with an empty array for every type in the original `record_types` argument.
+- If one record type has an operational resolver failure, the whole call returns `Err(String)`. Operational resolver failures include transport timeout, resolver configuration failure, malformed response, `SERVFAIL`, `REFUSED`, and other non-success/non-NXDOMAIN DNS response codes. Mixed partial failure maps are deliberately out of scope for this primitive; apps needing partial behavior can call `dns_lookup()` individually.
 
 Priority: high if current DNS usage feels repetitive; otherwise defer.
 
@@ -320,8 +348,17 @@ Candidate `reason_code` values:
 Compatibility rule:
 
 - Do not remove or rename existing `reason` fields in v0.4.12.
-- If `reason_code` is added, add it everywhere the corresponding result map is returned.
+- If `reason_code` is added, add it to failure/unreachable result maps consistently. Successful results omit `reason_code`; for example, an open `port_scan()` entry keeps its existing success fields and does not invent `reason_code: "open"`.
 - Tests must assert both human string and code for representative outcomes.
+
+For `port_scan()`, `reason_code` lives on each per-port entry that represents a closed, refused, filtered, timed-out, or otherwise unreachable port:
+
+```ntnt
+Ok([
+    map { "port": 22, "open": false, "reason": "connection refused", "reason_code": "connection_refused" },
+    map { "port": 25, "open": false, "reason": "timeout", "reason_code": "timeout" }
+])
+```
 
 Priority: high if v0.4.11 review leaves any result-string inconsistency unresolved.
 
@@ -343,21 +380,29 @@ let cert = tls_info("example.com", map {
 
 Additional result fields:
 
-- `expires_soon`: bool, present whenever TLS policy options are requested; `true` when `min_days_left` is provided and `days_left < min_days_left`, otherwise `false`
-- `policy_ok`: bool
-- `policy_errors`: array of strings
+- `expires_soon`: bool, present only when `min_days_left` is explicitly provided; `true` when `days_left < min_days_left`, otherwise `false`
+- `policy_ok`: bool, present only when at least one policy option (`require_valid` or `min_days_left`) is provided
+- `policy_errors`: array of strings, present only when at least one policy option (`require_valid` or `min_days_left`) is provided
 
-#### Option B: add `tls_check(host, opts?) -> Result<Map, String>`
+When `min_days_left` is provided and `expires_soon: true`, that is a policy violation: include an expiry warning in `policy_errors` and set `policy_ok: false`. `policy_ok` is true only when every requested policy option passes.
+
+Policy failures are still structured TLS probe results, not thrown errors: a reachable host with an expired certificate and `require_valid: true` returns `Ok(map { "valid": false, "policy_ok": false, "policy_errors": [...] })`. Reserve `Err(String)` for connect/handshake/system failures where certificate metadata cannot be obtained.
+
+`require_valid: true` means the certificate chain is trusted by the configured/default roots, the certificate is valid for the requested server name, and the current time is within `not_before`/`not_after`. Revocation checks (CRL/OCSP) are out of scope for v0.4.12 unless a later DD adds explicit support.
+
+Even after PR 4 centralizes resolver/address-family helpers, `tls_info()` connection-level, DNS, handshake, and policy-denied failures intentionally remain `Err(String)` when no certificate metadata can be obtained. Do not convert those paths to `Ok(map { "reason_code": ... })` as part of the generic TCP result-shape cleanup.
+
+#### Option B: future `tls_check(host, opts?) -> Result<Map, String>` sketch
 
 ```ntnt
 let check = tls_check("example.com", map {
     "min_days_left": 14,
     "require_valid": true
 })
-// Ok(map { "ok": true, "valid": true, "days_left": 90, "errors": [] })
+// Future sketch only; if promoted, use Option A's `policy_ok`, `policy_errors`, and `expires_soon` field names.
 ```
 
-Recommendation: prefer extending `tls_info()` unless the result shape becomes noisy. `tls_check()` is friendlier for monitoring apps but starts to overlap with `std/netmon` check orchestration.
+Normative v0.4.12 target: extend `tls_info()` using Option A. `tls_check()` is deferred unless Option A becomes too noisy during implementation; if it is later promoted, it must use the same `policy_ok`, `policy_errors`, and `expires_soon` field names so callers do not learn two certificate-policy result shapes.
 
 Priority: medium.
 
@@ -378,17 +423,25 @@ let banner = tcp_banner("smtp.example.com", 25, map {
     "timeout_ms": 1000,
     "max_bytes": 512
 })
-// Ok(map { "connected": true, "banner": "220 smtp.example.com ESMTP", "bytes_read": 27 })
+// Ok(map { "connected": true, "banner": "220 smtp.example.com ESMTP", "bytes_read": 27, "truncated": false })
 ```
 
 Rules:
 
 - Default `max_bytes`: 512.
-- Hard cap: 4096.
+- Valid `max_bytes` range: 1-4096. Caller-provided values outside that range return `Err(String)`, not a silent clamp.
+- Accept the same `family`, `address_order`, and `max_addresses` options as `tcp_connect()` once PR 4's shared resolver helper exists.
 - No send payload in the initial `tcp_banner()` implementation. Just read after connect.
 - `timeout_ms` is a total deadline covering DNS resolution, TCP connect, and the banner read. A service that accepts the connection but sends no banner must return a bounded timeout result instead of blocking indefinitely.
+- `truncated` is always present on connected banner-read results. Implementations should read at most `max_bytes + 1` bytes internally; return at most `max_bytes` bytes in `banner`, set `bytes_read` to returned banner length, and set `truncated: true` when an extra byte proves the banner exceeded the cap.
 - Return both text and bytes only if there is an established stdlib convention for byte arrays; otherwise use lossy string plus `bytes_read` and document it.
 - Apply the same private-target policy as `tcp_connect()`.
+
+Failure result shape:
+
+- Expected TCP/banner probe failures return `Ok(map { "connected": false, "banner": "", "bytes_read": 0, "reason": <string>, "reason_code": <code> })` rather than throwing.
+- If the TCP connection succeeds but no banner arrives before the total deadline, return `Ok(map { "connected": true, "banner": "", "bytes_read": 0, "truncated": false, "reason": "timeout", "reason_code": "timeout" })`.
+- Invalid input, unsupported options, DNS/system resolver failure, and policy-denied targets return `Err(String)`, matching `tcp_connect()`/`port_scan()` behavior.
 
 Do not add generic `tcp_exchange(send, read)` unless a real app needs it. That becomes a mini socket API, and then the walls start whispering about protocols.
 
@@ -405,10 +458,11 @@ Potential added fields:
 ```ntnt
 net_capabilities()
 // map {
-//   "icmp": map { "supported": true, "requires_raw_socket": false },
-//   "traceroute": map { "icmp": true, "udp": true, "tcp": true },
-//   "interfaces": map { "supported": true },
-//   "dns_custom_resolver": map { "supported": true },
+//   "ping": true,                 // preserve v0.4.11 booleans
+//   "traceroute": true,
+//   "icmpv4_raw": true,
+//   "interfaces_supported": true,  // additive v0.4.12 fields
+//   "dns_custom_resolver": true,
 //   "platform": "linux"
 // }
 ```
@@ -417,6 +471,8 @@ Rules:
 
 - Do not perform outbound probes.
 - Do not require elevated privileges just to ask capabilities.
+- Preserve existing v0.4.11 boolean fields such as `ping`, `traceroute`, `icmpv4_raw`, and `tcp`; do not replace them with nested maps in v0.4.12. Add new capability fields as additive booleans or clearly named maps only when no old field exists.
+- Normalize `platform` to one of `"linux"`, `"macos"`, `"windows"`, or `"other"`.
 - If a future helper is platform-specific, capabilities must expose that clearly.
 
 Priority: low-to-medium; bundle with whichever PR adds a feature that benefits from capability reporting.
@@ -441,6 +497,7 @@ Scope:
   - no resolved addresses
   - policy denial
   - port scan closed/timeout result
+  - representative `reason_code` values alongside the existing human-readable `reason` strings
 - Update `// @ntnt` docs and regenerate generated docs if visible result fields change.
 
 Files likely touched:
@@ -470,9 +527,9 @@ cargo test
 Scope:
 
 - Add `local_interfaces(opts?)`.
-- Optionally add `local_addr_for(target, opts?)` if the UDP socket trick is clean and testable.
-- Defer `default_route()` unless the cross-platform implementation is simple.
-- Add `net_capabilities().interfaces` if useful.
+- Optionally add `local_addr_for(ip, opts?)` if the UDP socket trick is clean and testable.
+- Defer `default_routes()` unless the cross-platform implementation is simple.
+- Add `net_capabilities().interfaces_supported` if useful.
 
 Files likely touched:
 
@@ -489,6 +546,8 @@ Tests:
 - Unit test result normalization from mocked interface data if possible.
 - Integration smoke test that `local_interfaces()` returns `Ok(Array)` without requiring a specific interface name.
 - Do not assert environment-specific IPs in CI.
+- If `local_addr_for(ip, opts?)` ships in this PR, test IP-literal success with a public documentation IP, hostname input returning `Err`, unknown option keys returning `Err`, and private IP literals requiring both `NTNT_NET_ALLOW_PRIVATE=1` plus `allow_private: true`.
+- Test `local_addr_for("fe80::1")` returns a clean `Err(String)` without attempting OS route selection, because zone-id support is deferred.
 
 ### PR 3: DNS resolver controls and batch lookup
 
@@ -514,7 +573,9 @@ Tests:
 - Empty record type array rejected.
 - Too many record types rejected.
 - Explicit private nameserver requires process + per-call opt-in.
+- `dns_reverse()` uses explicit nameserver controls consistently with `dns_lookup()`.
 - No-answer behavior remains `Ok([])` for single lookup and empty arrays for batch lookup.
+- `dns_lookup_many()` sets `nxdomain: true` for an NXDOMAIN response and `nxdomain: false` for a NOERROR/no-data response.
 
 ### PR 4: Address-family controls
 
@@ -523,8 +584,9 @@ Tests:
 Scope:
 
 - Add `family` and possibly `address_order` options to:
+  - `ping()`
   - `tcp_connect()`
-  - `reachable()` TCP fallback
+  - `reachable()` including both ICMP primary path and TCP fallback path
   - `port_scan()`
   - `tls_info()`
 - Consider traceroute only if it reuses the same resolver helper cleanly.
@@ -537,6 +599,7 @@ Tests:
 - Empty filtered result returns clear error.
 - Policy still checks every candidate address after filtering.
 - Resolver ordering is deterministic in tests.
+- `max_addresses` rejects values outside 1-64 and truncates the post-filter/post-order candidate list before probing.
 
 ### PR 5: TLS check convenience or TCP banner read
 
@@ -552,6 +615,16 @@ Recommendation:
 - Prefer TLS check if the target use case is certificate monitoring.
 - Prefer TCP banner only if there is a real app wanting SMTP/SSH/FTP/etc. banner checks.
 - Do not add generic TCP send/receive in v0.4.12.
+
+Tests:
+
+- For TLS policy options, test a reachable certificate that fails policy returns `Ok` with `policy_ok: false` and `policy_errors`, not `Err`.
+- Test `policy_ok` / `policy_errors` are absent when no TLS policy options are passed, and present when `require_valid` or `min_days_left` is passed.
+- Test `expires_soon` is absent when `min_days_left` is not passed, and present when it is passed.
+- Test `expires_soon: true` also sets `policy_ok: false` and adds a policy error.
+- If `tcp_banner()` ships, test `max_bytes` rejects values outside 1-4096 and enforces returned banner truncation at the cap.
+- Test `tcp_banner()` connection-refused results use the specified `connected: false` shape without a `truncated` field, and connected-but-no-banner timeout results use the specified `connected: true` shape with `truncated: false`.
+- Test `tcp_banner()` inherits address-family controls and private-target policy from `tcp_connect()`.
 
 ### PR 6: v0.4.12 docs and examples
 
@@ -588,7 +661,7 @@ If we want a tight release, ship only:
 Defer:
 
 - `dns_lookup_many()` if DNS extraction gets too big.
-- `default_route()` if cross-platform behavior is ugly.
+- `default_routes()` if cross-platform behavior is ugly.
 - `local_addr_for()` if policy semantics become confusing.
 - `tls_check()` unless certificate monitoring needs it immediately.
 - `tcp_banner()` unless a real app needs service banners.
