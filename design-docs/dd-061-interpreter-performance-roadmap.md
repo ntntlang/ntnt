@@ -1,6 +1,6 @@
 # DD-061: Interpreter Performance Roadmap for ntnt
 
-## Status: in_review / needs current-baseline refresh
+## Status: in_review
 
 **Updated:** 2026-06-20
 **Target baseline:** v0.4.11
