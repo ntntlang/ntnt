@@ -4,7 +4,7 @@
 
 **Updated:** 2026-06-20
 **Target baseline:** v0.4.11
-**Theme:** measurable performance wins for current ntnt apps before bytecode/JIT work
+**Theme:** lock template semantics first, then ship measured performance wins for current ntnt apps before bytecode/JIT work
 
 ---
 
@@ -21,7 +21,9 @@ For the current body of ntnt use cases, the hottest practical workloads are not 
 - single-query and moderate multi-query PostgreSQL handlers
 - file-routed apps with route/module/template discovery in dev and stable worker execution in production
 
-The current DD named the right broad categories, but it was too “interpreter theory” shaped and not specific enough about the PRs that would materially improve the apps we actually run. This refresh turns DD-061 into a shippable sequence.
+The first tempting optimization target is `template(path, data)`, because it currently re-reads and re-parses stable external templates on the ergonomic path every app uses. Before optimizing that path, we should lock the template contract: syntax, escaping, partial resolution, error behavior, and docs. Performance work should not fossilize stale docs or accidental semantics.
+
+This refresh turns DD-061 into a shippable sequence: first a template-system contract cleanup that preserves existing apps, then benchmark harness, then automatic `template()` caching and the remaining measured interpreter fast paths.
 
 ---
 
@@ -41,11 +43,35 @@ These are based on v0.4.11 source inspection and current app usage patterns.
 6. lexing and parsing it into an expression
 7. evaluating the template expression in a fresh data scope
 
-`compile(path)` / `render(compiled, data)` exists, but normal apps use `template(path, data)` directly. That means the user-facing ergonomic path is still the expensive path.
+`compile(path)` / `render(compiled, data)` exists, but normal apps use `template(path, data)` directly. Current local app/repo inspection found more than 100 `template(...)` calls and no meaningful current use of manual `compile()` / `render()` in the apps that matter. That means the user-facing ergonomic path is still the expensive path.
 
-**Performance implication:** Larri Dashboard-style pages that render layout + partials + detail views re-read and reparse stable templates repeatedly. This is likely the cleanest near-term win.
+**Performance implication:** Larri Dashboard-style pages that render layout + partials + detail views re-read and reparse stable templates repeatedly. This is likely the cleanest near-term win once the template contract is clarified.
 
-### 2. Environment lookup is still recursive string-keyed HashMap lookup with cloning
+### 2. The template syntax is mostly right, but docs and behavior need a contract pass
+
+The current explicit template syntax is a good fit for ntnt:
+
+- `{{expr}}` for escaped output
+- `{{{expr}}}` for raw output
+- `{{#if cond}}...{{#elif cond2}}...{{#else}}...{{/if}}`
+- `{{#for item in items}}...{{#empty}}...{{/for}}`
+- `{{> partial}}` and `{{> partial data_expr}}`
+- filters such as `{{title | default("Untitled")}}`
+
+The important design choice is to keep explicit `#if` and `#for` instead of adopting ambiguous Mustache sections like `{{#items}}...{{/items}}`. `{{#items}}` changes meaning by runtime type in Mustache-style engines; `{{#for item in items}}` and `{{#if items}}` are more predictable and more consistent with ntnt.
+
+However, current docs and implementation are not perfectly aligned:
+
+- `docs/STDLIB_REFERENCE.md` claims `{{#key}}...{{/key}}` sections, but implementation does not support that form.
+- docs claim no literal `{{` escape, but the lexer supports `\{{` and `\}}` in template strings.
+- inline triple-quoted template strings support both `{{expr}}` and `#{expr}`; external `.html` templates should document `{{expr}}` as canonical.
+- partial lookup is useful but under-specified in docs.
+- `{{#if}}` / `{{#elif}}` condition errors do not flow through the same strict/warn/forgiving template error helper as interpolation and loop errors.
+- filters support both parenthesized and space-separated arguments; the docs should choose a canonical style while preserving compatibility.
+
+**Performance implication:** automatic template AST caching needs stable semantics and dependency/invalidation rules, especially around partials. The first PR should fix the contract without breaking existing apps.
+
+### 3. Environment lookup is still recursive string-keyed HashMap lookup with cloning
 
 `Environment` is currently:
 
@@ -62,7 +88,7 @@ These are based on v0.4.11 source inspection and current app usage patterns.
 
 **Performance implication:** template loops, helper-heavy admin pages, and route functions with repeated globals/prelude/native calls all pay lookup overhead.
 
-### 3. Function-call dispatch contains many string-special cases in the generic call path
+### 4. Function-call dispatch contains many string-special cases in the generic call path
 
 `Expression::Call` currently checks identifiers for `old`, server actions, `template`, `compile`, `render`, path-relative `std/fs` functions, `filter`, `transform`, `sort`, and more before falling through to ordinary function evaluation.
 
@@ -70,11 +96,11 @@ That is maintainable today, but as a performance path it means every ordinary ca
 
 **Performance implication:** hot template filters, helper functions, and stdlib calls pay generic dispatch cost even when the parser/runtime can recognize common direct-call shapes.
 
-### 4. Route patterns are already compiled; avoid re-solving a solved problem
+### 5. Route patterns are already compiled; avoid re-solving a solved problem
 
 `src/stdlib/http_server.rs` already stores parsed route segments in `Route`. DD-061 should not prioritize “route matcher compilation” as the first win unless profiling proves it. The better route-layer target is request/response map construction and avoidable cloning, not route pattern parsing.
 
-### 5. Template caching is partially present but not the cache current apps need
+### 6. Template caching is partially present but not the cache current apps need
 
 `src/stdlib/template.rs` has a global compiled-template cache keyed by explicit template ids from `compile(path)`. It checks mtime when a compiled template is retrieved.
 
@@ -85,24 +111,117 @@ That is not the same as an automatic path-keyed cache for ordinary `template(pat
 
 ---
 
+## Template System Recommendation
+
+The template language should be tightened, not redesigned.
+
+### Keep as canonical
+
+```html
+{{expr}}                              <!-- escaped output -->
+{{{expr}}}                            <!-- raw/pre-rendered HTML output -->
+{{#if user_is_admin}}...{{/if}}
+{{#if status == "draft"}}...{{#elif status == "live"}}...{{#else}}...{{/if}}
+{{#for row in rows}}...{{#empty}}...{{/for}}
+{{> nav}}
+{{> card item}}
+{{title | default("Untitled")}}
+```
+
+### Preserve as compatibility behavior
+
+- `{{expr | default "Untitled"}}` space-separated filter arguments should continue to work, but parenthesized filter args should be documented as canonical.
+- `#{expr}` inside inline triple-quoted ntnt template strings should continue to work for normal-string interpolation consistency, but external `.html` templates should use `{{expr}}`.
+- Missing template variables should continue to render as empty strings for optional layout slots and partial data.
+- `{{{expr}}}` and `{{expr | safe}}` / `{{expr | raw}}` should remain explicit raw-output escape hatches.
+
+### Do not add now
+
+- Do not add Mustache-style ambiguous sections such as `{{#items}}...{{/items}}`.
+- Do not replace `template(path, data)` with mandatory manual `compile()` / `render()` calls.
+- Do not introduce a full component/layout/slot system before the current performance work.
+- Do not require typed `SafeHtml` before caching; that can be a separate future safety design.
+
+---
+
 ## Design Principles
 
-1. **Measure before and after every PR.** No “feels faster” commits.
-2. **Optimize current apps first.** Dashboard/article/template/database workloads beat synthetic arithmetic loops.
-3. **Preserve debuggability.** Tree-walking remains fine; bytecode comes later only with evidence.
-4. **Prefer localized fast paths.** Template AST caching and direct native-call dispatch are lower risk than rewriting `Value` or the environment model immediately.
-5. **Keep development invalidation correct.** Any cache must be boringly obvious in dev mode and stable in worker/prod mode.
-6. **Do not fossilize bad semantics for speed.** Correctness, diagnostics, and current language behavior stay primary.
+1. **Clarify semantics before optimizing them.** Template caching should preserve the template language we want, not stale docs or accidental behavior.
+2. **Measure before and after every performance PR.** No “feels faster” commits.
+3. **Optimize current apps first.** Dashboard/article/template/database workloads beat synthetic arithmetic loops.
+4. **Preserve debuggability.** Tree-walking remains fine; bytecode comes later only with evidence.
+5. **Prefer localized fast paths.** Template AST caching and direct native-call dispatch are lower risk than rewriting `Value` or the environment model immediately.
+6. **Keep development invalidation correct.** Any cache must be boringly obvious in dev mode and stable in worker/prod mode.
+7. **Do not fossilize bad semantics for speed.** Correctness, diagnostics, and current language behavior stay primary.
 
 ---
 
 ## Proposed PR Sequence
 
-### PR 1: Benchmark harness and current-use-case baseline
+### PR 1: Template system contract cleanup before caching
+
+**Goal:** make the existing template system consistent, documented, and predictable before optimizing `template()`.
+
+This should be a docs/tests/runtime-semantics cleanup PR, not a syntax redesign. It should preserve existing apps and explicitly bless the current good shape: `template(path, data)`, escaped-by-default `{{expr}}`, explicit `#if` / `#for`, partials, and raw output as an opt-in.
+
+Scope:
+
+- [ ] Update the canonical template docs/spec so implementation and docs agree:
+  - [ ] `{{expr}}` is escaped output.
+  - [ ] `{{{expr}}}` is raw/unescaped output.
+  - [ ] `{{#if cond}}`, `{{#elif cond}}`, `{{#else}}`, `{{/if}}` are explicit conditional forms.
+  - [ ] `{{#for item in items}}`, `{{#empty}}`, `{{/for}}` are explicit loop forms.
+  - [ ] `{{> partial}}` and `{{> partial data_expr}}` are partial forms.
+  - [ ] filters use parenthesized args as canonical, with space-separated args preserved as compatibility sugar.
+  - [ ] `\{{` and `\}}` produce literal braces where supported.
+- [ ] Remove or correct doc claims that Mustache `{{#key}}...{{/key}}` sections are supported.
+- [ ] Explicitly document that ambiguous Mustache sections are a non-goal for now; use `#if` or `#for` instead.
+- [ ] Document external `.html` templates as `{{expr}}`-first; keep `#{expr}` documented only for inline triple-quoted ntnt strings.
+- [ ] Document partial lookup order exactly as implemented, or adjust implementation/tests to match the chosen lookup order.
+- [ ] Normalize template error handling so interpolation, filters, loops, and `#if` / `#elif` conditions consistently honor strict/warn/forgiving mode.
+- [ ] Add regression tests for the chosen contract without changing existing app-visible syntax.
+
+Likely files:
+
+- `src/interpreter.rs` template error handling for `#if` / `#elif`
+- `src/lexer.rs` only if docs reveal a small escaping/diagnostic mismatch
+- `docs/syntax.toml`
+- `src/interpreter.rs` `// @ntnt template` doc block
+- generated docs from `./target/dev-release/ntnt docs --generate`
+- `tests/language_features_tests.rs` or a focused template test file
+- `docs/AI_AGENT_GUIDE.md` if the template guidance lives there too
+
+Non-goals:
+
+- no broad template syntax redesign
+- no Mustache `{{#key}}...{{/key}}` sections
+- no automatic template cache yet
+- no breaking changes to existing apps
+- no SafeHtml type system work
+
+Verification:
+
+```bash
+cargo fmt
+cargo build --profile dev-release
+cargo test --test language_features_tests template
+./target/dev-release/ntnt docs --generate
+git diff --check
+```
+
+Acceptance criteria:
+
+- [ ] Existing app template syntax remains valid.
+- [ ] Docs no longer claim unsupported Mustache section behavior.
+- [ ] Partial lookup rules are precise enough for cache dependency tracking.
+- [ ] Template condition errors follow the same TypeMode policy as other template errors.
+- [ ] The follow-up cache PR has a stable semantic contract to preserve.
+
+### PR 2: Benchmark harness and current-use-case baseline
 
 **Goal:** create a repeatable benchmark suite before touching performance-sensitive code.
 
-This should be a small PR that adds scripts/examples only. It should establish baseline numbers for v0.4.11 and make future performance PRs honest.
+This should be a small PR that adds scripts/examples only. It should establish baseline numbers for v0.4.11+ and make future performance PRs honest.
 
 Scope:
 
@@ -125,7 +244,7 @@ Likely files:
 - `scripts/bench/run-benchmarks.py` or `scripts/bench/run-benchmarks.sh`
 - `examples/perf/*.tnt`
 - `examples/perf/views/*.html`
-- `docs/AI_AGENT_GUIDE.md` or `design-docs/dd-061-interpreter-performance-roadmap.md` for benchmark instructions
+- `docs/AI_AGENT_GUIDE.md` or this DD for benchmark instructions
 
 Verification:
 
@@ -140,7 +259,7 @@ Acceptance criteria:
 - [ ] The suite includes at least one template-heavy route and one interpreter-only route.
 - [ ] DB benchmarks are skipped unless env config is present.
 
-### PR 2: Automatic path-keyed template AST cache for `template()`
+### PR 3: Automatic path-keyed template AST cache for `template()`
 
 **Goal:** make the normal ergonomic template path fast without requiring apps to manually call `compile()`.
 
@@ -150,6 +269,7 @@ Scope:
 
 - [ ] Add a path-keyed template cache for `template(path, data)`.
 - [ ] Cache parsed template expression / `TemplatePart` AST, not only raw file contents.
+- [ ] Include partial dependency invalidation based on the PR 1 partial lookup contract.
 - [ ] In production/worker mode, avoid per-request `metadata()` checks when hot reload is disabled.
 - [ ] In development/hot-reload mode, invalidate by mtime and reload safely.
 - [ ] Preserve `compile()` / `render()` compatibility.
@@ -176,8 +296,9 @@ Acceptance criteria:
 - [ ] Template-heavy benchmark improves meaningfully.
 - [ ] Dev edits still show up without restarting when hot reload is enabled.
 - [ ] Worker/prod mode does not stat stable templates on every render.
+- [ ] Partial edits invalidate the parent render path correctly.
 
-### PR 3: Template render scope and loop fast-path cleanup
+### PR 4: Template render scope and loop fast-path cleanup
 
 **Goal:** reduce per-render and per-loop environment churn in templates.
 
@@ -203,7 +324,7 @@ Acceptance criteria:
 - [ ] Missing variables still render as empty where current template semantics require it.
 - [ ] Nested template loops and parent-scope references remain correct.
 
-### PR 4: Direct native/global call fast path
+### PR 5: Direct native/global call fast path
 
 **Goal:** make common function calls cheaper without changing language semantics.
 
@@ -229,7 +350,7 @@ Acceptance criteria:
 - [ ] Simple native-call benchmark improves.
 - [ ] Call dispatch code reads cleaner after the change, not more haunted.
 
-### PR 5: Environment lookup measurement + low-risk lookup cache
+### PR 6: Environment lookup measurement + low-risk lookup cache
 
 **Goal:** reduce repeated recursive name lookup where semantics are stable.
 
@@ -260,7 +381,7 @@ Acceptance criteria:
 - [ ] Shadowing and mutation semantics remain unchanged.
 - [ ] The implementation is easy to remove if the benchmark delta is weak.
 
-### PR 6: Request/response allocation cleanup
+### PR 7: Request/response allocation cleanup
 
 **Goal:** reduce cloning/allocation in current HTTP request paths after template/call lookup wins are measured.
 
@@ -284,9 +405,9 @@ Acceptance criteria:
 - [ ] Multipart/body byte tests remain green.
 - [ ] Request maps keep the same user-visible fields.
 
-### PR 7: Decide whether deeper interpreter work is justified
+### PR 8: Decide whether deeper interpreter work is justified
 
-Only after PRs 1-6 have benchmark data should we choose one of:
+Only after PRs 1-7 have benchmark data should we choose one of:
 
 - symbol interning / binder metadata for locals
 - slot-based local frames
@@ -297,7 +418,7 @@ This should be a DD update or spike PR, not an automatic implementation.
 
 Acceptance criteria:
 
-- [ ] DD-061 includes measured deltas from PRs 2-6.
+- [ ] DD-061 includes measured deltas from PRs 3-7.
 - [ ] The next deeper design is justified by remaining measured bottlenecks.
 - [ ] We explicitly choose whether to keep optimizing the tree walker or start a bytecode/lowered-IR DD.
 
@@ -307,6 +428,7 @@ Acceptance criteria:
 
 | Priority | Work | Why |
 |---|---|---|
+| P0 | Template contract cleanup | Locks the semantics/docs before caching them; preserves existing apps while removing ambiguity. |
 | P0 | Benchmark harness | Without this, every performance PR is vibes wearing a stopwatch costume. |
 | P1 | Automatic `template()` AST cache | Directly targets dashboard/article/server-rendered apps and the current ergonomic path. |
 | P1 | Template render scope/loop cleanup | Current apps render lists, dashboards, docs, and article grids heavily. |
@@ -319,10 +441,10 @@ Acceptance criteria:
 
 ## Measurement Plan
 
-Every implementation PR should include a small benchmark table in the PR body:
+PR 1 is semantic/docs cleanup and should be verified by tests/docs drift checks, not throughput benchmarks. Every implementation performance PR after the benchmark harness should include a small benchmark table in the PR body:
 
 ```text
-Benchmark                         main/v0.4.11      branch        delta
+Benchmark                         main/v0.4.11+     branch        delta
 plaintext route                   ...               ...           ...
 small JSON route                  ...               ...           ...
 route param + map read            ...               ...           ...
@@ -352,6 +474,8 @@ Recommended local toolchain:
 - No JIT.
 - No bytecode VM in the first implementation PRs.
 - No breaking changes to map, field, template, import, or shadowing semantics.
+- No broad template language redesign before caching.
+- No ambiguous Mustache `{{#key}}...{{/key}}` sections in the cleanup PR.
 - No “optimize by disabling diagnostics” trickery.
 - No broad rewrite of `Value` or `Environment` without benchmark evidence.
 - No production-only behavior that makes development impossible to reason about.
@@ -362,23 +486,26 @@ Recommended local toolchain:
 
 | Risk | Mitigation |
 |---|---|
+| We optimize stale or accidental template semantics | PR 1 locks docs/tests/error behavior before caching. |
 | Caching returns stale templates | Separate dev/prod invalidation rules; add mtime/hot-reload tests. |
+| Partial edits fail to invalidate cached parents | PR 1 defines partial lookup; PR 3 tracks dependencies or invalidates conservatively. |
 | Fast paths break shadowing/import semantics | Add focused tests for shadowing, imports, libs, route modules, and user-defined helpers. |
 | Benchmarks become flaky/noisy | Use quick local benchmarks for direction and compare medians; keep DB benchmarks opt-in. |
 | Performance work bloats interpreter complexity | Require simplification pass and readable helper extraction in every PR. |
 | We optimize the wrong workload | Benchmark Larri Dashboard/article/template-shaped routes, not just arithmetic loops. |
-| Bytecode temptation derails smaller wins | Explicitly defer bytecode until after measured PRs 2-6. |
+| Bytecode temptation derails smaller wins | Explicitly defer bytecode until after measured PRs 3-7. |
 
 ---
 
 ## Updated Definition of Done
 
-- [ ] PR 1 adds a repeatable benchmark harness and baseline results.
-- [ ] PR 2 makes ordinary `template(path, data)` use a safe automatic AST/cache path.
-- [ ] PR 3 reduces template render/loop scope overhead without semantic drift.
-- [ ] PR 4 adds a safe direct native/global call fast path, or documents why profiling does not justify it.
-- [ ] PR 5 adds lookup instrumentation/cache only if measurements justify it.
-- [ ] PR 6 cleans request/response allocation only if profiles show meaningful headroom.
+- [ ] PR 1 clarifies and tests the template contract without breaking existing apps.
+- [ ] PR 2 adds a repeatable benchmark harness and baseline results.
+- [ ] PR 3 makes ordinary `template(path, data)` use a safe automatic AST/cache path.
+- [ ] PR 4 reduces template render/loop scope overhead without semantic drift.
+- [ ] PR 5 adds a safe direct native/global call fast path, or documents why profiling does not justify it.
+- [ ] PR 6 adds lookup instrumentation/cache only if measurements justify it.
+- [ ] PR 7 cleans request/response allocation only if profiles show meaningful headroom.
 - [ ] DD-061 is updated after each merged PR with measured deltas and completed checkboxes.
 - [ ] A final follow-up decision chooses whether deeper symbol/binder/slot/bytecode work is worth a separate DD.
 
@@ -386,9 +513,11 @@ Recommended local toolchain:
 
 ## Current Recommendation
 
-Start with **PR 1: benchmark harness** immediately, then **PR 2: automatic `template()` AST cache**.
+Start with **PR 1: template system contract cleanup**. It is the right first PR because it is low-risk, preserves existing app syntax, and makes the subsequent cache work target a clear, consistent template language.
 
-The template cache is the best first implementation target because it is:
+After PR 1 is merged, proceed with **PR 2: benchmark harness**, then **PR 3: automatic `template()` AST cache**.
+
+The template cache remains the best first implementation performance target because it is:
 
 - directly relevant to current server-rendered apps
 - visible in source as repeated work on the normal ergonomic API

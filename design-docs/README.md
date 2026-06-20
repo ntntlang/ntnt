@@ -18,7 +18,7 @@ This folder contains planning and design documents for NTNT features.
 | [dd-047-std-netmon.md](dd-047-std-netmon.md) | 📋 Draft | `std/netmon` private-library candidate for SNMP/device telemetry, interface counters, topology hints, composite checks, and alert-state helpers |
 | [dd-059-auth-crypto-boundary.md](dd-059-auth-crypto-boundary.md) | ✅ Complete | `std/auth` / `std/crypto` helper boundary in the v0.4.9 auth baseline |
 | [dd-060-ai-native-developer-experience.md](dd-060-ai-native-developer-experience.md) | 📋 Draft | AI-native developer experience roadmap |
-| [dd-061-interpreter-performance-roadmap.md](dd-061-interpreter-performance-roadmap.md) | 🔶 In Review | Current-use-case performance roadmap: benchmark harness, automatic template cache, template loop/scope cleanup, call/lookup fast paths |
+| [dd-061-interpreter-performance-roadmap.md](dd-061-interpreter-performance-roadmap.md) | 🔶 In Review | Current-use-case performance roadmap: template contract cleanup, benchmark harness, automatic template cache, template loop/scope cleanup, call/lookup fast paths |
 | [dd-062-secure-compiled-extension-libraries.md](dd-062-secure-compiled-extension-libraries.md) | 📋 Draft | Secure compiled extension libraries: stdlib-grade Rust modules, signed module universes, build provenance, and app-enforced trust requirements |
 | [language_comparison.md](language_comparison.md) | ✅ Complete | NTNT vs other languages |
 | [INTENT_DRIVEN_DEVELOPMENT.md](INTENT_DRIVEN_DEVELOPMENT.md) | ✅ Complete | IDD philosophy and workflow |
