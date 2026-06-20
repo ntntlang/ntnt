@@ -1,0 +1,13 @@
+// Interpreter-only benchmark fixture for DD-061.
+// Run with: ./target/dev-release/ntnt run examples/perf/compute_cli.tnt
+
+fn compute(iterations: Int) -> Int {
+    let mut total = 0
+    for i in 0..iterations {
+        total = total + ((i * 3) % 17)
+    }
+    return total
+}
+
+let result = compute(200000)
+print("compute=" + str(result))
