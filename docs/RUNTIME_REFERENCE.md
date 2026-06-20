@@ -23,11 +23,12 @@ Environment variables that control NTNT runtime behavior
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `NTNT_ALLOW_PRIVATE_IPS` | `true` | unset (disabled — private IPs blocked) | Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x). Required for Docker inter-container communication (e.g., calling a sidecar at 172.19.0.1). Disabled by default to prevent SSRF attacks. |
+| `NTNT_ALLOW_PRIVATE_IPS` | `true` | unset (disabled — private IPs blocked) | Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x). Required for Docker inter-container communication (e.g., calling a sidecar at 172.19.0.1). Disabled by default to prevent SSRF attacks. This does not enable `std/net` probes; use `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true` for those. |
 | `NTNT_DB_POOL_SIZE` | `any positive integer` | 5 | Maximum number of connections per database pool. Each worker creates its own pools, so total connections = num_workers × num_databases × pool_size. For multi-worker production deployments with multiple databases, keep this low (2-5) to avoid exhausting PostgreSQL max_connections. |
 | `NTNT_ENV` | `development`, `production`, `prod` | development (when unset) | Controls runtime mode. Production mode disables hot-reload for better performance. |
 | `NTNT_LINT_MODE` | `default`, `warn`, `strict` | default | Controls lint strictness for type annotations. `default`: only check annotated code. `warn`: also warn about missing annotations (non-fatal). `strict`: missing annotations are errors. CLI flags (`--strict`, `--warn-untyped`) override this. |
 | `NTNT_MAX_RECURSION` | integer | 256 | Maximum recursion depth for function calls. Prevents stack overflow from runaway recursion. |
+| `NTNT_NET_ALLOW_PRIVATE` | `1`, `true`, `yes` | unset (disabled — private targets blocked) | Process-level opt-in for `std/net` probes (`ping`, `tcp_connect`, `reachable`, `port_scan`, `tls_info`, `traceroute`) against private/internal targets. Each call must also pass `allow_private: true`. Special-purpose targets such as cloud metadata, multicast, broadcast, unspecified, and documentation ranges remain blocked. This is separate from `NTNT_ALLOW_PRIVATE_IPS`, which only applies to `fetch()`. |
 | `NTNT_STRICT` | `1`, `true` | unset (disabled) | **Deprecated — use `NTNT_LINT_MODE=strict` instead.** Enable strict type checking. Still works but emits a deprecation warning. |
 | `NTNT_TIMEOUT` | integer (seconds) | 30 | Request timeout for HTTP server in seconds. |
 | `NTNT_TYPE_MODE` | `strict`, `warn`, `forgiving` | warn | Controls runtime behavior for type mismatches. `strict`: type mismatches crash (fail-closed, recommended for auth/payments). `warn`: log `[WARN]` and continue (default). `forgiving`: silent degradation (pre-v0.4 behavior). See [Type Safety Modes](#type-safety-modes). |
@@ -49,6 +50,9 @@ NTNT_LINT_MODE=strict ntnt lint server.tnt
 
 # Maximum recursion depth for function calls
 NTNT_MAX_RECURSION=512 ntnt run server.tnt
+
+# Process-level opt-in for `std/net` probes (`ping`, `tcp_connect`, `reachable`, `port_scan`, `tls_info`, `traceroute`) against private/internal targets
+NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
 
 # **Deprecated — use `NTNT_LINT_MODE=strict` instead.** Enable strict type checking
 NTNT_STRICT=1 ntnt run server.tnt

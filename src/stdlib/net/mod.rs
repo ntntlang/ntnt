@@ -1,6 +1,7 @@
 //! std/net module - IPAM-grade IP/CIDR helpers and reachability probes.
 
 mod icmp;
+mod policy;
 mod probe;
 mod traceroute;
 mod transport;
@@ -12,6 +13,7 @@ use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::error::{ResolveError, ResolveErrorKind};
 use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::Resolver;
+use policy::{classify_ip, enforce_resolved_target_policy};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
 use rustls::{
@@ -20,6 +22,7 @@ use rustls::{
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -470,7 +473,7 @@ pub fn init() -> HashMap<String, Value> {
     // by default. Caller-provided tcp_ports add extra explicit TCP ports.
     // The result records the method that established reachability without pretending TCP is ping.
     // @param host Hostname or IP address to resolve and probe
-    // @param opts Optional map with extra tcp_ports, timeout_ms, count, interval_ms, and allow_private
+    // @param opts Optional map with extra tcp_ports, timeout_ms (per TCP port across resolved addresses), count, interval_ms, and allow_private
     // @returns Result containing reachability status, method used, fallback metadata, and attempt summary
     // @since v0.4.10
     // @tags #network
@@ -493,7 +496,7 @@ pub fn init() -> HashMap<String, Value> {
     // are accepted; ranges are intentionally not expanded. Results are sorted by port.
     // @param host Hostname or IP address to resolve and scan
     // @param ports Explicit array of TCP ports from 1 to 65535; duplicates are rejected
-    // @param opts Optional map with timeout_ms, concurrency, and allow_private
+    // @param opts Optional map with timeout_ms (per port across resolved addresses), concurrency, and allow_private
     // @returns Result containing one map per port with open, latency_ms, and reason fields
     // @since v0.4.10
     // @tags #network
@@ -1523,6 +1526,12 @@ struct TcpProbeResult {
     reason: String,
 }
 
+#[derive(Debug)]
+struct TcpConnectInfo {
+    remote_addr: Option<String>,
+    local_addr: Option<String>,
+}
+
 fn tcp_reachability_attempts_for_host(
     host: &str,
     ports: &[u16],
@@ -1598,10 +1607,16 @@ fn scan_port_targets(port: u16, targets: Vec<SocketAddr>, timeout: Duration) -> 
         };
     }
 
+    let deadline = Instant::now() + timeout;
     let mut last_reason = "unreachable".to_string();
     for addr in targets {
         let start = Instant::now();
-        match TcpStream::connect_timeout(&addr, timeout) {
+        let Some(remaining) = deadline.checked_duration_since(start) else {
+            last_reason = "timeout".to_string();
+            break;
+        };
+
+        match TcpStream::connect_timeout(&addr, remaining) {
             Ok(stream) => {
                 let remote_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
                 let local_addr = stream.local_addr().ok().map(|addr| addr.to_string());
@@ -1616,7 +1631,7 @@ fn scan_port_targets(port: u16, targets: Vec<SocketAddr>, timeout: Duration) -> 
                 };
             }
             Err(e) => {
-                last_reason = e.kind().to_string();
+                last_reason = tcp_probe_error_reason(e.kind());
             }
         }
     }
@@ -1628,6 +1643,13 @@ fn scan_port_targets(port: u16, targets: Vec<SocketAddr>, timeout: Duration) -> 
         remote_addr: None,
         local_addr: None,
         reason: last_reason,
+    }
+}
+
+fn tcp_probe_error_reason(kind: io::ErrorKind) -> String {
+    match kind {
+        io::ErrorKind::TimedOut => "timeout".to_string(),
+        _ => kind.to_string(),
     }
 }
 
@@ -1648,6 +1670,25 @@ fn tcp_reachability_attempts(
 }
 
 fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> TcpProbeResult {
+    tcp_reachability_once_with(targets, timeout, |addr, remaining| {
+        let stream = TcpStream::connect_timeout(addr, remaining)?;
+        let info = TcpConnectInfo {
+            remote_addr: stream.peer_addr().ok().map(|addr| addr.to_string()),
+            local_addr: stream.local_addr().ok().map(|addr| addr.to_string()),
+        };
+        drop(stream);
+        Ok(info)
+    })
+}
+
+fn tcp_reachability_once_with<F>(
+    targets: &[(u16, SocketAddr)],
+    timeout: Duration,
+    mut connect: F,
+) -> TcpProbeResult
+where
+    F: FnMut(&SocketAddr, Duration) -> io::Result<TcpConnectInfo>,
+{
     if targets.is_empty() {
         return TcpProbeResult {
             reachable: false,
@@ -1659,25 +1700,43 @@ fn tcp_reachability_once(targets: &[(u16, SocketAddr)], timeout: Duration) -> Tc
         };
     }
 
-    let mut last_reason = "unreachable".to_string();
+    let mut port_order = Vec::new();
+    let mut targets_by_port: HashMap<u16, Vec<SocketAddr>> = HashMap::new();
     for (port, addr) in targets {
-        let start = Instant::now();
-        match TcpStream::connect_timeout(addr, timeout) {
-            Ok(stream) => {
-                let remote_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
-                let local_addr = stream.local_addr().ok().map(|addr| addr.to_string());
-                drop(stream);
-                return TcpProbeResult {
-                    reachable: true,
-                    connected_port: Some(*port),
-                    latency_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
-                    remote_addr,
-                    local_addr,
-                    reason: "connected".to_string(),
-                };
-            }
-            Err(e) => {
-                last_reason = e.kind().to_string();
+        if !targets_by_port.contains_key(port) {
+            port_order.push(*port);
+        }
+        targets_by_port.entry(*port).or_default().push(*addr);
+    }
+
+    let mut last_reason = "unreachable".to_string();
+    for port in port_order {
+        let addrs = targets_by_port
+            .remove(&port)
+            .expect("port_order is populated from targets_by_port; entry must exist");
+        let deadline = Instant::now() + timeout;
+        for addr in addrs {
+            let start = Instant::now();
+            let Some(remaining) = deadline.checked_duration_since(start) else {
+                last_reason = "timeout".to_string();
+                break;
+            };
+
+            match connect(&addr, remaining) {
+                Ok(info) => {
+                    let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    return TcpProbeResult {
+                        reachable: true,
+                        connected_port: Some(port),
+                        latency_ms: Some(latency_ms),
+                        remote_addr: info.remote_addr,
+                        local_addr: info.local_addr,
+                        reason: "connected".to_string(),
+                    };
+                }
+                Err(e) => {
+                    last_reason = tcp_probe_error_reason(e.kind());
+                }
             }
         }
     }
@@ -1726,16 +1785,6 @@ fn resolve_port_scan_targets(host: &str, ports: &[u16]) -> Result<Vec<(u16, Sock
         targets.extend(ips.iter().map(|ip| (*port, SocketAddr::new(*ip, *port))));
     }
     Ok(targets)
-}
-
-fn enforce_resolved_target_policy(
-    targets: &[(u16, SocketAddr)],
-    allow_private: bool,
-) -> Result<(), String> {
-    for (_, addr) in targets {
-        enforce_target_policy(addr.ip(), allow_private)?;
-    }
-    Ok(())
 }
 
 fn tcp_reachability_result_map(
@@ -2099,110 +2148,6 @@ fn add_common_classification(map: &mut HashMap<String, Value>, ip: IpAddr) {
     );
 }
 
-#[derive(Debug)]
-struct IpClassification {
-    is_private: bool,
-    is_loopback: bool,
-    is_link_local: bool,
-    is_multicast: bool,
-    is_unspecified: bool,
-    is_documentation: bool,
-    is_broadcast: bool,
-    is_metadata_endpoint: bool,
-    is_unique_local: bool,
-}
-
-fn classify_ip(ip: IpAddr) -> IpClassification {
-    match ip {
-        IpAddr::V4(ip) => IpClassification {
-            is_private: ip.is_private(),
-            is_loopback: ip.is_loopback(),
-            is_link_local: ip.is_link_local(),
-            is_multicast: ip.is_multicast(),
-            is_unspecified: ip.is_unspecified(),
-            is_documentation: is_ipv4_documentation(ip),
-            is_broadcast: ip.is_broadcast(),
-            is_metadata_endpoint: is_ipv4_metadata_endpoint(ip),
-            is_unique_local: false,
-        },
-        IpAddr::V6(ip) => {
-            if let Some(mapped) = ip.to_ipv4_mapped() {
-                return classify_ip(IpAddr::V4(mapped));
-            }
-            let first_segment = ip.segments()[0];
-            let is_unique_local = (first_segment & 0xfe00) == 0xfc00;
-            let is_link_local = (first_segment & 0xffc0) == 0xfe80;
-            let is_documentation = ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8;
-            IpClassification {
-                is_private: is_unique_local,
-                is_loopback: ip.is_loopback(),
-                is_link_local,
-                is_multicast: ip.is_multicast(),
-                is_unspecified: ip.is_unspecified(),
-                is_documentation,
-                is_broadcast: false,
-                is_metadata_endpoint: is_ipv6_metadata_endpoint(ip),
-                is_unique_local,
-            }
-        }
-    }
-}
-
-fn is_ipv4_documentation(ip: Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    matches!(
-        octets,
-        [192, 0, 2, _] | [198, 51, 100, _] | [203, 0, 113, _]
-    )
-}
-
-fn is_ipv4_metadata_endpoint(ip: Ipv4Addr) -> bool {
-    matches!(ip.octets(), [169, 254, 169, 254] | [169, 254, 170, 2])
-}
-
-fn is_ipv6_metadata_endpoint(ip: Ipv6Addr) -> bool {
-    ip.segments() == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254]
-}
-
-fn enforce_target_policy(ip: IpAddr, allow_private: bool) -> Result<(), String> {
-    let classification = classify_ip(ip);
-    let never_allowed = classification.is_metadata_endpoint
-        || classification.is_unspecified
-        || classification.is_multicast
-        || classification.is_documentation
-        || classification.is_broadcast;
-    if never_allowed {
-        return Err(
-            "Network target denied by policy: special-purpose targets are not allowed".to_string(),
-        );
-    }
-
-    let private_target = classification.is_private
-        || classification.is_loopback
-        || classification.is_link_local
-        || classification.is_unique_local;
-    if !private_target {
-        return Ok(());
-    }
-    if !allow_private || !process_allows_private_targets() {
-        return Err(
-            "Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn process_allows_private_targets() -> bool {
-    matches!(
-        std::env::var("NTNT_NET_ALLOW_PRIVATE").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    ) || matches!(
-        std::env::var("NTNT_ALLOW_PRIVATE_IPS").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    )
-}
-
 fn ensure_same_family(a: &Network, b: &Network) -> Result<(), String> {
     if a.family != b.family {
         return Err("mixed IPv4/IPv6 families are not comparable".to_string());
@@ -2547,62 +2492,6 @@ mod tests {
     }
 
     #[test]
-    fn target_policy_classifies_ipv4_mapped_ipv6_by_embedded_address() {
-        let mapped_loopback = "[::ffff:127.0.0.1]:80".parse::<SocketAddr>().unwrap();
-        let mapped_metadata = "[::ffff:169.254.169.254]:80".parse::<SocketAddr>().unwrap();
-
-        assert!(enforce_resolved_target_policy(&[(80, mapped_loopback)], false).is_err());
-        assert!(enforce_resolved_target_policy(&[(80, mapped_metadata)], false).is_err());
-    }
-
-    #[test]
-    fn target_policy_rejects_special_ranges_by_default() {
-        let multicast = "224.0.0.1:80".parse::<SocketAddr>().unwrap();
-        let documentation = "192.0.2.1:80".parse::<SocketAddr>().unwrap();
-        let broadcast = "255.255.255.255:80".parse::<SocketAddr>().unwrap();
-        let mapped_broadcast = "[::ffff:255.255.255.255]:80".parse::<SocketAddr>().unwrap();
-
-        assert!(enforce_resolved_target_policy(&[(80, multicast)], false).is_err());
-        assert!(enforce_resolved_target_policy(&[(80, documentation)], false).is_err());
-        assert!(enforce_resolved_target_policy(&[(80, broadcast)], false).is_err());
-        assert!(enforce_resolved_target_policy(&[(80, mapped_broadcast)], false).is_err());
-    }
-
-    #[test]
-    fn target_policy_never_allows_metadata_or_special_ranges() {
-        let metadata = "169.254.169.254:80".parse::<SocketAddr>().unwrap();
-        let ecs_metadata = "169.254.170.2:80".parse::<SocketAddr>().unwrap();
-        let mapped_metadata = "[::ffff:169.254.169.254]:80".parse::<SocketAddr>().unwrap();
-        let mapped_ecs_metadata = "[::ffff:169.254.170.2]:80".parse::<SocketAddr>().unwrap();
-        let multicast = "224.0.0.1:80".parse::<SocketAddr>().unwrap();
-        let documentation = "192.0.2.1:80".parse::<SocketAddr>().unwrap();
-        let broadcast = "255.255.255.255:80".parse::<SocketAddr>().unwrap();
-
-        for target in [
-            metadata,
-            ecs_metadata,
-            mapped_metadata,
-            mapped_ecs_metadata,
-            multicast,
-            documentation,
-            broadcast,
-        ] {
-            let err = enforce_resolved_target_policy(&[(80, target)], true).unwrap_err();
-            assert!(err.contains("special-purpose targets are not allowed"));
-        }
-    }
-
-    #[test]
-    fn target_policy_checks_all_resolved_addresses_before_probe() {
-        let public = "93.184.216.34:443".parse::<SocketAddr>().unwrap();
-        let private = "127.0.0.1:443".parse::<SocketAddr>().unwrap();
-        let targets = [(443, public), (443, private)];
-
-        let err = enforce_resolved_target_policy(&targets, false).unwrap_err();
-        assert!(err.contains("Network target denied by policy"));
-    }
-
-    #[test]
     fn ping_tcp_method_points_to_tcp_connect() {
         let result = ping_fn(&[
             Value::String("example.com".to_string()),
@@ -2893,5 +2782,41 @@ mod tests {
         assert!(matches!(summary.get("failed"), Some(Value::Int(0))));
         assert!(matches!(summary.get("loss_percent"), Some(Value::Float(value)) if *value == 0.0));
         assert!(matches!(summary.get("attempts"), Some(Value::Array(values)) if values.len() == 3));
+    }
+
+    #[test]
+    fn tcp_reachability_attempts_later_ports_after_earlier_failures() {
+        let first_port = 80;
+        let second_port = 443;
+        let first_a = SocketAddr::from(([127, 0, 0, 1], first_port));
+        let first_b = SocketAddr::from(([127, 0, 0, 2], first_port));
+        let second = SocketAddr::from(([127, 0, 0, 1], second_port));
+        let mut tried = Vec::new();
+
+        let result = tcp_reachability_once_with(
+            &[
+                (first_port, first_a),
+                (first_port, first_b),
+                (second_port, second),
+            ],
+            Duration::from_millis(100),
+            |addr, _remaining| {
+                tried.push(*addr);
+                if addr.port() == first_port {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "simulated filtered port",
+                    ));
+                }
+                Ok(TcpConnectInfo {
+                    remote_addr: Some(addr.to_string()),
+                    local_addr: Some("127.0.0.1:50000".to_string()),
+                })
+            },
+        );
+
+        assert!(result.reachable);
+        assert_eq!(result.connected_port, Some(second_port));
+        assert_eq!(tried, vec![first_a, first_b, second]);
     }
 }

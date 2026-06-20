@@ -23,11 +23,13 @@ DD-046 gives ntnt safe network primitives. DD-047 is where those primitives beco
 DD-046 owns the low-level, generally safe primitives:
 
 - IP/CIDR/IPAM helpers
-- `ping()` with first-shot fallback behavior
+- `ping()` with protocol-honest ICMP behavior
+- `reachable()` for explicit high-level reachability fallback
 - `tcp_connect()`
 - DNS lookup/reverse lookup
 - bounded port scanning
 - TLS certificate inspection
+- one-shot traceroute (`icmp`/`udp`/`tcp`)
 
 DD-047 owns higher-level monitoring concerns:
 
@@ -468,6 +470,7 @@ Retention, rollups, dashboards, and notification delivery should live in the ref
 - DNS lookup/reverse
 - bounded port scan
 - TLS inspection
+- one-shot traceroute
 
 ### `std/netmon` / DD-047
 
@@ -492,7 +495,7 @@ Retention, rollups, dashboards, and notification delivery should live in the ref
 
 ### Future raw/network toolbox, not initial `std/netmon`
 
-- traceroute/MTR
+- MTR-style repeated traceroute statistics / hop enrichment
 - ARP scan
 - packet capture
 - bandwidth testing
