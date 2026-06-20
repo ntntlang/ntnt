@@ -2,412 +2,527 @@
 
 ## Status: in_review
 
+**Updated:** 2026-06-20
+**Target baseline:** v0.4.11
+**Theme:** lock template semantics first, then ship measured performance wins for current ntnt apps before bytecode/JIT work
+
+---
+
 ## Problem
-ntnt has already captured major server/runtime wins by moving from a single request interpreter to a worker-pool architecture and by adding async PostgreSQL pooling. Those changes delivered large benchmark gains, especially for database-heavy workloads, but they did **not** fundamentally optimize the interpreter itself.
 
-As long as ntnt remains a tree-walking Rust interpreter, performance is still constrained by interpreter-core costs such as:
-- `Value` representation overhead
-- environment / scope lookup churn
-- repeated string-based name lookup
-- generic property / method dispatch
-- repeated dynamic branching in hot AST evaluation paths
-- repeated per-render/per-call work that could be cached or specialized
+ntnt already shipped the big runtime-shell improvements: async HTTP serving, worker interpreters, production-mode hot-reload suppression, and async PostgreSQL pooling. Those wins made DB-heavy HTTP workloads much more viable, but the language still pays tree-walking interpreter costs on every request.
 
-This means that, after the server/runtime improvements from v0.4.2, the next ceiling is increasingly the interpreter core rather than the web server shell around it.
+For the current body of ntnt use cases, the hottest practical workloads are not abstract compute benchmarks. They are:
 
-The open question is not whether ntnt should become a JIT or bytecode VM immediately. The nearer-term question is which **interpreter-native** techniques are high leverage for ntnt’s current architecture, and how to adopt them without losing the language’s clarity, debuggability, and correctness posture.
+- server-rendered pages using `template("views/...")`
+- admin/dashboard pages with many helper calls and map field reads
+- article/list pages with loops, filters, Markdown/string helpers, and DB rows
+- JSON/API endpoints with route params and map indexing
+- single-query and moderate multi-query PostgreSQL handlers
+- file-routed apps with route/module/template discovery in dev and stable worker execution in production
 
-## Solution
-Create a staged performance roadmap for the existing tree-walking ntnt interpreter that focuses on high-ROI architectural and runtime improvements **before** considering bytecode or JIT work.
+The first tempting optimization target is `template(path, data)`, because it currently re-reads and re-parses stable external templates on the ergonomic path every app uses. Before optimizing that path, we should lock the template contract: syntax, escaping, partial resolution, error behavior, and docs. Performance work should not fossilize stale docs or accidental semantics.
 
-The roadmap should prioritize techniques that:
-- fit a dynamic tree-walking interpreter
-- preserve ntnt’s debuggability and implementation clarity
-- improve real workloads, not just synthetic benchmarks
-- compose safely with ntnt’s worker-pool server model
-- avoid premature complexity where simpler structural fixes will yield most of the gain
-
-The core proposal is to split performance work into four layers:
-
-1. **Hot-path simplification**
-2. **Lookup and dispatch optimization**
-3. **Runtime representation optimization**
-4. **Execution model evolution**
-
-This design doc proposes specific work in each layer and recommends an implementation order.
-
-## Design
-
-### Guiding Principles
-
-#### 1. Optimize the interpreter we actually have
-ntnt today is a tree-walking Rust interpreter with a compiled Rust runtime shell. The most valuable near-term work is the work that makes **that architecture** faster.
-
-That means prioritizing:
-- cheaper lookups
-- cheaper values
-- cheaper dispatch
-- less repeated work
-
-before jumping to:
-- bytecode
-- JIT
-- speculative compilation
-
-#### 2. Preserve debuggability
-ntnt’s current implementation has a major advantage: it is comparatively easy to reason about. Performance work should not casually destroy this.
-
-Each phase should therefore prefer:
-- explicit data structures over magic
-- localized specialization over invisible global behavior
-- invalidation rules that are explainable
-- performance wins that do not make correctness opaque
-
-#### 3. Measure against real ntnt workloads
-Performance work must be evaluated against workloads that reflect how ntnt is actually used:
-- plaintext / JSON endpoints
-- route dispatch
-- auth/session flows
-- template rendering
-- single-query DB handlers
-- multi-query DB handlers
-- blog/page render workloads
-
-Microbenchmarks are useful, but only as supplements.
-
-#### 4. Avoid pretending all wins are equal
-Some techniques are highly relevant to ntnt now; others are intellectually interesting but premature.
-
-**Highly relevant now:**
-- environment lookup optimization
-- `Value` representation / allocation reduction
-- field / method inline caches
-- object / map model improvements
-- AST-path specialization
-- template caching
-
-**Possibly later:**
-- bytecode interpreter
-- register VM
-- JIT
-- aggressive speculative optimization
+This refresh turns DD-061 into a shippable sequence: first a template-system contract cleanup that preserves existing apps, then benchmark harness, then automatic `template()` caching and the remaining measured interpreter fast paths.
 
 ---
 
-### What We Already Did
+## Current Baseline Observations
 
-Before this roadmap, ntnt already shipped significant server/runtime performance work:
+These are based on v0.4.11 source inspection and current app usage patterns.
 
-#### Worker pool
-- one interpreter per worker thread
-- requests distributed over an MPMC queue
-- removes the single-request funnel for HTTP workloads
+### 1. External `template()` still pays repeated file + parse work
 
-#### Async PostgreSQL connection pooling
-- moved from synchronous single-client posture to pooled async DB access
-- allows concurrent DB operations across workers
+`src/interpreter.rs` currently handles `template(path, data)` by:
 
-#### Worker-mode runtime simplification
-- workers skip hot-reload/dev-only overhead
-- reduces per-request non-essential work in serving mode
+1. evaluating `path` and `data`
+2. cloning the data map
+3. loading the template file through `std/template::load_template_file(...)`
+4. calling `render_template_with_data(...)`
+5. wrapping the full template source in triple quotes
+6. lexing and parsing it into an expression
+7. evaluating the template expression in a fresh data scope
 
-These changes produced strong gains, especially on DB-heavy benchmarks. They should be understood as **runtime-shell performance improvements**, not interpreter-core performance work.
+`compile(path)` / `render(compiled, data)` exists, but normal apps use `template(path, data)` directly. Current local app/repo inspection found more than 100 `template(...)` calls and no meaningful current use of manual `compile()` / `render()` in the apps that matter. That means the user-facing ergonomic path is still the expensive path.
 
-This roadmap begins where those gains stop.
+**Performance implication:** Larri Dashboard-style pages that render layout + partials + detail views re-read and reparse stable templates repeatedly. This is likely the cleanest near-term win once the template contract is clarified.
 
----
+### 2. The template syntax is mostly right, but docs and behavior need a contract pass
 
-### Performance Layers
+The current explicit template syntax is a good fit for ntnt:
 
-## Layer 1: Hot-Path Simplification
+- `{{expr}}` for escaped output
+- `{{{expr}}}` for raw output
+- `{{#if cond}}...{{#elif cond2}}...{{#else}}...{{/if}}`
+- `{{#for item in items}}...{{#empty}}...{{/for}}`
+- `{{> partial}}` and `{{> partial data_expr}}`
+- filters such as `{{title | default("Untitled")}}`
 
-These are the lowest-risk, highest-clarity improvements. They keep the current architecture intact while reducing obvious waste.
+The important design choice is to keep explicit `#if` and `#for` instead of adopting ambiguous Mustache sections like `{{#items}}...{{/items}}`. `{{#items}}` changes meaning by runtime type in Mustache-style engines; `{{#for item in items}}` and `{{#if items}}` are more predictable and more consistent with ntnt.
 
-### 1.1 Reduce repeated string-driven dispatch in hot interpreter paths
-Current dynamic language interpreters often pay too much for repeated string lookup in places like:
-- variable access
-- object field access
-- method dispatch
-- builtin/operator dispatch
+However, current docs and implementation are not perfectly aligned:
 
-#### Proposal
-Audit hot AST evaluation paths and replace repeated string-driven or generic dispatch with more direct specialized paths where the parser/runtime already knows enough structure.
+- `docs/STDLIB_REFERENCE.md` claims `{{#key}}...{{/key}}` sections, but implementation does not support that form.
+- docs claim no literal `{{` escape, but the lexer supports `\{{` and `\}}` in template strings.
+- inline triple-quoted template strings support both `{{expr}}` and `#{expr}`; external `.html` templates should document `{{expr}}` as canonical.
+- partial lookup is useful but under-specified in docs.
+- `{{#if}}` / `{{#elif}}` condition errors do not flow through the same strict/warn/forgiving template error helper as interpolation and loop errors.
+- filters support both parenthesized and space-separated arguments; the docs should choose a canonical style while preserving compatibility.
 
-Examples:
-- direct operator fast paths instead of generic name-based dispatch where possible
-- specialized evaluation paths for common AST node categories
-- reduced repeated normalization / map probing in common route/template/auth code paths
+**Performance implication:** automatic template AST caching needs stable semantics and dependency/invalidation rules, especially around partials. The first PR should fix the contract without breaking existing apps.
 
-#### Why this matters
-Tree-walking interpreters frequently lose large amounts of time in generic “do everything” code paths rather than in the AST walk itself.
+### 3. Environment lookup is still recursive string-keyed HashMap lookup with cloning
 
-#### Implementation Checklist
-- [ ] Identify top interpreter hot paths using perf/flamegraph or benchmark-guided sampling
-- [ ] Inventory string-driven dispatch in arithmetic, comparisons, property access, and calls
-- [ ] Replace obviously static operator paths with direct evaluation helpers where safe
-- [ ] Reduce redundant normalization / repeated path-building in HTTP/auth/template hot paths
-- [ ] Add microbenchmarks for each changed hot path
+`Environment` is currently:
 
----
+- `HashMap<String, Value>` for values
+- `HashSet<String>` for mutability
+- optional parent `Rc<RefCell<Environment>>`
 
-### 1.2 Cache compiled / prepared template state
-The benchmark post explicitly called out template re-parse overhead as remaining headroom.
+`Environment::get(name)` recursively walks parent scopes and returns `Value` by clone. This is clear and correct, but it means variable-heavy template and handler execution repeatedly pays:
 
-#### Proposal
-Introduce template compilation/parsing caches with safe invalidation in development and stable reuse in worker/prod mode.
+- string hashing/comparison
+- `RefCell` borrow boundaries
+- scope-chain traversal
+- `Value` cloning
 
-#### Why this matters
-Template rendering is exactly the sort of repeated structured work that should not be re-done on every request if the source has not changed.
+**Performance implication:** template loops, helper-heavy admin pages, and route functions with repeated globals/prelude/native calls all pay lookup overhead.
 
-#### Implementation Checklist
-- [ ] Measure current template parse vs render cost separately
-- [ ] Add compiled template cache keyed by canonical path + invalidation metadata
-- [ ] Support dev invalidation via mtime / watched change detection
-- [ ] Support worker/prod stable reuse without per-request stat churn
-- [ ] Benchmark template-heavy routes before/after
+### 4. Function-call dispatch contains many string-special cases in the generic call path
 
----
+`Expression::Call` currently checks identifiers for `old`, server actions, `template`, `compile`, `render`, path-relative `std/fs` functions, `filter`, `transform`, `sort`, and more before falling through to ordinary function evaluation.
 
-### 1.3 Reduce allocation / cloning churn in common request paths
-#### Proposal
-Audit repeated `String`, `Vec`, `HashMap`, and `Value` clones in request handling, template rendering, and route dispatch.
+That is maintainable today, but as a performance path it means every ordinary call flows through a growing special-case ladder.
 
-#### Why this matters
-Interpreters often bleed performance through allocation churn even when algorithms are fine.
+**Performance implication:** hot template filters, helper functions, and stdlib calls pay generic dispatch cost even when the parser/runtime can recognize common direct-call shapes.
 
-#### Implementation Checklist
-- [ ] Profile allocation-heavy request paths
-- [ ] Reduce avoidable cloning in route dispatch and request/response helpers
-- [ ] Reuse buffers or interned/static strings where appropriate
-- [ ] Add regression benches focused on allocation-sensitive endpoints
+### 5. Route patterns are already compiled; avoid re-solving a solved problem
+
+`src/stdlib/http_server.rs` already stores parsed route segments in `Route`. DD-061 should not prioritize “route matcher compilation” as the first win unless profiling proves it. The better route-layer target is request/response map construction and avoidable cloning, not route pattern parsing.
+
+### 6. Template caching is partially present but not the cache current apps need
+
+`src/stdlib/template.rs` has a global compiled-template cache keyed by explicit template ids from `compile(path)`. It checks mtime when a compiled template is retrieved.
+
+That is not the same as an automatic path-keyed cache for ordinary `template(path, data)`. The current DD should distinguish:
+
+- explicit user-managed compiled templates: already present
+- automatic ergonomic `template()` AST/source cache: not done, high priority
 
 ---
 
-## Layer 2: Lookup and Dispatch Optimization
+## Template System Recommendation
 
-This is likely the biggest ROI zone for ntnt’s actual interpreter.
+The template language should be tightened, not redesigned.
 
-### 2.1 Environment / scope lookup optimization
-The current interpreter model likely pays repeated cost for:
-- lexical scope chain walking
-- repeated map lookups by string name
-- nested closure / environment traversal
+### Keep as canonical
 
-#### Proposal
-Add lookup specialization for variable resolution.
+```html
+{{expr}}                              <!-- escaped output -->
+{{{expr}}}                            <!-- raw/pre-rendered HTML output -->
+{{#if user_is_admin}}...{{/if}}
+{{#if status == "draft"}}...{{#elif status == "live"}}...{{#else}}...{{/if}}
+{{#for row in rows}}...{{#empty}}...{{/for}}
+{{> nav}}
+{{> card item}}
+{{title | default("Untitled")}}
+```
 
-Possible strategies:
-- symbol IDs instead of repeated raw string comparison
-- resolved lexical slots captured during parse/bind/typecheck phases
-- per-node cached lookup metadata pointing to environment depth + slot index
+### Preserve as compatibility behavior
 
-#### Why this matters
-For a tree-walking interpreter, variable lookup is often one of the most frequent operations in the system.
+- `{{expr | default "Untitled"}}` space-separated filter arguments should continue to work, but parenthesized filter args should be documented as canonical.
+- `#{expr}` inside inline triple-quoted ntnt template strings should continue to work for normal-string interpolation consistency, but external `.html` templates should use `{{expr}}`.
+- Missing template variables should continue to render as empty strings for optional layout slots and partial data.
+- `{{{expr}}}` and `{{expr | safe}}` / `{{expr | raw}}` should remain explicit raw-output escape hatches.
 
-#### Design direction
-Prefer a staged approach:
-1. symbolization / name interning
-2. binder-produced metadata for resolved locals/upvalues
-3. slot-based lookup where environment layout is stable enough
+### Do not add now
 
-#### Implementation Checklist
-- [ ] Measure variable/scope lookup share in representative benchmarks
-- [ ] Add symbol / interned-name abstraction for identifiers
-- [ ] Add a binding/resolution pass that records scope depth and binding identity per node
-- [ ] Introduce slot-based or index-based access for stable local frames
-- [ ] Fall back safely for dynamic/global/module cases
-- [ ] Benchmark closure-heavy and local-variable-heavy workloads
+- Do not add Mustache-style ambiguous sections such as `{{#items}}...{{/items}}`.
+- Do not replace `template(path, data)` with mandatory manual `compile()` / `render()` calls.
+- Do not introduce a full component/layout/slot system before the current performance work.
+- Do not require typed `SafeHtml` before caching; that can be a separate future safety design.
 
 ---
 
-### 2.2 Property / method inline caches
-#### Proposal
-Introduce inline caches for repeated property and method lookup.
+## Design Principles
 
-Candidate targets:
-- object field access
-- map/object property reads
-- method resolution on stable receiver shapes/types
-
-#### Why this matters
-If the same AST node repeatedly accesses the same logical property on similarly shaped values, a node-local cache can collapse repeated hash/string lookup into a fast check.
-
-#### Design direction
-Start with monomorphic inline caches:
-- cache receiver kind/shape + resolved slot/index/lookup result
-- on mismatch, fall back to slow path and refresh cache
-
-Only add polymorphic caches if monomorphic results prove insufficient.
-
-#### Invalidation
-If shape/layout can change, add invalidation/watchpoint-style versioning rather than complex mutation hooks everywhere.
-
-#### Implementation Checklist
-- [ ] Define a shape/version model for cachable object/map lookups
-- [ ] Add monomorphic inline cache to field-get path
-- [ ] Add equivalent cache to method lookup path
-- [ ] Add invalidation/version bump rules for mutating operations
-- [ ] Benchmark repeated field/method access workloads
+1. **Clarify semantics before optimizing them.** Template caching should preserve the template language we want, not stale docs or accidental behavior.
+2. **Measure before and after every performance PR.** No “feels faster” commits.
+3. **Optimize current apps first.** Dashboard/article/template/database workloads beat synthetic arithmetic loops.
+4. **Preserve debuggability.** Tree-walking remains fine; bytecode comes later only with evidence.
+5. **Prefer localized fast paths.** Template AST caching and direct native-call dispatch are lower risk than rewriting `Value` or the environment model immediately.
+6. **Keep development invalidation correct.** Any cache must be boringly obvious in dev mode and stable in worker/prod mode.
+7. **Do not fossilize bad semantics for speed.** Correctness, diagnostics, and current language behavior stay primary.
 
 ---
 
-### 2.3 Truthful route / helper dispatch specialization
-#### Proposal
-Where route resolution or helper lookup repeatedly traverses generic maps/registries, add cached fast-path lookup keyed by normalized route/helper identity.
+## Proposed PR Sequence
 
-#### Why this matters
-Web-heavy ntnt apps likely spend time in repeated structural dispatch that could be specialized safely.
+### PR 1: Template system contract cleanup before caching
 
-#### Implementation Checklist
-- [ ] Measure route dispatch and helper lookup overhead in HTTP-heavy benchmarks
-- [ ] Cache route matcher results where safe
-- [ ] Cache helper/builtin resolution where semantics are stable
-- [ ] Ensure dev-mode invalidation remains correct
+**Goal:** make the existing template system consistent, documented, and predictable before optimizing `template()`.
+
+This should be a docs/tests/runtime-semantics cleanup PR, not a syntax redesign. It should preserve existing apps and explicitly bless the current good shape: `template(path, data)`, escaped-by-default `{{expr}}`, explicit `#if` / `#for`, partials, and raw output as an opt-in.
+
+Scope:
+
+- [ ] Update the canonical template docs/spec so implementation and docs agree:
+  - [ ] `{{expr}}` is escaped output.
+  - [ ] `{{{expr}}}` is raw/unescaped output.
+  - [ ] `{{#if cond}}`, `{{#elif cond}}`, `{{#else}}`, `{{/if}}` are explicit conditional forms.
+  - [ ] `{{#for item in items}}`, `{{#empty}}`, `{{/for}}` are explicit loop forms.
+  - [ ] `{{> partial}}` and `{{> partial data_expr}}` are partial forms.
+  - [ ] filters use parenthesized args as canonical, with space-separated args preserved as compatibility sugar.
+  - [ ] `\{{` and `\}}` produce literal braces where supported.
+- [ ] Remove or correct doc claims that Mustache `{{#key}}...{{/key}}` sections are supported.
+- [ ] Explicitly document that ambiguous Mustache sections are a non-goal for now; use `#if` or `#for` instead.
+- [ ] Document external `.html` templates as `{{expr}}`-first; keep `#{expr}` documented only for inline triple-quoted ntnt strings.
+- [ ] Document partial lookup order exactly as implemented, or adjust implementation/tests to match the chosen lookup order.
+- [ ] Normalize template error handling so interpolation, filters, loops, and `#if` / `#elif` conditions consistently honor strict/warn/forgiving mode.
+- [ ] Add regression tests for the chosen contract without changing existing app-visible syntax.
+
+Likely files:
+
+- `src/interpreter.rs` template error handling for `#if` / `#elif`
+- `src/lexer.rs` only if docs reveal a small escaping/diagnostic mismatch
+- `docs/syntax.toml`
+- `src/interpreter.rs` `// @ntnt template` doc block
+- generated docs from `./target/dev-release/ntnt docs --generate`
+- `tests/language_features_tests.rs` or a focused template test file
+- `docs/AI_AGENT_GUIDE.md` if the template guidance lives there too
+
+Non-goals:
+
+- no broad template syntax redesign
+- no Mustache `{{#key}}...{{/key}}` sections
+- no automatic template cache yet
+- no breaking changes to existing apps
+- no SafeHtml type system work
+
+Verification:
+
+```bash
+cargo fmt
+cargo build --profile dev-release
+cargo test --test language_features_tests template
+./target/dev-release/ntnt docs --generate
+git diff --check
+```
+
+Acceptance criteria:
+
+- [ ] Existing app template syntax remains valid.
+- [ ] Docs no longer claim unsupported Mustache section behavior.
+- [ ] Partial lookup rules are precise enough for cache dependency tracking.
+- [ ] Template condition errors follow the same TypeMode policy as other template errors.
+- [ ] The follow-up cache PR has a stable semantic contract to preserve.
+
+### PR 2: Benchmark harness and current-use-case baseline
+
+**Goal:** create a repeatable benchmark suite before touching performance-sensitive code.
+
+This should be a small PR that adds scripts/examples only. It should establish baseline numbers for v0.4.11+ and make future performance PRs honest.
+
+Scope:
+
+- [ ] Add a benchmark script under `scripts/bench/` or `tools/bench/` that can build `dev-release`, start benchmark servers, run `wrk`, and write JSON/Markdown results.
+- [ ] Add representative ntnt benchmark apps under `examples/perf/` or `benchmarks/`:
+  - [ ] plaintext response
+  - [ ] small JSON response
+  - [ ] route param + map read
+  - [ ] compute loop (`for i in 0..N`) for interpreter-only cost
+  - [ ] external template render with layout + partial + loop
+  - [ ] template-heavy page with 100 row maps
+  - [ ] single PostgreSQL query handler, optional/gated by env
+  - [ ] multi-query handler, optional/gated by env
+- [ ] Capture interpreter-only CLI timings separately from HTTP throughput where practical.
+- [ ] Document how to run the suite locally and how to compare before/after.
+- [ ] Ensure benchmarks are opt-in and do not make normal CI flaky.
+
+Likely files:
+
+- `scripts/bench/run-benchmarks.py` or `scripts/bench/run-benchmarks.sh`
+- `examples/perf/*.tnt`
+- `examples/perf/views/*.html`
+- `docs/AI_AGENT_GUIDE.md` or this DD for benchmark instructions
+
+Verification:
+
+```bash
+cargo build --profile dev-release
+python3 scripts/bench/run-benchmarks.py --quick
+```
+
+Acceptance criteria:
+
+- [ ] A future PR can run one command and produce comparable baseline/after numbers.
+- [ ] The suite includes at least one template-heavy route and one interpreter-only route.
+- [ ] DB benchmarks are skipped unless env config is present.
+
+### PR 3: Automatic path-keyed template AST cache for `template()`
+
+**Goal:** make the normal ergonomic template path fast without requiring apps to manually call `compile()`.
+
+Current `template()` reparses the template every call. This PR should cache the parsed template expression / template parts for external template files by resolved path and invalidation metadata.
+
+Scope:
+
+- [ ] Add a path-keyed template cache for `template(path, data)`.
+- [ ] Cache parsed template expression / `TemplatePart` AST, not only raw file contents.
+- [ ] Include partial dependency invalidation based on the PR 1 partial lookup contract.
+- [ ] In production/worker mode, avoid per-request `metadata()` checks when hot reload is disabled.
+- [ ] In development/hot-reload mode, invalidate by mtime and reload safely.
+- [ ] Preserve `compile()` / `render()` compatibility.
+- [ ] Preserve template error behavior in strict/warn/forgiving modes.
+- [ ] Add tests proving edits invalidate cached templates in dev mode.
+- [ ] Benchmark external template render before/after.
+
+Likely files:
+
+- `src/stdlib/template.rs`
+- `src/interpreter.rs` (`template`, `compile`, `render`, `render_template_with_data`)
+- `tests/language_features_tests.rs` or a focused template test file
+- `examples/perf/*`
+
+Non-goals:
+
+- no new public API required
+- no bytecode/lowered template VM
+- no broad template syntax changes
+
+Acceptance criteria:
+
+- [ ] Existing `template(path, data)` behavior is unchanged.
+- [ ] Template-heavy benchmark improves meaningfully.
+- [ ] Dev edits still show up without restarting when hot reload is enabled.
+- [ ] Worker/prod mode does not stat stable templates on every render.
+- [ ] Partial edits invalidate the parent render path correctly.
+
+### PR 4: Template render scope and loop fast-path cleanup
+
+**Goal:** reduce per-render and per-loop environment churn in templates.
+
+`render_template_with_data()` currently creates a new `Environment` scope and defines every data key. Template loops also create new scopes per iteration. This is correct but expensive for row-heavy pages.
+
+Scope:
+
+- [ ] Measure cost of template data scope creation and per-row loop scope creation.
+- [ ] Add a template data lookup path that can read from a borrowed render context before falling back to interpreter environment, or otherwise reduce data-scope setup/cloning.
+- [ ] Reduce unnecessary `Value` clones when binding template data and loop metadata.
+- [ ] Keep template variable shadowing semantics unchanged.
+- [ ] Add regression tests for loop metadata, nested loops, `{{#if}}`, missing vars, and parent-scope fallback.
+
+Likely files:
+
+- `src/interpreter.rs` template rendering section
+- possibly a small `src/template_runtime.rs` helper module if extraction improves clarity
+- template tests and perf examples
+
+Acceptance criteria:
+
+- [ ] Row-heavy template benchmark improves.
+- [ ] Missing variables still render as empty where current template semantics require it.
+- [ ] Nested template loops and parent-scope references remain correct.
+
+### PR 5: Direct native/global call fast path
+
+**Goal:** make common function calls cheaper without changing language semantics.
+
+The interpreter already snapshots `builtin_bindings`, but ordinary identifier call evaluation still goes through generic expression evaluation and `Value::NativeFunction` call handling. We should add a constrained fast path for simple identifier calls where the callee is a stable native/global function.
+
+Scope:
+
+- [ ] Profile common native calls in template/page workloads (`len`, string helpers, collections helpers, response builders, template filters).
+- [ ] Add a direct-call path for `Expression::Call { function: Identifier(name), ... }` after server-action/template/fs special cases are handled.
+- [ ] Avoid re-looking-up stable native functions through recursive environment chains when the name is known to be an unshadowed builtin/prelude binding.
+- [ ] Preserve user-defined shadowing behavior. If an app defines `len`, the app binding must win.
+- [ ] Add tests for shadowing, imported functions, prelude functions, and ordinary user functions.
+
+Likely files:
+
+- `src/interpreter.rs`
+- possibly a small call-dispatch helper to reduce the existing special-case ladder
+- focused interpreter tests
+
+Acceptance criteria:
+
+- [ ] No behavior change for shadowing/imports.
+- [ ] Simple native-call benchmark improves.
+- [ ] Call dispatch code reads cleaner after the change, not more haunted.
+
+### PR 6: Environment lookup measurement + low-risk lookup cache
+
+**Goal:** reduce repeated recursive name lookup where semantics are stable.
+
+Do not jump straight to a full binder/slot system. First add measurements and the smallest safe lookup cache.
+
+Candidate shape:
+
+- per-interpreter cache for global/prelude/native names that are not shadowed in the current local scope
+- or per-call-frame local lookup helper that avoids repeated parent traversal for globals
+- explicit cache invalidation when definitions/imports/libs mutate global scope
+
+Scope:
+
+- [ ] Measure lookup depth/frequency in representative routes and templates.
+- [ ] Add instrumentation behind an env var such as `NTNT_PROFILE_LOOKUPS=1` if useful.
+- [ ] Implement only a safe, local fast path with obvious invalidation.
+- [ ] Add tests for shadowing, mutation, imports, libs, and route hot reload.
+
+Likely files:
+
+- `src/interpreter.rs`
+- maybe `src/perf.rs` or a small internal instrumentation helper
+- tests for environment semantics
+
+Acceptance criteria:
+
+- [ ] Lookup-heavy benchmark improves.
+- [ ] Shadowing and mutation semantics remain unchanged.
+- [ ] The implementation is easy to remove if the benchmark delta is weak.
+
+### PR 7: Request/response allocation cleanup
+
+**Goal:** reduce cloning/allocation in current HTTP request paths after template/call lookup wins are measured.
+
+Scope:
+
+- [ ] Profile request map construction and response conversion.
+- [ ] Reduce avoidable `HashMap<String, Value>` and `String` clones in request/response helpers.
+- [ ] Keep public request object shape unchanged.
+- [ ] Avoid binary upload regressions; preserve `body_bytes` behavior for multipart paths.
+
+Likely files:
+
+- `src/stdlib/http_bridge.rs`
+- `src/stdlib/http_server.rs`
+- `src/stdlib/http_server_async.rs`
+- `src/interpreter.rs` request handling paths
+
+Acceptance criteria:
+
+- [ ] Plaintext/JSON route benchmark improves or allocation profile improves clearly.
+- [ ] Multipart/body byte tests remain green.
+- [ ] Request maps keep the same user-visible fields.
+
+### PR 8: Decide whether deeper interpreter work is justified
+
+Only after PRs 1-7 have benchmark data should we choose one of:
+
+- symbol interning / binder metadata for locals
+- slot-based local frames
+- map/object shape versioning and inline caches
+- lowered IR / bytecode spike
+
+This should be a DD update or spike PR, not an automatic implementation.
+
+Acceptance criteria:
+
+- [ ] DD-061 includes measured deltas from PRs 3-7.
+- [ ] The next deeper design is justified by remaining measured bottlenecks.
+- [ ] We explicitly choose whether to keep optimizing the tree walker or start a bytecode/lowered-IR DD.
 
 ---
 
-## Layer 3: Runtime Representation Optimization
+## Prioritization for Current Use Cases
 
-### 3.1 Revisit `Value` representation
-#### Proposal
-Review the current `Value` representation for:
-- size
-- copy cost
-- boxing frequency
-- integer/float fast paths
-- string/object indirection cost
-
-#### Why this matters
-Every interpreter operation touches `Value`. Small inefficiencies here multiply everywhere.
-
-#### Possible directions
-- reduce enum size / indirection costs
-- keep cheap scalar cases fast
-- avoid unnecessary heap allocation for common small values
-- tighten common-case operator fast paths
-
-This does **not** imply rewriting the whole runtime around clever tagging immediately. It means auditing whether the current representation is leaving obvious wins on the table.
-
-#### Implementation Checklist
-- [ ] Measure `Value` size and copy behavior in hot paths
-- [ ] Inventory boxing/allocation patterns for common scalar operations
-- [ ] Prototype low-risk representation improvements
-- [ ] Verify impact on arithmetic, JSON, template, and dispatch benchmarks
+| Priority | Work | Why |
+|---|---|---|
+| P0 | Template contract cleanup | Locks the semantics/docs before caching them; preserves existing apps while removing ambiguity. |
+| P0 | Benchmark harness | Without this, every performance PR is vibes wearing a stopwatch costume. |
+| P1 | Automatic `template()` AST cache | Directly targets dashboard/article/server-rendered apps and the current ergonomic path. |
+| P1 | Template render scope/loop cleanup | Current apps render lists, dashboards, docs, and article grids heavily. |
+| P2 | Direct native/global call fast path | Likely useful in templates and helper-heavy pages; must preserve shadowing. |
+| P2 | Environment lookup cache/instrumentation | High theoretical ROI, but needs careful semantic guardrails. |
+| P3 | Request/response allocation cleanup | Useful after template/call costs are reduced; likely smaller than template parse wins. |
+| P4 | Bytecode/lowered IR | Powerful later; premature until tree-walker wins are measured. |
 
 ---
 
-### 3.2 Object / map model specialization
-#### Proposal
-Move toward a more explicit object model for frequently used structured values.
+## Measurement Plan
 
-Potential ingredients:
-- stable shapes / hidden-class-like metadata
-- slot-based storage for stable object layouts
-- faster property lookup than generic hash maps in the common case
+PR 1 is semantic/docs cleanup and should be verified by tests/docs drift checks, not throughput benchmarks. Every implementation performance PR after the benchmark harness should include a small benchmark table in the PR body:
 
-#### Why this matters
-Dynamic-language object access often dominates runtime costs. A better object model is usually prerequisite for effective inline caches.
+```text
+Benchmark                         main/v0.4.11+     branch        delta
+plaintext route                   ...               ...           ...
+small JSON route                  ...               ...           ...
+route param + map read            ...               ...           ...
+template layout + partial         ...               ...           ...
+template 100-row loop             ...               ...           ...
+compute loop                      ...               ...           ...
+```
 
-#### Implementation Checklist
-- [ ] Classify current object/map-heavy runtime paths
-- [ ] Design a shape/version abstraction suitable for ntnt objects/maps/struct-like values
-- [ ] Prototype slot-backed fast lookup for stable shapes
-- [ ] Integrate with inline cache invalidation strategy
-- [ ] Benchmark object/property-heavy workloads
+Required rules:
 
----
+- Run each benchmark at least 3 times and report median or best-of-three consistently.
+- Keep DB benchmarks separate and env-gated.
+- Record machine/container context briefly.
+- If a PR changes behavior or semantics to get speed, it is not a performance cleanup PR; it needs separate language-design review.
 
-## Layer 4: Execution Model Evolution
+Recommended local toolchain:
 
-These are meaningful, but should come after Layers 1–3 unless measurements prove otherwise.
-
-### 4.1 Bytecode / lowered IR exploration
-#### Proposal
-Investigate lowering AST to a compact intermediate representation or bytecode while preserving current semantics and diagnostics.
-
-#### Why this matters
-Tree walking has inherent dispatch overhead. Bytecode can reduce interpreter dispatch cost dramatically.
-
-#### Why this is not first
-ntnt still appears to have substantial wins available from simpler structural fixes. Moving to bytecode too early risks complexity before we understand the actual hot costs.
-
-#### Implementation Checklist
-- [ ] Document current AST-walk dispatch overhead with profiling evidence
-- [ ] Sketch a minimal lowered IR / bytecode for a subset of the language
-- [ ] Compare implementation/debug complexity vs expected wins
-- [ ] Decide whether to pursue after Layers 1–3 data
+- `cargo build --profile dev-release`
+- `wrk` for HTTP throughput/latency
+- `/usr/bin/time` for CLI/interpreter-only scripts
+- `perf record` / `perf report` for targeted local profiling when available
 
 ---
 
-### 4.2 Parallel query execution / higher-level DB batching
-#### Proposal
-Add first-class support for batched or parallel query execution in handlers where it preserves semantics.
+## Non-Goals for This Roadmap Refresh
 
-#### Why this matters
-The benchmark post explicitly identified the sequential-query bottleneck in multi-query workloads.
-
-This sits partly above the interpreter layer, but is still a major real-world performance lever.
-
-#### Implementation Checklist
-- [ ] Design batched/parallel query API surface
-- [ ] Define ordering/error semantics clearly
-- [ ] Benchmark 20-query and template-style workloads
+- No JIT.
+- No bytecode VM in the first implementation PRs.
+- No breaking changes to map, field, template, import, or shadowing semantics.
+- No broad template language redesign before caching.
+- No ambiguous Mustache `{{#key}}...{{/key}}` sections in the cleanup PR.
+- No “optimize by disabling diagnostics” trickery.
+- No broad rewrite of `Value` or `Environment` without benchmark evidence.
+- No production-only behavior that makes development impossible to reason about.
 
 ---
 
-## Relevance Matrix
+## Risks and Mitigations
 
-| Technique | Relevance to ntnt now | Why |
-|---|---:|---|
-| Worker pool | Already done | Runtime-shell improvement, not interpreter-core |
-| Async DB pooling | Already done | Major DB concurrency win already shipped |
-| Template caching | High | Called out directly by current benchmark headroom |
-| Scope/env lookup optimization | Very high | Core tree-walking interpreter cost |
-| Inline caching | Very high | Fits dynamic tree-walker, large lookup/dispatch ROI |
-| Object model specialization | High | Enables faster property/method lookup |
-| Value representation tuning | High | Touches every operation |
-| General hot-path cleanup | Very high | Low risk, immediate wins |
-| Bytecode VM | Medium later | Powerful, but likely premature today |
-| JIT | Low now | Too much complexity for current stage |
-| GC innovation | Low now | Not current dominant bottleneck |
+| Risk | Mitigation |
+|---|---|
+| We optimize stale or accidental template semantics | PR 1 locks docs/tests/error behavior before caching. |
+| Caching returns stale templates | Separate dev/prod invalidation rules; add mtime/hot-reload tests. |
+| Partial edits fail to invalidate cached parents | PR 1 defines partial lookup; PR 3 tracks dependencies or invalidates conservatively. |
+| Fast paths break shadowing/import semantics | Add focused tests for shadowing, imports, libs, route modules, and user-defined helpers. |
+| Benchmarks become flaky/noisy | Use quick local benchmarks for direction and compare medians; keep DB benchmarks opt-in. |
+| Performance work bloats interpreter complexity | Require simplification pass and readable helper extraction in every PR. |
+| We optimize the wrong workload | Benchmark Larri Dashboard/article/template-shaped routes, not just arithmetic loops. |
+| Bytecode temptation derails smaller wins | Explicitly defer bytecode until after measured PRs 3-7. |
 
 ---
 
-## Proposed Implementation Order
+## Updated Definition of Done
 
-### Phase 1: Interpreter-core performance foundation
-- [ ] Add profiling for representative ntnt benchmark workloads (plaintext, JSON, route params, DB single, DB multi, template) and capture where interpreter time is actually going
-- [ ] Audit and reduce obvious hot-path waste: repeated string dispatch, repeated normalization, unnecessary cloning/allocation, and other generic interpreter overhead that shows up in profiles
-- [ ] Add template parse/compile caching with correct development invalidation and stable worker/prod reuse
-- [ ] Design identifier symbolization plus binder/resolution metadata for locals/upvalues so repeated scope lookup can move toward depth/slot-based access
-- [ ] Prototype monomorphic inline caches for the highest-value repeated lookup path (field access or method resolution), including explicit invalidation/versioning rules
-- [ ] Evaluate current `Value` representation and identify low-risk changes that reduce copy/allocation overhead in the hottest interpreter paths
-- [ ] Re-run benchmarks after each sub-step and document which wins came from runtime-shell work vs interpreter-core work
+- [ ] PR 1 clarifies and tests the template contract without breaking existing apps.
+- [ ] PR 2 adds a repeatable benchmark harness and baseline results.
+- [ ] PR 3 makes ordinary `template(path, data)` use a safe automatic AST/cache path.
+- [ ] PR 4 reduces template render/loop scope overhead without semantic drift.
+- [ ] PR 5 adds a safe direct native/global call fast path, or documents why profiling does not justify it.
+- [ ] PR 6 adds lookup instrumentation/cache only if measurements justify it.
+- [ ] PR 7 cleans request/response allocation only if profiles show meaningful headroom.
+- [ ] DD-061 is updated after each merged PR with measured deltas and completed checkboxes.
+- [ ] A final follow-up decision chooses whether deeper symbol/binder/slot/bytecode work is worth a separate DD.
 
-## Risks
+---
 
-| Risk | Likelihood | Mitigation |
-|------|-----------|------------|
-| Premature complexity outruns measured value | Medium | Gate each phase with profiling + benchmark deltas |
-| Caching introduces stale/incorrect behavior | High | Start monomorphic, explicit invalidation/versioning, add targeted tests |
-| Performance work harms debuggability | Medium | Prefer localized specialization and explicit structures over opaque magic |
-| Object-model changes ripple widely through stdlib/runtime | Medium | Stage behind compatibility layers and benchmark each step |
-| Bytecode temptation derails simpler wins | High | Treat bytecode as Phase 5 decision, not default path |
+## Current Recommendation
 
-## Alternatives Considered
+Start with **PR 1: template system contract cleanup**. It is the right first PR because it is low-risk, preserves existing app syntax, and makes the subsequent cache work target a clear, consistent template language.
 
-### Jump straight to bytecode
-Rejected for now because simpler interpreter-native wins are likely still abundant.
+After PR 1 is merged, proceed with **PR 2: benchmark harness**, then **PR 3: automatic `template()` AST cache**.
 
-### Jump straight to JIT
-Rejected as far too complex relative to ntnt’s current stage and bottlenecks.
+The template cache remains the best first implementation performance target because it is:
 
-### Keep focusing only on server/runtime shell
-Rejected because the benchmark post suggests the next ceiling increasingly sits in interpreter behavior and repeated work, not only in the outer HTTP shell.
+- directly relevant to current server-rendered apps
+- visible in source as repeated work on the normal ergonomic API
+- lower risk than environment/frame representation changes
+- benchmarkable with a contained route and template fixture
+- compatible with the current tree-walking interpreter
 
-## Definition of Done
-- [ ] Profiling exists for representative ntnt benchmark workloads
-- [ ] A prioritized roadmap with staged interpreter-core work is accepted
-- [ ] Phase 1 implementation work is split into actionable follow-up tasks or DDs
-- [ ] Benchmark methodology for future interpreter-core changes is documented
-- [ ] This design doc status is updated from `draft` to the appropriate next state
+After that, use benchmark data to decide whether template loop scopes, native-call dispatch, or environment lookup is the next real bottleneck. Computers are annoyingly literal; we should let them tell us where they hurt.
