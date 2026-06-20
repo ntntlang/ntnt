@@ -1616,7 +1616,7 @@ template("../views/page.html", data) // WRONG — don't use relative paths from 
 
 ### Template Strings vs template() — Key Difference
 
-Template strings in `.tnt` code (`"""...{{expr}}..."""`) **auto-escape HTML** in interpolated values. The `template()` function uses Mustache syntax where `{{var}}` escapes HTML and `{{{var}}}` outputs raw HTML.
+Template strings in `.tnt` code (`"""...{{expr}}..."""`) and external templates rendered with `template()` share the same NTNT template syntax: `{{expr}}` emits HTML-escaped output and `{{{expr}}}` emits trusted raw HTML.
 
 If you need to inject pre-rendered HTML (like from another template call), use `{{{var}}}` triple-braces in the template file:
 
