@@ -114,12 +114,12 @@ def start_server(args: argparse.Namespace, env: dict[str, str]) -> tuple[subproc
     )
     try:
         wait_for_server(args.base_url, args.startup_timeout)
-    except Exception:
+    except Exception as exc:
         stop_process(proc)
         log_file.seek(0)
         output = log_file.read()[-4000:]
         log_file.close()
-        raise RuntimeError(f"failed to start benchmark server. Recent output:\n{output}")
+        raise RuntimeError(f"failed to start benchmark server. Recent output:\n{output}") from exc
     return proc, log_file
 
 
@@ -295,7 +295,14 @@ def render_markdown(results: dict[str, Any]) -> str:
     for item in results["http"]:
         rps = format_number(item.get("requests_per_second"))
         latency = format_number(item.get("avg_latency_ms"))
-        notes = item.get("parse_warning") or ("ok" if item.get("ok") else item.get("error", "error"))
+        if item.get("parse_warning"):
+            notes = item["parse_warning"]
+        elif item.get("ok"):
+            notes = "ok"
+        elif "errors" in item:
+            notes = f"{item['errors']} request error(s)"
+        else:
+            notes = item.get("error", "error")
         lines.append(f"| {item['name']} | `{item['path']}` | {rps} | {latency} | {notes} |")
     cli = results["cli"]
     lines.extend(["", "## CLI benchmark", ""])

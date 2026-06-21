@@ -8,6 +8,8 @@ import { get_env } from "std/env"
 fn make_rows(count: Int) -> Array {
     let mut rows = []
     for i in 0..count {
+        // ntnt array construction returns a new array today. Rows are built once
+        // at startup so this does not pollute per-request template timings.
         rows = rows + [map {
             "id": i,
             "name": "Widget " + str(i),
