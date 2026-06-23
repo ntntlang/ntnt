@@ -7836,6 +7836,8 @@ impl Interpreter {
         index: usize,
         length: usize,
     ) {
+        debug_assert!(length > 0, "template loop scope requires a non-empty loop");
+
         let mut env = environment.borrow_mut();
         env.values.clear();
         env.mutable_vars.clear();
@@ -7843,7 +7845,7 @@ impl Interpreter {
         env.define("@index".to_string(), Value::Int(index as i64));
         env.define("@index1".to_string(), Value::Int((index + 1) as i64));
         env.define("@first".to_string(), Value::Bool(index == 0));
-        env.define("@last".to_string(), Value::Bool(index == length - 1));
+        env.define("@last".to_string(), Value::Bool(index + 1 == length));
         env.define("@length".to_string(), Value::Int(length as i64));
         env.define("@even".to_string(), Value::Bool(index % 2 == 0));
         env.define("@odd".to_string(), Value::Bool(index % 2 == 1));
