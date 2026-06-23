@@ -54,6 +54,16 @@ fn compute_loop(req: Map) -> Map {
     return json(map { "total": total })
 }
 
+fn native_call_loop(req: Map) -> Map {
+    let mut total = 0
+    let label = "ntnt-performance"
+    let rows = ROWS_10
+    for i in 0..5000 {
+        total = total + len(label) + len(rows) + len(str(i))
+    }
+    return json(map { "total": total })
+}
+
 fn template_layout(req: Map) -> Map {
     let rendered = template("views/page.html", map {
         "title": "Template layout benchmark",
@@ -121,6 +131,7 @@ get("/", plaintext)
 get("/json", small_json)
 get("/param/{id}", route_param)
 get("/compute", compute_loop)
+get("/native/calls", native_call_loop)
 get("/template/layout", template_layout)
 get("/template/rows", template_rows)
 get("/db/single", db_single)

@@ -36,6 +36,7 @@ HTTP_BENCHMARKS = [
     {"name": "small JSON route", "path": "/json"},
     {"name": "route param + map read", "path": "/param/12345"},
     {"name": "compute loop route", "path": "/compute"},
+    {"name": "native call loop route", "path": "/native/calls"},
     {"name": "template layout + partial", "path": "/template/layout"},
     {"name": "template 100-row loop", "path": "/template/rows"},
 ]

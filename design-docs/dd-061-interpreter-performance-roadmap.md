@@ -326,31 +326,33 @@ Acceptance criteria:
 
 Candidate benchmark note: local 3s/3-run `wrk` pass at 16 connections/2 threads, comparing `origin/main` at `52554e9` to this PR's dev-release binary, showed `/template/layout` RPS `23807.29 -> 24701.15` (+3.8%) and `/template/rows` RPS `6053.89 -> 6420.77` (+6.1%), while non-template routes stayed within noise.
 
-### PR 5: Direct native/global call fast path
+### PR 5: Targeted native/global call fast path
 
 **Goal:** make common function calls cheaper without changing language semantics.
 
-The interpreter already snapshots `builtin_bindings`, but ordinary identifier call evaluation still goes through generic expression evaluation and `Value::NativeFunction` call handling. We should add a constrained fast path for simple identifier calls where the callee is a stable native/global function.
+The interpreter already snapshots `builtin_bindings`, but ordinary identifier call evaluation still goes through generic expression evaluation and clones argument values before invoking `Value::NativeFunction`. A broad direct-call path for every stable native/global call is not automatically a win: it can spend more time proving the callee is unshadowed than it saves. The useful first slice is narrower and measurable: `len(identifier)` should not clone large arrays/maps just to compute their length.
 
 Scope:
 
-- [ ] Profile common native calls in template/page workloads (`len`, string helpers, collections helpers, response builders, template filters).
-- [ ] Add a direct-call path for `Expression::Call { function: Identifier(name), ... }` after server-action/template/fs special cases are handled.
-- [ ] Avoid re-looking-up stable native functions through recursive environment chains when the name is known to be an unshadowed builtin/prelude binding.
-- [ ] Preserve user-defined shadowing behavior. If an app defines `len`, the app binding must win.
-- [ ] Add tests for shadowing, imported functions, prelude functions, and ordinary user functions.
+- [x] Profile common native calls in template/page workloads (`len`, string helpers, collections helpers, response builders, template filters).
+- [x] Add a targeted fast path for `len(identifier)` after preserving normal callee shadowing semantics.
+- [x] Avoid cloning large identifier-bound arrays/maps when only their length is needed.
+- [x] Preserve user-defined shadowing behavior. If an app defines `len`, the app binding must win.
+- [x] Add tests for builtin behavior, shadowing, type errors, and parent-scope lookup behavior.
 
 Likely files:
 
 - `src/interpreter.rs`
-- possibly a small call-dispatch helper to reduce the existing special-case ladder
 - focused interpreter tests
+- `examples/perf/*` and benchmark harness docs for the native-call fixture
 
 Acceptance criteria:
 
-- [ ] No behavior change for shadowing/imports.
-- [ ] Simple native-call benchmark improves.
-- [ ] Call dispatch code reads cleaner after the change, not more haunted.
+- [x] No behavior change for shadowing/imports.
+- [x] Simple native-call benchmark improves.
+- [x] Call dispatch code stays localized rather than more haunted.
+
+Candidate benchmark note: local 3s/3-run `wrk` pass at 16 connections/2 threads, comparing `origin/main` plus the new `/native/calls` fixture to this PR's dev-release binary, showed `/native/calls` RPS `349.95 -> 1574.70` (+350.0%). Other routes stayed within normal local noise.
 
 ### PR 6: Environment lookup measurement + low-risk lookup cache
 
@@ -505,7 +507,7 @@ Recommended local toolchain:
 - [x] PR 2 adds a repeatable benchmark harness and baseline results.
 - [x] PR 3 makes ordinary `template(path, data)` use a safe automatic AST/cache path.
 - [x] PR 4 reduces template render/loop scope overhead without semantic drift.
-- [ ] PR 5 adds a safe direct native/global call fast path, or documents why profiling does not justify it.
+- [x] PR 5 adds a safe targeted native/global call fast path for `len(identifier)`.
 - [ ] PR 6 adds lookup instrumentation/cache only if measurements justify it.
 - [ ] PR 7 cleans request/response allocation only if profiles show meaningful headroom.
 - [ ] DD-061 is updated after each merged PR with measured deltas and completed checkboxes.
@@ -515,6 +517,4 @@ Recommended local toolchain:
 
 ## Current Recommendation
 
-With the automatic template AST cache and loop-scope cleanup complete, use benchmark data to decide whether **PR 5: direct native/global call fast path** is justified next. Start by profiling common native calls in template/page workloads and only add the fast path if shadowing/import semantics can stay obvious and well-tested.
-
-If PR 5 does not produce a clean measurable win, skip to lookup instrumentation rather than forcing a dispatch optimization. Computers are annoyingly literal; we should let them tell us where they hurt.
+With the automatic template AST cache, loop-scope cleanup, and targeted `len(identifier)` fast path complete, use benchmark/profile data to choose between **PR 6: environment lookup measurement/cache** and **PR 7: request/response allocation cleanup**. Do not force a broad generic native-call shortcut unless a profile shows it beats the extra shadowing checks.

@@ -399,11 +399,48 @@ impl Environment {
 
     pub fn get(&self, name: &str) -> Option<Value> {
         if let Some(value) = self.values.get(name) {
-            Some(value.clone())
-        } else if let Some(ref parent) = self.parent {
-            parent.borrow().get(name)
-        } else {
-            None
+            return Some(value.clone());
+        }
+
+        let mut next = self.parent.clone();
+        while let Some(env_rc) = next {
+            let env = env_rc.borrow();
+            if let Some(value) = env.values.get(name) {
+                return Some(value.clone());
+            }
+            next = env.parent.clone();
+        }
+
+        None
+    }
+
+    fn len_of_binding(&self, name: &str) -> Option<Result<Value>> {
+        if let Some(value) = self.values.get(name) {
+            return Some(Self::len_of_value(value));
+        }
+
+        let mut next = self.parent.clone();
+        while let Some(env_rc) = next {
+            let env = env_rc.borrow();
+            if let Some(value) = env.values.get(name) {
+                return Some(Self::len_of_value(value));
+            }
+            next = env.parent.clone();
+        }
+
+        None
+    }
+
+    fn len_of_value(value: &Value) -> Result<Value> {
+        match value {
+            Value::String(s) => Ok(Value::Int(s.len() as i64)),
+            Value::Array(a) => Ok(Value::Int(a.len() as i64)),
+            Value::Map(m) => Ok(Value::Int(m.len() as i64)),
+            other => Err(IntentError::type_error_with_context(
+                format!("len() requires a collection, got {}", other.type_name()),
+                TypeContext::new("String, Array, or Map", other.type_name())
+                    .with_hint("Use type(x) to check the type before calling len()"),
+            )),
         }
     }
 
@@ -5930,6 +5967,24 @@ impl Interpreter {
             } => {
                 // Special handling for old() in postconditions
                 if let Expression::Identifier(name) = function.as_ref() {
+                    // Fast path for len(identifier): avoid cloning large arrays/maps just to
+                    // compute their length. This preserves normal function shadowing by only
+                    // firing when `len` currently resolves to the builtin native function.
+                    if name == "len" && arguments.len() == 1 {
+                        if let Expression::Identifier(arg_name) = &arguments[0] {
+                            let len_is_builtin = matches!(
+                                self.environment.borrow().get("len"),
+                                Some(Value::NativeFunction { name, .. }) if name == "len"
+                            );
+                            if len_is_builtin {
+                                let len_result = self.environment.borrow().len_of_binding(arg_name);
+                                if let Some(result) = len_result {
+                                    return result;
+                                }
+                            }
+                        }
+                    }
+
                     if name == "old" && arguments.len() == 1 {
                         // Look up the pre-execution value
                         let key = format!("{:?}", &arguments[0]);
@@ -10745,6 +10800,101 @@ mod tests {
             std::process::id(),
             now
         ))
+    }
+
+    #[test]
+    fn environment_get_finds_parent_bindings_and_preserves_child_shadowing() {
+        let root = Rc::new(RefCell::new(Environment::new()));
+        root.borrow_mut()
+            .define("name".to_string(), Value::String("root".to_string()));
+        root.borrow_mut()
+            .define("only_root".to_string(), Value::Int(7));
+
+        let child = Environment::with_parent(Rc::clone(&root));
+        assert!(matches!(child.get("only_root"), Some(Value::Int(7))));
+        assert!(matches!(child.get("name"), Some(Value::String(ref s)) if s == "root"));
+
+        let mut shadowing_child = Environment::with_parent(root);
+        shadowing_child.define("name".to_string(), Value::String("child".to_string()));
+        assert!(matches!(shadowing_child.get("name"), Some(Value::String(ref s)) if s == "child"));
+        assert!(shadowing_child.get("missing").is_none());
+    }
+
+    #[test]
+    fn environment_get_handles_deep_scope_chains_iteratively() {
+        let root = Rc::new(RefCell::new(Environment::new()));
+        root.borrow_mut()
+            .define("target".to_string(), Value::Int(42));
+
+        let mut current = root;
+        for _ in 0..64 {
+            current = Rc::new(RefCell::new(Environment::with_parent(current)));
+        }
+
+        assert!(matches!(
+            current.borrow().get("target"),
+            Some(Value::Int(42))
+        ));
+    }
+
+    #[test]
+    fn environment_len_of_binding_handles_parent_scopes() {
+        let root = Rc::new(RefCell::new(Environment::new()));
+        root.borrow_mut().define(
+            "rows".to_string(),
+            Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+        );
+
+        let child = Environment::with_parent(Rc::new(RefCell::new(Environment::with_parent(root))));
+        assert!(matches!(
+            child.len_of_binding("rows"),
+            Some(Ok(Value::Int(3)))
+        ));
+    }
+
+    #[test]
+    fn len_identifier_fast_path_preserves_builtin_behavior() {
+        let result = eval(
+            r#"
+            let rows = [1, 2, 3, 4]
+            len(rows)
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(result, Value::Int(4)));
+    }
+
+    #[test]
+    fn len_identifier_fast_path_preserves_shadowed_len_function() {
+        let result = eval(
+            r#"
+            fn len(value) {
+                return 99
+            }
+
+            let rows = [1, 2, 3, 4]
+            len(rows)
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(result, Value::Int(99)));
+    }
+
+    #[test]
+    fn len_identifier_fast_path_preserves_type_errors() {
+        let result = eval(
+            r#"
+            let n = 123
+            len(n)
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(result, IntentError::TypeError { message, .. } if message.contains("len() requires a collection"))
+        );
     }
 
     #[test]
