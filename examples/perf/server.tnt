@@ -1,0 +1,129 @@
+// DD-061 performance benchmark HTTP server.
+// Run with: ./target/dev-release/ntnt run examples/perf/server.tnt
+// The benchmark harness expects this server on localhost:18080.
+
+import { html, json, text } from "std/http/server"
+import { get_env } from "std/env"
+
+fn make_rows(count: Int) -> Array {
+    let mut rows = []
+    for i in 0..count {
+        // ntnt array construction returns a new array today. Rows are built once
+        // at startup so this does not pollute per-request template timings.
+        rows = rows + [map {
+            "id": i,
+            "name": "Widget " + str(i),
+            "status": if i % 2 == 0 { "active" } else { "draft" },
+            "score": i * 7,
+            "summary": "Benchmark row " + str(i) + " with enough text to exercise escaping and template output."
+        }]
+    }
+    return rows
+}
+
+// Build row data once at startup so template routes mostly measure rendering work.
+let ROWS_10 = make_rows(10)
+let ROWS_100 = make_rows(100)
+
+fn plaintext(req: Map) -> Map {
+    return text("Hello, ntnt performance harness")
+}
+
+fn small_json(req: Map) -> Map {
+    return json(map {
+        "ok": true,
+        "message": "Hello, ntnt performance harness",
+        "items": [1, 2, 3, 4, 5]
+    })
+}
+
+fn route_param(req: Map) -> Map {
+    let id = req.params["id"] ?? "missing"
+    return json(map {
+        "id": id,
+        "label": "item-" + id,
+        "metadata": map { "source": "route", "active": true }
+    })
+}
+
+fn compute_loop(req: Map) -> Map {
+    let mut total = 0
+    for i in 0..5000 {
+        total = total + ((i * 3) % 17)
+    }
+    return json(map { "total": total })
+}
+
+fn template_layout(req: Map) -> Map {
+    let rendered = template("views/page.html", map {
+        "title": "Template layout benchmark",
+        "heading": "Layout + partial + loop",
+        "rows": ROWS_10
+    })
+    return html(rendered)
+}
+
+fn template_rows(req: Map) -> Map {
+    let rendered = template("views/page.html", map {
+        "title": "Template row benchmark",
+        "heading": "One hundred row render",
+        "rows": ROWS_100
+    })
+    return html(rendered)
+}
+
+// The optional DB routes intentionally measure ntnt's current full
+// connect-query-close request path. Keep these numbers separate from pooled
+// query-only benchmarks.
+fn db_single(req: Map) -> Map {
+    import { connect, query_one, close } from "std/db/postgres"
+
+    let db_url = get_env("DATABASE_URL") ?? ""
+    if db_url == "" {
+        return json(map { "skipped": true, "reason": "DATABASE_URL is not set" })
+    }
+
+    let db = connect(db_url) otherwise {
+        return json(map { "error": "connect_failed" })
+    }
+    let row = query_one(db, "SELECT 1 AS value", []) otherwise {
+        close(db)
+        return json(map { "error": "query_failed" })
+    }
+    close(db)
+    return json(map { "value": row["value"] ?? 1 })
+}
+
+fn db_multi(req: Map) -> Map {
+    import { connect, query_one, close } from "std/db/postgres"
+
+    let db_url = get_env("DATABASE_URL") ?? ""
+    if db_url == "" {
+        return json(map { "skipped": true, "reason": "DATABASE_URL is not set" })
+    }
+
+    let db = connect(db_url) otherwise {
+        return json(map { "error": "connect_failed" })
+    }
+    let mut total = 0
+    for i in 0..5 {
+        let row = query_one(db, "SELECT $1::int AS value", [i]) otherwise {
+            close(db)
+            return json(map { "error": "query_failed" })
+        }
+        total = total + (row["value"] ?? 0)
+    }
+    close(db)
+    return json(map { "total": total })
+}
+
+get("/", plaintext)
+get("/json", small_json)
+get("/param/{id}", route_param)
+get("/compute", compute_loop)
+get("/template/layout", template_layout)
+get("/template/rows", template_rows)
+get("/db/single", db_single)
+get("/db/multi", db_multi)
+
+listen(18080)

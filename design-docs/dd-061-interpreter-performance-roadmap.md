@@ -166,20 +166,20 @@ This should be a docs/tests/runtime-semantics cleanup PR, not a syntax redesign.
 
 Scope:
 
-- [ ] Update the canonical template docs/spec so implementation and docs agree:
-  - [ ] `{{expr}}` is escaped output.
-  - [ ] `{{{expr}}}` is raw/unescaped output.
-  - [ ] `{{#if cond}}`, `{{#elif cond}}`, `{{#else}}`, `{{/if}}` are explicit conditional forms.
-  - [ ] `{{#for item in items}}`, `{{#empty}}`, `{{/for}}` are explicit loop forms.
-  - [ ] `{{> partial}}` and `{{> partial data_expr}}` are partial forms.
-  - [ ] filters use parenthesized args as canonical, with space-separated args preserved as compatibility sugar.
-  - [ ] `\{{` and `\}}` produce literal braces where supported.
-- [ ] Remove or correct doc claims that Mustache `{{#key}}...{{/key}}` sections are supported.
-- [ ] Explicitly document that ambiguous Mustache sections are a non-goal for now; use `#if` or `#for` instead.
-- [ ] Document external `.html` templates as `{{expr}}`-first; keep `#{expr}` documented only for inline triple-quoted ntnt strings.
-- [ ] Document partial lookup order exactly as implemented, or adjust implementation/tests to match the chosen lookup order.
-- [ ] Normalize template error handling so interpolation, filters, loops, and `#if` / `#elif` conditions consistently honor strict/warn/forgiving mode.
-- [ ] Add regression tests for the chosen contract without changing existing app-visible syntax.
+- [x] Update the canonical template docs/spec so implementation and docs agree:
+  - [x] `{{expr}}` is escaped output.
+  - [x] `{{{expr}}}` is raw/unescaped output.
+  - [x] `{{#if cond}}`, `{{#elif cond}}`, `{{#else}}`, `{{/if}}` are explicit conditional forms.
+  - [x] `{{#for item in items}}`, `{{#empty}}`, `{{/for}}` are explicit loop forms.
+  - [x] `{{> partial}}` and `{{> partial data_expr}}` are partial forms.
+  - [x] filters use parenthesized args as canonical, with space-separated args preserved as compatibility sugar.
+  - [x] `\{{` and `\}}` produce literal braces where supported.
+- [x] Remove or correct doc claims that Mustache `{{#key}}...{{/key}}` sections are supported.
+- [x] Explicitly document that ambiguous Mustache sections are a non-goal for now; use `#if` or `#for` instead.
+- [x] Document external `.html` templates as `{{expr}}`-first; keep `#{expr}` documented only for inline triple-quoted ntnt strings.
+- [x] Document partial lookup order exactly as implemented, or adjust implementation/tests to match the chosen lookup order.
+- [x] Normalize template error handling so interpolation, filters, loops, and `#if` / `#elif` conditions consistently honor strict/warn/forgiving mode.
+- [x] Add regression tests for the chosen contract without changing existing app-visible syntax.
 
 Likely files:
 
@@ -211,11 +211,11 @@ git diff --check
 
 Acceptance criteria:
 
-- [ ] Existing app template syntax remains valid.
-- [ ] Docs no longer claim unsupported Mustache section behavior.
-- [ ] Partial lookup rules are precise enough for cache dependency tracking.
-- [ ] Template condition errors follow the same TypeMode policy as other template errors.
-- [ ] The follow-up cache PR has a stable semantic contract to preserve.
+- [x] Existing app template syntax remains valid.
+- [x] Docs no longer claim unsupported Mustache section behavior.
+- [x] Partial lookup rules are precise enough for cache dependency tracking.
+- [x] Template condition errors follow the same TypeMode policy as other template errors.
+- [x] The follow-up cache PR has a stable semantic contract to preserve.
 
 ### PR 2: Benchmark harness and current-use-case baseline
 
@@ -225,19 +225,19 @@ This should be a small PR that adds scripts/examples only. It should establish b
 
 Scope:
 
-- [ ] Add a benchmark script under `scripts/bench/` or `tools/bench/` that can build `dev-release`, start benchmark servers, run `wrk`, and write JSON/Markdown results.
-- [ ] Add representative ntnt benchmark apps under `examples/perf/` or `benchmarks/`:
-  - [ ] plaintext response
-  - [ ] small JSON response
-  - [ ] route param + map read
-  - [ ] compute loop (`for i in 0..N`) for interpreter-only cost
-  - [ ] external template render with layout + partial + loop
-  - [ ] template-heavy page with 100 row maps
-  - [ ] single PostgreSQL query handler, optional/gated by env
-  - [ ] multi-query handler, optional/gated by env
-- [ ] Capture interpreter-only CLI timings separately from HTTP throughput where practical.
-- [ ] Document how to run the suite locally and how to compare before/after.
-- [ ] Ensure benchmarks are opt-in and do not make normal CI flaky.
+- [x] Add a benchmark script under `scripts/bench/` or `tools/bench/` that can build `dev-release`, start benchmark servers, run `wrk`, and write JSON/Markdown results.
+- [x] Add representative ntnt benchmark apps under `examples/perf/` or `benchmarks/`:
+  - [x] plaintext response
+  - [x] small JSON response
+  - [x] route param + map read
+  - [x] compute loop (`for i in 0..N`) for interpreter-only cost
+  - [x] external template render with layout + partial + loop
+  - [x] template-heavy page with 100 row maps
+  - [x] single PostgreSQL query handler, optional/gated by env
+  - [x] multi-query handler, optional/gated by env
+- [x] Capture interpreter-only CLI timings separately from HTTP throughput where practical.
+- [x] Document how to run the suite locally and how to compare before/after.
+- [x] Ensure benchmarks are opt-in and do not make normal CI flaky.
 
 Likely files:
 
@@ -255,9 +255,9 @@ python3 scripts/bench/run-benchmarks.py --quick
 
 Acceptance criteria:
 
-- [ ] A future PR can run one command and produce comparable baseline/after numbers.
-- [ ] The suite includes at least one template-heavy route and one interpreter-only route.
-- [ ] DB benchmarks are skipped unless env config is present.
+- [x] A future PR can run one command and produce comparable baseline/after numbers.
+- [x] The suite includes at least one template-heavy route and one interpreter-only route.
+- [x] DB benchmarks are skipped unless env config is present.
 
 ### PR 3: Automatic path-keyed template AST cache for `template()`
 
@@ -499,8 +499,8 @@ Recommended local toolchain:
 
 ## Updated Definition of Done
 
-- [ ] PR 1 clarifies and tests the template contract without breaking existing apps.
-- [ ] PR 2 adds a repeatable benchmark harness and baseline results.
+- [x] PR 1 clarifies and tests the template contract without breaking existing apps.
+- [x] PR 2 adds a repeatable benchmark harness and baseline results.
 - [ ] PR 3 makes ordinary `template(path, data)` use a safe automatic AST/cache path.
 - [ ] PR 4 reduces template render/loop scope overhead without semantic drift.
 - [ ] PR 5 adds a safe direct native/global call fast path, or documents why profiling does not justify it.
@@ -513,9 +513,7 @@ Recommended local toolchain:
 
 ## Current Recommendation
 
-Start with **PR 1: template system contract cleanup**. It is the right first PR because it is low-risk, preserves existing app syntax, and makes the subsequent cache work target a clear, consistent template language.
-
-After PR 1 is merged, proceed with **PR 2: benchmark harness**, then **PR 3: automatic `template()` AST cache**.
+Start with **PR 3: automatic `template()` AST cache** now that PR 1 has locked the template contract and PR 2 has added the benchmark harness.
 
 The template cache remains the best first implementation performance target because it is:
 
