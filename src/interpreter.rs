@@ -5688,10 +5688,16 @@ impl Interpreter {
             items.push(self.eval_expression(element)?);
         }
 
-        Ok(self
+        let appended = self
             .environment
             .borrow_mut()
-            .append_to_array_binding(target_name, items))
+            .append_to_array_binding(target_name, items);
+        if !appended {
+            return Err(IntentError::runtime_error(
+                "array self-append fast path invariant failed: target binding is no longer an array",
+            ));
+        }
+        Ok(true)
     }
 
     fn array_append_elements_are_side_effect_free(elements: &[Expression]) -> bool {
@@ -5759,6 +5765,14 @@ impl Interpreter {
     }
 
     fn eval_block_for_control(&mut self, block: &Block) -> Result<Value> {
+        self.eval_block_inner(block, true)
+    }
+
+    pub fn eval_block(&mut self, block: &Block) -> Result<Value> {
+        self.eval_block_inner(block, false)
+    }
+
+    fn eval_block_inner(&mut self, block: &Block, control_context: bool) -> Result<Value> {
         let previous = Rc::clone(&self.environment);
         self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
 
@@ -5766,7 +5780,13 @@ impl Interpreter {
         let mut result = Value::Unit;
         let mut error = None;
         for stmt in &block.statements {
-            match self.eval_statement_for_control(stmt) {
+            let statement_result = if control_context {
+                self.eval_statement_for_control(stmt)
+            } else {
+                self.eval_statement(stmt)
+            };
+
+            match statement_result {
                 Ok(value) => {
                     result = value;
                     match result {
@@ -5793,39 +5813,6 @@ impl Interpreter {
         if let Some(err) = error {
             return Err(err);
         }
-        Ok(result)
-    }
-
-    pub fn eval_block(&mut self, block: &Block) -> Result<Value> {
-        let previous = Rc::clone(&self.environment);
-        self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
-
-        // Track deferred statements for this block
-        let deferred_count_before = self.deferred_statements.len();
-
-        let mut result = Value::Unit;
-        for stmt in &block.statements {
-            result = self.eval_statement(stmt)?;
-            // Propagate control flow
-            match result {
-                Value::Return(_) | Value::Break | Value::Continue => break,
-                _ => {}
-            }
-        }
-
-        // Execute deferred statements in reverse order (LIFO)
-        let deferred_to_run: Vec<Expression> = self
-            .deferred_statements
-            .drain(deferred_count_before..)
-            .collect();
-
-        for deferred_expr in deferred_to_run.into_iter().rev() {
-            // Deferred expressions execute even if there was an error
-            // For now, we ignore any errors in deferred statements
-            let _ = self.eval_expression(&deferred_expr);
-        }
-
-        self.environment = previous;
         Ok(result)
     }
 
@@ -11130,6 +11117,44 @@ mod tests {
         assert!(
             matches!(result, IntentError::TypeError { message, .. } if message.contains("len() requires a collection"))
         );
+    }
+
+    #[test]
+    fn eval_block_restores_environment_after_statement_error() {
+        let mut interpreter = Interpreter::new();
+        let result = eval_with_interpreter(
+            &mut interpreter,
+            r#"
+            if true {
+                let leaked = 1
+                1 / 0
+            }
+            "#,
+        );
+
+        assert!(matches!(result, Err(IntentError::DivisionByZero { .. })));
+        assert!(interpreter.environment.borrow().get("leaked").is_none());
+    }
+
+    #[test]
+    fn eval_block_runs_deferred_statements_after_statement_error() {
+        let mut interpreter = Interpreter::new();
+        let result = eval_with_interpreter(
+            &mut interpreter,
+            r#"
+            let mut marker = 0
+            if true {
+                defer marker = 1
+                1 / 0
+            }
+            "#,
+        );
+
+        assert!(matches!(result, Err(IntentError::DivisionByZero { .. })));
+        assert!(matches!(
+            interpreter.environment.borrow().get("marker"),
+            Some(Value::Int(1))
+        ));
     }
 
     #[test]
