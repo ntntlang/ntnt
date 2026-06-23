@@ -7672,32 +7672,32 @@ impl Interpreter {
         resolved_path: std::path::PathBuf,
     ) -> Result<Rc<Vec<TemplatePart>>> {
         let cache_key = resolved_path.to_string_lossy().to_string();
+        let is_production = is_production_mode();
+        let current_mtime = if is_production {
+            None
+        } else {
+            std::fs::metadata(&resolved_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+        };
 
-        if is_production_mode() {
+        if is_production {
             if let Some(cached) = self.external_template_cache.get(&cache_key) {
                 return Ok(Rc::clone(&cached.parts));
             }
-        } else {
-            let current_mtime = std::fs::metadata(&resolved_path)
-                .ok()
-                .and_then(|m| m.modified().ok());
-            if let Some(cached) = self.external_template_cache.get(&cache_key) {
-                if Self::cached_template_is_fresh(cached.mtime, current_mtime) {
-                    return Ok(Rc::clone(&cached.parts));
-                }
+        } else if let Some(cached) = self.external_template_cache.get(&cache_key) {
+            if Self::cached_template_is_fresh(cached.mtime, current_mtime) {
+                return Ok(Rc::clone(&cached.parts));
             }
         }
 
         let content = Self::read_external_template_file(&resolved_path)?;
         let parts = Rc::new(Self::parse_template_content(&content)?);
-        let mtime = std::fs::metadata(&resolved_path)
-            .ok()
-            .and_then(|m| m.modified().ok());
         self.external_template_cache.insert(
             cache_key,
             CachedExternalTemplate {
                 parts: Rc::clone(&parts),
-                mtime,
+                mtime: current_mtime,
             },
         );
         Ok(parts)
@@ -7733,8 +7733,9 @@ impl Interpreter {
             std::path::PathBuf::from(".")
         };
 
-        // Find the project root by looking for a directory that contains "views/"
-        // Walk up from script_dir
+        // Preserve the existing partial lookup semantics: discover the nearest project
+        // root containing views/ for conventional views/partials lookups, then fall
+        // back to exact paths relative to the current script directory.
         let project_root = {
             let mut dir = script_dir.clone();
             loop {
