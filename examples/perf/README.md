@@ -47,6 +47,7 @@ The DB fixtures use simple `SELECT` queries so they do not require schema setup.
 - `/json` — small JSON response
 - `/param/{id}` — route params and map reads
 - `/compute` — interpreter loop inside an HTTP request
+- `/native/calls` — repeated stable native/global calls (`len`, `str`) inside an HTTP request
 - `/template/layout` — external template render with layout, partial, and loop
 - `/template/rows` — template-heavy 100-row render
 - `/db/single` — optional single PostgreSQL query
