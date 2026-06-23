@@ -10838,6 +10838,21 @@ mod tests {
     }
 
     #[test]
+    fn environment_len_of_binding_handles_parent_scopes() {
+        let root = Rc::new(RefCell::new(Environment::new()));
+        root.borrow_mut().define(
+            "rows".to_string(),
+            Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+        );
+
+        let child = Environment::with_parent(Rc::new(RefCell::new(Environment::with_parent(root))));
+        assert!(matches!(
+            child.len_of_binding("rows"),
+            Some(Ok(Value::Int(3)))
+        ));
+    }
+
+    #[test]
     fn len_identifier_fast_path_preserves_builtin_behavior() {
         let result = eval(
             r#"
