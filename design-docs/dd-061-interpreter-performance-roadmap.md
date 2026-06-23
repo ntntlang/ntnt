@@ -267,15 +267,15 @@ Current `template()` reparses the template every call. This PR should cache the 
 
 Scope:
 
-- [ ] Add a path-keyed template cache for `template(path, data)`.
-- [ ] Cache parsed template expression / `TemplatePart` AST, not only raw file contents.
-- [ ] Include partial dependency invalidation based on the PR 1 partial lookup contract.
-- [ ] In production/worker mode, avoid per-request `metadata()` checks when hot reload is disabled.
-- [ ] In development/hot-reload mode, invalidate by mtime and reload safely.
-- [ ] Preserve `compile()` / `render()` compatibility.
-- [ ] Preserve template error behavior in strict/warn/forgiving modes.
-- [ ] Add tests proving edits invalidate cached templates in dev mode.
-- [ ] Benchmark external template render before/after.
+- [x] Add a path-keyed template cache for `template(path, data)`.
+- [x] Cache parsed template expression / `TemplatePart` AST, not only raw file contents.
+- [x] Include partial dependency invalidation based on the PR 1 partial lookup contract.
+- [x] In production/worker mode, avoid per-request `metadata()` checks when hot reload is disabled.
+- [x] In development/hot-reload mode, invalidate by mtime and reload safely.
+- [x] Preserve `compile()` / `render()` compatibility.
+- [x] Preserve template error behavior in strict/warn/forgiving modes.
+- [x] Add tests proving edits invalidate cached templates in dev mode.
+- [x] Benchmark external template render before/after.
 
 Likely files:
 
@@ -292,11 +292,11 @@ Non-goals:
 
 Acceptance criteria:
 
-- [ ] Existing `template(path, data)` behavior is unchanged.
-- [ ] Template-heavy benchmark improves meaningfully.
-- [ ] Dev edits still show up without restarting when hot reload is enabled.
-- [ ] Worker/prod mode does not stat stable templates on every render.
-- [ ] Partial edits invalidate the parent render path correctly.
+- [x] Existing `template(path, data)` behavior is unchanged.
+- [x] Template-heavy benchmark improves meaningfully.
+- [x] Dev edits still show up without restarting when hot reload is enabled.
+- [x] Worker/prod mode does not stat stable templates on every render.
+- [x] Partial edits invalidate the parent render path correctly.
 
 ### PR 4: Template render scope and loop fast-path cleanup
 
@@ -306,11 +306,11 @@ Acceptance criteria:
 
 Scope:
 
-- [ ] Measure cost of template data scope creation and per-row loop scope creation.
-- [ ] Add a template data lookup path that can read from a borrowed render context before falling back to interpreter environment, or otherwise reduce data-scope setup/cloning.
-- [ ] Reduce unnecessary `Value` clones when binding template data and loop metadata.
-- [ ] Keep template variable shadowing semantics unchanged.
-- [ ] Add regression tests for loop metadata, nested loops, `{{#if}}`, missing vars, and parent-scope fallback.
+- [x] Measure cost of template data scope creation and per-row loop scope creation.
+- [x] Add a template data lookup path that can read from a borrowed render context before falling back to interpreter environment, or otherwise reduce data-scope setup/cloning.
+- [x] Reduce unnecessary `Value` clones when binding template data and loop metadata.
+- [x] Keep template variable shadowing semantics unchanged.
+- [x] Add regression tests for loop metadata, nested loops, missing vars, and parent-scope fallback.
 
 Likely files:
 
@@ -320,9 +320,11 @@ Likely files:
 
 Acceptance criteria:
 
-- [ ] Row-heavy template benchmark improves.
-- [ ] Missing variables still render as empty where current template semantics require it.
-- [ ] Nested template loops and parent-scope references remain correct.
+- [x] Row-heavy template benchmark improves.
+- [x] Missing variables still render as empty where current template semantics require it.
+- [x] Nested template loops and parent-scope references remain correct.
+
+Candidate benchmark note: local 3s/3-run `wrk` pass at 16 connections/2 threads, comparing `origin/main` at `52554e9` to this PR's dev-release binary, showed `/template/layout` RPS `23807.29 -> 24701.15` (+3.8%) and `/template/rows` RPS `6053.89 -> 6420.77` (+6.1%), while non-template routes stayed within noise.
 
 ### PR 5: Direct native/global call fast path
 
@@ -501,8 +503,8 @@ Recommended local toolchain:
 
 - [x] PR 1 clarifies and tests the template contract without breaking existing apps.
 - [x] PR 2 adds a repeatable benchmark harness and baseline results.
-- [ ] PR 3 makes ordinary `template(path, data)` use a safe automatic AST/cache path.
-- [ ] PR 4 reduces template render/loop scope overhead without semantic drift.
+- [x] PR 3 makes ordinary `template(path, data)` use a safe automatic AST/cache path.
+- [x] PR 4 reduces template render/loop scope overhead without semantic drift.
 - [ ] PR 5 adds a safe direct native/global call fast path, or documents why profiling does not justify it.
 - [ ] PR 6 adds lookup instrumentation/cache only if measurements justify it.
 - [ ] PR 7 cleans request/response allocation only if profiles show meaningful headroom.
@@ -513,14 +515,6 @@ Recommended local toolchain:
 
 ## Current Recommendation
 
-Start with **PR 3: automatic `template()` AST cache** now that PR 1 has locked the template contract and PR 2 has added the benchmark harness.
+With the automatic template AST cache and loop-scope cleanup complete, use benchmark data to decide whether **PR 5: direct native/global call fast path** is justified next. Start by profiling common native calls in template/page workloads and only add the fast path if shadowing/import semantics can stay obvious and well-tested.
 
-The template cache remains the best first implementation performance target because it is:
-
-- directly relevant to current server-rendered apps
-- visible in source as repeated work on the normal ergonomic API
-- lower risk than environment/frame representation changes
-- benchmarkable with a contained route and template fixture
-- compatible with the current tree-walking interpreter
-
-After that, use benchmark data to decide whether template loop scopes, native-call dispatch, or environment lookup is the next real bottleneck. Computers are annoyingly literal; we should let them tell us where they hurt.
+If PR 5 does not produce a clean measurable win, skip to lookup instrumentation rather than forcing a dispatch optimization. Computers are annoyingly literal; we should let them tell us where they hurt.

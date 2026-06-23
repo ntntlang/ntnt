@@ -362,6 +362,17 @@ impl Environment {
         }
     }
 
+    pub fn with_parent_and_values(
+        parent: Rc<RefCell<Environment>>,
+        values: HashMap<String, Value>,
+    ) -> Self {
+        Environment {
+            values,
+            mutable_vars: std::collections::HashSet::new(),
+            parent: Some(parent),
+        }
+    }
+
     pub fn define(&mut self, name: String, value: Value) {
         self.values.insert(name, value);
     }
@@ -7787,24 +7798,88 @@ impl Interpreter {
         parts: &[TemplatePart],
         data: &HashMap<String, Value>,
     ) -> Result<Value> {
-        // Create a new scope for template data
         let previous = Rc::clone(&self.environment);
-        self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+        let template_env = Rc::new(RefCell::new(Environment::with_parent_and_values(
+            Rc::clone(&previous),
+            data.clone(),
+        )));
+        self.with_template_environment(template_env, |interpreter| {
+            interpreter.eval_template_parts(parts)
+        })
+    }
 
-        // Define all data variables in the new scope
-        for (key, value) in data {
-            self.environment
-                .borrow_mut()
-                .define(key.clone(), value.clone());
+    fn with_template_environment<F>(
+        &mut self,
+        environment: Rc<RefCell<Environment>>,
+        render: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&mut Self) -> Result<Value>,
+    {
+        let previous = Rc::clone(&self.environment);
+        self.environment = environment;
+        let result = render(self);
+        self.environment = previous;
+        result
+    }
+
+    fn append_template_string(result: &mut String, rendered: Value) {
+        if let Value::String(s) = rendered {
+            result.push_str(&s);
+        }
+    }
+
+    fn bind_template_loop_scope(
+        environment: &Rc<RefCell<Environment>>,
+        var: &str,
+        value: Value,
+        index: usize,
+        length: usize,
+    ) {
+        debug_assert!(length > 0, "template loop scope requires a non-empty loop");
+
+        let mut env = environment.borrow_mut();
+        env.values.clear();
+        env.mutable_vars.clear();
+        env.define(var.to_string(), value);
+        env.define("@index".to_string(), Value::Int(index as i64));
+        env.define("@index1".to_string(), Value::Int((index + 1) as i64));
+        env.define("@first".to_string(), Value::Bool(index == 0));
+        env.define("@last".to_string(), Value::Bool(index + 1 == length));
+        env.define("@length".to_string(), Value::Int(length as i64));
+        env.define("@even".to_string(), Value::Bool(index % 2 == 0));
+        env.define("@odd".to_string(), Value::Bool(index % 2 == 1));
+    }
+
+    fn render_template_loop_values<I>(
+        &mut self,
+        var: &str,
+        length: usize,
+        values: I,
+        body: &[TemplatePart],
+        result: &mut String,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = Value>,
+    {
+        let previous = Rc::clone(&self.environment);
+        let loop_env = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+        self.environment = Rc::clone(&loop_env);
+
+        let mut render_result = Ok(());
+        for (index, value) in values.into_iter().enumerate() {
+            Self::bind_template_loop_scope(&loop_env, var, value, index, length);
+            match self.eval_template_parts(body) {
+                Ok(rendered) => Self::append_template_string(result, rendered),
+                Err(e) => {
+                    render_result = Err(e);
+                    break;
+                }
+            }
         }
 
-        // Evaluate the template expression
-        let result = self.eval_template_parts(parts);
-
-        // Restore environment
         self.environment = previous;
-
-        result
+        render_result
     }
 
     /// Format a template error for HTML output in warn mode.
@@ -8007,48 +8082,13 @@ impl Interpreter {
                         }
                         Value::Array(items) => {
                             let length = items.len();
-                            for (index, item) in items.into_iter().enumerate() {
-                                // Create new scope for each iteration
-                                let previous = Rc::clone(&self.environment);
-                                self.environment = Rc::new(RefCell::new(Environment::with_parent(
-                                    Rc::clone(&previous),
-                                )));
-
-                                // Bind the loop variable
-                                self.environment.borrow_mut().define(var.clone(), item);
-
-                                // Bind loop metadata variables
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@index".to_string(), Value::Int(index as i64));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@index1".to_string(), Value::Int((index + 1) as i64));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@first".to_string(), Value::Bool(index == 0));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@last".to_string(), Value::Bool(index == length - 1));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@length".to_string(), Value::Int(length as i64));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@even".to_string(), Value::Bool(index % 2 == 0));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@odd".to_string(), Value::Bool(index % 2 == 1));
-
-                                // Evaluate the body and append to result
-                                let body_result = self.eval_template_parts(body)?;
-                                if let Value::String(s) = body_result {
-                                    result.push_str(&s);
-                                }
-
-                                // Restore environment
-                                self.environment = previous;
-                            }
+                            self.render_template_loop_values(
+                                var,
+                                length,
+                                items,
+                                body,
+                                &mut result,
+                            )?;
                         }
                         Value::Map(ref map) if map.is_empty() => {
                             // Empty map - render empty_body if present
@@ -8062,48 +8102,16 @@ impl Interpreter {
                         Value::Map(map) => {
                             // When iterating over a map, yield (key, value) pairs
                             let length = map.len();
-                            for (index, (k, v)) in map.iter().enumerate() {
-                                // Create new scope for each iteration
-                                let previous = Rc::clone(&self.environment);
-                                self.environment = Rc::new(RefCell::new(Environment::with_parent(
-                                    Rc::clone(&previous),
-                                )));
-
-                                // Create a tuple-like array for the pair
-                                let pair = Value::Array(vec![Value::String(k.clone()), v.clone()]);
-                                self.environment.borrow_mut().define(var.clone(), pair);
-
-                                // Bind loop metadata variables
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@index".to_string(), Value::Int(index as i64));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@index1".to_string(), Value::Int((index + 1) as i64));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@first".to_string(), Value::Bool(index == 0));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@last".to_string(), Value::Bool(index == length - 1));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@length".to_string(), Value::Int(length as i64));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@even".to_string(), Value::Bool(index % 2 == 0));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("@odd".to_string(), Value::Bool(index % 2 == 1));
-
-                                let body_result = self.eval_template_parts(body)?;
-                                if let Value::String(s) = body_result {
-                                    result.push_str(&s);
-                                }
-
-                                // Restore environment
-                                self.environment = previous;
-                            }
+                            let pairs = map
+                                .into_iter()
+                                .map(|(k, v)| Value::Array(vec![Value::String(k), v]));
+                            self.render_template_loop_values(
+                                var,
+                                length,
+                                pairs,
+                                body,
+                                &mut result,
+                            )?;
                         }
                         _ => {
                             // Non-iterable value: behaviour depends on NTNT_TYPE_MODE
@@ -10854,6 +10862,57 @@ mod tests {
         assert!(matches!(second, Value::String(ref s) if s == "Page New B"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn template_loop_scope_reuse_preserves_metadata_and_parent_fallback() {
+        let result = eval(
+            r#"
+let title = "Parent"
+let rows = ["a", "b", "c"]
+let buckets = [[1, 2], [3]]
+"""{{#for row in rows}}{{@index}}/{{@index1}}/{{@first}}/{{@last}}/{{@length}}/{{@even}}/{{@odd}}:{{row}}:{{missing}}:{{title}};{{/for}}|{{#for bucket in buckets}}G{{@index}}[{{#for item in bucket}}{{@index}}={{item}}/{{title}};{{/for}}]{{/for}}"""
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            result,
+            Value::String(ref s) if s == "0/1/true/false/3/true/false:a::Parent;1/2/false/false/3/false/true:b::Parent;2/3/false/true/3/true/false:c::Parent;|G0[0=1/Parent;1=2/Parent;]G1[0=3/Parent;]"
+        ));
+    }
+
+    #[test]
+    fn template_loop_scope_reuse_preserves_map_pair_semantics() {
+        let result = eval(
+            r#"
+let pairs = map { "a": 1, "b": 2 }
+"""{{#for pair in pairs}}{{pair[0]}}={{pair[1]}}/{{@length}};{{/for}}"""
+"#,
+        )
+        .unwrap();
+
+        let Value::String(output) = result else {
+            panic!("expected string result");
+        };
+        assert!(output.contains("a=1/2;"), "output: {output}");
+        assert!(output.contains("b=2/2;"), "output: {output}");
+    }
+
+    #[test]
+    fn template_environment_helper_restores_after_error() {
+        let mut interpreter = Interpreter::new();
+        let previous = Rc::clone(&interpreter.environment);
+        let scoped = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+
+        let err = interpreter
+            .with_template_environment(scoped, |_interpreter| {
+                Err(IntentError::runtime_error("boom".to_string()))
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("boom"));
+        assert!(Rc::ptr_eq(&interpreter.environment, &previous));
     }
 
     #[test]
