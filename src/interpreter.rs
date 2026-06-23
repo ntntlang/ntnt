@@ -569,6 +569,12 @@ struct ServerAction {
     handler: fn(&mut Interpreter, &[Expression]) -> Result<Value>,
 }
 
+#[derive(Clone)]
+struct CachedExternalTemplate {
+    parts: Rc<Vec<TemplatePart>>,
+    mtime: Option<std::time::SystemTime>,
+}
+
 /// The Intent interpreter
 pub struct Interpreter {
     environment: Rc<RefCell<Environment>>,
@@ -636,6 +642,8 @@ pub struct Interpreter {
     jobs_dir_mtimes: HashMap<String, std::time::SystemTime>,
     /// Registry of server actions handled specially before general function lookup
     server_actions: HashMap<String, ServerAction>,
+    /// Parsed external templates keyed by resolved file path for ordinary template(path, data)
+    external_template_cache: HashMap<String, CachedExternalTemplate>,
     /// Last known source line being executed (for runtime error reporting)
     current_line: usize,
     /// Last known source column being executed (for runtime error reporting)
@@ -826,6 +834,7 @@ impl Interpreter {
             jobs_dir: None,
             jobs_dir_mtimes: HashMap::new(),
             server_actions: HashMap::new(),
+            external_template_cache: HashMap::new(),
             current_line: 0,
             current_col: 0,
             call_depth: 0,
@@ -5950,13 +5959,13 @@ impl Interpreter {
                             }
                         };
 
-                        // Load template file
-                        let base_path = self.current_file.as_deref();
-                        let content =
-                            crate::stdlib::template::load_template_file(&path_str, base_path)?;
+                        // Load or reuse parsed template parts
+                        let base_path = self.current_file.clone();
+                        let parts =
+                            self.get_cached_template_parts(&path_str, base_path.as_deref())?;
 
                         // Render with data
-                        return self.render_template_with_data(&content, &data_map);
+                        return self.render_template_parts_with_data(parts.as_slice(), &data_map);
                     }
 
                     // Special handling for compile(path) - pre-compile template
@@ -7603,14 +7612,118 @@ impl Interpreter {
         Ok(())
     }
 
-    /// Render a template string with the given data
-    /// Resolve a partial name to a file path and load its content.
+    fn resolve_template_path(&self, path: &str, base_path: Option<&str>) -> std::path::PathBuf {
+        if let Some(base) = base_path {
+            let base_dir = std::path::Path::new(base)
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
+            base_dir.join(path)
+        } else {
+            std::path::PathBuf::from(path)
+        }
+    }
+
+    fn read_external_template_file(path: &std::path::Path) -> Result<String> {
+        std::fs::read_to_string(path).map_err(|e| {
+            IntentError::runtime_error(format!(
+                "Failed to load template '{}': {}",
+                path.display(),
+                e
+            ))
+        })
+    }
+
+    fn parse_template_content(content: &str) -> Result<Vec<TemplatePart>> {
+        // Wrap content in triple quotes to make it a template string, preserving
+        // the external-template parser path used before automatic caching.
+        let template_source = format!("\"\"\"{}\"\"\"", content);
+
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+
+        let lexer = Lexer::new(&template_source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+
+        match parser
+            .expression()
+            .map_err(|e| IntentError::runtime_error(format!("Failed to compile template: {}", e)))?
+        {
+            Expression::TemplateString(parts) => Ok(parts),
+            other => Err(IntentError::runtime_error(format!(
+                "Failed to compile template: expected template string, got {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn cached_template_is_fresh(
+        cached_mtime: Option<std::time::SystemTime>,
+        current_mtime: Option<std::time::SystemTime>,
+    ) -> bool {
+        match (cached_mtime, current_mtime) {
+            (Some(cached), Some(current)) => current <= cached,
+            _ => false,
+        }
+    }
+
+    fn get_cached_template_parts_for_path(
+        &mut self,
+        resolved_path: std::path::PathBuf,
+    ) -> Result<Rc<Vec<TemplatePart>>> {
+        let cache_key = resolved_path.to_string_lossy().to_string();
+
+        if is_production_mode() {
+            if let Some(cached) = self.external_template_cache.get(&cache_key) {
+                return Ok(Rc::clone(&cached.parts));
+            }
+        } else {
+            let current_mtime = std::fs::metadata(&resolved_path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+            if let Some(cached) = self.external_template_cache.get(&cache_key) {
+                if Self::cached_template_is_fresh(cached.mtime, current_mtime) {
+                    return Ok(Rc::clone(&cached.parts));
+                }
+            }
+        }
+
+        let content = Self::read_external_template_file(&resolved_path)?;
+        let parts = Rc::new(Self::parse_template_content(&content)?);
+        let mtime = std::fs::metadata(&resolved_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        self.external_template_cache.insert(
+            cache_key,
+            CachedExternalTemplate {
+                parts: Rc::clone(&parts),
+                mtime,
+            },
+        );
+        Ok(parts)
+    }
+
+    fn get_cached_template_parts(
+        &mut self,
+        path: &str,
+        base_path: Option<&str>,
+    ) -> Result<Rc<Vec<TemplatePart>>> {
+        let resolved_path = self.resolve_template_path(path, base_path);
+        self.get_cached_template_parts_for_path(resolved_path)
+    }
+
+    /// Resolve a partial name to a file path.
     /// Resolution order:
-    /// 1. views/partials/{name}.html (relative to script dir)
+    /// 1. views/partials/{name}.html (relative to project root)
     /// 2. views/partials/{name} (with extension already included)
-    /// 3. {name}.html (relative to script dir)
-    /// 4. {name} (exact path relative to script dir)
-    fn resolve_and_load_partial(&self, name: &str, base_path: Option<&str>) -> Result<String> {
+    /// 3. views/{name}.html (relative to project root)
+    /// 4. {name}.html (relative to script dir)
+    /// 5. {name} (exact path relative to script dir)
+    fn resolve_partial_path(
+        &self,
+        name: &str,
+        base_path: Option<&str>,
+    ) -> Result<std::path::PathBuf> {
         let script_dir = if let Some(base) = base_path {
             std::path::Path::new(base)
                 .parent()
@@ -7644,14 +7757,7 @@ impl Interpreter {
 
         for candidate in &candidates {
             if candidate.is_file() {
-                return std::fs::read_to_string(candidate).map_err(|e| {
-                    IntentError::runtime_error(format!(
-                        "Failed to read partial '{}' from {}: {}",
-                        name,
-                        candidate.display(),
-                        e
-                    ))
-                });
+                return Ok(candidate.clone());
             }
         }
 
@@ -7671,21 +7777,15 @@ impl Interpreter {
         content: &str,
         data: &HashMap<String, Value>,
     ) -> Result<Value> {
-        // Wrap content in triple quotes to make it a template string
-        let template_source = format!("\"\"\"{}\"\"\"", content);
+        let parts = Rc::new(Self::parse_template_content(content)?);
+        self.render_template_parts_with_data(parts.as_slice(), data)
+    }
 
-        // Parse the template string
-        use crate::lexer::Lexer;
-        use crate::parser::Parser;
-
-        let lexer = Lexer::new(&template_source);
-        let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens);
-
-        let template_expr = parser.expression().map_err(|e| {
-            IntentError::runtime_error(format!("Failed to compile template: {}", e))
-        })?;
-
+    fn render_template_parts_with_data(
+        &mut self,
+        parts: &[TemplatePart],
+        data: &HashMap<String, Value>,
+    ) -> Result<Value> {
         // Create a new scope for template data
         let previous = Rc::clone(&self.environment);
         self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
@@ -7698,7 +7798,7 @@ impl Interpreter {
         }
 
         // Evaluate the template expression
-        let result = self.eval_expression(&template_expr);
+        let result = self.eval_template_parts(parts);
 
         // Restore environment
         self.environment = previous;
@@ -8063,8 +8163,8 @@ impl Interpreter {
                 }
                 TemplatePart::Partial { name, data_expr } => {
                     // Resolve partial file path
-                    let base_path = self.current_file.as_deref();
-                    let partial_content = self.resolve_and_load_partial(name, base_path)?;
+                    let base_path = self.current_file.clone();
+                    let partial_path = self.resolve_partial_path(name, base_path.as_deref())?;
 
                     // Build data map: start with current scope variables
                     // If data_expr is provided, use that map as the sole data scope for the partial.
@@ -8085,7 +8185,9 @@ impl Interpreter {
                     };
 
                     // Render the partial template with data
-                    let rendered = self.render_template_with_data(&partial_content, &data_map)?;
+                    let partial_parts = self.get_cached_template_parts_for_path(partial_path)?;
+                    let rendered =
+                        self.render_template_parts_with_data(partial_parts.as_slice(), &data_map)?;
                     if let Value::String(s) = rendered {
                         result.push_str(&s);
                     }
@@ -10613,6 +10715,144 @@ mod tests {
         let ast = parser.parse()?;
         let mut interpreter = Interpreter::new();
         interpreter.eval(&ast)
+    }
+
+    fn eval_with_interpreter(interpreter: &mut Interpreter, source: &str) -> Result<Value> {
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse()?;
+        interpreter.eval(&ast)
+    }
+
+    fn unique_template_test_dir(name: &str) -> std::path::PathBuf {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "ntnt_template_cache_{}_{}_{}",
+            name,
+            std::process::id(),
+            now
+        ))
+    }
+
+    #[test]
+    fn template_cache_reuses_parsed_templates_and_partials() {
+        let dir = unique_template_test_dir("reuse");
+        let views_dir = dir.join("views");
+        let partials_dir = views_dir.join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+        std::fs::write(views_dir.join("page.html"), "Hello {{name}} {{> card}}").unwrap();
+        std::fs::write(partials_dir.join("card.html"), "Partial {{name}}").unwrap();
+
+        let mut interpreter = Interpreter::new();
+        interpreter.current_file = Some(dir.join("app.tnt").to_string_lossy().to_string());
+
+        let first = eval_with_interpreter(
+            &mut interpreter,
+            r#"template("views/page.html", map { "name": "A" })"#,
+        )
+        .unwrap();
+        assert!(matches!(first, Value::String(ref s) if s == "Hello A Partial A"));
+        assert_eq!(interpreter.external_template_cache.len(), 2);
+
+        // Make the files invalid but keep the cached metadata fresh. Rendering should
+        // use the cached parsed ASTs for both the top-level template and the partial.
+        std::fs::write(views_dir.join("page.html"), "{{#if broken}}").unwrap();
+        std::fs::write(partials_dir.join("card.html"), "{{#for item in}}").unwrap();
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        for cached in interpreter.external_template_cache.values_mut() {
+            cached.mtime = Some(future);
+        }
+
+        let second = eval_with_interpreter(
+            &mut interpreter,
+            r#"template("views/page.html", map { "name": "B" })"#,
+        )
+        .unwrap();
+        assert!(matches!(second, Value::String(ref s) if s == "Hello B Partial B"));
+        assert_eq!(interpreter.external_template_cache.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn template_cache_reloads_stale_templates_in_development() {
+        let dir = unique_template_test_dir("reload");
+        let views_dir = dir.join("views");
+        std::fs::create_dir_all(&views_dir).unwrap();
+        std::fs::write(views_dir.join("page.html"), "Old {{name}}").unwrap();
+
+        let mut interpreter = Interpreter::new();
+        interpreter.current_file = Some(dir.join("app.tnt").to_string_lossy().to_string());
+
+        let first = eval_with_interpreter(
+            &mut interpreter,
+            r#"template("views/page.html", map { "name": "A" })"#,
+        )
+        .unwrap();
+        assert!(matches!(first, Value::String(ref s) if s == "Old A"));
+
+        let template_path = interpreter
+            .resolve_template_path("views/page.html", interpreter.current_file.as_deref());
+        let cache_key = template_path.to_string_lossy().to_string();
+        interpreter
+            .external_template_cache
+            .get_mut(&cache_key)
+            .unwrap()
+            .mtime = Some(std::time::UNIX_EPOCH);
+        std::fs::write(views_dir.join("page.html"), "New {{name}}").unwrap();
+
+        let second = eval_with_interpreter(
+            &mut interpreter,
+            r#"template("views/page.html", map { "name": "B" })"#,
+        )
+        .unwrap();
+        assert!(matches!(second, Value::String(ref s) if s == "New B"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn template_cache_reloads_stale_partials_in_development() {
+        let dir = unique_template_test_dir("partial_reload");
+        let views_dir = dir.join("views");
+        let partials_dir = views_dir.join("partials");
+        std::fs::create_dir_all(&partials_dir).unwrap();
+        std::fs::write(views_dir.join("page.html"), "Page {{> card}}").unwrap();
+        std::fs::write(partials_dir.join("card.html"), "Old {{name}}").unwrap();
+
+        let mut interpreter = Interpreter::new();
+        interpreter.current_file = Some(dir.join("app.tnt").to_string_lossy().to_string());
+
+        let first = eval_with_interpreter(
+            &mut interpreter,
+            r#"template("views/page.html", map { "name": "A" })"#,
+        )
+        .unwrap();
+        assert!(matches!(first, Value::String(ref s) if s == "Page Old A"));
+
+        let partial_path = interpreter
+            .resolve_partial_path("card", interpreter.current_file.as_deref())
+            .unwrap();
+        let cache_key = partial_path.to_string_lossy().to_string();
+        interpreter
+            .external_template_cache
+            .get_mut(&cache_key)
+            .unwrap()
+            .mtime = Some(std::time::UNIX_EPOCH);
+        std::fs::write(partials_dir.join("card.html"), "New {{name}}").unwrap();
+
+        let second = eval_with_interpreter(
+            &mut interpreter,
+            r#"template("views/page.html", map { "name": "B" })"#,
+        )
+        .unwrap();
+        assert!(matches!(second, Value::String(ref s) if s == "Page New B"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
