@@ -354,9 +354,55 @@ Acceptance criteria:
 
 Candidate benchmark note: local 3s/3-run `wrk` pass at 16 connections/2 threads, comparing `origin/main` plus the new `/native/calls` fixture to this PR's dev-release binary, showed `/native/calls` RPS `349.95 -> 1574.70` (+350.0%). Other routes stayed within normal local noise.
 
-### PR 6: Environment lookup measurement + low-risk lookup cache
+### PR 6: Array self-append fast path
 
-**Goal:** reduce repeated recursive name lookup where semantics are stable.
+**Goal:** eliminate the current O(n²) cliff for the common NTNT array-building idiom without changing syntax or observable semantics.
+
+Profiling after PR 5 showed `arr = arr + [item]` is the clearest next target. A 20k append CLI microbenchmark took about `7.17s`, and per-append cost increased with array size (`35.6µs` at 2k, `358.4µs` at 20k), proving repeated full-array cloning. Active app scans found this pattern in Larri Dashboard, larri.net, Portugal Counter, and examples.
+
+Scope:
+
+- [x] Add benchmark coverage for array-building via repeated `arr = arr + [item]`.
+- [x] Add a targeted interpreter fast path for assignment shaped like `identifier = same_identifier + [single_or_many_items]`.
+- [x] Avoid cloning the existing array before appending; mutate the stored binding in place only after RHS item evaluation succeeds.
+- [x] Preserve existing semantics for mutability, undefined variables, alias/copy behavior, nested scopes, returned assignment value, and error paths.
+- [x] Keep ordinary `arr = other + [item]`, `arr = arr + other_array`, call-containing RHS arrays, and non-array `+` behavior on the generic path unless explicitly covered.
+
+Likely files:
+
+- `src/interpreter.rs`
+- focused interpreter tests
+- `examples/perf/*` / benchmark harness docs for the array-build fixture
+
+Acceptance criteria:
+
+- [x] Array append microbenchmark curve becomes near-linear.
+- [x] Existing array concatenation semantics remain unchanged outside the targeted assignment shape.
+- [x] Tests cover mutability, alias preservation, nested-scope assignment, RHS failure/no-partial-mutation, call-RHS fallback semantics, and assignment expression return value.
+
+Candidate benchmark note: local CLI microbenchmarks with the dev-release binary showed the 20k append fixture improve from `7.11s` before this PR to median `0.0122s` after this PR. Larger after-only checks stayed near-linear: 50k appends median `0.0238s`; 100k appends median `0.0439s`.
+
+### PR 7: String self-concat fast path
+
+**Goal:** reduce repeated string-building cliffs in manual HTML/XML/SVG routes.
+
+A follow-up microbenchmark showed `s = s + "x"` also grows non-linearly (`0.020s` at 20k, `2.49s` at 200k). Active app scans found manual string accumulation in larri.net blog/sitemap routes and Larri Dashboard admin/SVG/API code.
+
+Scope:
+
+- [ ] Add a string-building benchmark fixture.
+- [ ] Add a targeted fast path for `s = s + piece` when `s` currently resolves to a mutable string binding.
+- [ ] Preserve TypeMode behavior for implicit string conversions and return/assignment semantics.
+- [ ] Add tests for strict/warn/forgiving behavior, RHS failure, alias preservation, and nested scopes.
+
+Acceptance criteria:
+
+- [ ] Repeated string self-concat benchmark improves materially.
+- [ ] Existing `+` behavior and TypeMode diagnostics remain unchanged.
+
+### PR 8: Environment lookup measurement + low-risk lookup cache
+
+**Goal:** reduce repeated recursive name lookup where semantics are stable, after clone/allocation cliffs are handled.
 
 Do not jump straight to a full binder/slot system. First add measurements and the smallest safe lookup cache.
 
@@ -373,21 +419,15 @@ Scope:
 - [ ] Implement only a safe, local fast path with obvious invalidation.
 - [ ] Add tests for shadowing, mutation, imports, libs, and route hot reload.
 
-Likely files:
-
-- `src/interpreter.rs`
-- maybe `src/perf.rs` or a small internal instrumentation helper
-- tests for environment semantics
-
 Acceptance criteria:
 
 - [ ] Lookup-heavy benchmark improves.
 - [ ] Shadowing and mutation semantics remain unchanged.
 - [ ] The implementation is easy to remove if the benchmark delta is weak.
 
-### PR 7: Request/response allocation cleanup
+### PR 9: Request/response allocation cleanup
 
-**Goal:** reduce cloning/allocation in current HTTP request paths after template/call lookup wins are measured.
+**Goal:** reduce cloning/allocation in current HTTP request paths after template/call/collection wins are measured.
 
 Scope:
 
@@ -409,9 +449,9 @@ Acceptance criteria:
 - [ ] Multipart/body byte tests remain green.
 - [ ] Request maps keep the same user-visible fields.
 
-### PR 8: Decide whether deeper interpreter work is justified
+### PR 10: Decide whether deeper interpreter work is justified
 
-Only after PRs 1-7 have benchmark data should we choose one of:
+Only after PRs 1-9 have benchmark data should we choose one of:
 
 - symbol interning / binder metadata for locals
 - slot-based local frames
@@ -422,7 +462,7 @@ This should be a DD update or spike PR, not an automatic implementation.
 
 Acceptance criteria:
 
-- [ ] DD-061 includes measured deltas from PRs 3-7.
+- [ ] DD-061 includes measured deltas from PRs 3-9.
 - [ ] The next deeper design is justified by remaining measured bottlenecks.
 - [ ] We explicitly choose whether to keep optimizing the tree walker or start a bytecode/lowered-IR DD.
 
@@ -436,9 +476,10 @@ Acceptance criteria:
 | P0 | Benchmark harness | Without this, every performance PR is vibes wearing a stopwatch costume. |
 | P1 | Automatic `template()` AST cache | Directly targets dashboard/article/server-rendered apps and the current ergonomic path. |
 | P1 | Template render scope/loop cleanup | Current apps render lists, dashboards, docs, and article grids heavily. |
-| P2 | Direct native/global call fast path | Likely useful in templates and helper-heavy pages; must preserve shadowing. |
-| P2 | Environment lookup cache/instrumentation | High theoretical ROI, but needs careful semantic guardrails. |
-| P3 | Request/response allocation cleanup | Useful after template/call costs are reduced; likely smaller than template parse wins. |
+| P2 | Array self-append fast path | Profiling found `arr = arr + [item]` has an O(n²) clone cliff and active apps use it heavily for route/API list shaping. |
+| P2 | String self-concat fast path | Manual HTML/XML/SVG builders show the same growth pattern; do after array append because TypeMode string coercion is trickier. |
+| P3 | Environment lookup cache/instrumentation | Function calls and lookup are still expensive, but clone/allocation cliffs are more clearly measurable first. |
+| P3 | Request/response allocation cleanup | Useful after template/call/collection costs are reduced; likely smaller than template parse and self-append wins. |
 | P4 | Bytecode/lowered IR | Powerful later; premature until tree-walker wins are measured. |
 
 ---
@@ -508,8 +549,10 @@ Recommended local toolchain:
 - [x] PR 3 makes ordinary `template(path, data)` use a safe automatic AST/cache path.
 - [x] PR 4 reduces template render/loop scope overhead without semantic drift.
 - [x] PR 5 adds a safe targeted native/global call fast path for `len(identifier)`.
-- [ ] PR 6 adds lookup instrumentation/cache only if measurements justify it.
-- [ ] PR 7 cleans request/response allocation only if profiles show meaningful headroom.
+- [x] PR 6 removes the O(n²) array self-append cliff for `arr = arr + [item]`.
+- [ ] PR 7 removes the repeated string self-concat cliff if measurements justify it after PR 6.
+- [ ] PR 8 adds lookup instrumentation/cache only if measurements justify it.
+- [ ] PR 9 cleans request/response allocation only if profiles show meaningful headroom.
 - [ ] DD-061 is updated after each merged PR with measured deltas and completed checkboxes.
 - [ ] A final follow-up decision chooses whether deeper symbol/binder/slot/bytecode work is worth a separate DD.
 
@@ -517,4 +560,4 @@ Recommended local toolchain:
 
 ## Current Recommendation
 
-With the automatic template AST cache, loop-scope cleanup, and targeted `len(identifier)` fast path complete, use benchmark/profile data to choose between **PR 6: environment lookup measurement/cache** and **PR 7: request/response allocation cleanup**. Do not force a broad generic native-call shortcut unless a profile shows it beats the extra shadowing checks.
+With the automatic template AST cache, loop-scope cleanup, targeted `len(identifier)` fast path, and array self-append fast path complete, use the same evidence gate for **PR 7: string self-concat fast path** next. Do not start broader lookup/cache work until the remaining clone/allocation cliffs are either fixed or rejected by measurements.
