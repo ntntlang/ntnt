@@ -483,6 +483,31 @@ impl Environment {
         }
     }
 
+    fn binding_is_array(&self, name: &str) -> bool {
+        if let Some(value) = self.values.get(name) {
+            matches!(value, Value::Array(_))
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow().binding_is_array(name)
+        } else {
+            false
+        }
+    }
+
+    fn append_to_array_binding(&mut self, name: &str, mut items: Vec<Value>) -> bool {
+        if let Some(value) = self.values.get_mut(name) {
+            if let Value::Array(arr) = value {
+                arr.append(&mut items);
+                true
+            } else {
+                false
+            }
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow_mut().append_to_array_binding(name, items)
+        } else {
+            false
+        }
+    }
+
     pub fn keys(&self) -> Vec<String> {
         let mut keys: Vec<_> = self.values.keys().cloned().collect();
         if let Some(ref parent) = self.parent {
@@ -5306,7 +5331,7 @@ impl Interpreter {
                     if !cond.is_truthy() {
                         break;
                     }
-                    let result = self.eval_block(body)?;
+                    let result = self.eval_block_for_control(body)?;
                     match result {
                         Value::Break => break,
                         Value::Continue => continue,
@@ -5319,7 +5344,7 @@ impl Interpreter {
 
             Statement::Loop { body } => {
                 loop {
-                    let result = self.eval_block(body)?;
+                    let result = self.eval_block_for_control(body)?;
                     match result {
                         Value::Break => break,
                         Value::Continue => continue,
@@ -5538,17 +5563,24 @@ impl Interpreter {
                         Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
 
                     // Bind the loop variable (with optional pattern destructuring)
-                    if let Some(pat) = pattern {
-                        self.bind_pattern(pat, &item)?;
+                    let bind_result = if let Some(pat) = pattern {
+                        self.bind_pattern(pat, &item)
                     } else {
                         self.environment.borrow_mut().define(variable.clone(), item);
+                        Ok(())
+                    };
+                    if let Err(err) = bind_result {
+                        self.environment = previous;
+                        return Err(err);
                     }
 
-                    // Execute the loop body
-                    result = self.eval_block(body)?;
+                    // Execute the loop body; normal expression values are not observable from
+                    // `for` iterations, so avoid carrying large temporary results between turns.
+                    let body_result = self.eval_block_for_control(body);
 
-                    // Restore environment
+                    // Restore environment before propagating errors/control flow.
                     self.environment = previous;
+                    result = body_result?;
 
                     // Handle control flow
                     match result {
@@ -5585,6 +5617,183 @@ impl Interpreter {
                 self.eval_server_block(port, directives, routes, groups)
             }
         }
+    }
+
+    fn eval_statement_for_control(&mut self, stmt: &Statement) -> Result<Value> {
+        match stmt {
+            Statement::Located { line, col, stmt } => {
+                self.current_line = *line;
+                self.current_col = *col;
+                self.eval_statement_for_control(stmt).map_err(|e| {
+                    if e.line().is_none() {
+                        e.at_line(*line)
+                    } else {
+                        e
+                    }
+                })
+            }
+            Statement::Expression(expr) => {
+                if self.try_eval_array_self_append_statement(expr)? {
+                    return Ok(Value::Unit);
+                }
+
+                let value = self.eval_expression(expr)?;
+                Ok(Self::control_flow_or_unit(value))
+            }
+            _ => {
+                let value = self.eval_statement(stmt)?;
+                Ok(Self::control_flow_or_unit(value))
+            }
+        }
+    }
+
+    fn control_flow_or_unit(value: Value) -> Value {
+        match value {
+            Value::Return(_) | Value::Break | Value::Continue => value,
+            _ => Value::Unit,
+        }
+    }
+
+    fn try_eval_array_self_append_statement(&mut self, expr: &Expression) -> Result<bool> {
+        let Expression::Assign { target, value } = expr else {
+            return Ok(false);
+        };
+        let Expression::Identifier(target_name) = target.as_ref() else {
+            return Ok(false);
+        };
+        let Expression::Binary {
+            left,
+            operator: BinaryOp::Add,
+            right,
+        } = value.as_ref()
+        else {
+            return Ok(false);
+        };
+        let Expression::Identifier(left_name) = left.as_ref() else {
+            return Ok(false);
+        };
+        let Expression::Array(elements) = right.as_ref() else {
+            return Ok(false);
+        };
+
+        if left_name != target_name || !Self::array_append_elements_are_side_effect_free(elements) {
+            return Ok(false);
+        }
+        if !self.environment.borrow().binding_is_array(target_name) {
+            return Ok(false);
+        }
+
+        let mut items = Vec::with_capacity(elements.len());
+        for element in elements {
+            items.push(self.eval_expression(element)?);
+        }
+
+        Ok(self
+            .environment
+            .borrow_mut()
+            .append_to_array_binding(target_name, items))
+    }
+
+    fn array_append_elements_are_side_effect_free(elements: &[Expression]) -> bool {
+        elements.iter().all(Self::expression_is_side_effect_free)
+    }
+
+    fn expression_is_side_effect_free(expr: &Expression) -> bool {
+        match expr {
+            Expression::Integer(_)
+            | Expression::Float(_)
+            | Expression::String(_)
+            | Expression::Bool(_)
+            | Expression::Unit
+            | Expression::Identifier(_) => true,
+            Expression::Unary { operand, .. } | Expression::Try(operand) => {
+                Self::expression_is_side_effect_free(operand)
+            }
+            Expression::Binary { left, right, .. } => {
+                Self::expression_is_side_effect_free(left)
+                    && Self::expression_is_side_effect_free(right)
+            }
+            Expression::FieldAccess { object, .. } => Self::expression_is_side_effect_free(object),
+            Expression::Index { object, index } => {
+                Self::expression_is_side_effect_free(object)
+                    && Self::expression_is_side_effect_free(index)
+            }
+            Expression::Array(items) => items.iter().all(Self::expression_is_side_effect_free),
+            Expression::MapLiteral(entries) => entries.iter().all(|(key, value)| {
+                Self::expression_is_side_effect_free(key)
+                    && Self::expression_is_side_effect_free(value)
+            }),
+            Expression::Range { start, end, .. } => {
+                Self::expression_is_side_effect_free(start)
+                    && Self::expression_is_side_effect_free(end)
+            }
+            Expression::InterpolatedString(parts) => parts.iter().all(|part| match part {
+                StringPart::Literal(_) => true,
+                StringPart::Expr(expr) => Self::expression_is_side_effect_free(expr),
+            }),
+            Expression::StructLiteral { fields, .. } => fields
+                .iter()
+                .all(|(_, value)| Self::expression_is_side_effect_free(value)),
+            Expression::EnumVariant { arguments, .. } => {
+                arguments.iter().all(Self::expression_is_side_effect_free)
+            }
+            Expression::IfExpr {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                Self::expression_is_side_effect_free(condition)
+                    && Self::expression_is_side_effect_free(then_branch)
+                    && Self::expression_is_side_effect_free(else_branch)
+            }
+            Expression::Call { .. }
+            | Expression::MethodCall { .. }
+            | Expression::Lambda { .. }
+            | Expression::Block(_)
+            | Expression::Match { .. }
+            | Expression::Assign { .. }
+            | Expression::TemplateString(_)
+            | Expression::Await(_)
+            | Expression::TryCatch { .. } => false,
+        }
+    }
+
+    fn eval_block_for_control(&mut self, block: &Block) -> Result<Value> {
+        let previous = Rc::clone(&self.environment);
+        self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+
+        let deferred_count_before = self.deferred_statements.len();
+        let mut result = Value::Unit;
+        let mut error = None;
+        for stmt in &block.statements {
+            match self.eval_statement_for_control(stmt) {
+                Ok(value) => {
+                    result = value;
+                    match result {
+                        Value::Return(_) | Value::Break | Value::Continue => break,
+                        _ => {}
+                    }
+                }
+                Err(err) => {
+                    error = Some(err);
+                    break;
+                }
+            }
+        }
+
+        let deferred_to_run: Vec<Expression> = self
+            .deferred_statements
+            .drain(deferred_count_before..)
+            .collect();
+        for deferred_expr in deferred_to_run.into_iter().rev() {
+            let _ = self.eval_expression(&deferred_expr);
+        }
+
+        self.environment = previous;
+        if let Some(err) = error {
+            return Err(err);
+        }
+        Ok(result)
     }
 
     pub fn eval_block(&mut self, block: &Block) -> Result<Value> {
@@ -10853,6 +11062,32 @@ mod tests {
     }
 
     #[test]
+    fn environment_append_to_array_binding_mutates_parent_without_replacing_aliases() {
+        let root = Rc::new(RefCell::new(Environment::new()));
+        root.borrow_mut().define(
+            "rows".to_string(),
+            Value::Array(vec![Value::Int(1), Value::Int(2)]),
+        );
+        let alias = root.borrow().get("rows").unwrap();
+        root.borrow_mut().define("alias".to_string(), alias);
+
+        let mut child = Environment::with_parent(root.clone());
+        assert!(child.append_to_array_binding("rows", vec![Value::Int(3)]));
+
+        assert!(matches!(
+            root.borrow().get("rows"),
+            Some(Value::Array(ref values))
+                if matches!(values.as_slice(), [Value::Int(1), Value::Int(2), Value::Int(3)])
+        ));
+        assert!(matches!(
+            root.borrow().get("alias"),
+            Some(Value::Array(ref values))
+                if matches!(values.as_slice(), [Value::Int(1), Value::Int(2)])
+        ));
+        assert!(!child.append_to_array_binding("missing", vec![Value::Int(4)]));
+    }
+
+    #[test]
     fn len_identifier_fast_path_preserves_builtin_behavior() {
         let result = eval(
             r#"
@@ -10895,6 +11130,76 @@ mod tests {
         assert!(
             matches!(result, IntentError::TypeError { message, .. } if message.contains("len() requires a collection"))
         );
+    }
+
+    #[test]
+    fn array_self_append_in_loop_builds_expected_array() {
+        let result = eval(
+            r#"
+            let mut rows = []
+            for i in 0..5 {
+                rows = rows + [i]
+            }
+            len(rows) + rows[0] + rows[4]
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(result, Value::Int(9)));
+    }
+
+    #[test]
+    fn array_self_append_preserves_assignment_expression_result() {
+        let result = eval(
+            r#"
+            let mut rows = []
+            let appended = (rows = rows + [1, 2])
+            len(appended) + len(rows)
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(result, Value::Int(4)));
+    }
+
+    #[test]
+    fn array_self_append_preserves_call_rhs_side_effect_semantics() {
+        let result = eval(
+            r#"
+            let mut rows = [0]
+            fn reset_and_return() {
+                rows = [9]
+                return 1
+            }
+            for i in 0..1 {
+                rows = rows + [reset_and_return()]
+            }
+            rows[0] + rows[1]
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(result, Value::Int(1)));
+    }
+
+    #[test]
+    fn array_self_append_rhs_error_does_not_partially_append() {
+        let mut interpreter = Interpreter::new();
+        let result = eval_with_interpreter(
+            &mut interpreter,
+            r#"
+            let mut rows = [1]
+            for i in 0..1 {
+                rows = rows + [1 / 0]
+            }
+            "#,
+        );
+
+        assert!(matches!(result, Err(IntentError::DivisionByZero { .. })));
+        assert!(matches!(
+            interpreter.environment.borrow().get("rows"),
+            Some(Value::Array(ref values)) if matches!(values.as_slice(), [Value::Int(1)])
+        ));
     }
 
     #[test]
