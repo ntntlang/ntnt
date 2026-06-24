@@ -1,0 +1,11 @@
+// DD-061 PR 7 CLI microbenchmark: repeated string self-concat.
+// Run with: ./target/dev-release/ntnt run examples/perf/string_concat_cli.tnt
+
+let mut text = ""
+let piece = "x"
+
+for i in 0..50000 {
+    text = text + piece + "y"
+}
+
+len(text)
