@@ -532,6 +532,79 @@ fn format_pg_error(prefix: &str, e: &tokio_postgres::Error) -> String {
     }
 }
 
+async fn pg_query_cached(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    param_refs: &[&(dyn ToSql + Sync)],
+) -> Result<Value> {
+    let stmt = match client.prepare_cached(sql).await {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            return Ok(Value::err(Value::String(format_pg_error(
+                "Query failed",
+                &e,
+            ))));
+        }
+    };
+    match client.query(&stmt, param_refs).await {
+        Ok(rows) => {
+            let result: Vec<Value> = rows.iter().map(row_to_value).collect();
+            Ok(Value::ok(Value::Array(result)))
+        }
+        Err(e) => Ok(Value::err(Value::String(format_pg_error(
+            "Query failed",
+            &e,
+        )))),
+    }
+}
+
+async fn pg_query_one_cached(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    param_refs: &[&(dyn ToSql + Sync)],
+) -> Result<Value> {
+    let stmt = match client.prepare_cached(sql).await {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            return Ok(Value::err(Value::String(format_pg_error(
+                "Query failed",
+                &e,
+            ))));
+        }
+    };
+    match client.query_opt(&stmt, param_refs).await {
+        Ok(Some(row)) => Ok(Value::ok(Value::some(row_to_value(&row)))),
+        Ok(None) => Ok(Value::ok(sql_none())),
+        Err(e) => Ok(Value::err(Value::String(format_pg_error(
+            "Query failed",
+            &e,
+        )))),
+    }
+}
+
+async fn pg_execute_cached(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    param_refs: &[&(dyn ToSql + Sync)],
+) -> Result<Value> {
+    let stmt = match client.prepare_cached(sql).await {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            return Ok(Value::err(Value::String(format_pg_error(
+                "Execute failed",
+                &e,
+            ))));
+        }
+    };
+    match client.execute(&stmt, param_refs).await {
+        Ok(count) => Ok(Value::ok(Value::Int(count as i64))),
+        Err(e) => Ok(Value::err(Value::String(format_pg_error(
+            "Execute failed",
+            &e,
+        )))),
+    }
+}
+
 /// Execute a query using either the transaction client or a fresh pool connection
 fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
@@ -564,16 +637,7 @@ fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
             }?;
 
             let client = txn_client.lock().await;
-            match client.query(sql, &param_refs).await {
-                Ok(rows) => {
-                    let result: Vec<Value> = rows.iter().map(row_to_value).collect();
-                    Ok(Value::ok(Value::Array(result)))
-                }
-                Err(e) => Ok(Value::err(Value::String(format_pg_error(
-                    "Query failed",
-                    &e,
-                )))),
-            }
+            pg_query_cached(&client, sql, &param_refs).await
         })
     } else {
         // Use a fresh connection from the pool
@@ -583,16 +647,7 @@ fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
                 IntentError::runtime_error(format!("Failed to get connection from pool: {}", e))
             })?;
 
-            match client.query(sql, &param_refs).await {
-                Ok(rows) => {
-                    let result: Vec<Value> = rows.iter().map(row_to_value).collect();
-                    Ok(Value::ok(Value::Array(result)))
-                }
-                Err(e) => Ok(Value::err(Value::String(format_pg_error(
-                    "Query failed",
-                    &e,
-                )))),
-            }
+            pg_query_cached(&client, sql, &param_refs).await
         })
     }
 }
@@ -627,14 +682,7 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
             }?;
 
             let client = txn_client.lock().await;
-            match client.query_opt(sql, &param_refs).await {
-                Ok(Some(row)) => Ok(Value::ok(Value::some(row_to_value(&row)))),
-                Ok(None) => Ok(Value::ok(sql_none())),
-                Err(e) => Ok(Value::err(Value::String(format_pg_error(
-                    "Query failed",
-                    &e,
-                )))),
-            }
+            pg_query_one_cached(&client, sql, &param_refs).await
         })
     } else {
         let pool = get_pool(conn)?;
@@ -643,14 +691,7 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
                 IntentError::runtime_error(format!("Failed to get connection from pool: {}", e))
             })?;
 
-            match client.query_opt(sql, &param_refs).await {
-                Ok(Some(row)) => Ok(Value::ok(Value::some(row_to_value(&row)))),
-                Ok(None) => Ok(Value::ok(sql_none())),
-                Err(e) => Ok(Value::err(Value::String(format_pg_error(
-                    "Query failed",
-                    &e,
-                )))),
-            }
+            pg_query_one_cached(&client, sql, &param_refs).await
         })
     }
 }
@@ -685,13 +726,7 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
             }?;
 
             let client = txn_client.lock().await;
-            match client.execute(sql, &param_refs).await {
-                Ok(count) => Ok(Value::ok(Value::Int(count as i64))),
-                Err(e) => Ok(Value::err(Value::String(format_pg_error(
-                    "Execute failed",
-                    &e,
-                )))),
-            }
+            pg_execute_cached(&client, sql, &param_refs).await
         })
     } else {
         let pool = get_pool(conn)?;
@@ -700,13 +735,7 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
                 IntentError::runtime_error(format!("Failed to get connection from pool: {}", e))
             })?;
 
-            match client.execute(sql, &param_refs).await {
-                Ok(count) => Ok(Value::ok(Value::Int(count as i64))),
-                Err(e) => Ok(Value::err(Value::String(format_pg_error(
-                    "Execute failed",
-                    &e,
-                )))),
-            }
+            pg_execute_cached(&client, sql, &param_refs).await
         })
     }
 }
