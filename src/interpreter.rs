@@ -5772,6 +5772,14 @@ impl Interpreter {
         target_name: &str,
         terms: &mut Vec<&'a Expression>,
     ) -> bool {
+        // This helper appends only after finding the leftmost `target + rhs` base case,
+        // so callers must start with an empty accumulator. Recursive calls preserve that
+        // invariant because they descend left before any term is pushed.
+        debug_assert!(
+            terms.is_empty(),
+            "collect_string_self_concat_terms expects an empty accumulator at entry"
+        );
+
         let Expression::Binary {
             left,
             operator: BinaryOp::Add,
