@@ -390,15 +390,17 @@ A follow-up microbenchmark showed `s = s + "x"` also grows non-linearly (`0.020s
 
 Scope:
 
-- [ ] Add a string-building benchmark fixture.
-- [ ] Add a targeted fast path for `s = s + piece` when `s` currently resolves to a mutable string binding.
-- [ ] Preserve TypeMode behavior for implicit string conversions and return/assignment semantics.
-- [ ] Add tests for strict/warn/forgiving behavior, RHS failure, alias preservation, and nested scopes.
+- [x] Add a string-building benchmark fixture.
+- [x] Add a targeted fast path for `s = s + piece` when `s` currently resolves to a string binding.
+- [x] Preserve TypeMode behavior for implicit string conversions and return/assignment semantics.
+- [x] Add tests for strict/warn/forgiving behavior, RHS failure, alias preservation, and nested scopes.
 
 Acceptance criteria:
 
-- [ ] Repeated string self-concat benchmark improves materially.
-- [ ] Existing `+` behavior and TypeMode diagnostics remain unchanged.
+- [x] Repeated string self-concat benchmark improves materially.
+- [x] Existing `+` behavior and TypeMode diagnostics remain unchanged.
+
+Candidate benchmark note: local CLI microbenchmarks comparing `origin/main` at `0491a74` to this PR's dev-release binary showed `s = s + "x"` at 100k iterations improve from median `0.770s` to `0.030s`, and 200k iterations improve from median `4.760s` to `0.060s`. A chained active-app-shaped fixture (`s = s + piece + "y"`) improved at 100k iterations from median `5.370s` to `0.040s`, and at 200k iterations from median `26.100s` to `0.070s`.
 
 ### PR 8: Environment lookup measurement + low-risk lookup cache
 
@@ -550,7 +552,7 @@ Recommended local toolchain:
 - [x] PR 4 reduces template render/loop scope overhead without semantic drift.
 - [x] PR 5 adds a safe targeted native/global call fast path for `len(identifier)`.
 - [x] PR 6 removes the O(n²) array self-append cliff for `arr = arr + [item]`.
-- [ ] PR 7 removes the repeated string self-concat cliff if measurements justify it after PR 6.
+- [x] PR 7 removes the repeated string self-concat cliff.
 - [ ] PR 8 adds lookup instrumentation/cache only if measurements justify it.
 - [ ] PR 9 cleans request/response allocation only if profiles show meaningful headroom.
 - [ ] DD-061 is updated after each merged PR with measured deltas and completed checkboxes.
@@ -560,4 +562,4 @@ Recommended local toolchain:
 
 ## Current Recommendation
 
-With the automatic template AST cache, loop-scope cleanup, targeted `len(identifier)` fast path, and array self-append fast path complete, use the same evidence gate for **PR 7: string self-concat fast path** next. Do not start broader lookup/cache work until the remaining clone/allocation cliffs are either fixed or rejected by measurements.
+With the automatic template AST cache, loop-scope cleanup, targeted `len(identifier)` fast path, array self-append fast path, and string self-concat fast path complete, move to **PR 8: environment lookup measurement + low-risk lookup cache** only after profiling representative routes/templates. The next step should be instrumentation and evidence, not a speculative binder/slot rewrite.

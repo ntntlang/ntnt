@@ -493,6 +493,16 @@ impl Environment {
         }
     }
 
+    fn binding_is_string(&self, name: &str) -> bool {
+        if let Some(value) = self.values.get(name) {
+            matches!(value, Value::String(_))
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow().binding_is_string(name)
+        } else {
+            false
+        }
+    }
+
     fn append_to_array_binding(&mut self, name: &str, mut items: Vec<Value>) -> bool {
         if let Some(value) = self.values.get_mut(name) {
             if let Value::Array(arr) = value {
@@ -503,6 +513,21 @@ impl Environment {
             }
         } else if let Some(ref parent) = self.parent {
             parent.borrow_mut().append_to_array_binding(name, items)
+        } else {
+            false
+        }
+    }
+
+    fn append_to_string_binding(&mut self, name: &str, suffix: &str) -> bool {
+        if let Some(value) = self.values.get_mut(name) {
+            if let Value::String(text) = value {
+                text.push_str(suffix);
+                true
+            } else {
+                false
+            }
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow_mut().append_to_string_binding(name, suffix)
         } else {
             false
         }
@@ -5633,7 +5658,9 @@ impl Interpreter {
                 })
             }
             Statement::Expression(expr) => {
-                if self.try_eval_array_self_append_statement(expr)? {
+                if self.try_eval_array_self_append_statement(expr)?
+                    || self.try_eval_string_self_concat_statement(expr)?
+                {
                     return Ok(Value::Unit);
                 }
 
@@ -5698,6 +5725,106 @@ impl Interpreter {
             ));
         }
         Ok(true)
+    }
+
+    fn try_eval_string_self_concat_statement(&mut self, expr: &Expression) -> Result<bool> {
+        let Expression::Assign { target, value } = expr else {
+            return Ok(false);
+        };
+        let Expression::Identifier(target_name) = target.as_ref() else {
+            return Ok(false);
+        };
+
+        let mut terms = Vec::new();
+        if !Self::collect_string_self_concat_terms(value, target_name, &mut terms) {
+            return Ok(false);
+        }
+        if !terms
+            .iter()
+            .all(|term| Self::expression_is_side_effect_free(term))
+        {
+            return Ok(false);
+        }
+        if !self.environment.borrow().binding_is_string(target_name) {
+            return Ok(false);
+        }
+
+        let mut suffix = String::new();
+        for term in terms {
+            let value = self.eval_expression(term)?;
+            suffix.push_str(&Self::coerce_string_concat_rhs(value)?);
+        }
+
+        let appended = self
+            .environment
+            .borrow_mut()
+            .append_to_string_binding(target_name, &suffix);
+        if !appended {
+            return Err(IntentError::runtime_error(
+                "string self-concat fast path invariant failed: target binding is no longer a string",
+            ));
+        }
+        Ok(true)
+    }
+
+    fn collect_string_self_concat_terms<'a>(
+        expr: &'a Expression,
+        target_name: &str,
+        terms: &mut Vec<&'a Expression>,
+    ) -> bool {
+        // This helper appends only after finding the leftmost `target + rhs` base case,
+        // so callers must start with an empty accumulator. Recursive calls preserve that
+        // invariant because they descend left before any term is pushed.
+        debug_assert!(
+            terms.is_empty(),
+            "collect_string_self_concat_terms expects an empty accumulator at entry"
+        );
+
+        let Expression::Binary {
+            left,
+            operator: BinaryOp::Add,
+            right,
+        } = expr
+        else {
+            return false;
+        };
+
+        if let Expression::Identifier(left_name) = left.as_ref() {
+            if left_name == target_name {
+                terms.push(right);
+                return true;
+            }
+        }
+
+        if Self::collect_string_self_concat_terms(left, target_name, terms) {
+            terms.push(right);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn coerce_string_concat_rhs(value: Value) -> Result<String> {
+        match value {
+            Value::String(text) => Ok(text),
+            other => match get_type_mode() {
+                TypeMode::Strict => Err(IntentError::type_error(format!(
+                    "Implicit conversion of {} to String in concatenation. Use str(value) explicitly.",
+                    other.type_name()
+                ))),
+                TypeMode::Warn => {
+                    type_warn_dedup(
+                        &format!("implicit_str_concat:rhs:{}", other.type_name()),
+                        &format!(
+                            "Implicit conversion of {} to String in concatenation. Use str(value) explicitly.",
+                            other.type_name()
+                        ),
+                    );
+                    Ok(other.to_string())
+                }
+                TypeMode::Forgiving => Ok(other.to_string()),
+            },
+        }
     }
 
     fn array_append_elements_are_side_effect_free(elements: &[Expression]) -> bool {
@@ -11155,6 +11282,156 @@ mod tests {
             interpreter.environment.borrow().get("marker"),
             Some(Value::Int(1))
         ));
+    }
+
+    #[test]
+    fn environment_append_to_string_binding_mutates_parent_without_replacing_aliases() {
+        let root = Rc::new(RefCell::new(Environment::new()));
+        root.borrow_mut()
+            .define("text".to_string(), Value::String("hello".to_string()));
+        let alias = root.borrow().get("text").unwrap();
+        root.borrow_mut().define("alias".to_string(), alias);
+
+        let mut child = Environment::with_parent(root.clone());
+        assert!(child.append_to_string_binding("text", " world"));
+
+        assert!(matches!(
+            root.borrow().get("text"),
+            Some(Value::String(ref value)) if value == "hello world"
+        ));
+        assert!(matches!(
+            root.borrow().get("alias"),
+            Some(Value::String(ref value)) if value == "hello"
+        ));
+        assert!(!child.append_to_string_binding("missing", "!"));
+    }
+
+    #[test]
+    fn string_self_concat_in_loop_builds_expected_string() {
+        let result = eval(
+            r#"
+            let mut text = ""
+            for i in 0..3 {
+                text = text + "x"
+            }
+            text
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(result, Value::String(ref value) if value == "xxx"));
+    }
+
+    #[test]
+    fn string_self_concat_preserves_assignment_expression_result() {
+        let result = eval(
+            r#"
+            let mut text = "a"
+            let appended = (text = text + "b")
+            appended + text
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(result, Value::String(ref value) if value == "abab"));
+    }
+
+    #[test]
+    fn string_self_concat_preserves_call_rhs_side_effect_semantics() {
+        let result = eval(
+            r#"
+            let mut text = "a"
+            fn reset_and_return() {
+                text = "z"
+                return "b"
+            }
+            for i in 0..1 {
+                text = text + reset_and_return()
+            }
+            text
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(result, Value::String(ref value) if value == "ab"));
+    }
+
+    #[test]
+    fn string_self_concat_rhs_error_does_not_partially_append() {
+        let mut interpreter = Interpreter::new();
+        let result = eval_with_interpreter(
+            &mut interpreter,
+            r#"
+            let mut text = "a"
+            for i in 0..1 {
+                text = text + (1 / 0)
+            }
+            "#,
+        );
+
+        assert!(matches!(result, Err(IntentError::DivisionByZero { .. })));
+        assert!(matches!(
+            interpreter.environment.borrow().get("text"),
+            Some(Value::String(ref value)) if value == "a"
+        ));
+    }
+
+    #[test]
+    fn string_self_concat_preserves_strict_type_mode_error() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
+        let mut interpreter = Interpreter::new();
+        let result = eval_with_interpreter(
+            &mut interpreter,
+            r#"
+            let mut text = "a"
+            for i in 0..1 {
+                text = text + 1
+            }
+            "#,
+        );
+
+        assert!(matches!(result, Err(IntentError::TypeError { .. })));
+        assert!(matches!(
+            interpreter.environment.borrow().get("text"),
+            Some(Value::String(ref value)) if value == "a"
+        ));
+    }
+
+    #[test]
+    fn string_self_concat_preserves_warn_type_mode_conversion() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Warn);
+        let result = eval(
+            r#"
+            let mut text = "n="
+            for i in 0..2 {
+                text = text + i
+            }
+            text
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(result, Value::String(ref value) if value == "n=01"));
+    }
+
+    #[test]
+    fn string_self_concat_preserves_forgiving_type_mode_conversion() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
+        let result = eval(
+            r#"
+            let mut text = "n="
+            for i in 0..2 {
+                text = text + i
+            }
+            text
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(result, Value::String(ref value) if value == "n=01"));
     }
 
     #[test]
