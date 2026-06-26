@@ -16,7 +16,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::ToSql;
@@ -34,22 +34,14 @@ static DB_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::Laz
         .expect("Failed to create DB runtime")
 });
 
-#[derive(Clone)]
-struct SharedPoolEntry {
-    id: u64,
-    pool: Pool,
-}
-
 /// Shared pool registry — maps hashed connection strings to deadpool-postgres pools.
 ///
 /// `connect(url)` is intentionally the fast path: repeated calls with the same
 /// URL reuse the same verified pool instead of creating a fresh pool per call.
 /// The raw URL may contain credentials, so it is used only to configure the pool
 /// and is never copied into the public handle or kept as the registry key.
-static SHARED_POOL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, SharedPoolEntry>>> =
+static SHARED_POOL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, Pool>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-
-static SHARED_POOL_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Transaction registry — maps connection handle IDs to dedicated client objects.
 /// Transactions must pin to a single connection, so we check out a client
@@ -60,10 +52,17 @@ static TXN_REGISTRY: std::sync::LazyLock<
 
 static CONNECTION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Connection handles are just value maps, so close(handle) records an opaque ID
-/// as closed without needing to keep per-handle pool references alive.
-static CLOSED_CONNECTIONS: std::sync::LazyLock<Mutex<HashSet<u64>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+#[derive(Clone)]
+struct HandleEntry {
+    pool: Pool,
+    token: String,
+}
+
+/// Active logical PostgreSQL handles keyed by opaque connection ID. close(handle)
+/// removes the handle entry, so request-path connect/query/close does not leave
+/// behind a permanent closed-id tombstone.
+static HANDLE_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, HandleEntry>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Enum to hold different SQL parameter types
 /// This allows us to properly serialize each type to PostgreSQL
@@ -400,10 +399,62 @@ fn json_to_intent_value(json: &serde_json::Value) -> Value {
     crate::stdlib::json::json_to_intent_value(json)
 }
 
-fn hash_connection_string(connection_string: &str) -> String {
+fn hash_pool_key(pool_key: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(connection_string.as_bytes());
+    hasher.update(pool_key.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn password_hash(password: Option<&[u8]>) -> Option<String> {
+    password.map(|password| {
+        let mut hasher = Sha256::new();
+        hasher.update(password);
+        hex::encode(hasher.finalize())
+    })
+}
+
+fn normalized_connection_key(connection_string: &str) -> String {
+    let Ok(cfg) = connection_string.parse::<tokio_postgres::Config>() else {
+        return connection_string.to_string();
+    };
+
+    let hosts: Vec<String> = if cfg.get_hosts().is_empty() {
+        vec!["<default>".to_string()]
+    } else {
+        cfg.get_hosts()
+            .iter()
+            .map(|host| format!("{:?}", host))
+            .collect()
+    };
+
+    let mut ports = cfg.get_ports().to_vec();
+    if ports.is_empty() {
+        ports.push(5432);
+    }
+    if ports.len() == 1 && hosts.len() > 1 {
+        ports = vec![ports[0]; hosts.len()];
+    }
+
+    format!(
+        "v1|hosts={hosts:?}|hostaddrs={:?}|ports={ports:?}|user={:?}|password_sha256={:?}|dbname={:?}|options={:?}|application_name={:?}|ssl_mode={:?}|ssl_negotiation={:?}|connect_timeout={:?}|tcp_user_timeout={:?}|target_session_attrs={:?}|channel_binding={:?}|load_balance_hosts={:?}",
+        cfg.get_hostaddrs(),
+        cfg.get_user(),
+        password_hash(cfg.get_password()),
+        cfg.get_dbname(),
+        cfg.get_options(),
+        cfg.get_application_name(),
+        cfg.get_ssl_mode(),
+        cfg.get_ssl_negotiation(),
+        cfg.get_connect_timeout(),
+        cfg.get_tcp_user_timeout(),
+        cfg.get_target_session_attrs(),
+        cfg.get_channel_binding(),
+        cfg.get_load_balance_hosts(),
+    )
+}
+
+fn hash_connection_string(connection_string: &str) -> String {
+    hash_pool_key(&normalized_connection_key(connection_string))
 }
 
 fn sanitize_connection_error(error: &str, connection_string: &str) -> String {
@@ -453,17 +504,26 @@ fn create_verified_pool(connection_string: &str) -> std::result::Result<Pool, St
     Ok(pool)
 }
 
-fn register_pool_handle(pool_key_id: u64) -> Result<Value> {
+fn register_pool_handle(pool: Pool) -> Result<Value> {
     let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let token = uuid::Uuid::new_v4().to_string();
+
+    let mut registry = HANDLE_REGISTRY.lock().map_err(|_| {
+        IntentError::runtime_error("Failed to lock Postgres handle registry".to_string())
+    })?;
+    registry.insert(
+        id,
+        HandleEntry {
+            pool,
+            token: token.clone(),
+        },
+    );
 
     // Return a connection handle as a map. The handle deliberately exposes only
-    // opaque IDs, not the connection string or shared-pool registry key.
+    // an opaque ID and nonce, not the connection string or shared-pool key.
     let mut handle = HashMap::new();
     handle.insert("_pg_connection_id".to_string(), Value::Int(id as i64));
-    handle.insert(
-        "_pg_pool_key_id".to_string(),
-        Value::Int(pool_key_id as i64),
-    );
+    handle.insert("_pg_handle_token".to_string(), Value::String(token));
     handle.insert("connected".to_string(), Value::Bool(true));
 
     Ok(Value::ok(Value::Map(handle)))
@@ -481,7 +541,7 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
         .get(&pool_key)
         .cloned()
     {
-        return register_pool_handle(entry.id);
+        return register_pool_handle(entry);
     }
 
     let pool = match create_verified_pool(connection_string) {
@@ -489,27 +549,21 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
         Err(error) => return Ok(Value::err(Value::String(error))),
     };
 
-    let pool_key_id = {
+    let pool = {
         let mut registry = SHARED_POOL_REGISTRY.lock().map_err(|_| {
             IntentError::runtime_error("Failed to lock Postgres pool registry".to_string())
         })?;
-        registry
-            .entry(pool_key)
-            .or_insert_with(|| SharedPoolEntry {
-                id: SHARED_POOL_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-                pool,
-            })
-            .id
+        registry.entry(pool_key).or_insert(pool).clone()
     };
 
-    register_pool_handle(pool_key_id)
+    register_pool_handle(pool)
 }
 
 /// Get a pool from the connection handle
 fn get_pool(conn: &Value) -> Result<Pool> {
     match conn {
         Value::Map(map) => {
-            let pool_key_id = match map.get("_pg_pool_key_id") {
+            let conn_id = match map.get("_pg_connection_id") {
                 Some(Value::Int(id)) => *id as u64,
                 _ => {
                     return Err(IntentError::type_error(
@@ -517,28 +571,28 @@ fn get_pool(conn: &Value) -> Result<Pool> {
                     ))
                 }
             };
-
-            if let Some(Value::Int(id)) = map.get("_pg_connection_id") {
-                if CLOSED_CONNECTIONS
-                    .lock()
-                    .map(|closed| closed.contains(&(*id as u64)))
-                    .unwrap_or(false)
-                {
-                    return Err(IntentError::runtime_error(
-                        "Invalid or closed database connection".to_string(),
-                    ));
+            let token = match map.get("_pg_handle_token") {
+                Some(Value::String(token)) => token,
+                _ => {
+                    return Err(IntentError::type_error(
+                        "Expected a database connection handle".to_string(),
+                    ))
                 }
+            };
+
+            let registry = HANDLE_REGISTRY.lock().map_err(|_| {
+                IntentError::runtime_error("Failed to lock Postgres handle registry".to_string())
+            })?;
+            let entry = registry.get(&conn_id).ok_or_else(|| {
+                IntentError::runtime_error("Invalid or closed database connection".to_string())
+            })?;
+            if entry.token != *token {
+                return Err(IntentError::runtime_error(
+                    "Invalid or closed database connection".to_string(),
+                ));
             }
 
-            if let Ok(registry) = SHARED_POOL_REGISTRY.lock() {
-                if let Some(entry) = registry.values().find(|entry| entry.id == pool_key_id) {
-                    return Ok(entry.pool.clone());
-                }
-            }
-
-            Err(IntentError::runtime_error(
-                "Invalid or closed database connection".to_string(),
-            ))
+            Ok(entry.pool.clone())
         }
         _ => Err(IntentError::type_error(
             "Expected a database connection handle".to_string(),
@@ -895,8 +949,8 @@ fn pg_close(conn: &Value) -> Result<Value> {
                     registry.remove(&conn_id);
                 }
 
-                if let Ok(mut closed) = CLOSED_CONNECTIONS.lock() {
-                    closed.insert(conn_id);
+                if let Ok(mut handles) = HANDLE_REGISTRY.lock() {
+                    handles.remove(&conn_id);
                 }
 
                 return Ok(Value::Bool(true));
@@ -1284,11 +1338,30 @@ mod tests {
     }
 
     #[test]
+    fn test_postgres_pool_key_normalizes_default_port_and_query_order() {
+        let a = "postgres://user:pass@localhost/db?sslmode=disable&application_name=ntnt";
+        let b = "postgres://user:pass@localhost:5432/db?application_name=ntnt&sslmode=disable";
+
+        assert_eq!(hash_connection_string(a), hash_connection_string(b));
+    }
+
+    #[test]
+    fn test_postgres_pool_key_separates_different_passwords() {
+        let a = "postgres://user:first@localhost/db";
+        let b = "postgres://user:second@localhost/db";
+
+        assert_ne!(hash_connection_string(a), hash_connection_string(b));
+    }
+
+    #[test]
     fn test_close_invalidates_logical_handle_without_pool_lookup() {
         let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut handle = HashMap::new();
         handle.insert("_pg_connection_id".to_string(), Value::Int(id as i64));
-        handle.insert("_pg_pool_key_id".to_string(), Value::Int(999_999));
+        handle.insert(
+            "_pg_handle_token".to_string(),
+            Value::String("test-token".to_string()),
+        );
         let conn = Value::Map(handle);
 
         assert!(matches!(pg_close(&conn), Ok(Value::Bool(true))));
