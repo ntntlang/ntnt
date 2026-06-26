@@ -600,16 +600,40 @@ fn get_pool(conn: &Value) -> Result<Pool> {
     }
 }
 
-/// Get the connection ID from a connection handle
+/// Get and validate the connection ID from a connection handle.
+///
+/// Handles are map values in ntnt, so every operation that can affect handle
+/// state must verify the per-handle token before using the ID.
 fn get_connection_id(conn: &Value) -> Result<u64> {
     match conn {
         Value::Map(map) => {
-            if let Some(Value::Int(id)) = map.get("_pg_connection_id") {
-                Ok(*id as u64)
-            } else {
-                Err(IntentError::type_error(
-                    "Expected a database connection handle".to_string(),
-                ))
+            let id = match map.get("_pg_connection_id") {
+                Some(Value::Int(id)) => *id as u64,
+                _ => {
+                    return Err(IntentError::type_error(
+                        "Expected a database connection handle".to_string(),
+                    ));
+                }
+            };
+
+            let token = match map.get("_pg_handle_token") {
+                Some(Value::String(token)) => token,
+                _ => {
+                    return Err(IntentError::runtime_error(
+                        "Invalid or closed database connection".to_string(),
+                    ));
+                }
+            };
+
+            let handles = HANDLE_REGISTRY.lock().map_err(|_| {
+                IntentError::runtime_error("Failed to lock Postgres handle registry".to_string())
+            })?;
+
+            match handles.get(&id) {
+                Some(entry) if entry.token == *token => Ok(id),
+                _ => Err(IntentError::runtime_error(
+                    "Invalid or closed database connection".to_string(),
+                )),
             }
         }
         _ => Err(IntentError::type_error(
@@ -938,24 +962,24 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
 /// using the fast path instead of recreating pools on request paths.
 fn pg_close(conn: &Value) -> Result<Value> {
     match conn {
-        Value::Map(map) => {
-            if let Some(Value::Int(id)) = map.get("_pg_connection_id") {
-                let conn_id = *id as u64;
+        Value::Map(_) => {
+            let conn_id = match get_connection_id(conn) {
+                Ok(id) => id,
+                Err(_) => return Ok(Value::Bool(false)),
+            };
 
-                // Remove any active transaction for this handle. Dropping the
-                // pinned client aborts an uncommitted transaction, matching the
-                // previous handle-close behavior.
-                if let Ok(mut registry) = TXN_REGISTRY.lock() {
-                    registry.remove(&conn_id);
-                }
-
-                if let Ok(mut handles) = HANDLE_REGISTRY.lock() {
-                    handles.remove(&conn_id);
-                }
-
-                return Ok(Value::Bool(true));
+            // Remove any active transaction for this handle. Dropping the
+            // pinned client aborts an uncommitted transaction, matching the
+            // previous handle-close behavior.
+            if let Ok(mut registry) = TXN_REGISTRY.lock() {
+                registry.remove(&conn_id);
             }
-            Ok(Value::Bool(false))
+
+            if let Ok(mut handles) = HANDLE_REGISTRY.lock() {
+                handles.remove(&conn_id);
+            }
+
+            Ok(Value::Bool(true))
         }
         _ => Err(IntentError::type_error(
             "Expected a database connection handle".to_string(),
@@ -1354,7 +1378,7 @@ mod tests {
     }
 
     #[test]
-    fn test_close_invalidates_logical_handle_without_pool_lookup() {
+    fn test_close_rejects_unregistered_handle() {
         let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut handle = HashMap::new();
         handle.insert("_pg_connection_id".to_string(), Value::Int(id as i64));
@@ -1364,11 +1388,53 @@ mod tests {
         );
         let conn = Value::Map(handle);
 
-        assert!(matches!(pg_close(&conn), Ok(Value::Bool(true))));
-        let err = get_pool(&conn).expect_err("closed handle should not resolve a pool");
+        assert!(matches!(pg_close(&conn), Ok(Value::Bool(false))));
+        let err = get_pool(&conn).expect_err("unregistered handle should not resolve a pool");
         assert!(err
             .to_string()
             .contains("Invalid or closed database connection"));
+    }
+
+    #[test]
+    fn test_close_requires_matching_handle_token() {
+        let mut cfg = Config::new();
+        cfg.host = Some("localhost".to_string());
+        cfg.user = Some("postgres".to_string());
+        cfg.dbname = Some("postgres".to_string());
+        let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls).unwrap();
+
+        let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        HANDLE_REGISTRY.lock().unwrap().insert(
+            id,
+            HandleEntry {
+                pool,
+                token: "real-token".to_string(),
+            },
+        );
+
+        let mut forged = HashMap::new();
+        forged.insert("_pg_connection_id".to_string(), Value::Int(id as i64));
+        forged.insert(
+            "_pg_handle_token".to_string(),
+            Value::String("wrong-token".to_string()),
+        );
+        assert!(matches!(
+            pg_close(&Value::Map(forged)),
+            Ok(Value::Bool(false))
+        ));
+        assert!(HANDLE_REGISTRY.lock().unwrap().contains_key(&id));
+
+        let mut valid = HashMap::new();
+        valid.insert("_pg_connection_id".to_string(), Value::Int(id as i64));
+        valid.insert(
+            "_pg_handle_token".to_string(),
+            Value::String("real-token".to_string()),
+        );
+        assert!(matches!(
+            pg_close(&Value::Map(valid)),
+            Ok(Value::Bool(true))
+        ));
+        assert!(!HANDLE_REGISTRY.lock().unwrap().contains_key(&id));
     }
 
     #[test]
