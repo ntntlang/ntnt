@@ -15,6 +15,7 @@ use crate::interpreter::Value;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use rust_decimal::Decimal;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tokio_postgres::error::SqlState;
@@ -39,12 +40,12 @@ struct SharedPoolEntry {
     pool: Pool,
 }
 
-/// Shared pool registry — maps connection strings to deadpool-postgres pools.
+/// Shared pool registry — maps hashed connection strings to deadpool-postgres pools.
 ///
 /// `connect(url)` is intentionally the fast path: repeated calls with the same
 /// URL reuse the same verified pool instead of creating a fresh pool per call.
-/// The raw URL is kept only as an internal in-memory key and is never copied into
-/// the public handle.
+/// The raw URL may contain credentials, so it is used only to configure the pool
+/// and is never copied into the public handle or kept as the registry key.
 static SHARED_POOL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, SharedPoolEntry>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -399,6 +400,12 @@ fn json_to_intent_value(json: &serde_json::Value) -> Value {
     crate::stdlib::json::json_to_intent_value(json)
 }
 
+fn hash_connection_string(connection_string: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(connection_string.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 fn sanitize_connection_error(error: &str, connection_string: &str) -> String {
     if error.contains("password") || error.contains("authentication") {
         "Connection failed: authentication error (details hidden for security)".to_string()
@@ -464,12 +471,14 @@ fn register_pool_handle(pool_key_id: u64) -> Result<Value> {
 
 /// Connect to a PostgreSQL database — returns a handle backed by a shared pool.
 fn pg_connect(connection_string: &str) -> Result<Value> {
+    let pool_key = hash_connection_string(connection_string);
+
     if let Some(entry) = SHARED_POOL_REGISTRY
         .lock()
         .map_err(|_| {
             IntentError::runtime_error("Failed to lock Postgres pool registry".to_string())
         })?
-        .get(connection_string)
+        .get(&pool_key)
         .cloned()
     {
         return register_pool_handle(entry.id);
@@ -485,7 +494,7 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
             IntentError::runtime_error("Failed to lock Postgres pool registry".to_string())
         })?;
         registry
-            .entry(connection_string.to_string())
+            .entry(pool_key)
             .or_insert_with(|| SharedPoolEntry {
                 id: SHARED_POOL_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
                 pool,
