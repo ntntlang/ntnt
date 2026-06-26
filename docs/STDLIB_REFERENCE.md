@@ -10338,9 +10338,9 @@ import { connect, query, query_one } from "std/postgres"
 | Function | Description |
 |----------|-------------|
 | [`begin`](#begin) | Begin a database transaction. |
-| [`close`](#close) | Close a PostgreSQL database connection pool. |
+| [`close`](#close) | Close a PostgreSQL database connection handle. |
 | [`commit`](#commit) | Commit the current transaction. |
-| [`connect`](#connect) | Open a connection pool to a PostgreSQL database. |
+| [`connect`](#connect) | Open or reuse a shared connection pool to a PostgreSQL database. |
 | [`execute`](#execute) | Execute a SQL statement and return the number of affected rows. |
 | [`query`](#query) | Execute a SQL query and return all matching rows. |
 | [`query_one`](#queryone) | Execute a SQL query and return at most one row. |
@@ -10384,9 +10384,9 @@ begin(db)  // => Result::Ok(Connection)  // Start a transaction
 close(conn: Connection) -> Bool
 ```
 
-Close a PostgreSQL database connection pool.
+Close a PostgreSQL database connection handle.
 
-Removes the connection pool from the internal registry, allowing all pooled connections to be released. Returns true if the pool was found and removed, false otherwise.
+Invalidates this logical handle and clears any transaction pinned to it. The URL-keyed shared pool remains cached so future connect(url) calls can reuse the fast path instead of recreating a pool. Returns true if the handle was accepted for close, false otherwise.
 
 **Parameters:**
 
@@ -10448,9 +10448,9 @@ commit(db)  // => true  // Commit an active transaction
 connect(connection_string: String) -> Result<Connection, String>
 ```
 
-Open a connection pool to a PostgreSQL database.
+Open or reuse a shared connection pool to a PostgreSQL database.
 
-Establishes a connection pool using the provided connection string and returns a connection handle that can be passed to query, execute, and transaction functions. The handle is stored in a global registry keyed by an internal connection ID. Uses deadpool-postgres for async pooling. Pool size defaults to 5 connections per pool (configurable via NTNT_DB_POOL_SIZE env var). Note: each worker creates its own pools, so total connections = num_workers × num_databases × pool_size.
+Establishes a URL-keyed shared connection pool using the provided connection string and returns an opaque connection handle that can be passed to query, execute, and transaction functions. Repeated connect() calls with the same connection string reuse the verified shared pool, so request-path connect() calls use the fast path instead of creating a new pool each time. close(handle) invalidates the logical handle and clears any transaction pinned to it, but keeps the shared pool cached for future connect() calls. Pool size defaults to 5 connections per pool (configurable via NTNT_DB_POOL_SIZE env var). Note: each worker has its own process-local shared pools, so total connections = num_workers × num_databases × pool_size.
 
 **Parameters:**
 
