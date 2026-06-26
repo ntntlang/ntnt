@@ -108,6 +108,94 @@ fn validate_code(code: &str) -> (String, String, i32) {
 // ============================================================================
 
 #[test]
+fn test_lint_warns_on_function_local_postgres_connect() {
+    let code = r#"import { connect as pg_connect } from "std/db/postgres"
+
+fn load_count() {
+    let conn = pg_connect("postgres://example/app") otherwise { return None }
+    return conn
+}
+"#;
+
+    let (stdout, _stderr, code) = lint_code(code);
+    assert_eq!(code, 0, "warning-only lint should exit zero");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let files = json["files"].as_array().unwrap();
+    let has_warning = files.iter().any(|file| {
+        file["issues"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|issue| {
+                issue["rule"].as_str() == Some("postgres_connect_in_function")
+                    && issue["severity"].as_str() == Some("warning")
+                    && issue["line"].as_i64() == Some(4)
+            })
+    });
+    assert!(
+        has_warning,
+        "expected postgres_connect_in_function warning: {stdout}"
+    );
+}
+
+#[test]
+fn test_lint_allows_closed_function_local_postgres_connect() {
+    let code = r#"import { connect as pg_connect, close as pg_close } from "std/db/postgres"
+
+fn load_count() {
+    let conn = pg_connect("postgres://example/app") otherwise { return None }
+    let _closed = pg_close(conn)
+    return conn
+}
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let files = json["files"].as_array().unwrap();
+    let has_warning = files.iter().any(|file| {
+        file["issues"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"))
+    });
+    assert!(
+        !has_warning,
+        "closed function-local Postgres connect should not warn: {stdout}"
+    );
+}
+
+#[test]
+fn test_lint_allows_module_scope_postgres_connect() {
+    let code = r#"import { connect as pg_connect } from "std/db/postgres"
+
+let pg = match pg_connect("postgres://example/app") {
+    Ok(conn) => conn,
+    Err(_) => None
+}
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let files = json["files"].as_array().unwrap();
+    let has_warning = files.iter().any(|file| {
+        file["issues"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"))
+    });
+    assert!(
+        !has_warning,
+        "module-scope Postgres connect should not warn: {stdout}"
+    );
+}
+
+#[test]
 fn test_lint_catches_arg_type_mismatch() {
     let code = r#"fn add(a: Int, b: Int) -> Int {
     return a + b

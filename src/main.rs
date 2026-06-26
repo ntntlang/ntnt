@@ -3505,6 +3505,34 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
     let mut issues = Vec::new();
     let source_lines: Vec<&str> = source.lines().collect();
 
+    let mut postgres_connect_functions = std::collections::HashSet::new();
+    let mut postgres_close_functions = std::collections::HashSet::new();
+    for stmt in &ast.statements {
+        if let Statement::Import {
+            items,
+            source,
+            wildcard,
+            ..
+        } = unwrap_located(stmt)
+        {
+            if source == "std/db/postgres" {
+                if *wildcard {
+                    postgres_connect_functions.insert("connect".to_string());
+                    postgres_close_functions.insert("close".to_string());
+                }
+                for item in items {
+                    if item.name == "connect" {
+                        postgres_connect_functions
+                            .insert(item.alias.clone().unwrap_or_else(|| item.name.clone()));
+                    } else if item.name == "close" {
+                        postgres_close_functions
+                            .insert(item.alias.clone().unwrap_or_else(|| item.name.clone()));
+                    }
+                }
+            }
+        }
+    }
+
     // Track context
     let mut http_route_functions = std::collections::HashSet::new();
     http_route_functions.insert("get");
@@ -3808,6 +3836,84 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         }
                     }
                     imported_names.insert(local_name.clone(), (source.clone(), current_line));
+                }
+            }
+        }
+    }
+
+    if !postgres_connect_functions.is_empty() {
+        let mut in_template_string = false;
+        let mut function_depth: Option<i32> = None;
+        let mut function_connects: Vec<(String, usize)> = Vec::new();
+        let mut function_closes_connection = false;
+        let mut warned_lines = std::collections::HashSet::new();
+
+        let mut emit_function_connect_warnings =
+            |issues: &mut Vec<serde_json::Value>,
+             function_connects: &[(String, usize)],
+             function_closes_connection: bool| {
+                if function_closes_connection {
+                    return;
+                }
+                for (connect_name, line) in function_connects {
+                    if warned_lines.insert(*line) {
+                        issues.push(json!({
+                        "severity": "warning",
+                        "rule": "postgres_connect_in_function",
+                        "message": format!("Postgres {}() is called inside a function without a matching close(). This can create a new connection pool on every request or repeated call; open the connection once at module scope or close it before returning.", connect_name),
+                        "line": line,
+                        "fix": {
+                            "description": "Prefer a module-scope connection handle. If this code must connect per call, import close() from std/db/postgres and close the handle on every path after query/execute completes."
+                        }
+                    }));
+                    }
+                }
+            };
+
+        for (line_num, line) in source_lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with("//") {
+                let triple_count = line.matches("\"\"\"").count();
+                if triple_count % 2 == 1 {
+                    in_template_string = !in_template_string;
+                }
+            }
+            if in_template_string || trimmed.starts_with("//") {
+                continue;
+            }
+
+            let starts_function = trimmed.starts_with("fn ");
+            if starts_function && trimmed.contains('{') {
+                function_depth = Some(0);
+                function_connects.clear();
+                function_closes_connection = false;
+            }
+
+            if function_depth.is_some() {
+                for connect_name in &postgres_connect_functions {
+                    if trimmed.contains(&format!("{}(", connect_name)) {
+                        function_connects.push((connect_name.clone(), line_num + 1));
+                    }
+                }
+                for close_name in &postgres_close_functions {
+                    if trimmed.contains(&format!("{}(", close_name)) {
+                        function_closes_connection = true;
+                    }
+                }
+
+                let delta = line.matches('{').count() as i32 - line.matches('}').count() as i32;
+                if let Some(depth) = function_depth.as_mut() {
+                    *depth += delta;
+                    if *depth <= 0 {
+                        emit_function_connect_warnings(
+                            &mut issues,
+                            &function_connects,
+                            function_closes_connection,
+                        );
+                        function_depth = None;
+                        function_connects.clear();
+                        function_closes_connection = false;
+                    }
                 }
             }
         }
