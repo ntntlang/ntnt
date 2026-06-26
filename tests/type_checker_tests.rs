@@ -304,6 +304,39 @@ fn load_count(should_close: Bool) {
 }
 
 #[test]
+fn test_lint_warns_when_shadowed_postgres_handle_leaks() {
+    let code = r#"import { connect as pg_connect, close as pg_close } from "std/db/postgres"
+
+fn load_count() {
+    let conn = pg_connect("postgres://example/first") otherwise { return None }
+    let conn = pg_connect("postgres://example/second") otherwise { return None }
+    let _closed = pg_close(conn)
+    return conn
+}
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let warnings: Vec<&serde_json::Value> = json["files"][0]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "one close cannot satisfy both shadowed handles: {stdout}"
+    );
+    assert_eq!(
+        warnings[0]["line"].as_i64(),
+        Some(4),
+        "the first shadowed handle is the leaked connect: {stdout}"
+    );
+}
+
+#[test]
 fn test_lint_catches_arg_type_mismatch() {
     let code = r#"fn add(a: Int, b: Int) -> Int {
     return a + b

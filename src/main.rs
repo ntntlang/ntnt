@@ -4402,15 +4402,30 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                 &mut closes,
             );
 
-            for (connect_name, handle_name, line) in connects {
-                let is_closed = handle_name.as_ref().is_some_and(|handle_name| {
-                    closes.iter().any(|closed| {
-                        closed.unconditional
-                            && closed.handle_name == *handle_name
-                            && closed.line > line
-                    })
-                });
-                if !is_closed {
+            let mut closed_connects = vec![false; connects.len()];
+            let mut unconditional_closes: Vec<&PostgresCloseCall> =
+                closes.iter().filter(|close| close.unconditional).collect();
+            unconditional_closes.sort_by_key(|close| close.line);
+
+            for close in unconditional_closes {
+                // A close consumes the most recent still-open binding with the same name.
+                // That keeps a later shadowed `let conn = ...; pg_close(conn)` from also
+                // satisfying an earlier `conn` binding that the program can no longer name.
+                if let Some((connect_index, _)) = connects.iter().enumerate().rev().find(
+                    |(connect_index, (_, handle_name, connect_line))| {
+                        !closed_connects[*connect_index]
+                            && handle_name.as_deref() == Some(close.handle_name.as_str())
+                            && *connect_line < close.line
+                    },
+                ) {
+                    closed_connects[connect_index] = true;
+                }
+            }
+
+            for (connect_index, (connect_name, _handle_name, line)) in
+                connects.into_iter().enumerate()
+            {
+                if !closed_connects[connect_index] {
                     issues.push(json!({
                         "severity": "warning",
                         "rule": "postgres_connect_in_function",
