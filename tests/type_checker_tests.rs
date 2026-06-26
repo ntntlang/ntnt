@@ -276,6 +276,34 @@ fn load_count() {
 }
 
 #[test]
+fn test_lint_warns_when_postgres_close_is_conditional() {
+    let code = r#"import { connect as pg_connect, close as pg_close } from "std/db/postgres"
+
+fn load_count(should_close: Bool) {
+    let conn = pg_connect("postgres://example/app") otherwise { return None }
+    if should_close {
+        let _closed = pg_close(conn)
+    }
+    return conn
+}
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let warnings = json["files"][0]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"))
+        .count();
+    assert_eq!(
+        warnings, 1,
+        "a branch-local close must not suppress the leak warning: {stdout}"
+    );
+}
+
+#[test]
 fn test_lint_catches_arg_type_mismatch() {
     let code = r#"fn add(a: Int, b: Int) -> Int {
     return a + b

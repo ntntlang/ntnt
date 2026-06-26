@@ -3849,14 +3849,24 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
             }
         }
 
+        struct PostgresCloseCall {
+            handle_name: String,
+            line: usize,
+            // Only closes reached by normal sequential execution suppress the warning.
+            // Branch/loop/otherwise/lambda closes are still recorded, but conservatively
+            // treated as conditional so one path cannot hide a leaked connection on another.
+            unconditional: bool,
+        }
+
         fn collect_postgres_calls_in_expr(
             expr: &Expression,
             line: usize,
             assigned_to: Option<&str>,
+            unconditional_closes: bool,
             connect_names: &std::collections::HashSet<String>,
             close_names: &std::collections::HashSet<String>,
             connects: &mut Vec<(String, Option<String>, usize)>,
-            closes: &mut Vec<(String, usize)>,
+            closes: &mut Vec<PostgresCloseCall>,
         ) {
             match expr {
                 Expression::Call {
@@ -3869,7 +3879,11 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         }
                         if close_names.contains(name) {
                             if let Some(Expression::Identifier(handle_name)) = arguments.first() {
-                                closes.push((handle_name.clone(), line));
+                                closes.push(PostgresCloseCall {
+                                    handle_name: handle_name.clone(),
+                                    line,
+                                    unconditional: unconditional_closes,
+                                });
                             }
                         }
                     }
@@ -3877,6 +3891,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         function,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -3887,6 +3902,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             arg,
                             line,
                             None,
+                            unconditional_closes,
                             connect_names,
                             close_names,
                             connects,
@@ -3899,6 +3915,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         left,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -3908,6 +3925,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         right,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -3920,6 +3938,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                     operand,
                     line,
                     None,
+                    unconditional_closes,
                     connect_names,
                     close_names,
                     connects,
@@ -3931,6 +3950,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             item,
                             line,
                             None,
+                            unconditional_closes,
                             connect_names,
                             close_names,
                             connects,
@@ -3944,6 +3964,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             key,
                             line,
                             None,
+                            unconditional_closes,
                             connect_names,
                             close_names,
                             connects,
@@ -3953,6 +3974,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             value,
                             line,
                             None,
+                            unconditional_closes,
                             connect_names,
                             close_names,
                             connects,
@@ -3967,6 +3989,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         object,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -3977,6 +4000,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             arg,
                             line,
                             None,
+                            unconditional_closes,
                             connect_names,
                             close_names,
                             connects,
@@ -3988,6 +4012,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                     object,
                     line,
                     None,
+                    unconditional_closes,
                     connect_names,
                     close_names,
                     connects,
@@ -3998,6 +4023,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         object,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -4007,6 +4033,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         index,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -4018,6 +4045,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         start,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -4027,6 +4055,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         end,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -4040,6 +4069,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                                 expr,
                                 line,
                                 None,
+                                unconditional_closes,
                                 connect_names,
                                 close_names,
                                 connects,
@@ -4054,6 +4084,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             value,
                             line,
                             None,
+                            unconditional_closes,
                             connect_names,
                             close_names,
                             connects,
@@ -4067,6 +4098,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             arg,
                             line,
                             None,
+                            unconditional_closes,
                             connect_names,
                             close_names,
                             connects,
@@ -4079,6 +4111,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         target,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -4088,6 +4121,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         value,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -4103,6 +4137,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         condition,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -4112,6 +4147,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         then_branch,
                         line,
                         None,
+                        false,
                         connect_names,
                         close_names,
                         connects,
@@ -4121,6 +4157,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         else_branch,
                         line,
                         None,
+                        false,
                         connect_names,
                         close_names,
                         connects,
@@ -4132,6 +4169,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         scrutinee,
                         line,
                         None,
+                        unconditional_closes,
                         connect_names,
                         close_names,
                         connects,
@@ -4143,6 +4181,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                                 guard,
                                 line,
                                 None,
+                                false,
                                 connect_names,
                                 close_names,
                                 connects,
@@ -4153,6 +4192,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             &arm.body,
                             line,
                             None,
+                            false,
                             connect_names,
                             close_names,
                             connects,
@@ -4164,6 +4204,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                 | Expression::Lambda { body: block, .. }
                 | Expression::TryCatch { body: block } => collect_postgres_calls_in_block(
                     block,
+                    false,
                     connect_names,
                     close_names,
                     connects,
@@ -4181,10 +4222,11 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
 
         fn collect_postgres_calls_in_block(
             block: &ntnt::ast::Block,
+            unconditional_closes: bool,
             connect_names: &std::collections::HashSet<String>,
             close_names: &std::collections::HashSet<String>,
             connects: &mut Vec<(String, Option<String>, usize)>,
-            closes: &mut Vec<(String, usize)>,
+            closes: &mut Vec<PostgresCloseCall>,
         ) {
             for stmt in &block.statements {
                 let line = located_line(stmt);
@@ -4200,6 +4242,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                                 expr,
                                 line,
                                 Some(name),
+                                unconditional_closes,
                                 connect_names,
                                 close_names,
                                 connects,
@@ -4209,6 +4252,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         if let Some(block) = otherwise {
                             collect_postgres_calls_in_block(
                                 block,
+                                false,
                                 connect_names,
                                 close_names,
                                 connects,
@@ -4221,6 +4265,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             expr,
                             line,
                             None,
+                            unconditional_closes,
                             connect_names,
                             close_names,
                             connects,
@@ -4233,6 +4278,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                                 expr,
                                 line,
                                 None,
+                                unconditional_closes,
                                 connect_names,
                                 close_names,
                                 connects,
@@ -4242,6 +4288,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         if let Some(block) = otherwise {
                             collect_postgres_calls_in_block(
                                 block,
+                                false,
                                 connect_names,
                                 close_names,
                                 connects,
@@ -4258,6 +4305,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             condition,
                             line,
                             None,
+                            unconditional_closes,
                             connect_names,
                             close_names,
                             connects,
@@ -4265,6 +4313,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         );
                         collect_postgres_calls_in_block(
                             then_branch,
+                            false,
                             connect_names,
                             close_names,
                             connects,
@@ -4273,6 +4322,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         if let Some(block) = else_branch {
                             collect_postgres_calls_in_block(
                                 block,
+                                false,
                                 connect_names,
                                 close_names,
                                 connects,
@@ -4285,6 +4335,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             condition,
                             line,
                             None,
+                            unconditional_closes,
                             connect_names,
                             close_names,
                             connects,
@@ -4292,6 +4343,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         );
                         collect_postgres_calls_in_block(
                             body,
+                            false,
                             connect_names,
                             close_names,
                             connects,
@@ -4303,6 +4355,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                             iterable,
                             line,
                             None,
+                            unconditional_closes,
                             connect_names,
                             close_names,
                             connects,
@@ -4310,6 +4363,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         );
                         collect_postgres_calls_in_block(
                             body,
+                            false,
                             connect_names,
                             close_names,
                             connects,
@@ -4318,6 +4372,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                     }
                     Statement::Loop { body } => collect_postgres_calls_in_block(
                         body,
+                        false,
                         connect_names,
                         close_names,
                         connects,
@@ -4340,6 +4395,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
             let mut closes = Vec::new();
             collect_postgres_calls_in_block(
                 function_body,
+                true,
                 connect_names,
                 close_names,
                 &mut connects,
@@ -4348,8 +4404,10 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
 
             for (connect_name, handle_name, line) in connects {
                 let is_closed = handle_name.as_ref().is_some_and(|handle_name| {
-                    closes.iter().any(|(closed_name, close_line)| {
-                        closed_name == handle_name && *close_line > line
+                    closes.iter().any(|closed| {
+                        closed.unconditional
+                            && closed.handle_name == *handle_name
+                            && closed.line > line
                     })
                 });
                 if !is_closed {
