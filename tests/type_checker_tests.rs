@@ -196,6 +196,86 @@ let pg = match pg_connect("postgres://example/app") {
 }
 
 #[test]
+fn test_lint_warns_when_only_unrelated_postgres_handle_is_closed() {
+    let code = r#"import { connect as pg_connect, close as pg_close } from "std/db/postgres"
+
+fn load_count() {
+    let old = pg_connect("postgres://example/app") otherwise { return None }
+    let _closed = pg_close(old)
+    let conn = pg_connect("postgres://example/app") otherwise { return None }
+    return conn
+}
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let warnings = json["files"][0]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"))
+        .count();
+    assert_eq!(
+        warnings, 1,
+        "only the second, unclosed Postgres handle should warn: {stdout}"
+    );
+}
+
+#[test]
+fn test_lint_warns_after_string_brace_inside_function() {
+    let code = r#"import { connect as pg_connect } from "std/db/postgres"
+
+fn load_count() {
+    let label = "}"
+    let conn = pg_connect("postgres://example/app") otherwise { return None }
+    return conn
+}
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let has_warning = json["files"][0]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"));
+    assert!(
+        has_warning,
+        "string braces must not hide a later Postgres connect: {stdout}"
+    );
+}
+
+#[test]
+fn test_lint_does_not_match_suffix_identifiers_as_postgres_connect() {
+    let code = r#"import * from "std/db/postgres"
+
+fn reconnect(url: String) -> String {
+    return url
+}
+
+fn load_count() {
+    let conn = reconnect("postgres://example/app")
+    return conn
+}
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+    let has_warning = json["files"][0]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"));
+    assert!(
+        !has_warning,
+        "reconnect() is not the imported Postgres connect(): {stdout}"
+    );
+}
+
+#[test]
 fn test_lint_catches_arg_type_mismatch() {
     let code = r#"fn add(a: Int, b: Int) -> Int {
     return a + b

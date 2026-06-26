@@ -3842,80 +3842,569 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
     }
 
     if !postgres_connect_functions.is_empty() {
-        let mut in_template_string = false;
-        let mut function_depth: Option<i32> = None;
-        let mut function_connects: Vec<(String, usize)> = Vec::new();
-        let mut function_closes_connection = false;
-        let mut warned_lines = std::collections::HashSet::new();
+        fn located_line(stmt: &Statement) -> usize {
+            match stmt {
+                Statement::Located { line, .. } => *line,
+                _ => 0,
+            }
+        }
 
-        let mut emit_function_connect_warnings =
-            |issues: &mut Vec<serde_json::Value>,
-             function_connects: &[(String, usize)],
-             function_closes_connection: bool| {
-                if function_closes_connection {
-                    return;
+        fn collect_postgres_calls_in_expr(
+            expr: &Expression,
+            line: usize,
+            assigned_to: Option<&str>,
+            connect_names: &std::collections::HashSet<String>,
+            close_names: &std::collections::HashSet<String>,
+            connects: &mut Vec<(String, Option<String>, usize)>,
+            closes: &mut Vec<(String, usize)>,
+        ) {
+            match expr {
+                Expression::Call {
+                    function,
+                    arguments,
+                } => {
+                    if let Expression::Identifier(name) = function.as_ref() {
+                        if connect_names.contains(name) {
+                            connects.push((name.clone(), assigned_to.map(str::to_string), line));
+                        }
+                        if close_names.contains(name) {
+                            if let Some(Expression::Identifier(handle_name)) = arguments.first() {
+                                closes.push((handle_name.clone(), line));
+                            }
+                        }
+                    }
+                    collect_postgres_calls_in_expr(
+                        function,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                    for arg in arguments {
+                        collect_postgres_calls_in_expr(
+                            arg,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                    }
                 }
-                for (connect_name, line) in function_connects {
-                    if warned_lines.insert(*line) {
-                        issues.push(json!({
+                Expression::Binary { left, right, .. } => {
+                    collect_postgres_calls_in_expr(
+                        left,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                    collect_postgres_calls_in_expr(
+                        right,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                }
+                Expression::Unary { operand, .. }
+                | Expression::Await(operand)
+                | Expression::Try(operand) => collect_postgres_calls_in_expr(
+                    operand,
+                    line,
+                    None,
+                    connect_names,
+                    close_names,
+                    connects,
+                    closes,
+                ),
+                Expression::Array(items) => {
+                    for item in items {
+                        collect_postgres_calls_in_expr(
+                            item,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                    }
+                }
+                Expression::MapLiteral(pairs) => {
+                    for (key, value) in pairs {
+                        collect_postgres_calls_in_expr(
+                            key,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                        collect_postgres_calls_in_expr(
+                            value,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                    }
+                }
+                Expression::MethodCall {
+                    object, arguments, ..
+                } => {
+                    collect_postgres_calls_in_expr(
+                        object,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                    for arg in arguments {
+                        collect_postgres_calls_in_expr(
+                            arg,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                    }
+                }
+                Expression::FieldAccess { object, .. } => collect_postgres_calls_in_expr(
+                    object,
+                    line,
+                    None,
+                    connect_names,
+                    close_names,
+                    connects,
+                    closes,
+                ),
+                Expression::Index { object, index } => {
+                    collect_postgres_calls_in_expr(
+                        object,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                    collect_postgres_calls_in_expr(
+                        index,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                }
+                Expression::Range { start, end, .. } => {
+                    collect_postgres_calls_in_expr(
+                        start,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                    collect_postgres_calls_in_expr(
+                        end,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                }
+                Expression::InterpolatedString(parts) => {
+                    for part in parts {
+                        if let ntnt::ast::StringPart::Expr(expr) = part {
+                            collect_postgres_calls_in_expr(
+                                expr,
+                                line,
+                                None,
+                                connect_names,
+                                close_names,
+                                connects,
+                                closes,
+                            );
+                        }
+                    }
+                }
+                Expression::StructLiteral { fields, .. } => {
+                    for (_, value) in fields {
+                        collect_postgres_calls_in_expr(
+                            value,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                    }
+                }
+                Expression::EnumVariant { arguments, .. } => {
+                    for arg in arguments {
+                        collect_postgres_calls_in_expr(
+                            arg,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                    }
+                }
+                Expression::Assign { target, value } => {
+                    collect_postgres_calls_in_expr(
+                        target,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                    collect_postgres_calls_in_expr(
+                        value,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                }
+                Expression::IfExpr {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    collect_postgres_calls_in_expr(
+                        condition,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                    collect_postgres_calls_in_expr(
+                        then_branch,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                    collect_postgres_calls_in_expr(
+                        else_branch,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                }
+                Expression::Match { scrutinee, arms } => {
+                    collect_postgres_calls_in_expr(
+                        scrutinee,
+                        line,
+                        None,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    );
+                    for arm in arms {
+                        if let Some(guard) = &arm.guard {
+                            collect_postgres_calls_in_expr(
+                                guard,
+                                line,
+                                None,
+                                connect_names,
+                                close_names,
+                                connects,
+                                closes,
+                            );
+                        }
+                        collect_postgres_calls_in_expr(
+                            &arm.body,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                    }
+                }
+                Expression::Block(block)
+                | Expression::Lambda { body: block, .. }
+                | Expression::TryCatch { body: block } => collect_postgres_calls_in_block(
+                    block,
+                    connect_names,
+                    close_names,
+                    connects,
+                    closes,
+                ),
+                Expression::TemplateString(_)
+                | Expression::Integer(_)
+                | Expression::Float(_)
+                | Expression::String(_)
+                | Expression::Bool(_)
+                | Expression::Unit
+                | Expression::Identifier(_) => {}
+            }
+        }
+
+        fn collect_postgres_calls_in_block(
+            block: &ntnt::ast::Block,
+            connect_names: &std::collections::HashSet<String>,
+            close_names: &std::collections::HashSet<String>,
+            connects: &mut Vec<(String, Option<String>, usize)>,
+            closes: &mut Vec<(String, usize)>,
+        ) {
+            for stmt in &block.statements {
+                let line = located_line(stmt);
+                match unwrap_located(stmt) {
+                    Statement::Let {
+                        name,
+                        value,
+                        otherwise,
+                        ..
+                    } => {
+                        if let Some(expr) = value {
+                            collect_postgres_calls_in_expr(
+                                expr,
+                                line,
+                                Some(name),
+                                connect_names,
+                                close_names,
+                                connects,
+                                closes,
+                            );
+                        }
+                        if let Some(block) = otherwise {
+                            collect_postgres_calls_in_block(
+                                block,
+                                connect_names,
+                                close_names,
+                                connects,
+                                closes,
+                            );
+                        }
+                    }
+                    Statement::Expression(expr) | Statement::Defer(expr) => {
+                        collect_postgres_calls_in_expr(
+                            expr,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        )
+                    }
+                    Statement::Return { value, otherwise } => {
+                        if let Some(expr) = value {
+                            collect_postgres_calls_in_expr(
+                                expr,
+                                line,
+                                None,
+                                connect_names,
+                                close_names,
+                                connects,
+                                closes,
+                            );
+                        }
+                        if let Some(block) = otherwise {
+                            collect_postgres_calls_in_block(
+                                block,
+                                connect_names,
+                                close_names,
+                                connects,
+                                closes,
+                            );
+                        }
+                    }
+                    Statement::If {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    } => {
+                        collect_postgres_calls_in_expr(
+                            condition,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                        collect_postgres_calls_in_block(
+                            then_branch,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                        if let Some(block) = else_branch {
+                            collect_postgres_calls_in_block(
+                                block,
+                                connect_names,
+                                close_names,
+                                connects,
+                                closes,
+                            );
+                        }
+                    }
+                    Statement::While { condition, body } => {
+                        collect_postgres_calls_in_expr(
+                            condition,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                        collect_postgres_calls_in_block(
+                            body,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                    }
+                    Statement::ForIn { iterable, body, .. } => {
+                        collect_postgres_calls_in_expr(
+                            iterable,
+                            line,
+                            None,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                        collect_postgres_calls_in_block(
+                            body,
+                            connect_names,
+                            close_names,
+                            connects,
+                            closes,
+                        );
+                    }
+                    Statement::Loop { body } => collect_postgres_calls_in_block(
+                        body,
+                        connect_names,
+                        close_names,
+                        connects,
+                        closes,
+                    ),
+                    // Nested declarations are scanned independently by scan_postgres_connect_lint().
+                    Statement::Function { .. } => {}
+                    _ => {}
+                }
+            }
+        }
+
+        fn emit_postgres_connect_warnings_for_function(
+            function_body: &ntnt::ast::Block,
+            connect_names: &std::collections::HashSet<String>,
+            close_names: &std::collections::HashSet<String>,
+            issues: &mut Vec<serde_json::Value>,
+        ) {
+            let mut connects = Vec::new();
+            let mut closes = Vec::new();
+            collect_postgres_calls_in_block(
+                function_body,
+                connect_names,
+                close_names,
+                &mut connects,
+                &mut closes,
+            );
+
+            for (connect_name, handle_name, line) in connects {
+                let is_closed = handle_name.as_ref().is_some_and(|handle_name| {
+                    closes.iter().any(|(closed_name, close_line)| {
+                        closed_name == handle_name && *close_line > line
+                    })
+                });
+                if !is_closed {
+                    issues.push(json!({
                         "severity": "warning",
                         "rule": "postgres_connect_in_function",
-                        "message": format!("Postgres {}() is called inside a function without a matching close(). This can create a new connection pool on every request or repeated call; open the connection once at module scope or close it before returning.", connect_name),
+                        "message": format!("Postgres {}() is called inside a function without a matching close(). This can create a new connection pool on every request or repeated call; open the connection once at module scope or close the same handle before returning.", connect_name),
                         "line": line,
                         "fix": {
-                            "description": "Prefer a module-scope connection handle. If this code must connect per call, import close() from std/db/postgres and close the handle on every path after query/execute completes."
+                            "description": "Prefer a module-scope connection handle. If this code must connect per call, import close() from std/db/postgres and close the same handle on every path after query/execute completes."
                         }
                     }));
-                    }
-                }
-            };
-
-        for (line_num, line) in source_lines.iter().enumerate() {
-            let trimmed = line.trim();
-            if !trimmed.starts_with("//") {
-                let triple_count = line.matches("\"\"\"").count();
-                if triple_count % 2 == 1 {
-                    in_template_string = !in_template_string;
                 }
             }
-            if in_template_string || trimmed.starts_with("//") {
-                continue;
-            }
+        }
 
-            let starts_function = trimmed.starts_with("fn ");
-            if starts_function && trimmed.contains('{') {
-                function_depth = Some(0);
-                function_connects.clear();
-                function_closes_connection = false;
-            }
-
-            if function_depth.is_some() {
-                for connect_name in &postgres_connect_functions {
-                    if trimmed.contains(&format!("{}(", connect_name)) {
-                        function_connects.push((connect_name.clone(), line_num + 1));
+        fn scan_postgres_connect_lint(
+            stmt: &Statement,
+            connect_names: &std::collections::HashSet<String>,
+            close_names: &std::collections::HashSet<String>,
+            issues: &mut Vec<serde_json::Value>,
+        ) {
+            match unwrap_located(stmt) {
+                Statement::Function { body, .. } => emit_postgres_connect_warnings_for_function(
+                    body,
+                    connect_names,
+                    close_names,
+                    issues,
+                ),
+                Statement::Module { body, .. } => {
+                    for stmt in body {
+                        scan_postgres_connect_lint(stmt, connect_names, close_names, issues);
                     }
                 }
-                for close_name in &postgres_close_functions {
-                    if trimmed.contains(&format!("{}(", close_name)) {
-                        function_closes_connection = true;
+                Statement::Impl { methods, .. } => {
+                    for method in methods {
+                        scan_postgres_connect_lint(method, connect_names, close_names, issues);
                     }
                 }
-
-                let delta = line.matches('{').count() as i32 - line.matches('}').count() as i32;
-                if let Some(depth) = function_depth.as_mut() {
-                    *depth += delta;
-                    if *depth <= 0 {
-                        emit_function_connect_warnings(
-                            &mut issues,
-                            &function_connects,
-                            function_closes_connection,
-                        );
-                        function_depth = None;
-                        function_connects.clear();
-                        function_closes_connection = false;
+                Statement::Export { statement, .. } => {
+                    if let Some(stmt) = statement {
+                        scan_postgres_connect_lint(stmt, connect_names, close_names, issues);
                     }
                 }
+                _ => {}
             }
+        }
+
+        for stmt in &ast.statements {
+            scan_postgres_connect_lint(
+                stmt,
+                &postgres_connect_functions,
+                &postgres_close_functions,
+                &mut issues,
+            );
         }
     }
 
