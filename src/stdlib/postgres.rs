@@ -15,7 +15,7 @@ use crate::interpreter::Value;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::ToSql;
@@ -33,9 +33,22 @@ static DB_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::Laz
         .expect("Failed to create DB runtime")
 });
 
-/// Pool registry — maps connection IDs to deadpool-postgres pools
-static POOL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Pool>>> =
+#[derive(Clone)]
+struct SharedPoolEntry {
+    id: u64,
+    pool: Pool,
+}
+
+/// Shared pool registry — maps connection strings to deadpool-postgres pools.
+///
+/// `connect(url)` is intentionally the fast path: repeated calls with the same
+/// URL reuse the same verified pool instead of creating a fresh pool per call.
+/// The raw URL is kept only as an internal in-memory key and is never copied into
+/// the public handle.
+static SHARED_POOL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, SharedPoolEntry>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static SHARED_POOL_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Transaction registry — maps connection handle IDs to dedicated client objects.
 /// Transactions must pin to a single connection, so we check out a client
@@ -45,6 +58,11 @@ static TXN_REGISTRY: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static CONNECTION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Connection handles are just value maps, so close(handle) records an opaque ID
+/// as closed without needing to keep per-handle pool references alive.
+static CLOSED_CONNECTIONS: std::sync::LazyLock<Mutex<HashSet<u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Enum to hold different SQL parameter types
 /// This allows us to properly serialize each type to PostgreSQL
@@ -381,16 +399,24 @@ fn json_to_intent_value(json: &serde_json::Value) -> Value {
     crate::stdlib::json::json_to_intent_value(json)
 }
 
-/// Connect to a PostgreSQL database — creates a connection pool
-fn pg_connect(connection_string: &str) -> Result<Value> {
-    // Build deadpool-postgres Config from connection string URL
+fn sanitize_connection_error(error: &str, connection_string: &str) -> String {
+    if error.contains("password") || error.contains("authentication") {
+        "Connection failed: authentication error (details hidden for security)".to_string()
+    } else {
+        let sanitized = error.replace(connection_string, "<connection_string>");
+        format!("Connection failed: {}", sanitized)
+    }
+}
+
+fn create_verified_pool(connection_string: &str) -> std::result::Result<Pool, String> {
+    // Build deadpool-postgres Config from connection string URL.
     let mut cfg = Config::new();
     cfg.url = Some(connection_string.to_string());
     cfg.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
     // Pool size: configurable via NTNT_DB_POOL_SIZE env var, default 5.
-    // Each worker spawns its own interpreter with its own pools, so total connections =
+    // Each worker has its own process-local shared pools, so total connections =
     // num_workers × num_databases × pool_size. With 8 workers and 2 databases,
     // default 5 = 80 total connections (vs 320 at the old default of 20).
     let pool_max_size: usize = std::env::var("NTNT_DB_POOL_SIZE")
@@ -402,77 +428,108 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
         ..Default::default()
     });
 
-    // Create the pool
-    let pool = match cfg.create_pool(Some(Runtime::Tokio1), NoTls) {
-        Ok(p) => p,
-        Err(e) => {
-            let error_msg = e.to_string();
-            let sanitized = if error_msg.contains("password")
-                || error_msg.contains("authentication")
-            {
-                "Connection failed: authentication error (details hidden for security)".to_string()
-            } else {
-                let sanitized = error_msg.replace(connection_string, "<connection_string>");
-                format!("Connection failed: {}", sanitized)
-            };
-            return Ok(Value::err(Value::String(sanitized)));
-        }
+    let pool = cfg
+        .create_pool(Some(Runtime::Tokio1), NoTls)
+        .map_err(|e| sanitize_connection_error(&e.to_string(), connection_string))?;
+
+    // Verify newly-created pools before caching them. Later connect(url) calls
+    // reuse the verified pool directly; deadpool's recycling handles stale clients.
+    DB_RUNTIME
+        .block_on(async {
+            match pool.get().await {
+                Ok(_client) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            }
+        })
+        .map_err(|e| sanitize_connection_error(&e, connection_string))?;
+
+    Ok(pool)
+}
+
+fn register_pool_handle(pool_key_id: u64) -> Result<Value> {
+    let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    // Return a connection handle as a map. The handle deliberately exposes only
+    // opaque IDs, not the connection string or shared-pool registry key.
+    let mut handle = HashMap::new();
+    handle.insert("_pg_connection_id".to_string(), Value::Int(id as i64));
+    handle.insert(
+        "_pg_pool_key_id".to_string(),
+        Value::Int(pool_key_id as i64),
+    );
+    handle.insert("connected".to_string(), Value::Bool(true));
+
+    Ok(Value::ok(Value::Map(handle)))
+}
+
+/// Connect to a PostgreSQL database — returns a handle backed by a shared pool.
+fn pg_connect(connection_string: &str) -> Result<Value> {
+    if let Some(entry) = SHARED_POOL_REGISTRY
+        .lock()
+        .map_err(|_| {
+            IntentError::runtime_error("Failed to lock Postgres pool registry".to_string())
+        })?
+        .get(connection_string)
+        .cloned()
+    {
+        return register_pool_handle(entry.id);
+    }
+
+    let pool = match create_verified_pool(connection_string) {
+        Ok(pool) => pool,
+        Err(error) => return Ok(Value::err(Value::String(error))),
     };
 
-    // Verify the pool works by getting a connection
-    let verify_result = DB_RUNTIME.block_on(async {
-        match pool.get().await {
-            Ok(_client) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        }
-    });
+    let pool_key_id = {
+        let mut registry = SHARED_POOL_REGISTRY.lock().map_err(|_| {
+            IntentError::runtime_error("Failed to lock Postgres pool registry".to_string())
+        })?;
+        registry
+            .entry(connection_string.to_string())
+            .or_insert_with(|| SharedPoolEntry {
+                id: SHARED_POOL_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                pool,
+            })
+            .id
+    };
 
-    match verify_result {
-        Ok(()) => {
-            let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-            // Store pool in registry
-            if let Ok(mut registry) = POOL_REGISTRY.lock() {
-                registry.insert(id, pool);
-            }
-
-            // Return a connection handle as a map
-            let mut handle = HashMap::new();
-            handle.insert("_pg_connection_id".to_string(), Value::Int(id as i64));
-            handle.insert("connected".to_string(), Value::Bool(true));
-
-            Ok(Value::ok(Value::Map(handle)))
-        }
-        Err(e) => {
-            let sanitized = if e.contains("password") || e.contains("authentication") {
-                "Connection failed: authentication error (details hidden for security)".to_string()
-            } else {
-                let sanitized = e.replace(connection_string, "<connection_string>");
-                format!("Connection failed: {}", sanitized)
-            };
-            Ok(Value::err(Value::String(sanitized)))
-        }
-    }
+    register_pool_handle(pool_key_id)
 }
 
 /// Get a pool from the connection handle
 fn get_pool(conn: &Value) -> Result<Pool> {
     match conn {
         Value::Map(map) => {
-            if let Some(Value::Int(id)) = map.get("_pg_connection_id") {
-                if let Ok(registry) = POOL_REGISTRY.lock() {
-                    if let Some(pool) = registry.get(&(*id as u64)) {
-                        return Ok(pool.clone());
-                    }
+            let pool_key_id = match map.get("_pg_pool_key_id") {
+                Some(Value::Int(id)) => *id as u64,
+                _ => {
+                    return Err(IntentError::type_error(
+                        "Expected a database connection handle".to_string(),
+                    ))
                 }
-                Err(IntentError::runtime_error(
-                    "Invalid or closed database connection".to_string(),
-                ))
-            } else {
-                Err(IntentError::type_error(
-                    "Expected a database connection handle".to_string(),
-                ))
+            };
+
+            if let Some(Value::Int(id)) = map.get("_pg_connection_id") {
+                if CLOSED_CONNECTIONS
+                    .lock()
+                    .map(|closed| closed.contains(&(*id as u64)))
+                    .unwrap_or(false)
+                {
+                    return Err(IntentError::runtime_error(
+                        "Invalid or closed database connection".to_string(),
+                    ));
+                }
             }
+
+            if let Ok(registry) = SHARED_POOL_REGISTRY.lock() {
+                if let Some(entry) = registry.values().find(|entry| entry.id == pool_key_id) {
+                    return Ok(entry.pool.clone());
+                }
+            }
+
+            Err(IntentError::runtime_error(
+                "Invalid or closed database connection".to_string(),
+            ))
         }
         _ => Err(IntentError::type_error(
             "Expected a database connection handle".to_string(),
@@ -811,23 +868,29 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     }
 }
 
-/// Close a database connection (drops the pool)
+/// Close a database connection handle.
+///
+/// This invalidates the logical handle and clears any transaction pinned to it.
+/// The URL-keyed shared pool remains cached so repeated connect(url) calls keep
+/// using the fast path instead of recreating pools on request paths.
 fn pg_close(conn: &Value) -> Result<Value> {
     match conn {
         Value::Map(map) => {
             if let Some(Value::Int(id)) = map.get("_pg_connection_id") {
                 let conn_id = *id as u64;
 
-                // Remove any active transaction
+                // Remove any active transaction for this handle. Dropping the
+                // pinned client aborts an uncommitted transaction, matching the
+                // previous handle-close behavior.
                 if let Ok(mut registry) = TXN_REGISTRY.lock() {
                     registry.remove(&conn_id);
                 }
 
-                // Remove the pool
-                if let Ok(mut registry) = POOL_REGISTRY.lock() {
-                    registry.remove(&conn_id);
-                    return Ok(Value::Bool(true));
+                if let Ok(mut closed) = CLOSED_CONNECTIONS.lock() {
+                    closed.insert(conn_id);
                 }
+
+                return Ok(Value::Bool(true));
             }
             Ok(Value::Bool(false))
         }
@@ -942,15 +1005,19 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/postgres
     // @module_description PostgreSQL database operations
     // @signature connect(connection_string: String) -> Result<Connection, String>
-    // Open a connection pool to a PostgreSQL database.
+    // Open or reuse a shared connection pool to a PostgreSQL database.
     //
-    // Establishes a connection pool using the provided connection string and
-    // returns a connection handle that can be passed to query, execute, and
-    // transaction functions. The handle is stored in a global registry keyed
-    // by an internal connection ID. Uses deadpool-postgres for async pooling.
+    // Establishes a URL-keyed shared connection pool using the provided
+    // connection string and returns an opaque connection handle that can be
+    // passed to query, execute, and transaction functions. Repeated connect()
+    // calls with the same connection string reuse the verified shared pool, so
+    // request-path connect() calls use the fast path instead of creating a new
+    // pool each time. close(handle) invalidates the logical handle and clears any
+    // transaction pinned to it, but keeps the shared pool cached for future
+    // connect() calls.
     // Pool size defaults to 5 connections per pool (configurable via NTNT_DB_POOL_SIZE
-    // env var). Note: each worker creates its own pools, so total connections =
-    // num_workers × num_databases × pool_size.
+    // env var). Note: each worker has its own process-local shared pools, so total
+    // connections = num_workers × num_databases × pool_size.
     // @param connection_string A PostgreSQL connection URI (e.g. "postgres://user:pass@localhost/mydb")
     // @returns Result::Ok containing a Connection map handle, or Result::Err with a description
     // @see_also close, query, execute, begin
@@ -1084,11 +1151,12 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt close
     // @module std/postgres
     // @signature close(conn: Connection) -> Bool
-    // Close a PostgreSQL database connection pool.
+    // Close a PostgreSQL database connection handle.
     //
-    // Removes the connection pool from the internal registry, allowing all
-    // pooled connections to be released. Returns true if the pool was found
-    // and removed, false otherwise.
+    // Invalidates this logical handle and clears any transaction pinned to it.
+    // The URL-keyed shared pool remains cached so future connect(url) calls can
+    // reuse the fast path instead of recreating a pool. Returns true if the
+    // handle was accepted for close, false otherwise.
     // @param conn A Connection handle obtained from connect()
     // @returns true if the connection was successfully closed, false if it was not found
     // @see_also connect
@@ -1204,6 +1272,21 @@ mod tests {
         assert!(module.contains_key("begin"));
         assert!(module.contains_key("commit"));
         assert!(module.contains_key("rollback"));
+    }
+
+    #[test]
+    fn test_close_invalidates_logical_handle_without_pool_lookup() {
+        let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut handle = HashMap::new();
+        handle.insert("_pg_connection_id".to_string(), Value::Int(id as i64));
+        handle.insert("_pg_pool_key_id".to_string(), Value::Int(999_999));
+        let conn = Value::Map(handle);
+
+        assert!(matches!(pg_close(&conn), Ok(Value::Bool(true))));
+        let err = get_pool(&conn).expect_err("closed handle should not resolve a pool");
+        assert!(err
+            .to_string()
+            .contains("Invalid or closed database connection"));
     }
 
     #[test]

@@ -108,7 +108,7 @@ fn validate_code(code: &str) -> (String, String, i32) {
 // ============================================================================
 
 #[test]
-fn test_lint_warns_on_function_local_postgres_connect() {
+fn test_lint_allows_function_local_postgres_connect() {
     let code = r#"import { connect as pg_connect } from "std/db/postgres"
 
 fn load_count() {
@@ -123,39 +123,7 @@ fn load_count() {
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("lint should output valid JSON");
     let files = json["files"].as_array().unwrap();
-    let has_warning = files.iter().any(|file| {
-        file["issues"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .any(|issue| {
-                issue["rule"].as_str() == Some("postgres_connect_in_function")
-                    && issue["severity"].as_str() == Some("warning")
-                    && issue["line"].as_i64() == Some(4)
-            })
-    });
-    assert!(
-        has_warning,
-        "expected postgres_connect_in_function warning: {stdout}"
-    );
-}
-
-#[test]
-fn test_lint_allows_closed_function_local_postgres_connect() {
-    let code = r#"import { connect as pg_connect, close as pg_close } from "std/db/postgres"
-
-fn load_count() {
-    let conn = pg_connect("postgres://example/app") otherwise { return None }
-    let _closed = pg_close(conn)
-    return conn
-}
-"#;
-
-    let (stdout, _stderr, _code) = lint_code(code);
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("lint should output valid JSON");
-    let files = json["files"].as_array().unwrap();
-    let has_warning = files.iter().any(|file| {
+    let has_stale_warning = files.iter().any(|file| {
         file["issues"]
             .as_array()
             .unwrap_or(&Vec::new())
@@ -163,176 +131,8 @@ fn load_count() {
             .any(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"))
     });
     assert!(
-        !has_warning,
-        "closed function-local Postgres connect should not warn: {stdout}"
-    );
-}
-
-#[test]
-fn test_lint_allows_module_scope_postgres_connect() {
-    let code = r#"import { connect as pg_connect } from "std/db/postgres"
-
-let pg = match pg_connect("postgres://example/app") {
-    Ok(conn) => conn,
-    Err(_) => None
-}
-"#;
-
-    let (stdout, _stderr, _code) = lint_code(code);
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("lint should output valid JSON");
-    let files = json["files"].as_array().unwrap();
-    let has_warning = files.iter().any(|file| {
-        file["issues"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .any(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"))
-    });
-    assert!(
-        !has_warning,
-        "module-scope Postgres connect should not warn: {stdout}"
-    );
-}
-
-#[test]
-fn test_lint_warns_when_only_unrelated_postgres_handle_is_closed() {
-    let code = r#"import { connect as pg_connect, close as pg_close } from "std/db/postgres"
-
-fn load_count() {
-    let old = pg_connect("postgres://example/app") otherwise { return None }
-    let _closed = pg_close(old)
-    let conn = pg_connect("postgres://example/app") otherwise { return None }
-    return conn
-}
-"#;
-
-    let (stdout, _stderr, _code) = lint_code(code);
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("lint should output valid JSON");
-    let warnings = json["files"][0]["issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"))
-        .count();
-    assert_eq!(
-        warnings, 1,
-        "only the second, unclosed Postgres handle should warn: {stdout}"
-    );
-}
-
-#[test]
-fn test_lint_warns_after_string_brace_inside_function() {
-    let code = r#"import { connect as pg_connect } from "std/db/postgres"
-
-fn load_count() {
-    let label = "}"
-    let conn = pg_connect("postgres://example/app") otherwise { return None }
-    return conn
-}
-"#;
-
-    let (stdout, _stderr, _code) = lint_code(code);
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("lint should output valid JSON");
-    let has_warning = json["files"][0]["issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"));
-    assert!(
-        has_warning,
-        "string braces must not hide a later Postgres connect: {stdout}"
-    );
-}
-
-#[test]
-fn test_lint_does_not_match_suffix_identifiers_as_postgres_connect() {
-    let code = r#"import * from "std/db/postgres"
-
-fn reconnect(url: String) -> String {
-    return url
-}
-
-fn load_count() {
-    let conn = reconnect("postgres://example/app")
-    return conn
-}
-"#;
-
-    let (stdout, _stderr, _code) = lint_code(code);
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("lint should output valid JSON");
-    let has_warning = json["files"][0]["issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"));
-    assert!(
-        !has_warning,
-        "reconnect() is not the imported Postgres connect(): {stdout}"
-    );
-}
-
-#[test]
-fn test_lint_warns_when_postgres_close_is_conditional() {
-    let code = r#"import { connect as pg_connect, close as pg_close } from "std/db/postgres"
-
-fn load_count(should_close: Bool) {
-    let conn = pg_connect("postgres://example/app") otherwise { return None }
-    if should_close {
-        let _closed = pg_close(conn)
-    }
-    return conn
-}
-"#;
-
-    let (stdout, _stderr, _code) = lint_code(code);
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("lint should output valid JSON");
-    let warnings = json["files"][0]["issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"))
-        .count();
-    assert_eq!(
-        warnings, 1,
-        "a branch-local close must not suppress the leak warning: {stdout}"
-    );
-}
-
-#[test]
-fn test_lint_warns_when_shadowed_postgres_handle_leaks() {
-    let code = r#"import { connect as pg_connect, close as pg_close } from "std/db/postgres"
-
-fn load_count() {
-    let conn = pg_connect("postgres://example/first") otherwise { return None }
-    let conn = pg_connect("postgres://example/second") otherwise { return None }
-    let _closed = pg_close(conn)
-    return conn
-}
-"#;
-
-    let (stdout, _stderr, _code) = lint_code(code);
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("lint should output valid JSON");
-    let warnings: Vec<&serde_json::Value> = json["files"][0]["issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|issue| issue["rule"].as_str() == Some("postgres_connect_in_function"))
-        .collect();
-    assert_eq!(
-        warnings.len(),
-        1,
-        "one close cannot satisfy both shadowed handles: {stdout}"
-    );
-    assert_eq!(
-        warnings[0]["line"].as_i64(),
-        Some(4),
-        "the first shadowed handle is the leaked connect: {stdout}"
+        !has_stale_warning,
+        "function-local Postgres connect is shared-pool backed and should not warn: {stdout}"
     );
 }
 

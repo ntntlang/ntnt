@@ -286,9 +286,9 @@ volumes:
   pg-data:
 ```
 
-**Connection pooling:** ntnt uses deadpool-postgres with configurable pool size:
+**Connection pooling:** ntnt reuses a process-local shared pool for each PostgreSQL connection string in each worker. `connect(url)` is the fast path; repeated calls with the same URL return new handles backed by the same shared pool.
 ```bash
-NTNT_DB_POOL_SIZE=5  # per-worker pool (total = workers × databases × pool_size)
+NTNT_DB_POOL_SIZE=5  # per-worker, per-database pool size (total = workers × databases × pool_size)
 ```
 
 ### SQLite (Simpler, Single-Server)
