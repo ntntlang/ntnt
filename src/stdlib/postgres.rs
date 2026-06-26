@@ -17,6 +17,7 @@ use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::NoTls;
 
@@ -532,6 +533,32 @@ fn format_pg_error(prefix: &str, e: &tokio_postgres::Error) -> String {
     }
 }
 
+fn is_cached_plan_stale_error(e: &tokio_postgres::Error) -> bool {
+    e.as_db_error().is_some_and(|db_err| {
+        db_err.code() == &SqlState::FEATURE_NOT_SUPPORTED
+            && db_err
+                .message()
+                .contains("cached plan must not change result type")
+    })
+}
+
+async fn pg_query_direct(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    param_refs: &[&(dyn ToSql + Sync)],
+) -> Result<Value> {
+    match client.query(sql, param_refs).await {
+        Ok(rows) => {
+            let result: Vec<Value> = rows.iter().map(row_to_value).collect();
+            Ok(Value::ok(Value::Array(result)))
+        }
+        Err(e) => Ok(Value::err(Value::String(format_pg_error(
+            "Query failed",
+            &e,
+        )))),
+    }
+}
+
 async fn pg_query_cached(
     client: &deadpool_postgres::Client,
     sql: &str,
@@ -551,6 +578,25 @@ async fn pg_query_cached(
             let result: Vec<Value> = rows.iter().map(row_to_value).collect();
             Ok(Value::ok(Value::Array(result)))
         }
+        Err(e) if is_cached_plan_stale_error(&e) => {
+            client.statement_cache.remove(sql, &[]);
+            pg_query_direct(client, sql, param_refs).await
+        }
+        Err(e) => Ok(Value::err(Value::String(format_pg_error(
+            "Query failed",
+            &e,
+        )))),
+    }
+}
+
+async fn pg_query_one_direct(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    param_refs: &[&(dyn ToSql + Sync)],
+) -> Result<Value> {
+    match client.query_opt(sql, param_refs).await {
+        Ok(Some(row)) => Ok(Value::ok(Value::some(row_to_value(&row)))),
+        Ok(None) => Ok(Value::ok(sql_none())),
         Err(e) => Ok(Value::err(Value::String(format_pg_error(
             "Query failed",
             &e,
@@ -575,8 +621,26 @@ async fn pg_query_one_cached(
     match client.query_opt(&stmt, param_refs).await {
         Ok(Some(row)) => Ok(Value::ok(Value::some(row_to_value(&row)))),
         Ok(None) => Ok(Value::ok(sql_none())),
+        Err(e) if is_cached_plan_stale_error(&e) => {
+            client.statement_cache.remove(sql, &[]);
+            pg_query_one_direct(client, sql, param_refs).await
+        }
         Err(e) => Ok(Value::err(Value::String(format_pg_error(
             "Query failed",
+            &e,
+        )))),
+    }
+}
+
+async fn pg_execute_direct(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    param_refs: &[&(dyn ToSql + Sync)],
+) -> Result<Value> {
+    match client.execute(sql, param_refs).await {
+        Ok(count) => Ok(Value::ok(Value::Int(count as i64))),
+        Err(e) => Ok(Value::err(Value::String(format_pg_error(
+            "Execute failed",
             &e,
         )))),
     }
@@ -598,6 +662,10 @@ async fn pg_execute_cached(
     };
     match client.execute(&stmt, param_refs).await {
         Ok(count) => Ok(Value::ok(Value::Int(count as i64))),
+        Err(e) if is_cached_plan_stale_error(&e) => {
+            client.statement_cache.remove(sql, &[]);
+            pg_execute_direct(client, sql, param_refs).await
+        }
         Err(e) => Ok(Value::err(Value::String(format_pg_error(
             "Execute failed",
             &e,
@@ -637,7 +705,10 @@ fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
             }?;
 
             let client = txn_client.lock().await;
-            pg_query_cached(&client, sql, &param_refs).await
+            // Do not use cached statements inside an explicit transaction: if a
+            // stale plan fails, Postgres aborts the transaction before retry is
+            // possible. Direct query preserves the pre-cache transaction path.
+            pg_query_direct(&client, sql, &param_refs).await
         })
     } else {
         // Use a fresh connection from the pool
@@ -682,7 +753,7 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
             }?;
 
             let client = txn_client.lock().await;
-            pg_query_one_cached(&client, sql, &param_refs).await
+            pg_query_one_direct(&client, sql, &param_refs).await
         })
     } else {
         let pool = get_pool(conn)?;
@@ -726,7 +797,7 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
             }?;
 
             let client = txn_client.lock().await;
-            pg_execute_cached(&client, sql, &param_refs).await
+            pg_execute_direct(&client, sql, &param_refs).await
         })
     } else {
         let pool = get_pool(conn)?;
@@ -1189,6 +1260,82 @@ mod tests {
         match param {
             SqlParam::String(v) => assert_eq!(v, "test"),
             _ => panic!("Expected String"),
+        }
+    }
+
+    #[test]
+    fn test_pg_query_cached_recovers_from_stale_result_plan() {
+        let Some(url) = std::env::var("NTNT_POSTGRES_TEST_URL")
+            .ok()
+            .or_else(|| std::env::var("NTNT_AUTH_TEST_POSTGRES_URL").ok())
+        else {
+            eprintln!(
+                "[postgres-test] skipping stale prepared-statement cache test — set NTNT_POSTGRES_TEST_URL"
+            );
+            return;
+        };
+
+        DB_RUNTIME.block_on(async {
+            let mut cfg = Config::new();
+            cfg.url = Some(url);
+            cfg.manager = Some(ManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            });
+            cfg.pool = Some(deadpool_postgres::PoolConfig {
+                max_size: 1,
+                ..Default::default()
+            });
+            let pool = cfg
+                .create_pool(Some(Runtime::Tokio1), NoTls)
+                .expect("test Postgres pool should be created");
+            let client = pool.get().await.expect("test Postgres should connect");
+            let sql = "SELECT value FROM ntnt_cached_plan_shape";
+
+            client
+                .batch_execute(
+                    "DROP TABLE IF EXISTS ntnt_cached_plan_shape;\n                     CREATE TEMP TABLE ntnt_cached_plan_shape (value integer);\n                     INSERT INTO ntnt_cached_plan_shape VALUES (1);",
+                )
+                .await
+                .expect("should create integer temp table");
+            let first = pg_query_cached(&client, sql, &[]).await.unwrap();
+            assert_result_ok_array_len(&first, 1);
+
+            client
+                .batch_execute(
+                    "DROP TABLE ntnt_cached_plan_shape;\n                     CREATE TEMP TABLE ntnt_cached_plan_shape (value text);\n                     INSERT INTO ntnt_cached_plan_shape VALUES ('changed');",
+                )
+                .await
+                .expect("should recreate temp table with changed result type");
+
+            let stale_stmt = client
+                .prepare_cached(sql)
+                .await
+                .expect("changed-shape query should remain in the statement cache");
+            let stale_result = client.query(&stale_stmt, &[]).await;
+            match stale_result {
+                Err(error) => assert!(
+                    is_cached_plan_stale_error(&error),
+                    "expected cached-plan stale error, got {error}"
+                ),
+                Ok(_) => panic!("expected cached prepared statement to be stale after result type change"),
+            }
+
+            let second = pg_query_cached(&client, sql, &[]).await.unwrap();
+            assert_result_ok_array_len(&second, 1);
+        });
+    }
+
+    fn assert_result_ok_array_len(value: &Value, expected_len: usize) {
+        match value {
+            Value::EnumValue {
+                enum_name,
+                variant,
+                values,
+            } if enum_name == "Result" && variant == "Ok" => match values.as_slice() {
+                [Value::Array(rows)] => assert_eq!(rows.len(), expected_len),
+                other => panic!("expected Result::Ok(Array), got {other:?}"),
+            },
+            other => panic!("expected Result::Ok, got {other:?}"),
         }
     }
 }
