@@ -51,20 +51,68 @@ pub struct ResolutionTrace {
     pub error: Option<String>,
 }
 
+/// What kind of resolution failure occurred
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveErrorKind {
+    /// The term matched nothing in the vocabulary
+    UnknownTerm,
+    /// The term's definitions form a cycle
+    Cycle,
+    /// Resolution exceeded MAX_DEPTH
+    MaxDepth,
+}
+
 /// Error during resolution
 #[derive(Debug, Clone)]
 pub struct ResolveError {
     pub term: String,
     pub message: String,
+    pub kind: ResolveErrorKind,
+    /// Near-miss vocabulary patterns for unknown terms (best first)
+    pub suggestions: Vec<String>,
 }
 
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Failed to resolve '{}': {}", self.term, self.message)
+        write!(f, "Failed to resolve '{}': {}", self.term, self.message)?;
+        if !self.suggestions.is_empty() {
+            let quoted: Vec<String> = self
+                .suggestions
+                .iter()
+                .map(|s| format!("'{}'", s))
+                .collect();
+            write!(f, "\n  did you mean: {}?", quoted.join(", "))?;
+        }
+        Ok(())
     }
 }
 
 impl std::error::Error for ResolveError {}
+
+/// Find vocabulary patterns similar to an unknown term. Both sides are
+/// normalized with the cycle normalizer (quoted args and `{param}` become
+/// placeholders) so `body containz "x"` can match `body contains {text}`.
+/// Returns up to 3 original pattern texts, closest first.
+fn suggest_similar_terms(text: &str, vocab: &Vocabulary) -> Vec<String> {
+    let normalized = normalize_term_for_cycle(text);
+    // Identifier-tuned thresholds in find_suggestion are too tight for
+    // multi-word phrases; allow roughly a quarter of the phrase to differ.
+    let max_distance = std::cmp::max(2, normalized.len() / 4);
+
+    let mut scored: Vec<(usize, String)> = vocab
+        .pattern_texts()
+        .into_iter()
+        .filter_map(|pattern| {
+            let dist = crate::error::levenshtein_distance(
+                &normalized,
+                &normalize_term_for_cycle(&pattern),
+            );
+            (dist > 0 && dist <= max_distance).then_some((dist, pattern))
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().take(3).map(|(_, p)| p).collect()
+}
 
 /// Resolve a term to primitives by recursive rewriting.
 ///
@@ -119,7 +167,8 @@ pub fn resolve_with_trace(
             Err(_) => vec![],
         },
         success: result.is_ok(),
-        error: result.as_ref().err().map(|e| e.message.clone()),
+        // to_string() rather than .message so traces carry the suggestions
+        error: result.as_ref().err().map(|e| e.to_string()),
     };
 
     (result, trace)
@@ -212,6 +261,8 @@ fn resolve_with_cycle_detection(
                 MAX_DEPTH,
                 path.join("\n  → ")
             ),
+            kind: ResolveErrorKind::MaxDepth,
+            suggestions: Vec::new(),
         });
     }
 
@@ -239,6 +290,8 @@ fn resolve_with_cycle_detection(
                  Check your glossary for circular references.",
                 cycle_path
             ),
+            kind: ResolveErrorKind::Cycle,
+            suggestions: Vec::new(),
         });
     }
 
@@ -326,6 +379,8 @@ fn resolve_with_cycle_detection(
         None => Err(ResolveError {
             term: term.text.clone(),
             message: "Unknown term - not found in vocabulary".to_string(),
+            kind: ResolveErrorKind::UnknownTerm,
+            suggestions: suggest_similar_terms(&term.text, vocab),
         }),
     }
 }
@@ -728,5 +783,72 @@ mod tests {
         assert!(!trace.success);
         assert!(trace.error.is_some());
         assert!(trace.final_primitives.is_empty());
+    }
+
+    #[test]
+    fn unknown_term_gets_suggestions_for_near_miss() {
+        let vocab = test_vocab();
+        let err = resolve(&Term::new("success respones"), &vocab).unwrap_err();
+
+        assert_eq!(err.kind, ResolveErrorKind::UnknownTerm);
+        assert_eq!(
+            err.suggestions.first().map(String::as_str),
+            Some("success response"),
+            "suggestions: {:?}",
+            err.suggestions
+        );
+        assert!(err.to_string().contains("did you mean"), "{err}");
+    }
+
+    #[test]
+    fn suggestions_normalize_params_and_quoted_args() {
+        let vocab = test_vocab();
+        // Typo'd verb with a quoted arg — normalizer maps "x" and {text}
+        // to the same placeholder so the patterns are comparable
+        let err = resolve(&Term::new("body containz \"x\""), &vocab).unwrap_err();
+
+        assert!(
+            err.suggestions.iter().any(|s| s == "body contains {text}"),
+            "suggestions: {:?}",
+            err.suggestions
+        );
+    }
+
+    #[test]
+    fn cycle_error_has_cycle_kind_and_no_suggestions() {
+        let mut vocab = Vocabulary::new();
+        vocab.add_terms("term a", vec![Term::new("term b")]);
+        vocab.add_terms("term b", vec![Term::new("term a")]);
+
+        let err = resolve(&Term::new("term a"), &vocab).unwrap_err();
+        assert_eq!(err.kind, ResolveErrorKind::Cycle);
+        assert!(err.suggestions.is_empty());
+        assert!(!err.to_string().contains("did you mean"));
+    }
+
+    #[test]
+    fn distant_unknown_term_gets_no_suggestions() {
+        let vocab = test_vocab();
+        let err = resolve(&Term::new("completely unrelated phrase here"), &vocab).unwrap_err();
+
+        assert_eq!(err.kind, ResolveErrorKind::UnknownTerm);
+        assert!(
+            err.suggestions.is_empty(),
+            "distant phrases should not suggest: {:?}",
+            err.suggestions
+        );
+    }
+
+    #[test]
+    fn trace_error_includes_suggestions() {
+        let vocab = test_vocab();
+        let (result, trace) = resolve_with_trace(&Term::new("success respones"), &vocab);
+
+        assert!(result.is_err());
+        let error_text = trace.error.unwrap();
+        assert!(
+            error_text.contains("did you mean"),
+            "trace error should carry suggestions: {error_text}"
+        );
     }
 }

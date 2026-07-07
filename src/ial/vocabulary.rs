@@ -230,6 +230,12 @@ impl Vocabulary {
         self.patterns.push((pattern, def));
     }
 
+    /// All pattern texts in insertion order (with `{param}` placeholders
+    /// visible) — used for did-you-mean suggestions and glossary lint scans
+    pub fn pattern_texts(&self) -> Vec<String> {
+        self.patterns.iter().map(|(p, _)| p.text.clone()).collect()
+    }
+
     /// Look up a term by exact text (fast path)
     pub fn lookup_exact(&self, text: &str) -> Option<&Definition> {
         self.terms.get(text).map(|(_, def)| def)
