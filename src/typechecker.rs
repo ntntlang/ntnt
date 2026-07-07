@@ -1223,12 +1223,16 @@ impl TypeContext {
                     let fn_line = self.find_line_near(&format!("fn {}", name));
 
                     // requires: check each expression evaluates to Bool
-                    for req_expr in &contract.requires {
-                        let req_type = self.infer_expression(req_expr);
+                    for req_clause in &contract.requires {
+                        let req_type = self.infer_expression(&req_clause.expression);
                         if !self.compatible(&req_type, &Type::Bool)
                             && !matches!(req_type, Type::Any)
                         {
-                            let line = self.find_line_near_from("requires", fn_line);
+                            let line = if req_clause.line > 0 {
+                                req_clause.line
+                            } else {
+                                self.find_line_near_from("requires", fn_line)
+                            };
                             self.error(
                                 format!(
                                     "Contract 'requires' in '{}' should be Bool, got {}",
@@ -1246,12 +1250,16 @@ impl TypeContext {
                         let result_type = resolved_return.clone().unwrap_or(Type::Any);
                         self.bind("result", result_type);
 
-                        for ens_expr in &contract.ensures {
-                            let ens_type = self.infer_expression(ens_expr);
+                        for ens_clause in &contract.ensures {
+                            let ens_type = self.infer_expression(&ens_clause.expression);
                             if !self.compatible(&ens_type, &Type::Bool)
                                 && !matches!(ens_type, Type::Any)
                             {
-                                let line = self.find_line_near_from("ensures", fn_line);
+                                let line = if ens_clause.line > 0 {
+                                    ens_clause.line
+                                } else {
+                                    self.find_line_near_from("ensures", fn_line)
+                                };
                                 self.error(
                                     format!(
                                         "Contract 'ensures' in '{}' should be Bool, got {}",

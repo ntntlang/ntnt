@@ -126,6 +126,14 @@ ntnt run myfile.tnt         # Only after lint passes
 ntnt test server.tnt --get /health --post /users --body 'name=Alice'
 ```
 
+**Multi-error lint:** `ntnt lint` recovers at statement boundaries and reports
+up to 5 syntax errors per file in one pass (rule `parse_error`, each with its
+own line), so fix them as a batch instead of re-linting after each one. Each
+parse error counts individually in the JSON `summary.errors` total, matching
+how semantic errors are counted. When a file has parse errors, lint/type
+findings for that file are suppressed until it parses — re-lint after fixing.
+`ntnt run` still stops at the first syntax error.
+
 ---
 
 ## Type Safety Modes (v0.4.0+)
@@ -1200,6 +1208,29 @@ fn create_user(req)
 - In `ensures`, `result` is typed to the function's return type
 - `old(expr)` returns the same type as `expr`
 - Struct invariants are checked with field types in scope
+
+**Contract violation diagnostics (E004):** when a contract fails at runtime,
+the error points at the failing clause and shows the actual values it saw —
+use them to fix the caller or the contract without re-running with prints:
+
+```text
+error[E004]
+  --> server.tnt:2
+  = Contract violation: Precondition failed in 'divide': b != 0
+  --> Source context
+   |
+   1 | fn divide(a: Int, b: Int) -> Int
+   2 |     requires b != 0
+   3 |     ensures result * b == a
+   |
+  where: b = 0
+  note: contract checked for call at line 7
+```
+
+- `-->` names the file and the line of the failing `requires`/`ensures` clause
+- `where:` lists the current values of the variables the clause references
+  (parameters, and `result` for `ensures`)
+- `note:` gives the call site that triggered the check
 
 ---
 

@@ -542,8 +542,19 @@ pub enum TypeExpr {
 /// Contract specification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Contract {
-    pub requires: Vec<Expression>,
-    pub ensures: Vec<Expression>,
+    pub requires: Vec<ContractCondition>,
+    pub ensures: Vec<ContractCondition>,
+}
+
+/// A single `requires` or `ensures` clause with its source position.
+///
+/// Named ContractCondition (not ContractClause) to avoid colliding with
+/// `contracts::ContractClause`, which the interpreter also imports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractCondition {
+    pub expression: Expression,
+    /// 1-based line of the `requires`/`ensures` keyword; 0 = unknown
+    pub line: usize,
 }
 
 /// Block of statements

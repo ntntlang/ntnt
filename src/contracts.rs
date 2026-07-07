@@ -218,7 +218,7 @@ impl ContractChecker {
             let msg = message
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("Precondition failed: {}", condition));
-            return Err(IntentError::ContractViolation(msg));
+            return Err(IntentError::contract_violation(msg));
         }
 
         Ok(())
@@ -242,7 +242,7 @@ impl ContractChecker {
             let msg = message
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("Postcondition failed: {}", condition));
-            return Err(IntentError::ContractViolation(msg));
+            return Err(IntentError::contract_violation(msg));
         }
 
         Ok(())
@@ -266,7 +266,7 @@ impl ContractChecker {
             let msg = message
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("Invariant violated: {}", condition));
-            return Err(IntentError::ContractViolation(msg));
+            return Err(IntentError::contract_violation(msg));
         }
 
         Ok(())

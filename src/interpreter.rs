@@ -145,13 +145,14 @@ pub enum Value {
     Continue,
 }
 
-/// Function contract with parsed expressions for runtime evaluation
+/// Function contract with parsed clauses (expression + source line) for
+/// runtime evaluation
 #[derive(Debug, Clone)]
 pub struct FunctionContract {
-    /// Precondition expressions
-    pub requires: Vec<Expression>,
-    /// Postcondition expressions
-    pub ensures: Vec<Expression>,
+    /// Precondition clauses
+    pub requires: Vec<crate::ast::ContractCondition>,
+    /// Postcondition clauses
+    pub ensures: Vec<crate::ast::ContractCondition>,
 }
 
 impl Value {
@@ -2596,9 +2597,7 @@ impl Interpreter {
                     if args[0].is_truthy() {
                         Ok(Value::Unit)
                     } else {
-                        Err(IntentError::ContractViolation(
-                            "Assertion failed".to_string(),
-                        ))
+                        Err(IntentError::contract_violation("Assertion failed"))
                     }
                 },
             },
@@ -5972,14 +5971,19 @@ impl Interpreter {
     ) -> Result<Value> {
         // Check preconditions
         if let Some(c) = contract {
-            for req_expr in &c.requires {
-                let condition_str = Self::format_expression(req_expr);
-                let check = self.eval_expression(req_expr)?;
+            for clause in &c.requires {
+                let condition_str = Self::format_expression(&clause.expression);
+                let check = self.eval_expression(&clause.expression)?;
                 if !check.is_truthy() {
-                    return Err(IntentError::ContractViolation(format!(
-                        "Precondition failed in '{}': {}",
-                        job_name, condition_str
-                    )));
+                    return Err(IntentError::ContractViolation {
+                        message: format!(
+                            "Precondition failed in '{}': {}",
+                            job_name, condition_str
+                        ),
+                        line: clause.line,
+                        call_line: 0,
+                        values: self.collect_clause_values(&clause.expression),
+                    });
                 }
                 self.contracts
                     .check_precondition(&condition_str, true, None)?;
@@ -6030,14 +6034,19 @@ impl Interpreter {
 
         // Check postconditions
         if let Some(c) = contract {
-            for ens_expr in &c.ensures {
-                let condition_str = Self::format_expression(ens_expr);
-                let check = self.eval_expression(ens_expr)?;
+            for clause in &c.ensures {
+                let condition_str = Self::format_expression(&clause.expression);
+                let check = self.eval_expression(&clause.expression)?;
                 if !check.is_truthy() {
-                    return Err(IntentError::ContractViolation(format!(
-                        "Postcondition failed in '{}': {}",
-                        job_name, condition_str
-                    )));
+                    return Err(IntentError::ContractViolation {
+                        message: format!(
+                            "Postcondition failed in '{}': {}",
+                            job_name, condition_str
+                        ),
+                        line: clause.line,
+                        call_line: 0,
+                        values: self.collect_clause_values(&clause.expression),
+                    });
                 }
                 self.contracts
                     .check_postcondition(&condition_str, true, None)?;
@@ -9219,20 +9228,31 @@ impl Interpreter {
 
         // Environment is already set to func_env for contract checking and body execution
 
+        // The caller's Located statement line — current_line still points at
+        // the call site here; after the body runs it points at the last body
+        // statement, so capture it before execution.
+        let call_site_line = self.current_line;
+
         // Track deferred statements for this function call
         let deferred_count_before = self.deferred_statements.len();
 
         // Check preconditions BEFORE execution
         if let Some(ref func_contract) = contract {
-            for req_expr in &func_contract.requires {
-                let condition_str = Self::format_expression(req_expr);
-                let result = self.eval_expression(req_expr)?;
+            for clause in &func_contract.requires {
+                let condition_str = Self::format_expression(&clause.expression);
+                let result = self.eval_expression(&clause.expression)?;
                 if !result.is_truthy() {
+                    // Read parameter values while func_env is still active —
+                    // after the restore below, lookups would hit the caller's
+                    // scope and silently produce wrong or missing values.
+                    let values = self.collect_clause_values(&clause.expression);
                     self.environment = previous;
-                    return Err(IntentError::ContractViolation(format!(
-                        "Precondition failed in '{}': {}",
-                        name, condition_str
-                    )));
+                    return Err(IntentError::ContractViolation {
+                        message: format!("Precondition failed in '{}': {}", name, condition_str),
+                        line: clause.line,
+                        call_line: call_site_line,
+                        values,
+                    });
                 }
                 self.contracts
                     .check_precondition(&condition_str, true, None)?;
@@ -9273,18 +9293,23 @@ impl Interpreter {
 
         // Check postconditions AFTER execution
         if let Some(ref func_contract) = contract {
-            for ens_expr in &func_contract.ensures {
-                let condition_str = Self::format_expression(ens_expr);
-                let postcond_result = self.eval_expression(ens_expr)?;
+            for clause in &func_contract.ensures {
+                let condition_str = Self::format_expression(&clause.expression);
+                let postcond_result = self.eval_expression(&clause.expression)?;
                 if !postcond_result.is_truthy() {
+                    // Values first: `result` and the parameters live in
+                    // func_env, which the restore below replaces.
+                    let values = self.collect_clause_values(&clause.expression);
                     // Clear state before returning error
                     self.current_old_values = None;
                     self.current_result = None;
                     self.environment = previous;
-                    return Err(IntentError::ContractViolation(format!(
-                        "Postcondition failed in '{}': {}",
-                        name, condition_str
-                    )));
+                    return Err(IntentError::ContractViolation {
+                        message: format!("Postcondition failed in '{}': {}", name, condition_str),
+                        line: clause.line,
+                        call_line: call_site_line,
+                        values,
+                    });
                 }
                 self.contracts
                     .check_postcondition(&condition_str, true, None)?;
@@ -9610,7 +9635,10 @@ impl Interpreter {
                                     } else {
                                         let method_path = format!("{} {}", method, path);
                                         // Check for contract violations and return appropriate HTTP status
-                                        if let IntentError::ContractViolation(msg) = &e {
+                                        if let IntentError::ContractViolation {
+                                            message: msg, ..
+                                        } = &e
+                                        {
                                             if msg.contains("Precondition failed") {
                                                 http_server::create_error_response_with_context(
                                                     400,
@@ -10279,14 +10307,136 @@ impl Interpreter {
     }
 
     /// Capture old values from expressions in postconditions
-    fn capture_old_values(&mut self, ensures: &[Expression]) -> Result<OldValues> {
+    fn capture_old_values(
+        &mut self,
+        ensures: &[crate::ast::ContractCondition],
+    ) -> Result<OldValues> {
         let mut old_values = OldValues::new();
 
-        for expr in ensures {
-            self.extract_old_calls(expr, &mut old_values)?;
+        for clause in ensures {
+            self.extract_old_calls(&clause.expression, &mut old_values)?;
         }
 
         Ok(old_values)
+    }
+
+    /// Recursively collect identifier names referenced by a contract clause,
+    /// skipping call-position names (`len` in `len(x)`) so only data
+    /// variables are reported in `where:` diagnostics.
+    fn collect_identifiers(expr: &Expression, out: &mut Vec<String>) {
+        match expr {
+            Expression::Identifier(name) => {
+                if !out.iter().any(|n| n == name) {
+                    out.push(name.clone());
+                }
+            }
+            Expression::Binary { left, right, .. } => {
+                Self::collect_identifiers(left, out);
+                Self::collect_identifiers(right, out);
+            }
+            Expression::Unary { operand, .. } => {
+                Self::collect_identifiers(operand, out);
+            }
+            Expression::Call {
+                function,
+                arguments,
+            } => {
+                // A bare identifier in function position is a function name,
+                // not a data variable — but old(x) exposes x.
+                match function.as_ref() {
+                    Expression::Identifier(name) if name == "old" => {
+                        for arg in arguments {
+                            Self::collect_identifiers(arg, out);
+                        }
+                        return;
+                    }
+                    Expression::Identifier(_) => {}
+                    other => Self::collect_identifiers(other, out),
+                }
+                for arg in arguments {
+                    Self::collect_identifiers(arg, out);
+                }
+            }
+            Expression::Index { object, index } => {
+                Self::collect_identifiers(object, out);
+                Self::collect_identifiers(index, out);
+            }
+            Expression::FieldAccess { object, .. } => {
+                Self::collect_identifiers(object, out);
+            }
+            // UFCS dot-call: `s.len()` — the receiver is a data variable,
+            // the method name is not
+            Expression::MethodCall {
+                object, arguments, ..
+            } => {
+                Self::collect_identifiers(object, out);
+                for arg in arguments {
+                    Self::collect_identifiers(arg, out);
+                }
+            }
+            Expression::IfExpr {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                Self::collect_identifiers(condition, out);
+                Self::collect_identifiers(then_branch, out);
+                Self::collect_identifiers(else_branch, out);
+            }
+            Expression::Range { start, end, .. } => {
+                Self::collect_identifiers(start, out);
+                Self::collect_identifiers(end, out);
+            }
+            Expression::Array(elements) => {
+                for element in elements {
+                    Self::collect_identifiers(element, out);
+                }
+            }
+            Expression::Try(inner) | Expression::Await(inner) => {
+                Self::collect_identifiers(inner, out);
+            }
+            _ => {}
+        }
+    }
+
+    /// Read the current values of the variables a failing contract clause
+    /// references, for `where: b = 0` diagnostics. Pure environment lookups
+    /// only — expressions are never re-evaluated here, so error construction
+    /// cannot trigger side effects.
+    fn collect_clause_values(&self, expr: &Expression) -> Vec<(String, String)> {
+        const MAX_VALUES: usize = 8;
+        const MAX_RENDERED_LEN: usize = 60;
+
+        let mut names = Vec::new();
+        Self::collect_identifiers(expr, &mut names);
+
+        let env = self.environment.borrow();
+        let mut values = Vec::new();
+        for name in names {
+            if values.len() >= MAX_VALUES {
+                break;
+            }
+            let Some(value) = env.get(&name) else {
+                continue;
+            };
+            let rendered = match &value {
+                Value::Function { .. } | Value::NativeFunction { .. } => continue,
+                Value::String(s) => format!("{:?}", s),
+                other => other.to_string(),
+            };
+            let mut rendered = rendered;
+            if rendered.len() > MAX_RENDERED_LEN {
+                // Truncate at a char boundary — String::truncate panics mid-char
+                let cut = (0..=MAX_RENDERED_LEN)
+                    .rev()
+                    .find(|i| rendered.is_char_boundary(*i))
+                    .unwrap_or(0);
+                rendered.truncate(cut);
+                rendered.push('…');
+            }
+            values.push((name, rendered));
+        }
+        values
     }
 
     /// Recursively find old() calls in an expression and capture their values
@@ -10525,11 +10675,19 @@ impl Interpreter {
             let result = self.eval_expression(inv_expr)?;
 
             if !result.is_truthy() {
+                // Field values are read from inv_env before the restore
+                let values = self.collect_clause_values(inv_expr);
                 self.environment = previous;
-                return Err(IntentError::ContractViolation(format!(
-                    "Invariant violated for '{}': {}",
-                    struct_name, condition_str
-                )));
+                return Err(IntentError::ContractViolation {
+                    message: format!(
+                        "Invariant violated for '{}': {}",
+                        struct_name, condition_str
+                    ),
+                    // Invariant expressions don't carry parsed lines yet
+                    line: 0,
+                    call_line: self.current_line,
+                    values,
+                });
             }
             self.contracts.check_invariant(&condition_str, true, None)?;
         }

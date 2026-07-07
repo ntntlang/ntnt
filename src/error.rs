@@ -69,8 +69,16 @@ pub enum IntentError {
         line: usize,
     },
 
-    #[error("Contract violation: {0}")]
-    ContractViolation(String),
+    #[error("Contract violation: {message}")]
+    ContractViolation {
+        message: String,
+        /// 1-based line of the failing requires/ensures clause; 0 = unknown
+        line: usize,
+        /// 1-based line of the call site that triggered the check; 0 = unknown
+        call_line: usize,
+        /// Variable name/value pairs referenced by the failing clause
+        values: Vec<(String, String)>,
+    },
 
     #[error("Runtime error: {message}")]
     RuntimeError {
@@ -137,6 +145,16 @@ impl IntentError {
         }
     }
 
+    /// Create a ContractViolation with just a message (no location or values)
+    pub fn contract_violation(message: impl Into<String>) -> Self {
+        IntentError::ContractViolation {
+            message: message.into(),
+            line: 0,
+            call_line: 0,
+            values: Vec::new(),
+        }
+    }
+
     /// Create a RuntimeError with just a message (backward compatible)
     pub fn runtime_error(message: impl Into<String>) -> Self {
         IntentError::RuntimeError {
@@ -165,6 +183,9 @@ impl IntentError {
             IntentError::UndefinedFunction { line: l, .. } => *l = line,
             IntentError::ArityMismatch { line: l, .. } => *l = line,
             IntentError::DivisionByZero { line: l } => *l = line,
+            // Backfill the call-site line from Located statement tracking,
+            // but never overwrite a clause line already captured.
+            IntentError::ContractViolation { line: l, .. } if *l == 0 => *l = line,
             _ => {}
         }
         self
@@ -209,7 +230,7 @@ impl IntentError {
             IntentError::LexerError { .. } => "E001",
             IntentError::ParserError { .. } => "E002",
             IntentError::TypeError { .. } => "E003",
-            IntentError::ContractViolation(_) => "E004",
+            IntentError::ContractViolation { .. } => "E004",
             IntentError::RuntimeError { .. } => "E005",
             IntentError::UndefinedVariable { .. } => "E006",
             IntentError::UndefinedFunction { .. } => "E007",
@@ -232,6 +253,7 @@ impl IntentError {
             IntentError::UndefinedFunction { line, .. } if *line > 0 => Some(*line),
             IntentError::ArityMismatch { line, .. } if *line > 0 => Some(*line),
             IntentError::DivisionByZero { line } if *line > 0 => Some(*line),
+            IntentError::ContractViolation { line, .. } if *line > 0 => Some(*line),
             _ => None,
         }
     }
@@ -408,6 +430,25 @@ mod tests {
     }
 
     #[test]
+    fn contract_violation_carries_location_and_values() {
+        let err = IntentError::ContractViolation {
+            message: "Precondition failed in 'divide': b != 0".to_string(),
+            line: 2,
+            call_line: 7,
+            values: vec![("b".to_string(), "0".to_string())],
+        };
+
+        assert_eq!(err.error_code(), "E004");
+        assert_eq!(err.line(), Some(2));
+
+        // at_line backfills only when the clause line is unknown
+        let backfilled = IntentError::contract_violation("msg").at_line(9);
+        assert_eq!(backfilled.line(), Some(9));
+        let kept = err.at_line(99);
+        assert_eq!(kept.line(), Some(2));
+    }
+
+    #[test]
     fn test_error_codes_unique() {
         let errors: Vec<IntentError> = vec![
             IntentError::LexerError {
@@ -421,7 +462,7 @@ mod tests {
                 message: String::new(),
             },
             IntentError::type_error(""),
-            IntentError::ContractViolation(String::new()),
+            IntentError::contract_violation(String::new()),
             IntentError::runtime_error(""),
             IntentError::UndefinedVariable {
                 name: String::new(),
