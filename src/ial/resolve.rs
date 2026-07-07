@@ -93,7 +93,7 @@ impl std::error::Error for ResolveError {}
 /// normalized with the cycle normalizer (quoted args and `{param}` become
 /// placeholders) so `body containz "x"` can match `body contains {text}`.
 /// Returns up to 3 original pattern texts, closest first.
-fn suggest_similar_terms(text: &str, vocab: &Vocabulary) -> Vec<String> {
+pub(crate) fn suggest_similar_terms(text: &str, vocab: &Vocabulary) -> Vec<String> {
     let normalized = normalize_term_for_cycle(text);
     // Identifier-tuned thresholds in find_suggestion are too tight for
     // multi-word phrases; allow roughly a quarter of the phrase to differ.

@@ -5817,6 +5817,222 @@ pub fn find_intent_file(ntnt_path: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
+// ============================================================================
+// INTENT LINT (static glossary/scenario validation, DD-063 Rec 4b)
+// ============================================================================
+
+/// A single finding from `ntnt intent lint`
+#[derive(Debug, Clone, Serialize)]
+pub struct IntentLintFinding {
+    /// One of: unresolved_term, unresolved_when, cycle, orphan_term
+    pub kind: String,
+    /// Feature the finding belongs to (empty for glossary-wide findings)
+    pub feature: String,
+    /// Scenario the finding belongs to (empty for glossary-wide findings)
+    pub scenario: String,
+    /// The offending text (outcome, when-clause, or glossary term)
+    pub text: String,
+    /// Near-miss vocabulary patterns, best first
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<String>,
+    /// Human-readable explanation
+    pub detail: String,
+}
+
+/// Report from statically validating an intent file's glossary and scenarios
+#[derive(Debug, Serialize)]
+pub struct IntentLintReport {
+    /// Unresolved terms/when-clauses and cycles — these make `intent check`
+    /// unable to execute the affected scenarios
+    pub errors: Vec<IntentLintFinding>,
+    /// Orphan glossary entries and other non-blocking findings
+    pub warnings: Vec<IntentLintFinding>,
+    pub terms_checked: usize,
+    pub scenarios_checked: usize,
+}
+
+/// Statically resolve every scenario when-clause and outcome against the
+/// glossary + standard vocabulary without executing any primitives, scan the
+/// glossary for definition cycles, and report unused glossary entries.
+///
+/// Outcome resolution deliberately mirrors the execution fallback chain in
+/// `resolve_scenario_with_base_dir` (component reference → IAL vocabulary →
+/// direct pattern) — if that chain changes, update this to match, or lint
+/// will drift from what `intent check` actually executes.
+pub fn lint_intent_file(intent: &IntentFile) -> IntentLintReport {
+    let glossary = intent.glossary.clone().unwrap_or_default();
+    let vocab = glossary.to_ial_vocabulary_full(&intent.components, &intent.invariants);
+
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let mut scenarios_checked = 0;
+
+    for feature in &intent.features {
+        for scenario in &feature.scenarios {
+            scenarios_checked += 1;
+
+            if glossary
+                .resolve_when_clause(&scenario.when_clause)
+                .is_none()
+            {
+                errors.push(IntentLintFinding {
+                    kind: "unresolved_when".to_string(),
+                    feature: feature.name.clone(),
+                    scenario: scenario.name.clone(),
+                    text: scenario.when_clause.clone(),
+                    suggestions: crate::ial::resolve::suggest_similar_terms(
+                        &Glossary::convert_params_to_ial(&scenario.when_clause),
+                        &vocab,
+                    ),
+                    detail: "when-clause matches no known action pattern".to_string(),
+                });
+            }
+
+            // Given-clauses are skipped: execution treats them as descriptive
+
+            for outcome in &scenario.outcomes {
+                // Mirror the execution fallback chain
+                if glossary
+                    .resolve_component_reference(outcome, &intent.components)
+                    .is_some()
+                {
+                    continue;
+                }
+                if !glossary
+                    .resolve_outcomes_with_context(outcome, &intent.components, &intent.invariants)
+                    .is_empty()
+                {
+                    continue;
+                }
+
+                // Unresolvable at execution time — classify via the IAL
+                // resolver (cycle vs unknown term, with suggestions)
+                let ial_outcome = Glossary::convert_params_to_ial(outcome);
+                let err = match crate::ial::resolve(&Term::new(&ial_outcome), &vocab) {
+                    Err(e) => e,
+                    // Resolvable as raw IAL but not through the execution
+                    // chain — still report, without classification detail
+                    Ok(_) => {
+                        errors.push(IntentLintFinding {
+                            kind: "unresolved_term".to_string(),
+                            feature: feature.name.clone(),
+                            scenario: scenario.name.clone(),
+                            text: outcome.clone(),
+                            suggestions: Vec::new(),
+                            detail: "outcome does not resolve to executable assertions".to_string(),
+                        });
+                        continue;
+                    }
+                };
+                match err.kind {
+                    crate::ial::ResolveErrorKind::Cycle => errors.push(IntentLintFinding {
+                        kind: "cycle".to_string(),
+                        feature: feature.name.clone(),
+                        scenario: scenario.name.clone(),
+                        text: outcome.clone(),
+                        suggestions: Vec::new(),
+                        detail: err.message,
+                    }),
+                    _ => errors.push(IntentLintFinding {
+                        kind: "unresolved_term".to_string(),
+                        feature: feature.name.clone(),
+                        scenario: scenario.name.clone(),
+                        text: outcome.clone(),
+                        suggestions: err.suggestions,
+                        detail: "term not found in glossary or standard vocabulary".to_string(),
+                    }),
+                }
+            }
+        }
+    }
+
+    // Glossary-wide cycle scan: catches cycles in entries no scenario touches.
+    // Substitute dummy values for {param} placeholders so patterns resolve.
+    let mut seen_cycles = HashSet::new();
+    let param_re = regex::Regex::new(r"\{[^}]+\}").unwrap();
+    for term in glossary.terms.values() {
+        let ial_term = Glossary::convert_params_to_ial(&term.term);
+        let dummy = param_re.replace_all(&ial_term, "\"x\"").to_string();
+        if let Err(e) = crate::ial::resolve(&Term::new(&dummy), &vocab) {
+            if e.kind == crate::ial::ResolveErrorKind::Cycle
+                && seen_cycles.insert(e.message.clone())
+            {
+                errors.push(IntentLintFinding {
+                    kind: "cycle".to_string(),
+                    feature: String::new(),
+                    scenario: String::new(),
+                    text: term.term.clone(),
+                    suggestions: Vec::new(),
+                    detail: e.message,
+                });
+            }
+        }
+    }
+
+    // Orphan detection: a glossary term is used if any scenario clause,
+    // other term's meaning part, component behavior, or invariant assertion
+    // matches its pattern (via the same matcher execution uses) or contains
+    // it as a phrase.
+    let mut usage_corpus: Vec<String> = Vec::new();
+    for feature in &intent.features {
+        for scenario in &feature.scenarios {
+            usage_corpus.push(scenario.when_clause.clone());
+            if let Some(given) = &scenario.given_clause {
+                usage_corpus.push(given.clone());
+            }
+            for outcome in &scenario.outcomes {
+                usage_corpus.push(outcome.clone());
+            }
+        }
+    }
+    for component in &intent.components {
+        usage_corpus.extend(component.inherent_behavior.iter().cloned());
+    }
+    for invariant in &intent.invariants {
+        usage_corpus.extend(invariant.assertions.iter().cloned());
+    }
+
+    for (key, term) in &glossary.terms {
+        // Meaning parts of OTHER terms also count as usage
+        let other_meanings: Vec<String> = glossary
+            .terms
+            .iter()
+            .filter(|(k, _)| *k != key)
+            .flat_map(|(_, t)| t.meaning.split(','))
+            .map(|part| part.trim().to_string())
+            .collect();
+
+        let term_lower = term.term.to_lowercase();
+        let used = usage_corpus
+            .iter()
+            .chain(other_meanings.iter())
+            .any(|usage| {
+                glossary.match_term_pattern(usage, &term.term).is_some()
+                    || usage.to_lowercase().contains(&term_lower)
+            });
+
+        if !used {
+            warnings.push(IntentLintFinding {
+                kind: "orphan_term".to_string(),
+                feature: String::new(),
+                scenario: String::new(),
+                text: term.term.clone(),
+                suggestions: Vec::new(),
+                detail:
+                    "glossary term is never used by a scenario, component, invariant, or other term"
+                        .to_string(),
+            });
+        }
+    }
+
+    IntentLintReport {
+        errors,
+        warnings,
+        terms_checked: glossary.terms.len(),
+        scenarios_checked,
+    }
+}
+
 /// Resolve both .intent and .tnt paths from either extension
 ///
 /// This function accepts either a .tnt or .intent file and resolves both paths.
