@@ -129,7 +129,7 @@ Scoping also surfaced **two additional doc drifts** beyond the v2 findings: CLAU
 
 - [x] **PR-1** — `${}` interpolation detection (Rec 1) — S
 - [x] **PR-2** — Intentional syntax contract tests, CLAUDE.md truth, UFCS embrace (Rec 2) — S
-- [ ] **PR-3** — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M
+- [x] **PR-3** — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M
 - [ ] **PR-4** — Diagnostics II: method bridge hints, unknown-method lint, IAL suggestions, `ntnt intent lint` (Rec 4b) — M
 - [ ] **PR-5** — Index out-of-bounds loudness (Rec 3) — M — **blocked on decisions**
 - [ ] Recs 5–10 — unscheduled, see end of section
@@ -164,13 +164,13 @@ Maintainer decision applied after review: PR-2 should not lock every current CLA
 
 New opt-in `Parser::parse_with_recovery() -> (Program, Vec<Error>)` with statement-level panic-mode synchronization (cap 5 errors/file, same-line dedup + token-gap cascade suppression); existing `parse()` keeps its exact signature and single-error behavior so all 18 call sites (run path, module imports, REPL, intent) are untouched — only `lint_project`/`validate_project` consume the multi-error path. E004 gains what every other error class has: per-clause line capture (`ast::ContractCondition { expression, line }`), a struct `ContractViolation { message, line, call_line, values }`, and parameter values read from the function environment *before* restore (`where: b = 0`), rendered with a real source frame. Display text stays byte-identical for existing consumers.
 
-- [ ] `parse_with_recovery` + private `recover` flag + `synchronize()` with guaranteed token advance
-- [ ] `lint_project`/`validate_project` report all recovered errors; semantic checks skipped on parse-error files
-- [ ] `ast::ContractCondition` + line capture in `parse_contract()`
-- [ ] `ContractViolation` struct variant; identifier-walking value capture (env lookups only — never expression re-evaluation, which could fire side effects during error construction); capture **before** env restore
-- [ ] `rich_display` source frame for E004; `error.rs` wiring
-- [ ] `tests/diagnostics_tests.rs`: multi-error lint, token-soup termination, run-path regression (run still aborts on first error), multi-param `where:` values
-- [ ] Lint all `examples/*.tnt` before/after as a recovery-regression sweep
+- [x] `parse_with_recovery` + private `recover` flag + `synchronize()` with guaranteed token advance
+- [x] `lint_project`/`validate_project` report all recovered errors; semantic checks skipped on parse-error files
+- [x] `ast::ContractCondition` + line capture in `parse_contract()`
+- [x] `ContractViolation` struct variant; identifier-walking value capture (env lookups only — never expression re-evaluation, which could fire side effects during error construction); capture **before** env restore
+- [x] `rich_display` source frame for E004; `error.rs` wiring
+- [x] `tests/diagnostics_tests.rs`: multi-error lint, token-soup termination, run-path regression (run still aborts on first error), multi-param `where:` values
+- [x] Lint all `examples/*.tnt` before/after as a recovery-regression sweep
 
 Defaults applied: run path stays first-error-only (lint is the multi-error surface); MAX_PARSE_ERRORS = 5; struct invariants get values but not clause lines in v1. Maintainer decision: `ntnt parse --json` contract-clause shape changes to `{expression, line}` objects — acceptable, or add a compatibility serializer?
 

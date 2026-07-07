@@ -802,7 +802,8 @@ Error[E012]: Type mismatch in function call
 - [x] Runtime error line numbers via AST location tracking
 - [x] "Did you mean?" suggestions for wrong imports — both wrong module names and wrong export names get Levenshtein suggestions with available exports list
 - [x] Contract violation messages show the contract expression (`"Precondition failed in 'fn': b != 0"`)
-- [ ] Contract violation messages show actual values (e.g., "b was 0") — expression is shown but runtime values are not
+- [x] Contract violation messages show actual values (`where: b = 0`), the failing clause's line with a source frame, and the call site (DD-063 Rec 4a)
+- [x] Parser error recovery: `ntnt lint`/`validate` report up to 5 syntax errors per file in one pass (DD-063 Rec 4a); `run` still stops at the first
 - [x] `ntnt lint --fix` outputs JSON patch suggestions for auto-fixes
 - [ ] `ntnt lint --format=json` explicit structured output mode for full agent consumption
 

@@ -1310,11 +1310,11 @@ fn collect_free_vars(
                 bind_parameter_defaults_and_names(params, referenced, &mut fn_bound);
 
                 if let Some(contract) = contract {
-                    for expr in &contract.requires {
-                        collect_free_vars_expr(expr, referenced, &fn_bound);
+                    for clause in &contract.requires {
+                        collect_free_vars_expr(&clause.expression, referenced, &fn_bound);
                     }
-                    for expr in &contract.ensures {
-                        collect_free_vars_expr(expr, referenced, &fn_bound);
+                    for clause in &contract.ensures {
+                        collect_free_vars_expr(&clause.expression, referenced, &fn_bound);
                     }
                 }
 

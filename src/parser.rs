@@ -8,12 +8,26 @@ use crate::lexer::{
     StringPart as LexerStringPart, TemplatePart as LexerTemplatePart, Token, TokenKind,
 };
 
+/// Maximum parse errors collected per file in recovery mode
+pub const MAX_PARSE_ERRORS: usize = 5;
+/// Minimum token distance between recorded errors (cascade suppression)
+const MIN_ERROR_TOKEN_GAP: usize = 2;
+
 /// Parser for Intent source code
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
     /// Track if we're inside a map literal context (for nested map inference)
     in_map_context: bool,
+    /// When true, statement-level errors are recorded and parsing resumes at
+    /// the next statement boundary instead of aborting (lint/validate only)
+    recover: bool,
+    /// Errors collected while recovering
+    errors: Vec<IntentError>,
+    /// Line of the last recorded error (same-line dedup)
+    last_error_line: usize,
+    /// Token position of the last recorded error (cascade suppression)
+    last_error_pos: usize,
 }
 
 impl Parser {
@@ -22,6 +36,10 @@ impl Parser {
             tokens,
             current: 0,
             in_map_context: false,
+            recover: false,
+            errors: Vec::new(),
+            last_error_line: 0,
+            last_error_pos: 0,
         }
     }
 
@@ -34,6 +52,107 @@ impl Parser {
         }
 
         Ok(Program { statements })
+    }
+
+    /// Parse a complete program, recovering at statement boundaries after
+    /// errors so multiple syntax errors can be reported in a single pass.
+    ///
+    /// Returns the statements that parsed successfully alongside every
+    /// collected error (capped at [`MAX_PARSE_ERRORS`]). Intended for lint,
+    /// validate, and check paths only — the run/import pipeline uses
+    /// [`Parser::parse`], which still aborts on the first error and never
+    /// executes a partial AST.
+    pub fn parse_with_recovery(&mut self) -> (Program, Vec<IntentError>) {
+        self.recover = true;
+
+        let mut statements = Vec::new();
+        while !self.is_at_end() {
+            match self.declaration() {
+                Ok(stmt) => statements.push(stmt),
+                Err(e) => {
+                    self.record_error(e);
+                    if self.errors.len() >= MAX_PARSE_ERRORS {
+                        break;
+                    }
+                    self.synchronize();
+                    // A bare `}` is never a valid top-level declaration; any
+                    // we see here are leftovers from a broken construct.
+                    while self.check(&TokenKind::RightBrace) {
+                        self.advance();
+                    }
+                }
+            }
+        }
+
+        self.recover = false;
+        (Program { statements }, std::mem::take(&mut self.errors))
+    }
+
+    /// Record an error during recovery, suppressing cascades: errors on the
+    /// same line as the previous one, or within a couple of tokens of it,
+    /// are usually artifacts of the first failure rather than new problems.
+    fn record_error(&mut self, e: IntentError) {
+        let line = e.line().unwrap_or(0);
+        let same_line = line != 0 && line == self.last_error_line;
+        let too_close =
+            !self.errors.is_empty() && self.current < self.last_error_pos + MIN_ERROR_TOKEN_GAP;
+        if same_line || too_close {
+            return;
+        }
+        self.last_error_line = line;
+        self.last_error_pos = self.current;
+        self.errors.push(e);
+    }
+
+    /// Skip tokens until a likely statement boundary: either a token that
+    /// starts a new line and looks like a statement keyword, or a `}` that
+    /// lets an enclosing block close. Always advances at least one token so
+    /// recovery cannot loop forever.
+    fn synchronize(&mut self) {
+        self.advance();
+
+        while let Some(tok) = self.peek() {
+            if tok.kind == TokenKind::RightBrace {
+                return;
+            }
+            // The lexer swallows newlines (no Newline token is emitted), so
+            // line starts are detected by comparing Token.line values.
+            let starts_line = self.previous().is_none_or(|p| p.line < tok.line);
+            if starts_line && Self::is_statement_start(&tok.kind) {
+                return;
+            }
+            self.advance();
+        }
+    }
+
+    /// Tokens that can begin a top-level or block statement — used as
+    /// synchronization points for error recovery.
+    fn is_statement_start(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::Let
+                | TokenKind::Fn
+                | TokenKind::Type
+                | TokenKind::Struct
+                | TokenKind::Enum
+                | TokenKind::Trait
+                | TokenKind::Impl
+                | TokenKind::Mod
+                | TokenKind::Use
+                | TokenKind::Import
+                | TokenKind::Export
+                | TokenKind::Pub
+                | TokenKind::Server
+                | TokenKind::If
+                | TokenKind::While
+                | TokenKind::Loop
+                | TokenKind::For
+                | TokenKind::Defer
+                | TokenKind::Break
+                | TokenKind::Continue
+                | TokenKind::Return
+                | TokenKind::Hash
+        )
     }
 
     // Helper methods
@@ -369,11 +488,19 @@ impl Parser {
         let mut ensures = Vec::new();
 
         while self.match_token(&[TokenKind::Requires]) {
-            requires.push(self.expression()?);
+            let line = self.previous().map(|t| t.line).unwrap_or(0);
+            requires.push(ContractCondition {
+                expression: self.expression()?,
+                line,
+            });
         }
 
         while self.match_token(&[TokenKind::Ensures]) {
-            ensures.push(self.expression()?);
+            let line = self.previous().map(|t| t.line).unwrap_or(0);
+            ensures.push(ContractCondition {
+                expression: self.expression()?,
+                line,
+            });
         }
 
         if requires.is_empty() && ensures.is_empty() {
@@ -1436,7 +1563,17 @@ impl Parser {
         let mut statements = Vec::new();
 
         while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
-            statements.push(self.declaration()?);
+            match self.declaration() {
+                Ok(stmt) => statements.push(stmt),
+                // In recovery mode, record the error and resync so the rest
+                // of the block (and file) can still be checked. synchronize()
+                // stops at `}` so the block closes normally.
+                Err(e) if self.recover && self.errors.len() < MAX_PARSE_ERRORS => {
+                    self.record_error(e);
+                    self.synchronize();
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         self.consume(&TokenKind::RightBrace, "Expected '}' after block")?;
@@ -2939,6 +3076,77 @@ mod tests {
             Statement::Located { stmt, .. } => stmt,
             other => other,
         }
+    }
+
+    fn parse_recover(source: &str) -> (Program, Vec<IntentError>) {
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        parser.parse_with_recovery()
+    }
+
+    #[test]
+    fn recovery_reports_multiple_top_level_errors_and_keeps_valid_statements() {
+        let source = "let a = 1\nlet 2 = 3\nlet b = 4\nlet 5 = 6\nlet c = 7";
+        let (program, errors) = parse_recover(source);
+
+        assert_eq!(errors.len(), 2, "expected two errors, got: {errors:?}");
+        assert_eq!(errors[0].line(), Some(2));
+        assert_eq!(errors[1].line(), Some(4));
+        // The three valid lets survive recovery
+        assert_eq!(program.statements.len(), 3);
+    }
+
+    #[test]
+    fn recovery_reports_errors_across_function_bodies() {
+        let source = "fn one() {\n    let 1 = 2\n}\nfn two() {\n    let 3 = 4\n}\nfn three() {\n    let x = 5\n}";
+        let (program, errors) = parse_recover(source);
+
+        assert_eq!(errors.len(), 2, "expected two errors, got: {errors:?}");
+        assert_eq!(errors[0].line(), Some(2));
+        assert_eq!(errors[1].line(), Some(5));
+        // All three functions still parse (bodies recovered)
+        assert_eq!(program.statements.len(), 3);
+    }
+
+    #[test]
+    fn recovery_caps_errors_at_maximum() {
+        let mut source = String::new();
+        for i in 0..8 {
+            source.push_str(&format!("let {} = {}\n", i * 2, i * 2 + 1));
+        }
+        let (_, errors) = parse_recover(&source);
+        assert_eq!(errors.len(), MAX_PARSE_ERRORS);
+    }
+
+    #[test]
+    fn recovery_suppresses_cascade_from_single_error() {
+        let source = "let x = 1 +\nlet y = 2\nlet z = 3";
+        let (_, errors) = parse_recover(source);
+        // One broken expression should not produce a pile of follow-on errors
+        assert!(
+            errors.len() <= 2,
+            "cascading errors from one break: {errors:?}"
+        );
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn recovery_terminates_on_token_soup() {
+        let source = ") ) ( ] } @ } ) ( ] fn ) let }";
+        let (_, errors) = parse_recover(source);
+        assert!(!errors.is_empty());
+        assert!(errors.len() <= MAX_PARSE_ERRORS);
+    }
+
+    #[test]
+    fn plain_parse_still_aborts_on_first_error() {
+        let source = "let a = 1\nlet 2 = 3\nlet 5 = 6";
+        let err = parse(source).unwrap_err();
+        assert_eq!(err.line(), Some(2));
+
+        let (_, recovered) = parse_recover(source);
+        assert_eq!(recovered[0].to_string(), err.to_string());
     }
 
     #[test]

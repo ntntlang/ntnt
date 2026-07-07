@@ -800,6 +800,28 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
             }
         }
 
+        // Contract violation context: runtime values + call site
+        if let IntentError::ContractViolation {
+            values, call_line, ..
+        } = intent_err
+        {
+            if !values.is_empty() {
+                let rendered = values
+                    .iter()
+                    .map(|(name, value)| format!("{} = {}", name, value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                eprintln!("  {} {}", "where:".cyan().bold(), rendered);
+            }
+            if *call_line > 0 && Some(*call_line) != line_info {
+                eprintln!(
+                    "  {} contract checked for call at line {}",
+                    "note:".cyan().bold(),
+                    call_line
+                );
+            }
+        }
+
         // Suggestion ("Did you mean?")
         if let Some(suggestion) = intent_err.suggestion() {
             eprintln!(
@@ -2646,7 +2668,17 @@ fn check_file(path: &PathBuf) -> anyhow::Result<()> {
     let tokens: Vec<_> = lexer.collect();
 
     let mut parser = IntentParser::new(tokens);
-    let _ast = parser.parse()?;
+    let (_ast, parse_errors) = parser.parse_with_recovery();
+
+    if !parse_errors.is_empty() {
+        for e in &parse_errors {
+            match e.line() {
+                Some(line) => eprintln!("error[E002] line {}: {}", line, e),
+                None => eprintln!("error[E002]: {}", e),
+            }
+        }
+        anyhow::bail!("{} parse error(s) found", parse_errors.len());
+    }
 
     println!("{} No errors found in {}", "✓".green(), path.display());
     Ok(())
@@ -3175,8 +3207,10 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
         let tokens: Vec<_> = lexer.collect();
         let mut parser = IntentParser::new(tokens);
 
-        match parser.parse() {
-            Ok(ast) => {
+        let (ast, parse_errors) = parser.parse_with_recovery();
+
+        match parse_errors.as_slice() {
+            [] => {
                 // Check for potential issues
                 let mut warnings = analyze_ast_warnings(&ast, &source);
 
@@ -3234,18 +3268,25 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
                     );
                 }
             }
-            Err(e) => {
-                let error_msg = e.to_string();
-                // Try to extract line number from error
-                let line = extract_line_from_error(&error_msg);
+            errors => {
+                // One entry per recovered parse error; semantic checks are
+                // skipped because the AST is partial.
+                let error_entries: Vec<JsonValue> = errors
+                    .iter()
+                    .map(|e| {
+                        let error_msg = e.to_string();
+                        let line = e.line().or_else(|| extract_line_from_error(&error_msg));
+                        json!({"message": error_msg, "line": line})
+                    })
+                    .collect();
+                error_count += errors.len();
 
                 results.push(json!({
                     "file": relative_path,
                     "valid": false,
-                    "errors": [{"message": error_msg, "line": line}],
+                    "errors": error_entries,
                     "warnings": [],
                 }));
-                error_count += 1;
 
                 eprintln!("{} {}", "✗".red(), relative_path);
             }
@@ -3340,8 +3381,10 @@ fn lint_project(
         let tokens: Vec<_> = lexer.collect();
         let mut parser = IntentParser::new(tokens);
 
-        match parser.parse() {
-            Ok(ast) => {
+        let (ast, parse_errors) = parser.parse_with_recovery();
+
+        match parse_errors.as_slice() {
+            [] => {
                 // Run comprehensive lint checks
                 let mut issues = lint_ast(&ast, &source, &relative_path);
 
@@ -3429,20 +3472,37 @@ fn lint_project(
                     eprintln!("{} {}", "✓".green(), relative_path);
                 }
             }
-            Err(e) => {
-                let error_msg = e.to_string();
-                let line = extract_line_from_error(&error_msg);
+            errors => {
+                // Report every recovered parse error, then skip lint/type
+                // checks: semantic results on a partial AST are misleading.
+                let mut issues: Vec<JsonValue> = errors
+                    .iter()
+                    .map(|e| {
+                        let error_msg = e.to_string();
+                        let line = e.line().or_else(|| extract_line_from_error(&error_msg));
+                        json!({
+                            "severity": "error",
+                            "rule": "parse_error",
+                            "message": error_msg,
+                            "line": line,
+                            "column": e.column(),
+                        })
+                    })
+                    .collect();
+                if errors.len() >= ntnt::parser::MAX_PARSE_ERRORS {
+                    issues.push(json!({
+                        "severity": "suggestion",
+                        "rule": "parse_error",
+                        "message": "additional parse errors may be suppressed; re-lint after fixing the reported ones",
+                        "line": JsonValue::Null,
+                    }));
+                }
+                error_count += errors.len();
 
                 results.push(json!({
                     "file": relative_path,
-                    "issues": [{
-                        "severity": "error",
-                        "rule": "parse_error",
-                        "message": error_msg,
-                        "line": line
-                    }],
+                    "issues": issues,
                 }));
-                error_count += 1;
 
                 eprintln!("{} {}", "✗".red(), relative_path);
             }
@@ -4848,8 +4908,8 @@ fn contract_to_json(contract: &Option<ntnt::ast::Contract>) -> serde_json::Value
     use serde_json::json;
     match contract {
         Some(c) => json!({
-            "requires": c.requires.iter().map(|e| expr_to_string(e)).collect::<Vec<_>>(),
-            "ensures": c.ensures.iter().map(|e| expr_to_string(e)).collect::<Vec<_>>(),
+            "requires": c.requires.iter().map(|cond| expr_to_string(&cond.expression)).collect::<Vec<_>>(),
+            "ensures": c.ensures.iter().map(|cond| expr_to_string(&cond.expression)).collect::<Vec<_>>(),
         }),
         None => json!(null),
     }
@@ -5252,10 +5312,10 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
             // Collect from contracts too
             if let Some(c) = contract {
                 for req in &c.requires {
-                    collect_from_expr(req, names);
+                    collect_from_expr(&req.expression, names);
                 }
                 for ens in &c.ensures {
-                    collect_from_expr(ens, names);
+                    collect_from_expr(&ens.expression, names);
                 }
             }
         }
