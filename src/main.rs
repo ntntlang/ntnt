@@ -3276,7 +3276,7 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
                     .map(|e| {
                         let error_msg = e.to_string();
                         let line = e.line().or_else(|| extract_line_from_error(&error_msg));
-                        json!({"message": error_msg, "line": line})
+                        json!({"message": error_msg, "line": line, "column": e.column()})
                     })
                     .collect();
                 error_count += errors.len();

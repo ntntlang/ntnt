@@ -214,24 +214,6 @@ impl IntentError {
                 out
             }
             None => {
-                if let IntentError::ContractViolation {
-                    values, call_line, ..
-                } = self
-                {
-                    let mut out = base;
-                    if !values.is_empty() {
-                        let rendered = values
-                            .iter()
-                            .map(|(name, value)| format!("{} = {}", name, value))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        out.push_str(&format!("\n  │ where: {}", rendered));
-                    }
-                    if *call_line > 0 {
-                        out.push_str(&format!("\n  │ called from line {}", call_line));
-                    }
-                    return out;
-                }
                 // Add suggestion for known error types
                 if let Some(suggestion) = self.suggestion() {
                     format!("{}\n  └─ did you mean: {}?", base, suggestion)
@@ -458,10 +440,6 @@ mod tests {
 
         assert_eq!(err.error_code(), "E004");
         assert_eq!(err.line(), Some(2));
-
-        let rendered = err.rich_display();
-        assert!(rendered.contains("where: b = 0"), "{rendered}");
-        assert!(rendered.contains("called from line 7"), "{rendered}");
 
         // at_line backfills only when the clause line is unknown
         let backfilled = IntentError::contract_violation("msg").at_line(9);

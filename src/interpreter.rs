@@ -10369,6 +10369,37 @@ impl Interpreter {
             Expression::FieldAccess { object, .. } => {
                 Self::collect_identifiers(object, out);
             }
+            // UFCS dot-call: `s.len()` — the receiver is a data variable,
+            // the method name is not
+            Expression::MethodCall {
+                object, arguments, ..
+            } => {
+                Self::collect_identifiers(object, out);
+                for arg in arguments {
+                    Self::collect_identifiers(arg, out);
+                }
+            }
+            Expression::IfExpr {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                Self::collect_identifiers(condition, out);
+                Self::collect_identifiers(then_branch, out);
+                Self::collect_identifiers(else_branch, out);
+            }
+            Expression::Range { start, end, .. } => {
+                Self::collect_identifiers(start, out);
+                Self::collect_identifiers(end, out);
+            }
+            Expression::Array(elements) => {
+                for element in elements {
+                    Self::collect_identifiers(element, out);
+                }
+            }
+            Expression::Try(inner) | Expression::Await(inner) => {
+                Self::collect_identifiers(inner, out);
+            }
             _ => {}
         }
     }

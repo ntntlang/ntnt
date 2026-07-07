@@ -92,6 +92,12 @@ impl Parser {
     /// same line as the previous one, or within a couple of tokens of it,
     /// are usually artifacts of the first failure rather than new problems.
     fn record_error(&mut self, e: IntentError) {
+        // Enforce the cap here, not just in the loops: a block-level error at
+        // the cap propagates out of block() and reaches the top-level loop's
+        // record_error, which would otherwise push a 6th error.
+        if self.errors.len() >= MAX_PARSE_ERRORS {
+            return;
+        }
         let line = e.line().unwrap_or(0);
         let same_line = line != 0 && line == self.last_error_line;
         let too_close =
@@ -3117,6 +3123,19 @@ mod tests {
         }
         let (_, errors) = parse_recover(&source);
         assert_eq!(errors.len(), MAX_PARSE_ERRORS);
+    }
+
+    #[test]
+    fn recovery_cap_holds_when_block_error_propagates_to_top_level() {
+        // Errors inside fn bodies are recorded by block(); once the cap is
+        // reached the block guard stops catching and the error propagates to
+        // the top-level loop, which must not record past the cap either.
+        let mut source = String::new();
+        for i in 0..7 {
+            source.push_str(&format!("fn f{}() {{\n    let {} = 1\n}}\n", i, i * 2));
+        }
+        let (_, errors) = parse_recover(&source);
+        assert_eq!(errors.len(), MAX_PARSE_ERRORS, "cap breached: {errors:?}");
     }
 
     #[test]

@@ -209,6 +209,19 @@ fn e004_multi_param_clause_lists_all_values_in_order() {
 }
 
 #[test]
+fn e004_ufcs_receiver_appears_in_where_values() {
+    // `s.len()` is a MethodCall — the receiver must still be collected
+    let code = "fn shout(s: String) -> String\n    requires s.len() > 0\n{\n    return s\n}\n\nlet x = shout(\"\")";
+    let (_stdout, stderr, exit_code) = run(code);
+
+    assert_ne!(exit_code, 0);
+    assert!(
+        stderr.contains("where: s = \"\""),
+        "UFCS receiver missing from where values: {stderr}"
+    );
+}
+
+#[test]
 fn e004_message_text_is_unchanged_for_existing_consumers() {
     // HTTP mapping and user tests match on this exact Display prefix
     let code = "fn divide(a: Int, b: Int) -> Int\n    requires b != 0\n{\n    return a / b\n}\n\nlet boom = divide(10, 0)";
