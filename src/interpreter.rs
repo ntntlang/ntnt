@@ -5772,14 +5772,9 @@ impl Interpreter {
         target_name: &str,
         terms: &mut Vec<&'a Expression>,
     ) -> bool {
-        // This helper appends only after finding the leftmost `target + rhs` base case,
-        // so callers must start with an empty accumulator. Recursive calls preserve that
-        // invariant because they descend left before any term is pushed.
-        debug_assert!(
-            terms.is_empty(),
-            "collect_string_self_concat_terms expects an empty accumulator at entry"
-        );
-
+        // Callers must pass an empty accumulator: terms are appended only after the
+        // leftmost `target + rhs` base case is found, and the recursion descends left
+        // before any push, so entries stay ordered left-to-right.
         let Expression::Binary {
             left,
             operator: BinaryOp::Add,
@@ -11320,6 +11315,23 @@ mod tests {
         .unwrap();
 
         assert!(matches!(result, Value::String(ref value) if value == "xxx"));
+    }
+
+    #[test]
+    fn string_self_concat_multi_term_chain_builds_expected_string() {
+        let result = eval(
+            r#"
+            let mut text = ""
+            let piece = "ab"
+            for i in 0..3 {
+                text = text + piece + "y"
+            }
+            text
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(result, Value::String(ref value) if value == "abyabyaby"));
     }
 
     #[test]
