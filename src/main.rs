@@ -3229,6 +3229,7 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
                         ntnt::typechecker::DiagnosticKind::JsStyleInterpolation => {
                             "javascript_style_interpolation"
                         }
+                        ntnt::typechecker::DiagnosticKind::UnknownMethod => "unknown_method",
                         _ => "type_check",
                     };
                     let entry = json!({
@@ -3410,6 +3411,7 @@ fn lint_project(
                         ntnt::typechecker::DiagnosticKind::JsStyleInterpolation => {
                             "javascript_style_interpolation"
                         }
+                        ntnt::typechecker::DiagnosticKind::UnknownMethod => "unknown_method",
                         _ => "type_check",
                     };
                     issues.push(json!({

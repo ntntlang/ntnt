@@ -1176,3 +1176,114 @@ let cert = tls_info(443)
         "type errors should mention expected argument types: {stdout}"
     );
 }
+
+// ===========================================================================
+// Unknown-method lint (DD-063 Rec 4b)
+// ===========================================================================
+
+#[test]
+fn test_unknown_method_warns_in_default_mode() {
+    let source = r#"let s = "hi"
+print(s.length())
+"#;
+    let (stdout, _stderr, exit_code) = lint_code(source);
+    assert!(
+        stdout.contains("\"rule\": \"unknown_method\""),
+        "default-mode lint should flag s.length(): {stdout}"
+    );
+    assert!(
+        stdout.contains("try len(s)"),
+        "hint should bridge to the free function: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"severity\": \"warning\""),
+        "should be a warning in default mode: {stdout}"
+    );
+    assert_eq!(exit_code, 0, "warnings must not fail default lint");
+}
+
+#[test]
+fn test_unknown_method_errors_in_strict_mode() {
+    let source = r#"let s = "hi"
+print(s.length())
+"#;
+    let (stdout, _stderr, _exit_code) = lint_strict_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let found = json["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|f| f["issues"].as_array().cloned().unwrap_or_default())
+        .any(|i| i["rule"] == "unknown_method" && i["severity"] == "error");
+    assert!(found, "strict mode should promote to error: {stdout}");
+}
+
+#[test]
+fn test_unknown_method_suppressed_for_untyped_receiver() {
+    // Untyped param -> receiver is Any -> no warning (runtime hint catches it)
+    let source = r#"fn shout(s) {
+    return s.length()
+}
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        !stdout.contains("unknown_method"),
+        "Any receivers must not warn: {stdout}"
+    );
+}
+
+#[test]
+fn test_unknown_method_suppressed_for_let_bound_lambda() {
+    let source = r#"let double = fn(x) { x * 2 }
+let n = 5
+print(n.double())
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        !stdout.contains("unknown_method"),
+        "let-bound lambdas are UFCS-callable: {stdout}"
+    );
+}
+
+#[test]
+fn test_unknown_method_suppressed_with_unresolved_import() {
+    let source = r#"import { mystery } from "./does_not_exist_anywhere.tnt"
+let s = "hi"
+print(s.definitely_not_real())
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        !stdout.contains("unknown_method"),
+        "unresolved imports must suppress the check: {stdout}"
+    );
+}
+
+#[test]
+fn test_ufcs_known_functions_do_not_warn() {
+    let source = r#"let s = "hi"
+let arr = [1, 2, 3]
+let x = Some(1)
+print(s.len())
+print(arr.push(4))
+print(x.is_some())
+print(x.unwrap_or(0))
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        !stdout.contains("unknown_method"),
+        "real builtins/runtime globals must not warn: {stdout}"
+    );
+}
+
+#[test]
+fn test_option_helper_free_call_arity_checked() {
+    // is_some is now in builtin_sigs, so wrong arity is caught statically
+    let source = r#"let x = Some(1)
+print(is_some(x, 99))
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        stdout.contains("is_some") && stdout.contains("argument"),
+        "arity mismatch on is_some should be reported: {stdout}"
+    );
+}
