@@ -128,10 +128,11 @@ ntnt test server.tnt --get /health --post /users --body 'name=Alice'
 
 **Multi-error lint:** `ntnt lint` recovers at statement boundaries and reports
 up to 5 syntax errors per file in one pass (rule `parse_error`, each with its
-own line), so fix them as a batch instead of re-linting after each one. When a
-file has parse errors, lint/type findings for that file are suppressed until
-it parses — re-lint after fixing. `ntnt run` still stops at the first syntax
-error.
+own line), so fix them as a batch instead of re-linting after each one. Each
+parse error counts individually in the JSON `summary.errors` total, matching
+how semantic errors are counted. When a file has parse errors, lint/type
+findings for that file are suppressed until it parses — re-lint after fixing.
+`ntnt run` still stops at the first syntax error.
 
 ---
 
