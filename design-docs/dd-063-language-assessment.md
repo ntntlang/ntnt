@@ -130,7 +130,7 @@ Scoping also surfaced **two additional doc drifts** beyond the v2 findings: CLAU
 - [x] **PR-1** — `${}` interpolation detection (Rec 1) — S
 - [x] **PR-2** — Intentional syntax contract tests, CLAUDE.md truth, UFCS embrace (Rec 2) — S
 - [x] **PR-3** — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M
-- [ ] **PR-4** — Diagnostics II: method bridge hints, unknown-method lint, IAL suggestions, `ntnt intent lint` (Rec 4b) — M
+- [x] **PR-4** — Diagnostics II: method bridge hints, unknown-method lint, IAL suggestions, `ntnt intent lint` (Rec 4b) — M
 - [ ] **PR-5** — Index out-of-bounds loudness (Rec 3) — M — **blocked on decisions**
 - [ ] Recs 5–10 — unscheduled, see end of section
 
@@ -178,12 +178,12 @@ Defaults applied: run path stays first-error-only (lint is the multi-error surfa
 
 Four self-contained commits in one PR: (1) method-call misses get Levenshtein suggestions over `Environment::keys()` plus a small alias table (`length→len`, …) and a UFCS bridge hint ("methods resolve to free functions: try `len(s)`"); (2) the typechecker warns on method names found in neither the function registry, builtin sigs, nor scope (gated to non-`Any` receivers; warning in default lint mode, error in strict); (3) `ResolveError` gains `kind` + `suggestions` computed over normalized vocabulary patterns, flowing to intent-check output automatically; (4) `ntnt intent lint` statically resolves every scenario assertion against glossary+standard vocabulary without executing primitives — reports unresolved terms (with suggestions), cycles, orphan glossary entries; exit 1 on unresolved/cycles, `--json` for CI.
 
-- [ ] Method-miss suggestions + alias table + `hint` field on `IntentError::UndefinedFunction` (`src/interpreter.rs` ~7044)
-- [ ] Typechecker unknown-method diagnostic + register the five runtime-global option/result helpers (`is_some`/`is_none`/`is_ok`/`is_err`/`unwrap_or`) in `builtin_sigs` (note: introduces arity checking on previously-unchecked calls — release-note item)
-- [ ] IAL `ResolveError.suggestions` via vocabulary-key Levenshtein with `normalize_term_for_cycle` normalization
-- [ ] `intent::lint_intent_file()` + clap subcommand + `--json`; orphan entries stay warnings (never exit-1 — legacy direct-pattern fallback makes orphan detection imperfect)
+- [x] Method-miss suggestions + alias table + `hint` field on `IntentError::UndefinedFunction` (`src/interpreter.rs` ~7044)
+- [x] Typechecker unknown-method diagnostic + register the five runtime-global option/result helpers (`is_some`/`is_none`/`is_ok`/`is_err`/`unwrap_or`) in `builtin_sigs` (note: introduces arity checking on previously-unchecked calls — release-note item)
+- [x] IAL `ResolveError.suggestions` via vocabulary-key Levenshtein with `normalize_term_for_cycle` normalization
+- [x] `intent::lint_intent_file()` + clap subcommand + `--json`; orphan entries stay warnings (never exit-1 — legacy direct-pattern fallback makes orphan detection imperfect)
 - [ ] Visual check of Intent Studio error rendering (trace.error string changes)
-- [ ] Lint-run real .tnt projects to confirm unknown-method noise level before merging
+- [x] Lint-run real .tnt projects to confirm unknown-method noise level before merging
 
 Defaults applied: unknown-method fires in default lint mode (that's the DD-063 complaint — `lint` passed clean on `s.length()`); `intent lint` accepts a `.tnt` path and auto-locates the paired `.intent`. Maintainer decision: approve/trim the alias table (`length→len, size→len, count→len, map→transform, to_string→str, to_str→str, append→push, upper→to_upper, lower→to_lower`).
 

@@ -583,6 +583,11 @@ command = "ntnt intent check <file>"
 description = "Run tests defined in intent file against implementation"
 example = "ntnt intent check server.tnt"
 
+[commands.lint]
+command = "ntnt intent lint <file>"
+description = "Statically validate glossary and scenarios without running tests: unresolved terms and when-clauses (with did-you-mean suggestions), definition cycles, and orphan glossary entries. Exit 1 on unresolved terms or cycles; orphans are warnings only. --json for CI"
+example = "ntnt intent lint server.intent"
+
 [commands.coverage]
 command = "ntnt intent coverage <file>"
 description = "Show which features have implementations"
