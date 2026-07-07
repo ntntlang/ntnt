@@ -100,6 +100,8 @@ pub enum IntentError {
     UndefinedFunction {
         name: String,
         suggestion: Option<String>,
+        /// Extra guidance beyond did-you-mean (e.g. the UFCS bridge hint)
+        hint: Option<String>,
 
         line: usize,
     },
@@ -275,7 +277,31 @@ impl IntentError {
             _ => None,
         }
     }
+
+    /// Return the extra hint if this error has one
+    pub fn hint(&self) -> Option<&str> {
+        match self {
+            IntentError::UndefinedFunction { hint, .. } => hint.as_deref(),
+            _ => None,
+        }
+    }
 }
+
+/// Method names agents commonly reach for, mapped to the NTNT function that
+/// actually exists. Consulted before Levenshtein by both the runtime
+/// method-miss error and the typechecker's unknown-method lint.
+pub const METHOD_ALIAS_HINTS: &[(&str, &str)] = &[
+    ("length", "len"),
+    ("size", "len"),
+    ("count", "len"),
+    // no "map" entry: `map` is a keyword, so `.map(` is a parse error and
+    // never reaches method dispatch
+    ("to_string", "str"),
+    ("to_str", "str"),
+    ("append", "push"),
+    ("upper", "to_upper"),
+    ("lower", "to_lower"),
+];
 
 /// Compute the Levenshtein edit distance between two strings
 pub fn levenshtein_distance(a: &str, b: &str) -> usize {
@@ -472,6 +498,7 @@ mod tests {
             IntentError::UndefinedFunction {
                 name: String::new(),
                 suggestion: None,
+                hint: None,
                 line: 0,
             },
             IntentError::ArityMismatch {

@@ -830,6 +830,11 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
                 suggestion.green()
             );
         }
+
+        // Extra guidance (e.g. the UFCS free-function bridge for method misses)
+        if let Some(hint) = intent_err.hint() {
+            eprintln!("  {} {}", "hint:".cyan().bold(), hint);
+        }
     } else {
         // Non-IntentError: fall back to simple display
         eprintln!("{}: {}", "Error".red().bold(), error);
