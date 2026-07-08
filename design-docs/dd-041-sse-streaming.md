@@ -10,16 +10,17 @@
 
 ## Table of Contents
 
-1. [Vision](#vision)
-2. [Architecture](#architecture)
-3. [API Design](#api-design)
-4. [Full Stack Examples](#full-stack-examples)
-5. [Implementation Notes](#implementation-notes)
-6. [Phase Details](#phase-details)
-7. [Relationship to std/events and std/jobs](#relationship-to-stdevents-and-stdjobs)
-8. [Security](#security)
-9. [Competitive Analysis](#competitive-analysis)
-10. [Open Questions](#open-questions)
+1. [Design Review (2026-07-08)](#design-review-2026-07-08)
+2. [Vision](#vision)
+3. [Architecture](#architecture)
+4. [API Design](#api-design)
+5. [Full Stack Examples](#full-stack-examples)
+6. [Implementation Notes](#implementation-notes)
+7. [Phase Details](#phase-details)
+8. [Relationship to std/events and std/jobs](#relationship-to-stdevents-and-stdjobs)
+9. [Security](#security)
+10. [Competitive Analysis](#competitive-analysis)
+11. [Open Questions](#open-questions)
 
 ---
 
@@ -153,9 +154,9 @@ send(bc, value) → all three subscribers receive a copy
 
 The custom approach (Vec of senders) is most consistent with ntnt's existing crossbeam usage.
 
-### How `return sse(...)` Works
+### How the `sse()` Response Works
 
-When a route handler returns `return sse(subscription)`:
+When a route handler returns `sse(subscription)`:
 
 1. The Rust HTTP layer recognizes the SSE response type.
 2. It sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`, connection stays open.
@@ -510,7 +511,7 @@ struct BroadcastMessage {
 
 ### SSE Response Handler (Rust HTTP Layer)
 
-When the HTTP layer sees `Response::SSE(subscription_id)`:
+When the HTTP layer sees `BridgeBody::Sse { subscription_id }` on the bridge response (see Design Review):
 
 ```rust
 async fn sse_handler(subscription_id: u64, req: Request) -> Response {
@@ -586,11 +587,14 @@ sig!("connection_count", ["handle" => Type::Named("BroadcastHandle".to_string())
 sig!("sse_stream", ["handler" => Type::Any], Type::Named("SSEResponse".to_string()));
 ```
 
-### `return sse(...)` Parser Integration
+### No Parser Integration Needed
 
-`respond` already handles `return file(...)`, `return json(...)`, `return html(...)`. Add:
-- `return sse(expr)` — where `expr` evaluates to `SSESubscription`
-- `return sse_stream(expr)` — where `expr` evaluates to a closure
+The original draft planned a `respond sse(...)` keyword form, but there is
+no `respond` keyword in the language (see Design Review). `sse()` and
+`sse_stream()` are ordinary imported response builders, exactly like
+`json()`/`html()`: the handler returns their value, the bridge recognizes
+the SSE response (via the `BridgeBody::Sse` variant), and the parser is
+untouched.
 
 ---
 
@@ -693,13 +697,18 @@ get("/dashboard/stream", fn(req) { return sse(subscribe(metrics_bus)) })
 
 The middleware runs before the SSE connection is established. If the middleware rejects the request (401, 403), the SSE connection is never opened. This is correct — you don't want to establish the connection and then reject it.
 
-**CORS:** If the SSE endpoint is consumed from a different origin (e.g. a static frontend), add CORS headers:
+**CORS:** If the SSE endpoint is consumed from a different origin (e.g. a static frontend), add CORS headers with `with_header` — the same mechanism as any other response:
 
 ```ntnt
+import { with_header } from "std/http/server"
+
 get("/stream/metrics", fn(req) {
-    return sse(subscribe(metrics_bus))
+    let resp = sse(subscribe(metrics_bus))
+    return with_header(resp, "Access-Control-Allow-Origin", "https://app.example.com")
 })
 ```
+
+(Phase 1 must ensure `with_header` composes with the SSE response type — headers are set before the stream body begins.)
 
 **Rate limiting:** Handled at the route level, same as any other route. `max_connections` on `broadcast()` caps total subscribers regardless of auth status.
 
@@ -747,3 +756,4 @@ reconciled into the body):
 | Date | Change |
 |------|--------|
 | 2026-03-17 | Initial draft — vision, architecture, full API, three phases, implementation notes |
+| 2026-07-08 | Design review against current main: response-builder API (no `respond` keyword), `BridgeBody::Sse` bridge variant, named process-global broadcasts, Worker-mode `schedule()` gate, bounded drop-oldest subscriber queues; body reconciled end to end |
