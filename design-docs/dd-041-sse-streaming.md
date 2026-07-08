@@ -89,9 +89,12 @@ Resolution, now part of Phase 1:
 
 **Open questions resolved (recommendations):**
 
-- Backing: custom `Vec<Sender>` per bus (crossbeam-consistent) — but with
-  **bounded per-subscriber queues** (e.g. 1024) rather than unbounded: a
-  stuck TCP connection with an unbounded queue is slow-motion OOM.
+- Backing: custom `Vec<flume::Sender>` per bus — flume is already a
+  dependency (the request bridge uses it) and, unlike crossbeam, supports
+  BOTH sync sends from interpreter threads and `recv_async()` in the Axum
+  write task. Per-subscriber queues are **bounded** (e.g. 1024) rather
+  than unbounded: a stuck TCP connection with an unbounded queue is
+  slow-motion OOM.
   Default policy drop-oldest with a deduped warn; `"drop_slow": false`
   opts into blocking sends for correctness-critical streams.
 - `send()` reuses the existing dispatch on handle type — no new verb.
@@ -136,7 +139,7 @@ schedule(500ms) → send(metrics_bus) → [N browser connections] each subscribe
 
 ### The New Primitive: Broadcast Channel
 
-`broadcast()` creates a broadcast channel backed by a multi-sender, multi-receiver bus. Each subscriber gets their own crossbeam receiver that receives a copy of every message sent to the bus. Messages are not consumed — they're fanned out.
+`broadcast()` creates a broadcast channel backed by a multi-sender, multi-receiver bus. Each subscriber gets their own bounded flume receiver that receives a copy of every message sent to the bus. Messages are not consumed — they're fanned out.
 
 ```
 broadcast_channel
@@ -150,9 +153,9 @@ send(bc, value) → all three subscribers receive a copy
 **Implementation options (see Open Questions):**
 - `bus` crate — lock-free SPMC broadcast, fastest, single-producer only
 - `tokio::sync::broadcast` — MPMC, has lag/drop semantics, skip-behind
-- Custom: Vec of crossbeam senders, new sender added per subscriber, clean up on disconnect
+- Custom: Vec of flume senders, new sender added per subscriber, clean up on disconnect
 
-The custom approach (Vec of senders) is most consistent with ntnt's existing crossbeam usage.
+The custom approach (Vec of senders) won — see the Design Review: flume is already the bridge's channel library and its receivers support `recv_async()` in the Axum write task, which crossbeam receivers do not.
 
 ### How the `sse()` Response Works
 
@@ -160,7 +163,7 @@ When a route handler returns `sse(subscription)`:
 
 1. The Rust HTTP layer recognizes the SSE response type.
 2. It sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`, connection stays open.
-3. A Rust task (not an interpreter thread) polls the subscription's crossbeam receiver in a loop, formatting each `Value` as an SSE event and writing to the HTTP response body.
+3. A Rust task (not an interpreter thread) awaits the subscription's flume receiver (`recv_async()`) in a loop, formatting each `Value` as an SSE event and writing to the HTTP response body.
 4. When the client disconnects, the write fails, the loop exits, and the subscription is dropped — which removes this subscriber from the broadcast channel's sender list.
 5. The interpreter thread is free after returning the SSE response token. It does not block.
 
@@ -479,9 +482,21 @@ enum BroadcastKey {
 
 struct BroadcastChannel {
     id: u64,
-    senders: Vec<crossbeam::channel::Sender<BroadcastMessage>>,
+    senders: Vec<(u64, flume::Sender<BroadcastMessage>)>, // (sender_id, tx)
     replay_buffer: Option<VecDeque<BroadcastMessage>>,
     replay_buffer_size: usize,
+}
+
+// Holds a subscription between the interpreter returning
+// Value::SSESubscription(id) from the handler and the Axum layer taking
+// ownership to drive the write task. take() consumes the entry, so a
+// subscription streams to exactly one response.
+static SUBSCRIPTION_REGISTRY: LazyLock<Mutex<HashMap<u64, SseSubscription>>> = ...;
+
+struct SseSubscription {
+    receiver: flume::Receiver<BroadcastMessage>,
+    channel_key: BroadcastKey, // for sender cleanup on disconnect
+    sender_id: u64,
 }
 
 struct BroadcastMessage {
@@ -499,11 +514,12 @@ struct BroadcastMessage {
 5. Drop lock
 
 `subscribe(bc)`:
-1. Create a new `crossbeam::channel::bounded(1024)` pair — bounded per the
-   Design Review: a stuck TCP connection with an unbounded queue is
-   slow-motion OOM. On a full queue the send policy is drop-oldest with a
-   deduped warn (unless the bus was created with `"drop_slow": false`,
-   which opts into briefly-blocking sends)
+1. Create a new `flume::bounded(1024)` pair — flume so the Axum write task
+   can `recv_async()` (crossbeam receivers have no async recv); bounded
+   per the Design Review: a stuck TCP connection with an unbounded queue
+   is slow-motion OOM. On a full queue the send policy is drop-oldest
+   with a deduped warn (unless the bus was created with
+   `"drop_slow": false`, which opts into briefly-blocking sends)
 2. Lock registry, push `sender` into `BroadcastChannel.senders`
 3. Wrap `receiver` in `SSESubscription { receiver, channel_id, last_event_id: None }`
 4. Drop lock
@@ -584,7 +600,10 @@ sig!("broadcast", ["name" => Type::String, "opts" => Type::Map { key_type: Box::
 sig!("subscribe", ["handle" => Type::Named("BroadcastHandle".to_string())], Type::Named("SSESubscription".to_string()));
 sig!("filter", ["sub" => Type::Named("SSESubscription".to_string()), "pred" => Type::Any], Type::Named("SSESubscription".to_string()));
 sig!("connection_count", ["handle" => Type::Named("BroadcastHandle".to_string())], Type::Int);
-sig!("sse_stream", ["handler" => Type::Any], Type::Named("SSEResponse".to_string()));
+// Both builders return Response, same as json()/html(), so middleware
+// and with_header() compose without special cases
+sig!("sse", ["sub" => Type::Named("SSESubscription".to_string())], Type::Named("Response".to_string()));
+sig!("sse_stream", ["handler" => Type::Any], Type::Named("Response".to_string()));
 ```
 
 ### No Parser Integration Needed
