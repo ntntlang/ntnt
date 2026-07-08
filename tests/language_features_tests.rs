@@ -6520,3 +6520,64 @@ print(b[10])
         "distinct call sites should each warn: {stderr}"
     );
 }
+
+// ===========================================================================
+// std quick wins: from_now/time_ago and paginate (DD-058 item 5)
+// ===========================================================================
+
+#[test]
+fn test_from_now_and_time_ago() {
+    let code = r#"
+import { from_now, time_ago, now } from "std/time"
+
+print(from_now(now() - 7200))
+print(from_now(now() + 172800))
+print(from_now(now()))
+print(time_ago(now() - 60))
+print(from_now(now() - 400 * 86400))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("2 hours ago"), "{stdout}");
+    assert!(stdout.contains("in 2 days"), "{stdout}");
+    assert!(stdout.contains("just now"), "{stdout}");
+    assert!(stdout.contains("1 minute ago"), "singular unit: {stdout}");
+    assert!(stdout.contains("1 year ago"), "{stdout}");
+}
+
+#[test]
+fn test_paginate_math_and_clamping() {
+    let code = r##"
+import { paginate } from "std/collections"
+
+let p = paginate(45, 3, 10)
+print("#{p["offset"]} #{p["limit"]} #{p["total_pages"]} #{p["has_next"]} #{p["has_prev"]}")
+let clamped = paginate(45, 99, 10)
+print("#{clamped["page"]} #{clamped["offset"]} #{clamped["has_next"]}")
+let low = paginate(45, 0, 10)
+print("#{low["page"]} #{low["offset"]} #{low["has_prev"]}")
+let empty = paginate(0, 1, 10)
+print("#{empty["total_pages"]} #{empty["offset"]}")
+"##;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("20 10 5 true true"), "{stdout}");
+    assert!(stdout.contains("5 40 false"), "high page clamps: {stdout}");
+    assert!(stdout.contains("1 0 false"), "low page clamps: {stdout}");
+    assert!(
+        stdout.contains("1 0"),
+        "empty list is page 1 of 1: {stdout}"
+    );
+}
+
+#[test]
+fn test_paginate_rejects_bad_per_page() {
+    let code = r#"
+import { paginate } from "std/collections"
+let p = paginate(45, 1, 0)
+print(p)
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0);
+    assert!(stderr.contains("per_page must be at least 1"), "{stderr}");
+}

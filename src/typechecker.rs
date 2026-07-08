@@ -4233,6 +4233,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("E", [], Type::Float);
         }
         "std/collections" => {
+            sig!("paginate", ["total_items" => Type::Int, "page" => Type::Int, "per_page" => Type::Int], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) });
             sig!("push", ["array" => Type::Array(Box::new(Type::Any)), "item" => Type::Any], Type::Array(Box::new(Type::Any)));
             sig!("pop", ["array" => Type::Array(Box::new(Type::Any))], Type::Any);
             sig!("keys", ["map" => Type::Any], Type::Array(Box::new(Type::String)));
@@ -4499,6 +4500,8 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("is_absolute", ["path" => Type::String], Type::Bool);
         }
         "std/time" => {
+            sig!("from_now", ["timestamp" => Type::Int], Type::String);
+            sig!("time_ago", ["timestamp" => Type::Int], Type::String);
             sig!("now", [], Type::Any);
             sig!("now_millis", [], Type::Int);
             sig!("format", ["time" => Type::Any, "fmt" => Type::String], Type::String);

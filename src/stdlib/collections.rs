@@ -971,6 +971,76 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt paginate
+    // @module std/collections
+    // @signature paginate(total_items: Int, page: Int, per_page: Int) -> Map<String, Any>
+    // Pagination math for list views: offset, limit, page counts, and flags.
+    //
+    // Returns map { "offset", "limit", "page", "per_page", "total_items",
+    // "total_pages", "has_next", "has_prev" }. The requested page is clamped
+    // into [1, total_pages] (an empty list yields page 1 of 1 with offset 0),
+    // so out-of-range requests never produce a negative offset.
+    // @param total_items Total number of items across all pages.
+    // @param page Requested 1-based page number (clamped).
+    // @param per_page Items per page (must be >= 1).
+    // @returns Pagination map ready for SQL OFFSET/LIMIT and template links.
+    // @see_also slice, len
+    // @since v0.4.12
+    // @tags #pagination, #collections, #web
+    // @error TypeError ~ "per_page must be at least 1" fix: "Pass a positive page size"
+    // @example paginate(45, 3, 10) => map { "offset": 20, "limit": 10, "page": 3, "per_page": 10, "total_items": 45, "total_pages": 5, "has_next": true, "has_prev": true } ~ "Middle page"
+    // @example paginate(45, 99, 10) => map { "offset": 40, "limit": 10, "page": 5, "per_page": 10, "total_items": 45, "total_pages": 5, "has_next": false, "has_prev": true } ~ "Out-of-range page clamps to the last"
+    module.insert(
+        "paginate".to_string(),
+        Value::NativeFunction {
+            name: "paginate".to_string(),
+            arity: 3,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                let as_int = |value: &Value, name: &str| -> Result<i64, IntentError> {
+                    match value {
+                        Value::Int(n) => Ok(*n),
+                        other => Err(IntentError::type_error(format!(
+                            "paginate() {} must be an Int, got {}",
+                            name,
+                            other.type_name()
+                        ))),
+                    }
+                };
+                let total_items = as_int(&args[0], "total_items")?;
+                let page = as_int(&args[1], "page")?;
+                let per_page = as_int(&args[2], "per_page")?;
+
+                if total_items < 0 {
+                    return Err(IntentError::type_error(
+                        "paginate() total_items must be >= 0".to_string(),
+                    ));
+                }
+                if per_page < 1 {
+                    return Err(IntentError::type_error(
+                        "paginate() per_page must be at least 1".to_string(),
+                    ));
+                }
+
+                let total_pages = ((total_items + per_page - 1) / per_page).max(1);
+                let page = page.clamp(1, total_pages);
+                let offset = (page - 1) * per_page;
+
+                let mut result = HashMap::new();
+                result.insert("offset".to_string(), Value::Int(offset));
+                result.insert("limit".to_string(), Value::Int(per_page));
+                result.insert("page".to_string(), Value::Int(page));
+                result.insert("per_page".to_string(), Value::Int(per_page));
+                result.insert("total_items".to_string(), Value::Int(total_items));
+                result.insert("total_pages".to_string(), Value::Int(total_pages));
+                result.insert("has_next".to_string(), Value::Bool(page < total_pages));
+                result.insert("has_prev".to_string(), Value::Bool(page > 1));
+                Ok(Value::Map(result))
+            },
+        },
+    );
+
     module
 }
 
