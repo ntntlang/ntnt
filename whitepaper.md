@@ -10,8 +10,66 @@ AI systems are rapidly evolving from coding assistants to primary software creat
 - **Integrated Workflow Automation:** The entire dev lifecycle (design → code → test → deploy) is baked into the language runtime, allowing AI agents to collaborate (e.g. code-generation agent and code-review agent) using native constructs like agent pull requests, automated CI checks, and traceable commit rationales.
 - **Human Governance and Trust:** Every critical decision made by an AI agent is transparent and optionally gated by human approval. This ensures that while AI handles the heavy lifting 24/7, it cannot bypass human judgment on high-impact design choices, UX decisions, or cross-service API contracts[2][3].
 - **Grounded Innovation:** The language draws inspiration from proven ideas in programming language design (contracts from Eiffel/Racket, effect types from functional languages, versioning from Elm, etc.) and extends them to a holistic system tailored for AI. It aims to feel familiar in its guarantees (like Rust’s safety or Go’s simplicity) but goes further by being *“AI-friendly”* in syntax and tooling.
-In summary, this white paper introduces the design of **a novel programming language ecosystem optimized for AI developers**, combining machine-oriented code structure with human-oriented oversight. We detail the core language features, built-in development workflow support, and observability mechanisms. We also compare this approach to Go, Rust, and Node.js, and illustrate its use in two concrete scenarios: *(1)* autonomous AI agents building a full-stack blog application, and *(2)* an AI-guided refactoring of a legacy PHP app into a modern, AI-maintained codebase. Our aim is to demonstrate that with the right language and tools, AI-led development can be not only efficient, but **safe, transparent, and collaborative**.
-## Introduction and Motivation
+(See **Implementation Status** below for what NTNT has shipped versus what remains vision.) In summary, this white paper introduces the design of **a novel programming language ecosystem optimized for AI developers**, combining machine-oriented code structure with human-oriented oversight. We detail the core language features, built-in development workflow support, and observability mechanisms. We also compare this approach to Go, Rust, and Node.js, and illustrate its use in two concrete scenarios: *(1)* autonomous AI agents building a full-stack blog application, and *(2)* an AI-guided refactoring of a legacy PHP app into a modern, AI-maintained codebase. Our aim is to demonstrate that with the right language and tools, AI-led development can be not only efficient, but **safe, transparent, and collaborative**.
+## Implementation Status: Shipped vs Aspirational
+
+This paper is a **vision document**. NTNT, the language it motivated, has
+shipped a substantial subset of it — and that subset stands on its own. To
+keep agents and readers grounded (DD-063 Rec 8), here is the honest split as
+of v0.4.12. The authoritative, always-current status lives in
+[ROADMAP.md](ROADMAP.md) and the design docs.
+
+**Shipped and real today:**
+
+- **Intent verification (IAL)** — `.intent` files with a glossary-driven term
+  rewriting engine resolve natural-language scenarios ("a visitor goes to the
+  home page → they see 'Bear Lake'") down to executable HTTP/CLI/unit-test
+  probes: `ntnt intent check`, `ntnt intent lint`, Intent Studio. This is the
+  paper's "intent encoding" idea, realized at the specification level.
+- **Runtime contracts** — `requires`/`ensures`/`old()`/`result` and struct
+  invariants, enforced at runtime with rich diagnostics (clause source
+  frames, `where:` values, call sites); statically-certain violations of
+  `requires` clauses at literal-argument call sites are flagged at lint time.
+- **A secure-by-default web stack** — parameterized-only DB access,
+  auto-escaping templates, SSRF/path-traversal/open-redirect protection,
+  security headers, bcrypt/argon2id + session/CSRF/OAuth/OIDC in `std/auth`.
+- **Gradual typing with real enforcement** — inference, generics, union
+  types, flow narrowing, strict/warn/forgiving runtime modes; verification
+  commands run strict by default.
+- **Agent-native diagnostics** — error codes, source frames, did-you-mean
+  suggestions, multi-error lint recovery, build-enforced stdlib docs
+  embedded in the binary.
+- **Concurrency and jobs** — isolated-interpreter `spawn`/`channel`/
+  `parallel` (no shared mutable state by construction), a durable job system,
+  and a multi-worker HTTP runtime that parallelizes blocking I/O.
+
+**Aspirational — explicitly future work, not yet implemented:**
+
+- **Typed error effects** (§ Typed Error Effects) — NTNT uses
+  `Result`/`Option` with `?`/`otherwise`; there is no effect system. An
+  earlier effect-annotation foundation was deliberately removed until it can
+  be checked for real.
+- **Session-typed concurrency protocols** (§ Concurrency Protocols) — the
+  shipped model is isolated interpreters with message passing; protocol
+  types are research direction.
+- **Structured AST edits** (§ Structured Edits) — agents edit NTNT as text
+  today. The machine-readable surface is `ntnt parse --json`, `ntnt inspect`,
+  and lint's JSON output.
+- **Semantic versioning enforcement** (§ Semantic Versioning) — not
+  implemented; versioning is conventional.
+- **Belief/confidence observability, decision provenance, dashboards**
+  (§ Observability) — the shipped observability is structured logging,
+  request logging, job audit trails, and intent-check traces.
+- **First-class PRs/CI/review objects and multi-agent workflow primitives**
+  (§ Integrated Development Workflow) — these live in external tooling
+  (git/GitHub/CI) today, not in the language.
+- **UI/UX constraint declarations and `human_approve` constructs**
+  (§ UI/UX Constraints, § Human-in-the-Loop) — design ideas only.
+
+Sections below describing aspirational features are kept as originally
+written — read them as design direction, not shipped capability.
+
+## Introduction and Motivation## Introduction and Motivation
 
 Traditional programming languages assume a human writing and reading the code. As a result, they emphasize human-friendly syntax, informal code style conventions, and development workflows that rely on human intuition (manual code review, ad-hoc testing, etc.). With AI agents taking on coding tasks, these assumptions no longer hold. AI developers do not get “tired” or bored by boilerplate, nor do they need code to be written in a conversational style – they benefit most from *structured, unambiguous code representations*[1]. Conversely, humans overseeing AI-written code need more than a diff and a commit message to understand what an AI changed and why. There is a gap between **human-oriented software practices** and **AI-driven code generation**.
 Several pain points illustrate this gap:
