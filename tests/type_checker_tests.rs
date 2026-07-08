@@ -1342,6 +1342,19 @@ print(x)
 }
 
 #[test]
+fn test_block_binding_exempts_annotated_bindings() {
+    // An explicit annotation signals intent; a wrong one is a type error
+    let source = r#"let x: Int = { 5 }
+print(x)
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        !stdout.contains("block_binding"),
+        "annotated bindings are intentional: {stdout}"
+    );
+}
+
+#[test]
 fn test_block_binding_errors_in_strict_mode() {
     let source = r#"let e = {}
 print(e)
