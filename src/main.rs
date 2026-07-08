@@ -60,6 +60,12 @@ enum Commands {
         /// Request timeout in seconds for HTTP server (default: 30, env: NTNT_TIMEOUT)
         #[arg(long, default_value = "30", env("NTNT_TIMEOUT"))]
         timeout: u64,
+
+        /// Interpreter worker threads for the HTTP server (default: 1 in dev,
+        /// CPU cores up to 8 in production; env: NTNT_WORKERS). More workers
+        /// let blocking I/O (DB queries, fetch) run in parallel.
+        #[arg(long)]
+        workers: Option<usize>,
     },
     /// Test an HTTP server by running it and making requests
     ///
@@ -880,7 +886,18 @@ fn main() {
 
     let result = match cli.command {
         Some(Commands::Repl) => run_repl(),
-        Some(Commands::Run { file, timeout }) => run_file(&file, timeout),
+        Some(Commands::Run {
+            file,
+            timeout,
+            workers,
+        }) => {
+            if let Some(workers) = workers {
+                // Flows through the existing NTNT_WORKERS resolution in the
+                // async server startup
+                std::env::set_var("NTNT_WORKERS", workers.to_string());
+            }
+            run_file(&file, timeout)
+        }
         Some(Commands::Test {
             file,
             get_requests,

@@ -1,10 +1,51 @@
 # DD-057: Interpreter Suspension for Async I/O
 
-**Status:** Draft
+**Status:** Phase 1 verified shipped (2026-07-08 spike); Phase 2 deferred pending production-mode re-benchmark
 **Author:** Larri + Josh
 **Created:** 2026-03-31
 **App:** ntnt
 **Origin:** DD-038 benchmarks (2026-03-12) — ntnt matches Hono/Bun on HTTP-only but is 4-20× slower on DB workloads. Phase 1 (connection pooling) shipped in v0.4.2 with zero throughput gain, confirming the bottleneck is the interpreter, not the pool.
+
+---
+
+## Verified State (2026-07-08 spike)
+
+Code inspection and an empirical test against current main show **the Phase 1
+worker pool below is already shipped** — it landed in v0.4.2 alongside the
+connection pool (DD-039, PR #23), before this DD was written:
+
+- `run_worker` (interpreter.rs) gives each worker its own interpreter in
+  Worker mode, re-evaluating the program for its own route table; workers
+  1..N never hot-reload.
+- Worker count resolution (interpreter.rs, async server startup):
+  production defaults to `min(num_cpus, 8)`, dev to 1, `NTNT_WORKERS`
+  overrides both; `ntnt run --workers N` sets it from the CLI.
+- The flume channel is MPMC and all cross-worker state
+  (`SHARED_POOL_REGISTRY`, `DB_RUNTIME`, KV registries, sqlite
+  `CONNECTION_REGISTRY`, auth session stores, `EMAIL_STATE`) is
+  static + `Mutex`/`Arc` — audited 2026-07-08, including post-March
+  additions.
+
+**Empirical proof that workers parallelize blocking I/O** (no local
+Postgres; `sleep_ms(200)` in a handler blocks the worker thread exactly
+like `DB_RUNTIME.block_on`):
+
+| 8 concurrent 200ms-blocking requests | wall time |
+|--------------------------------------|----------:|
+| `NTNT_WORKERS=1` | 1.61s (fully serialized, 8 × 200ms) |
+| `NTNT_WORKERS=4` | 0.41s (theoretical 4× exactly) |
+
+**Implication for the DD-038 numbers above:** the "zero throughput gain"
+v0.4.2 measurement is consistent with running in dev mode, where the
+default is one worker — the pool cannot help when a single thread
+serializes every query. The 4-20× DB gap must be re-measured with
+`NTNT_ENV=production` (or `NTNT_WORKERS=N`) before any Phase 2
+investment; Phase 1's expected gains appear to already exist behind the
+right configuration.
+
+Phase 1 gaps found and closed by the spike PR: panicked workers were
+never respawned (silent capacity loss — now supervised and respawned),
+and the `--workers` CLI flag was missing (env var only).
 
 ---
 
@@ -228,15 +269,15 @@ The infrastructure is already there — `num_workers` config field exists, flume
 
 **Expected impact:** With 4 workers and a 5-connection pool, DB throughput should approach 4× current (limited by the slowest of workers or connections). 8.3K → ~25-30K on single-query benchmark, closing most of the gap with FastAPI (37K).
 
-**Checklist:**
-- [ ] Worker pool initialization: spawn N interpreter threads from the loaded program
-- [ ] Each worker gets its own `Interpreter` instance (clone the AST, re-run module loading)
-- [ ] `num_workers` config: default to `min(num_cpus, 4)` in production, 1 in development
-- [ ] Hot-reload propagation: file watcher signals all workers to reload
-- [ ] Worker health monitoring: detect panicked workers, respawn
-- [ ] `ntnt run server.tnt --workers 8` CLI flag
-- [ ] Benchmark: re-run DD-038 suite, compare against v0.4.2
-- [ ] Verify shared state is safe: `POOL_REGISTRY`, `DB_RUNTIME`, KV stores all use `static LazyLock<Mutex<>>` — already thread-safe
+**Checklist (statuses verified 2026-07-08):**
+- [x] Worker pool initialization: spawn N interpreter threads from the loaded program — shipped v0.4.2 (DD-039)
+- [x] Each worker gets its own `Interpreter` instance (re-reads and re-evaluates the program) — `run_worker`
+- [x] `num_workers` config: defaults to `min(num_cpus, 8)` in production, 1 in development; `NTNT_WORKERS` overrides
+- [x] Hot-reload propagation — resolved by design instead: dev defaults to 1 worker (which hot-reloads); workers 1..N run with hot-reload off. Multi-worker dev (`NTNT_WORKERS>1` without production) leaves workers 1..N stale after edits — documented tradeoff, restart to pick up changes
+- [x] Worker health monitoring: panicked workers are logged and respawned (spike PR; previously a panic silently lost the worker)
+- [x] `ntnt run server.tnt --workers 8` CLI flag (spike PR; env var existed)
+- [ ] Benchmark: re-run DD-038 suite **with `NTNT_ENV=production` / `NTNT_WORKERS≥4`**, compare against the v0.4.2 numbers — the original measurement almost certainly ran with the dev default of 1 worker (see Verified State)
+- [x] Verify shared state is safe: `SHARED_POOL_REGISTRY`, `DB_RUNTIME`, KV/sqlite/auth/email statics all `Mutex`/`Arc` — re-audited 2026-07-08 including post-March additions
 
 **Risks:**
 - Memory: each worker holds a full interpreter clone. Measure RSS with 4 workers on a real app.
@@ -264,7 +305,7 @@ Each has tradeoffs in complexity, performance, and debuggability. This needs its
 - [ ] Benchmark: single-worker suspended vs multi-worker blocking
 - [ ] Consider: does suspension replace workers, or complement them? (suspended workers = best of both)
 
-**Deferred until:** Phase 1 results are measured. If 4 workers closes the gap sufficiently for production use, Phase 2 becomes an optimization rather than a necessity.
+**Deferred until:** Phase 1 results are measured **under production configuration** — the 2026-07-08 spike's sleep-proxy result (near-perfect 4× parallelization with 4 workers) predicts the DB benchmark re-run will close most of the gap, which would make Phase 2 an optimization for memory footprint and beyond-N-workers concurrency rather than a necessity. Do not start the suspension refactor before that re-benchmark exists.
 
 ---
 

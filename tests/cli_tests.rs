@@ -966,3 +966,66 @@ fn find_ntnt_binary() -> String {
         panic!("No ntnt binary found in {}/target/", manifest_dir);
     }
 }
+
+// ===========================================================================
+// Worker pool CLI (DD-057 Phase 1 gaps)
+// ===========================================================================
+
+#[test]
+fn run_help_documents_workers_flag() {
+    let binary = find_ntnt_binary();
+    let output = std::process::Command::new(binary)
+        .args(["run", "--help"])
+        .output()
+        .expect("run ntnt");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--workers"),
+        "run --help should document --workers: {stdout}"
+    );
+}
+
+#[test]
+fn workers_flag_reaches_server_banner() {
+    use std::io::Read as _;
+
+    let dir = std::env::temp_dir().join(format!("ntnt_workers_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = dir.join("srv.tnt");
+    std::fs::write(&server, "get(\"/\", fn(req) { \"ok\" })\nlisten(8391)\n").unwrap();
+
+    let binary = find_ntnt_binary();
+    let mut child = std::process::Command::new(binary)
+        .args(["run", "--workers", "3", server.to_str().unwrap()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn server");
+
+    // Poll the banner for the worker count
+    let mut stdout = child.stdout.take().unwrap();
+    let mut collected = String::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut buf = [0u8; 1024];
+    let found = loop {
+        if std::time::Instant::now() > deadline {
+            break false;
+        }
+        match stdout.read(&mut buf) {
+            Ok(0) => break collected.contains("Workers: 3"),
+            Ok(n) => {
+                collected.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if collected.contains("Workers: 3") {
+                    break true;
+                }
+            }
+            Err(_) => break false,
+        }
+    };
+
+    let _ = child.kill();
+    let _ = child.wait();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(found, "banner should show Workers: 3, got: {collected}");
+}

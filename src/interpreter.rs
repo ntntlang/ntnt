@@ -9976,15 +9976,29 @@ impl Interpreter {
             });
         });
 
-        // Spawn additional worker threads (workers 2..N)
+        // Spawn additional worker threads (workers 2..N). Each is wrapped in
+        // a supervisor loop: run_worker returns normally on channel close
+        // (shutdown), so any panic that unwinds out of it is a crashed
+        // worker — log it and respawn rather than silently losing capacity.
         let mut worker_handles = Vec::new();
         if num_workers > 1 {
             let source_file = self.main_source_file.clone().unwrap_or_default();
             for worker_id in 1..num_workers {
                 let worker_rx = rx.clone();
                 let worker_source = source_file.clone();
-                let handle = thread::spawn(move || {
-                    Self::run_worker(worker_id, worker_rx, &worker_source);
+                let handle = thread::spawn(move || loop {
+                    let rx = worker_rx.clone();
+                    let source = worker_source.clone();
+                    let result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                            Self::run_worker(worker_id, rx, &source);
+                        }));
+                    match result {
+                        Ok(()) => break, // normal shutdown (channel closed)
+                        Err(_) => {
+                            eprintln!("[worker {}] crashed (panic) — respawning", worker_id);
+                        }
+                    }
                 });
                 worker_handles.push(handle);
             }
