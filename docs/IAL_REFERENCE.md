@@ -463,6 +463,7 @@ CLI commands for IAL
 | Command | Description |
 |---------|-------------|
 | `ntnt intent check <file>` | Run tests defined in intent file against implementation |
+| `ntnt intent lint <file>` | Statically validate glossary and scenarios without running tests: unresolved terms and when-clauses (with did-you-mean suggestions), definition cycles, and orphan glossary entries. Exit 1 on unresolved terms or cycles; orphans are warnings only. --json for CI |
 | `ntnt intent coverage <file>` | Show which features have implementations |
 | `ntnt intent init <file.intent> -o <output.tnt>` | Generate code scaffolding from intent file |
 | `ntnt intent studio <file.intent>` | Visual preview with live test execution |

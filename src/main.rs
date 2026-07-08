@@ -7321,7 +7321,7 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
         md.push_str("| Command | Description |\n");
         md.push_str("|---------|-------------|\n");
 
-        let cmd_names = ["check", "coverage", "init", "studio"];
+        let cmd_names = ["check", "lint", "coverage", "init", "studio"];
         for cmd in &cmd_names {
             if let Some(c) = commands.get(*cmd) {
                 let command = c.get("command").and_then(|v| v.as_str()).unwrap_or("");
