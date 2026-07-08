@@ -303,6 +303,7 @@ import {
     broadcast,          // create a broadcast channel
     subscribe,          // tap into a broadcast (per-connection)
     filter,             // filter a subscription by predicate
+    sse,                // SSE response builder for a subscription (primary form)
     sse_stream,         // per-connection stream with push/on_close callbacks
     connection_count,   // how many active subscribers on a broadcast channel
 } from "std/sse"
@@ -453,7 +454,7 @@ get("/stream/logs", fn(req) {
 })
 
 get("/stream/logs/{level}", fn(req) {
-    let level = params["level"]
+    let level = req.params.level
     return sse(filter(subscribe(log_bus), fn(e) { e["level"] == level }))
 })
 ```
