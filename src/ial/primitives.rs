@@ -33,9 +33,6 @@ pub enum Primitive {
         validate: bool,
     },
 
-    /// SQL query execution
-    Sql { query: String, params: Vec<Value> },
-
     /// Read file contents
     ReadFile { path: String },
 
@@ -63,13 +60,12 @@ pub enum Primitive {
         input: Value,
     },
 
-    /// Invariant check: expand and verify an invariant
-    InvariantCheck {
-        /// Invariant ID (e.g., "invariant.url_slug")
-        invariant_id: String,
-        /// Value to check against the invariant
-        value: Value,
-    },
+    // Note: invariants are handled by EXPANSION during term resolution —
+    // `invariant.id` resolves to its assertion terms, which become Check
+    // primitives. There is deliberately no InvariantCheck primitive (and no
+    // Sql primitive): neither had a construction path, and phantom
+    // primitives invite docs promising unimplemented capabilities
+    // (DD-063 Rec 5).
 
     // === Checks (verify values in Context) ===
     /// Universal check: operation on a path with expected value

@@ -27,11 +27,9 @@ IAL primitives are the leaf nodes of term resolution - they execute directly
 | **Http** | Execute an HTTP request and capture response in context | `response.status`, `response.body`, `response.headers.*`, `response.time_ms` | Implemented |
 | **Cli** | Execute a CLI command and capture output | `cli.exit_code`, `cli.stdout`, `cli.stderr` | Implemented |
 | **CodeQuality** | Run lint/validation checks on source files | `code.quality.passed`, `code.quality.error_count`, `code.quality.warning_count`, `code.quality.errors` | Implemented |
-| **Sql** | Execute a SQL query with parameters | `sql.result`, `sql.rows` | Not implemented |
 | **ReadFile** | Read file contents into context | `file.content`, `file.exists` | Implemented |
 | **FunctionCall** | Call an NTNT function for unit testing | `result` | Implemented |
 | **PropertyCheck** | Verify a function property (deterministic, idempotent, round-trips) | `property.passed`, `property.failures` | Implemented |
-| **InvariantCheck** | Verify a named invariant holds for a value | `invariant.passed`, `invariant.failures` | Resolver marker only; direct execution fails unless expanded |
 | **Check** | Universal assertion - compare context value against expected |  | Implemented |
 
 ---

@@ -55,22 +55,6 @@ parameters = ["function_name", "property_type", "test_inputs"]
 context_sets = ["property.passed", "property.failures"]
 example = "PropertyCheck(hash, Deterministic, [\"test\", \"data\"])"
 
-[primitives.sql]
-name = "Sql"
-description = "Execute a SQL query with parameters"
-status = "Not implemented"
-parameters = ["query", "params"]
-context_sets = ["sql.result", "sql.rows"]
-example = "Sql(SELECT * FROM users WHERE id = $1, [42])"
-
-[primitives.invariant_check]
-name = "InvariantCheck"
-description = "Verify a named invariant holds for a value"
-status = "Resolver marker only; direct execution fails unless expanded"
-parameters = ["invariant_id", "value"]
-context_sets = ["invariant.passed", "invariant.failures"]
-example = "InvariantCheck(invariant.url_slug, \"hello-world\")"
-
 [primitives.check]
 name = "Check"
 description = "Universal assertion - compare context value against expected"
@@ -81,6 +65,11 @@ example = "Check(Equals, response.status, 200)"
 # =============================================================================
 # CHECK OPERATIONS - Comparison types for Check primitive
 # =============================================================================
+
+[primitives.invariant_expansion]
+name = "Invariant expansion (not a primitive)"
+description = "Invariants have no primitive of their own: during term resolution, a reference to `invariant.id` (e.g. via a glossary meaning `check: invariant.url_slug`) expands to the invariant's assertion terms, each of which resolves to Check primitives (typically against the `result` path for unit-test scenarios). Parameterized invariants substitute `{param}` values during expansion."
+example = "glossary: `slug is URL-safe | check: invariant.url_slug` -> assertions `uses only [a-z0-9-]`, `is lowercase`, ... -> Check primitives"
 
 [check_operations]
 description = "Operations available for the Check primitive"
