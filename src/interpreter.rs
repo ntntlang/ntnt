@@ -6916,6 +6916,11 @@ impl Interpreter {
             }
 
             Expression::Index { object, index } => {
+                // Guard suppression applies to THIS index only: consume the
+                // flag before evaluating sub-expressions so a nested OOB
+                // (`arr[brr[99]] ?? d`) still gets its own clear diagnostic
+                // instead of a confusing downstream type mismatch.
+                let oob_suppressed = self.suppress_index_warn.replace(false);
                 let obj = self.eval_expression(object)?;
                 let idx = self.eval_expression(index)?;
 
@@ -6925,14 +6930,16 @@ impl Interpreter {
                         let index = if i < 0 {
                             match (len as i64).checked_add(i) {
                                 Some(idx) if idx >= 0 => idx as usize,
-                                _ => return self.index_oob_outcome("Array", i, len),
+                                _ => {
+                                    return self.index_oob_outcome(oob_suppressed, "Array", i, len)
+                                }
                             }
                         } else {
                             i as usize
                         };
                         match arr.get(index) {
                             Some(value) => Ok(value.clone()),
-                            None => self.index_oob_outcome("Array", i, len),
+                            None => self.index_oob_outcome(oob_suppressed, "Array", i, len),
                         }
                     }
                     (Value::String(s), Value::Int(i)) => {
@@ -6940,14 +6947,21 @@ impl Interpreter {
                         let index = if i < 0 {
                             match (char_count as i64).checked_add(i) {
                                 Some(idx) if idx >= 0 => idx as usize,
-                                _ => return self.index_oob_outcome("String", i, char_count),
+                                _ => {
+                                    return self.index_oob_outcome(
+                                        oob_suppressed,
+                                        "String",
+                                        i,
+                                        char_count,
+                                    )
+                                }
                             }
                         } else {
                             i as usize
                         };
                         match s.chars().nth(index) {
                             Some(c) => Ok(Value::String(c.to_string())),
-                            None => self.index_oob_outcome("String", i, char_count),
+                            None => self.index_oob_outcome(oob_suppressed, "String", i, char_count),
                         }
                     }
                     // Map access with string key: map["key"]
@@ -10370,11 +10384,18 @@ impl Interpreter {
 
     /// TypeMode-gated outcome for an out-of-bounds array/string read
     /// (DD-063 Rec 3): strict → E010 error; warn → deduped [WARN] + None;
-    /// forgiving → silent None. Suppressed entirely under `??`/`?`/`otherwise`
-    /// guards. Map missing-key access never routes here — None-for-missing
-    /// is documented intentional DX there.
-    fn index_oob_outcome(&self, kind: &str, requested: i64, length: usize) -> Result<Value> {
-        if self.suppress_index_warn.get() {
+    /// forgiving → silent None. `suppressed` is the guard flag consumed by
+    /// the Index arm (`??`/`?`/`otherwise` on the direct index). Map
+    /// missing-key access never routes here — None-for-missing is documented
+    /// intentional DX there.
+    fn index_oob_outcome(
+        &self,
+        suppressed: bool,
+        kind: &str,
+        requested: i64,
+        length: usize,
+    ) -> Result<Value> {
+        if suppressed {
             return Ok(Value::none());
         }
         match get_type_mode() {
@@ -10383,12 +10404,20 @@ impl Interpreter {
                 length,
             }),
             TypeMode::Warn => {
+                // current_line scopes dedup to the statement, so two
+                // different arrays with the same OOB signature still warn
+                let line = self.current_line;
+                let location = if line > 0 {
+                    format!(" (line {})", line)
+                } else {
+                    String::new()
+                };
                 crate::config::type_warn_dedup(
-                    &format!("index_oob:{}:{}:{}", kind, requested, length),
+                    &format!("index_oob:{}:{}:{}:{}", kind, requested, length, line),
                     &format!(
-                        "{} index {} out of bounds (length {}) — returning None. \
+                        "{} index {} out of bounds (length {}){} — returning None. \
                          Guard with `value[i] ?? default` or a len() check.",
-                        kind, requested, length
+                        kind, requested, length, location
                     ),
                 );
                 Ok(Value::none())
