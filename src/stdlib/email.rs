@@ -468,8 +468,13 @@ pub fn init() -> HashMap<String, Value> {
                 let (config, transport) = checkout()?;
                 let mut results = Vec::with_capacity(emails.len());
                 for email in &emails {
-                    let opts = require_config_map(email, "send_email_batch")?;
-                    results.push(dispatch(&config, transport.as_ref(), &opts)?);
+                    // A non-map entry is a per-email Err too — the documented
+                    // contract is that one bad email never stops the rest
+                    let result = match require_config_map(email, "send_email_batch") {
+                        Ok(opts) => dispatch(&config, transport.as_ref(), &opts)?,
+                        Err(e) => Value::err(Value::String(e.to_string())),
+                    };
+                    results.push(result);
                 }
                 Ok(Value::ok(Value::Array(results)))
             },

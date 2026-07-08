@@ -164,6 +164,36 @@ match send_email_batch([
 }
 
 #[test]
+fn batch_records_non_map_entries_as_per_email_errors() {
+    let code = r#"
+import { configure_email, send_email_batch } from "std/email"
+
+configure_email(map { "transport": "log", "from": "dev@localhost" })
+
+match send_email_batch([
+    map { "to": "a@b.co", "subject": "One", "text": "x" },
+    "not a map",
+    map { "to": "c@d.co", "subject": "Three", "text": "x" }
+]) {
+    Ok(results) => {
+        print("count: " + str(len(results)))
+        match results[1] { Ok(_) => print("1 ok"), Err(e) => print("1 err: " + e) }
+        match results[2] { Ok(_) => print("2 ok"), Err(_) => print("2 err") }
+    },
+    Err(e) => print("unexpected hard failure: " + e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run(code, &[]);
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("count: 3"), "{stdout}");
+    assert!(
+        stdout.contains("1 err") && stdout.contains("requires a map"),
+        "non-map entry is a per-email Err: {stdout}"
+    );
+    assert!(stdout.contains("2 ok"), "later emails still send: {stdout}");
+}
+
+#[test]
 fn env_var_forces_log_mode_over_smtp_config() {
     // SMTP config pointing nowhere, but NTNT_EMAIL_MODE=log short-circuits
     // before any connection attempt
