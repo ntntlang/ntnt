@@ -78,6 +78,12 @@ fn parse_config(map: &HashMap<String, Value>) -> Result<EmailConfig> {
 
     let port = match map.get("port") {
         Some(Value::Int(p)) if *p > 0 && *p <= 65535 => *p as u16,
+        Some(Value::Int(p)) => {
+            return Err(IntentError::type_error(format!(
+                "configure_email(): port {} is out of range (1-65535)",
+                p
+            )))
+        }
         Some(Value::String(s)) => s.parse::<u16>().map_err(|_| {
             IntentError::type_error(format!("configure_email(): invalid port \"{}\"", s))
         })?,
@@ -93,10 +99,12 @@ fn parse_config(map: &HashMap<String, Value>) -> Result<EmailConfig> {
     // TLS mode defaults from the port: 465 implicit, 587/25 STARTTLS
     let tls = match get_string(map, "tls") {
         Some(mode) if ["starttls", "implicit", "none"].contains(&mode.as_str()) => mode,
-        Some(mode) => return Err(IntentError::type_error(format!(
+        Some(mode) => {
+            return Err(IntentError::type_error(format!(
             "configure_email(): tls must be \"starttls\", \"implicit\", or \"none\", got \"{}\"",
             mode
-        ))),
+        )))
+        }
         None => {
             if port == 465 {
                 "implicit".to_string()
@@ -285,14 +293,38 @@ fn log_email(opts: &HashMap<String, Value>, message_id: &str) {
     );
 }
 
-/// Send one already-parsed message through the given mode, sharing the
-/// cached transport for smtp
+/// Check out the config and (for smtp mode) the shared pooled transport.
+/// The global lock is held only for this lookup — never across network
+/// I/O — so concurrent senders (spawned tasks, job workers) don't
+/// serialize behind one SMTP round-trip. SmtpTransport clones share the
+/// underlying connection pool.
+fn checkout() -> Result<(EmailConfig, Option<SmtpTransport>)> {
+    let mut guard = EMAIL_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((config, transport_slot)) = guard.as_mut() else {
+        return Err(IntentError::runtime_error(
+            "configure_email() has not been called — configure SMTP (or \"transport\": \"log\") at startup"
+                .to_string(),
+        ));
+    };
+    let config = config.clone();
+    let transport = if transport_mode(&config) == "smtp" {
+        if transport_slot.is_none() {
+            *transport_slot = Some(build_transport(&config)?);
+        }
+        transport_slot.clone()
+    } else {
+        None
+    };
+    Ok((config, transport))
+}
+
+/// Send one email through the checked-out transport (None = log mode).
+/// Runs entirely outside the global lock.
 fn dispatch(
     config: &EmailConfig,
-    transport_slot: &mut Option<SmtpTransport>,
+    transport: Option<&SmtpTransport>,
     opts: &HashMap<String, Value>,
 ) -> Result<Value> {
-    let mode = transport_mode(config);
     let (message, message_id) = match build_message(config, opts) {
         Ok(built) => built,
         // Bad options are a per-email Err value, not a hard error, so
@@ -300,15 +332,10 @@ fn dispatch(
         Err(e) => return Ok(Value::err(Value::String(e.to_string()))),
     };
 
-    if mode == "log" {
+    let Some(transport) = transport else {
         log_email(opts, &message_id);
         return Ok(sent_result(message_id, "log"));
-    }
-
-    if transport_slot.is_none() {
-        *transport_slot = Some(build_transport(config)?);
-    }
-    let transport = transport_slot.as_ref().expect("just built");
+    };
 
     match transport.send(&message) {
         Ok(_) => Ok(sent_result(message_id, "smtp")),
@@ -317,11 +344,6 @@ fn dispatch(
             e
         )))),
     }
-}
-
-fn with_state<T>(f: impl FnOnce(&mut Option<(EmailConfig, Option<SmtpTransport>)>) -> T) -> T {
-    let mut guard = EMAIL_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    f(&mut guard)
 }
 
 fn require_config_map(value: &Value, function: &str) -> Result<HashMap<String, Value>> {
@@ -369,7 +391,8 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| {
                 let map = require_config_map(&args[0], "configure_email")?;
                 let config = parse_config(&map)?;
-                with_state(|state| *state = Some((config, None)));
+                let mut guard = EMAIL_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = Some((config, None));
                 Ok(Value::Unit)
             },
         },
@@ -404,16 +427,8 @@ pub fn init() -> HashMap<String, Value> {
             requires: None,
             func: |args| {
                 let opts = require_config_map(&args[0], "send_email")?;
-                with_state(|state| {
-                    let Some((config, transport_slot)) = state.as_mut() else {
-                        return Err(IntentError::runtime_error(
-                            "configure_email() has not been called — configure SMTP (or \"transport\": \"log\") at startup"
-                                .to_string(),
-                        ));
-                    };
-                    let config = config.clone();
-                    dispatch(&config, transport_slot, &opts)
-                })
+                let (config, transport) = checkout()?;
+                dispatch(&config, transport.as_ref(), &opts)
             },
         },
     );
@@ -450,21 +465,13 @@ pub fn init() -> HashMap<String, Value> {
                         )))
                     }
                 };
-                with_state(|state| {
-                    let Some((config, transport_slot)) = state.as_mut() else {
-                        return Err(IntentError::runtime_error(
-                            "configure_email() has not been called — configure SMTP (or \"transport\": \"log\") at startup"
-                                .to_string(),
-                        ));
-                    };
-                    let config = config.clone();
-                    let mut results = Vec::with_capacity(emails.len());
-                    for email in &emails {
-                        let opts = require_config_map(email, "send_email_batch")?;
-                        results.push(dispatch(&config, transport_slot, &opts)?);
-                    }
-                    Ok(Value::ok(Value::Array(results)))
-                })
+                let (config, transport) = checkout()?;
+                let mut results = Vec::with_capacity(emails.len());
+                for email in &emails {
+                    let opts = require_config_map(email, "send_email_batch")?;
+                    results.push(dispatch(&config, transport.as_ref(), &opts)?);
+                }
+                Ok(Value::ok(Value::Array(results)))
             },
         },
     );
@@ -506,6 +513,17 @@ mod tests {
         let err = parse_config(&map(vec![("from", s("a@b.co"))])).unwrap_err();
         assert!(err.to_string().contains("host"));
         assert!(parse_config(&map(vec![("transport", s("log")), ("from", s("a@b.co"))])).is_ok());
+    }
+
+    #[test]
+    fn out_of_range_port_gets_clear_message() {
+        let err = parse_config(&map(vec![
+            ("host", s("smtp.example.com")),
+            ("from", s("a@b.co")),
+            ("port", Value::Int(70000)),
+        ]))
+        .unwrap_err();
+        assert!(err.to_string().contains("out of range"), "got: {}", err);
     }
 
     #[test]
