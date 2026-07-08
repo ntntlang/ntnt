@@ -238,3 +238,45 @@ match validate(map { "name": [required] }, map { "name": "ok" }) {
     assert_eq!(exit_code, 0);
     assert!(stdout.contains("ok"), "{stdout}");
 }
+
+#[test]
+fn aliased_import_keeps_closure_support() {
+    // Dispatch is on the resolved value, not the call-site name
+    let code = r#"
+import { validate as check, schema, required } from "std/validate"
+
+let s = schema(map { "even": [required, fn(v) { v % 2 == 0 }] })
+match check(s, map { "even": 4 }) {
+    Ok(clean) => print("ok: " + str(clean["even"])),
+    Err(e) => print("unexpected err: " + str(e))
+}
+let indirect = check
+match indirect(s, map { "even": 3 }) {
+    Ok(_) => print("unexpected ok"),
+    Err(errors) => print(errors["even"])
+}
+"#;
+    let (stdout, stderr, exit_code) = run(code);
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("ok: 4"), "aliased call: {stdout}");
+    assert!(
+        stdout.contains("Invalid value"),
+        "let-bound call with closure rule: {stdout}"
+    );
+}
+
+#[test]
+fn matches_on_non_string_says_must_be_string() {
+    let code = r#"
+import { schema, validate, matches } from "std/validate"
+
+let s = schema(map { "code": [matches("^[A-Z]+$")] })
+match validate(s, map { "code": 42 }) {
+    Ok(_) => print("unexpected ok"),
+    Err(errors) => print(errors["code"])
+}
+"#;
+    let (stdout, _stderr, exit_code) = run(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("Must be a string"), "{stdout}");
+}

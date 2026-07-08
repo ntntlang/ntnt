@@ -63,6 +63,26 @@ fn email_regex() -> &'static regex::Regex {
     RE.get_or_init(|| regex::Regex::new(r"^[^@\s]+@[^@\s]+\.[^@\s]+$").unwrap())
 }
 
+/// Compiled-pattern cache for matches() rules: a schema validates the same
+/// few patterns on every request, and Regex can't be stored inside a Value.
+/// Thread-local because validation runs on the interpreter thread.
+fn cached_regex(pattern: &str) -> Result<regex::Regex> {
+    use std::cell::RefCell;
+    thread_local! {
+        static PATTERN_CACHE: RefCell<HashMap<String, regex::Regex>> =
+            RefCell::new(HashMap::new());
+    }
+    PATTERN_CACHE.with(|cache| {
+        if let Some(re) = cache.borrow().get(pattern) {
+            return Ok(re.clone());
+        }
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| IntentError::type_error(format!("matches(): invalid pattern: {}", e)))?;
+        cache.borrow_mut().insert(pattern.to_string(), re.clone());
+        Ok(re)
+    })
+}
+
 fn url_regex() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| regex::Regex::new(r"^https?://[^\s/$.?#].[^\s]*$").unwrap())
@@ -254,12 +274,11 @@ fn apply_rule(rule: &Value, value: Value, invoke: &mut ClosureInvoker) -> Result
                     ))
                 }
             };
-            let re = regex::Regex::new(&pattern).map_err(|e| {
-                IntentError::type_error(format!("matches(): invalid pattern: {}", e))
-            })?;
+            let re = cached_regex(&pattern)?;
             match &value {
                 Value::String(s) if re.is_match(s) => Pass(value),
-                _ => Fail("Invalid format".to_string()),
+                Value::String(_) => Fail("Invalid format".to_string()),
+                _ => Fail("Must be a string".to_string()),
             }
         }
         other => {

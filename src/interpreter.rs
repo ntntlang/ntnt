@@ -6681,29 +6681,6 @@ impl Interpreter {
                         }
                     }
 
-                    // Special handling for validate(schema, data): custom
-                    // fn(value) rules need interpreter context to call the
-                    // closure. Guarded on the binding so a user-defined
-                    // validate() still shadows the builtin.
-                    if name == "validate" && arguments.len() == 2 {
-                        let is_std_validate = matches!(
-                            self.environment.borrow().get("validate"),
-                            Some(Value::NativeFunction { name, .. }) if name == "validate"
-                        );
-                        if is_std_validate {
-                            let schema = self.eval_expression(&arguments[0])?;
-                            let data = self.eval_expression(&arguments[1])?;
-                            let mut invoke = |func: &Value, args: Vec<Value>| {
-                                self.call_function(func.clone(), args)
-                            };
-                            return crate::stdlib::validate::run_validation(
-                                &schema,
-                                &data,
-                                &mut invoke,
-                            );
-                        }
-                    }
-
                     // Special handling for sort_by(arr, comparator) - higher-order function
                     if name == "sort_by" {
                         if arguments.len() != 2 {
@@ -6926,6 +6903,22 @@ impl Interpreter {
                         let arr = args[0].clone();
                         let comparator = args[1].clone();
                         return self.sort_by_hof(arr, comparator);
+                    }
+
+                    // validate(schema, data) needs interpreter context so
+                    // custom fn(value) rules can call the closure. Dispatch
+                    // on the RESOLVED value (not the call-site name) so
+                    // aliased imports and let-bound references keep closure
+                    // support; user-defined validate() shadows naturally.
+                    if name == "validate" && args.len() == 2 {
+                        let mut invoke = |func: &Value, call_args: Vec<Value>| {
+                            self.call_function(func.clone(), call_args)
+                        };
+                        return crate::stdlib::validate::run_validation(
+                            &args[0],
+                            &args[1],
+                            &mut invoke,
+                        );
                     }
                 }
 
