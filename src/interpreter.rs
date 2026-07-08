@@ -6904,6 +6904,22 @@ impl Interpreter {
                         let comparator = args[1].clone();
                         return self.sort_by_hof(arr, comparator);
                     }
+
+                    // validate(schema, data) needs interpreter context so
+                    // custom fn(value) rules can call the closure. Dispatch
+                    // on the RESOLVED value (not the call-site name) so
+                    // aliased imports and let-bound references keep closure
+                    // support; user-defined validate() shadows naturally.
+                    if name == "validate" && args.len() == 2 {
+                        let mut invoke = |func: &Value, call_args: Vec<Value>| {
+                            self.call_function(func.clone(), call_args)
+                        };
+                        return crate::stdlib::validate::run_validation(
+                            &args[0],
+                            &args[1],
+                            &mut invoke,
+                        );
+                    }
                 }
 
                 self.call_function(callee, args)
