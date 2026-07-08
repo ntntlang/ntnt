@@ -193,8 +193,9 @@ Browser → GET /metrics/stream
   → Route handler exits, interpreter thread free
 
 schedule(500ms) loop (separate thread):
-  → send(metrics_bus, value) → locks BROADCAST_REGISTRY, evaluates any filter
-    predicates, try_send to each matching subscriber's sender
+  → send(metrics_bus, value) → briefly locks BROADCAST_REGISTRY to snapshot
+    the subscriber list, then (outside the lock) evaluates any filter
+    predicates and try_sends to each matching subscriber's sender
   → Each write task wakes, reads value, writes SSE event to socket
 ```
 
@@ -306,7 +307,7 @@ get("/stream/network/{iface}", fn(req) {
 
 `filter(SSESubscription, fn(Map) -> Bool) -> SSESubscription`
 
-Filtering happens server-side before writing to the socket — non-matching events are dropped, never sent over the wire. Execution point: the predicate is an ntnt closure, which the Rust write task cannot evaluate — so filtered subscriptions register their predicate with the bus and it runs at `send()` fan-out time, on the sending interpreter thread. The write task stays interpreter-free (the zero-overhead property holds); the cost of filtering lands on the publisher, proportional to filtered subscribers.
+Filtering happens server-side before writing to the socket — non-matching events are dropped, never sent over the wire. Execution point: the predicate is an ntnt closure, which the Rust write task cannot evaluate — so filtered subscriptions register their predicate with the bus and it runs at `send()` fan-out time, on the sending interpreter thread — outside the registry lock, against a snapshot of the subscriber list (see the `send()` algorithm in Implementation Notes), so a predicate may itself call `send()` safely. The write task stays interpreter-free (the zero-overhead property holds); the cost of filtering lands on the publisher, proportional to filtered subscribers.
 
 **Event IDs and reconnect:**
 
@@ -565,16 +566,27 @@ struct BroadcastMessage {
 `send(bc, value)`:
 1. Serialize `Value` → `SerializedValue`
 2. Lock registry, look up the `BroadcastChannel` by the handle's
-   `BroadcastKey`
-3. Append to replay buffer if configured
-4. For each `SubscriberEntry`: if `filter` is set, evaluate the predicate
-   against the value (we are on the publishing interpreter thread, so
-   ntnt closures are evaluable here) and skip non-matching subscribers
-5. `try_send` to each remaining sender; on `Disconnected` (receiver
-   dropped) → remove that entry from the list; on `Full` → apply the
-   queue policy (default: pop the oldest event and retry, warn deduped
-   per subscriber; `"drop_slow": false`: block briefly instead)
-6. Drop lock
+   `BroadcastKey`; append to replay buffer if configured; **snapshot the
+   subscriber list** (clone each entry's `flume::Sender` — cheap, it's an
+   Arc internally — plus `sender_id` and filter handle); drop the lock
+3. Outside the lock, for each snapshot entry: if `filter` is set,
+   evaluate the predicate against the value (we are on the publishing
+   interpreter thread, so ntnt closures are evaluable here) and skip
+   non-matching subscribers
+4. `try_send` to each remaining sender; on `Full` → apply the queue
+   policy (default: pop the oldest event and retry, warn deduped per
+   subscriber; `"drop_slow": false`: block briefly instead); collect the
+   `sender_id` of any `Disconnected` sender (receiver dropped)
+5. If any senders were dead, re-lock the registry briefly and remove
+   those entries
+
+Predicates and sends run OUTSIDE the registry lock deliberately:
+`std::sync::Mutex` is non-reentrant, so a filter predicate that itself
+calls `send()` (or `subscribe()`/`broadcast()`) would deadlock if the
+lock were held across evaluation. With the snapshot approach, re-entrant
+`send()` from a predicate simply takes the lock afresh and works;
+recursion depth is bounded by user code. The cost is benign staleness: a
+subscriber added or removed mid-send catches the next event.
 
 `subscribe(bc)`:
 1. Create a new `flume::bounded(1024)` pair — flume so the Axum write task
