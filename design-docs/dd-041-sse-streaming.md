@@ -95,11 +95,15 @@ Resolution, now part of Phase 1:
 
 **Open questions resolved (recommendations):**
 
-- Backing: custom `Vec<flume::Sender>` per bus — flume is already a
-  dependency (the request bridge uses it) and, unlike crossbeam, supports
-  BOTH sync sends from interpreter threads and `recv_async()` in the Axum
-  write task. Per-subscriber queues are **bounded** (e.g. 1024) rather
-  than unbounded: a stuck TCP connection with an unbounded queue is
+- Backing: each subscriber gets a **bounded ring buffer**
+  (`Arc<Mutex<VecDeque>>`, cap ~1024) plus a coalescing flume `bounded(1)`
+  wake signal. The ring — not a channel — is required because the default
+  policy is drop-**oldest** (evict the stalest event so a slow client
+  catches up to *now*), and neither flume nor crossbeam lets the sending
+  end pop the oldest queued item; only the receiver drains. flume carries
+  the payload-free wake so the Axum write task can `recv_async()` (flume
+  is already a bridge dependency; crossbeam has no async recv). Bounded
+  rather than unbounded: a stuck TCP connection with an unbounded queue is
   slow-motion OOM.
   Default policy drop-oldest with a deduped warn; `"drop_slow": false`
   opts into blocking sends for correctness-critical streams.
@@ -145,7 +149,7 @@ schedule(500ms) → send(metrics_bus) → [N browser connections] each subscribe
 
 ### The New Primitive: Broadcast Channel
 
-`broadcast()` creates a broadcast channel backed by a multi-sender, multi-receiver bus. Each subscriber gets their own bounded flume receiver that receives a copy of every message sent to the bus. Messages are not consumed — they're fanned out.
+`broadcast()` creates a broadcast channel backed by a fan-out bus. Each subscriber gets their own bounded per-connection queue that receives a copy of every message sent to the bus. Messages are not consumed by one subscriber at the expense of others — they're fanned out.
 
 ```
 broadcast_channel
@@ -159,9 +163,9 @@ send(bc, value) → all three subscribers receive a copy
 **Implementation options (see Open Questions):**
 - `bus` crate — lock-free SPMC broadcast, fastest, single-producer only
 - `tokio::sync::broadcast` — MPMC, has lag/drop semantics, skip-behind
-- Custom: Vec of flume senders, new sender added per subscriber, clean up on disconnect
+- Custom: per-subscriber bounded ring buffer + coalescing wake signal, added per subscriber, cleaned up on disconnect
 
-The custom approach (Vec of senders) won — see the Design Review: flume is already the bridge's channel library and its receivers support `recv_async()` in the Axum write task, which crossbeam receivers do not.
+The custom approach won — see the Design Review. A ring buffer (not a channel) is needed because the default backpressure policy is drop-**oldest**, a sender-side eviction that channels don't allow; a payload-free flume `bounded(1)` wake lets the Axum write task `recv_async()` and then drain (flume is already the bridge's library; crossbeam has no async recv).
 
 ### How the `sse()` Response Works
 
@@ -169,7 +173,7 @@ When a route handler returns `sse(subscription)`:
 
 1. The Rust HTTP layer recognizes the SSE response type.
 2. It sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`, connection stays open.
-3. A Rust task (not an interpreter thread) awaits the subscription's flume receiver (`recv_async()`) in a loop, formatting each `Value` as an SSE event and writing to the HTTP response body.
+3. A Rust task (not an interpreter thread) awaits the subscription's wake signal (`recv_async()`), then drains the per-connection ring buffer, formatting each `Value` as an SSE event and writing to the HTTP response body.
 4. When the client disconnects, the write fails, the loop exits, and the subscription is dropped — which removes this subscriber from the broadcast channel's sender list.
 5. The interpreter thread is free after returning the SSE response token. It does not block.
 
@@ -184,19 +188,20 @@ SSE connections die silently when passing through proxies and load balancers tha
 ```
 Browser → GET /metrics/stream
   → Route handler runs (interpreter thread)
-  → subscribe(metrics_bus) → creates bounded flume queue (flume::bounded(1024)),
-    registers sender in BROADCAST_REGISTRY, parks the receiver in
-    SUBSCRIPTION_REGISTRY under a fresh subscription_id
+  → subscribe(metrics_bus) → creates bounded ring buffer + wake signal,
+    registers the entry in BROADCAST_REGISTRY, parks the subscription
+    (ring + wake receiver) in SUBSCRIPTION_REGISTRY under a subscription_id
   → return sse(subscription) → BridgeBody::Sse { subscription_id } to HTTP layer
   → HTTP layer take()s the subscription, spawns write task:
-    recv_async() on the flume receiver → write to socket
+    recv_async() on the wake signal → drain ring buffer → write to socket
   → Route handler exits, interpreter thread free
 
 schedule(500ms) loop (separate thread):
   → send(metrics_bus, value) → briefly locks BROADCAST_REGISTRY to snapshot
     the subscriber list, then (outside the lock) evaluates any filter
-    predicates and try_sends to each matching subscriber's sender
-  → Each write task wakes, reads value, writes SSE event to socket
+    predicates and, per subscriber, enqueues into the ring (drop-oldest if
+    full) and signals its wake
+  → Each write task wakes, drains the ring, writes SSE events to socket
 ```
 
 ---
@@ -277,6 +282,22 @@ get("/jobs/{id}/progress", fn(req) {
 > task. Disconnect is detected in the write task, which enqueues the
 > registered `on_close` callback onto the scheduler's interpreter thread
 > (the same thread that runs `schedule()` callbacks) for execution.
+
+> **Implementation note — the generator runs in a scheduling-capable
+> context, NOT the worker request scope.** A route handler executes on a
+> worker interpreter, and Worker mode deliberately lacks
+> `RuntimeCapability::Scheduling` — so a bare `schedule()` in a worker
+> handler is silently skipped. That gate exists to stop *module-level*
+> samplers from registering N times (once per worker) during program
+> load; it must NOT disable per-connection timers, or the clock and
+> progress-bar streams above would silently never tick under multi-worker.
+> Resolution: `sse_stream` hands the generator off (like the `sse()`
+> subscription handoff) to run in a per-connection execution scope that
+> grants `Scheduling`. `schedule()`/`cancel_schedule()` inside the
+> generator therefore register normally, and the cardinality is correct by
+> construction — one timer per open connection, not one per worker. (A
+> module-level `schedule()` at app top level is still skipped on workers,
+> unchanged.)
 
 ### Phase 2: Named Events, IDs, Filtering
 
@@ -531,7 +552,14 @@ struct BroadcastChannel {
 
 struct SubscriberEntry {
     sender_id: u64,
-    tx: flume::Sender<BroadcastMessage>,
+    // Per-subscriber bounded ring buffer. Drop-oldest is a SENDER-side
+    // eviction (pop_front on overflow), which a flume/crossbeam channel
+    // cannot do from the sending end — so the queue is an explicit
+    // VecDeque under a Mutex, and `wake` is a coalescing signal that tells
+    // the write task "drain me" without carrying the payload.
+    queue: Arc<Mutex<VecDeque<BroadcastMessage>>>, // cap = queue_size (1024)
+    wake: flume::Sender<()>,                        // bounded(1), coalescing
+    queue_size: usize,
     // Phase 2: set by filter(sub, pred). The predicate is an ntnt closure;
     // it is evaluated at send() fan-out time on the publishing interpreter
     // thread (the write task never runs interpreter code).
@@ -551,7 +579,8 @@ struct FilterPredicate {
 static SUBSCRIPTION_REGISTRY: LazyLock<Mutex<HashMap<u64, SseSubscription>>> = ...;
 
 struct SseSubscription {
-    receiver: flume::Receiver<BroadcastMessage>,
+    queue: Arc<Mutex<VecDeque<BroadcastMessage>>>, // SAME Arc as the entry
+    wake_rx: flume::Receiver<()>,                  // write task awaits this
     channel_key: BroadcastKey, // for sender cleanup on disconnect
     sender_id: u64,
 }
@@ -567,40 +596,54 @@ struct BroadcastMessage {
 1. Serialize `Value` → `SerializedValue`
 2. Lock registry, look up the `BroadcastChannel` by the handle's
    `BroadcastKey`; append to replay buffer if configured; **snapshot the
-   subscriber list** (clone each entry's `flume::Sender` — cheap, it's an
-   Arc internally — plus `sender_id` and filter handle); drop the lock
+   subscriber list** (clone each entry's `queue` Arc and `wake` Sender —
+   both cheap, they're Arc-backed — plus `sender_id` and filter handle);
+   drop the lock
 3. Outside the lock, for each snapshot entry: if `filter` is set,
    evaluate the predicate against the value (we are on the publishing
    interpreter thread, so ntnt closures are evaluable here) and skip
    non-matching subscribers
-4. `try_send` to each remaining sender; on `Full` → apply the queue
-   policy (default: pop the oldest event and retry, warn deduped per
-   subscriber; `"drop_slow": false`: block briefly instead); collect the
-   `sender_id` of any `Disconnected` sender (receiver dropped)
-5. If any senders were dead, re-lock the registry briefly and remove
+4. For each remaining entry, enqueue with drop-oldest: lock the entry's
+   `queue`; if `queue.len() == queue_size`, `pop_front()` (drop the oldest
+   unsent event, warn deduped per subscriber) — unless the bus was created
+   with `"drop_slow": false`, which instead waits briefly for the write
+   task to drain (Phase 2); `push_back(message)`; unlock; then
+   `wake.try_send(())` and ignore a `Full` result (a pending wake already
+   means "drain"). A `Disconnected` wake receiver means the write task is
+   gone → collect this `sender_id` for cleanup.
+5. If any subscribers were dead, re-lock the registry briefly and remove
    those entries
 
-Predicates and sends run OUTSIDE the registry lock deliberately:
+Drop-oldest is a sender-side eviction, so the per-subscriber queue must be
+an explicit `Mutex<VecDeque>`, not a channel: neither flume nor crossbeam
+lets the sending end pop the oldest queued item (only the receiver drains).
+The `wake` channel carries no payload — it is a coalescing "data ready"
+signal (`bounded(1)`), so the write task can `recv_async()` on it and then
+drain the deque.
+
+Predicates and enqueues run OUTSIDE the registry lock deliberately:
 `std::sync::Mutex` is non-reentrant, so a filter predicate that itself
 calls `send()` (or `subscribe()`/`broadcast()`) would deadlock if the
-lock were held across evaluation. With the snapshot approach, re-entrant
-`send()` from a predicate simply takes the lock afresh and works;
-recursion depth is bounded by user code. The cost is benign staleness: a
-subscriber added or removed mid-send catches the next event.
+registry lock were held across evaluation. With the snapshot approach,
+re-entrant `send()` from a predicate simply takes the registry lock afresh
+and works; recursion depth is bounded by user code. The cost is benign
+staleness: a subscriber added or removed mid-send catches the next event.
 
 `subscribe(bc)`:
-1. Create a new `flume::bounded(1024)` pair — flume so the Axum write task
-   can `recv_async()` (crossbeam receivers have no async recv); bounded
-   per the Design Review: a stuck TCP connection with an unbounded queue
-   is slow-motion OOM. On a full queue the send policy is drop-oldest
-   with a deduped warn (unless the bus was created with
-   `"drop_slow": false`, which opts into briefly-blocking sends)
+1. Create the per-subscriber queue — `Arc<Mutex<VecDeque>>` capped at
+   `queue_size` (default 1024) — and a `flume::bounded::<()>(1)` wake pair.
+   Bounded per the Design Review: a stuck TCP connection with an unbounded
+   queue is slow-motion OOM. The wake channel is flume so the Axum write
+   task can `recv_async()` on it (crossbeam has no async recv). On a full
+   queue the policy is drop-oldest with a deduped warn (unless the bus was
+   created with `"drop_slow": false`, which opts into briefly-blocking
+   sends — Phase 2).
 2. Allocate a fresh `sender_id`; lock the broadcast registry, push
-   `SubscriberEntry { sender_id, tx: sender, filter: None }` into
-   `BroadcastChannel.senders`, drop the lock. (Phase 2's `filter(sub,
-   pred)` later sets `filter` on this entry, located by `channel_key` +
-   `sender_id`.)
-3. Insert `SseSubscription { receiver, channel_key, sender_id }` into
+   `SubscriberEntry { sender_id, queue: queue.clone(), wake: wake_tx,
+   queue_size, filter: None }` into `BroadcastChannel.senders`, drop the
+   lock. (Phase 2's `filter(sub, pred)` later sets `filter` on this entry,
+   located by `channel_key` + `sender_id`.)
+3. Insert `SseSubscription { queue, wake_rx, channel_key, sender_id }` into
    `SUBSCRIPTION_REGISTRY` under a fresh `subscription_id` — this is the
    bridge handoff: the Axum handler later `take()`s this entry
 4. Return `Value::SSESubscription(subscription_id)` to ntnt; the handler
@@ -623,17 +666,24 @@ async fn sse_handler(subscription_id: u64, req: Request) -> Response {
                 _ = keepalive.tick() => {
                     yield Ok(Bytes::from(":\n\n"));  // SSE comment = keep-alive
                 }
-                msg = subscription.receiver.recv_async() => {
-                    match msg {
-                        Ok(m) => yield Ok(format_sse_event(&m)),
-                        Err(_) => break,  // broadcast channel dropped
+                woken = subscription.wake_rx.recv_async() => {
+                    if woken.is_err() { break; } // all senders dropped
+                    // Drain everything currently queued (drop-oldest means
+                    // the deque already holds only the freshest queue_size
+                    // events). Hold the lock only to move messages out.
+                    let batch: Vec<BroadcastMessage> = {
+                        let mut q = subscription.queue.lock();
+                        q.drain(..).collect()
+                    };
+                    for m in batch {
+                        yield Ok(format_sse_event(&m));
                     }
                 }
                 _ = req.closed() => break,  // client disconnected
             }
         }
 
-        // Cleanup: remove this subscriber's sender from the broadcast registry
+        // Cleanup: remove this subscriber from the broadcast registry
         BROADCAST_REGISTRY.lock().remove_sender(&subscription.channel_key, subscription.sender_id);
     });
 
@@ -710,7 +760,7 @@ untouched.
 - [ ] `Value::BroadcastHandle(BroadcastKey)` and `Value::SSESubscription(u64)` variants
 - [ ] `BroadcastRegistry` global, keyed by name for named buses (Design Review: shared across workers and hot reloads) — LazyLock, same pattern as the pool registry
 - [ ] `broadcast(name?) -> BroadcastHandle` — named form is the documented default; anonymous form is per-worker
-- [ ] `subscribe(BroadcastHandle) -> SSESubscription` — bounded per-subscriber queue (1024), drop-oldest with deduped warn (the `"drop_slow": false` blocking opt-in arrives with `opts?` in Phase 2)
+- [ ] `subscribe(BroadcastHandle) -> SSESubscription` — per-subscriber bounded ring buffer (`Arc<Mutex<VecDeque>>`, cap 1024) + coalescing `flume::bounded(1)` wake; drop-oldest on overflow with deduped warn (the `"drop_slow": false` blocking opt-in arrives with `opts?` in Phase 2). Ring, not a channel: drop-oldest is a sender-side eviction channels can't do
 - [ ] `send(BroadcastHandle, value) -> Bool` — dispatches on handle type (existing channel `send` is arity-2 and returns Bool; the broadcast arm keeps that contract. Phase 2's 3-arg named-event form widens `max_arity`)
 - [ ] `sse(SSESubscription) -> Response` — response BUILDER returned from a normal handler (there is no `respond` keyword; zero parser work)
 - [ ] `BridgeBody::Sse { subscription_id }` variant on the bridge response; Axum layer builds the streaming body when it sees it (Design Review item)
@@ -718,6 +768,7 @@ untouched.
 - [ ] SSE write loop in Rust: format events, keep-alive pings, disconnect cleanup
 - [ ] Sender cleanup on subscriber disconnect
 - [ ] `sse_stream(fn(push, on_close))` — per-connection callback form; `push()` returns Bool (false after disconnect)
+- [ ] `sse_stream` generator runs in a scheduling-capable per-connection scope (handed off from the worker), so `schedule()`/`cancel_schedule()` inside it register per connection instead of being skipped by the Worker capability gate — with a multi-worker test that a per-connection timer actually ticks when the request was served by a worker
 - [ ] `connection_count(BroadcastHandle) -> Int`
 - [ ] `enable_cors()` headers apply to SSE responses — headers are set before the stream body begins (see Security)
 - [ ] Typechecker signatures
@@ -862,7 +913,7 @@ reconciled into the body):
 
 | Question | Resolution |
 |----------|------------|
-| Broadcast backing implementation | Custom `Vec<SubscriberEntry>` per bus, flume-backed — with BOUNDED per-subscriber queues (1024) |
+| Broadcast backing implementation | Custom `Vec<SubscriberEntry>` per bus; each subscriber has a BOUNDED ring buffer (1024, drop-oldest) + a coalescing flume wake signal |
 | `send()` overload on BroadcastHandle | Reuse existing `send()` dispatch on handle type |
 | `drop_slow` default | Drop-oldest with deduped warn (default); `"drop_slow": false` opts into briefly-blocking sends |
 | `sse_stream` cleanup model | `on_close(fn)` callback |
@@ -878,4 +929,4 @@ reconciled into the body):
 | Date | Change |
 |------|--------|
 | 2026-03-17 | Initial draft — vision, architecture, full API, three phases, implementation notes |
-| 2026-07-08 | Design review against current main: response-builder API (no `respond` keyword), `BridgeBody::Sse` bridge variant, named process-global broadcasts, bounded drop-oldest subscriber queues; verified the Worker-mode `schedule()` gate already exists (no change needed); body reconciled end to end |
+| 2026-07-08 | Design review against current main: response-builder API (no `respond` keyword), `BridgeBody::Sse` bridge variant, named process-global broadcasts; per-subscriber bounded ring buffer + wake signal (drop-oldest needs sender-side eviction, which a channel can't do); `sse_stream` generators run in a scheduling-capable per-connection scope so per-connection timers work under multi-worker; verified the module-level Worker `schedule()` gate already exists; body reconciled end to end |
