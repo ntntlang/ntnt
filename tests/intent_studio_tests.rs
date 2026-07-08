@@ -988,6 +988,34 @@ Feature: Home Page
 }
 
 #[test]
+fn intent_lint_warns_on_vacuous_component_scenario() {
+    let content = r#"## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+
+---
+
+Component: Error Popup
+  id: component.error_popup
+
+  Scenario: Popup appears
+    When a user visits /error
+"#;
+    let (stdout, _stderr, exit_code) = run_intent_lint(content, &[]);
+    assert_eq!(exit_code, 0, "{stdout}");
+    assert!(
+        stdout.contains("vacuous_scenario") && stdout.contains("a user visits /error"),
+        "component scenarios need the same guard: {stdout}"
+    );
+    assert!(
+        !stdout.contains("orphan_term"),
+        "component-scenario clauses count as term usage: {stdout}"
+    );
+}
+
+#[test]
 fn intent_lint_accepts_tnt_path_with_paired_intent() {
     use std::io::Write as _;
     let dir = std::env::temp_dir().join(format!("ntnt_lint_pair_{}", std::process::id()));

@@ -5971,6 +5971,24 @@ pub fn lint_intent_file(intent: &IntentFile) -> IntentLintReport {
         }
     }
 
+    // Component scenarios pass vacuously without outcomes for the same
+    // reason feature scenarios do — warn symmetrically
+    for component in &intent.components {
+        for scenario in &component.scenarios {
+            scenarios_checked += 1;
+            if scenario.outcomes.is_empty() {
+                warnings.push(IntentLintFinding {
+                    kind: "vacuous_scenario".to_string(),
+                    feature: component.name.clone(),
+                    scenario: scenario.name.clone(),
+                    text: scenario.when_clause.clone(),
+                    suggestions: Vec::new(),
+                    detail: "scenario has no outcome (→) lines — it verifies nothing and will pass vacuously".to_string(),
+                });
+            }
+        }
+    }
+
     // Glossary-wide cycle scan: catches cycles in entries no scenario touches.
     // Substitute dummy values for {param} placeholders so patterns resolve.
     // Dedup on the set of participating terms, not the path message —
@@ -6035,6 +6053,14 @@ pub fn lint_intent_file(intent: &IntentFile) -> IntentLintReport {
     }
     for component in &intent.components {
         usage_corpus.extend(component.inherent_behavior.iter().cloned());
+        // Component scenarios use glossary terms exactly like feature ones
+        for scenario in &component.scenarios {
+            usage_corpus.push(scenario.when_clause.clone());
+            if let Some(given) = &scenario.given_clause {
+                usage_corpus.push(given.clone());
+            }
+            usage_corpus.extend(scenario.outcomes.iter().cloned());
+        }
     }
     for invariant in &intent.invariants {
         usage_corpus.extend(invariant.assertions.iter().cloned());

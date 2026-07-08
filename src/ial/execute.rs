@@ -1087,11 +1087,6 @@ fn execute_property_check(
     }
 }
 
-/// Execute an invariant check
-///
-/// Invariants are bundles of assertions that are expanded and checked.
-/// For now, this is a placeholder - invariant expansion happens during
-/// glossary resolution, not at execution time.
 /// Execute multiple primitives and collect results
 pub fn execute_all(primitives: &[Primitive], ctx: &mut Context, port: u16) -> Vec<ExecuteResult> {
     primitives.iter().map(|p| execute(p, ctx, port)).collect()
