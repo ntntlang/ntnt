@@ -11,6 +11,7 @@ AI systems are rapidly evolving from coding assistants to primary software creat
 - **Human Governance and Trust:** Every critical decision made by an AI agent is transparent and optionally gated by human approval. This ensures that while AI handles the heavy lifting 24/7, it cannot bypass human judgment on high-impact design choices, UX decisions, or cross-service API contracts[2][3].
 - **Grounded Innovation:** The language draws inspiration from proven ideas in programming language design (contracts from Eiffel/Racket, effect types from functional languages, versioning from Elm, etc.) and extends them to a holistic system tailored for AI. It aims to feel familiar in its guarantees (like Rust’s safety or Go’s simplicity) but goes further by being *“AI-friendly”* in syntax and tooling.
 (See **Implementation Status** below for what NTNT has shipped versus what remains vision.) In summary, this white paper introduces the design of **a novel programming language ecosystem optimized for AI developers**, combining machine-oriented code structure with human-oriented oversight. We detail the core language features, built-in development workflow support, and observability mechanisms. We also compare this approach to Go, Rust, and Node.js, and illustrate its use in two concrete scenarios: *(1)* autonomous AI agents building a full-stack blog application, and *(2)* an AI-guided refactoring of a legacy PHP app into a modern, AI-maintained codebase. Our aim is to demonstrate that with the right language and tools, AI-led development can be not only efficient, but **safe, transparent, and collaborative**.
+
 ## Implementation Status: Shipped vs Aspirational
 
 This paper is a **vision document**. NTNT, the language it motivated, has
@@ -69,7 +70,7 @@ of v0.4.12. The authoritative, always-current status lives in
 Sections below describing aspirational features are kept as originally
 written — read them as design direction, not shipped capability.
 
-## Introduction and Motivation## Introduction and Motivation
+## Introduction and Motivation
 
 Traditional programming languages assume a human writing and reading the code. As a result, they emphasize human-friendly syntax, informal code style conventions, and development workflows that rely on human intuition (manual code review, ad-hoc testing, etc.). With AI agents taking on coding tasks, these assumptions no longer hold. AI developers do not get “tired” or bored by boilerplate, nor do they need code to be written in a conversational style – they benefit most from *structured, unambiguous code representations*[1]. Conversely, humans overseeing AI-written code need more than a diff and a commit message to understand what an AI changed and why. There is a gap between **human-oriented software practices** and **AI-driven code generation**.
 Several pain points illustrate this gap:
