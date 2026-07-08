@@ -2413,6 +2413,44 @@ let name = get_str(kv, "user:name", "Anonymous")     // String, default "Anonymo
 
 ---
 
+## Email (`std/email`)
+
+SMTP email for signup confirmations, password resets, and notifications.
+Configure once at startup; `send_email()` returns
+`Ok(map { "message_id", "transport" })` or `Err(message)` — bad addresses
+and SMTP failures are `Err` values, never crashes.
+
+```ntnt
+import { configure_email, send_email, send_email_batch } from "std/email"
+import { get_env } from "std/env"
+
+configure_email(map {
+    "host": get_env("SMTP_HOST") ?? "smtp.example.com",
+    "port": 587,                    // 587 STARTTLS (default), 465 implicit TLS
+    "username": get_env("SMTP_USER") ?? "",
+    "password": get_env("SMTP_PASS") ?? "",
+    "from": "hello@myapp.com",
+    "from_name": "My App"
+})
+
+let result = send_email(map {
+    "to": "user@example.com",       // string or array of strings
+    "subject": "Welcome!",
+    "html": template("emails/welcome.html", map { "name": name }),
+    "text": "Welcome, #{name}!"     // both = multipart with plain-text fallback
+}) otherwise { return status(500, "Email failed: #{err}") }
+```
+
+- **Development/CI**: `configure_email(map { "transport": "log", "from": "dev@localhost" })`
+  prints emails to stderr and reports them as sent — no SMTP server needed.
+  `NTNT_EMAIL_MODE=log` forces log mode over any config.
+- Options: `to` (required), `subject` (required), `text` and/or `html`,
+  `cc`, `bcc`, `reply_to`, per-message `from`/`from_name` overrides.
+- `send_email_batch([...])` reuses one connection and returns
+  `Ok(array of per-email results)` — one bad email doesn't stop the rest.
+
+---
+
 ## Logging (`std/log`)
 
 Structured logging with configurable levels.

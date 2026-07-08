@@ -12,6 +12,7 @@
 - [std/concurrent](#stdconcurrent)
 - [std/crypto](#stdcrypto)
 - [std/csv](#stdcsv)
+- [std/email](#stdemail)
 - [std/env](#stdenv)
 - [std/fs](#stdfs)
 - [std/http](#stdhttp)
@@ -5570,6 +5571,120 @@ stringify_with_headers([map { "name": "Alice" }], ["name"])  // => "name\nAlice"
 **See also:** `stringify`, `parse_with_headers`
 
 *Since v0.2.0*
+
+---
+
+## std/email
+
+SMTP email sending with a log transport for development
+
+```ntnt
+import { configure_email, send_email, send_email_batch } from "std/email"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`configure_email`](#configureemail) | Configure the SMTP transport. Call once at startup, before send_email(). |
+| [`send_email`](#sendemail) | Send a single email through the configured transport. |
+| [`send_email_batch`](#sendemailbatch) | Send multiple emails, reusing one SMTP connection. |
+
+#### `configure_email`
+
+```ntnt
+configure_email(config: Map<String, Any>) -> Unit
+```
+
+Configure the SMTP transport. Call once at startup, before send_email().
+
+Config keys: "host" (required for smtp), "port" (default 587), "username", "password", "from" (required), "from_name", "tls" ("starttls" | "implicit" | "none"; defaults from the port — 465 is implicit, others STARTTLS), and "transport" ("smtp" | "log"). The log transport prints emails to stderr and reports them as sent — use it in development and tests. The NTNT_EMAIL_MODE env var ("log" or "smtp") overrides the configured transport.
+
+**Parameters:**
+
+- `config` — SMTP configuration map.
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+configure_email(map { "host": "smtp.example.com", "from": "hello@myapp.com", "username": "u", "password": "p" })  // Production SMTP
+configure_email(map { "transport": "log", "from": "dev@localhost" })  // Development: log emails instead of sending
+```
+
+**Errors:**
+
+- **TypeError**: requires a \ — *Fix: Add \"from\": \"hello@myapp.com\" to the config*
+
+**See also:** `send_email`, `send_email_batch`, `get_env`
+
+*Since v0.4.12*
+
+---
+
+#### `send_email`
+
+```ntnt
+send_email(opts: Map<String, Any>) -> Result<Map<String, String>, String>
+```
+
+Send a single email through the configured transport.
+
+Options: "to" (string or array, required), "subject" (required), "text" and/or "html" (at least one required — both sends a multipart message with a plain-text fallback), "cc", "bcc", "reply_to", and per-message "from" / "from_name" overrides. Returns Ok(map { "message_id", "transport" }) or Err(message). Invalid options and SMTP failures are Err values (use `otherwise` or match), not runtime errors.
+
+**Parameters:**
+
+- `opts` — The email to send.
+
+**Returns:** Ok with the generated message id, or Err with the failure reason.
+
+**Examples:**
+
+```ntnt
+send_email(map { "to": "user@example.com", "subject": "Welcome!", "text": "Hello!" })  // Plain text email
+send_email(map { "to": "user@example.com", "subject": "Welcome!", "html": template("emails/welcome.html", map { "name": name }), "text": "Welcome!" })  // HTML with text fallback
+```
+
+**Errors:**
+
+- **RuntimeError**: configure_email() has not been called — *Fix: Call configure_email() at startup before sending*
+
+**Gotchas:**
+
+- Returns Err for bad addresses or SMTP failures instead of crashing — always handle the Result.
+
+**See also:** `configure_email`, `send_email_batch`, `template`
+
+*Since v0.4.12*
+
+---
+
+#### `send_email_batch`
+
+```ntnt
+send_email_batch(emails: Array<Map<String, Any>>) -> Result<Array<Any>, String>
+```
+
+Send multiple emails, reusing one SMTP connection.
+
+Each entry takes the same options as send_email(). Returns Ok with an array of per-email results (each Ok(map) or Err(message), in input order); a hard Err is returned only when the transport itself cannot be set up. One bad email does not stop the rest.
+
+**Parameters:**
+
+- `emails` — Array of email option maps.
+
+**Returns:** Ok(array of per-email results), or Err for transport setup failure.
+
+**Examples:**
+
+```ntnt
+send_email_batch([map { "to": "a@x.co", "subject": "Hi", "text": "..." }, map { "to": "b@x.co", "subject": "Hi", "text": "..." }])  // Two emails, one connection
+```
+
+**See also:** `send_email`, `configure_email`
+
+*Since v0.4.12*
 
 ---
 

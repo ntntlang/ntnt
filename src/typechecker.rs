@@ -3981,6 +3981,32 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("transaction", ["conn" => Type::Any, "callback" => Type::Any], Type::Any);
             sig!("close", ["conn" => Type::Any], Type::Unit);
         }
+        "std/email" => {
+            let opts_map = Type::Map {
+                key_type: Box::new(Type::String),
+                value_type: Box::new(Type::Any),
+            };
+            let send_result = Type::Generic {
+                name: "Result".to_string(),
+                args: vec![
+                    Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::String),
+                    },
+                    Type::String,
+                ],
+            };
+            sig!("configure_email", ["config" => opts_map.clone()], Type::Unit);
+            sig!("send_email", ["opts" => opts_map.clone()], send_result);
+            sig!(
+                "send_email_batch",
+                ["emails" => Type::Array(Box::new(opts_map))],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![Type::Array(Box::new(Type::Any)), Type::String],
+                }
+            );
+        }
         "std/validate" => {
             let validator = Type::Named("Validator".to_string());
             let string_map = Type::Map {

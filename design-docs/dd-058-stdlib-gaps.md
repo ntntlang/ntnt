@@ -1,6 +1,6 @@
 # DD-058: Stdlib Gap Analysis — Eliminating Common Package Dependencies
 
-**Status:** Draft — item 1 (`std/validate`) shipped 2026-07-08
+**Status:** Draft — items 1 (`std/validate`) and 2 (`std/email`) shipped 2026-07-08
 **Author:** Larri + Josh
 **Created:** 2026-03-31
 **App:** ntnt
@@ -115,7 +115,13 @@ let result = validate(user_schema, parse_form(req))
 
 **Scope:** ~500-800 lines of Rust. No new dependencies (regex already in use).
 
-#### 2. Email Sending (`std/email`)
+#### 2. Email Sending (`std/email`) — ✅ SHIPPED (v0.4.12)
+
+> Implemented as proposed (`lettre` with rustls, matching the repo's TLS
+> stack), plus a `"transport": "log"` mode (and `NTNT_EMAIL_MODE=log` env
+> override) that prints emails to stderr and reports them as sent — so dev
+> environments and CI run without an SMTP server. TLS defaults from the
+> port (465 implicit, otherwise STARTTLS) with an explicit `"tls"` override.
 
 **The gap:** Every web app with users eventually sends email — signup confirmations, password resets, notifications, contact forms. Currently requires `fetch()` to an external API (Resend, SendGrid) or shelling out.
 
@@ -479,7 +485,7 @@ Based on impact, effort, and dependencies:
 | Order | Module | Effort | Impact | Notes |
 |-------|--------|--------|--------|-------|
 | 1 | `std/validate` | Medium (500-800 LOC) | Very High | ✅ Shipped v0.4.12. Every app needs it. No new deps. |
-| 2 | `std/email` | Medium (400-600 LOC) | High | `lettre` crate. Every app with users. |
+| 2 | `std/email` | Medium (400-600 LOC) | High | ✅ Shipped v0.4.12. `lettre` crate. Every app with users. |
 | 3 | Rate limiting | Medium (300-500 LOC) | High | Covered in DD-051. Middleware-level. |
 | 4 | Multipart uploads | Medium (400-600 LOC) | High | `multer` crate. File upload forms. |
 | 5 | `from_now()` / `slugify()` / `paginate()` | Small (200 LOC total) | Medium | Quick wins, extend existing modules. |
