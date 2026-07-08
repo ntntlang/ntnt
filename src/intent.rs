@@ -5947,14 +5947,37 @@ pub fn lint_intent_file(intent: &IntentFile) -> IntentLintReport {
 
     // Glossary-wide cycle scan: catches cycles in entries no scenario touches.
     // Substitute dummy values for {param} placeholders so patterns resolve.
-    let mut seen_cycles = HashSet::new();
+    // Dedup on the set of participating terms, not the path message —
+    // scanning "a" and "b" yields "a → b → a" and "b → a → b" for the SAME
+    // cycle, so message keys would report each cycle once per participant.
+    fn cycle_identity(message: &str) -> String {
+        let mut nodes: Vec<String> = message
+            .lines()
+            .find(|l| l.contains(" → "))
+            .map(|l| {
+                l.split(" → ")
+                    .map(|n| Glossary::normalize_for_cycle(n.trim()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        nodes.sort();
+        nodes.dedup();
+        nodes.join(" | ")
+    }
+
+    // Cycles already reported through a scenario outcome count as seen
+    let mut seen_cycles: HashSet<String> = errors
+        .iter()
+        .filter(|f| f.kind == "cycle")
+        .map(|f| cycle_identity(&f.detail))
+        .collect();
     let param_re = regex::Regex::new(r"\{[^}]+\}").unwrap();
     for term in glossary.terms.values() {
         let ial_term = Glossary::convert_params_to_ial(&term.term);
         let dummy = param_re.replace_all(&ial_term, "\"x\"").to_string();
         if let Err(e) = crate::ial::resolve(&Term::new(&dummy), &vocab) {
             if e.kind == crate::ial::ResolveErrorKind::Cycle
-                && seen_cycles.insert(e.message.clone())
+                && seen_cycles.insert(cycle_identity(&e.message))
             {
                 errors.push(IntentLintFinding {
                     kind: "cycle".to_string(),

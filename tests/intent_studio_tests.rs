@@ -889,6 +889,43 @@ fn intent_lint_json_output_shape() {
 }
 
 #[test]
+fn intent_lint_reports_each_cycle_exactly_once() {
+    // A two-term cycle must yield ONE finding, not one per participant —
+    // and not once more via the scenario that references it
+    let content = r#"## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the homepage | / |
+| term alpha | term beta |
+| term beta | term alpha |
+
+---
+
+Feature: Home Page
+  id: feature.home
+
+  Scenario: First visit
+    When a user visits the homepage
+    → term alpha
+"#;
+    let (stdout, _stderr, exit_code) = run_intent_lint(content, &["--json"]);
+    assert_eq!(exit_code, 1);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let cycle_count = json["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "cycle")
+        .count();
+    assert_eq!(
+        cycle_count, 1,
+        "cycle reported {cycle_count} times: {stdout}"
+    );
+}
+
+#[test]
 fn intent_lint_json_suggestions_is_empty_array_when_no_near_miss() {
     // Cycle findings carry no suggestions — the key must still be present
     let content = r#"## Glossary
