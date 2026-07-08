@@ -60,6 +60,12 @@ enum Commands {
         /// Request timeout in seconds for HTTP server (default: 30, env: NTNT_TIMEOUT)
         #[arg(long, default_value = "30", env("NTNT_TIMEOUT"))]
         timeout: u64,
+
+        /// Interpreter worker threads for the HTTP server (default: 1 in dev,
+        /// CPU cores up to 8 in production; env: NTNT_WORKERS). More workers
+        /// let blocking I/O (DB queries, fetch) run in parallel.
+        #[arg(long)]
+        workers: Option<usize>,
     },
     /// Test an HTTP server by running it and making requests
     ///
@@ -880,7 +886,11 @@ fn main() {
 
     let result = match cli.command {
         Some(Commands::Repl) => run_repl(),
-        Some(Commands::Run { file, timeout }) => run_file(&file, timeout),
+        Some(Commands::Run {
+            file,
+            timeout,
+            workers,
+        }) => run_file_with_workers(&file, timeout, workers),
         Some(Commands::Test {
             file,
             get_requests,
@@ -1236,6 +1246,14 @@ fn evaluate(interpreter: &mut Interpreter, source: &str) -> anyhow::Result<Strin
 }
 
 fn run_file(path: &PathBuf, timeout: u64) -> anyhow::Result<()> {
+    run_file_with_workers(path, timeout, None)
+}
+
+fn run_file_with_workers(
+    path: &PathBuf,
+    timeout: u64,
+    workers: Option<usize>,
+) -> anyhow::Result<()> {
     let source = fs::read_to_string(path)?;
     let mut interpreter = Interpreter::new();
 
@@ -1247,6 +1265,11 @@ fn run_file(path: &PathBuf, timeout: u64) -> anyhow::Result<()> {
 
     // Set request timeout for HTTP server
     interpreter.set_request_timeout(timeout);
+
+    // Explicit --workers beats NTNT_WORKERS and mode defaults
+    if let Some(workers) = workers {
+        interpreter.set_worker_count(workers);
+    }
 
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
