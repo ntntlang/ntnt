@@ -375,8 +375,6 @@ pub fn find_js_interpolation_idents(s: &str) -> Vec<(String, String)> {
     results
 }
 
-/// Extract a search-friendly string from an Expression AST node.
-/// Returns a string that is likely unique near the expression's source location.
 /// A literal value produced by const-folding contract clauses (DD-063 Rec 9)
 #[derive(Debug, Clone, PartialEq)]
 enum ConstValue {
@@ -544,6 +542,8 @@ fn const_eval(expr: &Expression, bindings: &HashMap<String, ConstValue>) -> Opti
     })
 }
 
+/// Extract a search-friendly string from an Expression AST node.
+/// Returns a string that is likely unique near the expression's source location.
 fn expr_search_hint(expr: &Expression) -> String {
     match expr {
         Expression::Identifier(name) => name.clone(),
@@ -733,11 +733,6 @@ impl TypeContext {
         self.emit(Severity::Warning, message, line, hint);
     }
 
-    /// Warn on `x.method()` when `method` is not a defined function,
-    /// builtin, or callable in-scope binding — UFCS means the call can only
-    /// fail at runtime (E007). Skipped for `Any` receivers (module aliases,
-    /// untyped params) and whenever an import could not be resolved, since
-    /// both make the check unreliable.
     /// Statically check a call's literal arguments against the callee's
     /// `requires` clauses (DD-063 Rec 9). Only fires when every clause input
     /// const-evaluates — anything dynamic skips silently, so there are no
@@ -750,9 +745,11 @@ impl TypeContext {
             return;
         };
 
-        // Bind parameter names to const values from literal arguments
+        // Bind parameter names to const values from literal arguments,
+        // remembering declaration order so hints render deterministically
+        let param_order: Vec<String> = sig.params.iter().map(|(n, _)| n.clone()).collect();
         let mut bindings: HashMap<String, ConstValue> = HashMap::new();
-        for ((param_name, _), arg) in sig.params.iter().zip(arguments.iter()) {
+        for (param_name, arg) in param_order.iter().zip(arguments.iter()) {
             if let Some(value) = const_eval(arg, &HashMap::new()) {
                 bindings.insert(param_name.clone(), value);
             }
@@ -764,9 +761,13 @@ impl TypeContext {
         let clauses = clauses.clone();
         for clause in &clauses {
             if let Some(ConstValue::Bool(false)) = const_eval(&clause.expression, &bindings) {
-                let rendered: Vec<String> = bindings
+                let rendered: Vec<String> = param_order
                     .iter()
-                    .map(|(name, value)| format!("{} = {}", name, value.render()))
+                    .filter_map(|name| {
+                        bindings
+                            .get(name)
+                            .map(|value| format!("{} = {}", name, value.render()))
+                    })
                     .collect();
                 let line = self.find_line_near(&format!("{}(", fn_name));
                 self.emit_with_kind(
@@ -787,6 +788,11 @@ impl TypeContext {
         }
     }
 
+    /// Warn on `x.method()` when `method` is not a defined function,
+    /// builtin, or callable in-scope binding — UFCS means the call can only
+    /// fail at runtime (E007). Skipped for `Any` receivers (module aliases,
+    /// untyped params) and whenever an import could not be resolved, since
+    /// both make the check unreliable.
     fn check_unknown_method(&mut self, object: &Expression, method: &str, obj_type: &Type) {
         if matches!(obj_type, Type::Any) || self.has_unresolved_import {
             return;

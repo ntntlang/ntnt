@@ -1391,8 +1391,8 @@ print(boom)
         "{stdout}"
     );
     assert!(
-        stdout.contains("requires b != 0 is false") && stdout.contains("b = 0"),
-        "hint should show the clause and values: {stdout}"
+        stdout.contains("requires b != 0 is false with a = 10, b = 0"),
+        "hint shows the clause and values in parameter order: {stdout}"
     );
     assert_eq!(exit_code, 0, "warning in default mode");
 }
