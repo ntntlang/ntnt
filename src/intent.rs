@@ -3114,6 +3114,12 @@ impl IntentFile {
                     }
                     features.push(feat);
                 }
+                // Save previous invariant — a stale one would otherwise
+                // swallow this feature's `id:` and `→` outcome lines,
+                // corrupting both and leaving scenarios vacuously green
+                if let Some(inv) = current_invariant.take() {
+                    invariants.push(inv);
+                }
 
                 let name = trimmed.trim_start_matches("Feature:").trim().to_string();
                 current_feature = Some(Feature {
@@ -3129,6 +3135,7 @@ impl IntentFile {
                 in_assertions = false;
                 in_glossary = false;
                 in_component_inherent = false;
+                in_invariant_assertions = false;
                 _in_glossary_bindings = false;
                 continue;
             }
@@ -3153,6 +3160,11 @@ impl IntentFile {
                     features.push(feat);
                 }
 
+                // Save (not drop) a pending invariant
+                if let Some(inv) = current_invariant.take() {
+                    invariants.push(inv);
+                }
+
                 let name = trimmed.trim_start_matches("Component:").trim().to_string();
                 current_component = Some(Component {
                     id: String::new(),
@@ -3165,7 +3177,6 @@ impl IntentFile {
                 current_test = None;
                 current_scenario = None;
                 current_feature = None;
-                current_invariant = None;
                 current_test_data = None;
                 in_assertions = false;
                 in_glossary = false;
@@ -5870,6 +5881,21 @@ pub fn lint_intent_file(intent: &IntentFile) -> IntentLintReport {
         for scenario in &feature.scenarios {
             scenarios_checked += 1;
 
+            // A scenario with no outcomes asserts nothing and passes
+            // vacuously in intent check — usually a parse or authoring
+            // mistake (this exact shape was how the invariant state-leak
+            // bug hid: swallowed outcome lines left green scenarios)
+            if scenario.outcomes.is_empty() {
+                warnings.push(IntentLintFinding {
+                    kind: "vacuous_scenario".to_string(),
+                    feature: feature.name.clone(),
+                    scenario: scenario.name.clone(),
+                    text: scenario.when_clause.clone(),
+                    suggestions: Vec::new(),
+                    detail: "scenario has no outcome (→) lines — it verifies nothing and will pass vacuously".to_string(),
+                });
+            }
+
             if glossary
                 .resolve_when_clause(&scenario.when_clause)
                 .is_none()
@@ -5945,6 +5971,24 @@ pub fn lint_intent_file(intent: &IntentFile) -> IntentLintReport {
         }
     }
 
+    // Component scenarios pass vacuously without outcomes for the same
+    // reason feature scenarios do — warn symmetrically
+    for component in &intent.components {
+        for scenario in &component.scenarios {
+            scenarios_checked += 1;
+            if scenario.outcomes.is_empty() {
+                warnings.push(IntentLintFinding {
+                    kind: "vacuous_scenario".to_string(),
+                    feature: component.name.clone(),
+                    scenario: scenario.name.clone(),
+                    text: scenario.when_clause.clone(),
+                    suggestions: Vec::new(),
+                    detail: "scenario has no outcome (→) lines — it verifies nothing and will pass vacuously".to_string(),
+                });
+            }
+        }
+    }
+
     // Glossary-wide cycle scan: catches cycles in entries no scenario touches.
     // Substitute dummy values for {param} placeholders so patterns resolve.
     // Dedup on the set of participating terms, not the path message —
@@ -6009,6 +6053,14 @@ pub fn lint_intent_file(intent: &IntentFile) -> IntentLintReport {
     }
     for component in &intent.components {
         usage_corpus.extend(component.inherent_behavior.iter().cloned());
+        // Component scenarios use glossary terms exactly like feature ones
+        for scenario in &component.scenarios {
+            usage_corpus.push(scenario.when_clause.clone());
+            if let Some(given) = &scenario.given_clause {
+                usage_corpus.push(given.clone());
+            }
+            usage_corpus.extend(scenario.outcomes.iter().cloned());
+        }
     }
     for invariant in &intent.invariants {
         usage_corpus.extend(invariant.assertions.iter().cloned());
@@ -6555,6 +6607,113 @@ fn generate_function_name(path: &str, method: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invariants_before_features_do_not_swallow_feature_lines() {
+        // Regression: a pending invariant used to stay active across a
+        // Feature: declaration, eating the feature's `id:` and the
+        // scenarios' `→` outcomes — corrupting both and making scenarios
+        // pass vacuously (DD-063 Rec 5)
+        let content = r#"
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the slug is url-safe | check: invariant.url_slug |
+
+---
+
+Invariant: URL Slug
+  id: invariant.url_slug
+
+  Assertions:
+    → uses only [a-z0-9-]
+    → is lowercase
+
+---
+
+Feature: Slugs
+  id: feature.slugs
+
+  Scenario: Simple title
+    When a user visits /posts
+    → the slug is url-safe
+"#;
+        let intent = IntentFile::parse_content(content, "test.intent".to_string()).unwrap();
+
+        // The invariant is intact: right id, exactly its own assertions
+        assert_eq!(intent.invariants.len(), 1);
+        assert_eq!(intent.invariants[0].id, "invariant.url_slug");
+        assert_eq!(
+            intent.invariants[0].assertions,
+            vec![
+                "uses only [a-z0-9-]".to_string(),
+                "is lowercase".to_string()
+            ]
+        );
+
+        // The feature keeps its id and the scenario keeps its outcome
+        assert_eq!(intent.features.len(), 1);
+        assert_eq!(intent.features[0].id.as_deref(), Some("feature.slugs"));
+        let scenario = &intent.features[0].scenarios[0];
+        assert_eq!(scenario.outcomes, vec!["the slug is url-safe".to_string()]);
+    }
+
+    #[test]
+    fn invariant_before_component_is_saved_not_dropped() {
+        let content = r#"
+Invariant: URL Slug
+  id: invariant.url_slug
+
+  Assertions:
+    → is lowercase
+
+Component: Error Popup
+  id: component.error_popup
+  Inherent Behavior:
+    → status 200
+"#;
+        let intent = IntentFile::parse_content(content, "test.intent".to_string()).unwrap();
+        assert_eq!(intent.invariants.len(), 1);
+        assert_eq!(intent.invariants[0].id, "invariant.url_slug");
+        assert_eq!(intent.components.len(), 1);
+    }
+
+    #[test]
+    fn invariant_outcomes_resolve_to_executable_assertions() {
+        // End-to-end resolution: check: invariant.id expands through the
+        // vocabulary into concrete unit-test assertions
+        let content = r#"
+## Glossary
+
+| Term | Means |
+|------|-------|
+| the slug is url-safe | check: invariant.url_slug |
+
+---
+
+Invariant: URL Slug
+  id: invariant.url_slug
+
+  Assertions:
+    → uses only [a-z0-9-]
+    → is lowercase
+    → is non-empty
+"#;
+        let intent = IntentFile::parse_content(content, "test.intent".to_string()).unwrap();
+        let glossary = intent.glossary.clone().unwrap();
+        let assertions = glossary.resolve_outcomes_with_context(
+            "the slug is url-safe",
+            &intent.components,
+            &intent.invariants,
+        );
+        assert_eq!(
+            assertions.len(),
+            3,
+            "all three invariant assertions should resolve: {assertions:?}"
+        );
+    }
 
     #[test]
     fn test_parse_simple_intent() {
