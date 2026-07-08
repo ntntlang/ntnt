@@ -284,7 +284,7 @@ get("/stream/network/{iface}", fn(req) {
 
 `filter(SSESubscription, fn(Map) -> Bool) -> SSESubscription`
 
-Filtering happens server-side before writing to the socket — non-matching events are dropped, never sent over the wire.
+Filtering happens server-side before writing to the socket — non-matching events are dropped, never sent over the wire. Execution point: the predicate is an ntnt closure, which the Rust write task cannot evaluate — so filtered subscriptions register their predicate with the bus and it runs at `send()` fan-out time, on the sending interpreter thread. The write task stays interpreter-free (the zero-overhead property holds); the cost of filtering lands on the publisher, proportional to filtered subscribers.
 
 **Event IDs and reconnect:**
 
@@ -510,7 +510,10 @@ struct BroadcastMessage {
 1. Serialize `Value` → `SerializedValue`
 2. Lock registry, get `BroadcastChannel`
 3. Append to replay buffer if configured
-4. Send to each sender; on `SendError` (receiver dropped) → remove that sender from the list
+4. `try_send` to each sender; on `Disconnected` (receiver dropped) →
+   remove that sender from the list; on `Full` → apply the queue policy
+   (default: pop the oldest event and retry, warn deduped per subscriber;
+   `"drop_slow": false`: block briefly instead)
 5. Drop lock
 
 `subscribe(bc)`:
@@ -520,10 +523,14 @@ struct BroadcastMessage {
    is slow-motion OOM. On a full queue the send policy is drop-oldest
    with a deduped warn (unless the bus was created with
    `"drop_slow": false`, which opts into briefly-blocking sends)
-2. Lock registry, push `sender` into `BroadcastChannel.senders`
-3. Wrap `receiver` in `SSESubscription { receiver, channel_id, last_event_id: None }`
-4. Drop lock
-5. Return `Value::SSESubscription(id)` to ntnt
+2. Allocate a fresh `sender_id`; lock the broadcast registry, push
+   `(sender_id, sender)` into `BroadcastChannel.senders`, drop the lock
+3. Insert `SseSubscription { receiver, channel_key, sender_id }` into
+   `SUBSCRIPTION_REGISTRY` under a fresh `subscription_id` — this is the
+   bridge handoff: the Axum handler later `take()`s this entry
+4. Return `Value::SSESubscription(subscription_id)` to ntnt; the handler
+   returns it through `sse()`, which carries the id to the HTTP layer as
+   `BridgeBody::Sse { subscription_id }`
 
 ### SSE Response Handler (Rust HTTP Layer)
 
@@ -541,7 +548,7 @@ async fn sse_handler(subscription_id: u64, req: Request) -> Response {
                 _ = keepalive.tick() => {
                     yield Ok(Bytes::from(":\n\n"));  // SSE comment = keep-alive
                 }
-                msg = subscription.recv_async() => {
+                msg = subscription.receiver.recv_async() => {
                     match msg {
                         Ok(m) => yield Ok(format_sse_event(&m)),
                         Err(_) => break,  // broadcast channel dropped
@@ -551,8 +558,8 @@ async fn sse_handler(subscription_id: u64, req: Request) -> Response {
             }
         }
 
-        // Cleanup: remove sender from broadcast registry
-        BROADCAST_REGISTRY.lock().remove_sender(subscription.channel_id, &subscription.sender_id);
+        // Cleanup: remove this subscriber's sender from the broadcast registry
+        BROADCAST_REGISTRY.lock().remove_sender(&subscription.channel_key, subscription.sender_id);
     });
 
     Response::builder()
