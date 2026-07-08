@@ -1,6 +1,6 @@
 # DD-058: Stdlib Gap Analysis — Eliminating Common Package Dependencies
 
-**Status:** Draft
+**Status:** Draft — item 1 (`std/validate`) shipped 2026-07-08
 **Author:** Larri + Josh
 **Created:** 2026-03-31
 **App:** ntnt
@@ -59,7 +59,17 @@ These are capabilities that 80%+ of web apps need, that developers commonly inst
 
 ### Priority 1: High Impact (Most Web Apps Need These)
 
-#### 1. Validation / Schema (`std/validate`)
+#### 1. Validation / Schema (`std/validate`) — ✅ SHIPPED (v0.4.12)
+
+> Implemented with three deviations from the proposal below, to avoid
+> shadowing global builtins when imported: (a) numeric bounds are
+> `min_value`/`max_value` (importing `min`/`max` would shadow the math
+> globals); (b) type coercion uses the GLOBAL `int`/`float`/`bool`/`str`
+> functions (and `std/string` `trim`) directly in rule lists — recognized by
+> name, nothing to import, no `int`-shadowing footgun; (c) bare functions in
+> rule lists act as custom predicates, replacing `custom(fn)`. Fields are
+> required by default per the `optional` row below; explicit `required` also
+> rejects `None` and empty strings.
 
 **The gap:** Every web app validates incoming data — form submissions, API payloads, query params. ntnt has contracts (`requires`/`ensures`) for function-level assertions, but no declarative schema validation for incoming data.
 
@@ -468,7 +478,7 @@ Based on impact, effort, and dependencies:
 
 | Order | Module | Effort | Impact | Notes |
 |-------|--------|--------|--------|-------|
-| 1 | `std/validate` | Medium (500-800 LOC) | Very High | Every app needs it. No new deps. |
+| 1 | `std/validate` | Medium (500-800 LOC) | Very High | ✅ Shipped v0.4.12. Every app needs it. No new deps. |
 | 2 | `std/email` | Medium (400-600 LOC) | High | `lettre` crate. Every app with users. |
 | 3 | Rate limiting | Medium (300-500 LOC) | High | Covered in DD-051. Middleware-level. |
 | 4 | Multipart uploads | Medium (400-600 LOC) | High | `multer` crate. File upload forms. |

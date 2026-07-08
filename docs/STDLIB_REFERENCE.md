@@ -29,6 +29,7 @@
 - [std/string](#stdstring)
 - [std/time](#stdtime)
 - [std/url](#stdurl)
+- [std/validate](#stdvalidate)
 
 ---
 
@@ -14170,6 +14171,289 @@ parse_url("https://example.com/path?q=1")  // Parse URL into components map
 **See also:** `build_query`, `parse_query`
 
 *Since v0.2.0*
+
+---
+
+## std/validate
+
+Declarative schema validation for forms and API payloads
+
+```ntnt
+import { schema, validate, min_value } from "std/validate"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`default`](#default) | Validator: supply a default when the field is absent. |
+| [`matches`](#matches) | Validator: string value must match the regex pattern. |
+| [`max_length`](#maxlength) | Validator: string (or array) length must be <= bound. |
+| [`max_value`](#maxvalue) | Validator: numeric value must be <= bound. |
+| [`min_length`](#minlength) | Validator: string (or array) length must be >= bound. |
+| [`min_value`](#minvalue) | Validator: numeric value must be >= bound. |
+| [`one_of`](#oneof) | Validator: value must equal one of the listed options. |
+| [`schema`](#schema) | Build a validation schema from a map of field names to rule lists. |
+| [`validate`](#validate) | Validate a map of input data against a schema. |
+
+#### `default`
+
+```ntnt
+default(value: Any) -> Validator
+```
+
+Validator: supply a default when the field is absent.
+
+The default value still runs through the remaining rules (so a string default is coerced by a later `int` rule, for example).
+
+**Parameters:**
+
+- `value` — The value to use when the field is missing.
+
+**Returns:** A Validator for use in schema rules.
+
+**Examples:**
+
+```ntnt
+schema(map { "page": [default("1"), int, min_value(1)] })  // Pagination default
+```
+
+**See also:** `schema`, `validate`
+
+*Since v0.4.12*
+
+---
+
+#### `matches`
+
+```ntnt
+matches(pattern: String) -> Validator
+```
+
+Validator: string value must match the regex pattern.
+
+**Parameters:**
+
+- `pattern` — A regex pattern (anchor with ^...$ for full-string match).
+
+**Returns:** A Validator for use in schema rules.
+
+**Examples:**
+
+```ntnt
+schema(map { "phone": [matches("^\\+?[0-9]{10,15}$")] })  // Phone number format
+```
+
+**Errors:**
+
+- **TypeError**: invalid pattern — *Fix: Check the regex syntax; remember to escape backslashes in strings*
+
+**See also:** `one_of`, `email`, `schema`
+
+*Since v0.4.12*
+
+---
+
+#### `max_length`
+
+```ntnt
+max_length(bound: Int) -> Validator
+```
+
+Validator: string (or array) length must be <= bound.
+
+**Parameters:**
+
+- `bound` — The inclusive maximum length in characters/elements.
+
+**Returns:** A Validator for use in schema rules.
+
+**Examples:**
+
+```ntnt
+schema(map { "name": [required, max_length(100)] })  // Name capped at 100 chars
+```
+
+**See also:** `min_length`, `max_value`, `schema`
+
+*Since v0.4.12*
+
+---
+
+#### `max_value`
+
+```ntnt
+max_value(bound: Int | Float) -> Validator
+```
+
+Validator: numeric value must be <= bound.
+
+Named max_value (not max) so importing it never shadows the global max() function.
+
+**Parameters:**
+
+- `bound` — The inclusive upper bound.
+
+**Returns:** A Validator for use in schema rules.
+
+**Examples:**
+
+```ntnt
+schema(map { "age": [required, int, max_value(120)] })  // Age must be at most 120
+```
+
+**See also:** `min_value`, `max_length`, `schema`
+
+*Since v0.4.12*
+
+---
+
+#### `min_length`
+
+```ntnt
+min_length(bound: Int) -> Validator
+```
+
+Validator: string (or array) length must be >= bound.
+
+**Parameters:**
+
+- `bound` — The inclusive minimum length in characters/elements.
+
+**Returns:** A Validator for use in schema rules.
+
+**Examples:**
+
+```ntnt
+schema(map { "name": [required, min_length(1)] })  // Non-empty name
+```
+
+**See also:** `max_length`, `min_value`, `schema`
+
+*Since v0.4.12*
+
+---
+
+#### `min_value`
+
+```ntnt
+min_value(bound: Int | Float) -> Validator
+```
+
+Validator: numeric value must be >= bound.
+
+Named min_value (not min) so importing it never shadows the global min() function. Apply after `int`/`float` coercion in the rule list.
+
+**Parameters:**
+
+- `bound` — The inclusive lower bound.
+
+**Returns:** A Validator for use in schema rules.
+
+**Examples:**
+
+```ntnt
+schema(map { "age": [required, int, min_value(13)] })  // Age must be at least 13
+```
+
+**See also:** `max_value`, `min_length`, `schema`
+
+*Since v0.4.12*
+
+---
+
+#### `one_of`
+
+```ntnt
+one_of(options: Array<Any>) -> Validator
+```
+
+Validator: value must equal one of the listed options.
+
+**Parameters:**
+
+- `options` — Allowed values.
+
+**Returns:** A Validator for use in schema rules.
+
+**Examples:**
+
+```ntnt
+schema(map { "role": [one_of(["admin", "user"])] })  // Role allow-list
+```
+
+**See also:** `matches`, `schema`
+
+*Since v0.4.12*
+
+---
+
+#### `schema`
+
+```ntnt
+schema(rules: Map<String, Any>) -> Schema
+```
+
+Build a validation schema from a map of field names to rule lists.
+
+Rules compose validators from this module (`required`, `email`, `min_value(13)`, ...), the global conversion functions (`int`, `float`, `bool`, `str`, and `trim` from std/string) for coercion, and bare functions as custom predicates. Fields are required by default; use `optional` to permit absence or `default(value)` to supply one.
+
+**Parameters:**
+
+- `rules` — Map of field name to a rule or array of rules.
+
+**Returns:** A Schema for use with validate().
+
+**Examples:**
+
+```ntnt
+schema(map { "email": [required, email] })  // Schema requiring a valid email
+```
+
+**Errors:**
+
+- **TypeError**: field has an invalid rule — *Fix: Rules must be validators, conversion functions, or fn(value)*
+
+**See also:** `validate`, `one_of`, `matches`, `min_value`, `min_length`
+
+*Since v0.4.12*
+
+---
+
+#### `validate`
+
+```ntnt
+validate(schema: Schema, data: Map<String, Any>) -> Result<Map<String, Any>, Map<String, String>>
+```
+
+Validate a map of input data against a schema.
+
+Returns Ok with a cleaned map (coerced values, only schema fields) when every rule passes, or Err with one human-readable message per failing field. Rules run left to right per field; the first failure wins. Coercion rules accept form-style strings: `int` turns "25" into 25.
+
+**Parameters:**
+
+- `schema` — A Schema from schema(), or a raw rules map.
+- `data` — The input map to validate (e.g. parse_form(req)).
+
+**Returns:** Ok(cleaned) or Err(map of field -> error message).
+
+**Examples:**
+
+```ntnt
+validate(schema(map { "age": [required, int] }), map { "age": "25" })  // => Ok(map { "age": 25 })  // Coerces string input
+```
+
+**Errors:**
+
+- **TypeError**: requires a map of input data — *Fix: Pass the parsed form/JSON map, not the raw request*
+
+**Gotchas:**
+
+- Fields are required by default — add `optional` or `default(v)` for optional fields.
+
+**See also:** `schema`, `parse_form`, `parse_json`
+
+*Since v0.4.12*
 
 ---
 

@@ -186,6 +186,8 @@ import { open, get, set, del, list } from "std/kv"
 import { log_info, log_warn, log_error, set_log_level } from "std/log"
 import { channel, send, recv, sleep_ms, spawn, await_task, parallel, race } from "std/concurrent"
 import { enqueue, enqueue_in, configure_queue, work_async, work_jobs } from "std/jobs"
+import { schema, validate, required, optional, email, min_value, max_length, one_of, matches, default } from "std/validate"
+// In schema rules, use the GLOBAL int/float/bool/str (and std/string trim) directly for coercion — do not look for them in std/validate
 ```
 
 ---

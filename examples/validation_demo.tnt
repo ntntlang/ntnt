@@ -1,0 +1,64 @@
+// std/validate demo — declarative schema validation for form/API input
+//
+// Run: ntnt run examples/validation_demo.tnt
+
+import { schema, validate, required, optional, email, min_value, max_value, min_length, max_length, one_of, matches, default } from "std/validate"
+import { trim } from "std/string"
+
+// Rules compose three kinds of values:
+//   - validators from std/validate (required, email, min_value(13), ...)
+//   - global conversion functions (int, float, bool, str) and trim for coercion
+//   - bare functions as custom predicates
+let user_schema = schema(map {
+    "email": [required, email],
+    "age": [required, int, min_value(13), max_value(120)],
+    "name": [required, trim, min_length(1), max_length(100)],
+    "role": [default("user"), one_of(["admin", "user", "editor"])],
+    "phone": [optional, matches("^\\+?[0-9]{10,15}$")],
+    "referral": [optional, fn(code) {
+        if code == "BANNED" {
+            return "This referral code is not accepted"
+        }
+        return true
+    }]
+})
+
+// Valid submission: values are cleaned and coerced ("42" becomes 42),
+// unknown keys are dropped, defaults fill in
+let good_input = map {
+    "email": "alice@example.com",
+    "age": "42",
+    "name": "  Alice  ",
+    "phone": "+15551234567",
+    "csrf_junk": "dropped"
+}
+
+match validate(user_schema, good_input) {
+    Ok(user) => {
+        print("Valid user:")
+        print("  name:  #{user["name"]}")
+        print("  email: #{user["email"]}")
+        print("  age:   #{user["age"]} (Int, coerced from string)")
+        print("  role:  #{user["role"]} (defaulted)")
+    },
+    Err(errors) => print("unexpected errors: #{errors}")
+}
+
+// Invalid submission: one human-readable message per failing field
+let bad_input = map {
+    "email": "not-an-email",
+    "age": "12",
+    "name": "",
+    "role": "root",
+    "referral": "BANNED"
+}
+
+match validate(user_schema, bad_input) {
+    Ok(_) => print("unexpectedly valid"),
+    Err(errors) => {
+        print("Validation errors:")
+        for field in errors {
+            print("  #{field}: #{errors[field]}")
+        }
+    }
+}

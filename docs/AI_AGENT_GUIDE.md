@@ -1421,6 +1421,61 @@ let users = unwrap(query(db, "SELECT * FROM users", []))
 
 ---
 
+## Validation (`std/validate`)
+
+Declarative schema validation for form submissions, API payloads, and query
+params. `validate()` returns `Ok(cleaned)` with coerced values (only schema
+fields — unknown keys are dropped) or `Err(errors)` with one human-readable
+message per failing field.
+
+```ntnt
+import { schema, validate, required, optional, email, min_value, max_value, min_length, one_of, matches, default } from "std/validate"
+import { trim } from "std/string"
+import { json, parse_form } from "std/http/server"
+
+let user_schema = schema(map {
+    "email": [required, email],
+    "age": [required, int, min_value(13), max_value(120)],  // "25" is coerced to 25
+    "name": [required, trim, min_length(1)],
+    "role": [default("user"), one_of(["admin", "user", "editor"])],
+    "phone": [optional, matches("^\\+?[0-9]{10,15}$")],
+    "invite": [optional, fn(code) { code != "BANNED" }]     // bare fn = custom predicate
+})
+
+post("/users", fn(req) {
+    match validate(user_schema, parse_form(req)) {
+        Ok(user) => json(map { "created": true, "name": user["name"] }, 201),
+        Err(errors) => json(map { "errors": errors }, 400)
+    }
+})
+```
+
+Rules run left to right per field; the first failure wins. Three kinds of
+values compose in a rule list:
+
+- **Validators from `std/validate`**: `required`, `optional`, `string`,
+  `email`, `url`, `min_value(n)`, `max_value(n)`, `min_length(n)`,
+  `max_length(n)`, `one_of([...])`, `matches(pattern)`, `default(value)`
+- **Global conversion functions used directly** — `int`, `float`, `bool`,
+  `str`, and `trim` from `std/string` — as coercion rules. Nothing needs to
+  be imported from `std/validate` under those names, so the globals are
+  never shadowed (this is why the bound validators are named `min_value`/
+  `max_value`, not `min`/`max`).
+- **Bare functions** as custom predicates: return `true`/`false`, a `String`
+  error message, `Ok(transformed_value)`, or `Err(message)`.
+
+Key semantics:
+
+- **Fields are required by default** — absent fields error with "Required"
+  unless the rules include `optional` (field omitted from output) or
+  `default(v)` (value supplied, then remaining rules run on it)
+- `required` also rejects `None` and empty strings (form fields submit `""`)
+- Coercions accept form-style strings: `int` turns `"25"` into `25`, `bool`
+  accepts `"true"/"1"/"yes"/"on"`
+- Order matters: put `trim` before `min_length`, coercions before bounds
+
+---
+
 ## Type System
 
 NTNT uses **gradual typing** — type annotations are optional, and untyped code continues to work as before. When annotations are present, the type checker catches errors at lint time.

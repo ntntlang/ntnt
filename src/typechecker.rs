@@ -3981,6 +3981,39 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("transaction", ["conn" => Type::Any, "callback" => Type::Any], Type::Any);
             sig!("close", ["conn" => Type::Any], Type::Unit);
         }
+        "std/validate" => {
+            let validator = Type::Named("Validator".to_string());
+            let string_map = Type::Map {
+                key_type: Box::new(Type::String),
+                value_type: Box::new(Type::Any),
+            };
+            sig!("schema", ["rules" => string_map.clone()], Type::Named("Schema".to_string()));
+            sig!(
+                "validate",
+                ["schema" => Type::Any, "data" => string_map],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::Any),
+                        },
+                        Type::Map {
+                            key_type: Box::new(Type::String),
+                            value_type: Box::new(Type::String),
+                        },
+                    ],
+                }
+            );
+            sig!("min_value", ["bound" => Type::Any], validator.clone());
+            sig!("max_value", ["bound" => Type::Any], validator.clone());
+            sig!("min_length", ["bound" => Type::Int], validator.clone());
+            sig!("max_length", ["bound" => Type::Int], validator.clone());
+            sig!("one_of", ["options" => Type::Array(Box::new(Type::Any))], validator.clone());
+            sig!("matches", ["pattern" => Type::String], validator.clone());
+            sig!("default", ["value" => Type::Any], validator);
+            // required/optional/string/email/url are value exports (no sigs)
+        }
         "std/url" => {
             sig!("encode", ["s" => Type::String], Type::String);
             sig!("decode", ["s" => Type::String], Type::String);

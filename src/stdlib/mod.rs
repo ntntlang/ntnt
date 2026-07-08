@@ -31,6 +31,7 @@ pub mod string;
 pub mod template;
 pub mod time;
 pub mod url;
+pub mod validate;
 
 use crate::interpreter::Value;
 use std::collections::HashMap;
@@ -65,6 +66,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/kv".to_string(), kv::create_kv_module());
     modules.insert("std/jobs".to_string(), jobs::init());
     modules.insert("std/auth".to_string(), auth::init());
+    modules.insert("std/validate".to_string(), validate::init());
 
     modules
 }
