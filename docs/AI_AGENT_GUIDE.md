@@ -1310,6 +1310,27 @@ fn get_user(id) {
 }
 ```
 
+### Indexing Semantics (out-of-bounds is loud)
+
+Array and string indexing past the end is almost always a bug (off-by-one,
+short `split()` result, missing regex group), so it is loud by type mode:
+
+| Access | warn (default) | strict | forgiving |
+|--------|----------------|--------|-----------|
+| `arr[99]` / `"hi"[99]` out of bounds | `[WARN]` + `None` | error `E010` | silent `None` |
+| `m["missing"]` map key absent | silent `None` | silent `None` | silent `None` |
+
+Map missing-key stays silent by design — "optional key" is a legitimate idiom
+(`req.params`, config maps); use `has_key()` to check existence.
+
+Guarded access never warns or errors — the guard says None is expected:
+
+```ntnt
+let third = arr[2] ?? 0                       // suppressed: ?? is the safety net
+let item = arr[i] otherwise { return None }   // suppressed: otherwise handles it
+if len(arr) > 2 { print(arr[2]) }             // in bounds: nothing to report
+```
+
 **Behavior:**
 - `Some(v) ?? default` → `v` (unwrapped)
 - `None ?? default` → `default`

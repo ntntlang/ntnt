@@ -131,6 +131,8 @@ fn divide(a: Int, b: Int) -> Int
 
 ### 15. Map access returns `None` for missing keys — use `has_key()` to check existence, not `is_some()`
 
+Array/string out-of-bounds is different: it warns in warn mode and errors (E010) in strict mode. `arr[i] ?? default` and `otherwise` suppress both — guard any index that can legitimately miss.
+
 ### 16. `for k in map` iterates keys — use `entries()` for key-value pairs
 
 ---

@@ -131,7 +131,7 @@ Scoping also surfaced **two additional doc drifts** beyond the v2 findings: CLAU
 - [x] **PR-2** — Intentional syntax contract tests, CLAUDE.md truth, UFCS embrace (Rec 2) — S
 - [x] **PR-3** — Diagnostics I: parser error recovery + contract violation context (Rec 4a) — M
 - [x] **PR-4** — Diagnostics II: method bridge hints, unknown-method lint, IAL suggestions, `ntnt intent lint` (Rec 4b) — M
-- [ ] **PR-5** — Index out-of-bounds loudness (Rec 3) — M — **blocked on decisions**
+- [x] **PR-5** — Index out-of-bounds loudness (Rec 3) — M
 - [ ] Recs 5–10 — unscheduled, see end of section
 
 ### PR-1 — `${}` interpolation detection (Rec 1) — S, ~150 impl + ~280 tests
@@ -192,16 +192,16 @@ Defaults applied: unknown-method fires in default lint mode (that's the DD-063 c
 Scoping analysis recommends **staging**: ship runtime loudness for out-of-bounds **array/string read** access now (strict → E010 error; warn → deduped `[WARN]` + `None`; forgiving → silent), exactly mirroring the existing TypeMode gates in the same `Expression::Index` arm; **map missing-key stays silent-`None`** (documented intentional DX, 127 of 150 index usages in examples/ are map-key access, `has_key()` exists). `arr[i] ?? default` / `arr[i]?` / `otherwise` suppress both warn and strict error. Typechecker honesty (inferring `Option<T>`) is **deferred with cause**: the runtime's index result is a nullable union (`T | None`), not enum `Option<T>` — annotating `Option<T>` would be a new lie that crashes checker-blessed code on `unwrap`/`match`; unifying that representation needs its own DD first.
 
 Decisions required before this PR starts:
-- [ ] Confirm map missing-key (and `map.field`) stays silent in all modes
-- [ ] Confirm `??` / `?` / `otherwise` suppress the strict-mode error too (recommended: yes — `??` is the documented universal safety net)
-- [ ] Confirm `String[i]` OOB included alongside arrays (recommended: yes)
-- [ ] Confirm a strict-mode runtime behavior change is acceptable within 0.4.x (or needs 0.5 / a breaking-change release note)
-- [ ] Acknowledge the deferred-option-(a) constraint: any future `Option<T>` inference for index expressions requires the runtime-representation DD first
+- [x] Confirm map missing-key (and `map.field`) stays silent in all modes — **confirmed 2026-07-08**
+- [x] Confirm `??` / `?` / `otherwise` suppress the strict-mode error too — **confirmed: suppress both warn and error**
+- [x] Confirm `String[i]` OOB included alongside arrays — **confirmed: included**
+- [x] Confirm a strict-mode runtime behavior change is acceptable within 0.4.x — **confirmed: ship in 0.4.x with a release-note callout**
+- [x] Acknowledge the deferred-option-(a) constraint: any future `Option<T>` inference for index expressions requires the runtime-representation DD first — **acknowledged; recorded in the typechecker comment**
 
 Implementation (after decisions):
-- [ ] TypeMode-gated OOB handling in `Expression::Index` read path + suppression for guarded parents
-- [ ] Resolve the read/write asymmetry note (index *assignment* OOB already errors unconditionally)
-- [ ] Tests across all three modes + guarded-access suppression; update CLAUDE.md rule 15 area and AI_AGENT_GUIDE error-handling docs
+- [x] TypeMode-gated OOB handling in `Expression::Index` read path + suppression for guarded parents
+- [x] Resolve the read/write asymmetry note (index *assignment* OOB already errors unconditionally) — reads are now gated; writes keep erroring unconditionally, which is strictly louder and consistent
+- [x] Tests across all three modes + guarded-access suppression; update CLAUDE.md rule 15 area and AI_AGENT_GUIDE error-handling docs
 
 ### Recs 5–10 — assessed, not yet scheduled
 
