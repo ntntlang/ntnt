@@ -3661,6 +3661,7 @@ import { push, pop, first } from "std/collections"
 | [`keys`](#keys) | Returns an array of all keys in the map. |
 | [`last`](#last) | Returns the last element of an array. |
 | [`merge`](#merge) | Shallow-merges two maps. Values from map2 win on key conflicts. |
+| [`paginate`](#paginate) | Pagination math for list views: offset, limit, page counts, and flags. |
 | [`pop`](#pop) | Returns a tuple of [new array without last element, popped element as Option]. |
 | [`push`](#push) | Returns a new array with the item appended. |
 | [`reverse`](#reverse) | Returns a new array with elements in reverse order. |
@@ -4097,6 +4098,41 @@ merge(map { "a": 1, "b": 2 }, map { "b": 3, "c": 4 })  // => map { "a": 1, "b": 
 **See also:** `get_key`, `get_or`, `has_key`, `keys`, `values`
 
 *Since v0.3.13*
+
+---
+
+#### `paginate`
+
+```ntnt
+paginate(total_items: Int, page: Int, per_page: Int) -> Map<String, Any>
+```
+
+Pagination math for list views: offset, limit, page counts, and flags.
+
+Returns map { "offset", "limit", "page", "per_page", "total_items", "total_pages", "has_next", "has_prev" }. The requested page is clamped into [1, total_pages] (an empty list yields page 1 of 1 with offset 0), so out-of-range requests never produce a negative offset.
+
+**Parameters:**
+
+- `total_items` — Total number of items across all pages.
+- `page` — Requested 1-based page number (clamped).
+- `per_page` — Items per page (must be >= 1).
+
+**Returns:** Pagination map ready for SQL OFFSET/LIMIT and template links.
+
+**Examples:**
+
+```ntnt
+paginate(45, 3, 10)  // => map { "offset": 20, "limit": 10, "page": 3, "per_page": 10, "total_items": 45, "total_pages": 5, "has_next": true, "has_prev": true }  // Middle page
+paginate(45, 99, 10)  // => map { "offset": 40, "limit": 10, "page": 5, "per_page": 10, "total_items": 45, "total_pages": 5, "has_next": false, "has_prev": true }  // Out-of-range page clamps to the last
+```
+
+**Errors:**
+
+- **TypeError**: per_page must be at least 1 — *Fix: Pass a positive page size*
+
+**See also:** `slice`, `len`
+
+*Since v0.4.12*
 
 ---
 
@@ -12728,6 +12764,7 @@ import { now, now_millis, now_nanos } from "std/time"
 | [`format`](#format) | Formats a Unix timestamp as a string using a strftime format pattern (UTC). |
 | [`format_in`](#formatin) | Formats a Unix timestamp as a string in the specified timezone. |
 | [`format_timestamp`](#formattimestamp) | Formats a Unix timestamp as a string (legacy alias for format()). |
+| [`from_now`](#fromnow) | Human-friendly relative time: "3 hours ago", "in 2 days", "just now". |
 | [`hour`](#hour) | Extracts the hour from a Unix timestamp (UTC). |
 | [`is_leap_year`](#isleapyear) | Checks whether the year of the given timestamp is a leap year. |
 | [`list_timezones`](#listtimezones) | Returns a list of commonly used IANA timezone identifiers. |
@@ -12743,6 +12780,7 @@ import { now, now_millis, now_nanos } from "std/time"
 | [`parse_iso`](#parseiso) | Parses an ISO 8601 (RFC 3339) string into a Unix timestamp. |
 | [`second`](#second) | Extracts the second from a Unix timestamp (UTC). |
 | [`sleep`](#sleep) | Pauses execution for the specified number of milliseconds. |
+| [`time_ago`](#timeago) | Alias of from_now(): "3 hours ago", "in 2 days", "just now". |
 | [`to_iso`](#toiso) | Formats a Unix timestamp as an ISO 8601 (RFC 3339) string. |
 | [`to_timezone`](#totimezone) | Converts a Unix timestamp to a datetime map in the specified timezone. |
 | [`to_utc`](#toutc) | Converts a Unix timestamp to a UTC datetime map. |
@@ -13387,6 +13425,36 @@ format_timestamp(0, "%Y-%m-%d")  // => "1970-01-01"  // Epoch date formatted
 
 ---
 
+#### `from_now`
+
+```ntnt
+from_now(timestamp: Int) -> String
+```
+
+Human-friendly relative time: "3 hours ago", "in 2 days", "just now".
+
+Takes a Unix timestamp in seconds (as returned by now()) and renders its distance from the current time. Past timestamps read "N units ago", future ones "in N units"; anything within 60 seconds is "just now". Units step through minutes, hours, days, months (30-day) and years (365-day).
+
+**Parameters:**
+
+- `timestamp` — Unix timestamp in seconds.
+
+**Returns:** The relative description.
+
+**Examples:**
+
+```ntnt
+from_now(now() - 7200)  // => "2 hours ago"  // Past timestamp
+from_now(now() + 172800)  // => "in 2 days"  // Future timestamp
+from_now(now())  // => "just now"  // Current moment
+```
+
+**See also:** `time_ago`, `now`, `diff`, `format`
+
+*Since v0.4.12*
+
+---
+
 #### `hour`
 
 ```ntnt
@@ -13843,6 +13911,34 @@ sleep(100)  // => Unit  // Pauses for 100ms
 **See also:** `elapsed`, `now_millis`
 
 *Since v0.1.0*
+
+---
+
+#### `time_ago`
+
+```ntnt
+time_ago(timestamp: Int) -> String
+```
+
+Alias of from_now(): "3 hours ago", "in 2 days", "just now".
+
+Provided under the name most web developers reach for; identical behavior to from_now().
+
+**Parameters:**
+
+- `timestamp` — Unix timestamp in seconds.
+
+**Returns:** The relative description.
+
+**Examples:**
+
+```ntnt
+time_ago(now() - 60)  // => "1 minute ago"  // One minute back
+```
+
+**See also:** `from_now`, `now`
+
+*Since v0.4.12*
 
 ---
 

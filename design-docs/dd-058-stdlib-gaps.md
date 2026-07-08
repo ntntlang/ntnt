@@ -1,6 +1,6 @@
 # DD-058: Stdlib Gap Analysis — Eliminating Common Package Dependencies
 
-**Status:** Draft — items 1 (`std/validate`) and 2 (`std/email`) shipped 2026-07-08
+**Status:** Draft — items 1 (`std/validate`), 2 (`std/email`), and 5 (quick wins: `paginate`, `from_now`/`time_ago`; `slugify` pre-existed) shipped 2026-07-08
 **Author:** Larri + Josh
 **Created:** 2026-03-31
 **App:** ntnt
@@ -303,7 +303,7 @@ let clean = sanitize_html(user_input, map {
 
 ### Priority 3: Nice to Have
 
-#### 9. Slug Generation
+#### 9. Slug Generation — ✅ already shipped (`slugify` in `std/string`)
 
 **The gap:** URL-friendly slugs from titles. Every blog, CMS, or content site needs this.
 
@@ -311,7 +311,7 @@ let clean = sanitize_html(user_input, map {
 
 **Scope:** ~50-100 lines. Straightforward.
 
-#### 10. Pagination Helpers
+#### 10. Pagination Helpers — ✅ SHIPPED (v0.4.12, `paginate` in `std/collections`)
 
 **The gap:** Every list view needs pagination math — offset, limit, total pages, page links.
 
@@ -319,7 +319,7 @@ let clean = sanitize_html(user_input, map {
 
 **Scope:** ~50-100 lines. Pure logic, no dependencies.
 
-#### 11. Human-Friendly Time (`from_now`, `time_ago`)
+#### 11. Human-Friendly Time — ✅ SHIPPED (v0.4.12, `from_now`/`time_ago` in `std/time`)
 
 **The gap:** "3 hours ago", "in 2 days", "just now". `std/time` has `diff()` but not the human-readable relative format.
 
@@ -488,7 +488,7 @@ Based on impact, effort, and dependencies:
 | 2 | `std/email` | Medium (400-600 LOC) | High | ✅ Shipped v0.4.12. `lettre` crate. Every app with users. |
 | 3 | Rate limiting | Medium (300-500 LOC) | High | Covered in DD-051. Middleware-level. |
 | 4 | Multipart uploads | Medium (400-600 LOC) | High | `multer` crate. File upload forms. |
-| 5 | `from_now()` / `slugify()` / `paginate()` | Small (200 LOC total) | Medium | Quick wins, extend existing modules. |
+| 5 | `from_now()` / `slugify()` / `paginate()` | Small (200 LOC total) | Medium | ✅ Shipped v0.4.12 (slugify already existed). |
 | 6 | HTML sanitization | Small (300-400 LOC) | Medium | `ammonia` crate. UGC apps. |
 | 7 | Cron expressions | Small (200-300 LOC) | Medium | `cron` crate. Extend `std/time`. |
 | 8 | `std/xml` | Medium (400-600 LOC) | Medium | `quick-xml` crate. Integrations. |

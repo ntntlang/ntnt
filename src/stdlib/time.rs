@@ -1610,5 +1610,101 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt from_now
+    // @module std/time
+    // @signature from_now(timestamp: Int) -> String
+    // Human-friendly relative time: "3 hours ago", "in 2 days", "just now".
+    //
+    // Takes a Unix timestamp in seconds (as returned by now()) and renders
+    // its distance from the current time. Past timestamps read "N units
+    // ago", future ones "in N units"; anything within 60 seconds is
+    // "just now". Units step through minutes, hours, days, months
+    // (30-day) and years (365-day).
+    // @param timestamp Unix timestamp in seconds.
+    // @returns The relative description.
+    // @see_also time_ago, now, diff, format
+    // @since v0.4.12
+    // @tags #time, #formatting
+    // @example from_now(now() - 7200) => "2 hours ago" ~ "Past timestamp"
+    // @example from_now(now() + 172800) => "in 2 days" ~ "Future timestamp"
+    // @example from_now(now()) => "just now" ~ "Current moment"
+    module.insert(
+        "from_now".to_string(),
+        Value::NativeFunction {
+            name: "from_now".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| relative_time(&args[0], "from_now"),
+        },
+    );
+
+    // @ntnt time_ago
+    // @module std/time
+    // @signature time_ago(timestamp: Int) -> String
+    // Alias of from_now(): "3 hours ago", "in 2 days", "just now".
+    //
+    // Provided under the name most web developers reach for; identical
+    // behavior to from_now().
+    // @param timestamp Unix timestamp in seconds.
+    // @returns The relative description.
+    // @see_also from_now, now
+    // @since v0.4.12
+    // @tags #time, #formatting
+    // @example time_ago(now() - 60) => "1 minute ago" ~ "One minute back"
+    module.insert(
+        "time_ago".to_string(),
+        Value::NativeFunction {
+            name: "time_ago".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| relative_time(&args[0], "time_ago"),
+        },
+    );
+
     module
+}
+
+/// Shared implementation for from_now()/time_ago(): render the distance
+/// between a Unix-seconds timestamp and the current time
+fn relative_time(value: &Value, fn_name: &str) -> Result<Value, IntentError> {
+    let timestamp = match value {
+        Value::Int(n) => *n,
+        Value::Float(f) => *f as i64,
+        other => {
+            return Err(IntentError::type_error(format!(
+                "{}() requires a Unix timestamp in seconds, got {}",
+                fn_name,
+                other.type_name()
+            )))
+        }
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let delta = timestamp - now;
+    let past = delta <= 0;
+    let magnitude = delta.unsigned_abs();
+
+    let (count, unit) = if magnitude < 60 {
+        return Ok(Value::String("just now".to_string()));
+    } else if magnitude < 3600 {
+        (magnitude / 60, "minute")
+    } else if magnitude < 86_400 {
+        (magnitude / 3600, "hour")
+    } else if magnitude < 30 * 86_400 {
+        (magnitude / 86_400, "day")
+    } else if magnitude < 365 * 86_400 {
+        (magnitude / (30 * 86_400), "month")
+    } else {
+        (magnitude / (365 * 86_400), "year")
+    };
+
+    let plural = if count == 1 { "" } else { "s" };
+    let rendered = if past {
+        format!("{} {}{} ago", count, unit, plural)
+    } else {
+        format!("in {} {}{}", count, unit, plural)
+    };
+    Ok(Value::String(rendered))
 }
