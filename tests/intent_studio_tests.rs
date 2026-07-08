@@ -889,6 +889,41 @@ fn intent_lint_json_output_shape() {
 }
 
 #[test]
+fn intent_lint_json_suggestions_is_empty_array_when_no_near_miss() {
+    // Cycle findings carry no suggestions — the key must still be present
+    let content = r#"## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the homepage | / |
+| term alpha | term beta |
+| term beta | term alpha |
+
+---
+
+Feature: Home Page
+  id: feature.home
+
+  Scenario: First visit
+    When a user visits the homepage
+    → term alpha
+"#;
+    let (stdout, _stderr, _exit) = run_intent_lint(content, &["--json"]);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let cycle = json["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "cycle")
+        .expect("cycle finding present");
+    assert!(
+        cycle["suggestions"].is_array() && cycle["suggestions"].as_array().unwrap().is_empty(),
+        "suggestions must serialize as an empty array: {stdout}"
+    );
+}
+
+#[test]
 fn intent_lint_accepts_tnt_path_with_paired_intent() {
     use std::io::Write as _;
     let dir = std::env::temp_dir().join(format!("ntnt_lint_pair_{}", std::process::id()));

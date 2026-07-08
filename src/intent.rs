@@ -5832,8 +5832,7 @@ pub struct IntentLintFinding {
     pub scenario: String,
     /// The offending text (outcome, when-clause, or glossary term)
     pub text: String,
-    /// Near-miss vocabulary patterns, best first
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Near-miss vocabulary patterns, best first (empty array when none)
     pub suggestions: Vec<String>,
     /// Human-readable explanation
     pub detail: String,

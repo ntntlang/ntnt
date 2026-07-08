@@ -1233,6 +1233,21 @@ fn test_unknown_method_suppressed_for_untyped_receiver() {
 }
 
 #[test]
+fn test_unknown_method_warns_for_non_callable_binding() {
+    // A plain value binding named like the method must not silence the
+    // lint — UFCS dispatch on it fails at runtime
+    let source = r#"let length = 42
+let s = "hi"
+print(s.length())
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        stdout.contains("unknown_method"),
+        "non-callable bindings must not suppress: {stdout}"
+    );
+}
+
+#[test]
 fn test_unknown_method_suppressed_for_let_bound_lambda() {
     let source = r#"let double = fn(x) { x * 2 }
 let n = 5

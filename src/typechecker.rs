@@ -555,17 +555,24 @@ impl TypeContext {
     }
 
     /// Warn on `x.method()` when `method` is not a defined function,
-    /// builtin, or in-scope binding — UFCS means the call can only fail at
-    /// runtime (E007). Skipped for `Any` receivers (module aliases, untyped
-    /// params) and whenever an import could not be resolved, since both make
-    /// the check unreliable.
+    /// builtin, or callable in-scope binding — UFCS means the call can only
+    /// fail at runtime (E007). Skipped for `Any` receivers (module aliases,
+    /// untyped params) and whenever an import could not be resolved, since
+    /// both make the check unreliable.
     fn check_unknown_method(&mut self, object: &Expression, method: &str, obj_type: &Type) {
         if matches!(obj_type, Type::Any) || self.has_unresolved_import {
             return;
         }
+        // Scope bindings only count when callable: `let double = fn(x){..}`
+        // suppresses, `let length = 42` does not (that call fails at runtime).
+        // Any-typed bindings suppress because we can't tell.
+        let callable_binding = matches!(
+            self.lookup(method),
+            Some(Type::Function { .. }) | Some(Type::Any)
+        );
         if self.functions.contains_key(method)
             || self.builtin_sigs.contains_key(method)
-            || self.lookup(method).is_some()
+            || callable_binding
         {
             return;
         }
