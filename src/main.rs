@@ -900,16 +900,21 @@ fn main() {
             body,
             port,
             verbose,
-        }) => test_http_server(
-            &file,
-            get_requests,
-            post_requests,
-            put_requests,
-            delete_requests,
-            body,
-            port,
-            verbose,
-        ),
+        }) => {
+            // Verification runs strict by default (DD-063 Rec 7);
+            // explicit NTNT_TYPE_MODE still wins
+            ntnt::config::set_default_type_mode(ntnt::config::TypeMode::Strict);
+            test_http_server(
+                &file,
+                get_requests,
+                post_requests,
+                put_requests,
+                delete_requests,
+                body,
+                port,
+                verbose,
+            )
+        }
         Some(Commands::Parse { file, json }) => parse_file(&file, json),
         Some(Commands::Lex { file }) => lex_file(&file),
         Some(Commands::Check { file }) => check_file(&file),
@@ -3277,6 +3282,7 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
                             "javascript_style_interpolation"
                         }
                         ntnt::typechecker::DiagnosticKind::UnknownMethod => "unknown_method",
+                        ntnt::typechecker::DiagnosticKind::BlockBinding => "block_binding",
                         _ => "type_check",
                     };
                     let entry = json!({
@@ -3459,6 +3465,7 @@ fn lint_project(
                             "javascript_style_interpolation"
                         }
                         ntnt::typechecker::DiagnosticKind::UnknownMethod => "unknown_method",
+                        ntnt::typechecker::DiagnosticKind::BlockBinding => "block_binding",
                         _ => "type_check",
                     };
                     issues.push(json!({
@@ -4184,6 +4191,11 @@ fn run_intent_check_command(
     verbosity: usize,
     json_output: bool,
 ) -> anyhow::Result<()> {
+    // Verification runs strict by default (DD-063 Rec 7): warn mode's
+    // tolerated degradations (OOB→None, implicit conversions) should fail
+    // verification, not slip through it. Explicit NTNT_TYPE_MODE still wins.
+    ntnt::config::set_default_type_mode(ntnt::config::TypeMode::Strict);
+
     // Suppress banner output in JSON mode
     if !json_output {
         println!("{}", "=== NTNT Intent Check ===".cyan().bold());

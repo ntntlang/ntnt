@@ -48,11 +48,25 @@ pub enum LintMode {
 }
 
 #[cfg_attr(test, allow(dead_code))]
+/// Default type mode when NTNT_TYPE_MODE is unset. Verification commands
+/// (`ntnt intent check`, `ntnt test`) set this to Strict before the first
+/// get_type_mode() read so verification means verification (DD-063 Rec 7);
+/// an explicit NTNT_TYPE_MODE always wins.
+static TYPE_MODE_DEFAULT: std::sync::OnceLock<TypeMode> = std::sync::OnceLock::new();
+
+/// Set the default type mode used when NTNT_TYPE_MODE is unset.
+/// Must be called before the first `get_type_mode()` read; later calls
+/// (and calls after the cache is populated) have no effect.
+pub fn set_default_type_mode(mode: TypeMode) {
+    let _ = TYPE_MODE_DEFAULT.set(mode);
+}
+
 fn read_type_mode_from_env() -> TypeMode {
-    match std::env::var("NTNT_TYPE_MODE").as_deref().unwrap_or("warn") {
-        "strict" => TypeMode::Strict,
-        "forgiving" => TypeMode::Forgiving,
-        _ => TypeMode::Warn,
+    match std::env::var("NTNT_TYPE_MODE").as_deref() {
+        Ok("strict") => TypeMode::Strict,
+        Ok("forgiving") => TypeMode::Forgiving,
+        Ok(_) => TypeMode::Warn,
+        Err(_) => TYPE_MODE_DEFAULT.get().copied().unwrap_or(TypeMode::Warn),
     }
 }
 

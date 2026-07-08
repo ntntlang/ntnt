@@ -1029,3 +1029,48 @@ fn workers_flag_reaches_server_banner() {
 
     assert!(found, "banner should show Workers: 3, got: {collected}");
 }
+
+// ===========================================================================
+// Strict verification contexts (DD-063 Rec 7)
+// ===========================================================================
+
+#[test]
+fn ntnt_test_defaults_to_strict_type_mode() {
+    use std::io::Write as _;
+    let dir = std::env::temp_dir().join(format!("ntnt_strict_verify_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = dir.join("srv.tnt");
+    write!(
+        std::fs::File::create(&server).unwrap(),
+        "import {{ json }} from \"std/http/server\"\nget(\"/risky\", fn(req) {{\n    let arr = [1, 2]\n    return json(map {{ \"third\": arr[10] }})\n}})\nlisten(8080)\n"
+    )
+    .unwrap();
+
+    let binary = find_ntnt_binary();
+
+    // Default: verification is strict — OOB in the handler fails the request
+    let out = std::process::Command::new(&binary)
+        .args(["test", server.to_str().unwrap(), "--get", "/risky"])
+        .env_remove("NTNT_TYPE_MODE")
+        .output()
+        .expect("run ntnt test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("0 passed, 1 failed"),
+        "default verification should be strict: {stdout}"
+    );
+
+    // Explicit NTNT_TYPE_MODE=warn wins over the verification default
+    let out = std::process::Command::new(&binary)
+        .args(["test", server.to_str().unwrap(), "--get", "/risky"])
+        .env("NTNT_TYPE_MODE", "warn")
+        .output()
+        .expect("run ntnt test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("1 passed, 0 failed"),
+        "explicit NTNT_TYPE_MODE must win: {stdout}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

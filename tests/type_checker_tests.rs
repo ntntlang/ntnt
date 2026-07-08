@@ -1302,3 +1302,57 @@ print(is_some(x, 99))
         "arity mismatch on is_some should be reported: {stdout}"
     );
 }
+
+// ===========================================================================
+// Block-binding lint (DD-063 Rec 6)
+// ===========================================================================
+
+#[test]
+fn test_block_binding_warns_on_empty_and_single_expression_blocks() {
+    let source = r#"let e = {}
+let m = { 5 }
+print(e)
+print(m)
+"#;
+    let (stdout, _stderr, exit_code) = lint_code(source);
+    assert_eq!(
+        stdout.matches("\"rule\": \"block_binding\"").count(),
+        2,
+        "both footgun shapes should warn: {stdout}"
+    );
+    assert!(stdout.contains("binds Unit"), "{stdout}");
+    assert!(stdout.contains("map {}"), "empty-map hint: {stdout}");
+    assert_eq!(exit_code, 0, "warnings only in default mode");
+}
+
+#[test]
+fn test_block_binding_exempts_multi_statement_blocks() {
+    // Block expressions with real bodies are an intentional scoping feature
+    let source = r#"let x = {
+    let a = 1
+    a + 2
+}
+print(x)
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        !stdout.contains("block_binding"),
+        "multi-statement blocks are intentional: {stdout}"
+    );
+}
+
+#[test]
+fn test_block_binding_errors_in_strict_mode() {
+    let source = r#"let e = {}
+print(e)
+"#;
+    let (stdout, _stderr, _exit) = lint_strict_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let found = json["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|f| f["issues"].as_array().cloned().unwrap_or_default())
+        .any(|i| i["rule"] == "block_binding" && i["severity"] == "error");
+    assert!(found, "strict promotes block_binding: {stdout}");
+}

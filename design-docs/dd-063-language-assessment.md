@@ -206,8 +206,8 @@ Implementation (after decisions):
 ### Recs 5–10 — assessed, not yet scheduled
 
 - [ ] **Rec 5** — IAL stub completion: implement invariant execution (expansion already works); decide `Sql` primitive fate (PR-2 makes docs honest in the interim)
-- [ ] **Rec 6** — lint for silent block-binding (`let x = { 5 }` / `let e = {}`)
-- [ ] **Rec 7** — strict type mode in verification contexts (`intent check`, `ntnt test`)
+- [x] **Rec 6** — lint for silent block-binding — shipped 2026-07-08: rule `block_binding` warns (error in strict) on empty and single-expression bare-brace let initializers; multi-statement block expressions stay exempt (intentional scoping feature)
+- [x] **Rec 7** — strict type mode in verification contexts — shipped 2026-07-08: `ntnt test` and `intent check` default to TypeMode::Strict when NTNT_TYPE_MODE is unset (explicit env always wins); verified end-to-end (OOB handler fails verification by default, passes under explicit warn)
 - [ ] **Rec 8** — whitepaper restructure: shipped vs aspirational
 - [ ] **Rec 9** — static contract lint for literal-argument violations (stretch)
 - [ ] **Rec 10** — execute existing DDs: DD-061 phase 1 (fib(30) ≈ 35x CPython baseline recorded above), DD-058 priority-1 stdlib gaps, DD-062 extension model
