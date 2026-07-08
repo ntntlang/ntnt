@@ -1246,6 +1246,10 @@ fn create_user(req)
 - In `ensures`, `result` is typed to the function's return type
 - `old(expr)` returns the same type as `expr`
 - Struct invariants are checked with field types in scope
+- **Calls with literal arguments are checked against `requires` clauses**
+  (rule `static_contract_violation`, error in strict mode): `divide(10, 0)`
+  against `requires b != 0` is flagged at lint time as a guaranteed E004 —
+  dynamic arguments and non-constant clauses are skipped, never guessed
 
 **Contract violation diagnostics (E004):** when a contract fails at runtime,
 the error points at the failing clause and shows the actual values it saw —

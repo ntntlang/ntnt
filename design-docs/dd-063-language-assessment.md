@@ -209,7 +209,7 @@ Implementation (after decisions):
 - [x] **Rec 6** — lint for silent block-binding — shipped 2026-07-08: rule `block_binding` warns (error in strict) on empty and single-expression bare-brace let initializers; multi-statement block expressions stay exempt (intentional scoping feature)
 - [x] **Rec 7** — strict type mode in verification contexts — shipped 2026-07-08: `ntnt test` and `intent check` default to TypeMode::Strict when NTNT_TYPE_MODE is unset (explicit env always wins); verified end-to-end (OOB handler fails verification by default, passes under explicit warn)
 - [ ] **Rec 8** — whitepaper restructure: shipped vs aspirational
-- [ ] **Rec 9** — static contract lint for literal-argument violations (stretch)
+- [x] **Rec 9** — static contract lint — shipped 2026-07-08: rule `static_contract_violation` (warning; error in strict) const-evaluates `requires` clauses at call sites where arguments are literals; hint shows the clause and bindings (`requires b != 0 is false with b = 0`). Deliberately minimal const-eval (literals, `+ - *`, comparisons, logical ops) — anything dynamic skips, so no false positives; zero findings across examples/.
 - [ ] **Rec 10** — execute existing DDs: DD-061 phase 1 (fib(30) ≈ 35x CPython baseline recorded above), DD-058 priority-1 stdlib gaps, DD-062 extension model
 
 ## Non-goals

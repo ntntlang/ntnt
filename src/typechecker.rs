@@ -37,6 +37,9 @@ pub enum DiagnosticKind {
     /// `let x = { ... }` binds a bare block (Unit or its last expression),
     /// not a map — almost always a missing `map` keyword or stray brace
     BlockBinding,
+    /// A call with literal arguments statically violates the callee's
+    /// `requires` clause — guaranteed E004 at runtime
+    StaticContractViolation,
     /// General type error (mismatch, undefined, etc.)
     General,
 }
@@ -119,6 +122,9 @@ pub struct TypeContext {
     /// (check_statement + infer_statement_terminal_type) while still
     /// reporting genuinely distinct later sites of the same snippet.
     js_interp_reported: HashMap<String, usize>,
+    /// `requires` clauses per user function, for static contract checking
+    /// at call sites with literal arguments (DD-063 Rec 9)
+    function_requires: HashMap<String, Vec<crate::ast::ContractCondition>>,
 }
 
 /// Returns true if NTNT_STRICT mode is enabled.
@@ -224,6 +230,7 @@ pub fn check_program_with_lint_mode(
                         | DiagnosticKind::JsStyleInterpolation
                         | DiagnosticKind::UnknownMethod
                         | DiagnosticKind::BlockBinding
+                        | DiagnosticKind::StaticContractViolation
                 )
             {
                 d.severity = Severity::Error;
@@ -370,6 +377,173 @@ pub fn find_js_interpolation_idents(s: &str) -> Vec<(String, String)> {
 
 /// Extract a search-friendly string from an Expression AST node.
 /// Returns a string that is likely unique near the expression's source location.
+/// A literal value produced by const-folding contract clauses (DD-063 Rec 9)
+#[derive(Debug, Clone, PartialEq)]
+enum ConstValue {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+}
+
+impl ConstValue {
+    fn render(&self) -> String {
+        match self {
+            ConstValue::Int(n) => n.to_string(),
+            ConstValue::Float(f) => f.to_string(),
+            ConstValue::Str(s) => format!("{:?}", s),
+            ConstValue::Bool(b) => b.to_string(),
+        }
+    }
+
+    fn as_f64(&self) -> Option<f64> {
+        match self {
+            ConstValue::Int(n) => Some(*n as f64),
+            ConstValue::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+}
+
+/// Render an expression from the const-evaluable subset back to source-ish
+/// text for diagnostics. Only called for clauses const_eval fully handled,
+/// so every node here is renderable.
+fn render_const_expr(expr: &Expression) -> String {
+    use crate::ast::{BinaryOp, UnaryOp};
+    match expr {
+        Expression::Integer(n) => n.to_string(),
+        Expression::Float(f) => f.to_string(),
+        Expression::Bool(b) => b.to_string(),
+        Expression::String(text) => format!("{:?}", text),
+        Expression::Identifier(name) => name.clone(),
+        Expression::Unary { operator, operand } => match operator {
+            UnaryOp::Neg => format!("-{}", render_const_expr(operand)),
+            UnaryOp::Not => format!("!{}", render_const_expr(operand)),
+        },
+        Expression::Binary {
+            left,
+            operator,
+            right,
+        } => {
+            let op = match operator {
+                BinaryOp::Add => "+",
+                BinaryOp::Sub => "-",
+                BinaryOp::Mul => "*",
+                BinaryOp::Div => "/",
+                BinaryOp::Mod => "%",
+                BinaryOp::Pow => "**",
+                BinaryOp::Eq => "==",
+                BinaryOp::Ne => "!=",
+                BinaryOp::Lt => "<",
+                BinaryOp::Le => "<=",
+                BinaryOp::Gt => ">",
+                BinaryOp::Ge => ">=",
+                BinaryOp::And => "&&",
+                BinaryOp::Or => "||",
+                BinaryOp::NullCoalesce => "??",
+            };
+            format!(
+                "{} {} {}",
+                render_const_expr(left),
+                op,
+                render_const_expr(right)
+            )
+        }
+        _ => "<expr>".to_string(),
+    }
+}
+
+/// Const-evaluate an expression over literal bindings. Deliberately minimal:
+/// literals, bound identifiers, unary neg/not, `+ - *`, comparisons, and
+/// logical and/or. Anything else — calls, indexing, division (integer
+/// semantics live in the interpreter), null-coalescing — returns None and
+/// the clause is skipped, so this can never produce a false positive.
+fn const_eval(expr: &Expression, bindings: &HashMap<String, ConstValue>) -> Option<ConstValue> {
+    use crate::ast::{BinaryOp, UnaryOp};
+
+    Some(match expr {
+        Expression::Integer(n) => ConstValue::Int(*n),
+        Expression::Float(f) => ConstValue::Float(*f),
+        Expression::Bool(b) => ConstValue::Bool(*b),
+        Expression::String(text) if !text.contains("#{") => ConstValue::Str(text.clone()),
+        Expression::Identifier(name) => bindings.get(name)?.clone(),
+        Expression::Unary { operator, operand } => match (operator, const_eval(operand, bindings)?)
+        {
+            (UnaryOp::Neg, ConstValue::Int(n)) => ConstValue::Int(n.checked_neg()?),
+            (UnaryOp::Neg, ConstValue::Float(f)) => ConstValue::Float(-f),
+            (UnaryOp::Not, ConstValue::Bool(b)) => ConstValue::Bool(!b),
+            _ => return None,
+        },
+        Expression::Binary {
+            left,
+            operator,
+            right,
+        } => {
+            let lhs = const_eval(left, bindings)?;
+            // Short-circuit ops evaluate rhs lazily like the runtime
+            match operator {
+                BinaryOp::And => {
+                    if let ConstValue::Bool(false) = lhs {
+                        return Some(ConstValue::Bool(false));
+                    }
+                }
+                BinaryOp::Or => {
+                    if let ConstValue::Bool(true) = lhs {
+                        return Some(ConstValue::Bool(true));
+                    }
+                }
+                _ => {}
+            }
+            let rhs = const_eval(right, bindings)?;
+            match operator {
+                BinaryOp::Add => match (&lhs, &rhs) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => ConstValue::Int(a.checked_add(*b)?),
+                    _ => ConstValue::Float(lhs.as_f64()? + rhs.as_f64()?),
+                },
+                BinaryOp::Sub => match (&lhs, &rhs) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => ConstValue::Int(a.checked_sub(*b)?),
+                    _ => ConstValue::Float(lhs.as_f64()? - rhs.as_f64()?),
+                },
+                BinaryOp::Mul => match (&lhs, &rhs) {
+                    (ConstValue::Int(a), ConstValue::Int(b)) => ConstValue::Int(a.checked_mul(*b)?),
+                    _ => ConstValue::Float(lhs.as_f64()? * rhs.as_f64()?),
+                },
+                BinaryOp::Eq | BinaryOp::Ne => {
+                    let equal = match (&lhs, &rhs) {
+                        (ConstValue::Str(a), ConstValue::Str(b)) => a == b,
+                        (ConstValue::Bool(a), ConstValue::Bool(b)) => a == b,
+                        _ => lhs.as_f64()? == rhs.as_f64()?,
+                    };
+                    ConstValue::Bool(if matches!(operator, BinaryOp::Eq) {
+                        equal
+                    } else {
+                        !equal
+                    })
+                }
+                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                    let (a, b) = (lhs.as_f64()?, rhs.as_f64()?);
+                    ConstValue::Bool(match operator {
+                        BinaryOp::Lt => a < b,
+                        BinaryOp::Le => a <= b,
+                        BinaryOp::Gt => a > b,
+                        _ => a >= b,
+                    })
+                }
+                BinaryOp::And => match (&lhs, &rhs) {
+                    (ConstValue::Bool(a), ConstValue::Bool(b)) => ConstValue::Bool(*a && *b),
+                    _ => return None,
+                },
+                BinaryOp::Or => match (&lhs, &rhs) {
+                    (ConstValue::Bool(a), ConstValue::Bool(b)) => ConstValue::Bool(*a || *b),
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        }
+        _ => return None,
+    })
+}
+
 fn expr_search_hint(expr: &Expression) -> String {
     match expr {
         Expression::Identifier(name) => name.clone(),
@@ -485,6 +659,7 @@ impl TypeContext {
             resolving_files: Vec::new(),
             detected_cycles: Vec::new(),
             js_interp_reported: HashMap::new(),
+            function_requires: HashMap::new(),
         }
     }
 
@@ -563,6 +738,55 @@ impl TypeContext {
     /// fail at runtime (E007). Skipped for `Any` receivers (module aliases,
     /// untyped params) and whenever an import could not be resolved, since
     /// both make the check unreliable.
+    /// Statically check a call's literal arguments against the callee's
+    /// `requires` clauses (DD-063 Rec 9). Only fires when every clause input
+    /// const-evaluates — anything dynamic skips silently, so there are no
+    /// false positives; a hit is a guaranteed E004 at runtime.
+    fn check_static_contract(&mut self, fn_name: &str, arguments: &[Expression]) {
+        let Some(clauses) = self.function_requires.get(fn_name) else {
+            return;
+        };
+        let Some(sig) = self.functions.get(fn_name) else {
+            return;
+        };
+
+        // Bind parameter names to const values from literal arguments
+        let mut bindings: HashMap<String, ConstValue> = HashMap::new();
+        for ((param_name, _), arg) in sig.params.iter().zip(arguments.iter()) {
+            if let Some(value) = const_eval(arg, &HashMap::new()) {
+                bindings.insert(param_name.clone(), value);
+            }
+        }
+        if bindings.is_empty() {
+            return;
+        }
+
+        let clauses = clauses.clone();
+        for clause in &clauses {
+            if let Some(ConstValue::Bool(false)) = const_eval(&clause.expression, &bindings) {
+                let rendered: Vec<String> = bindings
+                    .iter()
+                    .map(|(name, value)| format!("{} = {}", name, value.render()))
+                    .collect();
+                let line = self.find_line_near(&format!("{}(", fn_name));
+                self.emit_with_kind(
+                    Severity::Warning,
+                    DiagnosticKind::StaticContractViolation,
+                    format!(
+                        "call to '{}' statically violates its requires clause — this always fails at runtime (E004)",
+                        fn_name
+                    ),
+                    line,
+                    Some(format!(
+                        "requires {} is false with {}",
+                        render_const_expr(&clause.expression),
+                        rendered.join(", ")
+                    )),
+                );
+            }
+        }
+    }
+
     fn check_unknown_method(&mut self, object: &Expression, method: &str, obj_type: &Type) {
         if matches!(obj_type, Type::Any) || self.has_unresolved_import {
             return;
@@ -1030,9 +1254,17 @@ impl TypeContext {
                 params,
                 return_type,
                 type_params,
+                contract,
                 ..
             } => {
                 let tp_names: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+
+                if let Some(contract) = contract {
+                    if !contract.requires.is_empty() {
+                        self.function_requires
+                            .insert(name.clone(), contract.requires.clone());
+                    }
+                }
 
                 let param_types: Vec<(String, Type)> = params
                     .iter()
@@ -2845,6 +3077,9 @@ impl TypeContext {
         };
 
         if let Some(name) = &fn_name {
+            // Static contract check: literal arguments vs requires clauses
+            self.check_static_contract(name, arguments);
+
             // Special built-in constructors and contract functions
             match name.as_str() {
                 // old(expr) in ensures clauses — returns the same type as expr
