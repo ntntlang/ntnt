@@ -292,9 +292,9 @@ let metrics_bus = broadcast("metrics", map { "replay_buffer": 100 })
 // ntnt replays the buffer from that ID forward
 ```
 
-`broadcast(opts?)`:
+`broadcast(name?, opts?)`:
 - `"replay_buffer": N` — keep the last N events in a ring buffer; replayed on reconnect
-- `"drop_slow": true` — drop events for slow subscribers instead of blocking (default: false, block briefly)
+- `"drop_slow": false` — opt INTO briefly-blocking sends for correctness-critical streams. The default is `true` (drop-oldest from the subscriber's bounded queue, with a deduped warn) — per the Design Review, blocking on a stuck subscriber is the OOM/backpressure hazard
 
 ### Full API Surface
 
@@ -576,7 +576,9 @@ enum Value {
 
 ```rust
 // std/sse module
-sig!("broadcast", [], Type::Named("BroadcastHandle".to_string()), required(0));
+// name and opts are both optional: broadcast(), broadcast("metrics"),
+// broadcast("metrics", map { "replay_buffer": 100 })
+sig!("broadcast", ["name" => Type::String, "opts" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Named("BroadcastHandle".to_string()), required(0));
 sig!("subscribe", ["handle" => Type::Named("BroadcastHandle".to_string())], Type::Named("SSESubscription".to_string()));
 sig!("filter", ["sub" => Type::Named("SSESubscription".to_string()), "pred" => Type::Any], Type::Named("SSESubscription".to_string()));
 sig!("connection_count", ["handle" => Type::Named("BroadcastHandle".to_string())], Type::Int);
@@ -622,7 +624,7 @@ sig!("sse_stream", ["handler" => Type::Any], Type::Named("SSEResponse".to_string
 
 - [ ] `send(BroadcastHandle, event_name, value)` — named SSE events
 - [ ] `filter(SSESubscription, fn) -> SSESubscription` — server-side predicate filter
-- [ ] `broadcast(opts)` — `replay_buffer: N`, `drop_slow: bool`
+- [ ] `broadcast(name?, opts?)` — `replay_buffer: N`, `drop_slow: bool` (default true = drop-oldest; false opts into blocking)
 - [ ] Replay buffer: ring buffer of last N events, sent on connect with `Last-Event-ID` header
 - [ ] Event ID auto-increment when replay is enabled
 - [ ] Tests: named events, filter, replay on reconnect, drop_slow behavior
@@ -713,7 +715,7 @@ get("/stream/metrics", fn(req) {
 | Filter/transform | `filter(sub, fn)` | Custom handler | Custom handler | Manual | Manual |
 | Keep-alive | Built-in (15s) | Built-in | Built-in | Manual | Manual |
 | Named events | `send(bc, "name", val)` | Topic-based | Channel-based | Manual | Manual |
-| Replay on reconnect | `broadcast(map { "replay_buffer": N })` | ❌ | ❌ | Manual | Manual |
+| Replay on reconnect | `broadcast("bus", map { "replay_buffer": N })` | ❌ | ❌ | Manual | Manual |
 | Works with existing scheduler | `schedule()` → `send()` | Separate GenServer | Separate worker | Separate asyncio task | Separate goroutine |
 | Lines for a metrics dashboard | ~15 | ~80 | ~100 | ~60 | ~70 |
 
@@ -723,16 +725,19 @@ ntnt's advantage: the sampler (`schedule`), the bus (`broadcast`), and the endpo
 
 ## Open Questions
 
-| Question | Options | Notes |
-|----------|---------|-------|
-| Broadcast backing implementation | `bus` crate (SPMC), `Vec<Sender>` (custom), `tokio::sync::broadcast` | Leaning custom Vec<Sender> for consistency with crossbeam |
-| `send()` overload on BroadcastHandle | Reuse existing `send()` dispatch vs. new `publish()` name | `send()` is cleaner, already familiar from channels |
-| `drop_slow` default | Drop (false) vs block briefly (true) | Blocking is safer for dashboards, dropping is safer for high-frequency metrics |
-| `sse_stream` cleanup model | `on_close(fn)` callback vs defer-style | `on_close` is explicit and readable |
-| Backpressure signal | No signal vs `push()` returns Bool | `push()` → Bool lets the handler decide to stop |
-| WebSockets | Separate DD vs extend this one | Separate DD — SSE covers 90% of dashboard needs and is simpler |
-| `ntnt sse status` CLI | Part of this DD vs Phase 3 | Phase 3 — not blocking core |
-| CORS middleware built-in | Yes vs user-defined | Likely a stdlib utility, not SSE-specific |
+All resolved by the 2026-07-08 Design Review (decisions recorded there and
+reconciled into the body):
+
+| Question | Resolution |
+|----------|------------|
+| Broadcast backing implementation | Custom `Vec<Sender>` per bus, crossbeam-consistent — with BOUNDED per-subscriber queues (1024) |
+| `send()` overload on BroadcastHandle | Reuse existing `send()` dispatch on handle type |
+| `drop_slow` default | Drop-oldest with deduped warn (default); `"drop_slow": false` opts into briefly-blocking sends |
+| `sse_stream` cleanup model | `on_close(fn)` callback |
+| Backpressure signal | `push()` returns Bool (false after disconnect) |
+| WebSockets | Separate DD — SSE covers the dashboard cases and is simpler |
+| `ntnt sse status` CLI | Phase 3 |
+| CORS middleware built-in | Stdlib utility, not SSE-specific |
 
 ---
 
