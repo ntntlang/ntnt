@@ -4500,8 +4500,8 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("is_absolute", ["path" => Type::String], Type::Bool);
         }
         "std/time" => {
-            sig!("from_now", ["timestamp" => Type::Int], Type::String);
-            sig!("time_ago", ["timestamp" => Type::Int], Type::String);
+            sig!("from_now", ["timestamp" => Type::Union(vec![Type::Int, Type::Float])], Type::String);
+            sig!("time_ago", ["timestamp" => Type::Union(vec![Type::Int, Type::Float])], Type::String);
             sig!("now", [], Type::Any);
             sig!("now_millis", [], Type::Int);
             sig!("format", ["time" => Type::Any, "fmt" => Type::String], Type::String);

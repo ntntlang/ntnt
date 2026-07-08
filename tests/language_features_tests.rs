@@ -6557,7 +6557,7 @@ print("#{clamped["page"]} #{clamped["offset"]} #{clamped["has_next"]}")
 let low = paginate(45, 0, 10)
 print("#{low["page"]} #{low["offset"]} #{low["has_prev"]}")
 let empty = paginate(0, 1, 10)
-print("#{empty["total_pages"]} #{empty["offset"]}")
+print("empty:#{empty["total_pages"]} #{empty["offset"]}")
 "##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "stderr: {stderr}");
@@ -6565,8 +6565,8 @@ print("#{empty["total_pages"]} #{empty["offset"]}")
     assert!(stdout.contains("5 40 false"), "high page clamps: {stdout}");
     assert!(stdout.contains("1 0 false"), "low page clamps: {stdout}");
     assert!(
-        stdout.contains("1 0"),
-        "empty list is page 1 of 1: {stdout}"
+        stdout.contains("empty:1 0"),
+        "empty list is page 1 of 1 (labeled so the low-clamp line can't satisfy it): {stdout}"
     );
 }
 

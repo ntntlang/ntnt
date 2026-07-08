@@ -1023,7 +1023,10 @@ pub fn init() -> HashMap<String, Value> {
                     ));
                 }
 
-                let total_pages = ((total_items + per_page - 1) / per_page).max(1);
+                // Overflow-safe ceiling division (total_items + per_page - 1
+                // can exceed i64::MAX for adversarial inputs)
+                let total_pages =
+                    (total_items / per_page + i64::from(total_items % per_page != 0)).max(1);
                 let page = page.clamp(1, total_pages);
                 let offset = (page - 1) * per_page;
 
