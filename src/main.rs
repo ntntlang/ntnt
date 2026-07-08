@@ -890,14 +890,7 @@ fn main() {
             file,
             timeout,
             workers,
-        }) => {
-            if let Some(workers) = workers {
-                // Flows through the existing NTNT_WORKERS resolution in the
-                // async server startup
-                std::env::set_var("NTNT_WORKERS", workers.to_string());
-            }
-            run_file(&file, timeout)
-        }
+        }) => run_file_with_workers(&file, timeout, workers),
         Some(Commands::Test {
             file,
             get_requests,
@@ -1253,6 +1246,14 @@ fn evaluate(interpreter: &mut Interpreter, source: &str) -> anyhow::Result<Strin
 }
 
 fn run_file(path: &PathBuf, timeout: u64) -> anyhow::Result<()> {
+    run_file_with_workers(path, timeout, None)
+}
+
+fn run_file_with_workers(
+    path: &PathBuf,
+    timeout: u64,
+    workers: Option<usize>,
+) -> anyhow::Result<()> {
     let source = fs::read_to_string(path)?;
     let mut interpreter = Interpreter::new();
 
@@ -1264,6 +1265,11 @@ fn run_file(path: &PathBuf, timeout: u64) -> anyhow::Result<()> {
 
     // Set request timeout for HTTP server
     interpreter.set_request_timeout(timeout);
+
+    // Explicit --workers beats NTNT_WORKERS and mode defaults
+    if let Some(workers) = workers {
+        interpreter.set_worker_count(workers);
+    }
 
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();

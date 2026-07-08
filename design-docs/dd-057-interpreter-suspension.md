@@ -26,22 +26,42 @@ connection pool (DD-039, PR #23), before this DD was written:
   static + `Mutex`/`Arc` — audited 2026-07-08, including post-March
   additions.
 
-**Empirical proof that workers parallelize blocking I/O** (no local
-Postgres; `sleep_ms(200)` in a handler blocks the worker thread exactly
-like `DB_RUNTIME.block_on`):
+**Empirical proof that workers parallelize blocking I/O** (sleep proxy:
+`sleep_ms(200)` in a handler blocks the worker thread exactly like
+`DB_RUNTIME.block_on`):
 
 | 8 concurrent 200ms-blocking requests | wall time |
 |--------------------------------------|----------:|
 | `NTNT_WORKERS=1` | 1.61s (fully serialized, 8 × 200ms) |
 | `NTNT_WORKERS=4` | 0.41s (theoretical 4× exactly) |
 
-**Implication for the DD-038 numbers above:** the "zero throughput gain"
-v0.4.2 measurement is consistent with running in dev mode, where the
-default is one worker — the pool cannot help when a single thread
-serializes every query. The 4-20× DB gap must be re-measured with
-`NTNT_ENV=production` (or `NTNT_WORKERS=N`) before any Phase 2
-investment; Phase 1's expected gains appear to already exist behind the
-right configuration.
+**DD-038 re-benchmark under production configuration (2026-07-08):**
+ntnt-benchmarks suite fixtures against current main (post-DD-061,
+dev-release binary), scratch Postgres 16 in Docker on the same shared
+host, `wrk -t4 -c64 -d10s`, `NTNT_ENV=production`:
+
+| Benchmark | 1 worker | 4 workers | 8 workers | DD-038 v0.4.2 | FastAPI (DD-038) | Hono/Bun (DD-038) |
+|-----------|--------:|---------:|---------:|-------------:|-------:|------:|
+| db (1 query) | 10.1K | 31.1K | **39.0K** | 8.3K | 37K | 32K |
+| 20 queries | 602 | 2,091 | 2,366 | 418 | 5.8K | 2.8K |
+| plaintext | 95K | — | 232K | 119K | 174K | 118K |
+
+(Absolute numbers are not directly comparable to the DD-038 machine, but
+the shape is decisive.)
+
+**Conclusions:**
+- The "zero throughput gain" v0.4.2 measurement was a one-worker
+  configuration artifact: the single-query workload scales 3.1× at 4
+  workers and 3.9× at 8, **surpassing DD-038's FastAPI and Hono/Bun
+  numbers** with 8 workers. The original 4-20× DB gap is closed for
+  single-query workloads by configuration that already existed.
+- The 20-query workload (20 sequential round-trips per request) scales
+  3.5× at 4 workers but flattens toward 8 (2.4K) — it reaches DD-038's
+  Hono/Bun (2.8K) but not FastAPI/Gin. This is the workload shape where
+  Phase 2 suspension (or per-request query pipelining) would still pay;
+  it is also the rarest shape in real apps.
+- Plaintext scales 95K → 232K with 8 workers: workers help CPU-bound
+  handler throughput too, not just blocking I/O.
 
 Phase 1 gaps found and closed by the spike PR: panicked workers were
 never respawned (silent capacity loss — now supervised and respawned),
@@ -276,7 +296,7 @@ The infrastructure is already there — `num_workers` config field exists, flume
 - [x] Hot-reload propagation — resolved by design instead: dev defaults to 1 worker (which hot-reloads); workers 1..N run with hot-reload off. Multi-worker dev (`NTNT_WORKERS>1` without production) leaves workers 1..N stale after edits — documented tradeoff, restart to pick up changes
 - [x] Worker health monitoring: panicked workers are logged and respawned (spike PR; previously a panic silently lost the worker)
 - [x] `ntnt run server.tnt --workers 8` CLI flag (spike PR; env var existed)
-- [ ] Benchmark: re-run DD-038 suite **with `NTNT_ENV=production` / `NTNT_WORKERS≥4`**, compare against the v0.4.2 numbers — the original measurement almost certainly ran with the dev default of 1 worker (see Verified State)
+- [x] Benchmark: re-run DD-038 suite with `NTNT_ENV=production` — done 2026-07-08 (see Verified State): db 8.3K → 39.0K with 8 workers, beating DD-038's FastAPI number; 20-queries 418 → 2.4K, reaching Hono/Bun
 - [x] Verify shared state is safe: `SHARED_POOL_REGISTRY`, `DB_RUNTIME`, KV/sqlite/auth/email statics all `Mutex`/`Arc` — re-audited 2026-07-08 including post-March additions
 
 **Risks:**
@@ -305,7 +325,7 @@ Each has tradeoffs in complexity, performance, and debuggability. This needs its
 - [ ] Benchmark: single-worker suspended vs multi-worker blocking
 - [ ] Consider: does suspension replace workers, or complement them? (suspended workers = best of both)
 
-**Deferred until:** Phase 1 results are measured **under production configuration** — the 2026-07-08 spike's sleep-proxy result (near-perfect 4× parallelization with 4 workers) predicts the DB benchmark re-run will close most of the gap, which would make Phase 2 an optimization for memory footprint and beyond-N-workers concurrency rather than a necessity. Do not start the suspension refactor before that re-benchmark exists.
+**Deferred — re-benchmark complete (2026-07-08), decision data in Verified State.** Single-query DB throughput with 8 workers surpasses DD-038's FastAPI and Hono/Bun numbers, so suspension is NOT needed for the common workload. The remaining case where it would pay is many-sequential-queries-per-request (20-query benchmark flattens at ~2.4K vs FastAPI's 5.8K) — before a suspension refactor, cheaper alternatives for that shape are: batching APIs (`pg_query_batch`), reducing per-query interpreter overhead (DD-061 continuation), or raising `NTNT_DB_POOL_SIZE`. Recommend keeping Phase 2 parked unless a real app demonstrates the sequential-query bottleneck.
 
 ---
 

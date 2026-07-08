@@ -578,6 +578,17 @@ pub enum RuntimeCapability {
     ServerAction,
 }
 
+/// Why an HTTP worker's request loop returned — the supervisor loop
+/// respawns on StartupFailed (with backoff) and exits on Shutdown
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WorkerExit {
+    /// The request channel closed: the server is shutting down
+    Shutdown,
+    /// The worker could not initialize (file read, parse, or eval failure —
+    /// often a transient hot-reload race); worth retrying
+    StartupFailed,
+}
+
 /// Execution mode controls how server-related functions behave
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ExecutionMode {
@@ -755,6 +766,9 @@ pub struct Interpreter {
     /// `otherwise` — out-of-bounds stays silent-None under a guard, in every
     /// type mode (the guard is the documented safety net)
     suppress_index_warn: std::cell::Cell<bool>,
+    /// Explicit worker count from `ntnt run --workers N`; overrides the
+    /// NTNT_WORKERS env var and mode defaults
+    worker_count_override: Option<usize>,
 }
 
 /// Information about a trait definition
@@ -942,6 +956,7 @@ impl Interpreter {
             current_col: 0,
             call_depth: 0,
             suppress_index_warn: std::cell::Cell::new(false),
+            worker_count_override: None,
             max_recursion_depth: std::env::var("NTNT_MAX_RECURSION")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
@@ -974,6 +989,12 @@ impl Interpreter {
     /// Set the request timeout for the HTTP server (in seconds)
     pub fn set_request_timeout(&mut self, seconds: u64) {
         self.request_timeout_secs = seconds;
+    }
+
+    /// Set an explicit HTTP worker count (from `ntnt run --workers N`),
+    /// overriding the NTNT_WORKERS env var and mode defaults
+    pub fn set_worker_count(&mut self, workers: usize) {
+        self.worker_count_override = Some(workers.max(1));
     }
 
     /// Set the execution mode for the interpreter
@@ -9931,19 +9952,21 @@ impl Interpreter {
         // Create interpreter handle for async handlers
         let interpreter_handle = Arc::new(InterpreterHandle::new(tx));
 
-        // Determine worker count
-        let num_workers = if is_production {
-            std::env::var("NTNT_WORKERS")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or_else(|| num_cpus::get().min(8).max(1))
-        } else {
-            // Dev mode: default to 1 worker for simpler hot-reload behavior
-            std::env::var("NTNT_WORKERS")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(1)
-        };
+        // Determine worker count: --workers flag > NTNT_WORKERS env > mode default
+        let num_workers = self.worker_count_override.unwrap_or_else(|| {
+            if is_production {
+                std::env::var("NTNT_WORKERS")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or_else(|| num_cpus::get().clamp(1, 8))
+            } else {
+                // Dev mode: default to 1 worker for simpler hot-reload behavior
+                std::env::var("NTNT_WORKERS")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(1)
+            }
+        });
 
         // Create server config
         let server_config = AsyncServerConfig {
@@ -9977,27 +10000,52 @@ impl Interpreter {
         });
 
         // Spawn additional worker threads (workers 2..N). Each is wrapped in
-        // a supervisor loop: run_worker returns normally on channel close
-        // (shutdown), so any panic that unwinds out of it is a crashed
-        // worker — log it and respawn rather than silently losing capacity.
+        // a supervisor loop so a crashed worker (panic) or a failed startup
+        // (transient file read, parse error during a hot-reload race) is
+        // retried instead of silently losing capacity for the process
+        // lifetime. Backoff doubles per consecutive failure (1s..30s) so a
+        // persistently-failing worker (e.g. poisoned global mutex) cannot
+        // hot-spin; it resets after a run that lasted long enough to have
+        // served real traffic.
         let mut worker_handles = Vec::new();
         if num_workers > 1 {
             let source_file = self.main_source_file.clone().unwrap_or_default();
             for worker_id in 1..num_workers {
                 let worker_rx = rx.clone();
                 let worker_source = source_file.clone();
-                let handle = thread::spawn(move || loop {
-                    let rx = worker_rx.clone();
-                    let source = worker_source.clone();
-                    let result =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                            Self::run_worker(worker_id, rx, &source);
-                        }));
-                    match result {
-                        Ok(()) => break, // normal shutdown (channel closed)
-                        Err(_) => {
-                            eprintln!("[worker {}] crashed (panic) — respawning", worker_id);
+                let handle = thread::spawn(move || {
+                    let mut backoff = std::time::Duration::from_secs(1);
+                    const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+                    loop {
+                        let rx = worker_rx.clone();
+                        let source = worker_source.clone();
+                        let started = std::time::Instant::now();
+                        let result =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                                Self::run_worker(worker_id, rx, &source)
+                            }));
+                        match result {
+                            Ok(WorkerExit::Shutdown) => break, // channel closed
+                            Ok(WorkerExit::StartupFailed) => {
+                                eprintln!(
+                                    "[worker {}] startup failed — retrying in {:?}",
+                                    worker_id, backoff
+                                );
+                            }
+                            Err(_) => {
+                                eprintln!(
+                                    "[worker {}] crashed (panic) — respawning in {:?}",
+                                    worker_id, backoff
+                                );
+                            }
                         }
+                        // A run that survived past the backoff window was
+                        // healthy — reset; otherwise keep doubling
+                        if started.elapsed() > MAX_BACKOFF {
+                            backoff = std::time::Duration::from_secs(1);
+                        }
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
                     }
                 });
                 worker_handles.push(handle);
@@ -10360,7 +10408,7 @@ impl Interpreter {
         worker_id: usize,
         rx: flume::Receiver<crate::stdlib::http_bridge::HandlerRequest>,
         source_file: &str,
-    ) {
+    ) -> WorkerExit {
         use crate::stdlib::http_bridge::HandlerRequest;
 
         // Read and parse the source file
@@ -10368,7 +10416,7 @@ impl Interpreter {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[worker {}] Failed to read source file: {}", worker_id, e);
-                return;
+                return WorkerExit::StartupFailed;
             }
         };
 
@@ -10383,7 +10431,7 @@ impl Interpreter {
             Ok(ast) => ast,
             Err(e) => {
                 eprintln!("[worker {}] Parse error: {}", worker_id, e);
-                return;
+                return WorkerExit::StartupFailed;
             }
         };
 
@@ -10396,7 +10444,7 @@ impl Interpreter {
         // Evaluate the source to register routes, middleware, etc.
         if let Err(e) = interpreter.eval(&ast) {
             eprintln!("[worker {}] Eval error: {}", worker_id, e);
-            return;
+            return WorkerExit::StartupFailed;
         }
 
         // Worker request loop — no hot-reload, just process requests
@@ -10407,7 +10455,7 @@ impl Interpreter {
                     let bridge_response = interpreter.process_request(request, false);
                     let _ = reply_tx.send(bridge_response);
                 }
-                Err(_) => break, // Channel closed, server shutting down
+                Err(_) => return WorkerExit::Shutdown, // Channel closed
             }
         }
     }
