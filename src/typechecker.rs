@@ -31,6 +31,9 @@ pub enum DiagnosticKind {
     /// JavaScript-style `${ident}` interpolation in a string literal where
     /// `ident` is a variable in scope (NTNT interpolation is `#{expr}`)
     JsStyleInterpolation,
+    /// Dot-call on a method name that is not a defined or imported function
+    /// (UFCS means `x.f()` needs a reachable function `f`)
+    UnknownMethod,
     /// General type error (mismatch, undefined, etc.)
     General,
 }
@@ -97,6 +100,9 @@ pub struct TypeContext {
     search_after: usize,
     /// When true, warn about untyped function parameters and missing return types
     strict_lint: bool,
+    /// True when an import could not be resolved — unknown-method warnings
+    /// are suppressed because unseen imports make the check unreliable
+    has_unresolved_import: bool,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -213,6 +219,7 @@ pub fn check_program_with_lint_mode(
                         | DiagnosticKind::MissingReturnAnnotation
                         | DiagnosticKind::MissingLambdaParamAnnotation
                         | DiagnosticKind::JsStyleInterpolation
+                        | DiagnosticKind::UnknownMethod
                 )
             {
                 d.severity = Severity::Error;
@@ -468,6 +475,7 @@ impl TypeContext {
             source_lines: source.lines().map(|l| l.to_string()).collect(),
             search_after: 0,
             strict_lint: false,
+            has_unresolved_import: false,
             current_file: None,
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
@@ -544,6 +552,62 @@ impl TypeContext {
 
     fn warning(&mut self, message: String, line: usize, hint: Option<String>) {
         self.emit(Severity::Warning, message, line, hint);
+    }
+
+    /// Warn on `x.method()` when `method` is not a defined function,
+    /// builtin, or callable in-scope binding — UFCS means the call can only
+    /// fail at runtime (E007). Skipped for `Any` receivers (module aliases,
+    /// untyped params) and whenever an import could not be resolved, since
+    /// both make the check unreliable.
+    fn check_unknown_method(&mut self, object: &Expression, method: &str, obj_type: &Type) {
+        if matches!(obj_type, Type::Any) || self.has_unresolved_import {
+            return;
+        }
+        // Scope bindings only count when callable: `let double = fn(x){..}`
+        // suppresses, `let length = 42` does not (that call fails at runtime).
+        // Any-typed bindings suppress because we can't tell.
+        let callable_binding = matches!(
+            self.lookup(method),
+            Some(Type::Function { .. }) | Some(Type::Any)
+        );
+        if self.functions.contains_key(method)
+            || self.builtin_sigs.contains_key(method)
+            || callable_binding
+        {
+            return;
+        }
+
+        let mut candidates: Vec<String> = self.functions.keys().cloned().collect();
+        candidates.extend(self.builtin_sigs.keys().cloned());
+        let alias = crate::error::METHOD_ALIAS_HINTS
+            .iter()
+            .find(|(from, to)| *from == method && candidates.iter().any(|c| c == *to))
+            .map(|(_, to)| to.to_string());
+        let suggestion = alias.or_else(|| crate::error::find_suggestion(method, &candidates));
+
+        let receiver = expr_search_hint(object);
+        let hint = match &suggestion {
+            Some(target) => format!(
+                "NTNT methods resolve to free functions — try {}({})",
+                target, receiver
+            ),
+            None => format!(
+                "NTNT methods resolve to free functions — call name({}, ...) or define fn {}(...)",
+                receiver, method
+            ),
+        };
+
+        let line = self.find_line_near(&format!(".{}(", method));
+        self.emit_with_kind(
+            Severity::Warning,
+            DiagnosticKind::UnknownMethod,
+            format!(
+                "Unknown method '{}' — no function with this name is defined or imported",
+                method
+            ),
+            line,
+            Some(hint),
+        );
     }
 
     /// Warn when a string literal contains JavaScript-style `${ident}` and
@@ -1945,6 +2009,7 @@ impl TypeContext {
                 arguments,
             } => {
                 let obj_type = self.infer_expression(object);
+                self.check_unknown_method(object, method, &obj_type);
                 let method_arg_types: Vec<Type> =
                     arguments.iter().map(|a| self.infer_expression(a)).collect();
                 // Method calls: infer return type from known methods
@@ -3428,22 +3493,27 @@ impl TypeContext {
                 return;
             }
 
-            if let Some(file_path) = self.resolve_import_path(source) {
-                let exports = self.extract_file_exports(&file_path);
-                for (name, sig) in exports.functions {
-                    self.builtin_sigs.insert(name, sig);
+            match self.resolve_import_path(source) {
+                Some(file_path) if file_path.exists() => {
+                    let exports = self.extract_file_exports(&file_path);
+                    for (name, sig) in exports.functions {
+                        self.builtin_sigs.insert(name, sig);
+                    }
+                    for (name, fields) in exports.structs {
+                        self.structs.insert(name.clone(), fields);
+                        self.bind(&name, Type::Named(name.clone()));
+                    }
+                    for (name, variants) in exports.enums {
+                        self.enums.insert(name.clone(), variants);
+                        self.bind(&name, Type::Named(name.clone()));
+                    }
+                    for (name, typ) in exports.type_aliases {
+                        self.type_aliases.insert(name, typ);
+                    }
                 }
-                for (name, fields) in exports.structs {
-                    self.structs.insert(name.clone(), fields);
-                    self.bind(&name, Type::Named(name.clone()));
-                }
-                for (name, variants) in exports.enums {
-                    self.enums.insert(name.clone(), variants);
-                    self.bind(&name, Type::Named(name.clone()));
-                }
-                for (name, typ) in exports.type_aliases {
-                    self.type_aliases.insert(name, typ);
-                }
+                // Wildcard import of something we can't see — any method
+                // name might exist in it
+                _ => self.has_unresolved_import = true,
             }
             return;
         }
@@ -3463,7 +3533,7 @@ impl TypeContext {
         }
 
         // Try user file import
-        if let Some(file_path) = self.resolve_import_path(source) {
+        if let Some(file_path) = self.resolve_import_path(source).filter(|p| p.exists()) {
             let exports = self.extract_file_exports(&file_path);
             for item in items {
                 let local_name = item.alias.as_ref().unwrap_or(&item.name);
@@ -3489,6 +3559,7 @@ impl TypeContext {
         }
 
         // Unknown module — bind all as Any
+        self.has_unresolved_import = true;
         for item in items {
             let local_name = item.alias.as_ref().unwrap_or(&item.name);
             self.bind(local_name, Type::Any);
@@ -3620,6 +3691,13 @@ impl TypeContext {
 
         // Utility
         sig!("unwrap", ["value" => Type::Any], Type::Any);
+        // Runtime-global Option/Result helpers (interpreter globals; keeping
+        // builtin_sigs the single source of truth for the unknown-method check)
+        sig!("is_some", ["value" => Type::Any], Type::Bool);
+        sig!("is_none", ["value" => Type::Any], Type::Bool);
+        sig!("is_ok", ["value" => Type::Any], Type::Bool);
+        sig!("is_err", ["value" => Type::Any], Type::Bool);
+        sig!("unwrap_or", ["value" => Type::Any, "default" => Type::Any], Type::Any);
 
         // Register synthetic struct types for HTTP
         let map_string_string = Type::Map {

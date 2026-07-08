@@ -2951,6 +2951,97 @@ print(completely_wrong_name)
 }
 
 // ===========================================================================
+// Method-miss bridge hints (DD-063 Rec 4b)
+// ===========================================================================
+
+#[test]
+fn test_unknown_method_gets_alias_suggestion_and_bridge_hint() {
+    let code = r#"
+let s = "hi"
+print(s.length())
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0);
+    assert!(stderr.contains("error[E007]"), "stderr: {}", stderr);
+    assert!(stderr.contains("Did you mean 'len'"), "stderr: {}", stderr);
+    assert!(
+        stderr.contains("free functions") && stderr.contains("len(s)"),
+        "missing bridge hint: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_unknown_method_suggests_user_function() {
+    let code = r#"
+fn greet(u) {
+    return "hello " + u
+}
+let u = "world"
+print(u.greeet())
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0);
+    assert!(
+        stderr.contains("Did you mean 'greet'"),
+        "user functions should be suggestion candidates: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_size_alias_hints_len() {
+    let code = r#"
+let nums = [1, 2, 3]
+print(nums.size())
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0);
+    assert!(
+        stderr.contains("Did you mean 'len'"),
+        "alias table should map size->len: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("len(nums)"),
+        "hint should show receiver: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_ufcs_dispatch_still_works() {
+    let code = r#"
+let s = "hi"
+let arr = [1, 2]
+print(s.len())
+print(len(arr.push(3)))
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "UFCS positive control failed: {}", stderr);
+}
+
+#[test]
+fn test_module_method_miss_suggests_export() {
+    let code = r#"
+import "std/string" as strutil
+print(strutil.trimm("  x  "))
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0);
+    assert!(
+        stderr.contains("has no function 'trimm'"),
+        "module miss message changed: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Did you mean 'trim'"),
+        "module miss should suggest nearest export: {}",
+        stderr
+    );
+}
+
+// ===========================================================================
 // ? operator tests
 // ===========================================================================
 

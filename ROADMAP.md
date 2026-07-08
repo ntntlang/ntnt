@@ -1421,14 +1421,18 @@ $ ntnt intent validate server.intent
 
 **Implementation plan:**
 
-- [ ] `ntnt intent validate <file.intent>` — parse and validate without server
-- [ ] Check all glossary terms resolve to primitives (no dangling references)
-- [ ] Warn on unused glossary terms
+> Shipped as **`ntnt intent lint`** (DD-063 Rec 4b) — same feature, named to
+> match `ntnt lint`. Remaining items below extend it.
+
+- [x] `ntnt intent lint <file.intent>` — parse and validate without server (also accepts a `.tnt` path with a paired `.intent`)
+- [x] Check all scenario when-clauses and outcomes resolve (mirrors the execution fallback chain)
+- [x] Detect glossary definition cycles, including in entries no scenario uses
+- [x] Warn on unused glossary terms
 - [ ] Warn on features with no scenarios
 - [ ] Warn on duplicate feature IDs
 - [ ] Validate `@implements` annotations reference existing feature IDs (cross-check with `.tnt` file)
-- [ ] Suggest corrections for unresolved terms (Levenshtein distance against glossary + standard terms)
-- [ ] JSON output mode for agent consumption
+- [x] Suggest corrections for unresolved terms (Levenshtein distance against glossary + standard terms)
+- [x] JSON output mode for agent consumption (`--json`, exit 1 on errors for CI)
 
 ### 8.3 Glossary Inspector (`ntnt intent glossary`)
 

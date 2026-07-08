@@ -427,6 +427,30 @@ enum IntentCommands {
         #[arg(long = "intent", short = 'i')]
         intent_file: Option<PathBuf>,
     },
+    /// Statically validate an intent file's glossary and scenarios
+    ///
+    /// Resolves every scenario when-clause and outcome against the glossary
+    /// and standard vocabulary WITHOUT starting a server or executing tests.
+    /// Reports unresolved terms (with did-you-mean suggestions), glossary
+    /// definition cycles, and unused glossary entries.
+    ///
+    /// Exit code 1 when unresolved terms or cycles are found (orphan
+    /// warnings never fail the run), so it can gate CI before the slower
+    /// `ntnt intent check`.
+    ///
+    /// Examples:
+    ///   ntnt intent lint server.intent
+    ///   ntnt intent lint server.tnt          (locates the paired .intent)
+    ///   ntnt intent lint server.intent --json
+    Lint {
+        /// The .intent file to validate (or a .tnt file with a paired .intent)
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Output the report as JSON (for CI)
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate code scaffolding from an intent file
     ///
     /// Creates a new .tnt file with function stubs and route
@@ -829,6 +853,11 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
                 "help:".cyan().bold(),
                 suggestion.green()
             );
+        }
+
+        // Extra guidance (e.g. the UFCS free-function bridge for method misses)
+        if let Some(hint) = intent_err.hint() {
+            eprintln!("  {} {}", "hint:".cyan().bold(), hint);
         }
     } else {
         // Non-IntentError: fall back to simple display
@@ -3224,6 +3253,7 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
                         ntnt::typechecker::DiagnosticKind::JsStyleInterpolation => {
                             "javascript_style_interpolation"
                         }
+                        ntnt::typechecker::DiagnosticKind::UnknownMethod => "unknown_method",
                         _ => "type_check",
                     };
                     let entry = json!({
@@ -3405,6 +3435,7 @@ fn lint_project(
                         ntnt::typechecker::DiagnosticKind::JsStyleInterpolation => {
                             "javascript_style_interpolation"
                         }
+                        ntnt::typechecker::DiagnosticKind::UnknownMethod => "unknown_method",
                         _ => "type_check",
                     };
                     issues.push(json!({
@@ -4015,6 +4046,7 @@ fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
         IntentCommands::Coverage { file, intent_file } => {
             run_intent_coverage_command(&file, intent_file.as_ref())
         }
+        IntentCommands::Lint { file, json } => run_intent_lint_command(&file, json),
         IntentCommands::Init {
             intent_file,
             output,
@@ -4026,6 +4058,94 @@ fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
             no_open,
         } => run_intent_studio_command(&intent_file, port, app_port, no_open),
     }
+}
+
+/// Run the intent lint command: static glossary/scenario validation with
+/// no server startup and no primitive execution
+fn run_intent_lint_command(input_path: &PathBuf, json_output: bool) -> anyhow::Result<()> {
+    // Accept either a .intent file or a .tnt file with a paired .intent
+    let intent_path = if input_path.extension().and_then(|e| e.to_str()) == Some("intent") {
+        input_path.clone()
+    } else {
+        let (intent, _tnt) = ntnt::intent::resolve_intent_tnt_pair(input_path);
+        match intent.filter(|p| p.exists()) {
+            Some(p) => p,
+            None => anyhow::bail!(
+                "No .intent file found for {} — pass the .intent file directly",
+                input_path.display()
+            ),
+        }
+    };
+
+    if !intent_path.exists() {
+        anyhow::bail!("Intent file not found: {}", intent_path.display());
+    }
+
+    let intent = ntnt::intent::IntentFile::parse(&intent_path)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", intent_path.display(), e))?;
+
+    let report = ntnt::intent::lint_intent_file(&intent);
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", "=== NTNT Intent Lint ===".cyan().bold());
+        println!("  File: {}", intent_path.display());
+        println!();
+
+        for finding in &report.errors {
+            let location = if finding.feature.is_empty() {
+                "glossary".to_string()
+            } else {
+                format!("{} › {}", finding.feature, finding.scenario)
+            };
+            println!(
+                "{} [{}] {}: \"{}\"",
+                "✗".red(),
+                finding.kind.red(),
+                location,
+                finding.text
+            );
+            println!("    {}", finding.detail);
+            if !finding.suggestions.is_empty() {
+                let quoted: Vec<String> = finding
+                    .suggestions
+                    .iter()
+                    .map(|s| format!("'{}'", s))
+                    .collect();
+                println!("    {} {}", "did you mean:".cyan(), quoted.join(", "));
+            }
+        }
+
+        for finding in &report.warnings {
+            println!(
+                "{} [{}] \"{}\" — {}",
+                "⚠".yellow(),
+                finding.kind.yellow(),
+                finding.text,
+                finding.detail
+            );
+        }
+
+        println!();
+        if report.errors.is_empty() && report.warnings.is_empty() {
+            println!("{}", "No issues found!".green().bold());
+        }
+        println!(
+            "{} scenarios and {} glossary terms checked: {} error(s), {} warning(s)",
+            report.scenarios_checked,
+            report.terms_checked,
+            report.errors.len(),
+            report.warnings.len()
+        );
+    }
+
+    // Orphans are warnings and never fail the run (legacy direct-pattern
+    // fallback makes orphan detection imperfect)
+    if !report.errors.is_empty() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// Run the intent check command

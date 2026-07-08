@@ -7462,10 +7462,13 @@ impl Interpreter {
                                 .strip_prefix("module:")
                                 .or_else(|| name.strip_prefix("lib:"))
                                 .unwrap_or(name);
-                            return Err(IntentError::runtime_error(format!(
-                                "Module '{}' has no function '{}'",
-                                module_name, method
-                            )));
+                            let exports: Vec<String> = fields.keys().cloned().collect();
+                            let mut msg =
+                                format!("Module '{}' has no function '{}'", module_name, method);
+                            if let Some(sugg) = crate::error::find_suggestion(method, &exports) {
+                                msg.push_str(&format!(". Did you mean '{}'?", sugg));
+                            }
+                            return Err(IntentError::runtime_error(msg));
                         }
                     }
                 }
@@ -7496,10 +7499,37 @@ impl Interpreter {
 
                     Ok(result)
                 } else {
+                    // Suggest the closest real function: alias table first
+                    // (length→len etc.), then Levenshtein over everything in
+                    // scope (builtins, imports, user functions)
+                    let candidates = self.environment.borrow().keys();
+                    let alias = crate::error::METHOD_ALIAS_HINTS
+                        .iter()
+                        .find(|(from, to)| from == method && candidates.iter().any(|c| c == to))
+                        .map(|(_, to)| to.to_string());
+                    let suggestion =
+                        alias.or_else(|| crate::error::find_suggestion(method, &candidates));
+
+                    let receiver = Self::format_expression(object);
+                    let hint = match &suggestion {
+                        Some(sugg) => {
+                            let rest = if arguments.is_empty() { "" } else { ", ..." };
+                            format!(
+                                "NTNT methods resolve to free functions — try {}({}{})",
+                                sugg, receiver, rest
+                            )
+                        }
+                        None => format!(
+                            "NTNT methods resolve to free functions — call name({}, ...) or define fn {}({}, ...)",
+                            receiver, method, receiver
+                        ),
+                    };
+
                     Err(IntentError::UndefinedFunction {
                         name: method.clone(),
-                        suggestion: None,
-                        line: 0,
+                        suggestion,
+                        hint: Some(hint),
+                        line: self.current_line,
                     })
                 }
             }

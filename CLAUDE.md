@@ -155,6 +155,7 @@ fn divide(a: Int, b: Int) -> Int
 4. **Verify** with `ntnt intent check` or `ntnt intent studio`
 
 ```bash
+ntnt intent lint server.intent     # Static glossary/scenario check — run after editing .intent
 ntnt intent check server.tnt       # Verify code matches intent
 ntnt intent studio server.intent   # Visual studio with live tests
 ntnt intent coverage server.tnt    # Feature coverage report
@@ -194,6 +195,7 @@ ntnt run <file>              # Run (hot-reload in dev)
 ntnt lint <file>             # Check for errors
 ntnt lint --strict <file>    # Strict type warnings
 ntnt test <file> --get /     # Test HTTP endpoints
+ntnt intent lint <intent>    # Static glossary/scenario validation
 ntnt intent check <file>     # Verify intent specs
 ntnt intent studio <intent>  # Visual studio
 ntnt docs [query]            # Search stdlib docs

@@ -315,10 +315,17 @@ For the complete list, see [IAL_REFERENCE.md](IAL_REFERENCE.md).
 
 ```bash
 ntnt intent check server.tnt       # Verify code matches intent
+ntnt intent lint server.intent     # Static glossary/scenario validation (no server)
 ntnt intent studio server.intent   # Live visual feedback (opens :3001)
 ntnt intent coverage server.tnt    # Feature coverage report
 ntnt intent init server.intent     # Generate scaffolding from intent
 ```
+
+Run `ntnt intent lint` after editing a `.intent` file and before
+`intent check`: it catches unresolved terms (with did-you-mean
+suggestions), glossary cycles, and unused glossary entries in
+milliseconds, without starting a server. Exit 1 means at least one
+scenario cannot execute as written.
 
 ---
 
@@ -448,6 +455,22 @@ Two rules to know:
 - **Closures stored in map values are not dot-callable.** `m.f(10)` fails with
   E007 `Undefined function: f` because the parens make it a UFCS lookup for a
   function named `f`. Bind first: `let f = m.f` then `f(10)`.
+
+**Unknown methods are caught early with a bridge back to the real function.**
+`ntnt lint` warns (rule `unknown_method`; error in strict mode) when a
+dot-call names a method that no defined or imported function backs, and the
+runtime E007 shows the closest match plus the free-function form:
+
+```text
+error[E007]
+  = Undefined function: length
+  help: Did you mean 'len'?
+  hint: NTNT methods resolve to free functions — try len(s)
+```
+
+Common method names from other languages are mapped directly: `length`,
+`size`, `count` → `len`; `to_string`/`to_str` → `str`; `append` → `push`;
+`upper`/`lower` → `to_upper`/`to_lower`.
 
 **When to use dot vs brackets on maps:**
 - **Dot notation** for static keys known at write time: `req.params.id`

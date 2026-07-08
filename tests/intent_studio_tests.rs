@@ -758,3 +758,231 @@ fn test_intent_coverage_command() {
         );
     }
 }
+
+// ============================================================================
+// ntnt intent lint (DD-063 Rec 4b)
+// ============================================================================
+
+/// Write an intent file to a unique temp path, run `ntnt intent lint` on it
+/// (plus extra args), clean up, and return (stdout, stderr, exit_code).
+fn run_intent_lint(content: &str, extra_args: &[&str]) -> (String, String, i32) {
+    use std::io::Write as _;
+    static LINT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = LINT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let path = std::env::temp_dir().join(format!(
+        "ntnt_intent_lint_{}_{}.intent",
+        std::process::id(),
+        counter
+    ));
+    let mut file = std::fs::File::create(&path).expect("create intent file");
+    write!(file, "{}", content).expect("write intent file");
+    drop(file);
+
+    let path_str = path.to_string_lossy().to_string();
+    let mut args = vec!["intent", "lint", path_str.as_str()];
+    args.extend_from_slice(extra_args);
+    let result = run_ntnt(&args);
+
+    std::fs::remove_file(&path).ok();
+    result
+}
+
+const CLEAN_INTENT: &str = r#"## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the homepage | / |
+| they see {text} | body contains {text} |
+| success response | status 200 |
+
+---
+
+Feature: Home Page
+  id: feature.home
+
+  Scenario: First visit
+    When a user visits the homepage
+    → success response
+    → they see "Welcome"
+"#;
+
+#[test]
+fn intent_lint_clean_file_exits_zero() {
+    let (stdout, _stderr, exit_code) = run_intent_lint(CLEAN_INTENT, &[]);
+    assert_eq!(exit_code, 0, "clean intent should pass: {stdout}");
+    assert!(stdout.contains("No issues found"), "{stdout}");
+}
+
+#[test]
+fn intent_lint_unknown_term_exits_one_with_suggestion() {
+    let content = CLEAN_INTENT.replace("→ success response", "→ succes response");
+    let (stdout, _stderr, exit_code) = run_intent_lint(&content, &[]);
+    assert_eq!(exit_code, 1, "unresolved term should fail: {stdout}");
+    assert!(stdout.contains("unresolved_term"), "{stdout}");
+    assert!(
+        stdout.contains("did you mean") && stdout.contains("success response"),
+        "should suggest the near-miss glossary term: {stdout}"
+    );
+}
+
+#[test]
+fn intent_lint_unresolved_when_clause_exits_one() {
+    let content = CLEAN_INTENT.replace(
+        "When a user visits the homepage",
+        "When a user creates a task",
+    );
+    let (stdout, _stderr, exit_code) = run_intent_lint(&content, &[]);
+    assert_eq!(exit_code, 1, "{stdout}");
+    assert!(stdout.contains("unresolved_when"), "{stdout}");
+}
+
+#[test]
+fn intent_lint_detects_glossary_cycle() {
+    let content = r#"## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the homepage | / |
+| term alpha | term beta |
+| term beta | term alpha |
+
+---
+
+Feature: Home Page
+  id: feature.home
+
+  Scenario: First visit
+    When a user visits the homepage
+    → term alpha
+"#;
+    let (stdout, _stderr, exit_code) = run_intent_lint(content, &[]);
+    assert_eq!(exit_code, 1, "{stdout}");
+    assert!(stdout.contains("cycle"), "{stdout}");
+    assert!(stdout.contains("term alpha"), "{stdout}");
+}
+
+#[test]
+fn intent_lint_orphan_term_warns_but_exits_zero() {
+    let content = CLEAN_INTENT.replace(
+        "| success response | status 200 |",
+        "| success response | status 200 |\n| never used term | status 418 |",
+    );
+    let (stdout, _stderr, exit_code) = run_intent_lint(&content, &[]);
+    assert_eq!(exit_code, 0, "orphans are warnings only: {stdout}");
+    assert!(stdout.contains("orphan_term"), "{stdout}");
+    assert!(stdout.contains("never used term"), "{stdout}");
+}
+
+#[test]
+fn intent_lint_json_output_shape() {
+    let content = CLEAN_INTENT.replace("→ success response", "→ succes response");
+    let (stdout, _stderr, exit_code) = run_intent_lint(&content, &["--json"]);
+    assert_eq!(exit_code, 1);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert!(json["errors"].is_array());
+    assert!(json["warnings"].is_array());
+    assert_eq!(json["errors"][0]["kind"], "unresolved_term");
+    assert!(json["errors"][0]["suggestions"].is_array());
+    assert!(json["scenarios_checked"].is_number());
+}
+
+#[test]
+fn intent_lint_reports_each_cycle_exactly_once() {
+    // A two-term cycle must yield ONE finding, not one per participant —
+    // and not once more via the scenario that references it
+    let content = r#"## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the homepage | / |
+| term alpha | term beta |
+| term beta | term alpha |
+
+---
+
+Feature: Home Page
+  id: feature.home
+
+  Scenario: First visit
+    When a user visits the homepage
+    → term alpha
+"#;
+    let (stdout, _stderr, exit_code) = run_intent_lint(content, &["--json"]);
+    assert_eq!(exit_code, 1);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let cycle_count = json["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "cycle")
+        .count();
+    assert_eq!(
+        cycle_count, 1,
+        "cycle reported {cycle_count} times: {stdout}"
+    );
+}
+
+#[test]
+fn intent_lint_json_suggestions_is_empty_array_when_no_near_miss() {
+    // Cycle findings carry no suggestions — the key must still be present
+    let content = r#"## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the homepage | / |
+| term alpha | term beta |
+| term beta | term alpha |
+
+---
+
+Feature: Home Page
+  id: feature.home
+
+  Scenario: First visit
+    When a user visits the homepage
+    → term alpha
+"#;
+    let (stdout, _stderr, _exit) = run_intent_lint(content, &["--json"]);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let cycle = json["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "cycle")
+        .expect("cycle finding present");
+    assert!(
+        cycle["suggestions"].is_array() && cycle["suggestions"].as_array().unwrap().is_empty(),
+        "suggestions must serialize as an empty array: {stdout}"
+    );
+}
+
+#[test]
+fn intent_lint_accepts_tnt_path_with_paired_intent() {
+    use std::io::Write as _;
+    let dir = std::env::temp_dir().join(format!("ntnt_lint_pair_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let intent_path = dir.join("app.intent");
+    let tnt_path = dir.join("app.tnt");
+    write!(
+        std::fs::File::create(&intent_path).unwrap(),
+        "{}",
+        CLEAN_INTENT
+    )
+    .unwrap();
+    write!(
+        std::fs::File::create(&tnt_path).unwrap(),
+        "get(\"/\", fn(req) {{ \"Welcome\" }})\nlisten(8080)\n"
+    )
+    .unwrap();
+
+    let tnt_str = tnt_path.to_string_lossy().to_string();
+    let (stdout, _stderr, exit_code) = run_ntnt(&["intent", "lint", &tnt_str]);
+
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(exit_code, 0, "should locate paired .intent: {stdout}");
+    assert!(stdout.contains("app.intent"), "{stdout}");
+}

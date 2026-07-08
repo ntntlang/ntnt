@@ -44,6 +44,7 @@ pub use execute::{execute, execute_all, Context, ExecuteResult};
 pub use primitives::{CheckOp, Primitive, Value};
 pub use resolve::{
     resolve, resolve_all, resolve_with_trace, ResolutionStep, ResolutionTrace, ResolveError,
+    ResolveErrorKind,
 };
 pub use standard::{parse_glossary, standard_vocabulary};
 pub use vocabulary::{Definition, Pattern, Term, Vocabulary};
