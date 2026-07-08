@@ -1,6 +1,6 @@
 # DD-041: Real-Time Streaming — SSE & Broadcast Channels
 
-**Status:** Draft
+**Status:** Draft — design review 2026-07-08 (see § Design Review below); awaiting maintainer go/no-go for Phase 1
 **Author:** Larri
 **Created:** 2026-03-17
 **Branch:** TBD
@@ -23,7 +23,86 @@
 
 ---
 
-## Vision
+## Design Review (2026-07-08)
+
+The March draft was verified against current main (post multi-worker
+hardening, DD-057/DD-063). The architecture holds; three assumptions do
+not, and each changes the plan:
+
+**1. There is no `respond` keyword.** The draft's "`respond` already
+handles `respond file(...)`" is drift — handlers return response VALUES
+(`json()`, `html()`). This simplifies the design: `sse()` and
+`sse_stream()` are ordinary response builders and Phase 1 needs zero
+parser work:
+
+```ntnt
+import { broadcast, subscribe, sse } from "std/sse"
+
+let metrics_bus = broadcast("metrics")
+
+get("/metrics/stream", fn(req) {
+    return sse(subscribe(metrics_bus))
+})
+```
+
+All `route`/`respond`/`group` syntax in the examples below should be read
+in this form.
+
+**2. The bridge buffers whole responses.** `BridgeResponse` is
+`{ status, headers, body: String }` — returned over a oneshot channel and
+written once. SSE needs the one real structural change: a body variant
+(`BridgeBody::Text(String) | BridgeBody::Sse { subscription_id }`). When
+the Axum layer sees the SSE variant it builds a streaming body (the
+draft's write-task design, unchanged: keep-alive comments, disconnect
+cleanup, `X-Accel-Buffering: no`). The interpreter thread still returns
+immediately — the zero-interpreter-overhead property survives contact
+with the bridge.
+
+**3. Multi-worker breaks the naive design — named broadcasts fix it.**
+Production defaults to `min(num_cpus, 8)` workers, each re-evaluating the
+program. Two consequences the draft predates:
+
+- A module-level `let bus = broadcast()` creates N DISTINCT buses (one
+  per worker). A subscriber lands on whichever worker served its request;
+  a sampler sends on whichever worker runs it. Subscribers on other
+  workers receive nothing.
+- `schedule()` spawns its loop unconditionally, so a module-level sampler
+  runs N times — a pre-existing duplicate-background-work bug that SSE
+  would surface as duplicate events.
+
+Resolution, now part of Phase 1:
+
+- **Broadcasts are named and process-global**: `broadcast("metrics")`
+  returns the same bus for the same name from every worker (registry
+  keyed by name, same `LazyLock<Mutex<HashMap>>` pattern as the pool
+  registry). Named buses also survive hot reload — a re-eval re-attaches
+  to the existing bus instead of orphaning open connections.
+  Anonymous `broadcast()` remains for single-connection/`sse_stream`
+  patterns and is documented as per-worker.
+- **`schedule()` registers only outside Worker mode** (workers 1..N skip
+  it, exactly as they skip `listen()`/`on_shutdown()`). This fixes the
+  duplicate-sampler bug for ALL apps, not just SSE — flagged as its own
+  release-note item since multi-worker apps today silently run N copies
+  of every scheduled loop.
+
+**Open questions resolved (recommendations):**
+
+- Backing: custom `Vec<Sender>` per bus (crossbeam-consistent) — but with
+  **bounded per-subscriber queues** (e.g. 1024) rather than unbounded: a
+  stuck TCP connection with an unbounded queue is slow-motion OOM.
+  Default policy drop-oldest with a deduped warn; `"drop_slow": false`
+  opts into blocking sends for correctness-critical streams.
+- `send()` reuses the existing dispatch on handle type — no new verb.
+- `sse_stream` cleanup stays `on_close(fn)`; `push()` returns Bool so
+  generators can stop on disconnect.
+- WebSockets remain a separate DD; `ntnt sse status` stays Phase 3.
+
+Phase 1 effort holds at 3-4 days with the two additions (BridgeBody
+variant, worker-mode schedule gate). Awaiting go/no-go.
+
+---
+
+## Vision## Vision
 
 ntnt already has `schedule()` for periodic sampling and channels for in-process communication. The missing piece for real-time dashboards — compute metrics, network monitoring, live logs, progress bars — is a way to push data from those samplers to a browser the moment it's collected.
 
