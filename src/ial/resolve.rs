@@ -186,9 +186,6 @@ fn primitive_to_string(primitive: &Primitive) -> String {
         Primitive::Cli { command, args } => {
             format!("cli: {} {}", command, args.join(" "))
         }
-        Primitive::Sql { query, .. } => {
-            format!("sql: {}", query)
-        }
         Primitive::ReadFile { path } => {
             format!("read_file: {}", path)
         }
@@ -207,9 +204,6 @@ fn primitive_to_string(primitive: &Primitive) -> String {
         }
         Primitive::PropertyCheck { property, .. } => {
             format!("property_check: {:?}", property)
-        }
-        Primitive::InvariantCheck { invariant_id, .. } => {
-            format!("invariant_check: {}", invariant_id)
         }
     }
 }
@@ -406,14 +400,6 @@ fn substitute_primitive(primitive: &Primitive, params: &HashMap<String, Value>) 
             args: args.iter().map(|a| substitute_string(a, params)).collect(),
         },
 
-        Primitive::Sql {
-            query,
-            params: sql_params,
-        } => Primitive::Sql {
-            query: substitute_string(query, params),
-            params: sql_params.clone(),
-        },
-
         Primitive::ReadFile { path } => Primitive::ReadFile {
             path: substitute_string(path, params),
         },
@@ -454,14 +440,6 @@ fn substitute_primitive(primitive: &Primitive, params: &HashMap<String, Value>) 
             source_file: substitute_string(source_file, params),
             function_name: substitute_string(function_name, params),
             input: substitute_value(input, params),
-        },
-
-        Primitive::InvariantCheck {
-            invariant_id,
-            value,
-        } => Primitive::InvariantCheck {
-            invariant_id: substitute_string(invariant_id, params),
-            value: substitute_value(value, params),
         },
     }
 }

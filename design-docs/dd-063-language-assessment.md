@@ -205,7 +205,7 @@ Implementation (after decisions):
 
 ### Recs 5–10 — assessed, not yet scheduled
 
-- [ ] **Rec 5** — IAL stub completion: implement invariant execution (expansion already works); decide `Sql` primitive fate (PR-2 makes docs honest in the interim)
+- [x] **Rec 5** — IAL stub completion — shipped 2026-07-08. Root cause was better-defined than the assessment knew: invariant execution via expansion already worked, but the intent parser's `Feature:`/`Component:` handlers never finalized a pending invariant, so any file declaring invariants before features had the stale invariant swallow the feature's `id:` and scenario `→` outcomes — corrupting both and passing scenarios vacuously (verified: a broken slugify passed intent check with 0 assertions). Fixed the state leak; removed the never-constructed `InvariantCheck` and `Sql` primitives (docs now describe expansion instead of phantom primitives); `intent lint` warns on vacuous scenarios (zero outcomes) so this class can't hide again.
 - [ ] **Rec 6** — lint for silent block-binding (`let x = { 5 }` / `let e = {}`)
 - [ ] **Rec 7** — strict type mode in verification contexts (`intent check`, `ntnt test`)
 - [ ] **Rec 8** — whitepaper restructure: shipped vs aspirational

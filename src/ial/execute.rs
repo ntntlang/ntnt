@@ -132,7 +132,7 @@ impl ExecuteResult {
 
 /// Execute a single primitive against the context.
 ///
-/// Actions (Http, Cli, Sql, ReadFile) populate the context.
+/// Actions (Http, Cli, ReadFile) populate the context.
 /// Checks verify values in the context.
 pub fn execute(primitive: &Primitive, ctx: &mut Context, port: u16) -> ExecuteResult {
     match primitive {
@@ -151,14 +151,6 @@ pub fn execute(primitive: &Primitive, ctx: &mut Context, port: u16) -> ExecuteRe
             validate,
         } => execute_code_quality(file.as_deref(), *lint, *validate, ctx),
 
-        Primitive::Sql { query, params: _ } => {
-            // SQL execution not yet implemented
-            ExecuteResult::fail(
-                format!("SQL: {}", query),
-                "SQL execution not yet implemented",
-            )
-        }
-
         Primitive::ReadFile { path } => execute_read_file(path, ctx),
 
         Primitive::FunctionCall {
@@ -173,11 +165,6 @@ pub fn execute(primitive: &Primitive, ctx: &mut Context, port: u16) -> ExecuteRe
             function_name,
             input,
         } => execute_property_check(property, source_file, function_name, input, ctx),
-
-        Primitive::InvariantCheck {
-            invariant_id,
-            value,
-        } => execute_invariant_check(invariant_id, value, ctx),
 
         Primitive::Check { op, path, expected } => do_execute_check(op, path, expected, ctx),
     }
@@ -1105,22 +1092,6 @@ fn execute_property_check(
 /// Invariants are bundles of assertions that are expanded and checked.
 /// For now, this is a placeholder - invariant expansion happens during
 /// glossary resolution, not at execution time.
-fn execute_invariant_check(invariant_id: &str, value: &Value, ctx: &mut Context) -> ExecuteResult {
-    // Store the value being checked in context for assertion expansion
-    ctx.set("invariant.value", value.clone());
-
-    // Invariant expansion is handled during term resolution, not execution.
-    // This primitive is a marker that triggers the expansion.
-    // If we reach here, it means the invariant wasn't found/expanded.
-    ExecuteResult::fail(
-        format!("check: {}", invariant_id),
-        format!(
-            "Invariant '{}' not found or not expanded. Value: {}",
-            invariant_id, value
-        ),
-    )
-}
-
 /// Execute multiple primitives and collect results
 pub fn execute_all(primitives: &[Primitive], ctx: &mut Context, port: u16) -> Vec<ExecuteResult> {
     primitives.iter().map(|p| execute(p, ctx, port)).collect()

@@ -961,6 +961,33 @@ Feature: Home Page
 }
 
 #[test]
+fn intent_lint_warns_on_vacuous_scenario() {
+    // A scenario with no outcome lines verifies nothing — warn, don't fail
+    let content = r#"## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the homepage | / |
+
+---
+
+Feature: Home Page
+  id: feature.home
+
+  Scenario: First visit
+    When a user visits the homepage
+"#;
+    let (stdout, _stderr, exit_code) = run_intent_lint(content, &[]);
+    assert_eq!(exit_code, 0, "vacuous scenarios are warnings: {stdout}");
+    assert!(stdout.contains("vacuous_scenario"), "{stdout}");
+    assert!(
+        stdout.contains("passes vacuously") || stdout.contains("pass vacuously"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn intent_lint_accepts_tnt_path_with_paired_intent() {
     use std::io::Write as _;
     let dir = std::env::temp_dir().join(format!("ntnt_lint_pair_{}", std::process::id()));
