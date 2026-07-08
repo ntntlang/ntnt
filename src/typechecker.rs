@@ -34,6 +34,9 @@ pub enum DiagnosticKind {
     /// Dot-call on a method name that is not a defined or imported function
     /// (UFCS means `x.f()` needs a reachable function `f`)
     UnknownMethod,
+    /// `let x = { ... }` binds a bare block (Unit or its last expression),
+    /// not a map — almost always a missing `map` keyword or stray brace
+    BlockBinding,
     /// General type error (mismatch, undefined, etc.)
     General,
 }
@@ -220,6 +223,7 @@ pub fn check_program_with_lint_mode(
                         | DiagnosticKind::MissingLambdaParamAnnotation
                         | DiagnosticKind::JsStyleInterpolation
                         | DiagnosticKind::UnknownMethod
+                        | DiagnosticKind::BlockBinding
                 )
             {
                 d.severity = Severity::Error;
@@ -1132,6 +1136,45 @@ impl TypeContext {
                 otherwise,
                 ..
             } => {
+                // Bare-brace bindings are a silent footgun (DD-063 Rec 6):
+                // `let e = {}` binds Unit and `let m = { 5 }` binds 5 — the
+                // author almost always meant `map { ... }` or has a stray
+                // brace. Multi-statement blocks are left alone (block
+                // expressions are an intentional scoping feature), as are
+                // annotated bindings — `let x: Int = { 5 }` signals intent,
+                // and a wrong annotation surfaces as a type error anyway.
+                if let (None, Some(Expression::Block(block))) = (type_annotation, value) {
+                    let bound_to = name.as_str();
+                    if block.statements.is_empty() {
+                        let line = self.find_line_near(&format!("let {}", bound_to));
+                        self.emit_with_kind(
+                            Severity::Warning,
+                            DiagnosticKind::BlockBinding,
+                            format!(
+                                "`let {} = {{}}` binds Unit — a bare {{}} is an empty block, not a map",
+                                bound_to
+                            ),
+                            line,
+                            Some("For an empty map, use `map {}`".to_string()),
+                        );
+                    } else if block.statements.len() == 1 {
+                        let line = self.find_line_near(&format!("let {}", bound_to));
+                        self.emit_with_kind(
+                            Severity::Warning,
+                            DiagnosticKind::BlockBinding,
+                            format!(
+                                "`let {} = {{ ... }}` binds a block's value, not a map",
+                                bound_to
+                            ),
+                            line,
+                            Some(
+                                "For a map, use `map { ... }`; if the block is intentional, this single-expression form is equivalent to binding the expression directly"
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                }
+
                 let inferred = value
                     .as_ref()
                     .map(|v| self.infer_expression(v))

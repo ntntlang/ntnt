@@ -48,11 +48,38 @@ pub enum LintMode {
 }
 
 #[cfg_attr(test, allow(dead_code))]
+/// Default type mode when NTNT_TYPE_MODE is unset. Verification commands
+/// (`ntnt intent check`, `ntnt test`) set this to Strict before the first
+/// get_type_mode() read so verification means verification (DD-063 Rec 7);
+/// an explicit NTNT_TYPE_MODE always wins.
+static TYPE_MODE_DEFAULT: std::sync::OnceLock<TypeMode> = std::sync::OnceLock::new();
+
+/// Set the default type mode used when NTNT_TYPE_MODE is unset.
+/// Must be called before the first `get_type_mode()` read — a late call
+/// cannot take effect (the resolved mode is already cached), so it is
+/// surfaced loudly instead of silently leaving verification in warn mode.
+pub fn set_default_type_mode(mode: TypeMode) {
+    #[cfg(not(test))]
+    if TYPE_MODE_CACHE.get().is_some() {
+        eprintln!(
+            "[WARN] set_default_type_mode({:?}) called after the type mode was already resolved — default not applied",
+            mode
+        );
+        debug_assert!(
+            false,
+            "set_default_type_mode must run before the first get_type_mode() read"
+        );
+        return;
+    }
+    let _ = TYPE_MODE_DEFAULT.set(mode);
+}
+
 fn read_type_mode_from_env() -> TypeMode {
-    match std::env::var("NTNT_TYPE_MODE").as_deref().unwrap_or("warn") {
-        "strict" => TypeMode::Strict,
-        "forgiving" => TypeMode::Forgiving,
-        _ => TypeMode::Warn,
+    match std::env::var("NTNT_TYPE_MODE").as_deref() {
+        Ok("strict") => TypeMode::Strict,
+        Ok("forgiving") => TypeMode::Forgiving,
+        Ok(_) => TypeMode::Warn,
+        Err(_) => TYPE_MODE_DEFAULT.get().copied().unwrap_or(TypeMode::Warn),
     }
 }
 
@@ -64,10 +91,11 @@ fn read_type_mode_from_env() -> TypeMode {
 /// is unsafe in multi-threaded contexts on Rust 1.83+). Use
 /// [`set_test_type_mode`] to override in tests.
 #[cfg(not(test))]
+static TYPE_MODE_CACHE: std::sync::OnceLock<TypeMode> = std::sync::OnceLock::new();
+
+#[cfg(not(test))]
 pub fn get_type_mode() -> TypeMode {
-    use std::sync::OnceLock;
-    static TYPE_MODE: OnceLock<TypeMode> = OnceLock::new();
-    *TYPE_MODE.get_or_init(read_type_mode_from_env)
+    *TYPE_MODE_CACHE.get_or_init(read_type_mode_from_env)
 }
 
 #[cfg(test)]

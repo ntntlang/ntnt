@@ -142,8 +142,14 @@ Two independent axes for type control:
 
 **Runtime (`NTNT_TYPE_MODE`):** Controls behavior on type mismatches at runtime.
 - `strict` — crash on mismatch (use for auth/payment apps)
-- `warn` — log `[WARN]` and continue **(default)**
+- `warn` — log `[WARN]` and continue **(default for `ntnt run`)**
 - `forgiving` — silent degradation
+
+**Verification runs strict by default:** `ntnt test` and `ntnt intent check`
+use `strict` when `NTNT_TYPE_MODE` is unset, so degradations that warn mode
+tolerates (out-of-bounds → None, implicit conversions) fail verification
+instead of slipping through it. Set `NTNT_TYPE_MODE=warn` explicitly to
+verify at run-mode tolerance.
 
 **Lint (`NTNT_LINT_MODE`):** Controls annotation requirements.
 - `default` — only check annotated code **(default)**

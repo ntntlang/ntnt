@@ -60,6 +60,8 @@ let user = map { "name": "Alice", "age": 30 }   // CORRECT
 let user = { "name": "Alice" }                   // WRONG — {} is a block
 ```
 
+`ntnt lint` flags the silent shapes too (rule `block_binding`): `let e = {}` binds Unit and `let m = { 5 }` binds 5.
+
 ### 2. String interpolation: `#{expr}` — not `${expr}`
 
 ```ntnt
