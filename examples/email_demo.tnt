@@ -1,0 +1,55 @@
+// std/email demo — SMTP email with a log transport for development
+//
+// Run: ntnt run examples/email_demo.tnt
+// (uses the log transport: emails print to stderr, nothing is sent)
+
+import { configure_email, send_email, send_email_batch } from "std/email"
+
+// Development setup: log emails instead of sending.
+// Production swaps transport for real SMTP config:
+//   configure_email(map {
+//       "host": get_env("SMTP_HOST") ?? "smtp.example.com",
+//       "port": 587,                       // 587 STARTTLS (default), 465 implicit TLS
+//       "username": get_env("SMTP_USER") ?? "",
+//       "password": get_env("SMTP_PASS") ?? "",
+//       "from": "hello@myapp.com",
+//       "from_name": "My App"
+//   })
+// NTNT_EMAIL_MODE=log also forces log mode without code changes.
+configure_email(map {
+    "transport": "log",
+    "from": "hello@myapp.com",
+    "from_name": "My App"
+})
+
+// Single email — text and/or html (both = multipart with text fallback)
+match send_email(map {
+    "to": "user@example.com",
+    "subject": "Welcome!",
+    "html": "<h1>Welcome!</h1><p>Glad you're here.</p>",
+    "text": "Welcome! Glad you're here."
+}) {
+    Ok(result) => print("Sent #{result["message_id"]} via #{result["transport"]}"),
+    Err(e) => print("Send failed: #{e}")
+}
+
+// Batch — one connection, per-email results; a bad address doesn't
+// stop the rest
+match send_email_batch([
+    map { "to": "a@example.com", "subject": "Digest", "text": "Your weekly digest" },
+    map { "to": "not-an-address", "subject": "Digest", "text": "Your weekly digest" },
+    map { "to": "b@example.com", "subject": "Digest", "text": "Your weekly digest" }
+]) {
+    Ok(results) => {
+        let mut sent = 0
+        let mut failed = 0
+        for r in results {
+            match r {
+                Ok(_) => { sent = sent + 1 },
+                Err(_) => { failed = failed + 1 }
+            }
+        }
+        print("Batch: #{sent} sent, #{failed} failed")
+    },
+    Err(e) => print("Batch transport failure: #{e}")
+}

@@ -11,6 +11,7 @@ pub mod collections;
 pub mod concurrent;
 pub mod crypto;
 pub mod csv;
+pub mod email;
 pub mod env;
 pub mod fs;
 pub mod http;
@@ -67,6 +68,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/jobs".to_string(), jobs::init());
     modules.insert("std/auth".to_string(), auth::init());
     modules.insert("std/validate".to_string(), validate::init());
+    modules.insert("std/email".to_string(), email::init());
 
     modules
 }
