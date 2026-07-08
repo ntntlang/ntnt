@@ -1394,6 +1394,10 @@ print(boom)
         stdout.contains("requires b != 0 is false with a = 10, b = 0"),
         "hint shows the clause and values in parameter order: {stdout}"
     );
+    assert!(
+        stdout.contains("\"line\": 7"),
+        "diagnostic points at the call site, not the definition: {stdout}"
+    );
     assert_eq!(exit_code, 0, "warning in default mode");
 }
 
@@ -1433,6 +1437,26 @@ print(x)
     assert!(
         !stdout.contains("static_contract_violation"),
         "non-const clauses are skipped: {stdout}"
+    );
+}
+
+#[test]
+fn test_static_contract_large_integers_compare_exactly() {
+    // f64 promotion would merge distinct integers above 2^53 and fire a
+    // spurious violation; Int/Int comparisons must be exact
+    let source = r#"fn guard(x: Int) -> Int
+    requires x != 9007199254740993
+{
+    return x
+}
+
+let ok = guard(9007199254740992)
+print(ok)
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        !stdout.contains("static_contract_violation"),
+        "adjacent large integers are distinct: {stdout}"
     );
 }
 

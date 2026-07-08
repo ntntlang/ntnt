@@ -507,10 +507,19 @@ fn const_eval(expr: &Expression, bindings: &HashMap<String, ConstValue>) -> Opti
                     _ => ConstValue::Float(lhs.as_f64()? * rhs.as_f64()?),
                 },
                 BinaryOp::Eq | BinaryOp::Ne => {
+                    // Int/Int compares exactly — f64 promotion would merge
+                    // distinct integers above 2^53 and break the
+                    // no-false-positives invariant
                     let equal = match (&lhs, &rhs) {
                         (ConstValue::Str(a), ConstValue::Str(b)) => a == b,
                         (ConstValue::Bool(a), ConstValue::Bool(b)) => a == b,
-                        _ => lhs.as_f64()? == rhs.as_f64()?,
+                        (ConstValue::Int(a), ConstValue::Int(b)) => a == b,
+                        (ConstValue::Float(_), ConstValue::Float(_))
+                        | (ConstValue::Int(_), ConstValue::Float(_))
+                        | (ConstValue::Float(_), ConstValue::Int(_)) => {
+                            lhs.as_f64()? == rhs.as_f64()?
+                        }
+                        _ => return None,
                     };
                     ConstValue::Bool(if matches!(operator, BinaryOp::Eq) {
                         equal
@@ -519,12 +528,21 @@ fn const_eval(expr: &Expression, bindings: &HashMap<String, ConstValue>) -> Opti
                     })
                 }
                 BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    let (a, b) = (lhs.as_f64()?, rhs.as_f64()?);
+                    let ordering = match (&lhs, &rhs) {
+                        // Exact for Int/Int (see Eq above)
+                        (ConstValue::Int(a), ConstValue::Int(b)) => a.cmp(b),
+                        (ConstValue::Float(_), ConstValue::Float(_))
+                        | (ConstValue::Int(_), ConstValue::Float(_))
+                        | (ConstValue::Float(_), ConstValue::Int(_)) => {
+                            lhs.as_f64()?.partial_cmp(&rhs.as_f64()?)?
+                        }
+                        _ => return None,
+                    };
                     ConstValue::Bool(match operator {
-                        BinaryOp::Lt => a < b,
-                        BinaryOp::Le => a <= b,
-                        BinaryOp::Gt => a > b,
-                        _ => a >= b,
+                        BinaryOp::Lt => ordering.is_lt(),
+                        BinaryOp::Le => ordering.is_le(),
+                        BinaryOp::Gt => ordering.is_gt(),
+                        _ => ordering.is_ge(),
                     })
                 }
                 BinaryOp::And => match (&lhs, &rhs) {
@@ -769,7 +787,36 @@ impl TypeContext {
                             .map(|value| format!("{} = {}", name, value.render()))
                     })
                     .collect();
-                let line = self.find_line_near(&format!("{}(", fn_name));
+                // Render as many leading arguments as are source-faithful
+                // ("divide(10, 0") to disambiguate between multiple calls
+                let mut args_prefix: Vec<String> = Vec::new();
+                for arg in arguments {
+                    let rendered = match arg {
+                        Expression::Integer(n) => Some(n.to_string()),
+                        Expression::Bool(b) => Some(b.to_string()),
+                        Expression::String(text) if !text.contains("#{") => {
+                            Some(format!("{:?}", text))
+                        }
+                        Expression::Unary {
+                            operator: crate::ast::UnaryOp::Neg,
+                            operand,
+                        } => match operand.as_ref() {
+                            Expression::Integer(n) => Some(format!("-{}", n)),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    match rendered {
+                        Some(text) => args_prefix.push(text),
+                        None => break,
+                    }
+                }
+                let args_needle = if args_prefix.is_empty() {
+                    None
+                } else {
+                    Some(args_prefix.join(", "))
+                };
+                let line = self.find_line_near_call(fn_name, args_needle.as_deref());
                 self.emit_with_kind(
                     Severity::Warning,
                     DiagnosticKind::StaticContractViolation,
@@ -905,6 +952,53 @@ impl TypeContext {
         // Fallback: search from beginning (don't advance cursor)
         for (i, line) in self.source_lines.iter().enumerate() {
             if line.contains(needle) {
+                return i + 1;
+            }
+        }
+        0
+    }
+
+    /// Find the line of a CALL to `fn_name`, skipping its definition line
+    /// (`fn name(` also contains `name(`). When the first argument is a
+    /// source-faithful literal, a more specific needle disambiguates between
+    /// multiple calls to the same function.
+    fn find_line_near_call(&mut self, fn_name: &str, first_arg: Option<&str>) -> usize {
+        let call_needle = format!("{}(", fn_name);
+        let def_needle = format!("fn {}", fn_name);
+        let specific = first_arg.map(|arg| format!("{}({}", fn_name, arg));
+
+        let matches_line = |line: &str| -> bool {
+            if line.contains(&def_needle) {
+                return false;
+            }
+            match &specific {
+                // Tolerate a space after '(' is not needed: NTNT style puts
+                // the arg immediately after, and the fallback covers the rest
+                Some(needle) => line.contains(needle.as_str()) || line.contains(&call_needle),
+                None => line.contains(&call_needle),
+            }
+        };
+
+        // Prefer the specific needle in a first pass when available
+        if let Some(needle) = &specific {
+            for i in self.search_after..self.source_lines.len() {
+                if self.source_lines[i].contains(needle.as_str())
+                    && !self.source_lines[i].contains(&def_needle)
+                {
+                    self.search_after = i;
+                    return i + 1;
+                }
+            }
+        }
+        for i in self.search_after..self.source_lines.len() {
+            if matches_line(&self.source_lines[i]) {
+                self.search_after = i;
+                return i + 1;
+            }
+        }
+        // Fallback: search from the beginning (don't advance cursor)
+        for (i, line) in self.source_lines.iter().enumerate() {
+            if matches_line(line) {
                 return i + 1;
             }
         }
