@@ -2126,11 +2126,16 @@ impl TypeContext {
                 }
             }
 
-            // TODO: arr[i] and map[k] return Option at runtime (None for out-of-bounds
-            // or missing keys), but the typechecker currently infers the unwrapped element
-            // type. A full fix would return Option<T> here and require ?? or ? at usage
-            // sites, but that's a breaking change requiring broader migration. For now,
-            // the mismatch is documented and the runtime handles it gracefully.
+            // Index expressions can yield None at runtime (out-of-bounds or
+            // missing key), but the checker infers the unwrapped element type.
+            // Resolved per DD-063 Rec 3 direction (b): the RUNTIME is now loud
+            // on array/string out-of-bounds (E010 in strict, [WARN] in warn;
+            // map missing-key stays silent by design). Inferring Option<T>
+            // here is deferred: the runtime returns bare elements in-bounds,
+            // so an Option<T> annotation would bless unwrap()/match-Some/
+            // is_some() code that crashes on valid values — any future change
+            // needs a nullable-union vs enum-Option unification DD first (see
+            // plans/dd-063-scoping-notes.md PR-5 options analysis).
             Expression::Index { object, index } => {
                 let obj_type = self.infer_expression(object);
                 let _idx_type = self.infer_expression(index);

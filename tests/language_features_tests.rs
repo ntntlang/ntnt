@@ -6294,3 +6294,229 @@ print(x)
     assert_eq!(exit_code, 0);
     assert_eq!(stdout.trim(), "()", "Empty branch should return Unit");
 }
+
+// ===========================================================================
+// Index out-of-bounds loudness (DD-063 Rec 3, PR-5)
+// ===========================================================================
+
+#[test]
+fn test_array_oob_warns_in_default_mode() {
+    let code = r#"
+let arr = [1, 2]
+print(arr[10])
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("none"), "stdout: {stdout}");
+    assert!(
+        stderr.contains("[WARN]") && stderr.contains("out of bounds"),
+        "warn mode should warn on OOB: {stderr}"
+    );
+}
+
+#[test]
+fn test_array_oob_errors_in_strict_mode() {
+    let code = r#"
+let arr = [1, 2]
+print(arr[10])
+"#;
+    let (_stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_ne!(exit_code, 0);
+    assert!(
+        stderr.contains("error[E010]") && stderr.contains("Index out of bounds"),
+        "strict mode should error: {stderr}"
+    );
+}
+
+#[test]
+fn test_array_oob_silent_in_forgiving_mode() {
+    let code = r#"
+let arr = [1, 2]
+print(arr[10])
+"#;
+    let (stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "forgiving")]);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("none"));
+    assert!(
+        !stderr.contains("out of bounds"),
+        "forgiving mode must stay silent: {stderr}"
+    );
+}
+
+#[test]
+fn test_oob_suppressed_by_null_coalesce_in_warn_and_strict() {
+    let code = r#"
+let arr = [1, 2]
+print(arr[10] ?? 0)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("0"), "stdout: {stdout}");
+    assert!(
+        !stderr.contains("out of bounds"),
+        "?? must suppress the warn: {stderr}"
+    );
+
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_eq!(exit_code, 0, "?? must suppress the strict error: {stderr}");
+    assert!(stdout.contains("0"));
+}
+
+#[test]
+fn test_oob_suppressed_by_otherwise() {
+    let code = r#"
+fn pick(arr) {
+    let x = arr[10] otherwise { return 0 }
+    return x
+}
+print(pick([1, 2]))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("0"), "stdout: {stdout}");
+    assert!(
+        !stderr.contains("out of bounds"),
+        "otherwise must suppress the warn: {stderr}"
+    );
+}
+
+#[test]
+fn test_map_missing_key_stays_silent_in_all_modes() {
+    let code = r#"
+let m = map { "a": 1 }
+print(m["missing"])
+"#;
+    for mode in ["warn", "strict", "forgiving"] {
+        let (stdout, stderr, exit_code) = run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", mode)]);
+        assert_eq!(exit_code, 0, "mode {mode}: {stderr}");
+        assert!(stdout.contains("none"), "mode {mode}: {stdout}");
+        assert!(
+            !stderr.contains("out of bounds") && !stderr.contains("[WARN]"),
+            "map missing key must stay silent in {mode} mode: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn test_string_and_negative_oob_warn() {
+    let code = r#"
+let s = "hi"
+print(s[99])
+let arr = [1, 2]
+print(arr[-99])
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.matches("none").count(), 2, "stdout: {stdout}");
+    assert!(
+        stderr.contains("String index 99") && stderr.contains("Array index -99"),
+        "both OOB kinds should warn: {stderr}"
+    );
+}
+
+#[test]
+fn test_oob_warn_is_deduped_in_loops() {
+    let code = r#"
+let arr = [1, 2]
+for i in 0..5 {
+    print(arr[10])
+}
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(
+        stderr.matches("out of bounds").count(),
+        1,
+        "identical OOB should warn once: {stderr}"
+    );
+}
+
+#[test]
+fn test_in_bounds_access_no_warning_strict() {
+    let code = r#"
+let arr = [1, 2, 3]
+print(arr[0])
+print(arr[-1])
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_eq!(exit_code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("1") && stdout.contains("3"));
+    assert!(!stderr.contains("out of bounds"));
+}
+
+#[test]
+fn test_oob_suppressed_by_otherwise_in_strict_mode() {
+    let code = r#"
+fn pick(arr) {
+    let x = arr[10] otherwise { return 0 }
+    return x
+}
+print(pick([1, 2]))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_eq!(
+        exit_code, 0,
+        "otherwise must suppress strict E010: {stderr}"
+    );
+    assert!(stdout.contains("0"), "stdout: {stdout}");
+    assert!(!stderr.contains("E010"), "stderr: {stderr}");
+}
+
+#[test]
+fn test_oob_suppressed_by_try_operator() {
+    // arr[99]? unwraps None into an early return of None
+    let code = r#"
+fn pick(arr) {
+    let x = arr[99]?
+    return Some(x)
+}
+print(pick([1, 2]))
+"#;
+    for mode in ["warn", "strict"] {
+        let (stdout, stderr, exit_code) = run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", mode)]);
+        assert_eq!(exit_code, 0, "? must suppress OOB in {mode} mode: {stderr}");
+        assert!(stdout.contains("none"), "mode {mode}: {stdout}");
+        assert!(
+            !stderr.contains("out of bounds") && !stderr.contains("E010"),
+            "mode {mode}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn test_nested_index_oob_keeps_clear_diagnostic_under_guard() {
+    // The guard covers the OUTER index only: the inner brr[99] OOB gets its
+    // own diagnostic instead of silently becoming a None-index mismatch
+    let code = r#"
+let arr = [1, 2]
+let brr = [1]
+print(arr[brr[99]] ?? 0)
+"#;
+    let (_stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_ne!(exit_code, 0);
+    assert!(
+        stderr.contains("Index out of bounds: index 99, length 1"),
+        "inner OOB should surface its own E010: {stderr}"
+    );
+}
+
+#[test]
+fn test_oob_warns_per_call_site() {
+    // Same OOB signature on different lines: dedup is per statement line
+    let code = r#"
+let a = [1, 2]
+let b = [3, 4]
+print(a[10])
+print(b[10])
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(
+        stderr.matches("out of bounds").count(),
+        2,
+        "distinct call sites should each warn: {stderr}"
+    );
+}

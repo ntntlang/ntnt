@@ -751,6 +751,10 @@ pub struct Interpreter {
     call_depth: usize,
     /// Maximum allowed recursion depth
     max_recursion_depth: usize,
+    /// True while evaluating an index expression guarded by `??`, `?`, or
+    /// `otherwise` — out-of-bounds stays silent-None under a guard, in every
+    /// type mode (the guard is the documented safety net)
+    suppress_index_warn: std::cell::Cell<bool>,
 }
 
 /// Information about a trait definition
@@ -937,6 +941,7 @@ impl Interpreter {
             current_line: 0,
             current_col: 0,
             call_depth: 0,
+            suppress_index_warn: std::cell::Cell::new(false),
             max_recursion_depth: std::env::var("NTNT_MAX_RECURSION")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
@@ -4999,8 +5004,15 @@ impl Interpreter {
             } => {
                 let val = if let Some(expr) = value {
                     if otherwise.is_some() {
-                        // With otherwise block: catch runtime errors too
-                        match self.eval_expression(expr) {
+                        // With otherwise block: catch runtime errors too.
+                        // A guarded index stays silent-None so the otherwise
+                        // path is taken cleanly instead of via a caught error.
+                        let evaluated = if matches!(expr, Expression::Index { .. }) {
+                            self.eval_with_index_warn_suppressed(expr)
+                        } else {
+                            self.eval_expression(expr)
+                        };
+                        match evaluated {
                             Ok(v) => v,
                             Err(e) => {
                                 if !is_production_mode() {
@@ -5225,7 +5237,13 @@ impl Interpreter {
             Statement::Return { value, otherwise } => {
                 let value = if let Some(expr) = value {
                     if otherwise.is_some() {
-                        match self.eval_expression(expr) {
+                        // Guarded index stays silent-None (see let-otherwise)
+                        let evaluated = if matches!(expr, Expression::Index { .. }) {
+                            self.eval_with_index_warn_suppressed(expr)
+                        } else {
+                            self.eval_expression(expr)
+                        };
+                        match evaluated {
                             Ok(v) => v,
                             Err(e) => {
                                 if !is_production_mode() {
@@ -6113,7 +6131,15 @@ impl Interpreter {
                 operator,
                 right,
             } => {
-                let lhs = self.eval_expression(left)?;
+                // `arr[i] ?? default` is the documented safety net for
+                // optional access — don't warn/error on the guarded index
+                let lhs = if matches!(operator, BinaryOp::NullCoalesce)
+                    && matches!(left.as_ref(), Expression::Index { .. })
+                {
+                    self.eval_with_index_warn_suppressed(left)?
+                } else {
+                    self.eval_expression(left)?
+                };
 
                 // Short-circuit evaluation for logical operators
                 // TypeMode gate (DD-009 Phase 4): Strict requires Bool operands for && and ||.
@@ -6890,37 +6916,53 @@ impl Interpreter {
             }
 
             Expression::Index { object, index } => {
+                // Guard suppression applies to THIS index only: consume the
+                // flag before evaluating sub-expressions so a nested OOB
+                // (`arr[brr[99]] ?? d`) still gets its own clear diagnostic
+                // instead of a confusing downstream type mismatch.
+                let oob_suppressed = self.suppress_index_warn.replace(false);
                 let obj = self.eval_expression(object)?;
                 let idx = self.eval_expression(index)?;
 
                 match (obj, idx) {
                     (Value::Array(arr), Value::Int(i)) => {
+                        let len = arr.len();
                         let index = if i < 0 {
-                            match (arr.len() as i64).checked_add(i) {
+                            match (len as i64).checked_add(i) {
                                 Some(idx) if idx >= 0 => idx as usize,
-                                _ => return Ok(Value::none()),
+                                _ => {
+                                    return self.index_oob_outcome(oob_suppressed, "Array", i, len)
+                                }
                             }
                         } else {
                             i as usize
                         };
-                        // Out-of-bounds returns None instead of crashing
-                        Ok(arr.get(index).cloned().unwrap_or_else(|| Value::none()))
+                        match arr.get(index) {
+                            Some(value) => Ok(value.clone()),
+                            None => self.index_oob_outcome(oob_suppressed, "Array", i, len),
+                        }
                     }
                     (Value::String(s), Value::Int(i)) => {
+                        let char_count = s.chars().count();
                         let index = if i < 0 {
-                            let char_count = s.chars().count();
                             match (char_count as i64).checked_add(i) {
                                 Some(idx) if idx >= 0 => idx as usize,
-                                _ => return Ok(Value::none()),
+                                _ => {
+                                    return self.index_oob_outcome(
+                                        oob_suppressed,
+                                        "String",
+                                        i,
+                                        char_count,
+                                    )
+                                }
                             }
                         } else {
                             i as usize
                         };
-                        // Out-of-bounds returns None instead of crashing
-                        Ok(s.chars()
-                            .nth(index)
-                            .map(|c| Value::String(c.to_string()))
-                            .unwrap_or_else(|| Value::none()))
+                        match s.chars().nth(index) {
+                            Some(c) => Ok(Value::String(c.to_string())),
+                            None => self.index_oob_outcome(oob_suppressed, "String", i, char_count),
+                        }
                     }
                     // Map access with string key: map["key"]
                     // Returns None for missing keys instead of throwing (DX improvement)
@@ -7618,7 +7660,11 @@ impl Interpreter {
             }
 
             Expression::Try(inner) => {
-                let value = self.eval_expression(inner)?;
+                let value = if matches!(inner.as_ref(), Expression::Index { .. }) {
+                    self.eval_with_index_warn_suppressed(inner)?
+                } else {
+                    self.eval_expression(inner)?
+                };
                 match &value {
                     Value::EnumValue {
                         enum_name,
@@ -10334,6 +10380,60 @@ impl Interpreter {
                 Err(_) => break, // Channel closed, server shutting down
             }
         }
+    }
+
+    /// TypeMode-gated outcome for an out-of-bounds array/string read
+    /// (DD-063 Rec 3): strict → E010 error; warn → deduped [WARN] + None;
+    /// forgiving → silent None. `suppressed` is the guard flag consumed by
+    /// the Index arm (`??`/`?`/`otherwise` on the direct index). Map
+    /// missing-key access never routes here — None-for-missing is documented
+    /// intentional DX there.
+    fn index_oob_outcome(
+        &self,
+        suppressed: bool,
+        kind: &str,
+        requested: i64,
+        length: usize,
+    ) -> Result<Value> {
+        if suppressed {
+            return Ok(Value::none());
+        }
+        match get_type_mode() {
+            TypeMode::Strict => Err(IntentError::IndexOutOfBounds {
+                index: requested,
+                length,
+            }),
+            TypeMode::Warn => {
+                // current_line scopes dedup to the statement, so two
+                // different arrays with the same OOB signature still warn
+                let line = self.current_line;
+                let location = if line > 0 {
+                    format!(" (line {})", line)
+                } else {
+                    String::new()
+                };
+                crate::config::type_warn_dedup(
+                    &format!("index_oob:{}:{}:{}:{}", kind, requested, length, line),
+                    &format!(
+                        "{} index {} out of bounds (length {}){} — returning None. \
+                         Guard with `value[i] ?? default` or a len() check.",
+                        kind, requested, length, location
+                    ),
+                );
+                Ok(Value::none())
+            }
+            TypeMode::Forgiving => Ok(Value::none()),
+        }
+    }
+
+    /// Evaluate an expression with OOB index loudness suppressed — used for
+    /// the direct Index operand of `??`, `?`, and `otherwise`, which are the
+    /// documented safety nets for optional access.
+    fn eval_with_index_warn_suppressed(&mut self, expr: &Expression) -> Result<Value> {
+        let prev = self.suppress_index_warn.replace(true);
+        let result = self.eval_expression(expr);
+        self.suppress_index_warn.set(prev);
+        result
     }
 
     /// Capture old values from expressions in postconditions
@@ -15770,6 +15870,78 @@ c")
                 ref variant,
                 ..
             } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn index_oob_warn_mode_still_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Warn);
+        let result = eval(r#"[1, 2, 3][99]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue { ref variant, .. } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn index_oob_strict_mode_errors_with_e010() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
+        let err = eval(r#"[1, 2, 3][99]"#).unwrap_err();
+        assert!(matches!(
+            err,
+            IntentError::IndexOutOfBounds {
+                index: 99,
+                length: 3
+            }
+        ));
+
+        let err = eval(r#""hi"[99]"#).unwrap_err();
+        assert!(matches!(
+            err,
+            IntentError::IndexOutOfBounds {
+                index: 99,
+                length: 2
+            }
+        ));
+
+        let err = eval(r#"[1, 2, 3][-99]"#).unwrap_err();
+        assert!(matches!(
+            err,
+            IntentError::IndexOutOfBounds {
+                index: -99,
+                length: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn index_oob_strict_mode_in_bounds_still_works() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
+        assert!(matches!(eval(r#"[1, 2, 3][0]"#).unwrap(), Value::Int(1)));
+        assert!(matches!(eval(r#"[1, 2, 3][-1]"#).unwrap(), Value::Int(3)));
+    }
+
+    #[test]
+    fn index_oob_strict_mode_suppressed_by_null_coalesce() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
+        assert!(matches!(
+            eval(r#"[1, 2, 3][99] ?? 42"#).unwrap(),
+            Value::Int(42)
+        ));
+    }
+
+    #[test]
+    fn index_oob_strict_mode_map_missing_key_stays_silent() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
+        let result = eval(r#"map { "a": 1 }["missing"]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue { ref variant, .. } if variant == "None"
         ));
     }
 
