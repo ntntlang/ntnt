@@ -3283,6 +3283,9 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
                         }
                         ntnt::typechecker::DiagnosticKind::UnknownMethod => "unknown_method",
                         ntnt::typechecker::DiagnosticKind::BlockBinding => "block_binding",
+                        ntnt::typechecker::DiagnosticKind::StaticContractViolation => {
+                            "static_contract_violation"
+                        }
                         _ => "type_check",
                     };
                     let entry = json!({
@@ -3466,6 +3469,9 @@ fn lint_project(
                         }
                         ntnt::typechecker::DiagnosticKind::UnknownMethod => "unknown_method",
                         ntnt::typechecker::DiagnosticKind::BlockBinding => "block_binding",
+                        ntnt::typechecker::DiagnosticKind::StaticContractViolation => {
+                            "static_contract_violation"
+                        }
                         _ => "type_check",
                     };
                     issues.push(json!({

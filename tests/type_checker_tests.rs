@@ -1369,3 +1369,137 @@ print(e)
         .any(|i| i["rule"] == "block_binding" && i["severity"] == "error");
     assert!(found, "strict promotes block_binding: {stdout}");
 }
+
+// ===========================================================================
+// Static contract lint (DD-063 Rec 9)
+// ===========================================================================
+
+#[test]
+fn test_static_contract_violation_on_literal_args() {
+    let source = r#"fn divide(a: Int, b: Int) -> Int
+    requires b != 0
+{
+    return a / b
+}
+
+let boom = divide(10, 0)
+print(boom)
+"#;
+    let (stdout, _stderr, exit_code) = lint_code(source);
+    assert!(
+        stdout.contains("\"rule\": \"static_contract_violation\""),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("requires b != 0 is false with a = 10, b = 0"),
+        "hint shows the clause and values in parameter order: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"line\": 7"),
+        "diagnostic points at the call site, not the definition: {stdout}"
+    );
+    assert_eq!(exit_code, 0, "warning in default mode");
+}
+
+#[test]
+fn test_static_contract_ok_and_dynamic_calls_do_not_warn() {
+    let source = r#"fn divide(a: Int, b: Int) -> Int
+    requires b != 0
+{
+    return a / b
+}
+
+let ok = divide(10, 2)
+let x = 7
+let dynamic = divide(10, x)
+print(ok + dynamic)
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        !stdout.contains("static_contract_violation"),
+        "satisfied and dynamic calls must not warn: {stdout}"
+    );
+}
+
+#[test]
+fn test_static_contract_skips_unevaluable_clauses() {
+    // len() is not const-evaluable — the clause is skipped, never guessed
+    let source = r#"fn shout(s: String) -> String
+    requires len(s) > 0
+{
+    return s
+}
+
+let x = shout("")
+print(x)
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        !stdout.contains("static_contract_violation"),
+        "non-const clauses are skipped: {stdout}"
+    );
+}
+
+#[test]
+fn test_static_contract_large_integers_compare_exactly() {
+    // f64 promotion would merge distinct integers above 2^53 and fire a
+    // spurious violation; Int/Int comparisons must be exact
+    let source = r#"fn guard(x: Int) -> Int
+    requires x != 9007199254740993
+{
+    return x
+}
+
+let ok = guard(9007199254740992)
+print(ok)
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert!(
+        !stdout.contains("static_contract_violation"),
+        "adjacent large integers are distinct: {stdout}"
+    );
+}
+
+#[test]
+fn test_static_contract_promotes_in_strict() {
+    let source = r#"fn divide(a: Int, b: Int) -> Int
+    requires b != 0
+{
+    return a / b
+}
+
+let boom = divide(10, 0)
+print(boom)
+"#;
+    let (stdout, _stderr, _exit) = lint_strict_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let found = json["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|f| f["issues"].as_array().cloned().unwrap_or_default())
+        .any(|i| i["rule"] == "static_contract_violation" && i["severity"] == "error");
+    assert!(found, "strict promotes: {stdout}");
+}
+
+#[test]
+fn test_static_contract_multi_clause_and_negative_literals() {
+    let source = r#"fn transfer(from_balance: Int, amount: Int) -> Int
+    requires from_balance >= amount
+    requires amount > 0
+{
+    return from_balance - amount
+}
+
+let a = transfer(50, 100)
+let b = transfer(50, -5)
+print(a + b)
+"#;
+    let (stdout, _stderr, _exit) = lint_code(source);
+    assert_eq!(
+        stdout.matches("static_contract_violation").count(),
+        2,
+        "each violated clause warns once: {stdout}"
+    );
+    assert!(stdout.contains("amount > 0 is false"), "{stdout}");
+}
