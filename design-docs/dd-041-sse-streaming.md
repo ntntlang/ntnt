@@ -1,6 +1,6 @@
 # DD-041: Real-Time Streaming — SSE & Broadcast Channels
 
-**Status:** Draft
+**Status:** Draft — design review 2026-07-08 (see § Design Review below); awaiting maintainer go/no-go for Phase 1
 **Author:** Larri
 **Created:** 2026-03-17
 **Branch:** TBD
@@ -10,16 +10,110 @@
 
 ## Table of Contents
 
-1. [Vision](#vision)
-2. [Architecture](#architecture)
-3. [API Design](#api-design)
-4. [Full Stack Examples](#full-stack-examples)
-5. [Implementation Notes](#implementation-notes)
-6. [Phase Details](#phase-details)
-7. [Relationship to std/events and std/jobs](#relationship-to-stdevents-and-stdjobs)
-8. [Security](#security)
-9. [Competitive Analysis](#competitive-analysis)
-10. [Open Questions](#open-questions)
+1. [Design Review (2026-07-08)](#design-review-2026-07-08)
+2. [Vision](#vision)
+3. [Architecture](#architecture)
+4. [API Design](#api-design)
+5. [Full Stack Examples](#full-stack-examples)
+6. [Implementation Notes](#implementation-notes)
+7. [Phase Details](#phase-details)
+8. [Relationship to std/events and std/jobs](#relationship-to-stdevents-and-stdjobs)
+9. [Security](#security)
+10. [Competitive Analysis](#competitive-analysis)
+11. [Open Questions](#open-questions)
+12. [Version History](#version-history)
+
+---
+
+## Design Review (2026-07-08)
+
+The March draft was verified against current main (post multi-worker
+hardening, DD-057/DD-063). The architecture holds; three assumptions do
+not, and each changes the plan:
+
+**1. There is no `respond` keyword.** The draft's "`respond` already
+handles `return file(...)`" is drift — handlers return response VALUES
+(`json()`, `html()`). This simplifies the design: `sse()` and
+`sse_stream()` are ordinary response builders and Phase 1 needs zero
+parser work:
+
+```ntnt
+import { broadcast, subscribe, sse } from "std/sse"
+
+let metrics_bus = broadcast("metrics")
+
+get("/metrics/stream", fn(req) {
+    return sse(subscribe(metrics_bus))
+})
+```
+
+The body of this document — API sections, all examples, implementation
+notes, and the Phase 1 checklist — has been reconciled to this form and
+to the decisions below.
+
+**2. The bridge buffers whole responses.** `BridgeResponse` is
+`{ status, headers, body: String }` — returned over a oneshot channel and
+written once. SSE needs the one real structural change: a body variant
+(`BridgeBody::Text(String) | BridgeBody::Sse { subscription_id }`). When
+the Axum layer sees the SSE variant it builds a streaming body (the
+draft's write-task design, unchanged: keep-alive comments, disconnect
+cleanup, `X-Accel-Buffering: no`). The interpreter thread still returns
+immediately — the zero-interpreter-overhead property survives contact
+with the bridge.
+
+**3. Multi-worker breaks the naive design — named broadcasts fix it.**
+Production defaults to `min(num_cpus, 8)` workers, each re-evaluating the
+program. Two consequences the draft predates:
+
+- A module-level `let bus = broadcast()` creates N DISTINCT buses (one
+  per worker). A subscriber lands on whichever worker served its request.
+- `schedule()` is already gated correctly — Worker-mode interpreters lack
+  `RuntimeCapability::Scheduling`, so a module-level sampler registers
+  exactly once, on the primary interpreter (verified in source:
+  `schedule`/`after` carry `requires: Some(RuntimeCapability::Scheduling)`
+  and the Worker and HotReload capability sets exclude it; pinned by
+  `test_capability_gate_scheduling_worker_mode_skips`). The March draft
+  feared N× duplicate samplers; the multi-worker hardening already
+  prevents that. But the combination is exactly the trap: the single
+  sampler publishes on the PRIMARY interpreter's bus, while subscribers'
+  handlers run on workers holding their own per-worker buses — so with
+  anonymous module-level buses, subscribers receive nothing at all.
+
+Resolution, now part of Phase 1:
+
+- **Broadcasts are named and process-global**: `broadcast("metrics")`
+  returns the same bus for the same name from every worker (registry
+  keyed by name, same `LazyLock<Mutex<HashMap>>` pattern as the pool
+  registry). Named buses also survive hot reload — a re-eval re-attaches
+  to the existing bus instead of orphaning open connections.
+  Anonymous `broadcast()` remains for single-connection/`sse_stream`
+  patterns and is documented as per-worker.
+- **No `schedule()` change needed** — the Worker-mode gate already
+  exists. Phase 1 adds a multi-worker integration test (sampler on
+  primary, subscribers via workers, events arrive once) to pin the
+  behavior, not new gating code.
+
+**Open questions resolved (recommendations):**
+
+- Backing: each subscriber gets a **bounded ring buffer**
+  (`Arc<Mutex<VecDeque>>`, cap ~1024) plus a coalescing flume `bounded(1)`
+  wake signal. The ring — not a channel — is required because the default
+  policy is drop-**oldest** (evict the stalest event so a slow client
+  catches up to *now*), and neither flume nor crossbeam lets the sending
+  end pop the oldest queued item; only the receiver drains. flume carries
+  the payload-free wake so the Axum write task can `recv_async()` (flume
+  is already a bridge dependency; crossbeam has no async recv). Bounded
+  rather than unbounded: a stuck TCP connection with an unbounded queue is
+  slow-motion OOM.
+  Default policy drop-oldest with a deduped warn; `"drop_slow": false`
+  opts into blocking sends for correctness-critical streams.
+- `send()` reuses the existing dispatch on handle type — no new verb.
+- `sse_stream` cleanup stays `on_close(fn)`; `push()` returns Bool so
+  generators can stop on disconnect.
+- WebSockets remain a separate DD; `ntnt sse status` stays Phase 3.
+
+Phase 1 effort holds at 3-4 days with the one structural addition (the
+BridgeBody variant). Awaiting go/no-go.
 
 ---
 
@@ -31,7 +125,7 @@ ntnt already has `schedule()` for periodic sampling and channels for in-process 
 
 1. **`broadcast()`** — a fan-out channel: every subscriber gets every message
 2. **`subscribe(bc)`** — tap into a broadcast for one connection
-3. **`respond sse(...)`** — hold the HTTP connection open, push events as they arrive
+3. **`return sse(...)`** — hold the HTTP connection open, push events as they arrive
 
 The full real-time stack then looks like:
 ```
@@ -51,11 +145,11 @@ schedule(500ms) → send(metrics_bus) → [N browser connections] each subscribe
 
 ### The Problem with ntnt's Current Channel Model
 
-`channel()` creates a `ChannelHandle` backed by a crossbeam unbounded channel — one producer, one consumer (or multiple producers, one consumer via clone). Every `recv()` call removes the message from the queue. This is wrong for SSE: you want every connected browser to receive every metric sample, not one browser to receive each sample in round-robin.
+`channel()` creates a `TxChannelHandle`/`RxChannelHandle` pair backed by a crossbeam unbounded channel — one producer, one consumer (or multiple producers, one consumer via clone). Every `recv()` call removes the message from the queue. This is wrong for SSE: you want every connected browser to receive every metric sample, not one browser to receive each sample in round-robin.
 
 ### The New Primitive: Broadcast Channel
 
-`broadcast()` creates a broadcast channel backed by a multi-sender, multi-receiver bus. Each subscriber gets their own crossbeam receiver that receives a copy of every message sent to the bus. Messages are not consumed — they're fanned out.
+`broadcast()` creates a broadcast channel backed by a fan-out bus. Each subscriber gets their own bounded per-connection queue that receives a copy of every message sent to the bus. Messages are not consumed by one subscriber at the expense of others — they're fanned out.
 
 ```
 broadcast_channel
@@ -69,17 +163,17 @@ send(bc, value) → all three subscribers receive a copy
 **Implementation options (see Open Questions):**
 - `bus` crate — lock-free SPMC broadcast, fastest, single-producer only
 - `tokio::sync::broadcast` — MPMC, has lag/drop semantics, skip-behind
-- Custom: Vec of crossbeam senders, new sender added per subscriber, clean up on disconnect
+- Custom: per-subscriber bounded ring buffer + coalescing wake signal, added per subscriber, cleaned up on disconnect
 
-The custom approach (Vec of senders) is most consistent with ntnt's existing crossbeam usage.
+The custom approach won — see the Design Review. A ring buffer (not a channel) is needed because the default backpressure policy is drop-**oldest**, a sender-side eviction that channels don't allow; a payload-free flume `bounded(1)` wake lets the Axum write task `recv_async()` and then drain (flume is already the bridge's library; crossbeam has no async recv).
 
-### How `respond sse(...)` Works
+### How the `sse()` Response Works
 
-When a route handler returns `respond sse(subscription)`:
+When a route handler returns `sse(subscription)`:
 
 1. The Rust HTTP layer recognizes the SSE response type.
 2. It sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`, connection stays open.
-3. A Rust task (not an interpreter thread) polls the subscription's crossbeam receiver in a loop, formatting each `Value` as an SSE event and writing to the HTTP response body.
+3. A Rust task (not an interpreter thread) awaits the subscription's wake signal (`recv_async()`), then drains the per-connection ring buffer, formatting each `Value` as an SSE event and writing to the HTTP response body.
 4. When the client disconnects, the write fails, the loop exits, and the subscription is dropped — which removes this subscriber from the broadcast channel's sender list.
 5. The interpreter thread is free after returning the SSE response token. It does not block.
 
@@ -94,14 +188,20 @@ SSE connections die silently when passing through proxies and load balancers tha
 ```
 Browser → GET /metrics/stream
   → Route handler runs (interpreter thread)
-  → subscribe(metrics_bus) → creates crossbeam receiver, registers in BroadcastRegistry
-  → respond sse(subscription) → returns SSEResponse token to HTTP layer
-  → HTTP layer spawns write task: poll receiver → write to socket
+  → subscribe(metrics_bus) → creates bounded ring buffer + wake signal,
+    registers the entry in BROADCAST_REGISTRY, parks the subscription
+    (ring + wake receiver) in SUBSCRIPTION_REGISTRY under a subscription_id
+  → return sse(subscription) → BridgeBody::Sse { subscription_id } to HTTP layer
+  → HTTP layer take()s the subscription, spawns write task:
+    recv_async() on the wake signal → drain ring buffer → write to socket
   → Route handler exits, interpreter thread free
 
 schedule(500ms) loop (separate thread):
-  → send(metrics_bus, value) → locks BroadcastRegistry, sends to all registered receivers
-  → Each write task wakes, reads value, writes SSE event to socket
+  → send(metrics_bus, value) → briefly locks BROADCAST_REGISTRY to snapshot
+    the subscriber list, then (outside the lock) evaluates any filter
+    predicates and, per subscriber, enqueues into the ring (drop-oldest if
+    full) and signals its wake
+  → Each write task wakes, drains the ring, writes SSE events to socket
 ```
 
 ---
@@ -111,28 +211,30 @@ schedule(500ms) loop (separate thread):
 ### Phase 1: Core
 
 ```ntnt
-import { broadcast, subscribe } from "std/sse"
+import { broadcast, subscribe, sse } from "std/sse"
+import { send } from "std/concurrent"
+import { now_millis } from "std/time"
 
-// Create a broadcast channel (typically at module/app level)
-let metrics_bus = broadcast()
+// Create a NAMED broadcast channel (module/app level). The name makes the
+// bus process-global: every worker and every hot-reload re-evaluation
+// resolves the same bus (Design Review).
+let metrics_bus = broadcast("metrics")
 
 // Send a value to all current subscribers
-send(metrics_bus, map { "cpu": 87.3, "ts": unix_ms() })
+send(metrics_bus, map { "cpu": 87.3, "ts": now_millis() })
 
-// Subscribe — creates a per-connection receiver
-let sub = subscribe(metrics_bus)
-
-// In a route: hold the connection open, push events as they arrive
-route GET "/metrics/stream" {
-    respond sse(subscribe(metrics_bus))
-}
+// In a route handler: return the SSE response; the connection stays open
+// and events stream as they arrive
+get("/metrics/stream", fn(req) {
+    return sse(subscribe(metrics_bus))
+})
 ```
 
 **Types:**
-- `broadcast() -> BroadcastHandle`
+- `broadcast(name?: String) -> BroadcastHandle` — named: process-global; anonymous: per-worker
 - `subscribe(BroadcastHandle) -> SSESubscription`
-- `send(BroadcastHandle, Map) -> Unit` — reuses existing `send()` syntax, dispatches on handle type
-- `respond sse(SSESubscription) -> Response` — new response type
+- `send(BroadcastHandle, Map) -> Bool` — reuses existing `send()` dispatch on handle type; returns Bool like channel `send()` (true if the bus had at least one subscriber)
+- `sse(SSESubscription) -> Response` — ordinary response builder (like `json()`/`html()`)
 
 ### Per-Connection Streams (No Shared Bus)
 
@@ -140,36 +242,73 @@ For streams that are unique per connection — a clock, a personal notification 
 
 ```ntnt
 import { sse_stream } from "std/sse"
+import { now, format } from "std/time"
+import { schedule, cancel_schedule } from "std/concurrent"
+import { job_status } from "std/jobs"
 
-route GET "/clock" {
-    respond sse_stream(fn(push, on_close) {
+get("/clock", fn(req) {
+    return sse_stream(fn(push, on_close) {
         let sched = schedule(1000, fn() {
-            push(map { "time": format_time(now()) })
+            push(map { "time": format(now(), "%H:%M:%S") })
         })
         on_close(fn() { cancel_schedule(sched) })
     })
-}
+})
 
-route GET "/jobs/:id/progress" {
-    let job_id = params["id"]
-    respond sse_stream(fn(push, on_close) {
+get("/jobs/{id}/progress", fn(req) {
+    let job_id = req.params.id
+    return sse_stream(fn(push, on_close) {
         let poll = schedule(500, fn() {
             let status = unwrap(job_status(job_id))
             push(status)
-            if status["status"] in ["completed", "failed", "dead"] {
+            if includes(["completed", "failed", "dead"], status["status"]) {
+                // Terminal event: the browser closes the EventSource on
+                // "done", which fires on_close and cancels the poll
                 push(map { "done": true })
-                // on_close fires automatically when the response ends
             }
         })
         on_close(fn() { cancel_schedule(poll) })
     })
-}
+})
 ```
 
 `sse_stream(fn(push, on_close))`:
-- `push(value)` — send an event to this connection
+- `push(value)` — send an event to this connection; returns `false` after the client disconnects so generators can stop
 - `on_close(fn)` — register a cleanup callback for when the client disconnects
-- Returns when the connection closes or the handler returns
+- Returns a `Response` immediately, like `sse()` — the handler exits and the connection streams until the client disconnects
+
+The exact handoff — how the generator closure reaches a scheduling-capable
+interpreter, and where `push`/`on_close` run — is specified in
+Implementation Notes (`sse_stream(generator)` and `sse_handler`). The key
+points:
+
+> **The generator runs in a fresh scheduling-capable interpreter, NOT the
+> worker request scope.** A route handler executes on a worker interpreter,
+> and Worker mode deliberately lacks `RuntimeCapability::Scheduling` — so a
+> bare `schedule()` in a worker handler is silently skipped. That gate
+> exists to stop *module-level* samplers from registering N times (once per
+> worker) during program load; it must NOT disable per-connection timers,
+> or the clock and progress-bar streams above would silently never tick
+> under multi-worker. Resolution: `sse_stream` parks the captured generator
+> in `SUBSCRIPTION_REGISTRY` (identical bridge handoff to `sse()`); when the
+> write task starts, it runs the generator ONCE via the same
+> `run_in_fresh_interpreter` path `schedule()` ticks already use, in a mode
+> that grants `Scheduling`. So `schedule()`/`cancel_schedule()` inside the
+> generator register normally, and the cardinality is correct by
+> construction — one timer per open connection, not one per worker. (A
+> module-level `schedule()` at app top level is still skipped on workers,
+> unchanged.)
+
+> **on_close runs in a fresh interpreter too, not a persistent "scheduler
+> thread."** `schedule()` has no long-lived interpreter — each tick is a
+> fresh interpreter built from the captured closure (`run_in_fresh_interpreter`).
+> On disconnect, the write task takes the registered `on_close` closure out
+> of the shared `on_close` cell in `SseSource::Generator` (the generator's
+> `on_close(fn)` native wrote it there) and runs it in a fresh interpreter;
+> because `ScheduleHandle` is a process-global id, the
+> `cancel_schedule(sched)` inside `on_close` cancels the per-connection
+> timer even though it was registered from a different (also fresh)
+> interpreter.
 
 ### Phase 2: Named Events, IDs, Filtering
 
@@ -190,31 +329,31 @@ es.addEventListener('mem_update', e => updateMemChart(JSON.parse(e.data)))
 **Filtering** — create a derived subscription that only passes matching events:
 
 ```ntnt
-import { filter } from "std/sse"
+import { subscribe, filter, sse } from "std/sse"
 
-route GET "/stream/network/:iface" {
-    let iface = params["iface"]
-    respond sse(filter(subscribe(metrics_bus), fn(m) { m["interface"] == iface }))
-}
+get("/stream/network/{iface}", fn(req) {
+    let iface = req.params.iface
+    return sse(filter(subscribe(metrics_bus), fn(m) { m["interface"] == iface }))
+})
 ```
 
 `filter(SSESubscription, fn(Map) -> Bool) -> SSESubscription`
 
-Filtering happens server-side before writing to the socket — non-matching events are dropped, never sent over the wire.
+Filtering happens server-side before writing to the socket — non-matching events are dropped, never sent over the wire. Execution point: the predicate is an ntnt closure, which the Rust write task cannot evaluate — so filtered subscriptions register their predicate with the bus and it runs at `send()` fan-out time, on the sending interpreter thread — outside the registry lock, against a snapshot of the subscriber list (see the `send()` algorithm in Implementation Notes), so a predicate may itself call `send()` safely. The write task stays interpreter-free (the zero-overhead property holds); the cost of filtering lands on the publisher, proportional to filtered subscribers.
 
 **Event IDs and reconnect:**
 
 ```ntnt
 // Server assigns IDs automatically when replay is enabled
-let metrics_bus = broadcast(map { "replay_buffer": 100 })
+let metrics_bus = broadcast("metrics", map { "replay_buffer": 100 })
 
 // Browser automatically sends Last-Event-ID on reconnect
 // ntnt replays the buffer from that ID forward
 ```
 
-`broadcast(opts?)`:
+`broadcast(name?, opts?)`:
 - `"replay_buffer": N` — keep the last N events in a ring buffer; replayed on reconnect
-- `"drop_slow": true` — drop events for slow subscribers instead of blocking (default: false, block briefly)
+- `"drop_slow": false` — opt INTO briefly-blocking sends for correctness-critical streams. The default is `true` (drop-oldest from the subscriber's bounded queue, with a deduped warn) — per the Design Review, blocking on a stuck subscriber is the OOM/backpressure hazard
 
 ### Full API Surface
 
@@ -223,6 +362,7 @@ import {
     broadcast,          // create a broadcast channel
     subscribe,          // tap into a broadcast (per-connection)
     filter,             // filter a subscription by predicate
+    sse,                // SSE response builder for a subscription (primary form)
     sse_stream,         // per-connection stream with push/on_close callbacks
     connection_count,   // how many active subscribers on a broadcast channel
 } from "std/sse"
@@ -230,8 +370,8 @@ import {
 
 Response forms:
 ```ntnt
-respond sse(subscription)                    // push from shared bus
-respond sse_stream(fn(push, on_close) { })   // per-connection generator
+return sse(subscription)                    // push from shared bus
+return sse_stream(fn(push, on_close) { })   // per-connection generator
 ```
 
 ---
@@ -241,27 +381,32 @@ respond sse_stream(fn(push, on_close) { })   // per-connection generator
 ### Compute Dashboard
 
 ```ntnt
-import { broadcast, subscribe } from "std/sse"
+import { broadcast, subscribe, sse } from "std/sse"
+import { html } from "std/http/server"
+import { schedule, send } from "std/concurrent"
+import { now_millis } from "std/time"
+import { read_file } from "std/fs"
 
-let metrics = broadcast()
+let metrics = broadcast("metrics")
 
 // One sampler loop, feeds all connected browser tabs
+// (cpu_percent/mem_used_mb/load_avg are hypothetical samplers)
 schedule(500, fn() {
     send(metrics, map {
         "cpu":    cpu_percent(),
         "mem_mb": mem_used_mb(),
         "load":   load_avg(),
-        "ts":     unix_ms(),
+        "ts":     now_millis(),
     })
 })
 
-route GET "/dashboard" {
-    respond file("dashboard.html")
-}
+get("/dashboard", fn(req) {
+    return html(read_file("dashboard.html")?)
+})
 
-route GET "/stream/metrics" {
-    respond sse(subscribe(metrics))
-}
+get("/stream/metrics", fn(req) {
+    return sse(subscribe(metrics))
+})
 ```
 
 Frontend (40 lines of vanilla JS):
@@ -280,11 +425,15 @@ es.onmessage = e => {
 ### Network Monitoring Dashboard
 
 ```ntnt
-import { broadcast, subscribe, filter } from "std/sse"
+import { broadcast, subscribe, filter, sse } from "std/sse"
+import { schedule, send } from "std/concurrent"
+// std/events is planned, not shipped (DD-037 Phase 7: pub/sub fan-out
+// over the job system) — shown here to illustrate how the layers compose
 import { subscribe as event_subscribe, publish } from "std/events"
 
-let net_metrics = broadcast()
-let net_alerts  = broadcast()
+// Named buses: process-global, shared across workers and hot reloads
+let net_metrics = broadcast("net_metrics")
+let net_alerts  = broadcast("net_alerts")
 
 // Interface sampler
 schedule(1000, fn() {
@@ -311,20 +460,20 @@ schedule(5000, fn() {
 })
 
 // All interfaces — live feed
-route GET "/stream/network" {
-    respond sse(subscribe(net_metrics))
-}
+get("/stream/network", fn(req) {
+    return sse(subscribe(net_metrics))
+})
 
 // Per-interface filtered stream
-route GET "/stream/network/:iface" {
-    let iface = params["iface"]
-    respond sse(filter(subscribe(net_metrics), fn(m) { m["name"] == iface }))
-}
+get("/stream/network/{iface}", fn(req) {
+    let iface = req.params.iface
+    return sse(filter(subscribe(net_metrics), fn(m) { m["interface"] == iface }))
+})
 
 // Alert stream
-route GET "/stream/alerts" {
-    respond sse(subscribe(net_alerts))
-}
+get("/stream/alerts", fn(req) {
+    return sse(subscribe(net_alerts))
+})
 
 // Job-based alerting wired through std/events
 event_subscribe("interface.down",      "PageOnCall")
@@ -341,17 +490,23 @@ The monitoring stack: `schedule` samples → SSE streams live to browsers + `std
 ```ntnt
 import { sse_stream } from "std/sse"
 import { job_status } from "std/jobs"
+import { schedule, cancel_schedule } from "std/concurrent"
 
-route GET "/jobs/:id/progress" {
-    let job_id = params["id"]
-    respond sse_stream(fn(push, on_close) {
+get("/jobs/{id}/progress", fn(req) {
+    let job_id = req.params.id
+    return sse_stream(fn(push, on_close) {
         let poll = schedule(500, fn() {
             let status = unwrap(job_status(job_id))
             push(status)
+            if includes(["completed", "failed", "dead"], status["status"]) {
+                // Terminal event: the browser closes the EventSource on
+                // "done", which fires on_close and cancels the poll
+                push(map { "done": true })
+            }
         })
         on_close(fn() { cancel_schedule(poll) })
     })
-}
+})
 ```
 
 ---
@@ -359,23 +514,27 @@ route GET "/jobs/:id/progress" {
 ### Log Tail
 
 ```ntnt
-import { broadcast, subscribe, filter } from "std/sse"
+import { broadcast, subscribe, filter, sse } from "std/sse"
+import { send } from "std/concurrent"
 
-let log_bus = broadcast()
+let log_bus = broadcast("logs")
 
 // Hook into ntnt's log system (or tail a file)
+// on_log() is illustrative — ntnt has no log-hook API yet; a real
+// version of this example would need one (or a tail-file sampler on
+// schedule())
 on_log(fn(entry) {
     send(log_bus, entry)
 })
 
-route GET "/stream/logs" {
-    respond sse(subscribe(log_bus))
-}
+get("/stream/logs", fn(req) {
+    return sse(subscribe(log_bus))
+})
 
-route GET "/stream/logs/:level" {
-    let level = params["level"]
-    respond sse(filter(subscribe(log_bus), fn(e) { e["level"] == level }))
-}
+get("/stream/logs/{level}", fn(req) {
+    let level = req.params.level
+    return sse(filter(subscribe(log_bus), fn(e) { e["level"] == level }))
+})
 ```
 
 ---
@@ -385,14 +544,79 @@ route GET "/stream/logs/:level" {
 ### BroadcastHandle and BroadcastRegistry
 
 ```rust
-// Global registry of all broadcast channels
-static BROADCAST_REGISTRY: LazyLock<Mutex<HashMap<u64, BroadcastChannel>>> = ...;
+// Global registry of all broadcast channels — process-wide so every
+// worker (and hot-reload re-evaluation) resolves the same named bus.
+// Named buses key by name; anonymous buses key by generated id.
+static BROADCAST_REGISTRY: LazyLock<Mutex<HashMap<BroadcastKey, BroadcastChannel>>> = ...;
+
+enum BroadcastKey {
+    Named(String),  // broadcast("metrics") — shared across workers/reloads
+    Anon(u64),      // broadcast() — per-evaluation, single-worker semantics
+}
 
 struct BroadcastChannel {
     id: u64,
-    senders: Vec<crossbeam::channel::Sender<BroadcastMessage>>,
+    senders: Vec<SubscriberEntry>,
     replay_buffer: Option<VecDeque<BroadcastMessage>>,
     replay_buffer_size: usize,
+}
+
+struct SubscriberEntry {
+    sender_id: u64,
+    // Per-subscriber bounded ring buffer. Drop-oldest is a SENDER-side
+    // eviction (pop_front on overflow), which a flume/crossbeam channel
+    // cannot do from the sending end — so the queue is an explicit
+    // VecDeque under a Mutex, and `wake` is a coalescing signal that tells
+    // the write task "drain me" without carrying the payload.
+    queue: Arc<Mutex<VecDeque<BroadcastMessage>>>, // cap = queue_size (1024)
+    wake: flume::Sender<()>,                        // bounded(1), coalescing
+    queue_size: usize,
+    // Phase 2: set by filter(sub, pred). The predicate is an ntnt closure;
+    // it is evaluated at send() fan-out time on the publishing interpreter
+    // thread (the write task never runs interpreter code).
+    filter: Option<FilterPredicate>,
+}
+
+// Phase 2. Wraps the ntnt closure Value (and its captured environment)
+// so send() fan-out can evaluate it on the publishing interpreter thread.
+struct FilterPredicate {
+    closure: Value, // Value::Function — predicate fn(Map) -> Bool
+}
+
+// Holds a subscription between the interpreter returning
+// Value::SSESubscription(id) from the handler and the Axum layer taking
+// ownership to drive the write task. take() consumes the entry, so a
+// subscription streams to exactly one response.
+static SUBSCRIPTION_REGISTRY: LazyLock<Mutex<HashMap<u64, SseSubscription>>> = ...;
+
+struct SseSubscription {
+    queue: Arc<Mutex<VecDeque<BroadcastMessage>>>, // the ring the write task drains
+    wake_rx: flume::Receiver<()>,                  // write task awaits this
+    source: SseSource,                             // who fills the ring, + cleanup
+}
+
+// Both response builders (`sse()` and `sse_stream()`) share the ring +
+// wake + write-task machinery above. They differ ONLY in who produces
+// events and how the connection is cleaned up — captured here so the
+// bridge handoff and write task are identical for both.
+enum SseSource {
+    // sse(subscribe(bus)): the ring is filled by the bus's send() fan-out.
+    // Cleanup removes this subscriber from the bus.
+    Broadcast { channel_key: BroadcastKey, sender_id: u64 },
+    // sse_stream(gen): the ring is filled by the generator's own push().
+    // `closure` is the generator captured the same way schedule()/spawn()
+    // capture (environment + body); the write task runs it ONCE, in a fresh
+    // scheduling-capable interpreter, before entering the drain loop.
+    // `wake_tx` is handed to that interpreter's `push` native.
+    // `on_close` is a pre-allocated shared cell: the generator's `on_close`
+    // native writes its callback here, and the write task reads it back on
+    // disconnect (through the owned `source` — NOT via subscription_id,
+    // which take() already consumed).
+    Generator {
+        closure: CapturedClosure,
+        wake_tx: flume::Sender<()>,
+        on_close: Arc<Mutex<Option<CapturedClosure>>>,
+    },
 }
 
 struct BroadcastMessage {
@@ -404,27 +628,105 @@ struct BroadcastMessage {
 
 `send(bc, value)`:
 1. Serialize `Value` → `SerializedValue`
-2. Lock registry, get `BroadcastChannel`
-3. Append to replay buffer if configured
-4. Send to each sender; on `SendError` (receiver dropped) → remove that sender from the list
-5. Drop lock
+2. Lock registry, look up the `BroadcastChannel` by the handle's
+   `BroadcastKey`; append to replay buffer if configured; **snapshot the
+   subscriber list** (clone each entry's `queue` Arc and `wake` Sender —
+   both cheap, they're Arc-backed — plus `sender_id` and filter handle);
+   drop the lock
+3. Outside the lock, for each snapshot entry: if `filter` is set,
+   evaluate the predicate against the value (we are on the publishing
+   interpreter thread, so ntnt closures are evaluable here) and skip
+   non-matching subscribers
+4. For each remaining entry, enqueue with drop-oldest: lock the entry's
+   `queue`; if `queue.len() == queue_size`, `pop_front()` (drop the oldest
+   unsent event, warn deduped per subscriber) — unless the bus was created
+   with `"drop_slow": false`, which instead waits briefly for the write
+   task to drain (Phase 2); `push_back(message)`; unlock; then
+   `wake.try_send(())` and ignore a `Full` result (a pending wake already
+   means "drain"). A `Disconnected` wake receiver means the write task is
+   gone → collect this `sender_id` for cleanup.
+5. If any subscribers were dead, re-lock the registry briefly and remove
+   those entries
+
+Drop-oldest is a sender-side eviction, so the per-subscriber queue must be
+an explicit `Mutex<VecDeque>`, not a channel: neither flume nor crossbeam
+lets the sending end pop the oldest queued item (only the receiver drains).
+The `wake` channel carries no payload — it is a coalescing "data ready"
+signal (`bounded(1)`), so the write task can `recv_async()` on it and then
+drain the deque.
+
+Predicates and enqueues run OUTSIDE the registry lock deliberately:
+`std::sync::Mutex` is non-reentrant, so a filter predicate that itself
+calls `send()` (or `subscribe()`/`broadcast()`) would deadlock if the
+registry lock were held across evaluation. With the snapshot approach,
+re-entrant `send()` from a predicate simply takes the registry lock afresh
+and works; recursion depth is bounded by user code. The cost is benign
+staleness: a subscriber added or removed mid-send catches the next event.
 
 `subscribe(bc)`:
-1. Create a new `crossbeam::channel::unbounded()` pair
-2. Lock registry, push `sender` into `BroadcastChannel.senders`
-3. Wrap `receiver` in `SSESubscription { receiver, channel_id, last_event_id: None }`
-4. Drop lock
-5. Return `Value::SSESubscription(id)` to ntnt
+1. Create the per-subscriber queue — `Arc<Mutex<VecDeque>>` capped at
+   `queue_size` (default 1024) — and a `flume::bounded::<()>(1)` wake pair.
+   Bounded per the Design Review: a stuck TCP connection with an unbounded
+   queue is slow-motion OOM. The wake channel is flume so the Axum write
+   task can `recv_async()` on it (crossbeam has no async recv). On a full
+   queue the policy is drop-oldest with a deduped warn (unless the bus was
+   created with `"drop_slow": false`, which opts into briefly-blocking
+   sends — Phase 2).
+2. Allocate a fresh `sender_id`; lock the broadcast registry, push
+   `SubscriberEntry { sender_id, queue: queue.clone(), wake: wake_tx,
+   queue_size, filter: None }` into `BroadcastChannel.senders`, drop the
+   lock. (Phase 2's `filter(sub, pred)` later sets `filter` on this entry,
+   located by `channel_key` + `sender_id`.)
+3. Insert `SseSubscription { queue, wake_rx, source: Broadcast {
+   channel_key, sender_id } }` into `SUBSCRIPTION_REGISTRY` under a fresh
+   `subscription_id` — this is the bridge handoff: the Axum handler later
+   `take()`s this entry
+4. Return `Value::SSESubscription(subscription_id)` to ntnt; the handler
+   returns it through `sse()`, which carries the id to the HTTP layer as
+   `BridgeBody::Sse { subscription_id }`
+
+`sse_stream(generator)` — SAME bridge handoff as `subscribe()`/`sse()`, so
+the write task, ring, and `BridgeBody::Sse` path are reused unchanged; only
+the producer differs (the generator's `push()` instead of a bus's `send()`):
+1. Create the per-connection ring + `flume::bounded::<()>(1)` wake pair,
+   exactly as `subscribe()` step 1.
+2. Capture the `generator` closure the same way `schedule()`/`spawn()` do
+   (`validate_and_capture` → environment + body). No broadcast registry
+   entry is created — an `sse_stream` has no bus.
+3. Insert `SseSubscription { queue, wake_rx, source: Generator { closure,
+   wake_tx, on_close: Arc::new(Mutex::new(None)) } }` into
+   `SUBSCRIPTION_REGISTRY` under a fresh `subscription_id`. The `on_close`
+   cell starts empty; the generator's `on_close(fn)` native fills it.
+4. Return `Value::SSESubscription(subscription_id)`; `sse_stream()` carries
+   it to the HTTP layer as `BridgeBody::Sse { subscription_id }` — the
+   handler on the worker returns immediately, interpreter thread free.
 
 ### SSE Response Handler (Rust HTTP Layer)
 
-When the HTTP layer sees `Response::SSE(subscription_id)`:
+When the HTTP layer sees `BridgeBody::Sse { subscription_id }` on the bridge response (see Design Review):
 
 ```rust
 async fn sse_handler(subscription_id: u64, req: Request) -> Response {
     let subscription = SUBSCRIPTION_REGISTRY.take(subscription_id); // consume
+
+    // sse_stream only: start the producer. The generator runs in a FRESH
+    // interpreter (the same run_in_fresh_interpreter path schedule() ticks
+    // use) whose mode grants Scheduling — so schedule()/cancel_schedule()
+    // inside the generator register normally, unlike a worker request scope.
+    // Its `push`/`on_close` natives are bound to this connection's ring +
+    // wake_tx. This runs exactly once; the timers it registers keep pushing.
+    if let SseSource::Generator { closure, wake_tx, on_close } = &subscription.source {
+        // push  → enqueue+wake on (queue, wake_tx); on_close(fn) → store the
+        // callback into the shared `on_close` cell for the cleanup arm below.
+        spawn_generator_interpreter(
+            closure,
+            subscription.queue.clone(),
+            wake_tx.clone(),
+            on_close.clone(),
+        );
+    }
+
     let body = Body::new(async_stream::stream! {
-        // Keep-alive ping
         let mut keepalive = tokio::time::interval(Duration::from_secs(15));
 
         loop {
@@ -432,18 +734,40 @@ async fn sse_handler(subscription_id: u64, req: Request) -> Response {
                 _ = keepalive.tick() => {
                     yield Ok(Bytes::from(":\n\n"));  // SSE comment = keep-alive
                 }
-                msg = subscription.recv_async() => {
-                    match msg {
-                        Ok(m) => yield Ok(format_sse_event(&m)),
-                        Err(_) => break,  // broadcast channel dropped
+                woken = subscription.wake_rx.recv_async() => {
+                    if woken.is_err() { break; } // producer gone
+                    // Drain everything currently queued (drop-oldest means
+                    // the deque already holds only the freshest queue_size
+                    // events). Hold the lock only to move messages out.
+                    let batch: Vec<BroadcastMessage> = {
+                        let mut q = subscription.queue.lock();
+                        q.drain(..).collect()
+                    };
+                    for m in batch {
+                        yield Ok(format_sse_event(&m));
                     }
                 }
                 _ = req.closed() => break,  // client disconnected
             }
         }
 
-        // Cleanup: remove sender from broadcast registry
-        BROADCAST_REGISTRY.lock().remove_sender(subscription.channel_id, &subscription.sender_id);
+        // Cleanup depends on the producer:
+        match &subscription.source {
+            // sse(): drop this subscriber from the bus.
+            SseSource::Broadcast { channel_key, sender_id } =>
+                BROADCAST_REGISTRY.lock().remove_sender(channel_key, *sender_id),
+            // sse_stream(): take the callback out of the shared cell (owned
+            // here via `source` — subscription_id was consumed by take() at
+            // entry) and run it in a fresh interpreter, same mechanism as the
+            // generator itself. It cancel_schedule()s the per-connection
+            // timers by their handle. None if the generator registered no
+            // on_close.
+            SseSource::Generator { on_close, .. } => {
+                if let Some(cb) = on_close.lock().take() {
+                    run_captured_in_fresh_interpreter(cb);
+                }
+            }
+        }
     });
 
     Response::builder()
@@ -476,8 +800,10 @@ fn format_sse_event(msg: &BroadcastMessage) -> Bytes {
 ```rust
 enum Value {
     // ... existing variants ...
-    BroadcastHandle(u64),
-    SSESubscription(u64),
+    BroadcastHandle(BroadcastKey), // carries the registry key, so send()
+                                   // can address named and anonymous
+                                   // buses uniformly
+    SSESubscription(u64),          // subscription_id into SUBSCRIPTION_REGISTRY
 }
 ```
 
@@ -485,18 +811,26 @@ enum Value {
 
 ```rust
 // std/sse module
-sig!("broadcast", [], Type::Named("BroadcastHandle".to_string()), required(0));
+// name and opts are both optional: broadcast(), broadcast("metrics"),
+// broadcast("metrics", map { "replay_buffer": 100 })
+sig!("broadcast", ["name" => Type::String, "opts" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Named("BroadcastHandle".to_string()), required(0));
 sig!("subscribe", ["handle" => Type::Named("BroadcastHandle".to_string())], Type::Named("SSESubscription".to_string()));
 sig!("filter", ["sub" => Type::Named("SSESubscription".to_string()), "pred" => Type::Any], Type::Named("SSESubscription".to_string()));
 sig!("connection_count", ["handle" => Type::Named("BroadcastHandle".to_string())], Type::Int);
-sig!("sse_stream", ["handler" => Type::Any], Type::Named("SSEResponse".to_string()));
+// Both builders return Response, same as json()/html(), so middleware
+// and enable_cors() compose without special cases
+sig!("sse", ["sub" => Type::Named("SSESubscription".to_string())], Type::Named("Response".to_string()));
+sig!("sse_stream", ["handler" => Type::Any], Type::Named("Response".to_string()));
 ```
 
-### `respond sse(...)` Parser Integration
+### No Parser Integration Needed
 
-`respond` already handles `respond file(...)`, `respond json(...)`, `respond html(...)`. Add:
-- `respond sse(expr)` — where `expr` evaluates to `SSESubscription`
-- `respond sse_stream(expr)` — where `expr` evaluates to a closure
+The original draft planned a `respond sse(...)` keyword form, but there is
+no `respond` keyword in the language (see Design Review). `sse()` and
+`sse_stream()` are ordinary imported response builders, exactly like
+`json()`/`html()`: the handler returns their value, the bridge recognizes
+the SSE response (via the `BridgeBody::Sse` variant), and the parser is
+untouched.
 
 ---
 
@@ -506,16 +840,20 @@ sig!("sse_stream", ["handler" => Type::Any], Type::Named("SSEResponse".to_string
 
 **Estimated effort:** 3-4 days
 
-- [ ] `Value::BroadcastHandle(u64)` and `Value::SSESubscription(u64)` variants
-- [ ] `BroadcastRegistry` global (LazyLock, same pattern as ConcurrencyRuntime)
-- [ ] `broadcast() -> BroadcastHandle`
-- [ ] `subscribe(BroadcastHandle) -> SSESubscription`
-- [ ] `send(BroadcastHandle, value)` — dispatches on handle type (reuse `send` keyword)
-- [ ] `respond sse(SSESubscription)` — new response type in HTTP layer
-- [ ] SSE write loop in Rust: format events, keep-alive pings, disconnect cleanup
-- [ ] Sender cleanup on subscriber disconnect
-- [ ] `sse_stream(fn(push, on_close))` — per-connection callback form
+- [ ] `Value::BroadcastHandle(BroadcastKey)` and `Value::SSESubscription(u64)` variants
+- [ ] `BroadcastRegistry` global, keyed by name for named buses (Design Review: shared across workers and hot reloads) — LazyLock, same pattern as the pool registry
+- [ ] `broadcast(name?) -> BroadcastHandle` — named form is the documented default; anonymous form is per-worker
+- [ ] `subscribe(BroadcastHandle) -> SSESubscription` — per-subscriber bounded ring buffer (`Arc<Mutex<VecDeque>>`, cap 1024) + coalescing `flume::bounded(1)` wake; drop-oldest on overflow with deduped warn (the `"drop_slow": false` blocking opt-in arrives with `opts?` in Phase 2). Ring, not a channel: drop-oldest is a sender-side eviction channels can't do
+- [ ] `send(BroadcastHandle, value) -> Bool` — dispatches on handle type (existing channel `send` is arity-2 and returns Bool; the broadcast arm keeps that contract. Phase 2's 3-arg named-event form widens `max_arity`)
+- [ ] `sse(SSESubscription) -> Response` — response BUILDER returned from a normal handler (there is no `respond` keyword; zero parser work)
+- [ ] `BridgeBody::Sse { subscription_id }` variant on the bridge response; Axum layer builds the streaming body when it sees it (Design Review item)
+- [ ] `SUBSCRIPTION_REGISTRY` bridge handoff (`take()`-consumed), `SseSubscription { queue, wake_rx, source }` with `source` = `Broadcast` (`sse()`) or `Generator` (`sse_stream()`) — one shared struct so both builders reuse the ring/wake/write-task machinery
+- [ ] Multi-worker integration test: sampler registers once on the primary (the existing `RuntimeCapability::Scheduling` gate — no new code), subscribers connect via workers, each event arrives exactly once per subscriber
+- [ ] SSE write loop in Rust: `recv_async()` the wake + drain the ring, keep-alive pings, `X-Accel-Buffering: no`, source-dependent disconnect cleanup (bus `remove_sender` vs generator `on_close`)
+- [ ] `sse_stream(fn(push, on_close))` — per-connection callback form; `push()` = drop-oldest enqueue + wake (returns Bool, false after disconnect)
+- [ ] `sse_stream` generator handoff: captured (`validate_and_capture`) and run ONCE by the write task via `run_in_fresh_interpreter` in a `Scheduling`-capable mode — so `schedule()`/`cancel_schedule()` inside it register per connection instead of being skipped by the Worker gate. `on_close(fn)` stores into a pre-allocated `Arc<Mutex<Option<CapturedClosure>>>` cell in `SseSource::Generator`; on disconnect the write task takes it from the owned `source` (not the consumed `subscription_id`) and runs it the same way. Multi-worker test: a per-connection timer actually ticks when the request was served by a worker
 - [ ] `connection_count(BroadcastHandle) -> Int`
+- [ ] `enable_cors()` headers apply to SSE responses — headers are set before the stream body begins (see Security)
 - [ ] Typechecker signatures
 - [ ] `// @ntnt` doc blocks on all functions
 - [ ] `ntnt docs --generate`
@@ -529,7 +867,7 @@ sig!("sse_stream", ["handler" => Type::Any], Type::Named("SSEResponse".to_string
 
 - [ ] `send(BroadcastHandle, event_name, value)` — named SSE events
 - [ ] `filter(SSESubscription, fn) -> SSESubscription` — server-side predicate filter
-- [ ] `broadcast(opts)` — `replay_buffer: N`, `drop_slow: bool`
+- [ ] `broadcast(name?, opts?)` — `replay_buffer: N`, `drop_slow: bool` (default true = drop-oldest; false opts into blocking)
 - [ ] Replay buffer: ring buffer of last N events, sent on connect with `Last-Event-ID` header
 - [ ] Event ID auto-increment when replay is enabled
 - [ ] Tests: named events, filter, replay on reconnect, drop_slow behavior
@@ -540,26 +878,32 @@ sig!("sse_stream", ["handler" => Type::Any], Type::Named("SSEResponse".to_string
 
 - [ ] SSE-aware middleware — auth runs before SSE connection is established
 - [ ] `max_connections: N` option on `broadcast()` — reject new subscribers over limit (429)
-- [ ] Slow consumer detection: if a subscriber's buffer backs up > threshold, emit warning or drop
-- [ ] `X-Accel-Buffering: no` header set automatically (nginx/Cloudflare compat)
+- [ ] Slow-consumer observability: expose per-subscriber drop counts (the drop policy itself ships in Phase 1: bounded queue, drop-oldest with deduped warn)
 - [ ] `ntnt jobs`-style: `ntnt sse status server.tnt` — list active broadcast channels + connection counts
-- [ ] CORS headers for cross-origin SSE (configurable)
 
 ---
 
 ## Relationship to std/events and std/jobs
 
-These three modules are complementary, not competing. Each operates at a different layer:
+These three modules are complementary, not competing (`std/events` is
+planned, not shipped — DD-037 Phase 7). Each operates at a different
+layer:
 
 | Module | Layer | Transport | Latency | Use for |
 |--------|-------|-----------|---------|---------|
 | `std/jobs` | Background work | KV (SQLite/Redis) | Seconds | Email, cleanup, processing |
-| `std/events` | Application events → jobs | In-process (or Redis pub/sub) | ~ms | "When X happens, run these jobs" |
+| `std/events` (planned — DD-037 Phase 7) | Application events → jobs | In-process (or Redis pub/sub) | ~ms | "When X happens, run these jobs" |
 | `std/sse` | Browser push | HTTP (SSE) | ~ms | Live metrics, dashboards, progress |
 
 They compose naturally:
 
 ```ntnt
+import { broadcast, sse } from "std/sse"
+import { schedule, send } from "std/concurrent"
+import { subscribe as event_subscribe, publish } from "std/events"  // planned (DD-037 Phase 7)
+
+let metrics_bus = broadcast("metrics")
+
 // Sampler fires jobs + pushes to SSE simultaneously
 schedule(500, fn() {
     let m = sample_metrics()
@@ -570,9 +914,10 @@ schedule(500, fn() {
     }
 })
 
-// Job handles the durable response
-subscribe("cpu_critical", "SendPagerAlert")     // std/events wiring
-subscribe("cpu_critical", "LogIncident")
+// Job handles the durable response (std/events subscribe imported as
+// event_subscribe to avoid colliding with std/sse subscribe)
+event_subscribe("cpu_critical", "SendPagerAlert")
+event_subscribe("cpu_critical", "LogIncident")
 ```
 
 Real-time display: `std/sse`. Durable alerting: `std/events` + `std/jobs`.
@@ -584,21 +929,42 @@ Real-time display: `std/sse`. Durable alerting: `std/events` + `std/jobs`.
 **SSE endpoints go through normal route middleware** — no special cases. Auth middleware added to a route group applies to SSE endpoints in that group:
 
 ```ntnt
-group "/dashboard" middleware: [require_admin] {
-    route GET "/"         { respond file("dashboard.html") }
-    route GET "/stream"   { respond sse(subscribe(metrics_bus)) }
-}
+import { broadcast, subscribe, sse } from "std/sse"
+import { html, status } from "std/http/server"
+import { starts_with } from "std/string"
+import { read_file } from "std/fs"
+
+let metrics_bus = broadcast("metrics")
+
+// Middleware short-circuits before the SSE connection is established
+// (is_admin is a hypothetical app-level helper)
+use_middleware(fn(req) {
+    if starts_with(req.path, "/dashboard") && !is_admin(req) {
+        return status(403, "Forbidden")
+    }
+})
+
+get("/dashboard", fn(req) { return html(read_file("dashboard.html")?) })
+get("/dashboard/stream", fn(req) { return sse(subscribe(metrics_bus)) })
 ```
 
 The middleware runs before the SSE connection is established. If the middleware rejects the request (401, 403), the SSE connection is never opened. This is correct — you don't want to establish the connection and then reject it.
 
-**CORS:** If the SSE endpoint is consumed from a different origin (e.g. a static frontend), add CORS headers:
+**CORS:** If the SSE endpoint is consumed from a different origin (e.g. a static frontend), enable CORS the same way as for any other route — the existing `enable_cors()` server action (a global builtin, like the route functions) applies to SSE responses too:
 
 ```ntnt
-route GET "/stream/metrics" middleware: [cors("https://app.example.com")] {
-    respond sse(subscribe(metrics_bus))
-}
+import { broadcast, subscribe, sse } from "std/sse"
+
+let metrics_bus = broadcast("metrics")
+
+enable_cors(map { "origins": ["https://app.example.com"] })
+
+get("/stream/metrics", fn(req) {
+    return sse(subscribe(metrics_bus))
+})
 ```
+
+(Phase 1 must ensure the CORS layer applies its headers to `BridgeBody::Sse` responses — headers are set before the stream body begins.)
 
 **Rate limiting:** Handled at the route level, same as any other route. `max_connections` on `broadcast()` caps total subscribers regardless of auth status.
 
@@ -615,26 +981,29 @@ route GET "/stream/metrics" middleware: [cors("https://app.example.com")] {
 | Filter/transform | `filter(sub, fn)` | Custom handler | Custom handler | Manual | Manual |
 | Keep-alive | Built-in (15s) | Built-in | Built-in | Manual | Manual |
 | Named events | `send(bc, "name", val)` | Topic-based | Channel-based | Manual | Manual |
-| Replay on reconnect | `broadcast(map { "replay_buffer": N })` | ❌ | ❌ | Manual | Manual |
+| Replay on reconnect | `broadcast("bus", map { "replay_buffer": N })` | ❌ | ❌ | Manual | Manual |
 | Works with existing scheduler | `schedule()` → `send()` | Separate GenServer | Separate worker | Separate asyncio task | Separate goroutine |
 | Lines for a metrics dashboard | ~15 | ~80 | ~100 | ~60 | ~70 |
 
-ntnt's advantage: the sampler (`schedule`), the bus (`broadcast`), and the endpoint (`respond sse`) are first-class primitives that compose with each other and with `std/jobs`/`std/events`. No framework, no adapter, no external process.
+ntnt's advantage: the sampler (`schedule`), the bus (`broadcast`), and the endpoint (`sse()` responses) are first-class primitives that compose with each other and with `std/jobs`/`std/events`. No framework, no adapter, no external process.
 
 ---
 
 ## Open Questions
 
-| Question | Options | Notes |
-|----------|---------|-------|
-| Broadcast backing implementation | `bus` crate (SPMC), `Vec<Sender>` (custom), `tokio::sync::broadcast` | Leaning custom Vec<Sender> for consistency with crossbeam |
-| `send()` overload on BroadcastHandle | Reuse existing `send()` dispatch vs. new `publish()` name | `send()` is cleaner, already familiar from channels |
-| `drop_slow` default | Drop (false) vs block briefly (true) | Blocking is safer for dashboards, dropping is safer for high-frequency metrics |
-| `sse_stream` cleanup model | `on_close(fn)` callback vs defer-style | `on_close` is explicit and readable |
-| Backpressure signal | No signal vs `push()` returns Bool | `push()` → Bool lets the handler decide to stop |
-| WebSockets | Separate DD vs extend this one | Separate DD — SSE covers 90% of dashboard needs and is simpler |
-| `ntnt sse status` CLI | Part of this DD vs Phase 3 | Phase 3 — not blocking core |
-| CORS middleware built-in | Yes vs user-defined | Likely a stdlib utility, not SSE-specific |
+All resolved as of the 2026-07-08 Design Review (resolutions below,
+reconciled into the body):
+
+| Question | Resolution |
+|----------|------------|
+| Broadcast backing implementation | Custom `Vec<SubscriberEntry>` per bus; each subscriber has a BOUNDED ring buffer (1024, drop-oldest) + a coalescing flume wake signal |
+| `send()` overload on BroadcastHandle | Reuse existing `send()` dispatch on handle type |
+| `drop_slow` default | Drop-oldest with deduped warn (default); `"drop_slow": false` opts into briefly-blocking sends |
+| `sse_stream` cleanup model | `on_close(fn)` callback |
+| Backpressure signal | `push()` returns Bool (false after disconnect) |
+| WebSockets | Separate DD — SSE covers the dashboard cases and is simpler |
+| `ntnt sse status` CLI | Phase 3 |
+| CORS middleware built-in | Stdlib utility, not SSE-specific |
 
 ---
 
@@ -643,3 +1012,4 @@ ntnt's advantage: the sampler (`schedule`), the bus (`broadcast`), and the endpo
 | Date | Change |
 |------|--------|
 | 2026-03-17 | Initial draft — vision, architecture, full API, three phases, implementation notes |
+| 2026-07-08 | Design review against current main: response-builder API (no `respond` keyword), `BridgeBody::Sse` bridge variant, named process-global broadcasts; per-subscriber bounded ring buffer + wake signal (drop-oldest needs sender-side eviction, which a channel can't do); `sse_stream` generators run in a scheduling-capable per-connection scope so per-connection timers work under multi-worker; verified the module-level Worker `schedule()` gate already exists; body reconciled end to end |
