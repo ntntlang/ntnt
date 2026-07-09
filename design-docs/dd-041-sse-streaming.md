@@ -277,27 +277,36 @@ get("/jobs/{id}/progress", fn(req) {
 - `on_close(fn)` — register a cleanup callback for when the client disconnects
 - Returns a `Response` immediately, like `sse()` — the handler exits and the connection streams until the client disconnects
 
-> **Implementation note — on_close execution point:** the same constraint as
-> filter predicates applies: an ntnt closure cannot run on the Rust write
-> task. Disconnect is detected in the write task, which enqueues the
-> registered `on_close` callback onto the scheduler's interpreter thread
-> (the same thread that runs `schedule()` callbacks) for execution.
+The exact handoff — how the generator closure reaches a scheduling-capable
+interpreter, and where `push`/`on_close` run — is specified in
+Implementation Notes (`sse_stream(generator)` and `sse_handler`). The key
+points:
 
-> **Implementation note — the generator runs in a scheduling-capable
-> context, NOT the worker request scope.** A route handler executes on a
-> worker interpreter, and Worker mode deliberately lacks
-> `RuntimeCapability::Scheduling` — so a bare `schedule()` in a worker
-> handler is silently skipped. That gate exists to stop *module-level*
-> samplers from registering N times (once per worker) during program
-> load; it must NOT disable per-connection timers, or the clock and
-> progress-bar streams above would silently never tick under multi-worker.
-> Resolution: `sse_stream` hands the generator off (like the `sse()`
-> subscription handoff) to run in a per-connection execution scope that
-> grants `Scheduling`. `schedule()`/`cancel_schedule()` inside the
-> generator therefore register normally, and the cardinality is correct by
+> **The generator runs in a fresh scheduling-capable interpreter, NOT the
+> worker request scope.** A route handler executes on a worker interpreter,
+> and Worker mode deliberately lacks `RuntimeCapability::Scheduling` — so a
+> bare `schedule()` in a worker handler is silently skipped. That gate
+> exists to stop *module-level* samplers from registering N times (once per
+> worker) during program load; it must NOT disable per-connection timers,
+> or the clock and progress-bar streams above would silently never tick
+> under multi-worker. Resolution: `sse_stream` parks the captured generator
+> in `SUBSCRIPTION_REGISTRY` (identical bridge handoff to `sse()`); when the
+> write task starts, it runs the generator ONCE via the same
+> `run_in_fresh_interpreter` path `schedule()` ticks already use, in a mode
+> that grants `Scheduling`. So `schedule()`/`cancel_schedule()` inside the
+> generator register normally, and the cardinality is correct by
 > construction — one timer per open connection, not one per worker. (A
 > module-level `schedule()` at app top level is still skipped on workers,
 > unchanged.)
+
+> **on_close runs in a fresh interpreter too, not a persistent "scheduler
+> thread."** `schedule()` has no long-lived interpreter — each tick is a
+> fresh interpreter built from the captured closure (`run_in_fresh_interpreter`).
+> On disconnect, the write task likewise runs the registered `on_close`
+> closure in a fresh interpreter; because `ScheduleHandle` is a process-global
+> id, the `cancel_schedule(sched)` inside `on_close` cancels the
+> per-connection timer even though it was registered from a different
+> (also fresh) interpreter.
 
 ### Phase 2: Named Events, IDs, Filtering
 
@@ -579,10 +588,25 @@ struct FilterPredicate {
 static SUBSCRIPTION_REGISTRY: LazyLock<Mutex<HashMap<u64, SseSubscription>>> = ...;
 
 struct SseSubscription {
-    queue: Arc<Mutex<VecDeque<BroadcastMessage>>>, // SAME Arc as the entry
+    queue: Arc<Mutex<VecDeque<BroadcastMessage>>>, // the ring the write task drains
     wake_rx: flume::Receiver<()>,                  // write task awaits this
-    channel_key: BroadcastKey, // for sender cleanup on disconnect
-    sender_id: u64,
+    source: SseSource,                             // who fills the ring, + cleanup
+}
+
+// Both response builders (`sse()` and `sse_stream()`) share the ring +
+// wake + write-task machinery above. They differ ONLY in who produces
+// events and how the connection is cleaned up — captured here so the
+// bridge handoff and write task are identical for both.
+enum SseSource {
+    // sse(subscribe(bus)): the ring is filled by the bus's send() fan-out.
+    // Cleanup removes this subscriber from the bus.
+    Broadcast { channel_key: BroadcastKey, sender_id: u64 },
+    // sse_stream(gen): the ring is filled by the generator's own push().
+    // `closure` is the generator captured the same way schedule()/spawn()
+    // capture (environment + body); the write task runs it ONCE, in a fresh
+    // scheduling-capable interpreter, before entering the drain loop.
+    // `wake_tx` is handed to that interpreter's `push` native.
+    Generator { closure: CapturedClosure, wake_tx: flume::Sender<()> },
 }
 
 struct BroadcastMessage {
@@ -643,12 +667,28 @@ staleness: a subscriber added or removed mid-send catches the next event.
    queue_size, filter: None }` into `BroadcastChannel.senders`, drop the
    lock. (Phase 2's `filter(sub, pred)` later sets `filter` on this entry,
    located by `channel_key` + `sender_id`.)
-3. Insert `SseSubscription { queue, wake_rx, channel_key, sender_id }` into
-   `SUBSCRIPTION_REGISTRY` under a fresh `subscription_id` — this is the
-   bridge handoff: the Axum handler later `take()`s this entry
+3. Insert `SseSubscription { queue, wake_rx, source: Broadcast {
+   channel_key, sender_id } }` into `SUBSCRIPTION_REGISTRY` under a fresh
+   `subscription_id` — this is the bridge handoff: the Axum handler later
+   `take()`s this entry
 4. Return `Value::SSESubscription(subscription_id)` to ntnt; the handler
    returns it through `sse()`, which carries the id to the HTTP layer as
    `BridgeBody::Sse { subscription_id }`
+
+`sse_stream(generator)` — SAME bridge handoff as `subscribe()`/`sse()`, so
+the write task, ring, and `BridgeBody::Sse` path are reused unchanged; only
+the producer differs (the generator's `push()` instead of a bus's `send()`):
+1. Create the per-connection ring + `flume::bounded::<()>(1)` wake pair,
+   exactly as `subscribe()` step 1.
+2. Capture the `generator` closure the same way `schedule()`/`spawn()` do
+   (`validate_and_capture` → environment + body). No broadcast registry
+   entry is created — an `sse_stream` has no bus.
+3. Insert `SseSubscription { queue, wake_rx, source: Generator { closure,
+   wake_tx } }` into `SUBSCRIPTION_REGISTRY` under a fresh
+   `subscription_id`.
+4. Return `Value::SSESubscription(subscription_id)`; `sse_stream()` carries
+   it to the HTTP layer as `BridgeBody::Sse { subscription_id }` — the
+   handler on the worker returns immediately, interpreter thread free.
 
 ### SSE Response Handler (Rust HTTP Layer)
 
@@ -657,8 +697,18 @@ When the HTTP layer sees `BridgeBody::Sse { subscription_id }` on the bridge res
 ```rust
 async fn sse_handler(subscription_id: u64, req: Request) -> Response {
     let subscription = SUBSCRIPTION_REGISTRY.take(subscription_id); // consume
+
+    // sse_stream only: start the producer. The generator runs in a FRESH
+    // interpreter (the same run_in_fresh_interpreter path schedule() ticks
+    // use) whose mode grants Scheduling — so schedule()/cancel_schedule()
+    // inside the generator register normally, unlike a worker request scope.
+    // Its `push`/`on_close` natives are bound to this connection's ring +
+    // wake_tx. This runs exactly once; the timers it registers keep pushing.
+    if let SseSource::Generator { closure, wake_tx } = &subscription.source {
+        spawn_generator_interpreter(closure, subscription.queue.clone(), wake_tx.clone());
+    }
+
     let body = Body::new(async_stream::stream! {
-        // Keep-alive ping
         let mut keepalive = tokio::time::interval(Duration::from_secs(15));
 
         loop {
@@ -667,7 +717,7 @@ async fn sse_handler(subscription_id: u64, req: Request) -> Response {
                     yield Ok(Bytes::from(":\n\n"));  // SSE comment = keep-alive
                 }
                 woken = subscription.wake_rx.recv_async() => {
-                    if woken.is_err() { break; } // all senders dropped
+                    if woken.is_err() { break; } // producer gone
                     // Drain everything currently queued (drop-oldest means
                     // the deque already holds only the freshest queue_size
                     // events). Hold the lock only to move messages out.
@@ -683,8 +733,16 @@ async fn sse_handler(subscription_id: u64, req: Request) -> Response {
             }
         }
 
-        // Cleanup: remove this subscriber from the broadcast registry
-        BROADCAST_REGISTRY.lock().remove_sender(&subscription.channel_key, subscription.sender_id);
+        // Cleanup depends on the producer:
+        match &subscription.source {
+            // sse(): drop this subscriber from the bus.
+            SseSource::Broadcast { channel_key, sender_id } =>
+                BROADCAST_REGISTRY.lock().remove_sender(channel_key, *sender_id),
+            // sse_stream(): run the generator's on_close in a fresh
+            // interpreter (same mechanism as the generator itself), which
+            // cancel_schedule()s the per-connection timers by their handle.
+            SseSource::Generator { .. } => run_on_close_in_fresh_interpreter(subscription_id),
+        }
     });
 
     Response::builder()
@@ -764,11 +822,11 @@ untouched.
 - [ ] `send(BroadcastHandle, value) -> Bool` — dispatches on handle type (existing channel `send` is arity-2 and returns Bool; the broadcast arm keeps that contract. Phase 2's 3-arg named-event form widens `max_arity`)
 - [ ] `sse(SSESubscription) -> Response` — response BUILDER returned from a normal handler (there is no `respond` keyword; zero parser work)
 - [ ] `BridgeBody::Sse { subscription_id }` variant on the bridge response; Axum layer builds the streaming body when it sees it (Design Review item)
+- [ ] `SUBSCRIPTION_REGISTRY` bridge handoff (`take()`-consumed), `SseSubscription { queue, wake_rx, source }` with `source` = `Broadcast` (`sse()`) or `Generator` (`sse_stream()`) — one shared struct so both builders reuse the ring/wake/write-task machinery
 - [ ] Multi-worker integration test: sampler registers once on the primary (the existing `RuntimeCapability::Scheduling` gate — no new code), subscribers connect via workers, each event arrives exactly once per subscriber
-- [ ] SSE write loop in Rust: format events, keep-alive pings, disconnect cleanup
-- [ ] Sender cleanup on subscriber disconnect
-- [ ] `sse_stream(fn(push, on_close))` — per-connection callback form; `push()` returns Bool (false after disconnect)
-- [ ] `sse_stream` generator runs in a scheduling-capable per-connection scope (handed off from the worker), so `schedule()`/`cancel_schedule()` inside it register per connection instead of being skipped by the Worker capability gate — with a multi-worker test that a per-connection timer actually ticks when the request was served by a worker
+- [ ] SSE write loop in Rust: `recv_async()` the wake + drain the ring, keep-alive pings, `X-Accel-Buffering: no`, source-dependent disconnect cleanup (bus `remove_sender` vs generator `on_close`)
+- [ ] `sse_stream(fn(push, on_close))` — per-connection callback form; `push()` = drop-oldest enqueue + wake (returns Bool, false after disconnect)
+- [ ] `sse_stream` generator handoff: captured (`validate_and_capture`) and run ONCE by the write task via `run_in_fresh_interpreter` in a `Scheduling`-capable mode — so `schedule()`/`cancel_schedule()` inside it register per connection instead of being skipped by the Worker gate; `on_close` runs the same way on disconnect. Multi-worker test: a per-connection timer actually ticks when the request was served by a worker
 - [ ] `connection_count(BroadcastHandle) -> Int`
 - [ ] `enable_cors()` headers apply to SSE responses — headers are set before the stream body begins (see Security)
 - [ ] Typechecker signatures
