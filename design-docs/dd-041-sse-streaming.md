@@ -302,11 +302,13 @@ points:
 > **on_close runs in a fresh interpreter too, not a persistent "scheduler
 > thread."** `schedule()` has no long-lived interpreter — each tick is a
 > fresh interpreter built from the captured closure (`run_in_fresh_interpreter`).
-> On disconnect, the write task likewise runs the registered `on_close`
-> closure in a fresh interpreter; because `ScheduleHandle` is a process-global
-> id, the `cancel_schedule(sched)` inside `on_close` cancels the
-> per-connection timer even though it was registered from a different
-> (also fresh) interpreter.
+> On disconnect, the write task takes the registered `on_close` closure out
+> of the shared `on_close` cell in `SseSource::Generator` (the generator's
+> `on_close(fn)` native wrote it there) and runs it in a fresh interpreter;
+> because `ScheduleHandle` is a process-global id, the
+> `cancel_schedule(sched)` inside `on_close` cancels the per-connection
+> timer even though it was registered from a different (also fresh)
+> interpreter.
 
 ### Phase 2: Named Events, IDs, Filtering
 
@@ -606,7 +608,15 @@ enum SseSource {
     // capture (environment + body); the write task runs it ONCE, in a fresh
     // scheduling-capable interpreter, before entering the drain loop.
     // `wake_tx` is handed to that interpreter's `push` native.
-    Generator { closure: CapturedClosure, wake_tx: flume::Sender<()> },
+    // `on_close` is a pre-allocated shared cell: the generator's `on_close`
+    // native writes its callback here, and the write task reads it back on
+    // disconnect (through the owned `source` — NOT via subscription_id,
+    // which take() already consumed).
+    Generator {
+        closure: CapturedClosure,
+        wake_tx: flume::Sender<()>,
+        on_close: Arc<Mutex<Option<CapturedClosure>>>,
+    },
 }
 
 struct BroadcastMessage {
@@ -684,8 +694,9 @@ the producer differs (the generator's `push()` instead of a bus's `send()`):
    (`validate_and_capture` → environment + body). No broadcast registry
    entry is created — an `sse_stream` has no bus.
 3. Insert `SseSubscription { queue, wake_rx, source: Generator { closure,
-   wake_tx } }` into `SUBSCRIPTION_REGISTRY` under a fresh
-   `subscription_id`.
+   wake_tx, on_close: Arc::new(Mutex::new(None)) } }` into
+   `SUBSCRIPTION_REGISTRY` under a fresh `subscription_id`. The `on_close`
+   cell starts empty; the generator's `on_close(fn)` native fills it.
 4. Return `Value::SSESubscription(subscription_id)`; `sse_stream()` carries
    it to the HTTP layer as `BridgeBody::Sse { subscription_id }` — the
    handler on the worker returns immediately, interpreter thread free.
@@ -704,8 +715,15 @@ async fn sse_handler(subscription_id: u64, req: Request) -> Response {
     // inside the generator register normally, unlike a worker request scope.
     // Its `push`/`on_close` natives are bound to this connection's ring +
     // wake_tx. This runs exactly once; the timers it registers keep pushing.
-    if let SseSource::Generator { closure, wake_tx } = &subscription.source {
-        spawn_generator_interpreter(closure, subscription.queue.clone(), wake_tx.clone());
+    if let SseSource::Generator { closure, wake_tx, on_close } = &subscription.source {
+        // push  → enqueue+wake on (queue, wake_tx); on_close(fn) → store the
+        // callback into the shared `on_close` cell for the cleanup arm below.
+        spawn_generator_interpreter(
+            closure,
+            subscription.queue.clone(),
+            wake_tx.clone(),
+            on_close.clone(),
+        );
     }
 
     let body = Body::new(async_stream::stream! {
@@ -738,10 +756,17 @@ async fn sse_handler(subscription_id: u64, req: Request) -> Response {
             // sse(): drop this subscriber from the bus.
             SseSource::Broadcast { channel_key, sender_id } =>
                 BROADCAST_REGISTRY.lock().remove_sender(channel_key, *sender_id),
-            // sse_stream(): run the generator's on_close in a fresh
-            // interpreter (same mechanism as the generator itself), which
-            // cancel_schedule()s the per-connection timers by their handle.
-            SseSource::Generator { .. } => run_on_close_in_fresh_interpreter(subscription_id),
+            // sse_stream(): take the callback out of the shared cell (owned
+            // here via `source` — subscription_id was consumed by take() at
+            // entry) and run it in a fresh interpreter, same mechanism as the
+            // generator itself. It cancel_schedule()s the per-connection
+            // timers by their handle. None if the generator registered no
+            // on_close.
+            SseSource::Generator { on_close, .. } => {
+                if let Some(cb) = on_close.lock().take() {
+                    run_captured_in_fresh_interpreter(cb);
+                }
+            }
         }
     });
 
@@ -826,7 +851,7 @@ untouched.
 - [ ] Multi-worker integration test: sampler registers once on the primary (the existing `RuntimeCapability::Scheduling` gate — no new code), subscribers connect via workers, each event arrives exactly once per subscriber
 - [ ] SSE write loop in Rust: `recv_async()` the wake + drain the ring, keep-alive pings, `X-Accel-Buffering: no`, source-dependent disconnect cleanup (bus `remove_sender` vs generator `on_close`)
 - [ ] `sse_stream(fn(push, on_close))` — per-connection callback form; `push()` = drop-oldest enqueue + wake (returns Bool, false after disconnect)
-- [ ] `sse_stream` generator handoff: captured (`validate_and_capture`) and run ONCE by the write task via `run_in_fresh_interpreter` in a `Scheduling`-capable mode — so `schedule()`/`cancel_schedule()` inside it register per connection instead of being skipped by the Worker gate; `on_close` runs the same way on disconnect. Multi-worker test: a per-connection timer actually ticks when the request was served by a worker
+- [ ] `sse_stream` generator handoff: captured (`validate_and_capture`) and run ONCE by the write task via `run_in_fresh_interpreter` in a `Scheduling`-capable mode — so `schedule()`/`cancel_schedule()` inside it register per connection instead of being skipped by the Worker gate. `on_close(fn)` stores into a pre-allocated `Arc<Mutex<Option<CapturedClosure>>>` cell in `SseSource::Generator`; on disconnect the write task takes it from the owned `source` (not the consumed `subscription_id`) and runs it the same way. Multi-worker test: a per-connection timer actually ticks when the request was served by a worker
 - [ ] `connection_count(BroadcastHandle) -> Int`
 - [ ] `enable_cors()` headers apply to SSE responses — headers are set before the stream body begins (see Security)
 - [ ] Typechecker signatures
