@@ -60,8 +60,10 @@ pub struct BridgeRequest {
     pub body_bytes: Vec<u8>,
     /// Unique request ID
     pub id: String,
-    /// Client IP address
+    /// Client IP address after application/proxy header handling
     pub ip: String,
+    /// Immutable socket peer IP, unaffected by forwarding headers
+    pub peer_ip: String,
     /// Protocol (http/https)
     pub protocol: String,
 }
@@ -106,6 +108,7 @@ impl BridgeRequest {
         );
         map.insert("id".to_string(), Value::String(self.id.clone()));
         map.insert("ip".to_string(), Value::String(self.ip.clone()));
+        map.insert("peer_ip".to_string(), Value::String(self.peer_ip.clone()));
         map.insert("protocol".to_string(), Value::String(self.protocol.clone()));
 
         // Query params
@@ -301,7 +304,8 @@ mod tests {
             body: "{}".to_string(),
             body_bytes: vec![1, 2, 3],
             id: "req-json".to_string(),
-            ip: "127.0.0.1".to_string(),
+            ip: "203.0.113.99".to_string(),
+            peer_ip: "127.0.0.1".to_string(),
             protocol: "http".to_string(),
         };
 
@@ -354,7 +358,8 @@ mod tests {
             body: "".to_string(),
             body_bytes: Vec::new(),
             id: "req-123".to_string(),
-            ip: "127.0.0.1".to_string(),
+            ip: "203.0.113.99".to_string(),
+            peer_ip: "127.0.0.1".to_string(),
             protocol: "http".to_string(),
         };
 
@@ -368,6 +373,10 @@ mod tests {
             match map.get("path") {
                 Some(Value::String(p)) => assert_eq!(p, "/users/42"),
                 _ => panic!("Expected path"),
+            }
+            match map.get("peer_ip") {
+                Some(Value::String(ip)) => assert_eq!(ip, "127.0.0.1"),
+                _ => panic!("Expected immutable socket peer IP"),
             }
             if let Some(Value::Map(params)) = map.get("params") {
                 match params.get("id") {
@@ -479,7 +488,8 @@ mod tests {
             body: "".to_string(),
             body_bytes: Vec::new(),
             id: "1".to_string(),
-            ip: "127.0.0.1".to_string(),
+            ip: "203.0.113.99".to_string(),
+            peer_ip: "127.0.0.1".to_string(),
             protocol: "http".to_string(),
         };
 

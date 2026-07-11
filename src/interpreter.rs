@@ -6941,6 +6941,16 @@ impl Interpreter {
                             &mut invoke,
                         );
                     }
+
+                    // magic_link_flow(req, options) invokes app-provided policy
+                    // closures (eligible, deliver, authorize), so it needs the
+                    // current interpreter context just like validate().
+                    if name == "magic_link_flow" && args.len() == 2 {
+                        let mut invoke = |func: &Value, call_args: Vec<Value>| {
+                            self.call_function(func.clone(), call_args)
+                        };
+                        return crate::stdlib::auth::run_magic_link_flow(&args, &mut invoke);
+                    }
                 }
 
                 self.call_function(callee, args)

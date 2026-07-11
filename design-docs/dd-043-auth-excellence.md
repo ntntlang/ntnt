@@ -158,7 +158,100 @@ Goal: let apps implement passwordless email sign-in without app-owned authentica
 - [x] Recheck account state during consumption and permanently invalidate links rejected for a non-active identity
 - [x] Revoke outstanding password-reset and magic-link tokens whenever credentials are changed or reset
 - [x] Preserve backend parity across memory, SQLite, PostgreSQL, and Redis/Valkey
-- [x] Keep app policy outside `std/auth`: apps own email delivery, request throttling, authorization/group checks, confirmation UX, and `sign_in_session(...)`
+- [x] Keep the low-level boundary explicit: apps using only `issue_magic_link(...)` / `consume_magic_link(...)` own delivery, throttling, authorization, confirmation UX, and session creation
+
+### v0.5.1 Coordinated Magic-Link Flow
+
+Goal: make the secure path the short path. Most applications should not need to rebuild generic request throttling, generic public outcomes with best-effort timing equalization, fragment confirmation, replay handling, delivery cleanup, and session orchestration around the v0.5.1 primitives.
+
+#### Public API
+
+Add one optional high-level coordinator while preserving the low-level escape hatches:
+
+```ntnt
+import { magic_link_flow } from "std/auth"
+
+fn get(req) {
+    return magic_link_flow(req, magic_link_options())
+}
+
+fn post(req) {
+    return magic_link_flow(req, magic_link_options())
+}
+```
+
+The same function is mounted by the app at its request and consume routes. It dispatches from `req.method` and the configured paths:
+
+```ntnt
+map {
+    "request_path": "/admin/email-login",
+    "consume_path": "/admin/email-login/consume",
+    "base_url": "https://admin.example.com",
+    "success_url": "/admin",
+    "failure_url": "/admin/email-login",
+    "eligible": fn(identifier) { ... },
+    "deliver": fn(message) { ... },
+    "authorize": fn(identity) { ... }
+}
+```
+
+Required application hooks remain narrow and policy-shaped:
+
+- `eligible(identifier) -> Bool | Map` decides whether the normalized local identity may receive a link. The flow still returns the same public response for eligible, ineligible, absent, locked, and disabled identities.
+- `deliver(message) -> Result` receives `to`, `url`, `expires_in`, and a bounded `budget_hint_seconds` budget. The URL contains bearer material and must not be logged or persisted by the callback. Returning `Err` causes ntnt to discard the newly issued token before returning the generic response.
+- `authorize(identity) -> Result<Map, String>` runs only after atomic token consumption. It returns app-owned session extensions (`name`, `picture`, `claims`, and `data`) or rejects sign-in. Rejection consumes the bearer permanently and creates no session. The coordinator always forces `provider`, `subject_id`, and the canonical email from the consumed local identity; the hook cannot replace the authenticated principal.
+
+The coordinator owns default request and confirmation HTML. The confirmation page reads the token from `location.hash`, clears the fragment immediately with `history.replaceState`, validates the exact token shape, and submits it only after an explicit user action. Default responses are `no-store` and carry restrictive CSP, referrer, framing, MIME-sniffing, and permissions headers. Apps may override titles and copy without replacing the security-sensitive browser flow.
+
+#### Secure Defaults
+
+- Request identifier: `email`, normalized by the existing local-identity rules.
+- Link TTL: 900 seconds, capped at 3600 seconds by the low-level primitive.
+- Request body limit: 4096 bytes.
+- Per-client limit: 10 requests per 15 minutes.
+- Per-eligible-identity limit: 3 requests per 15 minutes.
+- Generic response floor: 1200 ms.
+- Delivery budget hint: 1 second; the callback must enforce it in its provider call.
+- Session TTL: configured auth default unless overridden by `session_options`; always capped by `max_session_ttl`.
+- Client address: immutable socket-peer `req.peer_ip` by default. Forwarded client-IP headers are ignored unless the app explicitly names a trusted header because its ingress strips spoofed values. If no socket-peer address is available, the flow warns once and uses a shared fail-closed bucket rather than weakening the limit.
+- Delivery origin: `base_url` or trusted `SITE_URL` only. Request `Host` and forwarded protocol headers are never used to build outbound magic links.
+- Redirects: local absolute paths only by default; external URLs require an explicit opt-in.
+
+Rate-limit storage belongs to `std/auth` and must be atomic across memory, SQLite, PostgreSQL, and Redis/Valkey. Store only HMAC-scoped client/identity hashes, counters, and expirations; never raw addresses, identifiers, links, selectors, or verifiers. Apply the client limit before eligibility lookup. Apply the identity limit only after eligibility succeeds so anonymous traffic cannot exhaust a known user's delivery budget.
+
+#### Authentication / Authorization Boundary
+
+The coordinator authenticates possession of a magic-link bearer. It does not decide roles, organizations, groups, administrator eligibility, or destination policy.
+
+Ordering is fixed:
+
+1. Bound and parse the request.
+2. Enforce the client limit.
+3. Normalize the identifier and invoke `eligible`.
+4. Enforce the eligible-identity limit.
+5. Issue through `issue_magic_link`.
+6. Invoke delivery with a timeout budget the callback must enforce; discard the exact issued token on failure.
+7. Return the generic response with best-effort padding.
+8. On confirmation, validate and atomically consume through `consume_magic_link`.
+9. Invoke `authorize` with the consumed identity.
+10. Force the authenticated principal from the consumed identity, merge only app-owned session extensions, and create the request-aware session.
+
+For Wolf Rentals, `authorize` must re-read `admin_user_profiles` after consumption and before returning the administrator session specification. A valid local identity alone must never imply Wolf administrator access.
+
+#### Acceptance Criteria
+
+- [x] Add `magic_link_flow(req, options) -> Response` without removing or weakening `issue_magic_link` / `consume_magic_link`
+- [x] Invoke application eligibility, delivery, and authorization closures with interpreter context and stable type/error contracts
+- [x] Own the default request page, fragment confirmation page, bounded form parsing, generic responses, and safe redirects
+- [x] Add HMAC-scoped atomic request limiting across memory, SQLite, PostgreSQL, and Redis/Valkey
+- [x] Guarantee client-limit-before-eligibility and eligible-identity-limit-after-eligibility ordering
+- [x] Discard the issued token when delivery rejects or fails
+- [x] Consume before authorization and never restore a token after authorization rejection
+- [x] Create sessions through the request-aware session path and honor per-flow session options within the configured absolute maximum
+- [x] Keep token material out of query strings, request paths, logs, diagnostics, public errors, and rate-limit storage
+- [x] Add browser-flow, replay, non-enumeration, timing, delivery-failure, backend-concurrency, session, and authorization-order regressions
+- [x] Document a conventional email-login example and a policy-heavy administrator example
+- [ ] Prove the Wolf integration can remove its generic limiter, request orchestration, confirmation JavaScript, and direct session ceremony while retaining Wolf-specific policy and branded overrides
 
 ### Template Integration Proof
 

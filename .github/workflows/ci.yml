@@ -137,6 +137,10 @@ jobs:
           cargo test --locked --lib test_redis_magic_link_storage_is_atomic_under_concurrency -- --test-threads=1 --nocapture
           cargo test --locked --lib test_postgres_password_reset_consume_is_one_time_under_concurrency -- --test-threads=1 --nocapture
           cargo test --locked --lib test_redis_password_reset_consume_is_one_time_under_concurrency -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_auth_rate_limit_contract_postgres -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_auth_rate_limit_contract_redis -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_magic_link_delivery_cleanup_race_postgres -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_magic_link_delivery_cleanup_race_redis -- --test-threads=1 --nocapture
           cargo test --locked --lib test_set_local_password_revokes_outstanding_one_time_tokens -- --test-threads=1 --nocapture
           cargo test --locked --lib test_password_reset_revokes_outstanding_magic_links -- --test-threads=1 --nocapture
         env:

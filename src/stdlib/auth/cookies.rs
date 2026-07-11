@@ -77,7 +77,7 @@ fn validate_cookie_name(name: &str) -> std::result::Result<String, String> {
     }
 }
 
-fn validate_cookie_path(path: &str) -> std::result::Result<String, String> {
+pub(super) fn validate_cookie_path(path: &str) -> std::result::Result<String, String> {
     if path.is_empty() {
         return Err("[auth] cookie_path must not be empty".to_string());
     }
@@ -154,7 +154,7 @@ fn auth_cookie_settings(
             &get_string("cookie_same_site")?.unwrap_or_else(|| config.cookie_same_site.clone()),
         )?,
         secure: get_bool("cookie_secure")?.unwrap_or(config.cookie_secure),
-        http_only: get_bool("cookie_http_only")?.unwrap_or(true),
+        http_only: get_bool("cookie_http_only")?.unwrap_or(config.cookie_http_only),
         max_age: cookie_max_age,
     })
 }

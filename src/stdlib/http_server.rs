@@ -1204,14 +1204,14 @@ pub fn request_to_value(
         bytes_to_value_array(exposed_body_bytes),
     );
 
-    // Client IP (from proxy headers or remote address)
-    let ip = client_ip.unwrap_or_else(|| {
-        request
-            .remote_addr()
-            .map(|addr| addr.ip().to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    });
+    // Preserve the socket peer independently from proxy-derived compatibility fields.
+    let peer_ip = request
+        .remote_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let ip = client_ip.unwrap_or_else(|| peer_ip.clone());
     req_map.insert("ip".to_string(), Value::String(ip));
+    req_map.insert("peer_ip".to_string(), Value::String(peer_ip));
 
     // Request ID (from header or generate one)
     let id = request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -3657,6 +3657,38 @@ mod tests {
             Some(Value::Map(m)) => m.clone(),
             other => panic!("Expected Map at key '{}', got {:?}", key, other),
         }
+    }
+
+    #[test]
+    fn test_sync_request_preserves_socket_peer_separately_from_forwarded_ip() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let client = std::thread::spawn(move || {
+            use std::io::Write;
+            let mut stream = std::net::TcpStream::connect(addr).unwrap();
+            stream
+                .write_all(
+                    b"GET /email-login HTTP/1.1\r\nHost: app.test\r\nX-Forwarded-For: 203.0.113.99\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let request = server.recv().unwrap();
+        let Value::Map(request_map) =
+            request_to_value(&request, HashMap::new(), String::new(), Vec::new())
+        else {
+            panic!("sync request should become a request map");
+        };
+        match request_map.get("ip") {
+            Some(Value::String(ip)) => assert_eq!(ip, "203.0.113.99"),
+            other => panic!("expected compatibility forwarded IP, got {other:?}"),
+        }
+        match request_map.get("peer_ip") {
+            Some(Value::String(ip)) => assert_eq!(ip, "127.0.0.1"),
+            other => panic!("expected immutable socket peer IP, got {other:?}"),
+        }
+        request.respond(tiny_http::Response::empty(204)).unwrap();
+        client.join().unwrap();
     }
 
     // ===========================================

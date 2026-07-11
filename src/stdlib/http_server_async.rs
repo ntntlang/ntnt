@@ -31,7 +31,7 @@ use crate::interpreter::Value;
 use crate::stdlib::http_bridge::{BridgeRequest, BridgeResponse, SharedHandle};
 use axum::{
     body::Body,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{header, Request, StatusCode},
     response::{IntoResponse, Response},
     Router,
@@ -364,6 +364,7 @@ pub struct AppState {
 async fn axum_to_bridge_request(
     req: Request<Body>,
     params: HashMap<String, String>,
+    peer_addr: SocketAddr,
 ) -> Result<BridgeRequest> {
     let method = req.method().to_string();
     let uri = req.uri();
@@ -431,7 +432,8 @@ async fn axum_to_bridge_request(
         body,
         body_bytes: raw_body_bytes,
         id: uuid::Uuid::new_v4().to_string(),
-        ip: client_ip.unwrap_or_else(|| "unknown".to_string()),
+        ip: client_ip.unwrap_or_else(|| peer_addr.ip().to_string()),
+        peer_ip: peer_addr.ip().to_string(),
         protocol: "http".to_string(),
     })
 }
@@ -590,7 +592,11 @@ fn guess_mime_type(path: &str) -> &'static str {
 }
 
 /// Main request handler - catches all requests and forwards to interpreter
-async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> impl IntoResponse {
+async fn handle_request(
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    req: Request<Body>,
+) -> impl IntoResponse {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
@@ -613,7 +619,7 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
     match route_match {
         Some((handler_name, params)) => {
             // Convert request and send to interpreter
-            let mut response = match axum_to_bridge_request(req, params).await {
+            let mut response = match axum_to_bridge_request(req, params, peer_addr).await {
                 Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
                     Ok(response) => bridge_to_axum_response(response, csp_ref),
                     Err(e) => {
@@ -691,7 +697,7 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
             // added file-based route may miss this async route index until the interpreter
             // gets a chance to rescan routes/. Forward the would-be 404 once so hot-reload
             // can run before deciding the route is really missing.
-            let mut response = match axum_to_bridge_request(req, HashMap::new()).await {
+            let mut response = match axum_to_bridge_request(req, HashMap::new(), peer_addr).await {
                 Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
                     Ok(response) => bridge_to_axum_response(response, csp_ref),
                     Err(e) => {
@@ -1022,10 +1028,13 @@ pub async fn start_server_with_bridge(
         .map_err(|e| IntentError::runtime_error(format!("Failed to bind: {}", e)))?;
 
     // Run the server with graceful shutdown
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| IntentError::runtime_error(format!("Server error: {}", e)))
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .map_err(|e| IntentError::runtime_error(format!("Server error: {}", e)))
 }
 
 /// Signal handler for graceful shutdown
@@ -1112,6 +1121,31 @@ pub fn create_error_response(status: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_bridge_request_preserves_socket_peer_separately_from_forwarded_ip() {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/email-login")
+            .header("x-forwarded-for", "203.0.113.99")
+            .body(Body::from("email=user%40example.com"))
+            .unwrap();
+        let peer_addr: SocketAddr = "198.51.100.7:43210".parse().unwrap();
+
+        let bridge = axum_to_bridge_request(request, HashMap::new(), peer_addr)
+            .await
+            .unwrap();
+
+        assert_eq!(bridge.ip, "203.0.113.99");
+        assert_eq!(bridge.peer_ip, "198.51.100.7");
+        let Value::Map(request_map) = bridge.to_value() else {
+            panic!("bridge request should become a request map");
+        };
+        match request_map.get("peer_ip") {
+            Some(Value::String(ip)) => assert_eq!(ip, "198.51.100.7"),
+            other => panic!("expected immutable socket peer IP, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_parse_route_pattern() {

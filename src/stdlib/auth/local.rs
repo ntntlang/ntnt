@@ -726,6 +726,26 @@ pub(in crate::stdlib::auth) fn issue_magic_link_record(
     Ok(local_token_response(selector, token, now, expires_at))
 }
 
+pub(in crate::stdlib::auth) fn discard_magic_link_record(
+    token: &str,
+) -> std::result::Result<(), String> {
+    let Some((selector, verifier)) = token.split_once('.') else {
+        return Ok(());
+    };
+    if !is_urlsafe_token_component(selector, 22) || !is_urlsafe_token_component(verifier, 43) {
+        return Ok(());
+    }
+
+    let submitted_hash = hash_local_token_verifier(verifier);
+    consume_local_one_time_token_record(
+        LocalOneTimeTokenPurpose::MagicLink,
+        selector,
+        &submitted_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map(|_| ())
+}
+
 pub(in crate::stdlib::auth) fn consume_magic_link_record(
     token: &str,
 ) -> std::result::Result<LocalIdentity, String> {

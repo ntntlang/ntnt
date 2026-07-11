@@ -2095,7 +2095,46 @@ Password reset does **not** revoke sessions by default. If the reset form has a 
 
 ### Passwordless Magic Links
 
-Use `issue_magic_link(...)` and `consume_magic_link(...)` for the reusable authentication token lifecycle. ntnt stores only verifier hashes, applies a 15-minute default TTL (one-hour maximum), replaces older links on issuance, and atomically rejects expiry and replay.
+Use `magic_link_flow(req, options)` for the common passwordless email flow. Mount the same helper on the request route and consume route. `std/auth` owns the default request page, fragment-clearing confirmation page, bounded form parsing, generic request outcomes with best-effort padding, generic replay handling, delivery cleanup, rate limiting, token consumption order, and request-aware session creation. The app still owns policy through three closures:
+
+```ntnt
+import { local_user, magic_link_flow } from "std/auth"
+import { get_env } from "std/env"
+
+fn email_login_options() {
+    return map {
+        "request_path": "/email-login",
+        "consume_path": "/email-login/consume",
+        "base_url": get_env("SITE_URL") ?? "",
+        "success_url": "/dashboard",
+        "failure_url": "/email-login",
+        "eligible": fn(email) { is_ok(local_user(email)) },
+        "deliver": fn(message) {
+            // Send message.url by email. Do not log or persist it.
+            return send_login_email(message.to, message.url, message.budget_hint_seconds)
+        },
+        "authorize": fn(identity) {
+            // Re-read app policy here; identity possession alone is not authorization.
+            return Ok(map { "claims": map { "role": "member" } })
+        }
+    }
+}
+
+fn email_login(req) {
+    return magic_link_flow(req, email_login_options())
+}
+
+get("/email-login", email_login)
+post("/email-login", email_login)
+get("/email-login/consume", email_login)
+post("/email-login/consume", email_login)
+```
+
+For administrator or tenant-specific sign-in, keep that policy in `authorize(identity)`: re-read your app tables after token consumption and return app-owned session extensions only if the user is still allowed. A valid local identity must not imply application role, organization, group, or administrator access. `eligible(identifier)` must return `bool` or `Result<bool>`; returning a user or policy record is rejected rather than treated as implicit approval. `magic_link_flow` forces `provider`, `subject_id`, and canonical email from the consumed identity, so the hook cannot replace the authenticated principal. The delivery callback receives `budget_hint_seconds` and must honor that budget in its own provider call. Prefer a fast enqueue callback: public response content and status remain generic, but padding is best-effort rather than a preemptive callback timeout, so a slow synchronous provider can remain observable while occupying an HTTP worker. If the queue persists message payloads, protect them as bearer credentials and expire them no later than the magic-link TTL.
+
+Set `base_url` to a trusted site origin, or configure `SITE_URL`; `magic_link_flow` does not derive emailed link origins from request `Host` or forwarded headers.
+
+Use `issue_magic_link(...)` and `consume_magic_link(...)` only when you need the low-level token lifecycle directly. ntnt stores only verifier hashes, applies a 15-minute default TTL (one-hour maximum), replaces older links on issuance, and atomically rejects expiry and replay.
 
 ```ntnt
 import { consume_magic_link, issue_magic_link, sign_in_session } from "std/auth"
@@ -2111,7 +2150,7 @@ return sign_in_session(redirect("/dashboard"), req, map {
 })
 ```
 
-`consume_magic_link(...)` verifies identity only; it does not create a session or grant roles. The app must authorize the identity, send the email (prefer `std/email`), throttle requests, use a scanner-safe confirmation step, and call `sign_in_session(...)`. Keep bearer tokens out of URL paths and query strings; a fragment-to-POST confirmation flow avoids normal server and proxy URL logs.
+`consume_magic_link(...)` verifies identity only; it does not create a session or grant roles. If you use the low-level APIs, the app must authorize the identity, send the email (prefer `std/email`), throttle requests, use a scanner-safe confirmation step, and call `sign_in_session(...)`. Keep bearer tokens out of URL paths and query strings; a fragment-to-POST confirmation flow avoids normal server and proxy URL logs.
 
 ### Local Credential Bootstrap and Setup Completion
 

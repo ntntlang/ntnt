@@ -4100,6 +4100,7 @@ impl TypeContext {
                 ("body_bytes".to_string(), Type::Array(Box::new(Type::Int))),
                 ("id".to_string(), Type::String),
                 ("ip".to_string(), Type::String),
+                ("peer_ip".to_string(), Type::String),
                 ("protocol".to_string(), Type::String),
                 ("query_params".to_string(), map_string_string.clone()),
                 ("params".to_string(), map_string_string.clone()),
@@ -4846,6 +4847,17 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     ],
                 },
                 required(1)
+            );
+            sig!(
+                "magic_link_flow",
+                [
+                    "req" => Type::Any,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Named("Response".to_string())
             );
             sig!(
                 "issue_password_reset",
