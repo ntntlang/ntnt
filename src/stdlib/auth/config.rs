@@ -612,6 +612,12 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
     let mut migration = client
         .transaction()
         .map_err(|e| format!("Failed to begin local one-time token migration: {}", e))?;
+    migration
+        .execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended('ntnt:auth:local-one-time-token-migration', 0))",
+            &[],
+        )
+        .map_err(|e| format!("Failed to lock local one-time token migration: {}", e))?;
     let has_legacy_reset_table: bool = migration
         .query_one(
             "SELECT EXISTS (

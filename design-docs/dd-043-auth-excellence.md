@@ -154,7 +154,7 @@ Goal: let apps implement passwordless email sign-in without app-owned authentica
 - [x] Recheck active identity state inside each backend's atomic issuance and consumption path
 - [x] Return generic invalid-token errors and sanitized, distinguishable storage-unavailable errors for password resets and magic links
 - [x] Persist password-reset and magic-link records in the shared one-time-token substrate with an explicit purpose discriminator so tokens cannot cross purposes
-- [x] Migrate legacy durable password-reset rows atomically, drop legacy SQL tables, and purge legacy Redis keys so upgrades cannot resurrect tokens after downgrade
+- [x] Migrate legacy durable password-reset rows atomically, serialize concurrent PostgreSQL startup migrations, drop legacy SQL tables, and purge legacy Redis keys so upgrades cannot resurrect tokens after downgrade
 - [x] Recheck account state during consumption and permanently invalidate links rejected for a non-active identity
 - [x] Preserve backend parity across memory, SQLite, PostgreSQL, and Redis/Valkey
 - [x] Keep app policy outside `std/auth`: apps own email delivery, request throttling, authorization/group checks, confirmation UX, and `sign_in_session(...)`

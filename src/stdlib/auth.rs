@@ -8664,8 +8664,48 @@ mod tests {
                 .unwrap();
         }
 
+        let mut migration_lock_client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        let mut migration_lock = migration_lock_client.transaction().unwrap();
+        migration_lock
+            .execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('ntnt:auth:local-one-time-token-migration', 0))",
+                &[],
+            )
+            .unwrap();
+
         reset_auth_test_state();
-        init_test_auth(SessionStore::Postgres(url.clone()));
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let url = url.clone();
+            let result_tx = result_tx.clone();
+            workers.push(std::thread::spawn(move || {
+                let config = AuthConfig {
+                    session_secret: "test-secret".to_string(),
+                    cookie_secure: false,
+                    session_store: SessionStore::Postgres(url),
+                    ..AuthConfig::default()
+                };
+                result_tx.send(ensure_auth_session_store(&config)).unwrap();
+            }));
+        }
+        drop(result_tx);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(
+            result_rx.try_recv().is_err(),
+            "PostgreSQL token migrations must wait for the transaction-scoped migration lock"
+        );
+        migration_lock.commit().unwrap();
+        for _ in 0..2 {
+            result_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("concurrent PostgreSQL auth initialization should complete")
+                .expect("concurrent PostgreSQL auth initialization should succeed");
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
         {
             let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
             let migrated = client
