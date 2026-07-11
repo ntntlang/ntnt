@@ -72,10 +72,14 @@ pub use guards::{
 };
 use local::{
     begin_totp_enrollment_record, bootstrap_local_user_record, confirm_totp_enrollment_record,
-    consume_password_reset_record, issue_password_reset_record, local_identity_to_safe_value,
-    local_user_record, reset_totp_record, set_local_password_record, totp_status_record,
+    consume_magic_link_record, consume_password_reset_record, issue_magic_link_record,
+    issue_password_reset_record, local_identity_to_safe_value, local_user_record,
+    reset_totp_record, set_local_password_record, totp_status_record,
     update_local_user_metadata_record, verified_local_password_to_value,
-    verify_local_password_record, verify_local_totp_record,
+    verify_local_password_record, verify_local_totp_record, EMPTY_LOCAL_PASSWORD,
+    INVALID_MAGIC_LINK_TOKEN, INVALID_PASSWORD_RESET_TOKEN, MAGIC_LINK_ISSUANCE_UNAVAILABLE,
+    MAGIC_LINK_VERIFICATION_UNAVAILABLE, PASSWORD_RESET_ISSUANCE_UNAVAILABLE,
+    PASSWORD_RESET_VERIFICATION_UNAVAILABLE,
 };
 use oauth::extract_user_info;
 pub use oauth::{
@@ -828,7 +832,27 @@ fn string_arg<'a>(
     }
 }
 
-fn parse_password_reset_issue_options(
+fn password_reset_error_response(message: String) -> Value {
+    if message == INVALID_PASSWORD_RESET_TOKEN || message == EMPTY_LOCAL_PASSWORD {
+        Value::err(Value::String(message))
+    } else {
+        Value::err(Value::String(
+            PASSWORD_RESET_VERIFICATION_UNAVAILABLE.to_string(),
+        ))
+    }
+}
+
+fn magic_link_error_response(message: String) -> Value {
+    if message == INVALID_MAGIC_LINK_TOKEN {
+        Value::err(Value::String(message))
+    } else {
+        Value::err(Value::String(
+            MAGIC_LINK_VERIFICATION_UNAVAILABLE.to_string(),
+        ))
+    }
+}
+
+fn parse_local_token_issue_options(
     function_name: &str,
     options: Option<&Value>,
 ) -> Result<(String, Option<i64>)> {
@@ -4588,6 +4612,94 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt issue_magic_link
+    // @module std/auth
+    // @signature issue_magic_link(identifier: String, options?: Map) -> Result<Map, String>
+    // Issue a one-time passwordless sign-in token for an active local identity.
+    //
+    // The helper stores only a hashed verifier with an opaque selector. Valid-shaped
+    // requests return equivalent token material whether or not an active identity exists;
+    // only active identities get a persisted token. Apps own delivery, request throttling,
+    // authorization policy, and the final sign_in_session(...) call.
+    // @param identifier The local user identifier. Email is the default identifier kind.
+    // @param options Optional map with `identifier_kind` and `ttl_seconds` (default 900, maximum 3600)
+    // @returns Ok(map) with `status: "accepted"` and, for valid-shaped requests, one-time token material
+    // @error RuntimeError ~ "Magic link issuance unavailable" fix: "Retry after checking the configured auth storage backend"
+    // @see_also consume_magic_link, sign_in_session, local_user
+    // @since v0.5.1
+    // @tags #auth, #local-auth, #magic-link, #passwordless, #security
+    // @example let issued = issue_magic_link(form["email"] ?? "")? ~ "Issue a passwordless sign-in token for out-of-band delivery"
+    module.insert(
+        "issue_magic_link".to_string(),
+        Value::NativeFunction {
+            name: "issue_magic_link".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::type_error(
+                        "[auth] issue_magic_link() requires identifier and optional options"
+                            .to_string(),
+                    ));
+                }
+                require_auth_initialized_for("issue_magic_link")?;
+                let identifier = string_arg("issue_magic_link", args, 0, "identifier")?;
+                let (identifier_kind, ttl_seconds) =
+                    parse_local_token_issue_options("issue_magic_link", args.get(1))?;
+                match issue_magic_link_record(&identifier_kind, identifier, ttl_seconds) {
+                    Ok(payload) => Ok(Value::ok(Value::Map(payload))),
+                    Err(_) => Ok(Value::err(Value::String(
+                        MAGIC_LINK_ISSUANCE_UNAVAILABLE.to_string(),
+                    ))),
+                }
+            },
+        },
+    );
+
+    // @ntnt consume_magic_link
+    // @module std/auth
+    // @signature consume_magic_link(token: String) -> Result<Map, String>
+    // Atomically consume a one-time passwordless sign-in token.
+    //
+    // Missing, malformed, expired, replayed, wrong-verifier, and non-active-identity
+    // tokens return the same generic error. Success returns a safe local identity payload;
+    // it does not create a session or grant app roles.
+    // @param token The `selector.verifier` token returned by issue_magic_link(...)
+    // @returns Ok(map) with safe local identity fields, or a generic Err for invalid tokens
+    // @error RuntimeError ~ "Magic link verification unavailable" fix: "Retry after checking the configured auth storage backend"
+    // @see_also issue_magic_link, sign_in_session, local_user
+    // @since v0.5.1
+    // @tags #auth, #local-auth, #magic-link, #passwordless, #security
+    // @example let user = consume_magic_link(form["token"] ?? "")? ~ "Verify a one-time token before creating an app-owned session"
+    module.insert(
+        "consume_magic_link".to_string(),
+        Value::NativeFunction {
+            name: "consume_magic_link".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(IntentError::type_error(
+                        "[auth] consume_magic_link() requires token".to_string(),
+                    ));
+                }
+                require_auth_initialized_for("consume_magic_link")?;
+                let token = string_arg("consume_magic_link", args, 0, "token")?;
+                match consume_magic_link_record(token) {
+                    Ok(identity) => match local_identity_to_safe_value(&identity) {
+                        Ok(value) => Ok(Value::ok(value)),
+                        Err(_) => Ok(Value::err(Value::String(
+                            MAGIC_LINK_VERIFICATION_UNAVAILABLE.to_string(),
+                        ))),
+                    },
+                    Err(message) => Ok(magic_link_error_response(message)),
+                }
+            },
+        },
+    );
+
     // @ntnt issue_password_reset
     // @module std/auth
     // @signature issue_password_reset(identifier: String, options?: Map) -> Result<Map, String>
@@ -4604,6 +4716,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param identifier The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
     // @param options Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`) and `ttl_seconds` (default 3600)
     // @returns Ok(map) with `status: "accepted"`; syntactically valid reset requests also include `token`, `selector`, `created_at`, and `expires_at` without revealing whether a matching account exists
+    // @error RuntimeError ~ "Password reset issuance unavailable" fix: "Retry after checking the configured auth storage backend"
     // @see_also consume_password_reset, verify_local_password, set_local_password
     // @since v0.4.9
     // @tags #auth, #local-auth, #password-reset, #security
@@ -4625,10 +4738,12 @@ pub fn init() -> HashMap<String, Value> {
                 require_auth_initialized_for("issue_password_reset")?;
                 let identifier = string_arg("issue_password_reset", args, 0, "identifier")?;
                 let (identifier_kind, ttl_seconds) =
-                    parse_password_reset_issue_options("issue_password_reset", args.get(1))?;
+                    parse_local_token_issue_options("issue_password_reset", args.get(1))?;
                 match issue_password_reset_record(&identifier_kind, identifier, ttl_seconds) {
                     Ok(payload) => Ok(Value::ok(Value::Map(payload))),
-                    Err(message) => Ok(Value::err(Value::String(message))),
+                    Err(_) => Ok(Value::err(Value::String(
+                        PASSWORD_RESET_ISSUANCE_UNAVAILABLE.to_string(),
+                    ))),
                 }
             },
         },
@@ -4650,7 +4765,8 @@ pub fn init() -> HashMap<String, Value> {
     // @param token The `selector.verifier` token returned by `issue_password_reset(...)`
     // @param new_password Replacement plaintext password to hash and store
     // @param options Optional map with `revoke_sessions` (default false)
-    // @returns Ok(map) with safe local user fields and `revoked_sessions`; Err(message) for invalid/expired/replayed tokens or storage failure
+    // @returns Ok(map) with safe local user fields and `revoked_sessions`; Err(message) for invalid/expired/replayed tokens or sanitized storage failure
+    // @error RuntimeError ~ "Password reset verification unavailable" fix: "Retry after checking the configured auth storage backend"
     // @see_also issue_password_reset, verify_local_password, logout_all, sign_in_session
     // @since v0.4.9
     // @tags #auth, #local-auth, #password-reset, #security
@@ -4686,7 +4802,7 @@ pub fn init() -> HashMap<String, Value> {
                         }
                         Ok(Value::ok(value))
                     }
-                    Err(message) => Ok(Value::err(Value::String(message))),
+                    Err(message) => Ok(password_reset_error_response(message)),
                 }
             },
         },
@@ -5508,17 +5624,18 @@ pub fn init() -> HashMap<String, Value> {
 mod tests {
     use super::storage::{
         cleanup_expired_oauth_state_records, consume_auth_challenge_record,
-        consume_exchange_token_record,
+        consume_exchange_token_record, consume_local_one_time_token_record,
         consume_local_password_reset_token_and_store_credential_record, consume_oauth_state_record,
         delete_all_session_records_for_user, delete_session_record, extend_session_record_expiry,
         get_auth_challenge_record, get_local_credential_secret_record,
         get_local_identity_by_identifier_record, get_refreshable_session_record,
         get_session_record, list_session_records_for_user, migrate_session_record,
         store_auth_challenge_record, store_exchange_token_record,
-        store_local_identity_and_credential_record, store_local_password_reset_token_record,
-        store_oauth_state_record, store_session_record, update_session_record_data,
-        update_session_record_tokens, LocalAccountState, LocalCredentialSecret, LocalIdentity,
-        LocalPasswordResetToken, OAUTH_STATE_TTL,
+        store_local_identity_and_credential_record, store_local_one_time_token_record,
+        store_oauth_state_record, store_session_record, update_local_identity_by_identifier_record,
+        update_session_record_data, update_session_record_tokens, LocalAccountState,
+        LocalCredentialSecret, LocalIdentity, LocalOneTimeToken, LocalOneTimeTokenPurpose,
+        OAUTH_STATE_TTL,
     };
     use super::*;
 
@@ -5935,19 +6052,66 @@ mod tests {
             stored_local_credential.password_hash,
             local_credential.password_hash
         );
-        let reset_token = LocalPasswordResetToken {
+        let reset_token = LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::PasswordReset,
             selector: format!("reset-selector-{}", label),
             local_user_id: local_identity.id.clone(),
             token_hash: format!("reset-hash-{}", label),
             created_at: now,
             expires_at: now + 3600,
         };
-        store_local_password_reset_token_record(&reset_token).unwrap_or_else(|e| {
-            panic!(
-                "{} local password reset token store should succeed: {}",
-                label, e
+        assert!(
+            store_local_one_time_token_record(&reset_token).unwrap_or_else(|e| {
+                panic!(
+                    "{} local password reset token store should succeed: {}",
+                    label, e
+                )
+            })
+        );
+        assert!(
+            consume_local_one_time_token_record(
+                LocalOneTimeTokenPurpose::MagicLink,
+                &reset_token.selector,
+                &reset_token.token_hash,
+                now,
             )
-        });
+            .unwrap_or_else(|e| panic!(
+                "{} cross-purpose reset lookup should succeed safely: {}",
+                label, e
+            ))
+            .is_none(),
+            "{} password-reset token must not consume as a magic link",
+            label
+        );
+        let mut wrong_verifier_builder_called = false;
+        assert!(
+            consume_local_password_reset_token_and_store_credential_record(
+                &reset_token.selector,
+                "wrong-reset-hash",
+                now,
+                |local_user_id| {
+                    wrong_verifier_builder_called = true;
+                    Ok(LocalCredentialSecret {
+                        local_user_id: local_user_id.to_string(),
+                        password_hash: "must-not-be-built".to_string(),
+                        password_hash_algorithm: "bcrypt".to_string(),
+                        password_hash_params_json: "{}".to_string(),
+                        password_changed_at: now + 1,
+                        must_change_password: false,
+                    })
+                },
+            )
+            .unwrap_or_else(|e| panic!(
+                "{} wrong-verifier reset lookup should succeed safely: {}",
+                label, e
+            ))
+            .is_none()
+        );
+        assert!(
+            !wrong_verifier_builder_called,
+            "{} wrong reset verifier must not invoke credential hashing",
+            label
+        );
         let consumed_reset = consume_local_password_reset_token_and_store_credential_record(
             &reset_token.selector,
             &reset_token.token_hash,
@@ -5997,6 +6161,58 @@ mod tests {
             ))
             .is_none()
         );
+
+        let magic_token = LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::MagicLink,
+            selector: format!("magic-selector-{}", label),
+            local_user_id: local_identity.id.clone(),
+            token_hash: format!("magic-hash-{}", label),
+            created_at: now,
+            expires_at: now + 900,
+        };
+        assert!(store_local_one_time_token_record(&magic_token)
+            .unwrap_or_else(|e| panic!("{} magic-link token store should succeed: {}", label, e)));
+        assert!(
+            consume_local_password_reset_token_and_store_credential_record(
+                &magic_token.selector,
+                &magic_token.token_hash,
+                now,
+                |local_user_id| {
+                    Ok(LocalCredentialSecret {
+                        local_user_id: local_user_id.to_string(),
+                        password_hash: "unused-cross-purpose".to_string(),
+                        password_hash_algorithm: "bcrypt".to_string(),
+                        password_hash_params_json: "{}".to_string(),
+                        password_changed_at: now + 2,
+                        must_change_password: false,
+                    })
+                },
+            )
+            .unwrap_or_else(|e| panic!(
+                "{} cross-purpose magic-link lookup should succeed safely: {}",
+                label, e
+            ))
+            .is_none(),
+            "{} magic-link token must not consume as a password reset",
+            label
+        );
+        let consumed_magic = consume_local_one_time_token_record(
+            LocalOneTimeTokenPurpose::MagicLink,
+            &magic_token.selector,
+            &magic_token.token_hash,
+            now,
+        )
+        .unwrap_or_else(|e| panic!("{} magic-link consume should succeed: {}", label, e))
+        .unwrap_or_else(|| panic!("{} magic-link token should consume", label));
+        assert_eq!(consumed_magic.id, local_identity.id);
+        assert!(consume_local_one_time_token_record(
+            LocalOneTimeTokenPurpose::MagicLink,
+            &magic_token.selector,
+            &magic_token.token_hash,
+            now,
+        )
+        .unwrap_or_else(|e| panic!("{} magic-link replay lookup should succeed: {}", label, e))
+        .is_none());
 
         let oauth_state = OAuthState {
             state: format!("oauth-{}-active", label),
@@ -6937,7 +7153,7 @@ mod tests {
             LocalAuthRecordKind::Identity,
             LocalAuthRecordKind::CredentialSecret,
             LocalAuthRecordKind::TotpEnrollment,
-            LocalAuthRecordKind::PasswordResetToken,
+            LocalAuthRecordKind::OneTimeToken,
             LocalAuthRecordKind::BootstrapState,
         ] {
             let policy = local_auth_record_fallback_policy(record_kind);
@@ -8029,6 +8245,504 @@ mod tests {
     }
 
     #[test]
+    fn test_magic_link_helpers_issue_consume_reject_replay_and_isolate_token_purpose() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        for store in [
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ] {
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            let module = init();
+            let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+            let set_local_password = module_fn(&module, "set_local_password");
+            let issue_magic_link = module_fn(&module, "issue_magic_link");
+            let consume_magic_link = module_fn(&module, "consume_magic_link");
+            let issue_password_reset = module_fn(&module, "issue_password_reset");
+            let consume_password_reset = module_fn(&module, "consume_password_reset");
+
+            result_ok_map(
+                bootstrap_local_user(&[
+                    Value::String(" Magic@Example.COM ".to_string()),
+                    Value::String("temporary magic password".to_string()),
+                ])
+                .unwrap(),
+            );
+            result_ok_map(
+                set_local_password(&[
+                    Value::String("magic@example.com".to_string()),
+                    Value::String("temporary magic password".to_string()),
+                    Value::String("active magic password".to_string()),
+                ])
+                .unwrap(),
+            );
+
+            let issued = result_ok_map(
+                issue_magic_link(&[Value::String(" magic@example.com ".to_string())]).unwrap(),
+            );
+            let token = map_string(&issued, "token");
+            let selector = map_string(&issued, "selector");
+            assert_eq!(
+                map_int(&issued, "expires_at") - map_int(&issued, "created_at"),
+                900
+            );
+            assert_eq!(selector.len(), 22);
+            assert_eq!(token.len(), 66);
+            assert!(token.starts_with(&format!("{selector}.")));
+            assert!(map_int(&issued, "expires_at") > map_int(&issued, "created_at"));
+            for secret_key in ["token_hash", "local_user_id", "password_hash", "credential"] {
+                assert!(!issued.contains_key(secret_key));
+            }
+
+            let mut token_parts = token.splitn(2, '.');
+            let token_selector = token_parts.next().unwrap();
+            let wrong_token = format!("{}.{}", token_selector, "A".repeat(43));
+            assert_eq!(
+                result_err_string(consume_magic_link(&[Value::String(wrong_token)]).unwrap()),
+                "Invalid magic link token"
+            );
+
+            let consumed =
+                result_ok_map(consume_magic_link(&[Value::String(token.clone())]).unwrap());
+            assert_eq!(
+                map_string(&consumed, "identifier_normalized"),
+                "magic@example.com"
+            );
+            assert_eq!(map_string(&consumed, "state"), "active");
+            for secret_key in [
+                "token",
+                "selector",
+                "token_hash",
+                "password_hash",
+                "credential",
+            ] {
+                assert!(!consumed.contains_key(secret_key));
+            }
+            assert_eq!(
+                result_err_string(consume_magic_link(&[Value::String(token)]).unwrap()),
+                "Invalid magic link token"
+            );
+
+            let replaced = result_ok_map(
+                issue_magic_link(&[Value::String("magic@example.com".to_string())]).unwrap(),
+            );
+            let replaced_token = map_string(&replaced, "token");
+            let replacement = result_ok_map(
+                issue_magic_link(&[Value::String("magic@example.com".to_string())]).unwrap(),
+            );
+            let replacement_token = map_string(&replacement, "token");
+            assert_eq!(
+                result_err_string(consume_magic_link(&[Value::String(replaced_token)]).unwrap()),
+                "Invalid magic link token",
+                "issuing a new link must invalidate older links for that identity"
+            );
+            result_ok_map(consume_magic_link(&[Value::String(replacement_token)]).unwrap());
+
+            let reset = result_ok_map(
+                issue_password_reset(&[Value::String("magic@example.com".to_string())]).unwrap(),
+            );
+            let reset_token = map_string(&reset, "token");
+            assert_eq!(
+                result_err_string(
+                    consume_magic_link(&[Value::String(reset_token.clone())]).unwrap()
+                ),
+                "Invalid magic link token"
+            );
+            result_ok_map(
+                consume_password_reset(&[
+                    Value::String(reset_token),
+                    Value::String("password reset still works".to_string()),
+                ])
+                .unwrap(),
+            );
+
+            let magic = result_ok_map(
+                issue_magic_link(&[Value::String("magic@example.com".to_string())]).unwrap(),
+            );
+            let magic_token = map_string(&magic, "token");
+            assert_eq!(
+                result_err_string(
+                    consume_password_reset(&[
+                        Value::String(magic_token.clone()),
+                        Value::String("must not reset password".to_string()),
+                    ])
+                    .unwrap()
+                ),
+                "Invalid password reset token"
+            );
+            result_ok_map(consume_magic_link(&[Value::String(magic_token)]).unwrap());
+
+            let capped = result_ok_map(
+                issue_magic_link(&[
+                    Value::String("magic@example.com".to_string()),
+                    Value::Map(HashMap::from([(
+                        "ttl_seconds".to_string(),
+                        Value::Int(7200),
+                    )])),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(
+                map_int(&capped, "expires_at") - map_int(&capped, "created_at"),
+                3600,
+                "magic-link TTL must be capped at one hour"
+            );
+            result_ok_map(
+                consume_magic_link(&[Value::String(map_string(&capped, "token"))]).unwrap(),
+            );
+
+            let unknown = result_ok_map(
+                issue_magic_link(&[Value::String("missing@example.com".to_string())]).unwrap(),
+            );
+            let mut known_response_keys = issued.keys().cloned().collect::<Vec<_>>();
+            let mut unknown_response_keys = unknown.keys().cloned().collect::<Vec<_>>();
+            known_response_keys.sort();
+            unknown_response_keys.sort();
+            assert_eq!(
+                unknown_response_keys, known_response_keys,
+                "valid-shaped requests must not reveal account existence through response shape"
+            );
+            let unknown_token = map_string(&unknown, "token");
+            assert_eq!(
+                result_err_string(consume_magic_link(&[Value::String(unknown_token)]).unwrap()),
+                "Invalid magic link token"
+            );
+
+            let state_bound = result_ok_map(
+                issue_magic_link(&[Value::String("magic@example.com".to_string())]).unwrap(),
+            );
+            let state_bound_token = map_string(&state_bound, "token");
+            update_local_identity_by_identifier_record("email", "magic@example.com", |identity| {
+                identity.state = LocalAccountState::Locked;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                result_err_string(
+                    consume_magic_link(&[Value::String(state_bound_token.clone())]).unwrap()
+                ),
+                "Invalid magic link token"
+            );
+            update_local_identity_by_identifier_record("email", "magic@example.com", |identity| {
+                identity.state = LocalAccountState::Active;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                result_err_string(
+                    consume_magic_link(&[Value::String(state_bound_token)]).unwrap()
+                ),
+                "Invalid magic link token",
+                "a token rejected while the account is non-active must remain unusable after reactivation"
+            );
+
+            update_local_identity_by_identifier_record("email", "magic@example.com", |identity| {
+                identity.state = LocalAccountState::Locked;
+                Ok(())
+            })
+            .unwrap();
+            let locked_issue = result_ok_map(
+                issue_magic_link(&[Value::String("magic@example.com".to_string())]).unwrap(),
+            );
+            let mut locked_response_keys = locked_issue.keys().cloned().collect::<Vec<_>>();
+            locked_response_keys.sort();
+            let mut active_response_keys = issued.keys().cloned().collect::<Vec<_>>();
+            active_response_keys.sort();
+            assert_eq!(locked_response_keys, active_response_keys);
+            let locked_issue_token = map_string(&locked_issue, "token");
+            let locked_identity =
+                get_local_identity_by_identifier_record("email", "magic@example.com")
+                    .unwrap()
+                    .unwrap();
+            let now = chrono::Utc::now().timestamp();
+            let rejected_store_token = LocalOneTimeToken {
+                purpose: LocalOneTimeTokenPurpose::MagicLink,
+                selector: "locked-store-selector".to_string(),
+                local_user_id: locked_identity.id,
+                token_hash: "locked-store-hash".to_string(),
+                created_at: now,
+                expires_at: now + 900,
+            };
+            assert!(!store_local_one_time_token_record(&rejected_store_token).unwrap());
+            update_local_identity_by_identifier_record("email", "magic@example.com", |identity| {
+                identity.state = LocalAccountState::Active;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                result_err_string(
+                    consume_magic_link(&[Value::String(locked_issue_token)]).unwrap()
+                ),
+                INVALID_MAGIC_LINK_TOKEN
+            );
+            assert!(consume_local_one_time_token_record(
+                LocalOneTimeTokenPurpose::MagicLink,
+                &rejected_store_token.selector,
+                &rejected_store_token.token_hash,
+                now,
+            )
+            .unwrap()
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn test_one_time_token_backend_failures_are_sanitized_and_distinct_from_invalid_tokens() {
+        assert_eq!(
+            result_err_string(password_reset_error_response(
+                "PostgreSQL transaction failed: backend detail".to_string(),
+            )),
+            PASSWORD_RESET_VERIFICATION_UNAVAILABLE
+        );
+        assert_eq!(
+            result_err_string(password_reset_error_response(
+                INVALID_PASSWORD_RESET_TOKEN.to_string(),
+            )),
+            INVALID_PASSWORD_RESET_TOKEN
+        );
+        assert_eq!(
+            result_err_string(password_reset_error_response(
+                EMPTY_LOCAL_PASSWORD.to_string(),
+            )),
+            EMPTY_LOCAL_PASSWORD
+        );
+        assert_eq!(
+            result_err_string(magic_link_error_response(
+                "Redis GET error: backend detail".to_string()
+            )),
+            MAGIC_LINK_VERIFICATION_UNAVAILABLE
+        );
+        assert_eq!(
+            result_err_string(magic_link_error_response(
+                INVALID_MAGIC_LINK_TOKEN.to_string()
+            )),
+            INVALID_MAGIC_LINK_TOKEN
+        );
+    }
+
+    #[test]
+    fn test_sqlite_migrates_legacy_password_reset_tokens_without_replay_copy() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("ntnt-auth-token-migration-{unique}.db"));
+        let path_string = path.to_string_lossy().into_owned();
+
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(path_string.clone()));
+        store_local_identity_and_credential_record(
+            &LocalIdentity {
+                id: "migration-user".to_string(),
+                identifier_kind: "email".to_string(),
+                identifier: "migration@example.com".to_string(),
+                identifier_normalized: "migration@example.com".to_string(),
+                created_at: 100,
+                updated_at: 100,
+                state: LocalAccountState::Active,
+                metadata_json: "{}".to_string(),
+            },
+            &LocalCredentialSecret {
+                local_user_id: "migration-user".to_string(),
+                password_hash: "migration-hash".to_string(),
+                password_hash_algorithm: "bcrypt".to_string(),
+                password_hash_params_json: "{}".to_string(),
+                password_changed_at: 100,
+                must_change_password: false,
+            },
+        )
+        .unwrap();
+        reset_auth_test_state();
+
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute("DROP TABLE auth_local_one_time_tokens", [])
+                .unwrap();
+            conn.execute(
+                "CREATE TABLE auth_local_password_reset_tokens (
+                    selector TEXT PRIMARY KEY,
+                    local_user_id TEXT NOT NULL,
+                    token_hash TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auth_local_password_reset_tokens
+                 (selector, local_user_id, token_hash, created_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params!["legacy-selector", "migration-user", "legacy-hash", 100, 200],
+            )
+            .unwrap();
+        }
+
+        init_test_auth(SessionStore::Sqlite(path_string));
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let migrated: (String, String, String) = conn
+                .query_row(
+                    "SELECT purpose, local_user_id, token_hash
+                     FROM auth_local_one_time_tokens WHERE selector = ?1",
+                    rusqlite::params!["legacy-selector"],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                migrated,
+                (
+                    "password_reset".to_string(),
+                    "migration-user".to_string(),
+                    "legacy-hash".to_string()
+                )
+            );
+            let legacy_exists: i64 = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                     WHERE type = 'table' AND name = 'auth_local_password_reset_tokens')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(legacy_exists, 0);
+        }
+        reset_auth_test_state();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_postgres_migrates_legacy_password_reset_tokens_without_replay_copy() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(SessionStore::Postgres(url)) = auth_test_postgres_store() else {
+            eprintln!(
+                "[auth-test] skipping Postgres token migration test — set NTNT_AUTH_TEST_POSTGRES_URL"
+            );
+            return;
+        };
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let user_id = format!("migration-user-{unique}");
+        let selector = format!("legacy-selector-{unique}");
+        let email = format!("migration-{unique}@example.com");
+
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Postgres(url.clone()));
+        {
+            let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+            client
+                .execute(
+                    "INSERT INTO auth_local_identities
+                     (id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json)
+                     VALUES ($1, 'email', $2, $2, 100, 100, 'active', '{}')",
+                    &[&user_id, &email],
+                )
+                .unwrap();
+            client
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS auth_local_password_reset_tokens (
+                        selector TEXT PRIMARY KEY,
+                        local_user_id TEXT NOT NULL REFERENCES auth_local_identities(id) ON DELETE CASCADE,
+                        token_hash TEXT NOT NULL,
+                        created_at BIGINT NOT NULL,
+                        expires_at BIGINT NOT NULL
+                    )",
+                    &[],
+                )
+                .unwrap();
+            client
+                .execute(
+                    "INSERT INTO auth_local_password_reset_tokens
+                     (selector, local_user_id, token_hash, created_at, expires_at)
+                     VALUES ($1, $2, 'legacy-hash', 100, 200)",
+                    &[&selector, &user_id],
+                )
+                .unwrap();
+        }
+
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Postgres(url.clone()));
+        {
+            let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+            let migrated = client
+                .query_one(
+                    "SELECT purpose, local_user_id, token_hash
+                     FROM auth_local_one_time_tokens WHERE selector = $1",
+                    &[&selector],
+                )
+                .unwrap();
+            assert_eq!(migrated.get::<_, String>(0), "password_reset");
+            assert_eq!(migrated.get::<_, String>(1), user_id);
+            assert_eq!(migrated.get::<_, String>(2), "legacy-hash");
+            let legacy_exists: bool = client
+                .query_one(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = current_schema()
+                          AND table_name = 'auth_local_password_reset_tokens'
+                    )",
+                    &[],
+                )
+                .unwrap()
+                .get(0);
+            assert!(!legacy_exists);
+            client
+                .execute(
+                    "DELETE FROM auth_local_identities WHERE id = $1",
+                    &[&user_id],
+                )
+                .unwrap();
+        }
+        reset_auth_test_state();
+    }
+
+    #[test]
+    fn test_redis_purges_legacy_password_reset_keys_on_upgrade() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(SessionStore::Redis(url)) = auth_test_redis_store() else {
+            eprintln!(
+                "[auth-test] skipping Redis token migration test — set NTNT_AUTH_TEST_REDIS_URL"
+            );
+            return;
+        };
+        let unique = uuid::Uuid::new_v4().to_string();
+        let token_key = format!("ntnt:local_password_reset:{unique}");
+        let user_set_key = format!("ntnt:local_password_reset_tokens_for_user:{unique}");
+        {
+            let client = redis::Client::open(url.as_str()).unwrap();
+            let mut conn = client.get_connection().unwrap();
+            redis::cmd("SET")
+                .arg(&token_key)
+                .arg("legacy-token-record")
+                .query::<String>(&mut conn)
+                .unwrap();
+            redis::cmd("SADD")
+                .arg(&user_set_key)
+                .arg(&unique)
+                .query::<usize>(&mut conn)
+                .unwrap();
+        }
+
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Redis(url.clone()));
+        {
+            let client = redis::Client::open(url.as_str()).unwrap();
+            let mut conn = client.get_connection().unwrap();
+            let remaining: usize = redis::cmd("EXISTS")
+                .arg(&token_key)
+                .arg(&user_set_key)
+                .query(&mut conn)
+                .unwrap();
+            assert_eq!(remaining, 0);
+        }
+        reset_auth_test_state();
+    }
+
+    #[test]
     fn test_set_local_password_revokes_outstanding_password_reset_tokens() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         for store in [
@@ -8089,6 +8803,44 @@ mod tests {
     }
 
     #[test]
+    fn test_password_reset_issue_sanitizes_sqlite_storage_failures() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Sqlite(":memory:".to_string()));
+
+        let module = init();
+        let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+        let issue_password_reset = module_fn(&module, "issue_password_reset");
+        result_ok_map(
+            bootstrap_local_user(&[
+                Value::String("issue-failure@example.com".to_string()),
+                Value::String("temporary reset password".to_string()),
+            ])
+            .unwrap(),
+        );
+        {
+            let conn_guard = SQLITE_CONN.lock().unwrap();
+            let conn = conn_guard.as_ref().expect("SQLite should be initialized");
+            conn.execute(
+                "CREATE TRIGGER fail_password_reset_issue
+                 BEFORE INSERT ON auth_local_one_time_tokens
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced password reset issue failure');
+                 END",
+                [],
+            )
+            .expect("test trigger should be installed");
+        }
+
+        let failed = result_err_string(
+            issue_password_reset(&[Value::String("issue-failure@example.com".to_string())])
+                .unwrap(),
+        );
+        assert_eq!(failed, PASSWORD_RESET_ISSUANCE_UNAVAILABLE);
+        assert!(!failed.contains("forced password reset issue failure"));
+    }
+
+    #[test]
     fn test_password_reset_consume_is_atomic_when_sqlite_credential_write_fails() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
@@ -8133,10 +8885,8 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert!(
-            failed.contains("forced password reset credential failure"),
-            "unexpected storage failure message: {failed}"
-        );
+        assert_eq!(failed, PASSWORD_RESET_VERIFICATION_UNAVAILABLE);
+        assert!(!failed.contains("forced password reset credential failure"));
 
         let old_password_still_valid = result_ok_map(
             verify_local_password(&[
@@ -9054,24 +9804,250 @@ mod tests {
         run_auth_storage_contract_round_trip(store, "redis");
     }
 
+    fn run_magic_link_concurrency_contract(store: SessionStore, label: &str) {
+        reset_auth_test_state();
+        init_test_auth(store);
+        let now = chrono::Utc::now().timestamp();
+        let unique = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let identity = LocalIdentity {
+            id: format!("local-user-magic-concurrent-{label}-{unique}"),
+            identifier_kind: "email".to_string(),
+            identifier: format!("magic-concurrent-{label}-{unique}@example.com"),
+            identifier_normalized: format!("magic-concurrent-{label}-{unique}@example.com"),
+            created_at: now,
+            updated_at: now,
+            state: LocalAccountState::Active,
+            metadata_json: "{}".to_string(),
+        };
+        let credential = LocalCredentialSecret {
+            local_user_id: identity.id.clone(),
+            password_hash: "unused-magic-concurrency-hash".to_string(),
+            password_hash_algorithm: "bcrypt".to_string(),
+            password_hash_params_json: "{}".to_string(),
+            password_changed_at: now,
+            must_change_password: false,
+        };
+        store_local_identity_and_credential_record(&identity, &credential).unwrap();
+        let token = LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::MagicLink,
+            selector: format!("magic-concurrent-selector-{label}-{unique}"),
+            local_user_id: identity.id,
+            token_hash: format!("magic-concurrent-hash-{label}-{unique}"),
+            created_at: now,
+            expires_at: now + 900,
+        };
+        store_local_one_time_token_record(&token).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let barrier = barrier.clone();
+            let selector = token.selector.clone();
+            let token_hash = token.token_hash.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                consume_local_one_time_token_record(
+                    LocalOneTimeTokenPurpose::MagicLink,
+                    &selector,
+                    &token_hash,
+                    now,
+                )
+            }));
+        }
+        let successes = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("magic-link consume thread should not panic")
+            })
+            .map(|result| result.expect("magic-link consume should not return storage error"))
+            .filter(Option::is_some)
+            .count();
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent consume should succeed"
+        );
+
+        let issue_a = LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::MagicLink,
+            selector: format!("magic-concurrent-issue-a-{label}-{unique}"),
+            local_user_id: token.local_user_id.clone(),
+            token_hash: format!("magic-concurrent-issue-hash-a-{label}-{unique}"),
+            created_at: now,
+            expires_at: now + 900,
+        };
+        let issue_b = LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::MagicLink,
+            selector: format!("magic-concurrent-issue-b-{label}-{unique}"),
+            local_user_id: token.local_user_id.clone(),
+            token_hash: format!("magic-concurrent-issue-hash-b-{label}-{unique}"),
+            created_at: now,
+            expires_at: now + 900,
+        };
+        let issue_barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let issue_handles = [issue_a, issue_b]
+            .into_iter()
+            .map(|candidate| {
+                let barrier = issue_barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store_local_one_time_token_record(&candidate)
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in issue_handles {
+            handle
+                .join()
+                .expect("magic-link issue thread should not panic")
+                .expect("magic-link issue should not return storage error");
+        }
+
+        let active_tokens = match label {
+            "postgres" => {
+                let url = std::env::var("NTNT_AUTH_TEST_POSTGRES_URL").unwrap();
+                let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+                client
+                    .query_one(
+                        "SELECT COUNT(*) FROM auth_local_one_time_tokens WHERE local_user_id = $1 AND purpose = $2",
+                        &[&token.local_user_id, &LocalOneTimeTokenPurpose::MagicLink.as_str()],
+                    )
+                    .unwrap()
+                    .get::<_, i64>(0)
+            }
+            "redis" => {
+                let url = std::env::var("NTNT_AUTH_TEST_REDIS_URL").unwrap();
+                let client = redis::Client::open(url).unwrap();
+                let mut conn = client.get_connection().unwrap();
+                redis::cmd("SCARD")
+                    .arg(format!(
+                        "ntnt:local_one_time_tokens_for_user:magic_link:{}",
+                        token.local_user_id
+                    ))
+                    .query::<i64>(&mut conn)
+                    .unwrap()
+            }
+            other => panic!("unsupported magic-link concurrency backend: {other}"),
+        };
+        assert_eq!(
+            active_tokens, 1,
+            "concurrent issuance must leave exactly one active token"
+        );
+
+        let race_initial = LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::MagicLink,
+            selector: format!("magic-issue-consume-initial-{label}-{unique}"),
+            local_user_id: token.local_user_id.clone(),
+            token_hash: format!("magic-issue-consume-initial-hash-{label}-{unique}"),
+            created_at: now,
+            expires_at: now + 900,
+        };
+        assert!(store_local_one_time_token_record(&race_initial).unwrap());
+        let race_replacement = LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::MagicLink,
+            selector: format!("magic-issue-consume-replacement-{label}-{unique}"),
+            local_user_id: token.local_user_id.clone(),
+            token_hash: format!("magic-issue-consume-replacement-hash-{label}-{unique}"),
+            created_at: now,
+            expires_at: now + 900,
+        };
+        let race_barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let consume_barrier = race_barrier.clone();
+        let consume_selector = race_initial.selector.clone();
+        let consume_hash = race_initial.token_hash.clone();
+        let consume_handle = std::thread::spawn(move || {
+            consume_barrier.wait();
+            consume_local_one_time_token_record(
+                LocalOneTimeTokenPurpose::MagicLink,
+                &consume_selector,
+                &consume_hash,
+                now,
+            )
+        });
+        let issue_barrier = race_barrier.clone();
+        let replacement_for_thread = race_replacement.clone();
+        let issue_handle = std::thread::spawn(move || {
+            issue_barrier.wait();
+            store_local_one_time_token_record(&replacement_for_thread)
+        });
+        consume_handle
+            .join()
+            .expect("issue-versus-consume thread should not panic")
+            .expect("issue-versus-consume race should not return storage error");
+        assert!(issue_handle
+            .join()
+            .expect("replacement issue thread should not panic")
+            .expect("replacement issue should not return storage error"));
+        assert!(consume_local_one_time_token_record(
+            LocalOneTimeTokenPurpose::MagicLink,
+            &race_replacement.selector,
+            &race_replacement.token_hash,
+            now,
+        )
+        .unwrap()
+        .is_some());
+
+        let identifier = format!("magic-concurrent-{label}-{unique}@example.com");
+        update_local_identity_by_identifier_record("email", &identifier, |identity| {
+            identity.state = LocalAccountState::Locked;
+            Ok(())
+        })
+        .unwrap();
+        let rejected_while_locked = LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::MagicLink,
+            selector: format!("magic-locked-selector-{label}-{unique}"),
+            local_user_id: token.local_user_id.clone(),
+            token_hash: format!("magic-locked-hash-{label}-{unique}"),
+            created_at: now,
+            expires_at: now + 900,
+        };
+        assert!(!store_local_one_time_token_record(&rejected_while_locked).unwrap());
+        update_local_identity_by_identifier_record("email", &identifier, |identity| {
+            identity.state = LocalAccountState::Active;
+            Ok(())
+        })
+        .unwrap();
+        assert!(consume_local_one_time_token_record(
+            LocalOneTimeTokenPurpose::MagicLink,
+            &rejected_while_locked.selector,
+            &rejected_while_locked.token_hash,
+            now,
+        )
+        .unwrap()
+        .is_none());
+    }
+
     #[test]
-    fn test_redis_password_reset_consume_is_one_time_under_concurrency() {
+    fn test_postgres_magic_link_storage_is_atomic_under_concurrency() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
-        let Some(store) = auth_test_redis_store() else {
-            eprintln!(
-                "[auth-test] skipping Redis password reset concurrency test — set NTNT_AUTH_TEST_REDIS_URL"
-            );
+        let Some(store) = auth_test_postgres_store() else {
+            eprintln!("[auth-test] skipping PostgreSQL magic-link concurrency test — set NTNT_AUTH_TEST_POSTGRES_URL");
             return;
         };
+        run_magic_link_concurrency_contract(store, "postgres");
+    }
+
+    #[test]
+    fn test_redis_magic_link_storage_is_atomic_under_concurrency() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(store) = auth_test_redis_store() else {
+            eprintln!("[auth-test] skipping Redis magic-link concurrency test — set NTNT_AUTH_TEST_REDIS_URL");
+            return;
+        };
+        run_magic_link_concurrency_contract(store, "redis");
+    }
+
+    fn run_password_reset_concurrency_contract(store: SessionStore, label: &str) {
         reset_auth_test_state();
         init_test_auth(store);
 
         let now = chrono::Utc::now().timestamp();
+        let unique = format!("{}-{}", now, uuid::Uuid::new_v4());
         let identity = LocalIdentity {
-            id: format!("local-user-redis-concurrent-{now}"),
+            id: format!("local-user-{label}-reset-concurrent-{unique}"),
             identifier_kind: "email".to_string(),
-            identifier: format!("redis-concurrent-{now}@example.com"),
-            identifier_normalized: format!("redis-concurrent-{now}@example.com"),
+            identifier: format!("{label}-reset-concurrent-{unique}@example.com"),
+            identifier_normalized: format!("{label}-reset-concurrent-{unique}@example.com"),
             created_at: now,
             updated_at: now,
             state: LocalAccountState::Active,
@@ -9086,14 +10062,15 @@ mod tests {
             must_change_password: false,
         };
         store_local_identity_and_credential_record(&identity, &credential).unwrap();
-        let reset_token = LocalPasswordResetToken {
-            selector: format!("redis-concurrent-selector-{now}"),
+        let reset_token = LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::PasswordReset,
+            selector: format!("{label}-reset-concurrent-selector-{unique}"),
             local_user_id: identity.id.clone(),
-            token_hash: format!("redis-concurrent-token-hash-{now}"),
+            token_hash: format!("{label}-reset-concurrent-token-hash-{unique}"),
             created_at: now,
             expires_at: now + 3600,
         };
-        store_local_password_reset_token_record(&reset_token).unwrap();
+        assert!(store_local_one_time_token_record(&reset_token).unwrap());
 
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let mut handles = Vec::new();
@@ -9126,14 +10103,14 @@ mod tests {
             .map(|handle| {
                 handle
                     .join()
-                    .expect("redis consume thread should not panic")
+                    .expect("password reset consume thread should not panic")
             })
-            .map(|result| result.expect("redis consume should not return storage error"))
+            .map(|result| result.expect("password reset consume should not return storage error"))
             .filter(|result| result.is_some())
             .count();
         assert_eq!(
             successes, 1,
-            "exactly one concurrent Redis password reset consume should succeed"
+            "exactly one concurrent {label} password reset consume should succeed"
         );
         assert!(
             consume_local_password_reset_token_and_store_credential_record(
@@ -9153,8 +10130,32 @@ mod tests {
             )
             .unwrap()
             .is_none(),
-            "Redis password reset token should be gone after the successful consume"
+            "{label} password reset token should be gone after the successful consume"
         );
+    }
+
+    #[test]
+    fn test_postgres_password_reset_consume_is_one_time_under_concurrency() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(store) = auth_test_postgres_store() else {
+            eprintln!(
+                "[auth-test] skipping PostgreSQL password reset concurrency test — set NTNT_AUTH_TEST_POSTGRES_URL"
+            );
+            return;
+        };
+        run_password_reset_concurrency_contract(store, "postgres");
+    }
+
+    #[test]
+    fn test_redis_password_reset_consume_is_one_time_under_concurrency() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(store) = auth_test_redis_store() else {
+            eprintln!(
+                "[auth-test] skipping Redis password reset concurrency test — set NTNT_AUTH_TEST_REDIS_URL"
+            );
+            return;
+        };
+        run_password_reset_concurrency_contract(store, "redis");
     }
 
     #[test]

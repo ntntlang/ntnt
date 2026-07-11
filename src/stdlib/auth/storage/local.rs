@@ -1,6 +1,6 @@
 // Local-auth storage includes write-side helpers for credential lifecycle.
 // DD-043 keeps app-specific extensions in metadata_json, while security-critical
-// lifecycle state such as reset tokens may still require auth-owned helpers/storage.
+// lifecycle state such as purpose-bound one-time tokens may still require auth-owned helpers/storage.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::*;
@@ -17,7 +17,7 @@ pub(in crate::stdlib::auth) enum LocalAuthRecordKind {
     Identity,
     CredentialSecret,
     TotpEnrollment,
-    PasswordResetToken,
+    OneTimeToken,
     BootstrapState,
 }
 
@@ -106,8 +106,52 @@ pub(in crate::stdlib::auth) struct LocalCredentialSecret {
     pub(in crate::stdlib::auth) must_change_password: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::stdlib::auth) enum LocalOneTimeTokenPurpose {
+    PasswordReset,
+    MagicLink,
+}
+
+impl LocalOneTimeTokenPurpose {
+    pub(in crate::stdlib::auth) fn as_str(self) -> &'static str {
+        match self {
+            LocalOneTimeTokenPurpose::PasswordReset => "password_reset",
+            LocalOneTimeTokenPurpose::MagicLink => "magic_link",
+        }
+    }
+
+    pub(in crate::stdlib::auth) fn from_str(value: &str) -> std::result::Result<Self, String> {
+        match value {
+            "password_reset" => Ok(LocalOneTimeTokenPurpose::PasswordReset),
+            "magic_link" => Ok(LocalOneTimeTokenPurpose::MagicLink),
+            other => Err(format!(
+                "[auth] unknown local one-time token purpose \"{}\". Expected one of: password_reset, magic_link",
+                other
+            )),
+        }
+    }
+
+    fn storage_label(self) -> &'static str {
+        match self {
+            LocalOneTimeTokenPurpose::PasswordReset => "password reset",
+            LocalOneTimeTokenPurpose::MagicLink => "magic-link",
+        }
+    }
+
+    fn state_is_eligible(self, state: LocalAccountState) -> bool {
+        match self {
+            LocalOneTimeTokenPurpose::PasswordReset => !matches!(
+                state,
+                LocalAccountState::Disabled | LocalAccountState::Locked
+            ),
+            LocalOneTimeTokenPurpose::MagicLink => state == LocalAccountState::Active,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::stdlib::auth) struct LocalPasswordResetToken {
+pub(in crate::stdlib::auth) struct LocalOneTimeToken {
+    pub(in crate::stdlib::auth) purpose: LocalOneTimeTokenPurpose,
     pub(in crate::stdlib::auth) selector: String,
     pub(in crate::stdlib::auth) local_user_id: String,
     pub(in crate::stdlib::auth) token_hash: String,
@@ -225,7 +269,7 @@ pub(in crate::stdlib::auth) struct LocalAuthMemoryStore {
     identities_by_id: HashMap<String, LocalIdentity>,
     identity_id_by_lookup_key: HashMap<String, String>,
     credential_secrets_by_local_user_id: HashMap<String, LocalCredentialSecret>,
-    password_reset_tokens_by_selector: HashMap<String, LocalPasswordResetToken>,
+    one_time_tokens_by_selector: HashMap<String, LocalOneTimeToken>,
 }
 
 impl LocalAuthMemoryStore {
@@ -372,8 +416,10 @@ impl LocalAuthMemoryStore {
         self.credential_secrets_by_local_user_id
             .insert(identity.id.clone(), credential);
         if revoke_password_resets {
-            self.password_reset_tokens_by_selector
-                .retain(|_, token| token.local_user_id != identity.id);
+            self.one_time_tokens_by_selector.retain(|_, token| {
+                token.local_user_id != identity.id
+                    || token.purpose != LocalOneTimeTokenPurpose::PasswordReset
+            });
         }
         Ok(())
     }
@@ -388,19 +434,28 @@ impl LocalAuthMemoryStore {
             .cloned())
     }
 
-    pub(in crate::stdlib::auth) fn store_password_reset_token(
+    pub(in crate::stdlib::auth) fn store_one_time_token(
         &mut self,
-        token: LocalPasswordResetToken,
-    ) -> std::result::Result<(), String> {
-        validate_local_password_reset_token_for_storage(&token)?;
-        if !self.identities_by_id.contains_key(&token.local_user_id) {
-            return Err(
-                "[auth] password reset token must reference an existing local identity".to_string(),
-            );
+        token: LocalOneTimeToken,
+    ) -> std::result::Result<bool, String> {
+        validate_local_one_time_token_for_storage(&token)?;
+        let Some(identity) = self.identities_by_id.get(&token.local_user_id) else {
+            return Err(format!(
+                "[auth] {} token must reference an existing local identity",
+                token.purpose.storage_label()
+            ));
+        };
+        if !token.purpose.state_is_eligible(identity.state) {
+            return Ok(false);
         }
-        self.password_reset_tokens_by_selector
+        if token.purpose == LocalOneTimeTokenPurpose::MagicLink {
+            self.one_time_tokens_by_selector.retain(|_, existing| {
+                existing.local_user_id != token.local_user_id || existing.purpose != token.purpose
+            });
+        }
+        self.one_time_tokens_by_selector
             .insert(token.selector.clone(), token);
-        Ok(())
+        Ok(true)
     }
 
     pub(in crate::stdlib::auth) fn consume_password_reset_token_and_store_credential<F>(
@@ -413,15 +468,14 @@ impl LocalAuthMemoryStore {
     where
         F: FnOnce(&str) -> std::result::Result<LocalCredentialSecret, String>,
     {
-        let Some(reset_token) = self
-            .password_reset_tokens_by_selector
-            .get(selector)
-            .cloned()
-        else {
+        let Some(reset_token) = self.one_time_tokens_by_selector.get(selector).cloned() else {
             return Ok(None);
         };
+        if reset_token.purpose != LocalOneTimeTokenPurpose::PasswordReset {
+            return Ok(None);
+        }
         if reset_token.expires_at <= now {
-            self.password_reset_tokens_by_selector.remove(selector);
+            self.one_time_tokens_by_selector.remove(selector);
             return Ok(None);
         }
         if !constant_time_compare(&reset_token.token_hash, token_hash) {
@@ -448,9 +502,49 @@ impl LocalAuthMemoryStore {
             ..identity
         };
         self.store_identity_and_credential(identity.clone(), credential.clone())?;
-        self.password_reset_tokens_by_selector
-            .retain(|_, token| token.local_user_id != reset_token.local_user_id);
+        self.one_time_tokens_by_selector.retain(|_, token| {
+            token.local_user_id != reset_token.local_user_id
+                || token.purpose != LocalOneTimeTokenPurpose::PasswordReset
+        });
         Ok(Some((identity, credential)))
+    }
+
+    pub(in crate::stdlib::auth) fn consume_one_time_token(
+        &mut self,
+        purpose: LocalOneTimeTokenPurpose,
+        selector: &str,
+        token_hash: &str,
+        now: i64,
+    ) -> std::result::Result<Option<LocalIdentity>, String> {
+        let Some(token) = self.one_time_tokens_by_selector.get(selector).cloned() else {
+            return Ok(None);
+        };
+        if token.purpose != purpose {
+            return Ok(None);
+        }
+        if token.expires_at <= now {
+            self.one_time_tokens_by_selector.remove(selector);
+            return Ok(None);
+        }
+        if !constant_time_compare(&token.token_hash, token_hash) {
+            return Ok(None);
+        }
+        let Some(identity) = self.identities_by_id.get(&token.local_user_id).cloned() else {
+            self.one_time_tokens_by_selector.retain(|_, existing| {
+                existing.local_user_id != token.local_user_id || existing.purpose != purpose
+            });
+            return Ok(None);
+        };
+        if !purpose.state_is_eligible(identity.state) {
+            self.one_time_tokens_by_selector.retain(|_, existing| {
+                existing.local_user_id != token.local_user_id || existing.purpose != purpose
+            });
+            return Ok(None);
+        }
+        self.one_time_tokens_by_selector.retain(|_, existing| {
+            existing.local_user_id != token.local_user_id || existing.purpose != purpose
+        });
+        Ok(Some(identity))
     }
 }
 
@@ -493,20 +587,25 @@ fn validate_local_credential_secret_for_storage(
     Ok(())
 }
 
-fn validate_local_password_reset_token_for_storage(
-    token: &LocalPasswordResetToken,
+fn validate_local_one_time_token_for_storage(
+    token: &LocalOneTimeToken,
 ) -> std::result::Result<(), String> {
+    let label = token.purpose.storage_label();
     if token.selector.trim().is_empty() {
-        return Err("[auth] password reset token selector must not be empty".to_string());
+        return Err(format!("[auth] {label} token selector must not be empty"));
     }
     if token.local_user_id.trim().is_empty() {
-        return Err("[auth] password reset token local_user_id must not be empty".to_string());
+        return Err(format!(
+            "[auth] {label} token local_user_id must not be empty"
+        ));
     }
     if token.token_hash.trim().is_empty() {
-        return Err("[auth] password reset token hash must not be empty".to_string());
+        return Err(format!("[auth] {label} token hash must not be empty"));
     }
     if token.expires_at <= token.created_at {
-        return Err("[auth] password reset token expires_at must be after created_at".to_string());
+        return Err(format!(
+            "[auth] {label} token expires_at must be after created_at"
+        ));
     }
     Ok(())
 }
@@ -678,18 +777,18 @@ pub(in crate::stdlib::auth) fn get_local_credential_secret_record(
     }
 }
 
-pub(in crate::stdlib::auth) fn store_local_password_reset_token_record(
-    token: &LocalPasswordResetToken,
-) -> std::result::Result<(), String> {
+pub(in crate::stdlib::auth) fn store_local_one_time_token_record(
+    token: &LocalOneTimeToken,
+) -> std::result::Result<bool, String> {
     match active_auth_storage_backend() {
         AuthStorageBackend::Memory => SESSION_STORE
             .lock()
             .unwrap()
             .local_auth
-            .store_password_reset_token(token.clone()),
-        AuthStorageBackend::Sqlite => store_local_password_reset_token_sqlite(token),
-        AuthStorageBackend::Postgres => store_local_password_reset_token_postgres(token),
-        AuthStorageBackend::Redis => store_local_password_reset_token_redis(token),
+            .store_one_time_token(token.clone()),
+        AuthStorageBackend::Sqlite => store_local_one_time_token_sqlite(token),
+        AuthStorageBackend::Postgres => store_local_one_time_token_postgres(token),
+        AuthStorageBackend::Redis => store_local_one_time_token_redis(token),
     }
 }
 
@@ -735,6 +834,30 @@ where
             now,
             credential_builder,
         ),
+    }
+}
+
+pub(in crate::stdlib::auth) fn consume_local_one_time_token_record(
+    purpose: LocalOneTimeTokenPurpose,
+    selector: &str,
+    token_hash: &str,
+    now: i64,
+) -> std::result::Result<Option<LocalIdentity>, String> {
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => SESSION_STORE
+            .lock()
+            .unwrap()
+            .local_auth
+            .consume_one_time_token(purpose, selector, token_hash, now),
+        AuthStorageBackend::Sqlite => {
+            consume_local_one_time_token_sqlite(purpose, selector, token_hash, now)
+        }
+        AuthStorageBackend::Postgres => {
+            consume_local_one_time_token_postgres(purpose, selector, token_hash, now)
+        }
+        AuthStorageBackend::Redis => {
+            consume_local_one_time_token_redis(purpose, selector, token_hash, now)
+        }
     }
 }
 
@@ -830,8 +953,11 @@ fn store_local_identity_and_credential_sqlite(
 
     if revoke_password_resets {
         tx.execute(
-            "DELETE FROM auth_local_password_reset_tokens WHERE local_user_id = ?1",
-            rusqlite::params![identity.id],
+            "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = ?1 AND purpose = ?2",
+            rusqlite::params![
+                identity.id,
+                LocalOneTimeTokenPurpose::PasswordReset.as_str()
+            ],
         )
         .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
     }
@@ -1016,22 +1142,78 @@ fn get_local_credential_secret_sqlite(
     .map_err(|e| format!("[auth] failed to lookup local credential: {}", e))
 }
 
-fn store_local_password_reset_token_sqlite(
-    token: &LocalPasswordResetToken,
-) -> std::result::Result<(), String> {
-    validate_local_password_reset_token_for_storage(token)?;
-    let conn_guard = SQLITE_CONN.lock().unwrap();
-    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
-    conn.execute(
-        "INSERT INTO auth_local_password_reset_tokens
-         (selector, local_user_id, token_hash, created_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(selector) DO UPDATE SET
-            local_user_id = excluded.local_user_id,
-            token_hash = excluded.token_hash,
-            created_at = excluded.created_at,
-            expires_at = excluded.expires_at",
+fn local_one_time_token_from_sqlite_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<LocalOneTimeToken> {
+    let purpose: String = row.get(0)?;
+    let purpose = LocalOneTimeTokenPurpose::from_str(&purpose).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
+    })?;
+    Ok(LocalOneTimeToken {
+        purpose,
+        selector: row.get(1)?,
+        local_user_id: row.get(2)?,
+        token_hash: row.get(3)?,
+        created_at: row.get(4)?,
+        expires_at: row.get(5)?,
+    })
+}
+
+fn store_local_one_time_token_sqlite(
+    token: &LocalOneTimeToken,
+) -> std::result::Result<bool, String> {
+    validate_local_one_time_token_for_storage(token)?;
+    let mut conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_mut().ok_or("SQLite not initialized")?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| {
+            format!(
+                "[auth] failed to begin one-time token store transaction: {}",
+                e
+            )
+        })?;
+    let state: Option<String> = tx
+        .query_row(
+            "SELECT state FROM auth_local_identities WHERE id = ?1",
+            rusqlite::params![token.local_user_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("[auth] failed to validate one-time token identity: {}", e))?;
+    let Some(state) = state else {
+        return Err(format!(
+            "[auth] {} token must reference an existing local identity",
+            token.purpose.storage_label()
+        ));
+    };
+    let state = LocalAccountState::from_str(&state)?;
+    if !token.purpose.state_is_eligible(state) {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit rejected one-time token store transaction: {}",
+                e
+            )
+        })?;
+        return Ok(false);
+    }
+    if token.purpose == LocalOneTimeTokenPurpose::MagicLink {
+        tx.execute(
+            "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = ?1 AND purpose = ?2",
+            rusqlite::params![token.local_user_id, token.purpose.as_str()],
+        )
+        .map_err(|e| format!("[auth] failed to replace one-time tokens: {}", e))?;
+    }
+    tx.execute(
+        "INSERT INTO auth_local_one_time_tokens
+         (purpose, selector, local_user_id, token_hash, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![
+            token.purpose.as_str(),
             token.selector,
             token.local_user_id,
             token.token_hash,
@@ -1039,8 +1221,14 @@ fn store_local_password_reset_token_sqlite(
             token.expires_at,
         ],
     )
-    .map_err(|e| format!("[auth] failed to store password reset token: {}", e))?;
-    Ok(())
+    .map_err(|e| format!("[auth] failed to store one-time token: {}", e))?;
+    tx.commit().map_err(|e| {
+        format!(
+            "[auth] failed to commit one-time token store transaction: {}",
+            e
+        )
+    })?;
+    Ok(true)
 }
 
 fn consume_local_password_reset_token_and_store_credential_sqlite<F>(
@@ -1054,28 +1242,22 @@ where
 {
     let mut conn_guard = SQLITE_CONN.lock().unwrap();
     let conn = conn_guard.as_mut().ok_or("SQLite not initialized")?;
-    let tx = conn.transaction().map_err(|e| {
-        format!(
-            "[auth] failed to begin password reset consume transaction: {}",
-            e
-        )
-    })?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| {
+            format!(
+                "[auth] failed to begin password reset consume transaction: {}",
+                e
+            )
+        })?;
 
     let Some(reset_token) = tx
         .query_row(
-            "SELECT selector, local_user_id, token_hash, created_at, expires_at
-             FROM auth_local_password_reset_tokens
-             WHERE selector = ?1",
-            rusqlite::params![selector],
-            |row| {
-                Ok(LocalPasswordResetToken {
-                    selector: row.get(0)?,
-                    local_user_id: row.get(1)?,
-                    token_hash: row.get(2)?,
-                    created_at: row.get(3)?,
-                    expires_at: row.get(4)?,
-                })
-            },
+            "SELECT purpose, selector, local_user_id, token_hash, created_at, expires_at
+             FROM auth_local_one_time_tokens
+             WHERE selector = ?1 AND purpose = ?2",
+            rusqlite::params![selector, LocalOneTimeTokenPurpose::PasswordReset.as_str()],
+            local_one_time_token_from_sqlite_row,
         )
         .optional()
         .map_err(|e| format!("[auth] failed to lookup password reset token: {}", e))?
@@ -1091,8 +1273,8 @@ where
 
     if reset_token.expires_at <= now {
         tx.execute(
-            "DELETE FROM auth_local_password_reset_tokens WHERE selector = ?1",
-            rusqlite::params![selector],
+            "DELETE FROM auth_local_one_time_tokens WHERE selector = ?1 AND purpose = ?2",
+            rusqlite::params![selector, LocalOneTimeTokenPurpose::PasswordReset.as_str()],
         )
         .map_err(|e| {
             format!(
@@ -1185,8 +1367,11 @@ where
     )
     .map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
     tx.execute(
-        "DELETE FROM auth_local_password_reset_tokens WHERE local_user_id = ?1",
-        rusqlite::params![reset_token.local_user_id],
+        "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = ?1 AND purpose = ?2",
+        rusqlite::params![
+            reset_token.local_user_id,
+            LocalOneTimeTokenPurpose::PasswordReset.as_str()
+        ],
     )
     .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
     tx.commit().map_err(|e| {
@@ -1197,6 +1382,105 @@ where
     })?;
 
     Ok(Some((identity, credential.clone())))
+}
+
+fn consume_local_one_time_token_sqlite(
+    purpose: LocalOneTimeTokenPurpose,
+    selector: &str,
+    token_hash: &str,
+    now: i64,
+) -> std::result::Result<Option<LocalIdentity>, String> {
+    let mut conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_mut().ok_or("SQLite not initialized")?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| {
+            format!(
+                "[auth] failed to begin one-time token consume transaction: {}",
+                e
+            )
+        })?;
+
+    let Some(token) = tx
+        .query_row(
+            "SELECT purpose, selector, local_user_id, token_hash, created_at, expires_at
+             FROM auth_local_one_time_tokens WHERE selector = ?1 AND purpose = ?2",
+            rusqlite::params![selector, purpose.as_str()],
+            local_one_time_token_from_sqlite_row,
+        )
+        .optional()
+        .map_err(|e| format!("[auth] failed to lookup one-time token: {}", e))?
+    else {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit one-time token consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    };
+
+    if token.expires_at <= now {
+        tx.execute(
+            "DELETE FROM auth_local_one_time_tokens WHERE selector = ?1 AND purpose = ?2",
+            rusqlite::params![selector, purpose.as_str()],
+        )
+        .map_err(|e| format!("[auth] failed to delete expired one-time token: {}", e))?;
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit one-time token consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    }
+    if !constant_time_compare(&token.token_hash, token_hash) {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit one-time token consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    }
+
+    let identity = tx
+        .query_row(
+            "SELECT id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json
+             FROM auth_local_identities WHERE id = ?1",
+            rusqlite::params![token.local_user_id],
+            local_identity_from_row,
+        )
+        .optional()
+        .map_err(|e| format!("[auth] failed to lookup local identity: {}", e))?;
+    let Some(identity) = identity.filter(|identity| purpose.state_is_eligible(identity.state))
+    else {
+        tx.execute(
+            "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = ?1 AND purpose = ?2",
+            rusqlite::params![token.local_user_id, purpose.as_str()],
+        )
+        .map_err(|e| format!("[auth] failed to delete unusable one-time tokens: {}", e))?;
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit one-time token consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    };
+
+    tx.execute(
+        "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = ?1 AND purpose = ?2",
+        rusqlite::params![token.local_user_id, purpose.as_str()],
+    )
+    .map_err(|e| format!("[auth] failed to delete consumed one-time tokens: {}", e))?;
+    tx.commit().map_err(|e| {
+        format!(
+            "[auth] failed to commit one-time token consume transaction: {}",
+            e
+        )
+    })?;
+    Ok(Some(identity))
 }
 
 fn postgres_url() -> std::result::Result<String, String> {
@@ -1325,8 +1609,11 @@ fn store_local_identity_and_credential_postgres(
 
     if revoke_password_resets {
         tx.execute(
-            "DELETE FROM auth_local_password_reset_tokens WHERE local_user_id = $1",
-            &[&identity.id],
+            "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = $1 AND purpose = $2",
+            &[
+                &identity.id,
+                &LocalOneTimeTokenPurpose::PasswordReset.as_str(),
+            ],
         )
         .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
     }
@@ -1484,32 +1771,83 @@ fn get_local_credential_secret_postgres(
     }))
 }
 
-fn store_local_password_reset_token_postgres(
-    token: &LocalPasswordResetToken,
-) -> std::result::Result<(), String> {
-    validate_local_password_reset_token_for_storage(token)?;
+fn local_one_time_token_from_postgres_row(
+    row: &postgres::Row,
+) -> std::result::Result<LocalOneTimeToken, String> {
+    let purpose: String = row.get(0);
+    Ok(LocalOneTimeToken {
+        purpose: LocalOneTimeTokenPurpose::from_str(&purpose)?,
+        selector: row.get(1),
+        local_user_id: row.get(2),
+        token_hash: row.get(3),
+        created_at: row.get(4),
+        expires_at: row.get(5),
+    })
+}
+
+fn store_local_one_time_token_postgres(
+    token: &LocalOneTimeToken,
+) -> std::result::Result<bool, String> {
+    validate_local_one_time_token_for_storage(token)?;
     let url = postgres_url()?;
     let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
-    client
-        .execute(
-            "INSERT INTO auth_local_password_reset_tokens
-         (selector, local_user_id, token_hash, created_at, expires_at)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (selector) DO UPDATE SET
-            local_user_id = EXCLUDED.local_user_id,
-            token_hash = EXCLUDED.token_hash,
-            created_at = EXCLUDED.created_at,
-            expires_at = EXCLUDED.expires_at",
-            &[
-                &token.selector,
-                &token.local_user_id,
-                &token.token_hash,
-                &token.created_at,
-                &token.expires_at,
-            ],
+    let mut tx = client.transaction().map_err(|e| {
+        format!(
+            "[auth] failed to begin one-time token store transaction: {}",
+            e
         )
-        .map_err(|e| format!("[auth] failed to store password reset token: {}", e))?;
-    Ok(())
+    })?;
+    let state_row = tx
+        .query_opt(
+            "SELECT state FROM auth_local_identities WHERE id = $1 FOR UPDATE",
+            &[&token.local_user_id],
+        )
+        .map_err(|e| format!("[auth] failed to lock one-time token identity: {}", e))?;
+    let Some(state_row) = state_row else {
+        return Err(format!(
+            "[auth] {} token must reference an existing local identity",
+            token.purpose.storage_label()
+        ));
+    };
+    let state: String = state_row.get(0);
+    let state = LocalAccountState::from_str(&state)?;
+    if !token.purpose.state_is_eligible(state) {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit rejected one-time token store transaction: {}",
+                e
+            )
+        })?;
+        return Ok(false);
+    }
+    if token.purpose == LocalOneTimeTokenPurpose::MagicLink {
+        tx.execute(
+            "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = $1 AND purpose = $2",
+            &[&token.local_user_id, &token.purpose.as_str()],
+        )
+        .map_err(|e| format!("[auth] failed to replace one-time tokens: {}", e))?;
+    }
+    tx.execute(
+        "INSERT INTO auth_local_one_time_tokens
+         (purpose, selector, local_user_id, token_hash, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+        &[
+            &token.purpose.as_str(),
+            &token.selector,
+            &token.local_user_id,
+            &token.token_hash,
+            &token.created_at,
+            &token.expires_at,
+        ],
+    )
+    .map_err(|e| format!("[auth] failed to store one-time token: {}", e))?;
+    tx.commit().map_err(|e| {
+        format!(
+            "[auth] failed to commit one-time token store transaction: {}",
+            e
+        )
+    })?;
+    Ok(true)
 }
 
 fn consume_local_password_reset_token_and_store_credential_postgres<F>(
@@ -1530,11 +1868,36 @@ where
         )
     })?;
 
+    let owner_rows = tx
+        .query(
+            "SELECT local_user_id FROM auth_local_one_time_tokens WHERE selector = $1 AND purpose = $2",
+            &[&selector, &LocalOneTimeTokenPurpose::PasswordReset.as_str()],
+        )
+        .map_err(|e| format!("[auth] failed to locate password reset owner: {}", e))?;
+    let Some(owner_row) = owner_rows.first() else {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit password reset consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    };
+    let initial_owner_id: String = owner_row.get(0);
+
+    let identity_rows = tx
+        .query(
+            "SELECT id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json
+             FROM auth_local_identities WHERE id = $1 FOR UPDATE",
+            &[&initial_owner_id],
+        )
+        .map_err(|e| format!("[auth] failed to lookup local identity: {}", e))?;
+
     let rows = tx
         .query(
-            "SELECT selector, local_user_id, token_hash, created_at, expires_at
-             FROM auth_local_password_reset_tokens WHERE selector = $1 FOR UPDATE",
-            &[&selector],
+            "SELECT purpose, selector, local_user_id, token_hash, created_at, expires_at
+             FROM auth_local_one_time_tokens WHERE selector = $1 AND purpose = $2 FOR UPDATE",
+            &[&selector, &LocalOneTimeTokenPurpose::PasswordReset.as_str()],
         )
         .map_err(|e| format!("[auth] failed to lookup password reset token: {}", e))?;
     let Some(row) = rows.first() else {
@@ -1546,17 +1909,20 @@ where
         })?;
         return Ok(None);
     };
-    let reset_token = LocalPasswordResetToken {
-        selector: row.get(0),
-        local_user_id: row.get(1),
-        token_hash: row.get(2),
-        created_at: row.get(3),
-        expires_at: row.get(4),
-    };
+    let reset_token = local_one_time_token_from_postgres_row(row)?;
+    if reset_token.local_user_id != initial_owner_id {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit password reset consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    }
     if reset_token.expires_at <= now {
         tx.execute(
-            "DELETE FROM auth_local_password_reset_tokens WHERE selector = $1",
-            &[&selector],
+            "DELETE FROM auth_local_one_time_tokens WHERE selector = $1 AND purpose = $2",
+            &[&selector, &LocalOneTimeTokenPurpose::PasswordReset.as_str()],
         )
         .map_err(|e| {
             format!(
@@ -1583,14 +1949,7 @@ where
     }
     let credential = credential_builder(&reset_token.local_user_id)?;
     validate_local_credential_secret_for_storage(&credential)?;
-    let rows = tx
-        .query(
-            "SELECT id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json
-             FROM auth_local_identities WHERE id = $1 FOR UPDATE",
-            &[&reset_token.local_user_id],
-        )
-        .map_err(|e| format!("[auth] failed to lookup local identity: {}", e))?;
-    let Some(row) = rows.first() else {
+    let Some(row) = identity_rows.first() else {
         tx.commit().map_err(|e| {
             format!(
                 "[auth] failed to commit password reset consume transaction: {}",
@@ -1600,10 +1959,7 @@ where
         return Ok(None);
     };
     let identity = local_identity_from_postgres_row(row)?;
-    if matches!(
-        identity.state,
-        LocalAccountState::Disabled | LocalAccountState::Locked
-    ) {
+    if !LocalOneTimeTokenPurpose::PasswordReset.state_is_eligible(identity.state) {
         tx.commit().map_err(|e| {
             format!(
                 "[auth] failed to commit password reset consume transaction: {}",
@@ -1642,8 +1998,11 @@ where
         ],
     ).map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
     tx.execute(
-        "DELETE FROM auth_local_password_reset_tokens WHERE local_user_id = $1",
-        &[&reset_token.local_user_id],
+        "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = $1 AND purpose = $2",
+        &[
+            &reset_token.local_user_id,
+            &LocalOneTimeTokenPurpose::PasswordReset.as_str(),
+        ],
     )
     .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
     tx.commit().map_err(|e| {
@@ -1671,12 +2030,23 @@ fn redis_local_credential_key(local_user_id: &str) -> String {
     format!("ntnt:local_credential:{}", local_user_id)
 }
 
-fn redis_local_password_reset_key(selector: &str) -> String {
-    format!("ntnt:local_password_reset:{}", selector)
+fn redis_local_one_time_token_key(purpose: LocalOneTimeTokenPurpose, selector: &str) -> String {
+    format!(
+        "ntnt:local_one_time_token:{}:{}",
+        purpose.as_str(),
+        selector
+    )
 }
 
-fn redis_local_password_reset_user_set_key(local_user_id: &str) -> String {
-    format!("ntnt:local_password_resets_for_user:{}", local_user_id)
+fn redis_local_one_time_token_user_set_key(
+    purpose: LocalOneTimeTokenPurpose,
+    local_user_id: &str,
+) -> String {
+    format!(
+        "ntnt:local_one_time_tokens_for_user:{}:{}",
+        purpose.as_str(),
+        local_user_id
+    )
 }
 
 fn local_identity_to_json(identity: &LocalIdentity) -> String {
@@ -1775,8 +2145,9 @@ fn local_credential_from_json(
     })
 }
 
-fn local_password_reset_token_to_json(token: &LocalPasswordResetToken) -> String {
+fn local_one_time_token_to_json(token: &LocalOneTimeToken) -> String {
     serde_json::json!({
+        "purpose": token.purpose.as_str(),
         "selector": token.selector,
         "local_user_id": token.local_user_id,
         "token_hash": token.token_hash,
@@ -1786,31 +2157,156 @@ fn local_password_reset_token_to_json(token: &LocalPasswordResetToken) -> String
     .to_string()
 }
 
-fn local_password_reset_token_from_json(
+fn local_one_time_token_from_json(
     json_str: &str,
-) -> std::result::Result<LocalPasswordResetToken, String> {
+) -> std::result::Result<LocalOneTimeToken, String> {
     let json: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| format!("[auth] failed to parse password reset JSON: {}", e))?;
-    Ok(LocalPasswordResetToken {
+        .map_err(|e| format!("[auth] failed to parse one-time token JSON: {}", e))?;
+    let purpose = json["purpose"]
+        .as_str()
+        .ok_or_else(|| "[auth] one-time token JSON missing purpose".to_string())?;
+    Ok(LocalOneTimeToken {
+        purpose: LocalOneTimeTokenPurpose::from_str(purpose)?,
         selector: json["selector"]
             .as_str()
-            .ok_or_else(|| "[auth] password reset JSON missing selector".to_string())?
+            .ok_or_else(|| "[auth] one-time token JSON missing selector".to_string())?
             .to_string(),
         local_user_id: json["local_user_id"]
             .as_str()
-            .ok_or_else(|| "[auth] password reset JSON missing local_user_id".to_string())?
+            .ok_or_else(|| "[auth] one-time token JSON missing local_user_id".to_string())?
             .to_string(),
         token_hash: json["token_hash"]
             .as_str()
-            .ok_or_else(|| "[auth] password reset JSON missing token_hash".to_string())?
+            .ok_or_else(|| "[auth] one-time token JSON missing token_hash".to_string())?
             .to_string(),
         created_at: json["created_at"]
             .as_i64()
-            .ok_or_else(|| "[auth] password reset JSON missing created_at".to_string())?,
+            .ok_or_else(|| "[auth] one-time token JSON missing created_at".to_string())?,
         expires_at: json["expires_at"]
             .as_i64()
-            .ok_or_else(|| "[auth] password reset JSON missing expires_at".to_string())?,
+            .ok_or_else(|| "[auth] one-time token JSON missing expires_at".to_string())?,
     })
+}
+
+fn consume_local_one_time_token_postgres(
+    purpose: LocalOneTimeTokenPurpose,
+    selector: &str,
+    token_hash: &str,
+    now: i64,
+) -> std::result::Result<Option<LocalIdentity>, String> {
+    let url = postgres_url()?;
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut tx = client.transaction().map_err(|e| {
+        format!(
+            "[auth] failed to begin one-time token consume transaction: {}",
+            e
+        )
+    })?;
+    let owner_rows = tx
+        .query(
+            "SELECT local_user_id FROM auth_local_one_time_tokens WHERE selector = $1 AND purpose = $2",
+            &[&selector, &purpose.as_str()],
+        )
+        .map_err(|e| format!("[auth] failed to locate one-time token owner: {}", e))?;
+    let Some(owner_row) = owner_rows.first() else {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit one-time token consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    };
+    let initial_owner_id: String = owner_row.get(0);
+
+    let identity_rows = tx
+        .query(
+            "SELECT id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json
+             FROM auth_local_identities WHERE id = $1 FOR UPDATE",
+            &[&initial_owner_id],
+        )
+        .map_err(|e| format!("[auth] failed to lock local identity: {}", e))?;
+    let identity = identity_rows
+        .first()
+        .map(local_identity_from_postgres_row)
+        .transpose()?;
+
+    let rows = tx
+        .query(
+            "SELECT purpose, selector, local_user_id, token_hash, created_at, expires_at
+             FROM auth_local_one_time_tokens WHERE selector = $1 AND purpose = $2 FOR UPDATE",
+            &[&selector, &purpose.as_str()],
+        )
+        .map_err(|e| format!("[auth] failed to lock one-time token: {}", e))?;
+    let Some(row) = rows.first() else {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit one-time token consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    };
+    let token = local_one_time_token_from_postgres_row(row)?;
+    if token.local_user_id != initial_owner_id {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit one-time token consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    }
+    if token.expires_at <= now {
+        tx.execute(
+            "DELETE FROM auth_local_one_time_tokens WHERE selector = $1 AND purpose = $2",
+            &[&selector, &purpose.as_str()],
+        )
+        .map_err(|e| format!("[auth] failed to delete expired one-time token: {}", e))?;
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit one-time token consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    }
+    if !constant_time_compare(&token.token_hash, token_hash) {
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit one-time token consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    }
+    let Some(identity) = identity.filter(|identity| purpose.state_is_eligible(identity.state))
+    else {
+        tx.execute(
+            "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = $1 AND purpose = $2",
+            &[&token.local_user_id, &purpose.as_str()],
+        )
+        .map_err(|e| format!("[auth] failed to delete unusable one-time tokens: {}", e))?;
+        tx.commit().map_err(|e| {
+            format!(
+                "[auth] failed to commit one-time token consume transaction: {}",
+                e
+            )
+        })?;
+        return Ok(None);
+    };
+    tx.execute(
+        "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = $1 AND purpose = $2",
+        &[&token.local_user_id, &purpose.as_str()],
+    )
+    .map_err(|e| format!("[auth] failed to delete consumed one-time tokens: {}", e))?;
+    tx.commit().map_err(|e| {
+        format!(
+            "[auth] failed to commit one-time token consume transaction: {}",
+            e
+        )
+    })?;
+    Ok(Some(identity))
 }
 
 fn store_local_identity_redis(identity: &LocalIdentity) -> std::result::Result<(), String> {
@@ -1876,7 +2372,10 @@ fn store_local_identity_and_credential_redis(
     let lookup_key =
         redis_local_identity_lookup_key(&identity.identifier_kind, &identity.identifier_normalized);
     let credential_key = redis_local_credential_key(&credential.local_user_id);
-    let reset_set_key = redis_local_password_reset_user_set_key(&identity.id);
+    let reset_set_key = redis_local_one_time_token_user_set_key(
+        LocalOneTimeTokenPurpose::PasswordReset,
+        &identity.id,
+    );
     let stored: i64 = redis::Script::new(
         r#"
         local existing_id = redis.call('GET', KEYS[2])
@@ -2013,44 +2512,79 @@ fn get_local_credential_secret_redis(
         .transpose()
 }
 
-fn store_local_password_reset_token_redis(
-    token: &LocalPasswordResetToken,
-) -> std::result::Result<(), String> {
-    validate_local_password_reset_token_for_storage(token)?;
-    if get_local_identity_by_id_redis(&token.local_user_id)?.is_none() {
-        return Err(
-            "[auth] password reset token must reference an existing local identity".to_string(),
-        );
-    }
+fn store_local_one_time_token_redis(
+    token: &LocalOneTimeToken,
+) -> std::result::Result<bool, String> {
+    validate_local_one_time_token_for_storage(token)?;
     let mut conn = redis_connection()?;
     let now = chrono::Utc::now().timestamp();
     let ttl = token.expires_at.saturating_sub(now);
     if ttl <= 0 {
-        return Err("[auth] password reset token expires before it can be stored".to_string());
+        return Err(format!(
+            "[auth] {} token expires before it can be stored",
+            token.purpose.storage_label()
+        ));
     }
-    let token_key = redis_local_password_reset_key(&token.selector);
-    let user_set_key = redis_local_password_reset_user_set_key(&token.local_user_id);
-    redis::Script::new(
+    let token_key = redis_local_one_time_token_key(token.purpose, &token.selector);
+    let user_set_key = redis_local_one_time_token_user_set_key(token.purpose, &token.local_user_id);
+    let identity_key = redis_local_identity_key(&token.local_user_id);
+    let stored: i64 = redis::Script::new(
         r#"
-        redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2])
-        redis.call('SADD', KEYS[2], KEYS[1])
-
-        local current_ttl = redis.call('TTL', KEYS[2])
-        local token_ttl = tonumber(ARGV[1])
-        if current_ttl < token_ttl then
-            redis.call('EXPIRE', KEYS[2], token_ttl)
+        local identity_json = redis.call('GET', KEYS[3])
+        if not identity_json then
+            return -1
+        end
+        local identity = cjson.decode(identity_json)
+        if identity.id ~= ARGV[4] then
+            return -1
+        end
+        if ARGV[3] == 'password_reset' then
+            if identity.state == 'disabled' or identity.state == 'locked' then
+                return 0
+            end
+        elseif ARGV[3] == 'magic_link' then
+            if identity.state ~= 'active' then
+                return 0
+            end
+        else
+            return -2
         end
 
+        if ARGV[3] == 'magic_link' then
+            local existing_keys = redis.call('SMEMBERS', KEYS[2])
+            for _, key in ipairs(existing_keys) do
+                redis.call('DEL', key)
+            end
+            redis.call('DEL', KEYS[2])
+        end
+        redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2])
+        redis.call('SADD', KEYS[2], KEYS[1])
+        local current_ttl = redis.call('TTL', KEYS[2])
+        local token_ttl = tonumber(ARGV[1])
+        if ARGV[3] == 'magic_link' or current_ttl < token_ttl then
+            redis.call('EXPIRE', KEYS[2], token_ttl)
+        end
         return 1
         "#,
     )
     .key(&token_key)
     .key(&user_set_key)
+    .key(&identity_key)
     .arg(ttl)
-    .arg(local_password_reset_token_to_json(token))
+    .arg(local_one_time_token_to_json(token))
+    .arg(token.purpose.as_str())
+    .arg(&token.local_user_id)
     .invoke::<i64>(&mut conn)
-    .map(|_| ())
-    .map_err(|e| format!("Redis password reset token store error: {}", e))
+    .map_err(|e| format!("Redis one-time token store error: {}", e))?;
+    match stored {
+        1 => Ok(true),
+        0 => Ok(false),
+        -1 => Err(format!(
+            "[auth] {} token must reference an existing local identity",
+            token.purpose.storage_label()
+        )),
+        _ => Err("[auth] unsupported one-time token purpose".to_string()),
+    }
 }
 
 fn invoke_redis_password_reset_consume_script(
@@ -2078,7 +2612,7 @@ fn invoke_redis_password_reset_consume_script(
             return 0
         end
 
-        if token.token_hash ~= ARGV[2] or token.local_user_id ~= ARGV[3] then
+        if token.purpose ~= 'password_reset' or token.token_hash ~= ARGV[2] or token.local_user_id ~= ARGV[3] then
             return 0
         end
 
@@ -2136,7 +2670,8 @@ where
     F: FnOnce(&str) -> std::result::Result<LocalCredentialSecret, String>,
 {
     let mut conn = redis_connection()?;
-    let token_key = redis_local_password_reset_key(selector);
+    let token_key =
+        redis_local_one_time_token_key(LocalOneTimeTokenPurpose::PasswordReset, selector);
     let token_json: Option<String> = redis::cmd("GET")
         .arg(&token_key)
         .query(&mut conn)
@@ -2144,51 +2679,28 @@ where
     let Some(token_json) = token_json else {
         return Ok(None);
     };
-    let reset_token = local_password_reset_token_from_json(&token_json)?;
-    if reset_token.expires_at <= now {
-        redis::pipe()
-            .atomic()
-            .cmd("DEL")
-            .arg(&token_key)
-            .ignore()
-            .cmd("SREM")
-            .arg(redis_local_password_reset_user_set_key(
-                &reset_token.local_user_id,
-            ))
-            .arg(&token_key)
-            .ignore()
-            .query::<()>(&mut conn)
-            .map_err(|e| format!("Redis expired password reset cleanup error: {}", e))?;
+    let reset_token = local_one_time_token_from_json(&token_json)?;
+    if reset_token.purpose != LocalOneTimeTokenPurpose::PasswordReset
+        || reset_token.expires_at <= now
+        || !constant_time_compare(&reset_token.token_hash, token_hash)
+    {
         return Ok(None);
     }
-    if !constant_time_compare(&reset_token.token_hash, token_hash) {
-        return Ok(None);
-    }
-    let identity_json: Option<String> = redis::cmd("GET")
-        .arg(redis_local_identity_key(&reset_token.local_user_id))
-        .query(&mut conn)
-        .map_err(|e| format!("Redis GET error: {}", e))?;
-    let Some(identity_json) = identity_json else {
+    let Some(identity) = get_local_identity_by_id_redis(&reset_token.local_user_id)? else {
         return Ok(None);
     };
-    let identity = local_identity_from_json(&identity_json)?;
-    if matches!(
-        identity.state,
-        LocalAccountState::Disabled | LocalAccountState::Locked
-    ) {
+    if !LocalOneTimeTokenPurpose::PasswordReset.state_is_eligible(identity.state) {
         return Ok(None);
     }
     let credential = credential_builder(&reset_token.local_user_id)?;
     validate_local_credential_secret_for_storage(&credential)?;
-    let identity = normalize_local_identity_for_storage(LocalIdentity {
-        updated_at: now,
-        state: LocalAccountState::Active,
-        ..identity
-    })?;
 
-    let identity_key = redis_local_identity_key(&identity.id);
+    let identity_key = redis_local_identity_key(&reset_token.local_user_id);
     let credential_key = redis_local_credential_key(&credential.local_user_id);
-    let reset_set_key = redis_local_password_reset_user_set_key(&identity.id);
+    let reset_set_key = redis_local_one_time_token_user_set_key(
+        LocalOneTimeTokenPurpose::PasswordReset,
+        &reset_token.local_user_id,
+    );
     let consumed = invoke_redis_password_reset_consume_script(
         &mut conn,
         &token_key,
@@ -2197,23 +2709,119 @@ where
         &reset_set_key,
         now,
         token_hash,
-        &identity.id,
+        &reset_token.local_user_id,
         &local_credential_to_json(&credential),
     )?;
 
     if consumed == -1 {
-        return Err(format!(
-            "[auth] local identity identifier already exists for {}",
-            identity.identifier_kind
-        ));
+        return Err("[auth] local identity identifier already exists".to_string());
     }
     if consumed != 1 {
         return Ok(None);
     }
-    let stored_identity = get_local_identity_by_id_redis(&identity.id)?.ok_or_else(|| {
-        "[auth] Redis password reset consumed token but local identity is missing".to_string()
-    })?;
+    let stored_identity =
+        get_local_identity_by_id_redis(&reset_token.local_user_id)?.ok_or_else(|| {
+            "[auth] Redis password reset consumed token but local identity is missing".to_string()
+        })?;
     Ok(Some((stored_identity, credential)))
+}
+
+fn consume_local_one_time_token_redis(
+    purpose: LocalOneTimeTokenPurpose,
+    selector: &str,
+    token_hash: &str,
+    now: i64,
+) -> std::result::Result<Option<LocalIdentity>, String> {
+    let mut conn = redis_connection()?;
+    let token_key = redis_local_one_time_token_key(purpose, selector);
+    let token_json: Option<String> = redis::cmd("GET")
+        .arg(&token_key)
+        .query(&mut conn)
+        .map_err(|e| format!("Redis GET error: {}", e))?;
+    let Some(token_json) = token_json else {
+        return Ok(None);
+    };
+    let token = local_one_time_token_from_json(&token_json)?;
+    if token.purpose != purpose {
+        return Ok(None);
+    }
+    let identity_key = redis_local_identity_key(&token.local_user_id);
+    let user_set_key = redis_local_one_time_token_user_set_key(purpose, &token.local_user_id);
+    let consumed: i64 = redis::Script::new(
+        r#"
+        local token_json = redis.call('GET', KEYS[1])
+        if not token_json then
+            return 0
+        end
+        local token = cjson.decode(token_json)
+        if tonumber(token.expires_at) <= tonumber(ARGV[1]) then
+            redis.call('DEL', KEYS[1])
+            redis.call('SREM', KEYS[3], KEYS[1])
+            return 0
+        end
+        if token.purpose ~= ARGV[4] or token.token_hash ~= ARGV[2] or token.local_user_id ~= ARGV[3] then
+            return 0
+        end
+        local identity_json = redis.call('GET', KEYS[2])
+        if not identity_json then
+            local missing_identity_keys = redis.call('SMEMBERS', KEYS[3])
+            for _, key in ipairs(missing_identity_keys) do
+                redis.call('DEL', key)
+            end
+            redis.call('DEL', KEYS[3])
+            return 0
+        end
+        local identity = cjson.decode(identity_json)
+        if identity.id ~= ARGV[3] then
+            local unusable_keys = redis.call('SMEMBERS', KEYS[3])
+            for _, key in ipairs(unusable_keys) do
+                redis.call('DEL', key)
+            end
+            redis.call('DEL', KEYS[3])
+            return 0
+        end
+        if ARGV[4] == 'password_reset' then
+            if identity.state == 'disabled' or identity.state == 'locked' then
+                local unusable_keys = redis.call('SMEMBERS', KEYS[3])
+                for _, key in ipairs(unusable_keys) do
+                    redis.call('DEL', key)
+                end
+                redis.call('DEL', KEYS[3])
+                return 0
+            end
+        elseif ARGV[4] == 'magic_link' then
+            if identity.state ~= 'active' then
+                local unusable_keys = redis.call('SMEMBERS', KEYS[3])
+                for _, key in ipairs(unusable_keys) do
+                    redis.call('DEL', key)
+                end
+                redis.call('DEL', KEYS[3])
+                return 0
+            end
+        else
+            return 0
+        end
+        local token_keys = redis.call('SMEMBERS', KEYS[3])
+        for _, key in ipairs(token_keys) do
+            redis.call('DEL', key)
+        end
+        redis.call('DEL', KEYS[3])
+        return 1
+        "#,
+    )
+    .key(&token_key)
+    .key(&identity_key)
+    .key(&user_set_key)
+    .arg(now)
+    .arg(token_hash)
+    .arg(&token.local_user_id)
+    .arg(purpose.as_str())
+    .invoke(&mut conn)
+    .map_err(|e| format!("Redis one-time token consume error: {}", e))?;
+    if consumed != 1 {
+        return Ok(None);
+    }
+    get_local_identity_by_id_redis(&token.local_user_id)
 }
 
 #[cfg(test)]
@@ -2383,10 +2991,15 @@ mod tests {
         identity: &LocalIdentity,
         selectors: &[&str],
     ) {
-        let reset_set_key = redis_local_password_reset_user_set_key(&identity.id);
+        let reset_set_key = redis_local_one_time_token_user_set_key(
+            LocalOneTimeTokenPurpose::PasswordReset,
+            &identity.id,
+        );
         let keys: Vec<String> = selectors
             .iter()
-            .map(|selector| redis_local_password_reset_key(selector))
+            .map(|selector| {
+                redis_local_one_time_token_key(LocalOneTimeTokenPurpose::PasswordReset, selector)
+            })
             .chain([
                 redis_local_identity_key(&identity.id),
                 redis_local_identity_lookup_key(
@@ -2414,29 +3027,34 @@ mod tests {
 
         store_local_identity_redis_with_connection(&mut conn, &identity).unwrap();
         let now = chrono::Utc::now().timestamp();
-        store_local_password_reset_token_redis(&LocalPasswordResetToken {
+        assert!(store_local_one_time_token_redis(&LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::PasswordReset,
             selector: selector_long.clone(),
             local_user_id: identity.id.clone(),
             token_hash: "long-token-hash".to_string(),
             created_at: now,
             expires_at: now + 3600,
         })
-        .unwrap();
-        let reset_set_key = redis_local_password_reset_user_set_key(&identity.id);
+        .unwrap());
+        let reset_set_key = redis_local_one_time_token_user_set_key(
+            LocalOneTimeTokenPurpose::PasswordReset,
+            &identity.id,
+        );
         let ttl_after_long = redis::cmd("TTL")
             .arg(&reset_set_key)
             .query::<i64>(&mut conn)
             .unwrap();
         assert!(ttl_after_long > 0);
 
-        store_local_password_reset_token_redis(&LocalPasswordResetToken {
+        assert!(store_local_one_time_token_redis(&LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::PasswordReset,
             selector: selector_short.clone(),
             local_user_id: identity.id.clone(),
             token_hash: "short-token-hash".to_string(),
             created_at: now,
             expires_at: now + 60,
         })
-        .unwrap();
+        .unwrap());
         let ttl_after_short = redis::cmd("TTL")
             .arg(&reset_set_key)
             .query::<i64>(&mut conn)
@@ -2463,14 +3081,15 @@ mod tests {
         store_local_identity_redis_with_connection(&mut conn, &identity).unwrap();
         let now = chrono::Utc::now().timestamp();
         let token_hash = "reset-token-hash";
-        store_local_password_reset_token_redis(&LocalPasswordResetToken {
+        assert!(store_local_one_time_token_redis(&LocalOneTimeToken {
+            purpose: LocalOneTimeTokenPurpose::PasswordReset,
             selector: selector.clone(),
             local_user_id: identity.id.clone(),
             token_hash: token_hash.to_string(),
             created_at: now,
             expires_at: now + 3600,
         })
-        .unwrap();
+        .unwrap());
 
         let mut locked_identity = identity.clone();
         locked_identity.state = LocalAccountState::Locked;
@@ -2480,10 +3099,13 @@ mod tests {
         let credential = redis_test_credential(&identity.id);
         let consumed = invoke_redis_password_reset_consume_script(
             &mut conn,
-            &redis_local_password_reset_key(&selector),
+            &redis_local_one_time_token_key(LocalOneTimeTokenPurpose::PasswordReset, &selector),
             &redis_local_identity_key(&identity.id),
             &redis_local_credential_key(&identity.id),
-            &redis_local_password_reset_user_set_key(&identity.id),
+            &redis_local_one_time_token_user_set_key(
+                LocalOneTimeTokenPurpose::PasswordReset,
+                &identity.id,
+            ),
             now + 20,
             token_hash,
             &identity.id,
@@ -2498,7 +3120,10 @@ mod tests {
             .unwrap();
         assert!(stored_credential.is_none());
         let stored_token: Option<String> = redis::cmd("GET")
-            .arg(redis_local_password_reset_key(&selector))
+            .arg(redis_local_one_time_token_key(
+                LocalOneTimeTokenPurpose::PasswordReset,
+                &selector,
+            ))
             .query(&mut conn)
             .unwrap();
         assert!(stored_token.is_some());

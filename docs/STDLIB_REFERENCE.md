@@ -1830,6 +1830,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`cancel_auth_challenge`](#cancelauthchallenge) | Cancel the current auth challenge and clear the challenge cookie. |
 | [`complete_auth_challenge`](#completeauthchallenge) | Upgrade the current auth challenge into a full authenticated session. |
 | [`confirm_totp_enrollment`](#confirmtotpenrollment) | Confirm a pending local TOTP enrollment using a code from the authenticator app. |
+| [`consume_magic_link`](#consumemagiclink) | Atomically consume a one-time passwordless sign-in token. |
 | [`consume_password_reset`](#consumepasswordreset) | Consume a one-time password reset token and rotate the local password. |
 | [`create_session_from_oauth`](#createsessionfromoauth) | Create a session from OAuth user info and tokens. |
 | [`csrf_field`](#csrffield) | Get an HTML hidden input field with the CSRF token. |
@@ -1841,6 +1842,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`get_session`](#getsession) | Get the current session from the request. |
 | [`get_user`](#getuser) | Get the current authenticated user from the request. |
 | [`has_group`](#hasgroup) | Check app-owned group IDs from authenticated session data. |
+| [`issue_magic_link`](#issuemagiclink) | Issue a one-time passwordless sign-in token for an active local identity. |
 | [`issue_password_reset`](#issuepasswordreset) | Issue a one-time password reset token for a local identity. |
 | [`jwt_decode`](#jwtdecode) | Decode a JWT token WITHOUT verifying the signature. |
 | [`jwt_sign`](#jwtsign) | Create a signed JWT token from claims. |
@@ -2259,6 +2261,38 @@ confirm_totp_enrollment("admin@example.com", form["code"] ?? "")?  // Finish TOT
 
 ---
 
+#### `consume_magic_link`
+
+```ntnt
+consume_magic_link(token: String) -> Result<Map, String>
+```
+
+Atomically consume a one-time passwordless sign-in token.
+
+Missing, malformed, expired, replayed, wrong-verifier, and non-active-identity tokens return the same generic error. Success returns a safe local identity payload; it does not create a session or grant app roles.
+
+**Parameters:**
+
+- `token` — The `selector.verifier` token returned by issue_magic_link(...)
+
+**Returns:** Ok(map) with safe local identity fields, or a generic Err for invalid tokens
+
+**Examples:**
+
+```ntnt
+let user = consume_magic_link(form["token"] ?? "")?  // Verify a one-time token before creating an app-owned session
+```
+
+**Errors:**
+
+- **RuntimeError**: Magic link verification unavailable — *Fix: Retry after checking the configured auth storage backend*
+
+**See also:** `issue_magic_link`, `sign_in_session`, `local_user`
+
+*Since v0.5.1*
+
+---
+
 #### `consume_password_reset`
 
 ```ntnt
@@ -2275,7 +2309,7 @@ Valid tokens are consumed atomically, verified against the stored hash, and then
 - `new_password` — Replacement plaintext password to hash and store
 - `options` — Optional map with `revoke_sessions` (default false)
 
-**Returns:** Ok(map) with safe local user fields and `revoked_sessions`; Err(message) for invalid/expired/replayed tokens or storage failure
+**Returns:** Ok(map) with safe local user fields and `revoked_sessions`; Err(message) for invalid/expired/replayed tokens or sanitized storage failure
 
 **Examples:**
 
@@ -2283,6 +2317,10 @@ Valid tokens are consumed atomically, verified against the stored hash, and then
 let user = consume_password_reset(form["token"] ?? "", form["new_password"] ?? "")?  // Finish a password reset without revoking sessions
 let user = consume_password_reset(form["token"] ?? "", form["new_password"] ?? "", map { "revoke_sessions": form["logout_all"] == "on" })?  // Finish a reset and explicitly revoke existing sessions from a checkbox
 ```
+
+**Errors:**
+
+- **RuntimeError**: Password reset verification unavailable — *Fix: Retry after checking the configured auth storage backend*
 
 **See also:** `issue_password_reset`, `verify_local_password`, `logout_all`, `sign_in_session`
 
@@ -2583,6 +2621,39 @@ has_group(current_session(req)?, ["admins", "owners"])  // Check any accepted gr
 
 ---
 
+#### `issue_magic_link`
+
+```ntnt
+issue_magic_link(identifier: String, options?: Map) -> Result<Map, String>
+```
+
+Issue a one-time passwordless sign-in token for an active local identity.
+
+The helper stores only a hashed verifier with an opaque selector. Valid-shaped requests return equivalent token material whether or not an active identity exists; only active identities get a persisted token. Apps own delivery, request throttling, authorization policy, and the final sign_in_session(...) call.
+
+**Parameters:**
+
+- `identifier` — The local user identifier. Email is the default identifier kind.
+- `options` — Optional map with `identifier_kind` and `ttl_seconds` (default 900, maximum 3600)
+
+**Returns:** Ok(map) with `status: "accepted"` and, for valid-shaped requests, one-time token material
+
+**Examples:**
+
+```ntnt
+let issued = issue_magic_link(form["email"] ?? "")?  // Issue a passwordless sign-in token for out-of-band delivery
+```
+
+**Errors:**
+
+- **RuntimeError**: Magic link issuance unavailable — *Fix: Retry after checking the configured auth storage backend*
+
+**See also:** `consume_magic_link`, `sign_in_session`, `local_user`
+
+*Since v0.5.1*
+
+---
+
 #### `issue_password_reset`
 
 ```ntnt
@@ -2605,6 +2676,10 @@ The helper normalizes the identifier (email by default), stores only a hashed ve
 ```ntnt
 let reset = issue_password_reset(form["email"] ?? "")?  // Begin password reset without account enumeration
 ```
+
+**Errors:**
+
+- **RuntimeError**: Password reset issuance unavailable — *Fix: Retry after checking the configured auth storage backend*
 
 **See also:** `consume_password_reset`, `verify_local_password`, `set_local_password`
 

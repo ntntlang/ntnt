@@ -131,6 +131,12 @@ jobs:
         run: |
           cargo test --locked --lib test_auth_storage_contract_postgres_round_trip_all_record_types -- --test-threads=1 --nocapture
           cargo test --locked --lib test_auth_storage_contract_redis_round_trip_all_record_types -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_postgres_migrates_legacy_password_reset_tokens_without_replay_copy -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_redis_purges_legacy_password_reset_keys_on_upgrade -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_postgres_magic_link_storage_is_atomic_under_concurrency -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_redis_magic_link_storage_is_atomic_under_concurrency -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_postgres_password_reset_consume_is_one_time_under_concurrency -- --test-threads=1 --nocapture
+          cargo test --locked --lib test_redis_password_reset_consume_is_one_time_under_concurrency -- --test-threads=1 --nocapture
         env:
           RUST_MIN_STACK: 8388608
           NTNT_AUTH_TEST_POSTGRES_URL: postgres://postgres:ntnt@localhost:5432/ntnt_auth_test

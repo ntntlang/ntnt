@@ -2003,7 +2003,7 @@ Full OAuth, session management, CSRF, JWT, TOTP, and local credential bootstrap,
 
 ### Local Auth Quickstart
 
-The 0.4.9 local-auth path is intentionally explicit: `std/auth` owns credentials, reset tokens, TOTP state, sessions, cookies, CSRF, and route protection; the app owns the forms, delivery, roles, and policy copy. Local credentials and reset tokens are stored by the configured auth backend: memory, SQLite, PostgreSQL, or Redis/Valkey.
+The local-auth path is intentionally explicit: `std/auth` owns credentials, reset and magic-link tokens, TOTP state, sessions, cookies, CSRF, and route protection; the app owns forms, email delivery, request throttling, roles, and policy copy. Local credentials and one-time tokens are stored by the configured auth backend: memory, SQLite, PostgreSQL, or Redis/Valkey.
 
 Supported local identifier kinds are:
 
@@ -2092,6 +2092,26 @@ fn post_logout_all(req) {
 ```
 
 Password reset does **not** revoke sessions by default. If the reset form has a “log me out of all active sessions” checkbox, pass `map { "revoke_sessions": true }` to `consume_password_reset(...)`. For a standalone account-security page, use `logout_all(req, keep_current)`; pass `false` to revoke every active session including the current one, or `true` to keep the current session and revoke the rest.
+
+### Passwordless Magic Links
+
+Use `issue_magic_link(...)` and `consume_magic_link(...)` for the reusable authentication token lifecycle. ntnt stores only verifier hashes, applies a 15-minute default TTL (one-hour maximum), replaces older links on issuance, and atomically rejects expiry and replay.
+
+```ntnt
+import { consume_magic_link, issue_magic_link, sign_in_session } from "std/auth"
+
+let issued = issue_magic_link(email)?
+// Deliver issued["token"] out of band. Do not put it in request logs.
+
+let identity = consume_magic_link(submitted_token)?
+return sign_in_session(redirect("/dashboard"), req, map {
+    "provider": "email",
+    "subject_id": identity["id"],
+    "email": identity["identifier_normalized"]
+})
+```
+
+`consume_magic_link(...)` verifies identity only; it does not create a session or grant roles. The app must authorize the identity, send the email (prefer `std/email`), throttle requests, use a scanner-safe confirmation step, and call `sign_in_session(...)`. Keep bearer tokens out of URL paths and query strings; a fragment-to-POST confirmation flow avoids normal server and proxy URL logs.
 
 ### Local Credential Bootstrap and Setup Completion
 
