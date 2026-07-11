@@ -718,19 +718,17 @@ fn magic_link_flow_client_id(req: &Value, options: &MagicLinkFlowOptions) -> Str
     "unknown".to_string()
 }
 
-fn eligible_result_allows(value: Value) -> Result<bool> {
+pub(super) fn eligible_result_allows(value: Value) -> Result<bool> {
     match value {
         Value::Bool(value) => Ok(value),
-        Value::Map(_) => Ok(true),
         Value::EnumValue {
             enum_name,
             variant,
             values,
         } if enum_name == "Result" && variant == "Ok" => match values.into_iter().next() {
             Some(Value::Bool(value)) => Ok(value),
-            Some(Value::Map(_)) => Ok(true),
             Some(other) => Err(IntentError::type_error(format!(
-                "[auth] magic_link_flow() eligible Ok payload must be bool or map, got {}",
+                "[auth] magic_link_flow() eligible Ok payload must be bool, got {}",
                 other.type_name()
             ))),
             None => Ok(false),
@@ -739,7 +737,7 @@ fn eligible_result_allows(value: Value) -> Result<bool> {
             enum_name, variant, ..
         } if enum_name == "Result" && variant == "Err" => Ok(false),
         other => Err(IntentError::type_error(format!(
-            "[auth] magic_link_flow() eligible must return bool, map, or Result, got {}",
+            "[auth] magic_link_flow() eligible must return bool or Result<bool>, got {}",
             other.type_name()
         ))),
     }

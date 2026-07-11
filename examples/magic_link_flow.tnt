@@ -22,6 +22,9 @@ fn eligible_for_email_login(email) {
 }
 
 fn deliver_magic_link(message) {
+    // Development-only direct SMTP keeps this example runnable. Production callbacks should
+    // enqueue quickly; synchronous provider latency remains observable after best-effort padding.
+    // Protect queued message.url as a bearer credential and expire it with the link TTL.
     // Never log message.url: it contains the bearer token in the URL fragment.
     configure_email(map {
         "host": get_env("SMTP_HOST") ?? "",

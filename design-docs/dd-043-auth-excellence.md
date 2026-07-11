@@ -162,7 +162,7 @@ Goal: let apps implement passwordless email sign-in without app-owned authentica
 
 ### v0.5.2 Addendum — Coordinated Magic-Link Flow
 
-Goal: make the secure path the short path. Most applications should not need to rebuild generic request throttling, non-enumeration, fragment confirmation, replay handling, delivery cleanup, and session orchestration around the v0.5.1 primitives.
+Goal: make the secure path the short path. Most applications should not need to rebuild generic request throttling, generic public outcomes with best-effort timing equalization, fragment confirmation, replay handling, delivery cleanup, and session orchestration around the v0.5.1 primitives.
 
 #### Public API
 

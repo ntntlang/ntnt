@@ -4688,8 +4688,11 @@ pub fn init() -> HashMap<String, Value> {
     // forces provider, subject_id, and canonical email from the consumed identity;
     // authorization may add only app-owned session extensions. Set `base_url` to
     // a trusted site origin, or configure SITE_URL; request Host and forwarded
-    // headers are not used to build outbound links. `budget_hint_seconds` is a budget
-    // the delivery callback must enforce, not a preemptive runtime timeout.
+    // headers are not used to build outbound links. `eligible` must return bool
+    // or Result<bool>; ambiguous record/map returns are rejected. Public response
+    // content and status remain generic, but timing padding is best-effort.
+    // `budget_hint_seconds` is a budget the delivery callback must enforce, not a
+    // preemptive runtime timeout.
     // @param req The current HTTP request map
     // @param options Map with request_path, consume_path, base_url, success_url, failure_url, eligible, deliver, authorize, and optional rate/session/UI settings
     // @returns Response for the request, confirmation, or consume step
@@ -12600,6 +12603,24 @@ mod tests {
             magic_link_flow_test_events().is_empty(),
             "client limit must run before eligibility so anonymous traffic cannot burn identity budget"
         );
+    }
+
+    #[test]
+    fn test_magic_link_flow_eligible_rejects_ambiguous_map_results() {
+        let map = Value::Map(HashMap::from([(
+            "email".to_string(),
+            Value::String("admin@example.com".to_string()),
+        )]));
+
+        let bare_error = magic_link_flow::eligible_result_allows(map.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(bare_error.contains("eligible must return bool or Result<bool>"));
+
+        let wrapped_error = magic_link_flow::eligible_result_allows(Value::ok(map))
+            .unwrap_err()
+            .to_string();
+        assert!(wrapped_error.contains("eligible Ok payload must be bool"));
     }
 
     #[test]
