@@ -656,7 +656,7 @@ fn purge_legacy_redis_password_reset_keys(
 ) -> std::result::Result<(), String> {
     for pattern in [
         "ntnt:local_password_reset:*",
-        "ntnt:local_password_reset_tokens_for_user:*",
+        "ntnt:local_password_resets_for_user:*",
     ] {
         let mut cursor = 0_u64;
         loop {

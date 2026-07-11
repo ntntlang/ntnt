@@ -2747,20 +2747,20 @@ fn consume_local_one_time_token_redis(
     }
     let identity_key = redis_local_identity_key(&token.local_user_id);
     let user_set_key = redis_local_one_time_token_user_set_key(purpose, &token.local_user_id);
-    let consumed: i64 = redis::Script::new(
+    let consumed_identity_json: Option<String> = redis::Script::new(
         r#"
         local token_json = redis.call('GET', KEYS[1])
         if not token_json then
-            return 0
+            return false
         end
         local token = cjson.decode(token_json)
         if tonumber(token.expires_at) <= tonumber(ARGV[1]) then
             redis.call('DEL', KEYS[1])
             redis.call('SREM', KEYS[3], KEYS[1])
-            return 0
+            return false
         end
         if token.purpose ~= ARGV[4] or token.token_hash ~= ARGV[2] or token.local_user_id ~= ARGV[3] then
-            return 0
+            return false
         end
         local identity_json = redis.call('GET', KEYS[2])
         if not identity_json then
@@ -2769,7 +2769,7 @@ fn consume_local_one_time_token_redis(
                 redis.call('DEL', key)
             end
             redis.call('DEL', KEYS[3])
-            return 0
+            return false
         end
         local identity = cjson.decode(identity_json)
         if identity.id ~= ARGV[3] then
@@ -2778,7 +2778,7 @@ fn consume_local_one_time_token_redis(
                 redis.call('DEL', key)
             end
             redis.call('DEL', KEYS[3])
-            return 0
+            return false
         end
         if ARGV[4] == 'password_reset' then
             if identity.state == 'disabled' or identity.state == 'locked' then
@@ -2787,7 +2787,7 @@ fn consume_local_one_time_token_redis(
                     redis.call('DEL', key)
                 end
                 redis.call('DEL', KEYS[3])
-                return 0
+                return false
             end
         elseif ARGV[4] == 'magic_link' then
             if identity.state ~= 'active' then
@@ -2796,17 +2796,17 @@ fn consume_local_one_time_token_redis(
                     redis.call('DEL', key)
                 end
                 redis.call('DEL', KEYS[3])
-                return 0
+                return false
             end
         else
-            return 0
+            return false
         end
         local token_keys = redis.call('SMEMBERS', KEYS[3])
         for _, key in ipairs(token_keys) do
             redis.call('DEL', key)
         end
         redis.call('DEL', KEYS[3])
-        return 1
+        return identity_json
         "#,
     )
     .key(&token_key)
@@ -2818,10 +2818,9 @@ fn consume_local_one_time_token_redis(
     .arg(purpose.as_str())
     .invoke(&mut conn)
     .map_err(|e| format!("Redis one-time token consume error: {}", e))?;
-    if consumed != 1 {
-        return Ok(None);
-    }
-    get_local_identity_by_id_redis(&token.local_user_id)
+    consumed_identity_json
+        .map(|identity_json| local_identity_from_json(&identity_json))
+        .transpose()
 }
 
 #[cfg(test)]

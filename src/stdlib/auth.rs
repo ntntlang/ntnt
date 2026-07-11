@@ -8711,7 +8711,7 @@ mod tests {
         };
         let unique = uuid::Uuid::new_v4().to_string();
         let token_key = format!("ntnt:local_password_reset:{unique}");
-        let user_set_key = format!("ntnt:local_password_reset_tokens_for_user:{unique}");
+        let user_set_key = format!("ntnt:local_password_resets_for_user:{unique}");
         {
             let client = redis::Client::open(url.as_str()).unwrap();
             let mut conn = client.get_connection().unwrap();
