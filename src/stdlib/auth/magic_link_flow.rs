@@ -703,7 +703,7 @@ fn magic_link_flow_client_id(req: &Value, options: &MagicLinkFlowOptions) -> Str
         }
     }
     if let Value::Map(req_map) = req {
-        if let Some(Value::String(ip)) = req_map.get("ip") {
+        if let Some(Value::String(ip)) = req_map.get("peer_ip") {
             let ip = ip.trim();
             if !ip.is_empty() && ip != "unknown" {
                 return ip.to_string();

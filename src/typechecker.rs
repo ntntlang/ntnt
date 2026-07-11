@@ -4100,6 +4100,7 @@ impl TypeContext {
                 ("body_bytes".to_string(), Type::Array(Box::new(Type::Int))),
                 ("id".to_string(), Type::String),
                 ("ip".to_string(), Type::String),
+                ("peer_ip".to_string(), Type::String),
                 ("protocol".to_string(), Type::String),
                 ("query_params".to_string(), map_string_string.clone()),
                 ("params".to_string(), map_string_string.clone()),

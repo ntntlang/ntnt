@@ -2095,7 +2095,7 @@ Password reset does **not** revoke sessions by default. If the reset form has a 
 
 ### Passwordless Magic Links
 
-Use `magic_link_flow(req, options)` for the common passwordless email flow. Mount the same helper on the request route and consume route. `std/auth` owns the default request page, fragment-clearing confirmation page, bounded form parsing, non-enumerating padded request response, generic replay handling, delivery cleanup, rate limiting, token consumption order, and request-aware session creation. The app still owns policy through three closures:
+Use `magic_link_flow(req, options)` for the common passwordless email flow. Mount the same helper on the request route and consume route. `std/auth` owns the default request page, fragment-clearing confirmation page, bounded form parsing, generic request outcomes with best-effort padding, generic replay handling, delivery cleanup, rate limiting, token consumption order, and request-aware session creation. The app still owns policy through three closures:
 
 ```ntnt
 import { local_user, magic_link_flow } from "std/auth"
@@ -2130,7 +2130,7 @@ get("/email-login/consume", email_login)
 post("/email-login/consume", email_login)
 ```
 
-For administrator or tenant-specific sign-in, keep that policy in `authorize(identity)`: re-read your app tables after token consumption and return app-owned session extensions only if the user is still allowed. A valid local identity must not imply application role, organization, group, or administrator access. `magic_link_flow` forces `provider`, `subject_id`, and canonical email from the consumed identity, so the hook cannot replace the authenticated principal. The delivery callback receives `budget_hint_seconds` and must honor that budget in its own provider call; response padding is best-effort, not a preemptive callback timeout.
+For administrator or tenant-specific sign-in, keep that policy in `authorize(identity)`: re-read your app tables after token consumption and return app-owned session extensions only if the user is still allowed. A valid local identity must not imply application role, organization, group, or administrator access. `magic_link_flow` forces `provider`, `subject_id`, and canonical email from the consumed identity, so the hook cannot replace the authenticated principal. The delivery callback receives `budget_hint_seconds` and must honor that budget in its own provider call. Prefer a fast durable enqueue callback: response padding is best-effort, not a preemptive callback timeout, and a slow synchronous provider can remain observable while occupying an HTTP worker.
 
 Set `base_url` to a trusted site origin, or configure `SITE_URL`; `magic_link_flow` does not derive emailed link origins from request `Host` or forwarded headers.
 

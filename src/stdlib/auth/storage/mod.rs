@@ -536,49 +536,11 @@ fn cleanup_expired_rate_limits_postgres(now: i64) -> std::result::Result<u64, St
         .map_err(|e| e.to_string())
 }
 
-fn cleanup_expired_rate_limits_redis(now: i64) -> std::result::Result<u64, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
-
-    let mut count = 0u64;
-    let mut cursor = 0u64;
-    loop {
-        let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg("ntnt:auth_rate_limit:*")
-            .arg("COUNT")
-            .arg(100)
-            .query(&mut conn)
-            .map_err(|e| format!("Redis SCAN error: {}", e))?;
-
-        for key in keys {
-            let expires_at: Option<i64> = redis::cmd("HGET")
-                .arg(&key)
-                .arg("expires_at")
-                .query(&mut conn)
-                .map_err(|e| format!("Redis HGET error: {}", e))?;
-            if expires_at.is_some_and(|expires_at| expires_at < now) {
-                let removed: u64 = redis::cmd("DEL")
-                    .arg(&key)
-                    .query(&mut conn)
-                    .map_err(|e| format!("Redis DEL error: {}", e))?;
-                count += removed;
-            }
-        }
-
-        cursor = new_cursor;
-        if cursor == 0 {
-            break;
-        }
-    }
-
-    Ok(count)
+fn cleanup_expired_rate_limits_redis(_now: i64) -> std::result::Result<u64, String> {
+    // Redis counters are written with EXPIREAT by the atomic increment script.
+    // Let Redis expire them: scanning and conditionally deleting here would race
+    // with a concurrent window reset and could remove a freshly incremented bucket.
+    Ok(0)
 }
 
 /// Store OAuth state

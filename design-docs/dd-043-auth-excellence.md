@@ -213,7 +213,7 @@ The coordinator owns default request and confirmation HTML. The confirmation pag
 - Generic response floor: 1200 ms.
 - Delivery budget hint: 1 second; the callback must enforce it in its provider call.
 - Session TTL: configured auth default unless overridden by `session_options`; always capped by `max_session_ttl`.
-- Client address: `req.ip` by default. Forwarded client-IP headers are ignored unless the app explicitly names a trusted header because its ingress strips spoofed values. If no client address is available, the flow warns once and uses a shared fail-closed bucket rather than weakening the limit.
+- Client address: immutable socket-peer `req.peer_ip` by default. Forwarded client-IP headers are ignored unless the app explicitly names a trusted header because its ingress strips spoofed values. If no socket-peer address is available, the flow warns once and uses a shared fail-closed bucket rather than weakening the limit.
 - Delivery origin: `base_url` or trusted `SITE_URL` only. Request `Host` and forwarded protocol headers are never used to build outbound magic links.
 - Redirects: local absolute paths only by default; external URLs require an explicit opt-in.
 
@@ -231,7 +231,7 @@ Ordering is fixed:
 4. Enforce the eligible-identity limit.
 5. Issue through `issue_magic_link`.
 6. Invoke delivery with a timeout budget the callback must enforce; discard the exact issued token on failure.
-7. Return the padded, non-enumerating response.
+7. Return the generic response with best-effort padding.
 8. On confirmation, validate and atomically consume through `consume_magic_link`.
 9. Invoke `authorize` with the consumed identity.
 10. Force the authenticated principal from the consumed identity, merge only app-owned session extensions, and create the request-aware session.

@@ -4678,9 +4678,12 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Mount this same helper on your request route and consume route. It owns the
     // default request form, fragment-clearing confirmation page, bounded form
-    // parsing, generic non-enumerating request response, token issue/consume
+    // parsing, generic request outcomes with best-effort padding, token issue/consume
     // ordering, delivery cleanup, storage-backed rate limiting, trusted-origin
-    // link construction, and request-aware session creation. Apps keep
+    // link construction, and request-aware session creation. The default client
+    // budget uses immutable `req.peer_ip`; a forwarded header is used only when
+    // explicitly named as trusted by an app whose ingress strips spoofed copies.
+    // Apps keep
     // authorization policy in the `authorize(identity)` closure. The coordinator
     // forces provider, subject_id, and canonical email from the consumed identity;
     // authorization may add only app-owned session extensions. Set `base_url` to
@@ -6087,6 +6090,10 @@ mod tests {
             ("body".to_string(), Value::String(body.to_string())),
             ("ip".to_string(), Value::String("198.51.100.44".to_string())),
             (
+                "peer_ip".to_string(),
+                Value::String("198.51.100.44".to_string()),
+            ),
+            (
                 "headers".to_string(),
                 Value::Map(HashMap::from([
                     ("host".to_string(), Value::String("app.test".to_string())),
@@ -6331,10 +6338,17 @@ mod tests {
 
         let removed = cleanup_expired_rate_limit_records(reset.expires_at + 1)
             .expect("rate-limit cleanup should succeed");
-        assert!(
-            removed >= 1,
-            "cleanup should remove at least the expired primary counter"
-        );
+        if label == "redis" {
+            assert_eq!(
+                removed, 0,
+                "Redis cleanup must rely on atomic key expiry instead of scanning and deleting"
+            );
+        } else {
+            assert!(
+                removed >= 1,
+                "cleanup should remove at least the expired primary counter"
+            );
+        }
 
         match label {
             "memory" => {
@@ -6360,6 +6374,21 @@ mod tests {
                 assert_eq!(
                     raw_count, 0,
                     "SQLite counters must not store raw identifiers"
+                );
+            }
+            "redis" => {
+                let url = REDIS_URL
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("Redis rate-limit contract requires a configured URL");
+                let client = redis::Client::open(url.as_str()).unwrap();
+                let mut conn = client.get_connection().unwrap();
+                let redis_key = format!("ntnt:auth_rate_limit:{scope}:{key_hash}");
+                let ttl: i64 = redis::cmd("TTL").arg(redis_key).query(&mut conn).unwrap();
+                assert!(
+                    ttl > 0,
+                    "Redis rate-limit counters must carry a live expiry instead of needing cleanup"
                 );
             }
             _ => {}
@@ -12570,6 +12599,53 @@ mod tests {
         assert!(
             magic_link_flow_test_events().is_empty(),
             "client limit must run before eligibility so anonymous traffic cannot burn identity budget"
+        );
+    }
+
+    #[test]
+    fn test_magic_link_flow_client_limit_uses_peer_ip_not_spoofable_forwarded_ip() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        store_magic_flow_active_user("admin@example.com");
+
+        let Value::Map(mut options) = magic_flow_options(test_flow_deliver, test_flow_authorize)
+        else {
+            unreachable!()
+        };
+        options.insert("client_limit".to_string(), Value::Int(1));
+        options.insert("generic_response_floor_ms".to_string(), Value::Int(1));
+
+        let mut invoke = invoke_test_flow;
+        for spoofed_ip in ["203.0.113.10", "203.0.113.11"] {
+            let Value::Map(mut request) =
+                magic_flow_request("POST", "/email-login", "email=admin%40example.com")
+            else {
+                unreachable!()
+            };
+            request.insert("ip".to_string(), Value::String(spoofed_ip.to_string()));
+            let Value::Map(headers) = request.get_mut("headers").unwrap() else {
+                unreachable!()
+            };
+            headers.insert(
+                "x-forwarded-for".to_string(),
+                Value::String(spoofed_ip.to_string()),
+            );
+            run_magic_link_flow(
+                &[Value::Map(request), Value::Map(options.clone())],
+                &mut invoke,
+            )
+            .expect("spoofed forwarded addresses should still receive generic responses");
+        }
+
+        let eligible_calls = magic_link_flow_test_events()
+            .into_iter()
+            .filter(|event| event.starts_with("eligible:"))
+            .count();
+        assert_eq!(
+            eligible_calls, 1,
+            "rotating forwarded addresses must not bypass the socket-peer client budget"
         );
     }
 
