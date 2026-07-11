@@ -47,6 +47,7 @@ mod config;
 mod cookies;
 mod guards;
 mod local;
+mod magic_link_flow;
 mod oauth;
 mod primitives;
 mod providers;
@@ -81,6 +82,9 @@ use local::{
     MAGIC_LINK_VERIFICATION_UNAVAILABLE, PASSWORD_RESET_ISSUANCE_UNAVAILABLE,
     PASSWORD_RESET_VERIFICATION_UNAVAILABLE,
 };
+pub(crate) use magic_link_flow::run_magic_link_flow;
+#[cfg(test)]
+use magic_link_flow::{auth_rate_limit_key, token_from_issued};
 use oauth::extract_user_info;
 pub use oauth::{
     client_credentials_grant, decode_id_token, exchange_code_for_tokens, fetch_oidc_discovery,
@@ -117,11 +121,13 @@ pub use sessions::{
     get_sessions_for_user, store_session,
 };
 #[cfg(test)]
+use storage::normalize_local_identifier;
+#[cfg(test)]
 use storage::store_auth_challenge_sqlite;
 pub use storage::{
     cleanup_expired_auth_challenges, cleanup_expired_exchange_tokens, cleanup_expired_oauth_states,
-    consume_oauth_state, delete_auth_challenge_by_id, get_auth_challenge_by_id,
-    store_auth_challenge, store_oauth_state,
+    cleanup_expired_rate_limits, consume_oauth_state, delete_auth_challenge_by_id,
+    get_auth_challenge_by_id, store_auth_challenge, store_oauth_state,
 };
 use storage::{
     consume_auth_challenge, consume_exchange_token, create_auth_challenge, create_manual_session,
@@ -319,6 +325,7 @@ pub struct AuthConfig {
     pub cookie_name: String,
     pub cookie_secure: bool,
     pub cookie_same_site: String,
+    pub cookie_http_only: bool,
     pub session_ttl: i64,
     pub refresh_ttl: i64, // How long refresh tokens can extend sessions (default: 30 days)
     pub sliding_sessions: bool, // Extend active sessions on authenticated reads
@@ -348,6 +355,7 @@ impl Default for AuthConfig {
             cookie_name: "ntnt_session".to_string(),
             cookie_secure: true,
             cookie_same_site: "lax".to_string(),
+            cookie_http_only: true,
             session_ttl: 86400 * 7,  // 7 days
             refresh_ttl: 86400 * 30, // 30 days — how long refresh tokens can extend sessions
             sliding_sessions: false,
@@ -456,6 +464,12 @@ pub struct SessionInfo {
     pub is_current: bool,
 }
 
+#[derive(Debug, Clone)]
+struct AuthRateBucket {
+    count: i64,
+    expires_at: i64,
+}
+
 /// In-memory session store (used as fallback or when session_store = Memory)
 #[allow(dead_code)]
 struct InMemoryStore {
@@ -463,6 +477,7 @@ struct InMemoryStore {
     oauth_states: HashMap<String, OAuthState>,
     exchange_tokens: HashMap<String, (String, i64)>, // token → (session_id, created_at)
     auth_challenges: HashMap<String, AuthChallenge>,
+    rate_limits: HashMap<String, AuthRateBucket>,
     local_auth: storage::LocalAuthMemoryStore,
 }
 
@@ -473,6 +488,7 @@ impl InMemoryStore {
             oauth_states: HashMap::new(),
             exchange_tokens: HashMap::new(),
             auth_challenges: HashMap::new(),
+            rate_limits: HashMap::new(),
             local_auth: storage::LocalAuthMemoryStore::default(),
         }
     }
@@ -569,6 +585,13 @@ impl InMemoryStore {
         self.auth_challenges
             .retain(|_, challenge| challenge.expires_at >= now);
         before - self.auth_challenges.len()
+    }
+
+    fn cleanup_expired_rate_limits(&mut self, now: i64) -> usize {
+        let before = self.rate_limits.len();
+        self.rate_limits
+            .retain(|_, bucket| bucket.expires_at >= now);
+        before - self.rate_limits.len()
     }
 
     fn cleanup_expired(&mut self, now: i64) -> usize {
@@ -2705,6 +2728,17 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 }
 
+                // Clean up expired rate-limit counters
+                match cleanup_expired_rate_limits() {
+                    Ok(count) => total += count,
+                    Err(e) => {
+                        return Ok(make_err(Value::String(format!(
+                            "Rate-limit cleanup failed: {}",
+                            e
+                        ))))
+                    }
+                }
+
                 Ok(make_ok(Value::Int(total as i64)))
             },
         },
@@ -3306,7 +3340,7 @@ pub fn init() -> HashMap<String, Value> {
     // refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure,
     // logout_url/after_logout, protected_paths, route_prefix, login_page, login_page_title,
     // login_page_logo_url, login_page_heading, login_page_copy, cookie_name, cookie_secure,
-    // cookie_same_site, session_store, store_tokens, health_endpoint.
+    // cookie_same_site, cookie_http_only, session_store, store_tokens, health_endpoint.
     // When a preset string is used, the overrides map is applied on top of the preset.
     // @param providers Array of provider configs created by oauth() or oauth_discover()
     // @param preset_or_options Optional preset string or options map
@@ -3429,6 +3463,7 @@ pub fn init() -> HashMap<String, Value> {
                                 | "cookie_name"
                                 | "cookie_secure"
                                 | "cookie_same_site"
+                                | "cookie_http_only"
                                 | "session_store"
                                 | "store_tokens"
                                 | "health_endpoint"
@@ -3469,7 +3504,12 @@ pub fn init() -> HashMap<String, Value> {
                 };
 
                 let session_ttl = match get_option(&["session_ttl"]) {
-                    Some(Value::Int(n)) => *n,
+                    Some(Value::Int(n)) if *n > 0 => *n,
+                    Some(Value::Int(_)) => {
+                        return Err(IntentError::type_error(
+                            "[auth] enable_auth() option \"session_ttl\" must be > 0".to_string(),
+                        ));
+                    }
                     Some(other) => {
                         return Err(IntentError::type_error(format!(
                             "[auth] enable_auth() option \"session_ttl\" must be an int, got {}",
@@ -3651,6 +3691,17 @@ pub fn init() -> HashMap<String, Value> {
                     None => base_config.cookie_same_site.clone(),
                 };
 
+                let cookie_http_only = match get_option(&["cookie_http_only"]) {
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return Err(IntentError::type_error(format!(
+                            "[auth] enable_auth() option \"cookie_http_only\" must be a bool, got {}",
+                            other.type_name()
+                        )));
+                    }
+                    None => base_config.cookie_http_only,
+                };
+
                 let session_store = match get_option(&["session_store"]) {
                     Some(Value::String(s)) => {
                         parse_auth_session_store(s).map_err(IntentError::type_error)?
@@ -3696,7 +3747,12 @@ pub fn init() -> HashMap<String, Value> {
                 };
 
                 let refresh_ttl = match get_option(&["refresh_ttl"]) {
-                    Some(Value::Int(n)) => *n,
+                    Some(Value::Int(n)) if *n > 0 => *n,
+                    Some(Value::Int(_)) => {
+                        return Err(IntentError::type_error(
+                            "[auth] enable_auth() option \"refresh_ttl\" must be > 0".to_string(),
+                        ));
+                    }
                     Some(other) => {
                         return Err(IntentError::type_error(format!(
                             "[auth] enable_auth() option \"refresh_ttl\" must be an int, got {}",
@@ -3774,6 +3830,7 @@ pub fn init() -> HashMap<String, Value> {
                 base_config.cookie_name = cookie_name;
                 base_config.cookie_secure = cookie_secure;
                 base_config.cookie_same_site = cookie_same_site;
+                base_config.cookie_http_only = cookie_http_only;
                 base_config.session_ttl = session_ttl;
                 base_config.refresh_ttl = refresh_ttl;
                 base_config.sliding_sessions = sliding_sessions;
@@ -4610,6 +4667,47 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(verified) => Ok(Value::ok(verified_local_password_to_value(verified))),
                     Err(message) => Ok(Value::err(Value::String(message))),
                 }
+            },
+        },
+    );
+
+    // @ntnt magic_link_flow
+    // @module std/auth
+    // @signature magic_link_flow(req: Request, options: Map) -> Response
+    // Coordinate a secure email magic-link request and confirmation flow.
+    //
+    // Mount this same helper on your request route and consume route. It owns the
+    // default request form, fragment-clearing confirmation page, bounded form
+    // parsing, generic non-enumerating request response, token issue/consume
+    // ordering, delivery cleanup, storage-backed rate limiting, trusted-origin
+    // link construction, and request-aware session creation. Apps keep
+    // authorization policy in the `authorize(identity)` closure. The coordinator
+    // forces provider, subject_id, and canonical email from the consumed identity;
+    // authorization may add only app-owned session extensions. Set `base_url` to
+    // a trusted site origin, or configure SITE_URL; request Host and forwarded
+    // headers are not used to build outbound links. `budget_hint_seconds` is a budget
+    // the delivery callback must enforce, not a preemptive runtime timeout.
+    // @param req The current HTTP request map
+    // @param options Map with request_path, consume_path, base_url, success_url, failure_url, eligible, deliver, authorize, and optional rate/session/UI settings
+    // @returns Response for the request, confirmation, or consume step
+    // @error TypeError ~ "eligible must be a function" fix: "Pass eligible, deliver, and authorize closures in the options map"
+    // @see_also issue_magic_link, consume_magic_link, sign_in_session
+    // @since v0.5.2
+    // @tags #auth, #local-auth, #magic-link, #passwordless, #security
+    // @example magic_link_flow(req, map { "base_url": "https://app.example.com", "eligible": fn(email) { true }, "deliver": fn(message) { deliver_login_email(message) }, "authorize": fn(identity) { Ok(map {}) } }) => Response ~ "Coordinate a conventional magic-link flow"
+    // @example magic_link_flow(req, map { "request_path": "/admin/email-login", "consume_path": "/admin/email-login/consume", "base_url": "https://admin.example.com", "success_url": "/admin", "failure_url": "/admin/email-login", "eligible": fn(email) { is_admin_email(email) }, "deliver": fn(message) { deliver_admin_link(message) }, "authorize": fn(identity) { authorize_admin(identity) } }) => Response ~ "Keep administrator policy in app callbacks"
+    module.insert(
+        "magic_link_flow".to_string(),
+        Value::NativeFunction {
+            name: "magic_link_flow".to_string(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: |_args| {
+                Err(IntentError::runtime_error(
+                    "[auth] magic_link_flow() must be called from NTNT interpreter context"
+                        .to_string(),
+                ))
             },
         },
     );
@@ -5625,19 +5723,20 @@ pub fn init() -> HashMap<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::storage::{
-        cleanup_expired_oauth_state_records, consume_auth_challenge_record,
-        consume_exchange_token_record, consume_local_one_time_token_record,
+        cleanup_expired_oauth_state_records, cleanup_expired_rate_limit_records,
+        consume_auth_challenge_record, consume_exchange_token_record,
+        consume_local_one_time_token_record,
         consume_local_password_reset_token_and_store_credential_record, consume_oauth_state_record,
         delete_all_session_records_for_user, delete_session_record, extend_session_record_expiry,
         get_auth_challenge_record, get_local_credential_secret_record,
         get_local_identity_by_identifier_record, get_refreshable_session_record,
-        get_session_record, list_session_records_for_user, migrate_session_record,
-        store_auth_challenge_record, store_exchange_token_record,
-        store_local_identity_and_credential_record, store_local_one_time_token_record,
-        store_oauth_state_record, store_session_record, update_local_identity_by_identifier_record,
-        update_session_record_data, update_session_record_tokens, LocalAccountState,
-        LocalCredentialSecret, LocalIdentity, LocalOneTimeToken, LocalOneTimeTokenPurpose,
-        OAUTH_STATE_TTL,
+        get_session_record, increment_auth_rate_limit_record, list_session_records_for_user,
+        migrate_session_record, store_auth_challenge_record, store_exchange_token_record,
+        store_local_identity_and_credential_record, store_local_identity_record,
+        store_local_one_time_token_record, store_oauth_state_record, store_session_record,
+        update_local_identity_by_identifier_record, update_session_record_data,
+        update_session_record_tokens, LocalAccountState, LocalCredentialSecret, LocalIdentity,
+        LocalOneTimeToken, LocalOneTimeTokenPurpose, OAUTH_STATE_TTL,
     };
     use super::*;
 
@@ -5650,6 +5749,7 @@ mod tests {
         store.oauth_states.clear();
         store.exchange_tokens.clear();
         store.auth_challenges.clear();
+        store.rate_limits.clear();
         store.local_auth = storage::LocalAuthMemoryStore::default();
         drop(store);
         *AUTH_CONFIG.lock().unwrap() = None;
@@ -5826,6 +5926,287 @@ mod tests {
         ]))
     }
 
+    static MAGIC_LINK_FLOW_TEST_EVENTS: std::sync::LazyLock<Mutex<Vec<String>>> =
+        std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+    fn clear_magic_link_flow_test_events() {
+        MAGIC_LINK_FLOW_TEST_EVENTS.lock().unwrap().clear();
+    }
+
+    fn push_magic_link_flow_test_event(event: impl Into<String>) {
+        MAGIC_LINK_FLOW_TEST_EVENTS
+            .lock()
+            .unwrap()
+            .push(event.into());
+    }
+
+    fn magic_link_flow_test_events() -> Vec<String> {
+        MAGIC_LINK_FLOW_TEST_EVENTS.lock().unwrap().clone()
+    }
+
+    fn test_flow_eligible(args: &[Value]) -> Result<Value> {
+        let identifier = match args.first() {
+            Some(Value::String(value)) => value.clone(),
+            other => panic!("eligible expected identifier string, got {other:?}"),
+        };
+        push_magic_link_flow_test_event(format!("eligible:{identifier}"));
+        Ok(Value::Bool(
+            identifier == "magic@example.com"
+                || (identifier.starts_with("magic-") && identifier.ends_with("@example.com")),
+        ))
+    }
+
+    fn test_flow_deliver(args: &[Value]) -> Result<Value> {
+        let message = match args.first() {
+            Some(Value::Map(map)) => map,
+            other => panic!("deliver expected message map, got {other:?}"),
+        };
+        assert_eq!(map_int(message, "budget_hint_seconds"), 1);
+        let url = map_string(message, "url");
+        assert!(
+            url.contains("#token="),
+            "magic-link delivery URL must carry token in a fragment: {url}"
+        );
+        assert!(
+            !url.contains("?token=") && !url.contains("/consume/"),
+            "magic-link delivery URL must keep bearer material out of query strings and paths: {url}"
+        );
+        push_magic_link_flow_test_event(format!("deliver:{url}"));
+        Ok(Value::ok(Value::Unit))
+    }
+
+    fn test_flow_deliver_fails(args: &[Value]) -> Result<Value> {
+        test_flow_deliver(args)?;
+        Ok(Value::err(Value::String("smtp unavailable".to_string())))
+    }
+
+    fn test_flow_deliver_wrong_shape(args: &[Value]) -> Result<Value> {
+        test_flow_deliver(args)?;
+        Ok(Value::Unit)
+    }
+
+    fn test_flow_deliver_slow(args: &[Value]) -> Result<Value> {
+        test_flow_deliver(args)?;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        Ok(Value::ok(Value::Unit))
+    }
+
+    fn test_flow_deliver_replaces_token_then_fails(args: &[Value]) -> Result<Value> {
+        test_flow_deliver(args)?;
+        let message = match args.first() {
+            Some(Value::Map(map)) => map,
+            other => panic!("deliver expected message map, got {other:?}"),
+        };
+        let recipient = map_string(message, "to");
+        let replacement = issue_magic_link_record("email", &recipient, Some(900))
+            .expect("replacement magic link should issue");
+        let token = token_from_issued(&replacement).expect("replacement should include token");
+        push_magic_link_flow_test_event(format!("replacement:{token}"));
+        Ok(Value::err(Value::String(
+            "first delivery failed".to_string(),
+        )))
+    }
+
+    fn test_flow_authorize(args: &[Value]) -> Result<Value> {
+        let identity = match args.first() {
+            Some(Value::Map(map)) => map,
+            other => panic!("authorize expected identity map, got {other:?}"),
+        };
+        push_magic_link_flow_test_event(format!(
+            "authorize:{}",
+            map_string(identity, "identifier_normalized")
+        ));
+        Ok(Value::ok(Value::Map(HashMap::from([
+            (
+                "subject_id".to_string(),
+                Value::String(map_string(identity, "local_user_id")),
+            ),
+            (
+                "email".to_string(),
+                Value::String(map_string(identity, "email")),
+            ),
+            (
+                "claims".to_string(),
+                Value::Map(HashMap::from([(
+                    "role".to_string(),
+                    Value::String("admin".to_string()),
+                )])),
+            ),
+        ]))))
+    }
+
+    fn test_flow_authorize_rejects(args: &[Value]) -> Result<Value> {
+        test_flow_authorize(args)?;
+        Ok(Value::err(Value::String("not an admin".to_string())))
+    }
+
+    fn test_flow_authorize_conflicting_principal(_args: &[Value]) -> Result<Value> {
+        Ok(Value::ok(Value::Map(HashMap::from([
+            (
+                "provider".to_string(),
+                Value::String("attacker-provider".to_string()),
+            ),
+            (
+                "subject_id".to_string(),
+                Value::String("attacker-subject".to_string()),
+            ),
+            (
+                "email".to_string(),
+                Value::String("attacker@example.com".to_string()),
+            ),
+            (
+                "claims".to_string(),
+                Value::Map(HashMap::from([(
+                    "role".to_string(),
+                    Value::String("admin".to_string()),
+                )])),
+            ),
+        ]))))
+    }
+
+    fn test_flow_callback_errors(_args: &[Value]) -> Result<Value> {
+        Err(IntentError::runtime_error(
+            "private callback backend diagnostic".to_string(),
+        ))
+    }
+
+    fn flow_native(name: &str, func: fn(&[Value]) -> Result<Value>) -> Value {
+        Value::NativeFunction {
+            name: name.to_string(),
+            arity: 1,
+            max_arity: 1,
+            func,
+            requires: None,
+        }
+    }
+
+    fn magic_flow_request(method: &str, path: &str, body: &str) -> Value {
+        Value::Map(HashMap::from([
+            ("method".to_string(), Value::String(method.to_string())),
+            ("path".to_string(), Value::String(path.to_string())),
+            ("body".to_string(), Value::String(body.to_string())),
+            ("ip".to_string(), Value::String("198.51.100.44".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([
+                    ("host".to_string(), Value::String("app.test".to_string())),
+                    (
+                        "x-forwarded-for".to_string(),
+                        Value::String("203.0.113.99".to_string()),
+                    ),
+                    (
+                        "user-agent".to_string(),
+                        Value::String("Flow Test Browser".to_string()),
+                    ),
+                ])),
+            ),
+        ]))
+    }
+
+    fn magic_flow_options(
+        deliver: fn(&[Value]) -> Result<Value>,
+        authorize: fn(&[Value]) -> Result<Value>,
+    ) -> Value {
+        Value::Map(HashMap::from([
+            (
+                "request_path".to_string(),
+                Value::String("/email-login".to_string()),
+            ),
+            (
+                "consume_path".to_string(),
+                Value::String("/email-login/consume".to_string()),
+            ),
+            (
+                "base_url".to_string(),
+                Value::String("https://auth.example.com".to_string()),
+            ),
+            (
+                "success_url".to_string(),
+                Value::String("/admin".to_string()),
+            ),
+            (
+                "failure_url".to_string(),
+                Value::String("/email-login".to_string()),
+            ),
+            ("generic_response_floor_ms".to_string(), Value::Int(1)),
+            (
+                "eligible".to_string(),
+                flow_native("test_flow_eligible", test_flow_eligible),
+            ),
+            (
+                "deliver".to_string(),
+                flow_native("test_flow_deliver", deliver),
+            ),
+            (
+                "authorize".to_string(),
+                flow_native("test_flow_authorize", authorize),
+            ),
+        ]))
+    }
+
+    fn store_magic_flow_active_user(email: &str) {
+        let now = chrono::Utc::now().timestamp();
+        let normalized = normalize_local_identifier("email", email).unwrap();
+        store_local_identity_record(&LocalIdentity {
+            id: format!("local:flow:{}", normalized),
+            identifier_kind: "email".to_string(),
+            identifier: email.to_string(),
+            identifier_normalized: normalized,
+            created_at: now,
+            updated_at: now,
+            state: LocalAccountState::Active,
+            metadata_json: "{}".to_string(),
+        })
+        .expect("active magic-link test identity should store");
+    }
+
+    fn invoke_test_flow(func: &Value, args: Vec<Value>) -> Result<Value> {
+        match func {
+            Value::NativeFunction { func, .. } => func(&args),
+            other => panic!("expected native test closure, got {other:?}"),
+        }
+    }
+
+    fn extract_delivered_token() -> String {
+        let delivery = magic_link_flow_test_events()
+            .into_iter()
+            .find(|event| event.starts_with("deliver:"))
+            .expect("delivery event should exist");
+        let url = delivery.trim_start_matches("deliver:");
+        let (_, token) = url
+            .split_once("#token=")
+            .expect("delivery URL should contain token fragment");
+        token.to_string()
+    }
+
+    fn expect_map(value: Value) -> HashMap<String, Value> {
+        match value {
+            Value::Map(map) => map,
+            other => panic!("expected map, got {other:?}"),
+        }
+    }
+
+    fn header_string(response: &HashMap<String, Value>, name: &str) -> String {
+        match response.get("headers") {
+            Some(Value::Map(headers)) => headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .and_then(|(_, value)| match value {
+                    Value::String(value) => Some(value.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    fn eval_auth_test_source(source: &str) -> Result<Value> {
+        let tokens: Vec<_> = crate::lexer::Lexer::new(source).collect();
+        let ast = crate::parser::Parser::new(tokens).parse()?;
+        let mut interpreter = crate::interpreter::Interpreter::new();
+        interpreter.eval(&ast)
+    }
+
     fn init_test_auth(session_store: SessionStore) {
         let config = AuthConfig {
             session_secret: "test-secret".to_string(),
@@ -5849,6 +6230,215 @@ mod tests {
             .ok()
             .filter(|s| !s.is_empty())
             .map(SessionStore::Redis)
+    }
+
+    fn run_magic_link_delivery_cleanup_race_contract(store_kind: SessionStore, label: &str) {
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(store_kind);
+        let email = format!("magic-{label}-{}@example.com", uuid::Uuid::new_v4());
+        store_magic_flow_active_user(&email);
+
+        let mut options = expect_map(magic_flow_options(
+            test_flow_deliver_replaces_token_then_fails,
+            test_flow_authorize,
+        ));
+        options.insert(
+            "trusted_client_ip_header".to_string(),
+            Value::String(format!("x-test-client-{label}")),
+        );
+        let mut request = expect_map(magic_flow_request(
+            "POST",
+            "/email-login",
+            &format!("email={}", urlencoding::encode(&email)),
+        ));
+        let Value::Map(headers) = request
+            .get_mut("headers")
+            .expect("test request should include headers")
+        else {
+            panic!("test request headers should be a map");
+        };
+        headers.insert(
+            format!("x-test-client-{label}"),
+            Value::String(format!("client-{label}-{}", uuid::Uuid::new_v4())),
+        );
+        let mut invoke = invoke_test_flow;
+        run_magic_link_flow(&[Value::Map(request), Value::Map(options)], &mut invoke)
+            .expect("failed delivery should still return a generic response");
+
+        let replacement = magic_link_flow_test_events()
+            .into_iter()
+            .find_map(|event| event.strip_prefix("replacement:").map(str::to_string))
+            .expect("delivery callback should issue a replacement token");
+        let consumed = consume_magic_link_record(&replacement)
+            .expect("cleanup of the failed older delivery must not revoke the replacement token");
+        assert_eq!(consumed.identifier_normalized, email);
+    }
+
+    fn run_auth_rate_limit_contract(store_kind: SessionStore, label: &str) {
+        reset_auth_test_state();
+        init_test_auth(store_kind);
+
+        let unique = format!("{}-{}", label, uuid::Uuid::new_v4());
+        let raw_identifier = format!("198.51.100.{}", unique);
+        let scope = format!("magic-link-flow-test-{label}");
+        let key_hash = auth_rate_limit_key("client", &raw_identifier);
+        assert_ne!(key_hash, raw_identifier);
+        let now = chrono::Utc::now().timestamp();
+
+        let first = increment_auth_rate_limit_record(&scope, &key_hash, 60, now)
+            .expect("first rate-limit increment should succeed");
+        assert_eq!(first.count, 1);
+        assert_eq!(first.expires_at, now + 60);
+
+        let second = increment_auth_rate_limit_record(&scope, &key_hash, 60, now + 1)
+            .expect("second rate-limit increment should succeed");
+        assert_eq!(second.count, 2);
+        assert_eq!(second.expires_at, first.expires_at);
+
+        let reset = increment_auth_rate_limit_record(&scope, &key_hash, 60, first.expires_at + 1)
+            .expect("expired window should reset atomically");
+        assert_eq!(reset.count, 1);
+        assert_eq!(reset.expires_at, first.expires_at + 61);
+
+        let concurrent_scope = format!("{scope}:concurrent");
+        let concurrent_hash =
+            auth_rate_limit_key("identity", &format!("user-{unique}@example.com"));
+        let workers = 8_i64;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers as usize));
+        let mut handles = Vec::new();
+        for _ in 0..workers {
+            let barrier = barrier.clone();
+            let scope = concurrent_scope.clone();
+            let key_hash = concurrent_hash.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                increment_auth_rate_limit_record(&scope, &key_hash, 120, now + 10)
+                    .map(|bucket| bucket.count)
+            }));
+        }
+        let mut counts = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("rate-limit worker should not panic")
+                    .expect("rate-limit worker should not return storage error")
+            })
+            .collect::<Vec<_>>();
+        counts.sort_unstable();
+        assert_eq!(counts, (1..=workers).collect::<Vec<_>>());
+
+        let removed = cleanup_expired_rate_limit_records(reset.expires_at + 1)
+            .expect("rate-limit cleanup should succeed");
+        assert!(
+            removed >= 1,
+            "cleanup should remove at least the expired primary counter"
+        );
+
+        match label {
+            "memory" => {
+                let store = SESSION_STORE.lock().unwrap();
+                assert!(
+                    store
+                        .rate_limits
+                        .keys()
+                        .all(|key| !key.contains(&raw_identifier)),
+                    "memory rate-limit keys must not contain raw identifiers"
+                );
+            }
+            "sqlite" => {
+                let conn_guard = SQLITE_CONN.lock().unwrap();
+                let conn = conn_guard.as_ref().unwrap();
+                let raw_count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM auth_rate_limits WHERE scope LIKE ?1 OR key_hash LIKE ?1",
+                        rusqlite::params![format!("%{}%", raw_identifier)],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    raw_count, 0,
+                    "SQLite counters must not store raw identifiers"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn test_auth_rate_limit_contract_memory() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        run_auth_rate_limit_contract(SessionStore::Memory, "memory");
+    }
+
+    #[test]
+    fn test_auth_rate_limit_contract_sqlite() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        run_auth_rate_limit_contract(SessionStore::Sqlite(":memory:".to_string()), "sqlite");
+    }
+
+    #[test]
+    fn test_auth_rate_limit_contract_postgres() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(store) = auth_test_postgres_store() else {
+            eprintln!(
+                "[auth-test] skipping PostgreSQL rate-limit contract test — set NTNT_AUTH_TEST_POSTGRES_URL"
+            );
+            return;
+        };
+        run_auth_rate_limit_contract(store, "postgres");
+    }
+
+    #[test]
+    fn test_auth_rate_limit_contract_redis() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(store) = auth_test_redis_store() else {
+            eprintln!(
+                "[auth-test] skipping Redis rate-limit contract test — set NTNT_AUTH_TEST_REDIS_URL"
+            );
+            return;
+        };
+        run_auth_rate_limit_contract(store, "redis");
+    }
+
+    #[test]
+    fn test_magic_link_delivery_cleanup_race_memory() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        run_magic_link_delivery_cleanup_race_contract(SessionStore::Memory, "memory");
+    }
+
+    #[test]
+    fn test_magic_link_delivery_cleanup_race_sqlite() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        run_magic_link_delivery_cleanup_race_contract(
+            SessionStore::Sqlite(":memory:".to_string()),
+            "sqlite",
+        );
+    }
+
+    #[test]
+    fn test_magic_link_delivery_cleanup_race_postgres() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(store) = auth_test_postgres_store() else {
+            eprintln!(
+                "[auth-test] skipping PostgreSQL delivery cleanup race test — set NTNT_AUTH_TEST_POSTGRES_URL"
+            );
+            return;
+        };
+        run_magic_link_delivery_cleanup_race_contract(store, "postgres");
+    }
+
+    #[test]
+    fn test_magic_link_delivery_cleanup_race_redis() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let Some(store) = auth_test_redis_store() else {
+            eprintln!(
+                "[auth-test] skipping Redis delivery cleanup race test — set NTNT_AUTH_TEST_REDIS_URL"
+            );
+            return;
+        };
+        run_magic_link_delivery_cleanup_race_contract(store, "redis");
     }
 
     fn run_auth_storage_contract_round_trip(store_kind: SessionStore, label: &str) {
@@ -10922,6 +11512,7 @@ mod tests {
                 ("sliding_sessions".to_string(), Value::Bool(true)),
                 ("refresh_throttle".to_string(), Value::Int(120)),
                 ("max_session_ttl".to_string(), Value::Int(3600)),
+                ("cookie_http_only".to_string(), Value::Bool(false)),
             ])),
         ])
         .expect("enable_auth should accept session lifecycle options");
@@ -10930,6 +11521,7 @@ mod tests {
         assert!(config.sliding_sessions);
         assert_eq!(config.refresh_throttle, 120);
         assert_eq!(config.max_session_ttl, Some(3600));
+        assert!(!config.cookie_http_only);
     }
 
     #[test]
@@ -10950,6 +11542,17 @@ mod tests {
         ])
         .expect_err("enable_auth should reject invalid sliding_sessions type");
         assert!(format!("{}", err).contains("option \"sliding_sessions\" must be a bool"));
+
+        let provider = github_test_provider_value();
+        let err = enable_auth(&[
+            Value::Array(vec![provider]),
+            Value::Map(HashMap::from([(
+                "cookie_http_only".to_string(),
+                Value::String("yes".to_string()),
+            )])),
+        ])
+        .expect_err("enable_auth should reject invalid cookie_http_only type");
+        assert!(format!("{}", err).contains("option \"cookie_http_only\" must be a bool"));
     }
 
     #[test]
@@ -11764,6 +12367,860 @@ mod tests {
 
         assert!(format!("{}", err).contains("cookie_name override is not supported"));
         assert!(SESSION_STORE.lock().unwrap().sessions.is_empty());
+    }
+
+    #[test]
+    fn test_magic_link_flow_confirmation_clears_fragment_before_safe_decode() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let mut invoke = invoke_test_flow;
+        let response = run_magic_link_flow(
+            &[
+                magic_flow_request("GET", "/email-login/consume", ""),
+                magic_flow_options(test_flow_deliver, test_flow_authorize),
+            ],
+            &mut invoke,
+        )
+        .expect("confirmation page should render");
+        let response_map = expect_map(response);
+        let csp = header_string(&response_map, "Content-Security-Policy");
+        assert!(csp.contains("script-src 'sha256-") && !csp.contains("unsafe-inline"));
+        let body = map_string(&response_map, "body");
+        let script = body
+            .split_once("<script>")
+            .and_then(|(_, rest)| rest.split_once("</script>"))
+            .map(|(script, _)| script)
+            .expect("confirmation page should contain its fixed script");
+        let expected_hash = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            Sha256::digest(script.as_bytes()),
+        );
+        assert!(csp.contains(&format!("'sha256-{expected_hash}'")));
+        let clear_index = body
+            .find("history.replaceState")
+            .expect("confirmation page should clear the fragment");
+        let decode_index = body
+            .find("decodeURIComponent")
+            .expect("confirmation page should decode the fragment payload");
+        assert!(clear_index < decode_index);
+        assert!(body.contains("try {") && body.contains("catch (_)"));
+        assert!(body.contains("button.disabled = false"));
+    }
+
+    #[test]
+    fn test_magic_link_flow_requests_delivers_fragment_and_consumes_before_authorize() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        let module = init();
+        store_magic_flow_active_user("magic@example.com");
+
+        let mut invoke = invoke_test_flow;
+        let request_response = run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=Magic%40Example.com"),
+                magic_flow_options(test_flow_deliver, test_flow_authorize),
+            ],
+            &mut invoke,
+        )
+        .expect("request flow should return a generic response");
+        let request_map = expect_map(request_response);
+        assert_eq!(map_int(&request_map, "status"), 200);
+        assert!(map_string(&request_map, "body").contains("If an account can use email sign-in"));
+        let request_csp = header_string(&request_map, "Content-Security-Policy");
+        assert!(request_csp.contains("form-action 'self'"));
+        assert!(request_csp.contains("script-src 'none'"));
+        assert!(!request_csp.contains("unsafe-inline"));
+        assert_eq!(
+            header_string(&request_map, "Referrer-Policy"),
+            "no-referrer"
+        );
+        assert_eq!(header_string(&request_map, "X-Frame-Options"), "DENY");
+        assert_eq!(
+            magic_link_flow_test_events()[0],
+            "eligible:magic@example.com",
+            "eligible must run before delivery"
+        );
+
+        let token = extract_delivered_token();
+        let consume_response = run_magic_link_flow(
+            &[
+                magic_flow_request(
+                    "POST",
+                    "/email-login/consume",
+                    &format!("token={}", urlencoding::encode(&token)),
+                ),
+                magic_flow_options(test_flow_deliver, test_flow_authorize),
+            ],
+            &mut invoke,
+        )
+        .expect("consume flow should sign in and redirect");
+        let consume_map = expect_map(consume_response);
+        assert_eq!(map_int(&consume_map, "status"), 302);
+        assert_eq!(header_string(&consume_map, "Location"), "/admin");
+        assert!(
+            header_string(&consume_map, "Set-Cookie").contains("ntnt_session="),
+            "magic_link_flow should create a request-aware session"
+        );
+        assert!(
+            magic_link_flow_test_events()
+                .iter()
+                .any(|event| event == "authorize:magic@example.com"),
+            "authorize should run after token consumption"
+        );
+
+        let consume_magic_link = module_fn(&module, "consume_magic_link");
+        assert_eq!(
+            result_err_string(consume_magic_link(&[Value::String(token)]).unwrap()),
+            INVALID_MAGIC_LINK_TOKEN,
+            "authorization must not restore an already-consumed token"
+        );
+    }
+
+    #[test]
+    fn test_magic_link_flow_delivery_failure_discards_issued_token() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        let module = init();
+        store_magic_flow_active_user("magic@example.com");
+
+        let mut invoke = invoke_test_flow;
+        let response = run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                magic_flow_options(test_flow_deliver_fails, test_flow_authorize),
+            ],
+            &mut invoke,
+        )
+        .expect("delivery failure should still return a generic response");
+        assert_eq!(map_int(&expect_map(response), "status"), 200);
+        let token = extract_delivered_token();
+
+        let consume_magic_link = module_fn(&module, "consume_magic_link");
+        assert_eq!(
+            result_err_string(consume_magic_link(&[Value::String(token)]).unwrap()),
+            INVALID_MAGIC_LINK_TOKEN,
+            "delivery failure must discard the newly issued token"
+        );
+    }
+
+    #[test]
+    fn test_magic_link_flow_wrong_delivery_return_shape_discards_token() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        let module = init();
+        store_magic_flow_active_user("magic@example.com");
+
+        let mut invoke = invoke_test_flow;
+        run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                magic_flow_options(test_flow_deliver_wrong_shape, test_flow_authorize),
+            ],
+            &mut invoke,
+        )
+        .expect("wrong delivery callback shape should stay publicly generic");
+        let token = extract_delivered_token();
+
+        let consume_magic_link = module_fn(&module, "consume_magic_link");
+        assert_eq!(
+            result_err_string(consume_magic_link(&[Value::String(token)]).unwrap()),
+            INVALID_MAGIC_LINK_TOKEN,
+            "delivery callbacks must return Result::Ok before a token remains usable"
+        );
+    }
+
+    #[test]
+    fn test_magic_link_flow_applies_client_limit_before_eligibility() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+
+        let mut options = expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        options.insert("client_limit".to_string(), Value::Int(1));
+        options.insert("client_window_seconds".to_string(), Value::Int(900));
+        let mut invoke = invoke_test_flow;
+        run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=missing%40example.com"),
+                Value::Map(options.clone()),
+            ],
+            &mut invoke,
+        )
+        .expect("first request should consume the positive client budget");
+        clear_magic_link_flow_test_events();
+
+        let response = run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                Value::Map(options),
+            ],
+            &mut invoke,
+        )
+        .expect("client-limited request should return generic response");
+        assert_eq!(map_int(&expect_map(response), "status"), 200);
+        assert!(
+            magic_link_flow_test_events().is_empty(),
+            "client limit must run before eligibility so anonymous traffic cannot burn identity budget"
+        );
+    }
+
+    #[test]
+    fn test_magic_link_flow_client_limit_counts_malformed_or_oversized_posts() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        store_magic_flow_active_user("magic@example.com");
+
+        let mut options = expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        options.insert("client_limit".to_string(), Value::Int(1));
+        options.insert("request_body_limit".to_string(), Value::Int(32));
+        let mut invoke = invoke_test_flow;
+        run_magic_link_flow(
+            &[
+                magic_flow_request(
+                    "POST",
+                    "/email-login",
+                    "this-body-is-deliberately-far-too-large-for-the-configured-limit",
+                ),
+                Value::Map(options.clone()),
+            ],
+            &mut invoke,
+        )
+        .expect("oversized request should remain publicly generic");
+        clear_magic_link_flow_test_events();
+
+        run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                Value::Map(options),
+            ],
+            &mut invoke,
+        )
+        .expect("subsequent client-limited request should remain generic");
+        assert!(
+            magic_link_flow_test_events().is_empty(),
+            "every request must consume client budget before body or eligibility processing"
+        );
+    }
+
+    #[test]
+    fn test_magic_link_flow_padding_is_best_effort_and_delivery_can_exceed_it() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+
+        let mut padded_options =
+            expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        padded_options.insert("generic_response_floor_ms".to_string(), Value::Int(20));
+        let started = std::time::Instant::now();
+        let mut invoke = invoke_test_flow;
+        run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=absent%40example.com"),
+                Value::Map(padded_options),
+            ],
+            &mut invoke,
+        )
+        .expect("unknown identity should receive a generic padded response");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(20));
+
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        store_magic_flow_active_user("magic@example.com");
+        let mut slow_options = expect_map(magic_flow_options(
+            test_flow_deliver_slow,
+            test_flow_authorize,
+        ));
+        slow_options.insert("generic_response_floor_ms".to_string(), Value::Int(10));
+        let started = std::time::Instant::now();
+        run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                Value::Map(slow_options),
+            ],
+            &mut invoke,
+        )
+        .expect("slow delivery should still return the generic response");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(30),
+            "padding must not be documented or implemented as a preemptive callback timeout"
+        );
+    }
+
+    #[test]
+    fn test_magic_link_flow_uses_base_url_not_request_host_for_delivery() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        store_magic_flow_active_user("magic@example.com");
+
+        let mut req = expect_map(magic_flow_request(
+            "POST",
+            "/email-login",
+            "email=magic%40example.com",
+        ));
+        req.insert(
+            "headers".to_string(),
+            Value::Map(HashMap::from([
+                (
+                    "host".to_string(),
+                    Value::String("attacker.example".to_string()),
+                ),
+                (
+                    "x-forwarded-proto".to_string(),
+                    Value::String("https".to_string()),
+                ),
+            ])),
+        );
+
+        let mut invoke = invoke_test_flow;
+        run_magic_link_flow(
+            &[
+                Value::Map(req),
+                magic_flow_options(test_flow_deliver, test_flow_authorize),
+            ],
+            &mut invoke,
+        )
+        .expect("request flow should deliver using trusted base_url");
+        let delivery = magic_link_flow_test_events()
+            .into_iter()
+            .find(|event| event.starts_with("deliver:"))
+            .expect("delivery event should exist");
+        assert!(delivery.starts_with("deliver:https://auth.example.com/email-login/consume#token="));
+        assert!(!delivery.contains("attacker.example"));
+    }
+
+    #[test]
+    fn test_magic_link_flow_uses_site_url_when_base_url_is_omitted() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let previous_site = std::env::var("SITE_URL").ok();
+        unsafe {
+            std::env::set_var("SITE_URL", "https://site.example.com");
+        }
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        store_magic_flow_active_user("magic@example.com");
+
+        let mut options = expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        options.remove("base_url");
+        let mut invoke = invoke_test_flow;
+        let result = run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                Value::Map(options),
+            ],
+            &mut invoke,
+        );
+
+        match previous_site {
+            Some(value) => unsafe {
+                std::env::set_var("SITE_URL", value);
+            },
+            None => unsafe {
+                std::env::remove_var("SITE_URL");
+            },
+        }
+
+        result.expect("request flow should use SITE_URL as trusted origin");
+        let delivery = magic_link_flow_test_events()
+            .into_iter()
+            .find(|event| event.starts_with("deliver:"))
+            .expect("delivery event should exist");
+        assert!(delivery.starts_with("deliver:https://site.example.com/email-login/consume#token="));
+    }
+
+    #[test]
+    fn test_magic_link_flow_rejects_missing_or_unsafe_base_url() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let previous_site = std::env::var("SITE_URL").ok();
+        unsafe {
+            std::env::remove_var("SITE_URL");
+        }
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let mut options = expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        options.remove("base_url");
+        let mut invoke = invoke_test_flow;
+        let missing = run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                Value::Map(options),
+            ],
+            &mut invoke,
+        )
+        .expect_err("missing base_url and SITE_URL should fail closed");
+        assert!(missing.to_string().contains("base_url is required"));
+
+        let mut unsafe_options =
+            expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        unsafe_options.insert(
+            "base_url".to_string(),
+            Value::String("http://attacker.example".to_string()),
+        );
+        let unsafe_result = run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                Value::Map(unsafe_options),
+            ],
+            &mut invoke,
+        )
+        .expect_err("unsafe base_url should fail closed");
+        assert!(unsafe_result.to_string().contains("trusted http(s) origin"));
+
+        match previous_site {
+            Some(value) => unsafe {
+                std::env::set_var("SITE_URL", value);
+            },
+            None => unsafe {
+                std::env::remove_var("SITE_URL");
+            },
+        }
+    }
+
+    #[test]
+    fn test_magic_link_flow_rejects_non_positive_integer_options() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let integer_keys = [
+            "ttl_seconds",
+            "request_body_limit",
+            "client_limit",
+            "client_window_seconds",
+            "identity_limit",
+            "identity_window_seconds",
+            "generic_response_floor_ms",
+            "delivery_budget_hint_seconds",
+        ];
+        for key in integer_keys {
+            for value in [0, -1] {
+                let mut options =
+                    expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+                options.insert(key.to_string(), Value::Int(value));
+                let mut invoke = invoke_test_flow;
+                let err = run_magic_link_flow(
+                    &[
+                        magic_flow_request("GET", "/email-login", ""),
+                        Value::Map(options),
+                    ],
+                    &mut invoke,
+                )
+                .expect_err("non-positive integer option should be rejected");
+                assert!(
+                    err.to_string().contains(key) && err.to_string().contains("must be > 0"),
+                    "unexpected error for {key}={value}: {err}"
+                );
+            }
+        }
+
+        for key in ["session_ttl", "cookie_max_age"] {
+            for value in [0, -1] {
+                let mut options =
+                    expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+                options.insert(
+                    "session_options".to_string(),
+                    Value::Map(HashMap::from([(key.to_string(), Value::Int(value))])),
+                );
+                let mut invoke = invoke_test_flow;
+                let err = run_magic_link_flow(
+                    &[
+                        magic_flow_request("GET", "/email-login", ""),
+                        Value::Map(options),
+                    ],
+                    &mut invoke,
+                )
+                .expect_err("non-positive session integer option should be rejected");
+                assert!(
+                    err.to_string().contains(key) && err.to_string().contains("must be > 0"),
+                    "unexpected error for session_options.{key}={value}: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_magic_link_flow_rejects_unknown_options() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let mut options = expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        options.insert("client_limti".to_string(), Value::Int(10));
+        let mut invoke = invoke_test_flow;
+        let err = run_magic_link_flow(
+            &[
+                magic_flow_request("GET", "/email-login", ""),
+                Value::Map(options),
+            ],
+            &mut invoke,
+        )
+        .expect_err("unknown security options must not be ignored");
+        assert!(err.to_string().contains("unknown option \"client_limti\""));
+
+        let mut nested_options =
+            expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        nested_options.insert(
+            "session_options".to_string(),
+            Value::Map(HashMap::from([(
+                "cookie_max_ag".to_string(),
+                Value::Int(900),
+            )])),
+        );
+        let nested_err = run_magic_link_flow(
+            &[
+                magic_flow_request("GET", "/email-login", ""),
+                Value::Map(nested_options),
+            ],
+            &mut invoke,
+        )
+        .expect_err("unknown session security options must not be ignored");
+        assert!(nested_err
+            .to_string()
+            .contains("unknown session option \"cookie_max_ag\""));
+    }
+
+    #[test]
+    fn test_magic_link_flow_sanitizes_callback_errors() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        store_magic_flow_active_user("magic@example.com");
+
+        let mut request_options =
+            expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        request_options.insert(
+            "eligible".to_string(),
+            flow_native("eligible_errors", test_flow_callback_errors),
+        );
+        let mut invoke = invoke_test_flow;
+        let request_response = run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                Value::Map(request_options),
+            ],
+            &mut invoke,
+        )
+        .expect("eligibility callback diagnostics must not escape publicly");
+        let request_map = expect_map(request_response);
+        assert_eq!(map_int(&request_map, "status"), 200);
+        assert!(!map_string(&request_map, "body").contains("private callback"));
+
+        run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                magic_flow_options(test_flow_deliver, test_flow_authorize),
+            ],
+            &mut invoke,
+        )
+        .expect("request flow should issue a token");
+        let token = extract_delivered_token();
+        let mut consume_options =
+            expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        consume_options.insert(
+            "authorize".to_string(),
+            flow_native("authorize_errors", test_flow_callback_errors),
+        );
+        let consume_response = run_magic_link_flow(
+            &[
+                magic_flow_request(
+                    "POST",
+                    "/email-login/consume",
+                    &format!("token={}", urlencoding::encode(&token)),
+                ),
+                Value::Map(consume_options),
+            ],
+            &mut invoke,
+        )
+        .expect("authorization callback diagnostics must not escape publicly");
+        let consume_map = expect_map(consume_response);
+        assert_eq!(map_int(&consume_map, "status"), 302);
+        assert_eq!(header_string(&consume_map, "Location"), "/email-login");
+    }
+
+    #[test]
+    fn test_magic_link_flow_binds_session_principal_to_consumed_identity() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        store_magic_flow_active_user("magic@example.com");
+
+        let mut invoke = invoke_test_flow;
+        run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                magic_flow_options(test_flow_deliver, test_flow_authorize_conflicting_principal),
+            ],
+            &mut invoke,
+        )
+        .expect("request flow should issue a token");
+        let token = extract_delivered_token();
+        let response = run_magic_link_flow(
+            &[
+                magic_flow_request(
+                    "POST",
+                    "/email-login/consume",
+                    &format!("token={}", urlencoding::encode(&token)),
+                ),
+                magic_flow_options(test_flow_deliver, test_flow_authorize_conflicting_principal),
+            ],
+            &mut invoke,
+        )
+        .expect("consume flow should create a bound session");
+
+        let response_map = expect_map(response);
+        let signed_pair = header_string(&response_map, "Set-Cookie")
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let session_id = get_session_id_from_request(&request_with_cookie(&signed_pair))
+            .expect("session cookie should verify");
+        let session = get_session_by_id(&session_id).expect("session should persist");
+        assert_eq!(session.user_id, "local:flow:magic@example.com");
+        assert_eq!(session.provider, "local");
+        assert_eq!(session.email.as_deref(), Some("magic@example.com"));
+        assert!(
+            session.data_json.contains("admin"),
+            "app claims should remain extensible"
+        );
+    }
+
+    #[test]
+    fn test_magic_link_flow_authorize_rejection_keeps_token_consumed() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        let module = init();
+        store_magic_flow_active_user("magic@example.com");
+
+        let mut invoke = invoke_test_flow;
+        run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                magic_flow_options(test_flow_deliver, test_flow_authorize_rejects),
+            ],
+            &mut invoke,
+        )
+        .expect("request flow should succeed");
+        let token = extract_delivered_token();
+        let consume_response = run_magic_link_flow(
+            &[
+                magic_flow_request(
+                    "POST",
+                    "/email-login/consume",
+                    &format!("token={}", urlencoding::encode(&token)),
+                ),
+                magic_flow_options(test_flow_deliver, test_flow_authorize_rejects),
+            ],
+            &mut invoke,
+        )
+        .expect("authorization rejection should redirect to failure");
+        let consume_map = expect_map(consume_response);
+        assert_eq!(map_int(&consume_map, "status"), 302);
+        assert_eq!(header_string(&consume_map, "Location"), "/email-login");
+        assert_eq!(header_string(&consume_map, "Set-Cookie"), "");
+
+        let consume_magic_link = module_fn(&module, "consume_magic_link");
+        assert_eq!(
+            result_err_string(consume_magic_link(&[Value::String(token)]).unwrap()),
+            INVALID_MAGIC_LINK_TOKEN,
+            "authorize rejection must not restore the token"
+        );
+    }
+
+    #[test]
+    fn test_magic_link_flow_session_options_bound_persisted_ttl_and_cookie_max_age() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_auth(AuthConfig {
+            session_secret: "test-secret".to_string(),
+            cookie_secure: false,
+            session_ttl: 3600,
+            max_session_ttl: Some(600),
+            ..AuthConfig::default()
+        });
+        store_magic_flow_active_user("magic@example.com");
+
+        let mut options = expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        options.insert(
+            "session_options".to_string(),
+            Value::Map(HashMap::from([
+                ("session_ttl".to_string(), Value::Int(1200)),
+                ("cookie_max_age".to_string(), Value::Int(9000)),
+            ])),
+        );
+
+        let mut invoke = invoke_test_flow;
+        run_magic_link_flow(
+            &[
+                magic_flow_request("POST", "/email-login", "email=magic%40example.com"),
+                Value::Map(options.clone()),
+            ],
+            &mut invoke,
+        )
+        .expect("request flow should issue a token");
+        let token = extract_delivered_token();
+        let response = run_magic_link_flow(
+            &[
+                magic_flow_request(
+                    "POST",
+                    "/email-login/consume",
+                    &format!("token={}", urlencoding::encode(&token)),
+                ),
+                Value::Map(options),
+            ],
+            &mut invoke,
+        )
+        .expect("consume flow should create a bounded session");
+
+        let response_map = expect_map(response);
+        let cookie = header_string(&response_map, "Set-Cookie");
+        assert!(
+            cookie.contains("Max-Age=600"),
+            "cookie Max-Age should be capped to max_session_ttl: {cookie}"
+        );
+        let signed_pair = cookie.split(';').next().unwrap();
+        let session_id = get_session_id_from_request(&request_with_cookie(signed_pair))
+            .expect("signed session cookie should verify");
+        let session = get_session_by_id(&session_id).expect("session should persist");
+        assert_eq!(
+            session.expires_at - session.created_at,
+            600,
+            "persisted session TTL should be capped to max_session_ttl"
+        );
+    }
+
+    #[test]
+    fn test_magic_link_flow_invokes_ntnt_closures_with_interpreter_context() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+        store_magic_flow_active_user("magic@example.com");
+
+        let requested = eval_auth_test_source(
+            r#"
+import { magic_link_flow } from "std/auth"
+
+let req = map {
+  "method": "POST",
+  "path": "/email-login",
+  "body": "email=magic%40example.com",
+  "ip": "198.51.100.44",
+  "headers": map { "host": "app.test" }
+}
+
+let mut delivered = ""
+let resp = magic_link_flow(req, map {
+  "request_path": "/email-login",
+  "consume_path": "/email-login/consume",
+  "base_url": "https://auth.example.com",
+  "success_url": "/admin",
+  "failure_url": "/email-login",
+  "generic_response_floor_ms": 1,
+  "eligible": fn(email) { email == "magic@example.com" },
+  "deliver": fn(message) { delivered = message.url; Ok(()) },
+  "authorize": fn(identity) { Ok(map { "subject_id": identity.local_user_id, "email": identity.email }) }
+})
+
+map { "status": resp.status, "delivered": delivered }
+"#,
+        )
+        .expect("interpreter magic_link_flow request should run");
+        let requested = expect_map(requested);
+        assert_eq!(map_int(&requested, "status"), 200);
+        assert!(map_string(&requested, "delivered").contains("#token="));
+    }
+
+    #[test]
+    fn test_magic_link_flow_supports_aliased_and_let_bound_dispatch() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let result = eval_auth_test_source(
+            r#"
+import { magic_link_flow as coordinated_login } from "std/auth"
+let flow = coordinated_login
+let req = map { "method": "GET", "path": "/email-login", "headers": map {} }
+let response = flow(req, map {
+  "request_path": "/email-login",
+  "consume_path": "/email-login/consume",
+  "base_url": "https://auth.example.com",
+  "success_url": "/admin",
+  "failure_url": "/email-login",
+  "eligible": fn(email) { true },
+  "deliver": fn(message) { Ok(()) },
+  "authorize": fn(identity) { Ok(map {}) }
+})
+response.status
+"#,
+        )
+        .expect("aliased, let-bound magic_link_flow should dispatch with interpreter context");
+        assert!(matches!(result, Value::Int(200)));
+    }
+
+    #[test]
+    fn test_magic_link_flow_user_shadowing_and_wrong_callback_shapes() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let shadowed = eval_auth_test_source(
+            r#"
+import { magic_link_flow } from "std/auth"
+let magic_link_flow = fn(req, options) { "shadowed" }
+magic_link_flow(map {}, map {})
+"#,
+        )
+        .expect("user-defined binding should shadow the stdlib coordinator");
+        assert!(matches!(shadowed, Value::String(value) if value == "shadowed"));
+
+        let wrong_shape = eval_auth_test_source(
+            r#"
+import { magic_link_flow } from "std/auth"
+let req = map {
+  "method": "POST",
+  "path": "/email-login",
+  "body": "email=magic%40example.com",
+  "ip": "198.51.100.77",
+  "headers": map {}
+}
+let response = magic_link_flow(req, map {
+  "request_path": "/email-login",
+  "consume_path": "/email-login/consume",
+  "base_url": "https://auth.example.com",
+  "success_url": "/admin",
+  "failure_url": "/email-login",
+  "generic_response_floor_ms": 1,
+  "eligible": fn(email) { map { "wrong": true } },
+  "deliver": fn(message) { Ok(()) },
+  "authorize": fn(identity) { Ok(map {}) }
+})
+response.status
+"#,
+        )
+        .expect("wrong callback return shape must be sanitized, not escape publicly");
+        assert!(matches!(wrong_shape, Value::Int(200)));
     }
 
     #[test]

@@ -1,0 +1,81 @@
+// Coordinated magic-link flow with std/auth.
+// Run: ntnt run examples/magic_link_flow.tnt
+// Visit: http://localhost:8080/email-login
+
+import { enable_auth, local_user, magic_link_flow } from "std/auth"
+import { configure_email, send_email } from "std/email"
+import { get_env } from "std/env"
+
+let session_secret = get_env("AUTH_SESSION_SECRET") ?? ""
+
+enable_auth([], "auth", map {
+    "session_secret": session_secret,
+    "session_store": get_env("AUTH_SESSION_STORE") ?? "memory",
+    "cookie_secure": get_env("AUTH_COOKIE_SECURE") == "true",
+    "success_url": "/admin",
+    "failure_url": "/email-login"
+})
+
+fn eligible_for_email_login(email) {
+    // Keep this narrow: decide only whether this normalized local identity may receive a link.
+    return is_ok(local_user(email))
+}
+
+fn deliver_magic_link(message) {
+    // Never log message.url: it contains the bearer token in the URL fragment.
+    configure_email(map {
+        "host": get_env("SMTP_HOST") ?? "",
+        "port": int(get_env("SMTP_PORT") ?? "587") ?? 587,
+        "username": get_env("SMTP_USER") ?? "",
+        "password": get_env("SMTP_PASS") ?? "",
+        "from": get_env("SMTP_FROM") ?? "",
+        "from_name": "Example App"
+    })
+    return send_email(map {
+        "to": message.to,
+        "subject": "Your sign-in link",
+        "text": "Open this link to continue: " + message.url,
+        "html": "<p><a href=\"" + message.url + "\">Continue signing in</a></p>"
+    })
+}
+
+fn authorize_admin(identity) {
+    // Re-read app policy here in real apps, e.g. admin_user_profiles.
+    // A valid local identity alone should not imply app or admin access.
+    if identity.email != (get_env("ADMIN_EMAIL") ?? "admin@example.com") {
+        return Err("not authorized")
+    }
+
+    return Ok(map {
+        "claims": map { "role": "admin" },
+        "data": map { "admin": true }
+    })
+}
+
+fn magic_link_options() {
+    return map {
+        "request_path": "/email-login",
+        "consume_path": "/email-login/consume",
+        "base_url": get_env("SITE_URL") ?? "http://localhost:8080",
+        "success_url": "/admin",
+        "failure_url": "/email-login",
+        "eligible": eligible_for_email_login,
+        "deliver": deliver_magic_link,
+        "authorize": authorize_admin
+    }
+}
+
+fn email_login(req) {
+    return magic_link_flow(req, magic_link_options())
+}
+
+fn admin(req) {
+    return "admin signed in"
+}
+
+get("/email-login", email_login)
+post("/email-login", email_login)
+get("/email-login/consume", email_login)
+post("/email-login/consume", email_login)
+get("/admin", admin)
+listen(8080)

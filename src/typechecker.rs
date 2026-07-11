@@ -4848,6 +4848,17 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 required(1)
             );
             sig!(
+                "magic_link_flow",
+                [
+                    "req" => Type::Any,
+                    "options" => Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Named("Response".to_string())
+            );
+            sig!(
                 "issue_password_reset",
                 [
                     "identifier" => Type::String,

@@ -43,6 +43,7 @@ Code examples demonstrating NTNT language features.
 |------|-------------|
 | [http_server.tnt](http_server.tnt) | REST API with routing, middleware, contracts |
 | [http_client.tnt](http_client.tnt) | HTTP client using fetch() |
+| [magic_link_flow.tnt](magic_link_flow.tnt) | Coordinated std/auth magic-link request and confirmation flow |
 | [postgres_demo.tnt](postgres_demo.tnt) | Database integration |
 | [redirect_demo.tnt](redirect_demo.tnt) | HTTP redirects |
 

@@ -301,6 +301,286 @@ pub(super) fn cleanup_expired_exchange_token_records(now: i64) -> std::result::R
     }
 }
 
+fn auth_rate_limit_storage_key(scope: &str, key_hash: &str) -> String {
+    format!("{scope}:{key_hash}")
+}
+
+fn validate_auth_rate_limit_parts(scope: &str, key_hash: &str) -> std::result::Result<(), String> {
+    if scope.trim().is_empty()
+        || !scope
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':'))
+    {
+        return Err("[auth] rate-limit scope is invalid".to_string());
+    }
+    if key_hash.len() != 64 || !key_hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("[auth] rate-limit key hash is invalid".to_string());
+    }
+    Ok(())
+}
+
+pub(super) fn increment_auth_rate_limit_record(
+    scope: &str,
+    key_hash: &str,
+    window_seconds: i64,
+    now: i64,
+) -> std::result::Result<AuthRateBucket, String> {
+    validate_auth_rate_limit_parts(scope, key_hash)?;
+    let window_seconds = window_seconds.max(1);
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => {
+            let expires_at = now.saturating_add(window_seconds);
+            let storage_key = auth_rate_limit_storage_key(scope, key_hash);
+            let mut store = SESSION_STORE.lock().unwrap();
+            store.cleanup_expired_rate_limits(now);
+            // The cleanup pass deliberately retains the exact boundary. Resetting
+            // `expires_at <= now` here keeps the first hit of the new window atomic
+            // and matches the SQLite/PostgreSQL/Redis implementations.
+            let bucket = store
+                .rate_limits
+                .entry(storage_key)
+                .or_insert(AuthRateBucket {
+                    count: 0,
+                    expires_at,
+                });
+            if bucket.expires_at <= now {
+                bucket.count = 0;
+                bucket.expires_at = expires_at;
+            }
+            bucket.count = bucket.count.saturating_add(1);
+            Ok(bucket.clone())
+        }
+        AuthStorageBackend::Sqlite => {
+            increment_auth_rate_limit_sqlite(scope, key_hash, window_seconds, now)
+        }
+        AuthStorageBackend::Postgres => {
+            increment_auth_rate_limit_postgres(scope, key_hash, window_seconds, now)
+        }
+        AuthStorageBackend::Redis => {
+            increment_auth_rate_limit_redis(scope, key_hash, window_seconds, now)
+        }
+    }
+}
+
+pub(super) fn cleanup_expired_rate_limit_records(now: i64) -> std::result::Result<u64, String> {
+    match active_auth_storage_backend() {
+        AuthStorageBackend::Memory => {
+            let mut store = SESSION_STORE.lock().unwrap();
+            Ok(store.cleanup_expired_rate_limits(now) as u64)
+        }
+        AuthStorageBackend::Sqlite => cleanup_expired_rate_limits_sqlite(now),
+        AuthStorageBackend::Postgres => cleanup_expired_rate_limits_postgres(now),
+        AuthStorageBackend::Redis => cleanup_expired_rate_limits_redis(now),
+    }
+}
+
+fn increment_auth_rate_limit_sqlite(
+    scope: &str,
+    key_hash: &str,
+    window_seconds: i64,
+    now: i64,
+) -> std::result::Result<AuthRateBucket, String> {
+    let mut conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_mut().ok_or("SQLite not initialized")?;
+    let expires_at = now.saturating_add(window_seconds);
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("[auth] failed to begin rate-limit transaction: {}", e))?;
+
+    tx.execute(
+        "INSERT INTO auth_rate_limits (scope, key_hash, count, expires_at)
+         VALUES (?1, ?2, 1, ?3)
+         ON CONFLICT(scope, key_hash) DO UPDATE SET
+            count = CASE
+                WHEN auth_rate_limits.expires_at <= ?4 THEN 1
+                ELSE auth_rate_limits.count + 1
+            END,
+            expires_at = CASE
+                WHEN auth_rate_limits.expires_at <= ?4 THEN excluded.expires_at
+                ELSE auth_rate_limits.expires_at
+            END",
+        rusqlite::params![scope, key_hash, expires_at, now],
+    )
+    .map_err(|e| format!("[auth] failed to increment rate-limit counter: {}", e))?;
+
+    let bucket = tx
+        .query_row(
+            "SELECT count, expires_at FROM auth_rate_limits WHERE scope = ?1 AND key_hash = ?2",
+            rusqlite::params![scope, key_hash],
+            |row| {
+                Ok(AuthRateBucket {
+                    count: row.get(0)?,
+                    expires_at: row.get(1)?,
+                })
+            },
+        )
+        .map_err(|e| format!("[auth] failed to read rate-limit counter: {}", e))?;
+    tx.commit()
+        .map_err(|e| format!("[auth] failed to commit rate-limit transaction: {}", e))?;
+    Ok(bucket)
+}
+
+fn increment_auth_rate_limit_postgres(
+    scope: &str,
+    key_hash: &str,
+    window_seconds: i64,
+    now: i64,
+) -> std::result::Result<AuthRateBucket, String> {
+    let url_guard = POSTGRES_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
+    let expires_at = now.saturating_add(window_seconds);
+    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let row = client
+        .query_one(
+            "INSERT INTO auth_rate_limits (scope, key_hash, count, expires_at)
+             VALUES ($1, $2, 1, $3)
+             ON CONFLICT(scope, key_hash) DO UPDATE SET
+                count = CASE
+                    WHEN auth_rate_limits.expires_at <= $4 THEN 1
+                    ELSE auth_rate_limits.count + 1
+                END,
+                expires_at = CASE
+                    WHEN auth_rate_limits.expires_at <= $4 THEN EXCLUDED.expires_at
+                    ELSE auth_rate_limits.expires_at
+                END
+             RETURNING count, expires_at",
+            &[&scope, &key_hash, &expires_at, &now],
+        )
+        .map_err(|e| format!("[auth] failed to increment rate-limit counter: {}", e))?;
+    Ok(AuthRateBucket {
+        count: row.get(0),
+        expires_at: row.get(1),
+    })
+}
+
+fn auth_rate_limit_redis_key(scope: &str, key_hash: &str) -> String {
+    format!("ntnt:auth_rate_limit:{}:{}", scope, key_hash)
+}
+
+fn increment_auth_rate_limit_redis(
+    scope: &str,
+    key_hash: &str,
+    window_seconds: i64,
+    now: i64,
+) -> std::result::Result<AuthRateBucket, String> {
+    let url_guard = REDIS_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
+    let client =
+        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
+    let mut conn = client
+        .get_connection()
+        .map_err(|e| format!("Redis connection error: {}", e))?;
+
+    let expires_at = now.saturating_add(window_seconds);
+    let key = auth_rate_limit_redis_key(scope, key_hash);
+    let lua_script = r#"
+        local key = KEYS[1]
+        local scope = ARGV[1]
+        local key_hash = ARGV[2]
+        local now = tonumber(ARGV[3])
+        local expires_at = tonumber(ARGV[4])
+
+        local existing_expires_at = tonumber(redis.call('HGET', key, 'expires_at'))
+        local count
+        if not existing_expires_at or existing_expires_at <= now then
+            count = 1
+            redis.call('HSET', key,
+                'scope', scope,
+                'key_hash', key_hash,
+                'count', count,
+                'expires_at', expires_at)
+        else
+            count = redis.call('HINCRBY', key, 'count', 1)
+            expires_at = existing_expires_at
+            redis.call('HSET', key, 'scope', scope, 'key_hash', key_hash, 'expires_at', expires_at)
+        end
+        redis.call('EXPIREAT', key, expires_at)
+        return {count, expires_at}
+    "#;
+
+    let values: Vec<i64> = redis::Script::new(lua_script)
+        .key(&key)
+        .arg(scope)
+        .arg(key_hash)
+        .arg(now)
+        .arg(expires_at)
+        .invoke(&mut conn)
+        .map_err(|e| format!("Redis rate-limit EVAL error: {}", e))?;
+
+    let count = values.first().copied().unwrap_or(0);
+    let expires_at = values.get(1).copied().unwrap_or(expires_at);
+    Ok(AuthRateBucket { count, expires_at })
+}
+
+fn cleanup_expired_rate_limits_sqlite(now: i64) -> std::result::Result<u64, String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+    let count = conn
+        .execute(
+            "DELETE FROM auth_rate_limits WHERE expires_at < ?1",
+            rusqlite::params![now],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(count as u64)
+}
+
+fn cleanup_expired_rate_limits_postgres(now: i64) -> std::result::Result<u64, String> {
+    let url_guard = POSTGRES_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
+    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    client
+        .execute(
+            "DELETE FROM auth_rate_limits WHERE expires_at < $1",
+            &[&now],
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn cleanup_expired_rate_limits_redis(now: i64) -> std::result::Result<u64, String> {
+    let url_guard = REDIS_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
+    let client =
+        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
+    let mut conn = client
+        .get_connection()
+        .map_err(|e| format!("Redis connection error: {}", e))?;
+
+    let mut count = 0u64;
+    let mut cursor = 0u64;
+    loop {
+        let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg("ntnt:auth_rate_limit:*")
+            .arg("COUNT")
+            .arg(100)
+            .query(&mut conn)
+            .map_err(|e| format!("Redis SCAN error: {}", e))?;
+
+        for key in keys {
+            let expires_at: Option<i64> = redis::cmd("HGET")
+                .arg(&key)
+                .arg("expires_at")
+                .query(&mut conn)
+                .map_err(|e| format!("Redis HGET error: {}", e))?;
+            if expires_at.is_some_and(|expires_at| expires_at < now) {
+                let removed: u64 = redis::cmd("DEL")
+                    .arg(&key)
+                    .query(&mut conn)
+                    .map_err(|e| format!("Redis DEL error: {}", e))?;
+                count += removed;
+            }
+        }
+
+        cursor = new_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    Ok(count)
+}
+
 /// Store OAuth state
 pub fn store_oauth_state(
     state: &str,
@@ -1580,6 +1860,11 @@ fn cleanup_expired_oauth_states_postgres(cutoff: i64) -> std::result::Result<u64
 pub fn cleanup_expired_exchange_tokens() -> std::result::Result<u64, String> {
     let now = chrono::Utc::now().timestamp();
     cleanup_expired_exchange_token_records(now)
+}
+
+pub fn cleanup_expired_rate_limits() -> std::result::Result<u64, String> {
+    let now = chrono::Utc::now().timestamp();
+    cleanup_expired_rate_limit_records(now)
 }
 
 fn cleanup_expired_exchange_tokens_sqlite(cutoff: i64) -> std::result::Result<u64, String> {

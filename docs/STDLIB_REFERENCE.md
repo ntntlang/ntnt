@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.5.1
+> Last updated: v0.5.2
 
 ## Table of Contents
 
@@ -1850,6 +1850,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`local_user`](#localuser) | Load a safe local identity payload, including non-secret extension metadata. |
 | [`logout_all`](#logoutall) | Log out all sessions for the current user. |
 | [`logout_user`](#logoutuser) | Log out the current user and return a redirect response. |
+| [`magic_link_flow`](#magiclinkflow) | Coordinate a secure email magic-link request and confirmation flow. |
 | [`oauth`](#oauth) | Create an OAuth provider configuration. |
 | [`oauth_discover`](#oauthdiscover) | Create an OAuth provider using OIDC Discovery. |
 | [`oauth_exchange`](#oauthexchange) | Exchange OAuth authorization code for tokens and user info. |
@@ -2508,7 +2509,7 @@ Initialize the authentication system with OAuth providers.
 
 Stores provider configurations for use by auth handlers. After calling this, you can use auth_start, auth_callback, and auth_logout with routes to enable OAuth login.
 
-Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url". Built-in presets: "consumer", "admin", "internal", "strict". Supported option keys: session_secret, session_ttl, refresh_ttl, sliding_sessions, refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, route_prefix, login_page, login_page_title, login_page_logo_url, login_page_heading, login_page_copy, cookie_name, cookie_secure, cookie_same_site, session_store, store_tokens, health_endpoint. When a preset string is used, the overrides map is applied on top of the preset.
+Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url". Built-in presets: "consumer", "admin", "internal", "strict". Supported option keys: session_secret, session_ttl, refresh_ttl, sliding_sessions, refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, route_prefix, login_page, login_page_title, login_page_logo_url, login_page_heading, login_page_copy, cookie_name, cookie_secure, cookie_same_site, cookie_http_only, session_store, store_tokens, health_endpoint. When a preset string is used, the overrides map is applied on top of the preset.
 
 **Parameters:**
 
@@ -2859,6 +2860,40 @@ logout_user(req)  // Log out and redirect to home
 **See also:** `get_user`, `get_session`
 
 *Since v0.3.11*
+
+---
+
+#### `magic_link_flow`
+
+```ntnt
+magic_link_flow(req: Request, options: Map) -> Response
+```
+
+Coordinate a secure email magic-link request and confirmation flow.
+
+Mount this same helper on your request route and consume route. It owns the default request form, fragment-clearing confirmation page, bounded form parsing, generic non-enumerating request response, token issue/consume ordering, delivery cleanup, storage-backed rate limiting, trusted-origin link construction, and request-aware session creation. Apps keep authorization policy in the `authorize(identity)` closure. The coordinator forces provider, subject_id, and canonical email from the consumed identity; authorization may add only app-owned session extensions. Set `base_url` to a trusted site origin, or configure SITE_URL; request Host and forwarded headers are not used to build outbound links. `budget_hint_seconds` is a budget the delivery callback must enforce, not a preemptive runtime timeout.
+
+**Parameters:**
+
+- `req` — The current HTTP request map
+- `options` — Map with request_path, consume_path, base_url, success_url, failure_url, eligible, deliver, authorize, and optional rate/session/UI settings
+
+**Returns:** Response for the request, confirmation, or consume step
+
+**Examples:**
+
+```ntnt
+magic_link_flow(req, map { "base_url": "https://app.example.com", "eligible": fn(email) { true }, "deliver": fn(message) { deliver_login_email(message) }, "authorize": fn(identity) { Ok(map {}) } })  // => Response  // Coordinate a conventional magic-link flow
+magic_link_flow(req, map { "request_path": "/admin/email-login", "consume_path": "/admin/email-login/consume", "base_url": "https://admin.example.com", "success_url": "/admin", "failure_url": "/admin/email-login", "eligible": fn(email) { is_admin_email(email) }, "deliver": fn(message) { deliver_admin_link(message) }, "authorize": fn(identity) { authorize_admin(identity) } })  // => Response  // Keep administrator policy in app callbacks
+```
+
+**Errors:**
+
+- **TypeError**: eligible must be a function — *Fix: Pass eligible, deliver, and authorize closures in the options map*
+
+**See also:** `issue_magic_link`, `consume_magic_link`, `sign_in_session`
+
+*Since v0.5.2*
 
 ---
 

@@ -126,6 +126,7 @@ pub fn init_auth(config: AuthConfig) {
                     let now = chrono::Utc::now().timestamp();
                     let removed_sessions = s.cleanup_expired(now);
                     let removed_challenges = s.cleanup_expired_auth_challenges(now);
+                    let removed_rate_limits = s.cleanup_expired_rate_limits(now);
                     s.cleanup_expired_oauth_states(now - 600);
                     s.cleanup_expired_exchange_tokens(now);
                     if removed_sessions > 0 {
@@ -135,6 +136,12 @@ pub fn init_auth(config: AuthConfig) {
                         eprintln!(
                             "[auth] Cleaned up {} expired auth challenge(s)",
                             removed_challenges
+                        );
+                    }
+                    if removed_rate_limits > 0 {
+                        eprintln!(
+                            "[auth] Cleaned up {} expired auth rate-limit counter(s)",
+                            removed_rate_limits
                         );
                     }
                 }
@@ -316,6 +323,24 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
         [],
     )
     .map_err(|e| format!("Failed to create auth_challenges index: {}", e))?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS auth_rate_limits (
+            scope TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            count INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            PRIMARY KEY(scope, key_hash)
+        )",
+        [],
+    )
+    .map_err(|e| format!("Failed to create auth_rate_limits table: {}", e))?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_auth_rate_limits_expires ON auth_rate_limits(expires_at)",
+        [],
+    )
+    .map_err(|e| format!("Failed to create auth_rate_limits index: {}", e))?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS auth_local_identities (
@@ -542,6 +567,26 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             &[],
         )
         .ok();
+
+    client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS auth_rate_limits (
+            scope TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            count BIGINT NOT NULL,
+            expires_at BIGINT NOT NULL,
+            PRIMARY KEY(scope, key_hash)
+        )",
+            &[],
+        )
+        .map_err(|e| format!("Failed to create auth_rate_limits table: {}", e))?;
+
+    client
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_auth_rate_limits_expires ON auth_rate_limits(expires_at)",
+            &[],
+        )
+        .map_err(|e| format!("Failed to create auth_rate_limits index: {}", e))?;
 
     client
         .execute(
