@@ -4698,7 +4698,7 @@ pub fn init() -> HashMap<String, Value> {
     // @returns Response for the request, confirmation, or consume step
     // @error TypeError ~ "eligible must be a function" fix: "Pass eligible, deliver, and authorize closures in the options map"
     // @see_also issue_magic_link, consume_magic_link, sign_in_session
-    // @since v0.5.2
+    // @since v0.5.1
     // @tags #auth, #local-auth, #magic-link, #passwordless, #security
     // @example magic_link_flow(req, map { "base_url": "https://app.example.com", "eligible": fn(email) { true }, "deliver": fn(message) { deliver_login_email(message) }, "authorize": fn(identity) { Ok(map {}) } }) => Response ~ "Coordinate a conventional magic-link flow"
     // @example magic_link_flow(req, map { "request_path": "/admin/email-login", "consume_path": "/admin/email-login/consume", "base_url": "https://admin.example.com", "success_url": "/admin", "failure_url": "/admin/email-login", "eligible": fn(email) { is_admin_email(email) }, "deliver": fn(message) { deliver_admin_link(message) }, "authorize": fn(identity) { authorize_admin(identity) } }) => Response ~ "Keep administrator policy in app callbacks"

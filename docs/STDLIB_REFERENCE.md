@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.5.2
+> Last updated: v0.5.1
 
 ## Table of Contents
 
@@ -2893,7 +2893,7 @@ magic_link_flow(req, map { "request_path": "/admin/email-login", "consume_path":
 
 **See also:** `issue_magic_link`, `consume_magic_link`, `sign_in_session`
 
-*Since v0.5.2*
+*Since v0.5.1*
 
 ---
 

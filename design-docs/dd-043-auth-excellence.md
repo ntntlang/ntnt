@@ -160,7 +160,7 @@ Goal: let apps implement passwordless email sign-in without app-owned authentica
 - [x] Preserve backend parity across memory, SQLite, PostgreSQL, and Redis/Valkey
 - [x] Keep the low-level boundary explicit: apps using only `issue_magic_link(...)` / `consume_magic_link(...)` own delivery, throttling, authorization, confirmation UX, and session creation
 
-### v0.5.2 Addendum — Coordinated Magic-Link Flow
+### v0.5.1 Coordinated Magic-Link Flow
 
 Goal: make the secure path the short path. Most applications should not need to rebuild generic request throttling, generic public outcomes with best-effort timing equalization, fragment confirmation, replay handling, delivery cleanup, and session orchestration around the v0.5.1 primitives.
 
