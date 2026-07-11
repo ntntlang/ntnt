@@ -143,6 +143,23 @@ Goal: ship reset password securely enough to use, without owning email delivery 
 - [x] Add local reset tests and backend contract coverage across memory, SQLite, PostgreSQL, and Redis/Valkey
 - Deferred post-v0.4.9 unless app/template pressure proves them: force-password-change-after-reset policy, TOTP reset-on-reset policy, and security-event emission
 
+### v0.5.1 Addendum — Magic-Link Essentials
+
+Goal: let apps implement passwordless email sign-in without app-owned authentication token tables.
+
+- [x] Add `issue_magic_link(identifier, options?) -> Result<Map, String>` for active local identities
+- [x] Add `consume_magic_link(token) -> Result<Map, String>` with a safe local-identity result and no implicit session or role grant
+- [x] Store only opaque selectors and verifier hashes in auth-owned storage
+- [x] Enforce a 15-minute default TTL, one-hour maximum, atomic one-time consumption, replay rejection, and sibling-token invalidation
+- [x] Recheck active identity state inside each backend's atomic issuance and consumption path
+- [x] Return generic invalid-token errors and sanitized, distinguishable storage-unavailable errors for password resets and magic links
+- [x] Persist password-reset and magic-link records in the shared one-time-token substrate with an explicit purpose discriminator so tokens cannot cross purposes
+- [x] Migrate legacy durable password-reset rows atomically, serialize concurrent PostgreSQL startup migrations, drop legacy SQL tables, and purge legacy Redis keys so upgrades cannot resurrect tokens after downgrade
+- [x] Recheck account state during consumption and permanently invalidate links rejected for a non-active identity
+- [x] Revoke outstanding password-reset and magic-link tokens whenever credentials are changed or reset
+- [x] Preserve backend parity across memory, SQLite, PostgreSQL, and Redis/Valkey
+- [x] Keep app policy outside `std/auth`: apps own email delivery, request throttling, authorization/group checks, confirmation UX, and `sign_in_session(...)`
+
 ### Template Integration Proof
 
 Completed in `larimonious/larri-site-template` PR #1 (`feat(auth): move template admin to std/auth primitives`), merged before the final v0.4.9 release-readiness pass.

@@ -197,7 +197,7 @@ fn run_postgres_migration(
 
 // Initialize SQLite session storage
 fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
-    let conn =
+    let mut conn =
         rusqlite::Connection::open(path).map_err(|e| format!("Failed to open SQLite: {}", e))?;
 
     conn.execute("PRAGMA foreign_keys = ON", [])
@@ -348,7 +348,8 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
     .map_err(|e| format!("Failed to create auth_local_credentials table: {}", e))?;
 
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS auth_local_password_reset_tokens (
+        "CREATE TABLE IF NOT EXISTS auth_local_one_time_tokens (
+            purpose TEXT NOT NULL CHECK (purpose IN ('password_reset', 'magic_link')),
             selector TEXT PRIMARY KEY,
             local_user_id TEXT NOT NULL,
             token_hash TEXT NOT NULL,
@@ -358,24 +359,56 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
         )",
         [],
     )
-    .map_err(|e| {
-        format!(
-            "Failed to create auth_local_password_reset_tokens table: {}",
-            e
+    .map_err(|e| format!("Failed to create auth_local_one_time_tokens table: {}", e))?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_expires ON auth_local_one_time_tokens(purpose, expires_at)",
+        [],
+    )
+    .map_err(|e| format!("Failed to create auth_local_one_time_tokens index: {}", e))?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_user_purpose ON auth_local_one_time_tokens(local_user_id, purpose)",
+        [],
+    )
+    .map_err(|e| format!("Failed to create auth_local_one_time_tokens user index: {}", e))?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_one_magic_link ON auth_local_one_time_tokens(local_user_id) WHERE purpose = 'magic_link'",
+        [],
+    )
+    .map_err(|e| format!("Failed to create auth_local_one_time_tokens magic-link index: {}", e))?;
+
+    let migration = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("Failed to begin local one-time token migration: {}", e))?;
+    let has_legacy_reset_table: bool = migration
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'auth_local_password_reset_tokens')",
+            [],
+            |row| row.get::<_, i64>(0),
         )
-    })?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_auth_local_password_reset_tokens_expires ON auth_local_password_reset_tokens(expires_at)",
-        [],
-    )
-    .map_err(|e| format!("Failed to create auth_local_password_reset_tokens index: {}", e))?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_auth_local_password_reset_tokens_user ON auth_local_password_reset_tokens(local_user_id)",
-        [],
-    )
-    .map_err(|e| format!("Failed to create auth_local_password_reset_tokens user index: {}", e))?;
+        .map(|exists| exists != 0)
+        .map_err(|e| format!("Failed to inspect legacy password reset table: {}", e))?;
+    if has_legacy_reset_table {
+        migration
+            .execute(
+                "INSERT OR IGNORE INTO auth_local_one_time_tokens
+                 (purpose, selector, local_user_id, token_hash, created_at, expires_at)
+                 SELECT 'password_reset', selector, local_user_id, token_hash, created_at, expires_at
+                 FROM auth_local_password_reset_tokens",
+                [],
+            )
+            .map_err(|e| format!("Failed to migrate legacy password reset tokens: {}", e))?;
+        migration
+            .execute("DELETE FROM auth_local_password_reset_tokens", [])
+            .map_err(|e| format!("Failed to clear legacy password reset tokens: {}", e))?;
+        migration
+            .execute("DROP TABLE auth_local_password_reset_tokens", [])
+            .map_err(|e| format!("Failed to drop legacy password reset table: {}", e))?;
+    }
+    migration
+        .commit()
+        .map_err(|e| format!("Failed to commit local one-time token migration: {}", e))?;
 
     let mut sqlite_conn = SQLITE_CONN.lock().unwrap();
     *sqlite_conn = Some(conn);
@@ -543,7 +576,8 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
 
     client
         .execute(
-            "CREATE TABLE IF NOT EXISTS auth_local_password_reset_tokens (
+            "CREATE TABLE IF NOT EXISTS auth_local_one_time_tokens (
+            purpose TEXT NOT NULL CHECK (purpose IN ('password_reset', 'magic_link')),
             selector TEXT PRIMARY KEY,
             local_user_id TEXT NOT NULL REFERENCES auth_local_identities(id) ON DELETE CASCADE,
             token_hash TEXT NOT NULL,
@@ -552,30 +586,108 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
         )",
             &[],
         )
-        .map_err(|e| {
-            format!(
-                "Failed to create auth_local_password_reset_tokens table: {}",
-                e
+        .map_err(|e| format!("Failed to create auth_local_one_time_tokens table: {}", e))?;
+
+    client
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_expires ON auth_local_one_time_tokens(purpose, expires_at)",
+            &[],
+        )
+        .map_err(|e| format!("Failed to create auth_local_one_time_tokens expiry index: {}", e))?;
+
+    client
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_user_purpose ON auth_local_one_time_tokens(local_user_id, purpose)",
+            &[],
+        )
+        .map_err(|e| format!("Failed to create auth_local_one_time_tokens user index: {}", e))?;
+
+    client
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_one_magic_link ON auth_local_one_time_tokens(local_user_id) WHERE purpose = 'magic_link'",
+            &[],
+        )
+        .map_err(|e| format!("Failed to create auth_local_one_time_tokens magic-link index: {}", e))?;
+
+    let mut migration = client
+        .transaction()
+        .map_err(|e| format!("Failed to begin local one-time token migration: {}", e))?;
+    migration
+        .execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended('ntnt:auth:local-one-time-token-migration', 0))",
+            &[],
+        )
+        .map_err(|e| format!("Failed to lock local one-time token migration: {}", e))?;
+    let has_legacy_reset_table: bool = migration
+        .query_one(
+            "SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = 'auth_local_password_reset_tokens'
+            )",
+            &[],
+        )
+        .map_err(|e| format!("Failed to inspect legacy password reset table: {}", e))?
+        .get(0);
+    if has_legacy_reset_table {
+        migration
+            .execute(
+                "INSERT INTO auth_local_one_time_tokens
+                 (purpose, selector, local_user_id, token_hash, created_at, expires_at)
+                 SELECT 'password_reset', selector, local_user_id, token_hash, created_at, expires_at
+                 FROM auth_local_password_reset_tokens
+                 ON CONFLICT DO NOTHING",
+                &[],
             )
-        })?;
-
-    client
-        .execute(
-            "CREATE INDEX IF NOT EXISTS idx_auth_local_password_reset_tokens_expires ON auth_local_password_reset_tokens(expires_at)",
-            &[],
-        )
-        .ok();
-
-    client
-        .execute(
-            "CREATE INDEX IF NOT EXISTS idx_auth_local_password_reset_tokens_user ON auth_local_password_reset_tokens(local_user_id)",
-            &[],
-        )
-        .ok();
+            .map_err(|e| format!("Failed to migrate legacy password reset tokens: {}", e))?;
+        migration
+            .execute("DELETE FROM auth_local_password_reset_tokens", &[])
+            .map_err(|e| format!("Failed to clear legacy password reset tokens: {}", e))?;
+        migration
+            .execute("DROP TABLE auth_local_password_reset_tokens", &[])
+            .map_err(|e| format!("Failed to drop legacy password reset table: {}", e))?;
+    }
+    migration
+        .commit()
+        .map_err(|e| format!("Failed to commit local one-time token migration: {}", e))?;
 
     // Store URL for later connections
     let mut pg_url = POSTGRES_URL.lock().unwrap();
     *pg_url = Some(url.to_string());
+    Ok(())
+}
+
+fn purge_legacy_redis_password_reset_keys(
+    conn: &mut redis::Connection,
+) -> std::result::Result<(), String> {
+    for pattern in [
+        "ntnt:local_password_reset:*",
+        "ntnt:local_password_resets_for_user:*",
+    ] {
+        let mut cursor = 0_u64;
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(256)
+                .query(conn)
+                .map_err(|e| format!("Failed to scan legacy Redis password reset keys: {}", e))?;
+            if !keys.is_empty() {
+                redis::cmd("DEL")
+                    .arg(keys)
+                    .query::<usize>(conn)
+                    .map_err(|e| {
+                        format!("Failed to purge legacy Redis password reset keys: {}", e)
+                    })?;
+            }
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -600,6 +712,7 @@ fn init_redis_sessions(url: &str) -> std::result::Result<(), String> {
     let _: String = redis::cmd("PING")
         .query(&mut conn)
         .map_err(|e| format!("Redis PING failed: {}", e))?;
+    purge_legacy_redis_password_reset_keys(&mut conn)?;
 
     // Store URL for later connections
     let mut redis_url_store = REDIS_URL.lock().unwrap();

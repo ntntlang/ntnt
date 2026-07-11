@@ -39,6 +39,8 @@ Source files:
 | Document | Description |
 |----------|-------------|
 | [Roadmap](../ROADMAP.md) | Implementation phases and progress |
+| [v0.5.1 Release Notes](release-notes/v0.5.1.md) | Purpose-bound magic-link primitives and password-reset hardening |
+| [v0.5.0 Release Notes](release-notes/v0.5.0.md) | Verification, validation, email, and multi-worker improvements |
 | [v0.4.9 Release Notes](release-notes/v0.4.9.md) | Local auth primitives, backend support, demo, and upgrade guidance |
 | [Contributing](../CONTRIBUTING.md) | How to contribute |
 | [Code of Conduct](../CODE_OF_CONDUCT.md) | Community standards |
