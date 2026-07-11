@@ -12,7 +12,7 @@ use super::storage::{
     delete_all_session_records_for_user, get_local_credential_secret_record,
     get_local_identity_by_identifier_record, normalize_local_identifier,
     store_local_identity_and_credential_record,
-    store_local_identity_and_credential_revoke_password_resets_record,
+    store_local_identity_and_credential_revoke_one_time_tokens_record,
     store_local_one_time_token_record, update_local_identity_by_identifier_record,
     LocalAccountState, LocalCredentialSecret, LocalIdentity, LocalOneTimeToken,
     LocalOneTimeTokenPurpose,
@@ -34,6 +34,7 @@ pub(in crate::stdlib::auth) const MAGIC_LINK_ISSUANCE_UNAVAILABLE: &str =
 pub(in crate::stdlib::auth) const MAGIC_LINK_VERIFICATION_UNAVAILABLE: &str =
     "Magic link verification unavailable";
 const DEFAULT_PASSWORD_RESET_TTL_SECONDS: i64 = 60 * 60;
+const MAX_PASSWORD_RESET_TTL_SECONDS: i64 = 24 * 60 * 60;
 const DEFAULT_MAGIC_LINK_TTL_SECONDS: i64 = 15 * 60;
 const MAX_MAGIC_LINK_TTL_SECONDS: i64 = 60 * 60;
 const INVALID_OR_UNSUPPORTED_LOCAL_CREDENTIAL_HASH: &str =
@@ -577,7 +578,7 @@ pub(in crate::stdlib::auth) fn set_local_password_record(
         must_change_password: false,
     };
 
-    store_local_identity_and_credential_revoke_password_resets_record(&identity, &credential)?;
+    store_local_identity_and_credential_revoke_one_time_tokens_record(&identity, &credential)?;
 
     Ok(VerifiedLocalPassword {
         identity,
@@ -590,7 +591,9 @@ pub(in crate::stdlib::auth) fn issue_password_reset_record(
     identifier: &str,
     ttl_seconds: Option<i64>,
 ) -> std::result::Result<HashMap<String, Value>, String> {
-    let ttl_seconds = ttl_seconds.unwrap_or(DEFAULT_PASSWORD_RESET_TTL_SECONDS);
+    let ttl_seconds = ttl_seconds
+        .unwrap_or(DEFAULT_PASSWORD_RESET_TTL_SECONDS)
+        .min(MAX_PASSWORD_RESET_TTL_SECONDS);
     let kind = identifier_kind.trim().to_ascii_lowercase();
     let identifier_normalized = match normalize_local_identifier(&kind, identifier.trim()) {
         Ok(identifier_normalized) => identifier_normalized,
@@ -613,7 +616,8 @@ pub(in crate::stdlib::auth) fn issue_password_reset_record(
             identity.state,
             LocalAccountState::Disabled | LocalAccountState::Locked
         ) {
-            store_local_one_time_token_record(&LocalOneTimeToken {
+            // A false result is intentionally indistinguishable from success to callers.
+            let _stored = store_local_one_time_token_record(&LocalOneTimeToken {
                 purpose: LocalOneTimeTokenPurpose::PasswordReset,
                 selector: selector.clone(),
                 local_user_id: identity.id.clone(),
@@ -707,7 +711,8 @@ pub(in crate::stdlib::auth) fn issue_magic_link_record(
     if let Some(identity) = get_local_identity_by_identifier_record(&kind, &identifier_normalized)?
     {
         if identity.state == LocalAccountState::Active {
-            store_local_one_time_token_record(&LocalOneTimeToken {
+            // A false result is intentionally indistinguishable from success to callers.
+            let _stored = store_local_one_time_token_record(&LocalOneTimeToken {
                 purpose: LocalOneTimeTokenPurpose::MagicLink,
                 selector: selector.clone(),
                 local_user_id: identity.id,
@@ -727,10 +732,7 @@ pub(in crate::stdlib::auth) fn consume_magic_link_record(
     let Some((selector, verifier)) = token.split_once('.') else {
         return Err(INVALID_MAGIC_LINK_TOKEN.to_string());
     };
-    if !is_urlsafe_token_component(selector, 22)
-        || !is_urlsafe_token_component(verifier, 43)
-        || token.split('.').count() != 2
-    {
+    if !is_urlsafe_token_component(selector, 22) || !is_urlsafe_token_component(verifier, 43) {
         return Err(INVALID_MAGIC_LINK_TOKEN.to_string());
     }
 

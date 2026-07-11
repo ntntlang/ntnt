@@ -833,8 +833,10 @@ fn string_arg<'a>(
 }
 
 fn password_reset_error_response(message: String) -> Value {
-    if message == INVALID_PASSWORD_RESET_TOKEN || message == EMPTY_LOCAL_PASSWORD {
+    if message == INVALID_PASSWORD_RESET_TOKEN {
         Value::err(Value::String(message))
+    } else if message == EMPTY_LOCAL_PASSWORD {
+        Value::err(Value::String("Password must not be empty".to_string()))
     } else {
         Value::err(Value::String(
             PASSWORD_RESET_VERIFICATION_UNAVAILABLE.to_string(),
@@ -4714,7 +4716,7 @@ pub fn init() -> HashMap<String, Value> {
     // a generic accepted payload without token material. Store or send the returned
     // `token` out-of-band; std/auth never stores the raw token.
     // @param identifier The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
-    // @param options Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`) and `ttl_seconds` (default 3600)
+    // @param options Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`) and `ttl_seconds` (default 3600; maximum 86400)
     // @returns Ok(map) with `status: "accepted"`; syntactically valid reset requests also include `token`, `selector`, `created_at`, and `expires_at` without revealing whether a matching account exists
     // @error RuntimeError ~ "Password reset issuance unavailable" fix: "Retry after checking the configured auth storage backend"
     // @see_also consume_password_reset, verify_local_password, set_local_password
@@ -8505,7 +8507,7 @@ mod tests {
             result_err_string(password_reset_error_response(
                 EMPTY_LOCAL_PASSWORD.to_string(),
             )),
-            EMPTY_LOCAL_PASSWORD
+            "Password must not be empty"
         );
         assert_eq!(
             result_err_string(magic_link_error_response(
@@ -8519,6 +8521,40 @@ mod tests {
             )),
             INVALID_MAGIC_LINK_TOKEN
         );
+    }
+
+    #[test]
+    fn test_password_reset_ttl_is_capped_at_twenty_four_hours() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        init_test_auth(SessionStore::Memory);
+
+        let module = init();
+        let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+        let issue_password_reset = module_fn(&module, "issue_password_reset");
+        result_ok_map(
+            bootstrap_local_user(&[
+                Value::String("reset-cap@example.com".to_string()),
+                Value::String("temporary password".to_string()),
+            ])
+            .unwrap(),
+        );
+
+        let issued = result_ok_map(
+            issue_password_reset(&[
+                Value::String("reset-cap@example.com".to_string()),
+                Value::Map(HashMap::from([(
+                    "ttl_seconds".to_string(),
+                    Value::Int(7 * 24 * 60 * 60),
+                )])),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(
+            map_int(&issued, "expires_at") - map_int(&issued, "created_at"),
+            24 * 60 * 60
+        );
+        reset_auth_test_state();
     }
 
     #[test]
@@ -8783,12 +8819,20 @@ mod tests {
     }
 
     #[test]
-    fn test_set_local_password_revokes_outstanding_password_reset_tokens() {
+    fn test_set_local_password_revokes_outstanding_one_time_tokens() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
-        for store in [
+        let mut stores = vec![
             SessionStore::Memory,
             SessionStore::Sqlite(":memory:".to_string()),
-        ] {
+        ];
+        if let Some(store) = auth_test_postgres_store() {
+            stores.push(store);
+        }
+        if let Some(store) = auth_test_redis_store() {
+            stores.push(store);
+        }
+        for store in stores {
+            let email = format!("manual-rotate-{}@example.com", uuid::Uuid::new_v4());
             reset_auth_test_state();
             init_test_auth(store);
 
@@ -8796,26 +8840,37 @@ mod tests {
             let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
             let issue_password_reset = module_fn(&module, "issue_password_reset");
             let consume_password_reset = module_fn(&module, "consume_password_reset");
+            let issue_magic_link = module_fn(&module, "issue_magic_link");
+            let consume_magic_link = module_fn(&module, "consume_magic_link");
             let set_local_password = module_fn(&module, "set_local_password");
             let verify_local_password = module_fn(&module, "verify_local_password");
 
             result_ok_map(
                 bootstrap_local_user(&[
-                    Value::String("manual-rotate@example.com".to_string()),
+                    Value::String(email.clone()),
                     Value::String("temporary reset password".to_string()),
                 ])
                 .unwrap(),
             );
-            let issued = result_ok_map(
-                issue_password_reset(&[Value::String("manual-rotate@example.com".to_string())])
-                    .unwrap(),
+            result_ok_map(
+                set_local_password(&[
+                    Value::String(email.clone()),
+                    Value::String("temporary reset password".to_string()),
+                    Value::String("active password".to_string()),
+                ])
+                .unwrap(),
             );
+            let issued =
+                result_ok_map(issue_password_reset(&[Value::String(email.clone())]).unwrap());
             let token = map_string(&issued, "token");
+            let magic_link =
+                result_ok_map(issue_magic_link(&[Value::String(email.clone())]).unwrap());
+            let magic_link_token = map_string(&magic_link, "token");
 
             let rotated = result_ok_map(
                 set_local_password(&[
-                    Value::String("manual-rotate@example.com".to_string()),
-                    Value::String("temporary reset password".to_string()),
+                    Value::String(email.clone()),
+                    Value::String("active password".to_string()),
                     Value::String("manually rotated password".to_string()),
                 ])
                 .unwrap(),
@@ -8830,16 +8885,84 @@ mod tests {
                 .unwrap(),
             );
             assert_eq!(stale_reset, "Invalid password reset token");
+            assert_eq!(
+                result_err_string(consume_magic_link(&[Value::String(magic_link_token)]).unwrap()),
+                "Invalid magic link token"
+            );
 
             let current_password_still_valid = result_ok_map(
                 verify_local_password(&[
-                    Value::String("manual-rotate@example.com".to_string()),
+                    Value::String(email.clone()),
                     Value::String("manually rotated password".to_string()),
                 ])
                 .unwrap(),
             );
             assert_eq!(map_string(&current_password_still_valid, "state"), "active");
         }
+    }
+
+    #[test]
+    fn test_password_reset_revokes_outstanding_magic_links() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let mut stores = vec![
+            SessionStore::Memory,
+            SessionStore::Sqlite(":memory:".to_string()),
+        ];
+        if let Some(store) = auth_test_postgres_store() {
+            stores.push(store);
+        }
+        if let Some(store) = auth_test_redis_store() {
+            stores.push(store);
+        }
+
+        for store in stores {
+            let email = format!("reset-revokes-magic-{}@example.com", uuid::Uuid::new_v4());
+            reset_auth_test_state();
+            init_test_auth(store);
+
+            let module = init();
+            let bootstrap_local_user = module_fn(&module, "bootstrap_local_user");
+            let set_local_password = module_fn(&module, "set_local_password");
+            let issue_magic_link = module_fn(&module, "issue_magic_link");
+            let consume_magic_link = module_fn(&module, "consume_magic_link");
+            let issue_password_reset = module_fn(&module, "issue_password_reset");
+            let consume_password_reset = module_fn(&module, "consume_password_reset");
+
+            result_ok_map(
+                bootstrap_local_user(&[
+                    Value::String(email.clone()),
+                    Value::String("temporary password".to_string()),
+                ])
+                .unwrap(),
+            );
+            result_ok_map(
+                set_local_password(&[
+                    Value::String(email.clone()),
+                    Value::String("temporary password".to_string()),
+                    Value::String("active password".to_string()),
+                ])
+                .unwrap(),
+            );
+            let magic_link =
+                result_ok_map(issue_magic_link(&[Value::String(email.clone())]).unwrap());
+            let reset =
+                result_ok_map(issue_password_reset(&[Value::String(email.clone())]).unwrap());
+
+            result_ok_map(
+                consume_password_reset(&[
+                    Value::String(map_string(&reset, "token")),
+                    Value::String("reset password".to_string()),
+                ])
+                .unwrap(),
+            );
+            assert_eq!(
+                result_err_string(
+                    consume_magic_link(&[Value::String(map_string(&magic_link, "token"))]).unwrap(),
+                ),
+                "Invalid magic link token"
+            );
+        }
+        reset_auth_test_state();
     }
 
     #[test]

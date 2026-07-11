@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.5.0
+> Last updated: v0.5.1
 
 ## Table of Contents
 
@@ -2667,7 +2667,7 @@ The helper normalizes the identifier (email by default), stores only a hashed ve
 **Parameters:**
 
 - `identifier` — The local user identifier. Supported kinds are `email` (default), `phone`, `username`, and `custom`.
-- `options` — Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`) and `ttl_seconds` (default 3600)
+- `options` — Optional map with `identifier_kind` (`"email"`, `"phone"`, `"username"`, or `"custom"`; default `"email"`) and `ttl_seconds` (default 3600; maximum 86400)
 
 **Returns:** Ok(map) with `status: "accepted"`; syntactically valid reset requests also include `token`, `selector`, `created_at`, and `expires_at` without revealing whether a matching account exists
 

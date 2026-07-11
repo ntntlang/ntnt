@@ -375,14 +375,14 @@ impl LocalAuthMemoryStore {
         identity: LocalIdentity,
         credential: LocalCredentialSecret,
     ) -> std::result::Result<(), String> {
-        self.store_identity_and_credential_with_reset_revocation(identity, credential, false)
+        self.store_identity_and_credential_with_token_revocation(identity, credential, false)
     }
 
-    pub(in crate::stdlib::auth) fn store_identity_and_credential_with_reset_revocation(
+    pub(in crate::stdlib::auth) fn store_identity_and_credential_with_token_revocation(
         &mut self,
         identity: LocalIdentity,
         credential: LocalCredentialSecret,
-        revoke_password_resets: bool,
+        revoke_one_time_tokens: bool,
     ) -> std::result::Result<(), String> {
         let identity = normalize_local_identity_for_storage(identity)?;
         validate_local_credential_secret_for_storage(&credential)?;
@@ -415,11 +415,9 @@ impl LocalAuthMemoryStore {
             .insert(identity.id.clone(), identity.clone());
         self.credential_secrets_by_local_user_id
             .insert(identity.id.clone(), credential);
-        if revoke_password_resets {
-            self.one_time_tokens_by_selector.retain(|_, token| {
-                token.local_user_id != identity.id
-                    || token.purpose != LocalOneTimeTokenPurpose::PasswordReset
-            });
+        if revoke_one_time_tokens {
+            self.one_time_tokens_by_selector
+                .retain(|_, token| token.local_user_id != identity.id);
         }
         Ok(())
     }
@@ -502,10 +500,8 @@ impl LocalAuthMemoryStore {
             ..identity
         };
         self.store_identity_and_credential(identity.clone(), credential.clone())?;
-        self.one_time_tokens_by_selector.retain(|_, token| {
-            token.local_user_id != reset_token.local_user_id
-                || token.purpose != LocalOneTimeTokenPurpose::PasswordReset
-        });
+        self.one_time_tokens_by_selector
+            .retain(|_, token| token.local_user_id != reset_token.local_user_id);
         Ok(Some((identity, credential)))
     }
 
@@ -642,7 +638,7 @@ pub(in crate::stdlib::auth) fn store_local_identity_and_credential_record(
     store_local_identity_and_credential_record_inner(identity, credential, false)
 }
 
-pub(in crate::stdlib::auth) fn store_local_identity_and_credential_revoke_password_resets_record(
+pub(in crate::stdlib::auth) fn store_local_identity_and_credential_revoke_one_time_tokens_record(
     identity: &LocalIdentity,
     credential: &LocalCredentialSecret,
 ) -> std::result::Result<(), String> {
@@ -652,28 +648,28 @@ pub(in crate::stdlib::auth) fn store_local_identity_and_credential_revoke_passwo
 fn store_local_identity_and_credential_record_inner(
     identity: &LocalIdentity,
     credential: &LocalCredentialSecret,
-    revoke_password_resets: bool,
+    revoke_one_time_tokens: bool,
 ) -> std::result::Result<(), String> {
     match active_auth_storage_backend() {
         AuthStorageBackend::Memory => SESSION_STORE
             .lock()
             .unwrap()
             .local_auth
-            .store_identity_and_credential_with_reset_revocation(
+            .store_identity_and_credential_with_token_revocation(
                 identity.clone(),
                 credential.clone(),
-                revoke_password_resets,
+                revoke_one_time_tokens,
             ),
         AuthStorageBackend::Sqlite => {
-            store_local_identity_and_credential_sqlite(identity, credential, revoke_password_resets)
+            store_local_identity_and_credential_sqlite(identity, credential, revoke_one_time_tokens)
         }
         AuthStorageBackend::Postgres => store_local_identity_and_credential_postgres(
             identity,
             credential,
-            revoke_password_resets,
+            revoke_one_time_tokens,
         ),
         AuthStorageBackend::Redis => {
-            store_local_identity_and_credential_redis(identity, credential, revoke_password_resets)
+            store_local_identity_and_credential_redis(identity, credential, revoke_one_time_tokens)
         }
     }
 }
@@ -894,7 +890,7 @@ fn store_local_identity_sqlite(identity: &LocalIdentity) -> std::result::Result<
 fn store_local_identity_and_credential_sqlite(
     identity: &LocalIdentity,
     credential: &LocalCredentialSecret,
-    revoke_password_resets: bool,
+    revoke_one_time_tokens: bool,
 ) -> std::result::Result<(), String> {
     let identity = normalize_local_identity_for_storage(identity.clone())?;
     validate_local_credential_secret_for_storage(credential)?;
@@ -951,15 +947,12 @@ fn store_local_identity_and_credential_sqlite(
     )
     .map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
 
-    if revoke_password_resets {
+    if revoke_one_time_tokens {
         tx.execute(
-            "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = ?1 AND purpose = ?2",
-            rusqlite::params![
-                identity.id,
-                LocalOneTimeTokenPurpose::PasswordReset.as_str()
-            ],
+            "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = ?1",
+            rusqlite::params![identity.id],
         )
-        .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
+        .map_err(|e| format!("[auth] failed to delete one-time tokens: {}", e))?;
     }
 
     tx.commit()
@@ -1367,13 +1360,10 @@ where
     )
     .map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
     tx.execute(
-        "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = ?1 AND purpose = ?2",
-        rusqlite::params![
-            reset_token.local_user_id,
-            LocalOneTimeTokenPurpose::PasswordReset.as_str()
-        ],
+        "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = ?1",
+        rusqlite::params![reset_token.local_user_id],
     )
-    .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
+    .map_err(|e| format!("[auth] failed to delete one-time tokens: {}", e))?;
     tx.commit().map_err(|e| {
         format!(
             "[auth] failed to commit password reset consume transaction: {}",
@@ -1552,7 +1542,7 @@ fn store_local_identity_postgres(identity: &LocalIdentity) -> std::result::Resul
 fn store_local_identity_and_credential_postgres(
     identity: &LocalIdentity,
     credential: &LocalCredentialSecret,
-    revoke_password_resets: bool,
+    revoke_one_time_tokens: bool,
 ) -> std::result::Result<(), String> {
     let identity = normalize_local_identity_for_storage(identity.clone())?;
     validate_local_credential_secret_for_storage(credential)?;
@@ -1607,15 +1597,12 @@ fn store_local_identity_and_credential_postgres(
         ],
     ).map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
 
-    if revoke_password_resets {
+    if revoke_one_time_tokens {
         tx.execute(
-            "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = $1 AND purpose = $2",
-            &[
-                &identity.id,
-                &LocalOneTimeTokenPurpose::PasswordReset.as_str(),
-            ],
+            "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = $1",
+            &[&identity.id],
         )
-        .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
+        .map_err(|e| format!("[auth] failed to delete one-time tokens: {}", e))?;
     }
 
     tx.commit()
@@ -1998,13 +1985,10 @@ where
         ],
     ).map_err(|e| format!("[auth] failed to store local credential: {}", e))?;
     tx.execute(
-        "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = $1 AND purpose = $2",
-        &[
-            &reset_token.local_user_id,
-            &LocalOneTimeTokenPurpose::PasswordReset.as_str(),
-        ],
+        "DELETE FROM auth_local_one_time_tokens WHERE local_user_id = $1",
+        &[&reset_token.local_user_id],
     )
-    .map_err(|e| format!("[auth] failed to delete password reset tokens: {}", e))?;
+    .map_err(|e| format!("[auth] failed to delete one-time tokens: {}", e))?;
     tx.commit().map_err(|e| {
         format!(
             "[auth] failed to commit password reset consume transaction: {}",
@@ -2362,7 +2346,7 @@ fn store_local_identity_redis_with_connection(
 fn store_local_identity_and_credential_redis(
     identity: &LocalIdentity,
     credential: &LocalCredentialSecret,
-    revoke_password_resets: bool,
+    revoke_one_time_tokens: bool,
 ) -> std::result::Result<(), String> {
     let identity = normalize_local_identity_for_storage(identity.clone())?;
     validate_local_credential_secret_for_storage(credential)?;
@@ -2376,6 +2360,8 @@ fn store_local_identity_and_credential_redis(
         LocalOneTimeTokenPurpose::PasswordReset,
         &identity.id,
     );
+    let magic_link_set_key =
+        redis_local_one_time_token_user_set_key(LocalOneTimeTokenPurpose::MagicLink, &identity.id);
     let stored: i64 = redis::Script::new(
         r#"
         local existing_id = redis.call('GET', KEYS[2])
@@ -2397,11 +2383,13 @@ fn store_local_identity_and_credential_redis(
         redis.call('SET', KEYS[3], ARGV[3])
 
         if ARGV[4] == '1' then
-            local reset_keys = redis.call('SMEMBERS', KEYS[4])
-            for _, key in ipairs(reset_keys) do
-                redis.call('DEL', key)
+            for _, set_key in ipairs({KEYS[4], KEYS[5]}) do
+                local token_keys = redis.call('SMEMBERS', set_key)
+                for _, key in ipairs(token_keys) do
+                    redis.call('DEL', key)
+                end
+                redis.call('DEL', set_key)
             end
-            redis.call('DEL', KEYS[4])
         end
 
         return 1
@@ -2411,10 +2399,11 @@ fn store_local_identity_and_credential_redis(
     .key(&lookup_key)
     .key(&credential_key)
     .key(&reset_set_key)
+    .key(&magic_link_set_key)
     .arg(&identity.id)
     .arg(local_identity_to_json(&identity))
     .arg(local_credential_to_json(credential))
-    .arg(if revoke_password_resets { "1" } else { "0" })
+    .arg(if revoke_one_time_tokens { "1" } else { "0" })
     .invoke(&mut conn)
     .map_err(|e| format!("Redis local identity+credential store error: {}", e))?;
 
@@ -2593,6 +2582,7 @@ fn invoke_redis_password_reset_consume_script(
     identity_key: &str,
     credential_key: &str,
     reset_set_key: &str,
+    magic_link_set_key: &str,
     now: i64,
     token_hash: &str,
     local_user_id: &str,
@@ -2640,11 +2630,13 @@ fn invoke_redis_password_reset_consume_script(
         redis.call('SET', current_lookup_key, ARGV[3])
         redis.call('SET', KEYS[3], ARGV[4])
 
-        local reset_keys = redis.call('SMEMBERS', KEYS[4])
-        for _, key in ipairs(reset_keys) do
-            redis.call('DEL', key)
+        for _, set_key in ipairs({KEYS[4], KEYS[5]}) do
+            local token_keys = redis.call('SMEMBERS', set_key)
+            for _, key in ipairs(token_keys) do
+                redis.call('DEL', key)
+            end
+            redis.call('DEL', set_key)
         end
-        redis.call('DEL', KEYS[4])
         return 1
         "#,
     )
@@ -2652,6 +2644,7 @@ fn invoke_redis_password_reset_consume_script(
     .key(identity_key)
     .key(credential_key)
     .key(reset_set_key)
+    .key(magic_link_set_key)
     .arg(now)
     .arg(token_hash)
     .arg(local_user_id)
@@ -2701,12 +2694,17 @@ where
         LocalOneTimeTokenPurpose::PasswordReset,
         &reset_token.local_user_id,
     );
+    let magic_link_set_key = redis_local_one_time_token_user_set_key(
+        LocalOneTimeTokenPurpose::MagicLink,
+        &reset_token.local_user_id,
+    );
     let consumed = invoke_redis_password_reset_consume_script(
         &mut conn,
         &token_key,
         &identity_key,
         &credential_key,
         &reset_set_key,
+        &magic_link_set_key,
         now,
         token_hash,
         &reset_token.local_user_id,
@@ -3103,6 +3101,10 @@ mod tests {
             &redis_local_credential_key(&identity.id),
             &redis_local_one_time_token_user_set_key(
                 LocalOneTimeTokenPurpose::PasswordReset,
+                &identity.id,
+            ),
+            &redis_local_one_time_token_user_set_key(
+                LocalOneTimeTokenPurpose::MagicLink,
                 &identity.id,
             ),
             now + 20,
