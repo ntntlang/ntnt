@@ -411,7 +411,7 @@ mod tests {
     };
     use super::SocketSecretProvider;
     use serde_json::Value as JsonValue;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -454,6 +454,14 @@ mod tests {
                 BufReader::new(&stream)
                     .read_line(&mut request)
                     .expect("read provider request");
+                let mut trailing_request = [0_u8; 1];
+                assert_eq!(
+                    stream
+                        .read(&mut trailing_request)
+                        .expect("read request EOF"),
+                    0,
+                    "provider request must half-close after one frame"
+                );
                 if let Ok(text) = String::from_utf8(response.clone()) {
                     if text.contains(REQUEST_ID_PLACEHOLDER) {
                         let parsed: JsonValue =
