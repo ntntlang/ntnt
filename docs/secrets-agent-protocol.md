@@ -10,7 +10,7 @@ This is an integration contract for `std/secrets`; it is not a general socket AP
 - One request and one response per connection.
 - Each message is one UTF-8 JSON object followed by `\n`.
 - The client half-closes its write side after the request.
-- The agent must complete its response and half-close its write side.
+- The agent should half-close its write side after the response. The newline completes the frame; the client does not wait for EOF, but rejects any trailing byte that is already available.
 - Requests and responses must not use carriage returns or additional frames.
 - Filesystem ownership and permissions authenticate the local endpoint. The protocol `scope` field detects routing mistakes but is not authentication.
 

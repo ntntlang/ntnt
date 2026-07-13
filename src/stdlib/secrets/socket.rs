@@ -224,27 +224,20 @@ impl SocketSecretProvider {
                         stream
                             .set_nonblocking(true)
                             .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
-                        loop {
-                            match stream.read(&mut trailing[..]) {
-                                Ok(0) => return Ok(response),
-                                Err(error)
-                                    if matches!(
-                                        error.kind(),
-                                        std::io::ErrorKind::ConnectionReset
-                                            | std::io::ErrorKind::ConnectionAborted
-                                    ) =>
-                                {
-                                    return Ok(response);
-                                }
-                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                                    let remaining = remaining_until(deadline).map_err(|_| {
-                                        self.error(ProviderErrorKind::InvalidConfiguration)
-                                    })?;
-                                    std::thread::sleep(remaining.min(Duration::from_millis(1)));
-                                }
-                                Ok(_) | Err(_) => {
-                                    return Err(self.error(ProviderErrorKind::InvalidConfiguration));
-                                }
+                        match stream.read(&mut trailing[..]) {
+                            Ok(0) => return Ok(response),
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::WouldBlock
+                                        | std::io::ErrorKind::ConnectionReset
+                                        | std::io::ErrorKind::ConnectionAborted
+                                ) =>
+                            {
+                                return Ok(response);
+                            }
+                            Ok(_) | Err(_) => {
+                                return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                             }
                         }
                     }
@@ -617,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn socket_provider_treats_complete_frame_without_eof_as_terminal_malformed() {
+    fn socket_provider_accepts_complete_frame_without_waiting_for_eof() {
         let path = socket_path("complete-without-eof");
         let listener = UnixListener::bind(&path).expect("bind fixture socket");
         let server = std::thread::spawn(move || {
@@ -643,16 +636,15 @@ mod tests {
             std::thread::sleep(Duration::from_millis(150));
         });
 
-        let Err(error) = SocketSecretProvider::new(
+        let result = SocketSecretProvider::new(
             path.clone(),
             ProviderEndpointLabel::socket(1),
             "deployment-a".to_string(),
             Duration::from_millis(30),
         )
-        .lookup("API_KEY") else {
-            panic!("complete frame without EOF must fail");
-        };
-        assert_eq!(error.kind, ProviderErrorKind::InvalidConfiguration);
+        .lookup("API_KEY")
+        .expect("complete frame should decode without waiting for EOF");
+        assert!(matches!(result, ProviderLookup::Found(_)));
 
         server.join().expect("fixture server");
         std::fs::remove_file(path).ok();
