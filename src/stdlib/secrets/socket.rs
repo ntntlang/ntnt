@@ -224,6 +224,15 @@ impl SocketSecretProvider {
                             .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
                         return match stream.read(&mut trailing[..]) {
                             Ok(0) => Ok(response),
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::ConnectionReset
+                                        | std::io::ErrorKind::ConnectionAborted
+                                ) =>
+                            {
+                                Ok(response)
+                            }
                             Ok(_) | Err(_) => {
                                 Err(self.error(ProviderErrorKind::InvalidConfiguration))
                             }
