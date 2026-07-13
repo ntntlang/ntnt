@@ -45,12 +45,20 @@ fn declaration_state() -> &'static RwLock<DeclarationState> {
 pub(crate) fn configure_for_source(source_path: &str) {
     let (identity, declarations) = load_declarations(Path::new(source_path));
     if let Ok(mut state) = declaration_state().write() {
+        if matches!(
+            state.declarations,
+            SecretDeclarations::ConflictingApplication
+        ) {
+            return;
+        }
         match &state.identity {
             None => {
                 state.identity = Some(identity);
                 state.declarations = declarations;
             }
             Some(current) if current == &identity => state.declarations = declarations,
+            // A mixed application identity is a process-level security violation.
+            // Keep the state permanently poisoned; only a process restart may reset it.
             Some(_) => state.declarations = SecretDeclarations::ConflictingApplication,
         }
     }
@@ -212,7 +220,6 @@ impl ProviderGroup {
     }
 
     fn lookup(&self, name: &str) -> Result<Option<SecretValue>> {
-        validate_secret_name(name)?;
         let mut unavailable = Vec::new();
         let mut attempts = 0;
 
@@ -316,6 +323,8 @@ fn configured_provider_group() -> Result<ProviderGroup> {
 }
 
 fn lookup_secret(name: &str) -> Result<Option<SecretValue>> {
+    // Validate before the name can reach declaration diagnostics or a provider.
+    // SecretValue validates again only to preserve its own construction invariant.
     validate_secret_name(name)?;
     enforce_declared(name)?;
     configured_provider_group()?.lookup(name)
@@ -323,10 +332,7 @@ fn lookup_secret(name: &str) -> Result<Option<SecretValue>> {
 
 fn secret_name_arg(args: &[Value], function: &str) -> Result<String> {
     match args.first() {
-        Some(Value::String(name)) => {
-            validate_secret_name(name)?;
-            Ok(name.clone())
-        }
+        Some(Value::String(name)) => Ok(name.clone()),
         _ => Err(IntentError::type_error(format!(
             "{function}() requires a secret name string"
         ))),

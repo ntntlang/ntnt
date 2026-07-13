@@ -8575,6 +8575,8 @@ impl Interpreter {
                             }
                         }
                     }
+                    // Filter arguments can introduce a Secret (for example,
+                    // `default(secret)`), so re-check the result before rendering.
                     if value.contains_secret() {
                         Self::handle_template_error(
                             IntentError::type_error(
@@ -8637,6 +8639,8 @@ impl Interpreter {
                             }
                         }
                     }
+                    // Filter arguments can introduce a Secret (for example,
+                    // `default(secret)`), so re-check the result before rendering.
                     if value.contains_secret() {
                         Self::handle_template_error(
                             IntentError::type_error(

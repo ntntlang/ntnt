@@ -154,6 +154,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Secret(_) => serde_json::Value::String(crate::secret::REDACTED_SECRET.to_string()),
         Value::Array(arr) => serde_json::Value::Array(arr.iter().map(value_to_json).collect()),
         Value::Map(map) => {
             let obj: serde_json::Map<String, serde_json::Value> = map
@@ -3044,5 +3045,9 @@ mod tests {
         let envelope_error =
             serialize_value_envelope(&nested).expect_err("Redis envelope must reject secrets");
         assert!(!envelope_error.to_string().contains("kv-secret-canary"));
+
+        let defensive_json = value_to_json_public(&nested).to_string();
+        assert!(defensive_json.contains(crate::secret::REDACTED_SECRET));
+        assert!(!defensive_json.contains("kv-secret-canary"));
     }
 }
