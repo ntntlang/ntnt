@@ -206,32 +206,22 @@ impl SocketSecretProvider {
             match stream.read(&mut chunk[..read_size]) {
                 Ok(0) => return Err(self.error(ProviderErrorKind::Unavailable)),
                 Ok(bytes_read) => {
-                    #[cfg(test)]
-                    eprintln!("socket-test-read bytes={bytes_read}");
                     let bytes = &chunk[..bytes_read];
                     if bytes.contains(&b'\r') {
                         return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                     }
                     if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
-                        #[cfg(test)]
-                        eprintln!("socket-test-newline index={newline}");
                         response.extend_from_slice(&bytes[..=newline]);
                         if newline + 1 != bytes_read || response.len() > MAX_RESPONSE_SIZE {
                             return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                         }
 
                         let mut trailing = Zeroizing::new([0_u8; 1]);
-                        let eof_timeout = remaining_until(deadline)
-                            .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
                         stream
-                            .set_read_timeout(Some(eof_timeout))
+                            .set_nonblocking(true)
                             .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
                         return match stream.read(&mut trailing[..]) {
-                            Ok(0) => {
-                                #[cfg(test)]
-                                eprintln!("socket-test-eof=clean");
-                                Ok(response)
-                            }
+                            Ok(0) => Ok(response),
                             Err(error)
                                 if matches!(
                                     error.kind(),
@@ -239,18 +229,9 @@ impl SocketSecretProvider {
                                         | std::io::ErrorKind::ConnectionAborted
                                 ) =>
                             {
-                                #[cfg(test)]
-                                eprintln!("socket-test-eof=reset");
                                 Ok(response)
                             }
-                            Ok(_) => {
-                                #[cfg(test)]
-                                eprintln!("socket-test-eof=trailing-byte");
-                                Err(self.error(ProviderErrorKind::InvalidConfiguration))
-                            }
-                            Err(error) => {
-                                #[cfg(test)]
-                                eprintln!("socket-test-eof=error kind={:?}", error.kind());
+                            Ok(_) | Err(_) => {
                                 Err(self.error(ProviderErrorKind::InvalidConfiguration))
                             }
                         };
@@ -323,8 +304,7 @@ impl SecretProvider for SocketSecretProvider {
     fn lookup(&self, name: &str) -> std::result::Result<ProviderLookup, ProviderError> {
         let deadline = Instant::now() + self.timeout;
         let mut stream = self.connect(deadline)?;
-        #[cfg(test)]
-        eprintln!("socket-test-stage=connected");
+
         let request_id = self.write_request(
             &mut DeadlineWriter {
                 stream: &mut stream,
@@ -332,21 +312,17 @@ impl SecretProvider for SocketSecretProvider {
             },
             name,
         )?;
-        #[cfg(test)]
-        eprintln!("socket-test-stage=request-written");
+
         stream
             .shutdown(Shutdown::Write)
             .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
 
         let response = self.read_response_frame(&mut stream, deadline)?;
-        #[cfg(test)]
-        eprintln!("socket-test-stage=frame-read bytes={}", response.len());
 
         let body = &response[..response.len() - 1];
         let parsed: SocketResponse = serde_json::from_slice(body)
             .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
-        #[cfg(test)]
-        eprintln!("socket-test-stage=frame-parsed");
+
         match parsed {
             SocketResponse::Found {
                 protocol,
