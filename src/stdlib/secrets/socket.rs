@@ -268,6 +268,70 @@ impl SocketSecretProvider {
             }
         }
     }
+
+    fn decode_response(
+        &self,
+        body: &[u8],
+        request_id: u64,
+    ) -> std::result::Result<ProviderLookup, ProviderError> {
+        let parsed: SocketResponse = serde_json::from_slice(body)
+            .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
+
+        match parsed {
+            SocketResponse::Found {
+                protocol,
+                request_id: response_request_id,
+                scope,
+                value,
+            } => {
+                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
+                if value.is_empty() || value.len() > MAX_SECRET_SIZE {
+                    return Err(self.error(ProviderErrorKind::InvalidConfiguration));
+                }
+                Ok(ProviderLookup::Found(value))
+            }
+            SocketResponse::Missing {
+                protocol,
+                request_id: response_request_id,
+                scope,
+            } => {
+                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
+                Ok(ProviderLookup::Missing)
+            }
+            SocketResponse::AccessDenied {
+                protocol,
+                request_id: response_request_id,
+                scope,
+            } => {
+                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
+                Err(self.error(ProviderErrorKind::AccessDenied))
+            }
+            SocketResponse::Unavailable {
+                protocol,
+                request_id: response_request_id,
+                scope,
+            } => {
+                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
+                Err(self.error(ProviderErrorKind::Unavailable))
+            }
+            SocketResponse::InvalidRequest {
+                protocol,
+                request_id: response_request_id,
+                scope,
+            } => {
+                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
+                Err(self.error(ProviderErrorKind::InvalidRequest))
+            }
+            SocketResponse::InvalidConfiguration {
+                protocol,
+                request_id: response_request_id,
+                scope,
+            } => {
+                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
+                Err(self.error(ProviderErrorKind::InvalidConfiguration))
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -341,65 +405,7 @@ impl SecretProvider for SocketSecretProvider {
             .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
 
         let response = self.read_response_frame(&mut stream, deadline)?;
-
-        let body = &response[..response.len() - 1];
-        let parsed: SocketResponse = serde_json::from_slice(body)
-            .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
-
-        match parsed {
-            SocketResponse::Found {
-                protocol,
-                request_id: response_request_id,
-                scope,
-                value,
-            } => {
-                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
-                if value.is_empty() || value.len() > MAX_SECRET_SIZE {
-                    return Err(self.error(ProviderErrorKind::InvalidConfiguration));
-                }
-                Ok(ProviderLookup::Found(value))
-            }
-            SocketResponse::Missing {
-                protocol,
-                request_id: response_request_id,
-                scope,
-            } => {
-                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
-                Ok(ProviderLookup::Missing)
-            }
-            SocketResponse::AccessDenied {
-                protocol,
-                request_id: response_request_id,
-                scope,
-            } => {
-                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
-                Err(self.error(ProviderErrorKind::AccessDenied))
-            }
-            SocketResponse::Unavailable {
-                protocol,
-                request_id: response_request_id,
-                scope,
-            } => {
-                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
-                Err(self.error(ProviderErrorKind::Unavailable))
-            }
-            SocketResponse::InvalidRequest {
-                protocol,
-                request_id: response_request_id,
-                scope,
-            } => {
-                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
-                Err(self.error(ProviderErrorKind::InvalidRequest))
-            }
-            SocketResponse::InvalidConfiguration {
-                protocol,
-                request_id: response_request_id,
-                scope,
-            } => {
-                self.validate_response_header(protocol, response_request_id, request_id, &scope)?;
-                Err(self.error(ProviderErrorKind::InvalidConfiguration))
-            }
-        }
+        self.decode_response(&response[..response.len() - 1], request_id)
     }
 }
 
@@ -871,23 +877,21 @@ mod tests {
 
     #[test]
     fn socket_provider_rejects_empty_or_oversized_values() {
+        let provider = provider(PathBuf::from("/tmp/unused-secrets-agent.sock"));
         for (label, value) in [
             ("empty-value", String::new()),
             ("oversized-value", "x".repeat(32_769)),
         ] {
-            let response = format!(
-                "{}\n",
-                serde_json::json!({
-                    "protocol": 1,
-                    "request_id": REQUEST_ID_PLACEHOLDER,
-                    "status": "found",
-                    "scope": "deployment-a",
-                    "value": value,
-                })
-            );
-            let (path, _request_rx, server) = serve_response(label, response.into_bytes());
+            let response = serde_json::to_vec(&serde_json::json!({
+                "protocol": 1,
+                "request_id": 7,
+                "status": "found",
+                "scope": "deployment-a",
+                "value": value,
+            }))
+            .expect("encode fixture response");
 
-            let Err(error) = provider(path.clone()).lookup("API_KEY") else {
+            let Err(error) = provider.decode_response(&response, 7) else {
                 panic!("invalid value size must fail closed");
             };
             assert_eq!(
@@ -896,9 +900,6 @@ mod tests {
                 "value fixture: {label}"
             );
             assert!(!format!("{error:?}").contains(SECRET_CANARY));
-
-            server.join().expect("fixture server");
-            std::fs::remove_file(path).ok();
         }
     }
 
