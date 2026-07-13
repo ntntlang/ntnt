@@ -63,7 +63,7 @@ fn serve_secret_agent_once(
     secret_value: &'static str,
 ) -> (std::path::PathBuf, std::thread::JoinHandle<()>) {
     let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let directory = std::env::temp_dir()
+    let directory = std::path::PathBuf::from("/tmp")
         .canonicalize()
         .unwrap_or_else(|_| std::env::temp_dir())
         .join(format!("ntnt-sa-{}-{counter}", std::process::id()));
@@ -815,7 +815,7 @@ print(token)
 #[test]
 fn test_larri_socket_missing_scope_fails_before_socket_contact() {
     let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let directory = std::env::temp_dir()
+    let directory = std::path::PathBuf::from("/tmp")
         .canonicalize()
         .unwrap_or_else(|_| std::env::temp_dir())
         .join(format!("ntnt-ms-{}-{counter}", std::process::id()));

@@ -391,7 +391,7 @@ mod tests {
 
     fn socket_path(label: &str) -> PathBuf {
         let counter = SOCKET_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir()
+        PathBuf::from("/tmp")
             .canonicalize()
             .unwrap_or_else(|_| std::env::temp_dir())
             .join(format!(
