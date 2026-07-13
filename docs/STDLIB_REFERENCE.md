@@ -10905,7 +10905,7 @@ get_secret(name: String) -> Option<Secret>
 
 Looks up a secret by its provider-neutral logical name.
 
-The v0.5.1 development-only environment provider reads the exact environment variable name and is disabled when `NTNT_ENV` is `production` or `prod`. Projects with an `ntnt.toml` must declare accessible names under `[secrets.<NAME>]`; undeclared lookups fail before contacting the provider. Declaration metadata may contain `label`, `description`, `required`, and `environments`; secret values are never accepted in the manifest. Secret values remain opaque and redact themselves in output and diagnostics.
+The environment provider reads the exact environment variable name and is disabled when `NTNT_ENV` is `production` or `prod`. Unix deployments can instead select the Larri host-agent provider with `NTNT_SECRETS_PROVIDER=larri-socket`, a comma-separated list of absolute `NTNT_SECRETS_SOCKET_ENDPOINTS`, and the expected non-credential deployment identifier in `NTNT_SECRETS_AUTHORIZATION_SCOPE`. Optional `NTNT_SECRETS_TIMEOUT_MS` is bounded from 10 through 10000 milliseconds. Production socket paths must be beneath `/run/larri-secrets`; endpoints are retried twice and failed over only for bounded unavailable results. Plaintext caching remains in the host agent rather than ntnt. Projects with an `ntnt.toml` must declare accessible names under `[secrets.<NAME>]`; undeclared lookups fail before contacting the provider. Declaration metadata may contain `label`, `description`, `required`, and `environments`; secret values are never accepted in the manifest. Secret values remain opaque and redact themselves in output and diagnostics.
 
 **Parameters:**
 
@@ -10921,7 +10921,7 @@ get_secret("STRIPE_SECRET_KEY")  // => Some([REDACTED])  // Optional lookup
 
 **Errors:**
 
-- **RuntimeError**: Unsupported secrets provider — *Fix: Set NTNT_SECRETS_PROVIDER=env for v0.5.1*
+- **RuntimeError**: Unsupported secrets provider — *Fix: Select env for development or larri-socket with deployment-scoped socket configuration*
 
 **See also:** `require_secret`
 

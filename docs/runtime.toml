@@ -20,6 +20,34 @@ description = "Controls runtime mode. Production mode disables hot-reload for be
 example = "NTNT_ENV=production ntnt run server.tnt"
 affects = ["hot-reload"]
 
+[env_vars.NTNT_SECRETS_PROVIDER]
+values = ["env", "larri-socket"]
+default = "env"
+description = "Selects the provider behind `std/secrets`. The exact-name environment provider is development-only and is rejected when `NTNT_ENV` is `production` or `prod`. `larri-socket` is Unix-only and talks to a local Larri host agent without depending directly on a secrets backend."
+example = "NTNT_SECRETS_PROVIDER=larri-socket ntnt run server.tnt"
+affects = ["std-secrets", "security"]
+
+[env_vars.NTNT_SECRETS_SOCKET_ENDPOINTS]
+type = "comma-separated absolute Unix socket paths"
+default = "unset (required for larri-socket)"
+description = "Ordered Larri host-agent endpoints for secret lookup. One through eight unique paths are allowed. Each endpoint is tried twice, and failover occurs only for bounded unavailable results. Production paths must be beneath the host-controlled `/run/larri-secrets` root; raw paths are never included in runtime diagnostics."
+example = "NTNT_SECRETS_SOCKET_ENDPOINTS=/run/larri-secrets/secrets.sock"
+affects = ["std-secrets", "security"]
+
+[env_vars.NTNT_SECRETS_AUTHORIZATION_SCOPE]
+type = "opaque ASCII deployment identifier"
+default = "unset (required for larri-socket)"
+description = "Trusted non-credential deployment scope expected in every Larri agent response. It detects endpoint miswiring but is not authentication and is never rendered in diagnostics. Leading or trailing whitespace is rejected."
+example = "NTNT_SECRETS_AUTHORIZATION_SCOPE=deployment-a"
+affects = ["std-secrets", "security"]
+
+[env_vars.NTNT_SECRETS_TIMEOUT_MS]
+type = "integer (milliseconds)"
+default = "1000"
+description = "Per-attempt Larri socket connect, write, and read timeout. Values must be between 10 and 10000 milliseconds."
+example = "NTNT_SECRETS_TIMEOUT_MS=500"
+affects = ["std-secrets", "security"]
+
 [env_vars.NTNT_TIMEOUT]
 type = "integer (seconds)"
 default = "30"

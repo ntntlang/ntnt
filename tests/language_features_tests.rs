@@ -11,6 +11,11 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::io::{BufRead, BufReader};
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
+
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn capture_http_request(listener: TcpListener) -> std::thread::JoinHandle<Option<String>> {
@@ -51,6 +56,52 @@ fn capture_http_request(listener: TcpListener) -> std::thread::JoinHandle<Option
         }
         None
     })
+}
+
+#[cfg(unix)]
+fn serve_secret_agent_once(
+    secret_value: &'static str,
+) -> (std::path::PathBuf, std::thread::JoinHandle<()>) {
+    let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let directory =
+        std::path::PathBuf::from("/tmp").join(format!("ntnt-sa-{}-{counter}", std::process::id()));
+    fs::create_dir_all(&directory).expect("create socket fixture directory");
+    let path = directory.join("agent.sock");
+    let listener = UnixListener::bind(&path).expect("bind secret agent fixture");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept secret lookup");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("set fixture read timeout");
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("set fixture write timeout");
+        let mut request = String::new();
+        BufReader::new(&stream)
+            .read_line(&mut request)
+            .expect("read secret lookup");
+        let request: serde_json::Value =
+            serde_json::from_str(request.trim_end()).expect("valid secret lookup JSON");
+        assert_eq!(request["protocol"], 1);
+        assert!(request["request_id"].as_u64().is_some());
+        assert_eq!(request["op"], "get");
+        assert_eq!(request["name"], "PRODUCTION_SOCKET_SECRET");
+        assert_eq!(request.as_object().expect("request object").len(), 4);
+
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({
+                "protocol": 1,
+                "request_id": request["request_id"],
+                "status": "found",
+                "scope": "deployment-a",
+                "value": secret_value,
+            })
+        )
+        .expect("write secret response");
+    });
+    (path, server)
 }
 
 /// Generate a unique test file path
@@ -704,6 +755,97 @@ print(token)
     assert!(stdout.contains("[REDACTED]"), "stdout={stdout}");
     assert!(!stdout.contains("template-secret-canary"));
     assert!(!stderr.contains("template-secret-canary"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_larri_socket_secret_provider_end_to_end() {
+    const SECRET_CANARY: &str = "PRODUCTION_SOCKET_CANARY_DO_NOT_DISCLOSE";
+    let (socket_path, server) = serve_secret_agent_once(SECRET_CANARY);
+    let socket_path_text = socket_path.to_string_lossy().to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind approved sink");
+    let port = listener.local_addr().expect("approved sink address").port();
+    let capture = capture_http_request(listener);
+    let code = format!(
+        r#"
+import {{ fetch }} from "std/http"
+import {{ require_secret }} from "std/secrets"
+let token = require_secret("PRODUCTION_SOCKET_SECRET")
+fetch(map {{
+    "url": "http://127.0.0.1:{port}/secret-sink",
+    "headers": map {{ "authorization": token }}
+}})
+print(token)
+"#
+    );
+
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(
+        &code,
+        &[
+            ("APP_ENV", "development"),
+            ("NTNT_ENV", "staging"),
+            ("NTNT_SECRETS_PROVIDER", "larri-socket"),
+            ("NTNT_SECRETS_SOCKET_ENDPOINTS", &socket_path_text),
+            ("NTNT_SECRETS_AUTHORIZATION_SCOPE", "deployment-a"),
+            ("NTNT_SECRETS_TIMEOUT_MS", "250"),
+        ],
+    );
+
+    assert_eq!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("[REDACTED]"), "stdout={stdout}");
+    assert!(!stdout.contains(SECRET_CANARY));
+    assert!(!stderr.contains(SECRET_CANARY));
+    let request = capture
+        .join()
+        .expect("capture approved sink")
+        .expect("approved sink received request");
+    assert!(
+        request.contains(SECRET_CANARY),
+        "approved sink did not receive socket-provided secret"
+    );
+    server.join().expect("secret agent fixture");
+    if let Some(directory) = socket_path.parent() {
+        fs::remove_dir_all(directory).ok();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_larri_socket_missing_scope_fails_before_socket_contact() {
+    let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let directory =
+        std::path::PathBuf::from("/tmp").join(format!("ntnt-ms-{}-{counter}", std::process::id()));
+    fs::create_dir_all(&directory).expect("create missing-scope fixture");
+    let socket_path = directory.join("agent.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind missing-scope fixture");
+    listener
+        .set_nonblocking(true)
+        .expect("set missing-scope fixture nonblocking");
+    let socket_path_text = socket_path.to_string_lossy().to_string();
+    let code = r#"
+import { require_secret } from "std/secrets"
+require_secret("PRODUCTION_SOCKET_SECRET")
+"#;
+
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(
+        code,
+        &[
+            ("NTNT_ENV", "staging"),
+            ("NTNT_SECRETS_PROVIDER", "larri-socket"),
+            ("NTNT_SECRETS_SOCKET_ENDPOINTS", &socket_path_text),
+        ],
+    );
+
+    assert_ne!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(
+        stderr.contains("configuration is invalid"),
+        "stderr={stderr}"
+    );
+    let error = listener
+        .accept()
+        .expect_err("missing authorization scope must not contact socket");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    fs::remove_dir_all(directory).ok();
 }
 
 #[test]
