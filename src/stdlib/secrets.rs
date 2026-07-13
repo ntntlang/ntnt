@@ -399,8 +399,10 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Use this at startup or immediately before an approved secret-consuming sink.
     // In v0.5.1, `std/http.fetch` accepts Secret values as header, cookie,
-    // basic-auth, raw body, JSON-leaf, and form values. Templates, public JSON,
-    // URL/CSV/string conversion, KV storage, and job payloads reject secrets.
+    // basic-auth, raw body, JSON-leaf, and form values. These requests require HTTPS;
+    // APP_ENV=development permits direct HTTP only for localhost and loopback IPs.
+    // Templates, public JSON, URL/CSV/string conversion, KV storage, and job payloads
+    // reject secrets.
     // There is intentionally no general Secret-to-String reveal function.
     // The error identifies only the logical name and never includes the value.
     // @param name A validated logical secret name

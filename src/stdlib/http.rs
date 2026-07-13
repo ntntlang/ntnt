@@ -7,6 +7,9 @@
 //! - `download(url, path)` - Download file to disk
 //! - `Cache(ttl)` - Create a response cache
 //!
+//! Requests containing `Secret` values require HTTPS. `APP_ENV=development`
+//! permits direct plain HTTP only for `localhost` and loopback IP addresses.
+//!
 //! # Options for fetch()
 //!
 //! - `url`: Request URL (required when using options map)
@@ -27,7 +30,7 @@ use reqwest::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -656,8 +659,69 @@ fn form_scalar(value: &Value) -> Result<String> {
     }
 }
 
+fn is_loopback_url(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn validate_secret_transport(
+    url: &str,
+    contains_secret: bool,
+    app_env: Option<&str>,
+) -> Result<bool> {
+    if !contains_secret {
+        return Ok(false);
+    }
+
+    let parsed = reqwest::Url::parse(url).map_err(|_| {
+        IntentError::type_error("Secret-bearing HTTP requests require a valid URL".to_string())
+    })?;
+
+    if parsed.scheme() == "https" {
+        return Ok(false);
+    }
+
+    let development = app_env.is_some_and(|value| value.eq_ignore_ascii_case("development"));
+    if development && parsed.scheme() == "http" && is_loopback_url(&parsed) {
+        return Ok(true);
+    }
+
+    Err(IntentError::type_error(
+        "Secret-bearing HTTP requests require HTTPS; APP_ENV=development permits HTTP only for localhost or loopback IPs"
+            .to_string(),
+    ))
+}
+
+fn format_ssrf_error(reason: &str, direct_loopback_http: bool) -> String {
+    if direct_loopback_http {
+        format!(
+            "SSRF protection: {reason}. APP_ENV=development permits plaintext loopback transport, but NTNT's SSRF policy remains independent"
+        )
+    } else {
+        format!("SSRF protection: {reason}")
+    }
+}
+
 /// Full HTTP request with all options
 fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
+    let app_env = std::env::var("APP_ENV").ok();
+    http_fetch_with_app_env(opts, app_env.as_deref())
+}
+
+pub(crate) fn http_fetch_with_app_env(
+    opts: &HashMap<String, Value>,
+    app_env: Option<&str>,
+) -> Result<Value> {
     // Cancellation yield point (rule 19): check before making the network request
     if crate::stdlib::concurrent::is_current_task_cancelled() {
         return Err(IntentError::runtime_error("Task cancelled".to_string()));
@@ -672,11 +736,14 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
         }
     };
 
+    let contains_secret = opts.values().any(Value::contains_secret);
+    let direct_loopback_http = validate_secret_transport(&url, contains_secret, app_env)?;
+
     // SSRF protection: validate URL before making request
     if let Err(reason) = validate_url_for_ssrf(&url) {
-        return Ok(Value::err(Value::String(format!(
-            "SSRF protection: {}",
-            reason
+        return Ok(Value::err(Value::String(format_ssrf_error(
+            &reason,
+            direct_loopback_http,
         ))));
     }
 
@@ -694,8 +761,26 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
     // Secret-bearing requests never follow redirects: custom credentials and
     // 307/308 bodies could otherwise be forwarded to a different origin.
     let mut client_builder = reqwest::blocking::Client::builder().cookie_store(true);
-    if opts.values().any(Value::contains_secret) {
+    if contains_secret {
         client_builder = client_builder.redirect(reqwest::redirect::Policy::none());
+    }
+    if direct_loopback_http {
+        // Plaintext development traffic must remain on loopback even when the process
+        // has system proxy settings or a nonstandard localhost resolver.
+        client_builder = client_builder.no_proxy();
+
+        let parsed = reqwest::Url::parse(&url).expect("secret transport URL was validated");
+        if parsed
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("localhost"))
+        {
+            // reqwest uses the URL's port; zero is only a DNS-override placeholder.
+            let loopback = [
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
+            ];
+            client_builder = client_builder.resolve_to_addrs("localhost", &loopback);
+        }
     }
     let client = client_builder
         .build()
@@ -952,8 +1037,10 @@ pub fn init() -> HashMap<String, Value> {
     //   the options map automatically.
     // Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout.
     // Opaque Secret values are accepted only in header values, cookie values, basic-auth
-    // fields, raw bodies, JSON leaves, and form values. Requests containing a Secret
-    // do not follow redirects, preventing credentials or 307/308 bodies from crossing origins.
+    // fields, raw bodies, JSON leaves, and form values. Secret-bearing requests require
+    // HTTPS; APP_ENV=development permits direct HTTP only for localhost and loopback IPs,
+    // bypassing system proxies. Requests containing a Secret do not follow redirects,
+    // preventing credentials or 307/308 bodies from crossing origins.
     // @param url_or_options A URL string for GET, or a Map with request options
     // @param options (optional) A Map with request options when first argument is a URL string
     // @returns Result<Response, String> where Response is a Map with status, status_text, headers, body, ok, url, redirected, and cookies fields
@@ -977,6 +1064,7 @@ pub fn init() -> HashMap<String, Value> {
     // @expected Ok({status: 201, ...})
     // @error TypeError ~ "fetch() requires a URL string or options map" fix: "Pass a String URL or a Map with request options"
     // @error TypeError ~ "fetch() requires 'url' option" fix: "Include 'url' key in the options map"
+    // @error TypeError ~ "Secret-bearing HTTP requests require HTTPS" fix: "Use HTTPS, or set APP_ENV=development for localhost/loopback HTTP"
     // @error RuntimeError ~ "Unsupported HTTP method: ..." fix: "Use GET, POST, PUT, DELETE, PATCH, or HEAD"
     module.insert(
         "fetch".to_string(),
@@ -1245,6 +1333,59 @@ pub fn init() -> HashMap<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_transport_requires_https_by_default() {
+        let error = validate_secret_transport("http://127.0.0.1:8080/api", true, None)
+            .expect_err("secret-bearing HTTP must fail closed without APP_ENV=development");
+        assert!(error.to_string().contains("HTTPS"));
+
+        assert!(validate_secret_transport("https://api.example.com/v1", true, None).is_ok());
+        assert!(validate_secret_transport("http://api.example.com/v1", false, None).is_ok());
+    }
+
+    #[test]
+    fn development_allows_secret_http_only_to_loopback_hosts() {
+        for url in [
+            "http://localhost:8080/api",
+            "http://127.0.0.1:8080/api",
+            "http://127.42.0.9:8080/api",
+            "http://[::1]:8080/api",
+        ] {
+            assert!(
+                validate_secret_transport(url, true, Some("development")).is_ok(),
+                "development should allow loopback URL: {url}"
+            );
+        }
+
+        for url in [
+            "http://example.com/api",
+            "http://localhost.example.com/api",
+            "http://localhost./api",
+            "http://10.0.0.8/api",
+            "http://192.168.1.10/api",
+            "http://0.0.0.0:8080/api",
+            "http://[::]:8080/api",
+        ] {
+            assert!(
+                validate_secret_transport(url, true, Some("development")).is_err(),
+                "development must reject non-loopback URL: {url}"
+            );
+        }
+
+        assert!(
+            validate_secret_transport("http://localhost:8080/api", true, Some("production"))
+                .is_err()
+        );
+        assert!(validate_secret_transport("http://localhost:8080/api", true, Some("dev")).is_err());
+        let invalid = validate_secret_transport("not a URL", true, Some("development"))
+            .expect_err("malformed secret-bearing URL must fail");
+        assert!(invalid.to_string().contains("valid URL"));
+
+        let ssrf_error = format_ssrf_error("Localhost requests blocked", true);
+        assert!(ssrf_error.contains("APP_ENV=development"));
+        assert!(ssrf_error.contains("SSRF policy remains independent"));
+    }
 
     #[test]
     fn cache_fetch_rejects_secret_bearing_options_before_cache_lookup() {
