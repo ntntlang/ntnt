@@ -339,6 +339,13 @@ fn cached_response_to_value(resp: &CachedResponse) -> Value {
 }
 
 fn cache_fetch(cache_id: u64, url: &str, opts: Option<&HashMap<String, Value>>) -> Result<Value> {
+    if opts.is_some_and(|options| options.values().any(Value::contains_secret)) {
+        return Err(IntentError::type_error(
+            "cache_fetch() cannot cache responses for secret-bearing requests; use fetch() directly"
+                .to_string(),
+        ));
+    }
+
     // Check cache first
     {
         let mut registry = CACHE_REGISTRY.lock().unwrap();
@@ -1092,6 +1099,7 @@ pub fn init() -> HashMap<String, Value> {
     // Fetch a URL using a cache, returning a cached response if available.
     //
     // Checks the cache for a previously stored response matching the URL.
+    // Secret-bearing request options are rejected because cache keys do not include credentials.
     // On a cache miss, performs the HTTP request via fetch(), stores the
     // successful response in the cache, and returns it. This is the internal
     // function backing cache.fetch() method calls.
@@ -1232,4 +1240,34 @@ pub fn init() -> HashMap<String, Value> {
     );
 
     module
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_fetch_rejects_secret_bearing_options_before_cache_lookup() {
+        let canary = "cache-secret-canary";
+        let options = HashMap::from([
+            (
+                "url".to_string(),
+                Value::String("http://127.0.0.1:1/never-requested".to_string()),
+            ),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "Authorization".to_string(),
+                    Value::Secret(
+                        crate::interpreter::SecretValue::new("CACHE_SECRET", canary)
+                            .expect("valid secret"),
+                    ),
+                )])),
+            ),
+        ]);
+
+        let error = cache_fetch(0, "http://127.0.0.1:1/never-requested", Some(&options))
+            .expect_err("secret-bearing requests must not use the response cache");
+        assert!(!error.to_string().contains(canary));
+    }
 }
