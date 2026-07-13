@@ -206,11 +206,15 @@ impl SocketSecretProvider {
             match stream.read(&mut chunk[..read_size]) {
                 Ok(0) => return Err(self.error(ProviderErrorKind::Unavailable)),
                 Ok(bytes_read) => {
+                    #[cfg(test)]
+                    eprintln!("socket-test-read bytes={bytes_read}");
                     let bytes = &chunk[..bytes_read];
                     if bytes.contains(&b'\r') {
                         return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                     }
                     if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
+                        #[cfg(test)]
+                        eprintln!("socket-test-newline index={newline}");
                         response.extend_from_slice(&bytes[..=newline]);
                         if newline + 1 != bytes_read || response.len() > MAX_RESPONSE_SIZE {
                             return Err(self.error(ProviderErrorKind::InvalidConfiguration));
@@ -223,7 +227,11 @@ impl SocketSecretProvider {
                             .set_read_timeout(Some(eof_timeout))
                             .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
                         return match stream.read(&mut trailing[..]) {
-                            Ok(0) => Ok(response),
+                            Ok(0) => {
+                                #[cfg(test)]
+                                eprintln!("socket-test-eof=clean");
+                                Ok(response)
+                            }
                             Err(error)
                                 if matches!(
                                     error.kind(),
@@ -231,9 +239,18 @@ impl SocketSecretProvider {
                                         | std::io::ErrorKind::ConnectionAborted
                                 ) =>
                             {
+                                #[cfg(test)]
+                                eprintln!("socket-test-eof=reset");
                                 Ok(response)
                             }
-                            Ok(_) | Err(_) => {
+                            Ok(_) => {
+                                #[cfg(test)]
+                                eprintln!("socket-test-eof=trailing-byte");
+                                Err(self.error(ProviderErrorKind::InvalidConfiguration))
+                            }
+                            Err(error) => {
+                                #[cfg(test)]
+                                eprintln!("socket-test-eof=error kind={:?}", error.kind());
                                 Err(self.error(ProviderErrorKind::InvalidConfiguration))
                             }
                         };
