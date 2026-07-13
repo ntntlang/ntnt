@@ -6,11 +6,52 @@
 //! - CSV parsing
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn capture_http_request(listener: TcpListener) -> std::thread::JoinHandle<Option<String>> {
+    listener
+        .set_nonblocking(true)
+        .expect("set HTTP capture nonblocking");
+    std::thread::spawn(move || {
+        for _ in 0..300 {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut request = Vec::new();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                        .expect("request read timeout");
+                    let mut chunk = [0_u8; 1024];
+                    loop {
+                        let read = stream.read(&mut chunk).expect("read local request");
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        )
+                        .expect("write local response");
+                    return Some(String::from_utf8_lossy(&request).to_string());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("HTTP capture accept failed: {error}"),
+            }
+        }
+        None
+    })
+}
 
 /// Generate a unique test file path
 fn unique_test_file(prefix: &str) -> String {
@@ -684,6 +725,121 @@ print(token)
     assert!(stderr.contains("development-only"), "stderr={stderr}");
     assert!(!stdout.contains("production-secret-canary"));
     assert!(!stderr.contains("production-secret-canary"));
+}
+
+#[test]
+fn test_secret_bearing_http_requires_https_outside_app_development() {
+    let code = r#"
+import { fetch } from "std/http"
+import { require_secret } from "std/secrets"
+let token = require_secret("NTNT_HTTP_TRANSPORT_SECRET")
+fetch(map {
+    "url": "http://127.0.0.1:9/private",
+    "headers": map { "authorization": token }
+})
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(
+        code,
+        &[
+            ("APP_ENV", "production"),
+            ("NTNT_HTTP_TRANSPORT_SECRET", "http-transport-secret-canary"),
+        ],
+    );
+
+    assert_ne!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(stderr.contains("require HTTPS"), "stderr={stderr}");
+    assert!(!stdout.contains("http-transport-secret-canary"));
+    assert!(!stderr.contains("http-transport-secret-canary"));
+}
+
+#[test]
+fn test_app_development_allows_secret_bearing_http_to_loopback() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
+    let port = listener.local_addr().expect("local HTTP address").port();
+    let capture = capture_http_request(listener);
+
+    let code = format!(
+        r#"
+import {{ fetch }} from "std/http"
+import {{ require_secret }} from "std/secrets"
+let token = require_secret("NTNT_HTTP_TRANSPORT_SECRET")
+fetch(map {{
+    "url": "http://localhost:{port}/private",
+    "headers": map {{ "x-api-key": token }}
+}})
+"#
+    );
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(
+        &code,
+        &[
+            ("APP_ENV", "development"),
+            ("NTNT_HTTP_TRANSPORT_SECRET", "http-transport-secret-canary"),
+        ],
+    );
+
+    assert_eq!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    let request = capture
+        .join()
+        .expect("capture local request")
+        .expect("loopback server received request");
+    assert!(
+        request.contains("x-api-key: http-transport-secret-canary"),
+        "request={request}"
+    );
+    assert!(!stdout.contains("http-transport-secret-canary"));
+    assert!(!stderr.contains("http-transport-secret-canary"));
+}
+
+#[test]
+fn test_app_development_loopback_secret_http_bypasses_system_proxy() {
+    let target = TcpListener::bind("127.0.0.1:0").expect("bind loopback target");
+    let target_address = target.local_addr().expect("loopback target address");
+    let target_capture = capture_http_request(target);
+
+    let proxy = TcpListener::bind("127.0.0.1:0").expect("bind proxy capture");
+    let proxy_address = proxy.local_addr().expect("proxy capture address");
+    let proxy_capture = capture_http_request(proxy);
+
+    let code = format!(
+        r#"
+import {{ fetch }} from "std/http"
+import {{ require_secret }} from "std/secrets"
+let token = require_secret("NTNT_HTTP_TRANSPORT_SECRET")
+fetch(map {{
+    "url": "http://{target_address}/private",
+    "headers": map {{ "x-api-key": token }}
+}})
+"#
+    );
+    let proxy_url = format!("http://{proxy_address}");
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(
+        &code,
+        &[
+            ("APP_ENV", "development"),
+            ("NTNT_HTTP_TRANSPORT_SECRET", "proxy-secret-canary"),
+            ("HTTP_PROXY", &proxy_url),
+            ("http_proxy", &proxy_url),
+            ("NO_PROXY", ""),
+            ("no_proxy", ""),
+        ],
+    );
+
+    assert_eq!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    let target_request = target_capture
+        .join()
+        .expect("target capture")
+        .expect("loopback target received request");
+    let proxy_request = proxy_capture.join().expect("proxy capture");
+    assert!(
+        target_request.contains("x-api-key: proxy-secret-canary"),
+        "target request={target_request}"
+    );
+    assert!(
+        proxy_request.is_none(),
+        "secret-bearing loopback request reached proxy: {proxy_request:?}"
+    );
+    assert!(!stdout.contains("proxy-secret-canary"));
+    assert!(!stderr.contains("proxy-secret-canary"));
 }
 
 #[test]

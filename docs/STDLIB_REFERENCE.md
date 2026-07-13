@@ -6733,7 +6733,7 @@ fetch(url_or_options: String | Map, options?: Map) -> Result<Response, String>
 
 Make an HTTP request to a URL.
 
-Accepts one or two arguments: - One argument: a URL string for a simple GET request, or an options map   with full control over method, headers, body, authentication, cookies, and timeout. - Two arguments: a URL string and an options map. The URL is merged into   the options map automatically. Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout. Opaque Secret values are accepted only in header values, cookie values, basic-auth fields, raw bodies, JSON leaves, and form values. Requests containing a Secret do not follow redirects, preventing credentials or 307/308 bodies from crossing origins.
+Accepts one or two arguments: - One argument: a URL string for a simple GET request, or an options map   with full control over method, headers, body, authentication, cookies, and timeout. - Two arguments: a URL string and an options map. The URL is merged into   the options map automatically. Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout. Opaque Secret values are accepted only in header values, cookie values, basic-auth fields, raw bodies, JSON leaves, and form values. Secret-bearing requests require HTTPS; APP_ENV=development permits direct HTTP only for localhost and loopback IPs, bypassing system proxies. Requests containing a Secret do not follow redirects, preventing credentials or 307/308 bodies from crossing origins.
 
 **Parameters:**
 
@@ -6766,6 +6766,7 @@ fetch("https://api.example.com", map {
 
 - **TypeError**: fetch() requires a URL string or options map — *Fix: Pass a String URL or a Map with request options*
 - **TypeError**: fetch() requires 'url' option — *Fix: Include 'url' key in the options map*
+- **TypeError**: Secret-bearing HTTP requests require HTTPS — *Fix: Use HTTPS, or set APP_ENV=development for localhost/loopback HTTP*
 - **RuntimeError**: Unsupported HTTP method: ... — *Fix: Use GET, POST, PUT, DELETE, PATCH, or HEAD*
 
 **See also:** `download`, `cache_fetch`
@@ -10936,7 +10937,7 @@ require_secret(name: String) -> Secret
 
 Looks up a required secret and fails closed when it is not configured.
 
-Use this at startup or immediately before an approved secret-consuming sink. In v0.5.1, `std/http.fetch` accepts Secret values as header, cookie, basic-auth, raw body, JSON-leaf, and form values. Templates, public JSON, URL/CSV/string conversion, KV storage, and job payloads reject secrets. There is intentionally no general Secret-to-String reveal function. The error identifies only the logical name and never includes the value.
+Use this at startup or immediately before an approved secret-consuming sink. In v0.5.1, `std/http.fetch` accepts Secret values as header, cookie, basic-auth, raw body, JSON-leaf, and form values. These requests require HTTPS; APP_ENV=development permits direct HTTP only for localhost and loopback IPs. Templates, public JSON, URL/CSV/string conversion, KV storage, and job payloads reject secrets. There is intentionally no general Secret-to-String reveal function. The error identifies only the logical name and never includes the value.
 
 **Parameters:**
 

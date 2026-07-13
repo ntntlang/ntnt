@@ -245,8 +245,8 @@ fn fetch_and_capture(mut options: HashMap<String, Value>) -> (Value, String) {
         String::from_utf8(bytes).expect("request is utf-8")
     });
 
-    let module = crate::stdlib::http::init();
-    let result = native_fn(&module, "fetch")(&[Value::Map(options)]).expect("fetch executes");
+    let result = crate::stdlib::http::http_fetch_with_app_env(&options, Some("development"))
+        .expect("fetch executes");
     (result, capture.join().expect("capture thread"))
 }
 
@@ -368,8 +368,8 @@ fn http_fetch_does_not_follow_redirects_when_request_contains_secrets() {
         "headers".to_string(),
         Value::Map(HashMap::from([("x-api-key".to_string(), test_secret())])),
     );
-    let module = crate::stdlib::http::init();
-    native_fn(&module, "fetch")(&[Value::Map(options)]).expect("fetch redirect response");
+    crate::stdlib::http::http_fetch_with_app_env(&options, Some("development"))
+        .expect("fetch redirect response");
 
     redirect_server.join().expect("redirect server");
     let forwarded = target_request.join().expect("target thread");
