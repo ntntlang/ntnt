@@ -3014,6 +3014,22 @@ mod tests {
     }
 
     #[test]
+    fn serialized_values_reject_secrets_across_task_and_channel_boundaries() {
+        let canary = "concurrent-secret-canary";
+        let value = Value::Map(HashMap::from([(
+            "token".to_string(),
+            Value::Secret(
+                crate::interpreter::SecretValue::new("CONCURRENT_SECRET", canary)
+                    .expect("valid secret"),
+            ),
+        )]));
+
+        let error = SerializedValue::from_value(&value)
+            .expect_err("task and channel serialization must reject secrets");
+        assert!(!error.to_string().contains(canary));
+    }
+
+    #[test]
     fn test_module_init() {
         let module = init();
         assert!(module.contains_key("channel"));

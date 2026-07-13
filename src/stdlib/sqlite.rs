@@ -29,8 +29,14 @@ static CONNECTION_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Arc<Mutex<Con
 static CONNECTION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Convert an Intent Value to a rusqlite Value
-fn value_to_sqlite(value: &Value) -> rusqlite::types::Value {
-    match value {
+fn value_to_sqlite(value: &Value) -> Result<rusqlite::types::Value> {
+    if value.contains_secret() {
+        return Err(IntentError::type_error(
+            "SQLite parameters cannot contain Secret values".to_string(),
+        ));
+    }
+
+    Ok(match value {
         Value::Int(i) => rusqlite::types::Value::Integer(*i),
         Value::Float(f) => rusqlite::types::Value::Real(*f),
         Value::String(s) => rusqlite::types::Value::Text(s.clone()),
@@ -40,7 +46,7 @@ fn value_to_sqlite(value: &Value) -> rusqlite::types::Value {
             enum_name, variant, ..
         } if enum_name == "Option" && variant == "None" => rusqlite::types::Value::Null,
         _ => rusqlite::types::Value::Text(format!("{}", value)),
-    }
+    })
 }
 
 /// Convert a SQLite ValueRef to an Intent Value
@@ -121,7 +127,8 @@ fn sqlite_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
-    let sqlite_params: Vec<rusqlite::types::Value> = params.iter().map(value_to_sqlite).collect();
+    let sqlite_params: Vec<rusqlite::types::Value> =
+        params.iter().map(value_to_sqlite).collect::<Result<_>>()?;
 
     let mut stmt = conn_guard
         .prepare(sql)
@@ -162,7 +169,8 @@ fn sqlite_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> 
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
-    let sqlite_params: Vec<rusqlite::types::Value> = params.iter().map(value_to_sqlite).collect();
+    let sqlite_params: Vec<rusqlite::types::Value> =
+        params.iter().map(value_to_sqlite).collect::<Result<_>>()?;
 
     let mut stmt = conn_guard
         .prepare(sql)
@@ -193,7 +201,8 @@ fn sqlite_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
-    let sqlite_params: Vec<rusqlite::types::Value> = params.iter().map(value_to_sqlite).collect();
+    let sqlite_params: Vec<rusqlite::types::Value> =
+        params.iter().map(value_to_sqlite).collect::<Result<_>>()?;
 
     match conn_guard.execute(sql, rusqlite::params_from_iter(sqlite_params.iter())) {
         Ok(count) => Ok(Value::ok(Value::Int(count as i64))),
@@ -937,34 +946,49 @@ mod tests {
 
     #[test]
     fn test_value_to_sqlite_conversion() {
-        match value_to_sqlite(&Value::Int(42)) {
+        match value_to_sqlite(&Value::Int(42)).expect("integer parameter") {
             rusqlite::types::Value::Integer(v) => assert_eq!(v, 42),
             _ => panic!("Expected Integer"),
         }
-        match value_to_sqlite(&Value::Float(3.14)) {
+        match value_to_sqlite(&Value::Float(3.14)).expect("float parameter") {
             rusqlite::types::Value::Real(v) => assert!((v - 3.14).abs() < f64::EPSILON),
             _ => panic!("Expected Real"),
         }
-        match value_to_sqlite(&Value::String("hello".to_string())) {
+        match value_to_sqlite(&Value::String("hello".to_string())).expect("string parameter") {
             rusqlite::types::Value::Text(v) => assert_eq!(v, "hello"),
             _ => panic!("Expected Text"),
         }
-        match value_to_sqlite(&Value::Bool(true)) {
+        match value_to_sqlite(&Value::Bool(true)).expect("boolean parameter") {
             rusqlite::types::Value::Integer(v) => assert_eq!(v, 1),
             _ => panic!("Expected Integer for true"),
         }
-        match value_to_sqlite(&Value::Bool(false)) {
+        match value_to_sqlite(&Value::Bool(false)).expect("boolean parameter") {
             rusqlite::types::Value::Integer(v) => assert_eq!(v, 0),
             _ => panic!("Expected Integer for false"),
         }
-        match value_to_sqlite(&Value::Unit) {
+        match value_to_sqlite(&Value::Unit).expect("unit parameter") {
             rusqlite::types::Value::Null => {}
             _ => panic!("Expected Null for Unit"),
         }
-        match value_to_sqlite(&Value::none()) {
+        match value_to_sqlite(&Value::none()).expect("none parameter") {
             rusqlite::types::Value::Null => {}
             _ => panic!("Expected Null for None"),
         }
+    }
+
+    #[test]
+    fn secret_values_are_rejected_from_sqlite_parameters() {
+        let canary = "sqlite-secret-canary";
+        let value = Value::Map(HashMap::from([(
+            "token".to_string(),
+            Value::Secret(
+                crate::interpreter::SecretValue::new("SQLITE_SECRET", canary)
+                    .expect("valid secret"),
+            ),
+        )]));
+
+        let error = value_to_sqlite(&value).expect_err("SQLite must reject secrets");
+        assert!(!error.to_string().contains(canary));
     }
 
     #[test]

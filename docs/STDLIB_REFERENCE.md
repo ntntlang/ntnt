@@ -6661,7 +6661,7 @@ cache_fetch(cache_obj: Map, url_or_options: String | Map) -> Result<Response, St
 
 Fetch a URL using a cache, returning a cached response if available.
 
-Checks the cache for a previously stored response matching the URL. On a cache miss, performs the HTTP request via fetch(), stores the successful response in the cache, and returns it. This is the internal function backing cache.fetch() method calls.
+Checks the cache for a previously stored response matching the URL. Secret-bearing request options are rejected because cache keys do not include credentials. On a cache miss, performs the HTTP request via fetch(), stores the successful response in the cache, and returns it. This is the internal function backing cache.fetch() method calls.
 
 **Parameters:**
 

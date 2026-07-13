@@ -156,8 +156,14 @@ impl ToSql for SqlParam {
 }
 
 /// Convert an Intent Value to a SQL parameter
-fn value_to_sql_param(value: &Value) -> SqlParam {
-    match value {
+fn value_to_sql_param(value: &Value) -> Result<SqlParam> {
+    if value.contains_secret() {
+        return Err(IntentError::type_error(
+            "PostgreSQL parameters cannot contain Secret values".to_string(),
+        ));
+    }
+
+    Ok(match value {
         Value::Int(i) => {
             // Use i32 for smaller values, i64 for larger
             if *i >= i32::MIN as i64 && *i <= i32::MAX as i64 {
@@ -206,7 +212,7 @@ fn value_to_sql_param(value: &Value) -> SqlParam {
             }
         }
         _ => SqlParam::String(format!("{}", value)), // Fallback to string representation
-    }
+    })
 }
 
 /// Convert a tokio-postgres row to an Intent Map
@@ -819,7 +825,10 @@ async fn pg_execute_cached(
 
 /// Execute a query using either the transaction client or a fresh pool connection
 fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
-    let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
+    let sql_params: Vec<SqlParam> = params
+        .iter()
+        .map(value_to_sql_param)
+        .collect::<Result<_>>()?;
     let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
         .iter()
         .map(|p| p as &(dyn ToSql + Sync))
@@ -869,7 +878,10 @@ fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
 
 /// Execute a query and return a single row (or null)
 fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
-    let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
+    let sql_params: Vec<SqlParam> = params
+        .iter()
+        .map(value_to_sql_param)
+        .collect::<Result<_>>()?;
     let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
         .iter()
         .map(|p| p as &(dyn ToSql + Sync))
@@ -913,7 +925,10 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
 
 /// Execute a statement (INSERT/UPDATE/DELETE) and return affected row count
 fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
-    let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
+    let sql_params: Vec<SqlParam> = params
+        .iter()
+        .map(value_to_sql_param)
+        .collect::<Result<_>>()?;
     let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
         .iter()
         .map(|p| p as &(dyn ToSql + Sync))
@@ -1473,25 +1488,37 @@ mod tests {
     #[test]
     fn test_value_to_sql_param() {
         // Test integer conversion
-        let param = value_to_sql_param(&Value::Int(42));
+        let param = value_to_sql_param(&Value::Int(42)).expect("integer parameter");
         match param {
             SqlParam::Int(v) => assert_eq!(v, 42),
             _ => panic!("Expected Int"),
         }
 
         // Test boolean conversion
-        let param = value_to_sql_param(&Value::Bool(true));
+        let param = value_to_sql_param(&Value::Bool(true)).expect("boolean parameter");
         match param {
             SqlParam::Bool(v) => assert!(v),
             _ => panic!("Expected Bool"),
         }
 
         // Test string conversion
-        let param = value_to_sql_param(&Value::String("test".to_string()));
+        let param =
+            value_to_sql_param(&Value::String("test".to_string())).expect("string parameter");
         match param {
             SqlParam::String(v) => assert_eq!(v, "test"),
             _ => panic!("Expected String"),
         }
+    }
+
+    #[test]
+    fn secret_values_are_rejected_from_postgres_parameters() {
+        let canary = "postgres-secret-canary";
+        let value = Value::Array(vec![Value::Secret(
+            crate::interpreter::SecretValue::new("POSTGRES_SECRET", canary).expect("valid secret"),
+        )]);
+
+        let error = value_to_sql_param(&value).expect_err("PostgreSQL must reject secrets");
+        assert!(!error.to_string().contains(canary));
     }
 
     #[test]
