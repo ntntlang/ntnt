@@ -529,7 +529,7 @@ mod tests {
             "larri-socket",
             Some(&endpoints),
             Some("deployment-a"),
-            Some("100"),
+            Some("1000"),
             false,
         )
         .expect("valid socket provider group");

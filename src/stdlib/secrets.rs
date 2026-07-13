@@ -753,16 +753,19 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn socket_provider_selector_fails_closed_off_unix() {
-        let error = configured_provider_group_from_values(
+        let result = configured_provider_group_from_values(
             "larri-socket",
             Some(r"C:\run\larri-secrets\agent.sock"),
             Some("deployment-a"),
             Some("250"),
             false,
-        )
-        .expect_err("socket provider must be unavailable off Unix");
+        );
+        let error = match result {
+            Ok(_) => panic!("socket provider must be unavailable off Unix"),
+            Err(error) => error,
+        };
         let rendered = error.to_string();
-        assert!(rendered.contains("configuration is invalid"));
+        assert!(rendered.contains("supported only on Unix platforms"));
         assert!(!rendered.contains("agent.sock"));
     }
 
