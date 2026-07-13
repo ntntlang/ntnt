@@ -684,9 +684,7 @@ fn validate_secret_transport(
     }
 
     let parsed = reqwest::Url::parse(url).map_err(|_| {
-        IntentError::type_error(
-            "Secret-bearing HTTP requests require a valid HTTPS URL".to_string(),
-        )
+        IntentError::type_error("Secret-bearing HTTP requests require a valid URL".to_string())
     })?;
 
     if parsed.scheme() == "https" {
@@ -702,6 +700,16 @@ fn validate_secret_transport(
         "Secret-bearing HTTP requests require HTTPS; APP_ENV=development permits HTTP only for localhost or loopback IPs"
             .to_string(),
     ))
+}
+
+fn format_ssrf_error(reason: &str, direct_loopback_http: bool) -> String {
+    if direct_loopback_http {
+        format!(
+            "SSRF protection: {reason}. APP_ENV=development permits plaintext loopback transport, but NTNT's SSRF policy remains independent"
+        )
+    } else {
+        format!("SSRF protection: {reason}")
+    }
 }
 
 /// Full HTTP request with all options
@@ -733,9 +741,9 @@ pub(crate) fn http_fetch_with_app_env(
 
     // SSRF protection: validate URL before making request
     if let Err(reason) = validate_url_for_ssrf(&url) {
-        return Ok(Value::err(Value::String(format!(
-            "SSRF protection: {}",
-            reason
+        return Ok(Value::err(Value::String(format_ssrf_error(
+            &reason,
+            direct_loopback_http,
         ))));
     }
 
@@ -766,6 +774,7 @@ pub(crate) fn http_fetch_with_app_env(
             .host_str()
             .is_some_and(|host| host.eq_ignore_ascii_case("localhost"))
         {
+            // reqwest uses the URL's port; zero is only a DNS-override placeholder.
             let loopback = [
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
                 SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
@@ -1369,7 +1378,13 @@ mod tests {
                 .is_err()
         );
         assert!(validate_secret_transport("http://localhost:8080/api", true, Some("dev")).is_err());
-        assert!(validate_secret_transport("not a URL", true, Some("development")).is_err());
+        let invalid = validate_secret_transport("not a URL", true, Some("development"))
+            .expect_err("malformed secret-bearing URL must fail");
+        assert!(invalid.to_string().contains("valid URL"));
+
+        let ssrf_error = format_ssrf_error("Localhost requests blocked", true);
+        assert!(ssrf_error.contains("APP_ENV=development"));
+        assert!(ssrf_error.contains("SSRF policy remains independent"));
     }
 
     #[test]
