@@ -21,7 +21,7 @@
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
-use crate::stdlib::json::intent_value_to_json;
+use crate::stdlib::json::intent_value_to_json_expose;
 use base64::Engine;
 use reqwest::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
 use std::collections::HashMap;
@@ -624,6 +624,31 @@ fn http_get(url: &str) -> Result<Value> {
     }
 }
 
+fn secret_or_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
+    match value {
+        Value::String(value) => Ok(value),
+        Value::Secret(secret) => Ok(secret.expose()),
+        other => Err(IntentError::type_error(format!(
+            "fetch() {field} must be a String or Secret, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn form_scalar(value: &Value) -> Result<String> {
+    match value {
+        Value::String(value) => Ok(value.clone()),
+        Value::Secret(secret) => Ok(secret.expose().to_string()),
+        Value::Int(value) => Ok(value.to_string()),
+        Value::Float(value) => Ok(value.to_string()),
+        Value::Bool(value) => Ok(value.to_string()),
+        other => Err(IntentError::type_error(format!(
+            "fetch() form values must be scalar or Secret, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 /// Full HTTP request with all options
 fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
     // Cancellation yield point (rule 19): check before making the network request
@@ -649,13 +674,23 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
     }
 
     let method = match opts.get("method") {
-        Some(Value::String(m)) => m.to_uppercase(),
-        _ => "GET".to_string(),
+        Some(Value::String(method)) => method.to_uppercase(),
+        None => "GET".to_string(),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "fetch() method must be a String, got {}",
+                other.type_name()
+            )))
+        }
     };
 
-    // Build client with cookie store
-    let client = reqwest::blocking::Client::builder()
-        .cookie_store(true)
+    // Secret-bearing requests never follow redirects: custom credentials and
+    // 307/308 bodies could otherwise be forwarded to a different origin.
+    let mut client_builder = reqwest::blocking::Client::builder().cookie_store(true);
+    if opts.values().any(Value::contains_secret) {
+        client_builder = client_builder.redirect(reqwest::redirect::Policy::none());
+    }
+    let client = client_builder
         .build()
         .map_err(|e| IntentError::runtime_error(format!("Failed to create HTTP client: {}", e)))?;
 
@@ -674,57 +709,67 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
         }
     };
 
-    // Add headers
+    // Add headers. Secrets are approved only as values, never names.
     if let Some(Value::Map(headers)) = opts.get("headers") {
         for (key, value) in headers {
-            if let Value::String(v) = value {
-                request = request.header(key.as_str(), v.as_str());
-            }
+            request = request.header(key.as_str(), secret_or_string(value, "header value")?);
         }
+    } else if let Some(other) = opts.get("headers") {
+        return Err(IntentError::type_error(format!(
+            "fetch() headers must be a Map, got {}",
+            other.type_name()
+        )));
     }
 
     // Add cookies
     if let Some(Value::Map(cookies)) = opts.get("cookies") {
-        let cookie_str: Vec<String> = cookies
+        let cookie_str: Result<Vec<String>> = cookies
             .iter()
-            .filter_map(|(k, v)| {
-                if let Value::String(val) = v {
-                    Some(format!("{}={}", k, val))
-                } else {
-                    None
-                }
+            .map(|(key, value)| {
+                secret_or_string(value, "cookie value").map(|value| format!("{key}={value}"))
             })
             .collect();
+        let cookie_str = cookie_str?;
         if !cookie_str.is_empty() {
             request = request.header(COOKIE, cookie_str.join("; "));
         }
+    } else if let Some(other) = opts.get("cookies") {
+        return Err(IntentError::type_error(format!(
+            "fetch() cookies must be a Map, got {}",
+            other.type_name()
+        )));
     }
 
     // Add basic auth
     if let Some(Value::Map(auth)) = opts.get("auth") {
         let username = match auth.get("user") {
-            Some(Value::String(u)) => u.clone(),
-            _ => String::new(),
+            Some(value) => secret_or_string(value, "basic-auth user")?,
+            None => "",
         };
         let password = match auth.get("pass") {
-            Some(Value::String(p)) => p.clone(),
-            _ => String::new(),
+            Some(value) => secret_or_string(value, "basic-auth password")?,
+            None => "",
         };
         if !username.is_empty() {
-            let credentials = format!("{}:{}", username, password);
+            let credentials = format!("{username}:{password}");
             let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
-            request = request.header(AUTHORIZATION, format!("Basic {}", encoded));
+            request = request.header(AUTHORIZATION, format!("Basic {encoded}"));
         }
+    } else if let Some(other) = opts.get("auth") {
+        return Err(IntentError::type_error(format!(
+            "fetch() auth must be a Map, got {}",
+            other.type_name()
+        )));
     }
 
     // Add raw body
-    if let Some(Value::String(body)) = opts.get("body") {
-        request = request.body(body.clone());
+    if let Some(body) = opts.get("body") {
+        request = request.body(secret_or_string(body, "body")?.to_string());
     }
 
     // Add JSON body
     if let Some(data) = opts.get("json") {
-        let json_body = intent_value_to_json(data);
+        let json_body = intent_value_to_json_expose(data)?;
         request = request
             .header("Content-Type", "application/json")
             .body(json_body.to_string());
@@ -732,23 +777,35 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
 
     // Add form data
     if let Some(Value::Map(form_data)) = opts.get("form") {
-        let mut form: Vec<(String, String)> = Vec::new();
-        for (key, value) in form_data {
-            let string_value = match value {
-                Value::String(s) => s.clone(),
-                Value::Int(i) => i.to_string(),
-                Value::Float(f) => f.to_string(),
-                Value::Bool(b) => b.to_string(),
-                _ => format!("{:?}", value),
-            };
-            form.push((key.clone(), string_value));
-        }
-        request = request.form(&form);
+        let form: Result<Vec<(String, String)>> = form_data
+            .iter()
+            .map(|(key, value)| form_scalar(value).map(|value| (key.clone(), value)))
+            .collect();
+        request = request.form(&form?);
+    } else if let Some(other) = opts.get("form") {
+        return Err(IntentError::type_error(format!(
+            "fetch() form must be a Map, got {}",
+            other.type_name()
+        )));
     }
 
     // Add timeout
-    if let Some(Value::Int(timeout)) = opts.get("timeout") {
-        request = request.timeout(Duration::from_secs(*timeout as u64));
+    match opts.get("timeout") {
+        Some(Value::Int(timeout)) if *timeout >= 0 => {
+            request = request.timeout(Duration::from_secs(*timeout as u64));
+        }
+        Some(Value::Int(_)) => {
+            return Err(IntentError::type_error(
+                "fetch() timeout must be non-negative".to_string(),
+            ))
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "fetch() timeout must be an Int, got {}",
+                other.type_name()
+            )))
+        }
+        None => {}
     }
 
     // Execute request
@@ -887,6 +944,9 @@ pub fn init() -> HashMap<String, Value> {
     // - Two arguments: a URL string and an options map. The URL is merged into
     //   the options map automatically.
     // Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout.
+    // Opaque Secret values are accepted only in header values, cookie values, basic-auth
+    // fields, raw bodies, JSON leaves, and form values. Requests containing a Secret
+    // do not follow redirects, preventing credentials or 307/308 bodies from crossing origins.
     // @param url_or_options A URL string for GET, or a Map with request options
     // @param options (optional) A Map with request options when first argument is a URL string
     // @returns Result<Response, String> where Response is a Map with status, status_text, headers, body, ok, url, redirected, and cookies fields

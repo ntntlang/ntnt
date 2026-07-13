@@ -1950,6 +1950,7 @@ dependencies = [
  "uuid",
  "webpki-root-certs",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]

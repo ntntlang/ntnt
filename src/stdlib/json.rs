@@ -32,9 +32,46 @@ pub fn json_to_intent_value(json: &serde_json::Value) -> Value {
     }
 }
 
-/// Convert Intent Value to JSON value
+/// Secret handling policy for JSON conversion.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecretSerialization {
+    Redact,
+    Reject,
+    Expose,
+}
+
+/// Convert an ntnt value to JSON while redacting any direct or nested secrets.
+///
+/// This compatibility helper is safe for diagnostics and internal metadata, but
+/// public serialization boundaries should use [`intent_value_to_json_reject`].
 pub fn intent_value_to_json(value: &Value) -> serde_json::Value {
-    match value {
+    intent_value_to_json_with_policy(value, SecretSerialization::Redact)
+        .unwrap_or_else(|_| serde_json::Value::String(crate::secret::REDACTED_SECRET.to_string()))
+}
+
+/// Convert an ntnt value to public JSON, rejecting direct or nested secrets.
+pub fn intent_value_to_json_reject(value: &Value) -> crate::error::Result<serde_json::Value> {
+    intent_value_to_json_with_policy(value, SecretSerialization::Reject)
+}
+
+/// Convert outbound HTTP request JSON, exposing secret leaves only at this audited sink.
+pub(crate) fn intent_value_to_json_expose(
+    value: &Value,
+) -> crate::error::Result<serde_json::Value> {
+    intent_value_to_json_with_policy(value, SecretSerialization::Expose)
+}
+
+fn intent_value_to_json_with_policy(
+    value: &Value,
+    policy: SecretSerialization,
+) -> crate::error::Result<serde_json::Value> {
+    if policy == SecretSerialization::Reject && value.contains_secret() {
+        return Err(IntentError::type_error(
+            "Secret values cannot be serialized to public JSON".to_string(),
+        ));
+    }
+
+    Ok(match value {
         Value::Unit => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
@@ -42,21 +79,38 @@ pub fn intent_value_to_json(value: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(intent_value_to_json).collect())
-        }
+        Value::Secret(secret) => match policy {
+            SecretSerialization::Redact => {
+                serde_json::Value::String(crate::secret::REDACTED_SECRET.to_string())
+            }
+            SecretSerialization::Expose => {
+                serde_json::Value::String(secret.expose().to_string())
+            }
+            SecretSerialization::Reject => unreachable!("rejected before conversion"),
+        },
+        Value::Array(arr) => serde_json::Value::Array(
+            arr.iter()
+                .map(|item| intent_value_to_json_with_policy(item, policy))
+                .collect::<crate::error::Result<Vec<_>>>()?,
+        ),
         Value::Map(map) => {
             let obj: serde_json::Map<String, serde_json::Value> = map
                 .iter()
-                .map(|(k, v)| (k.clone(), intent_value_to_json(v)))
-                .collect();
+                .map(|(key, item)| {
+                    intent_value_to_json_with_policy(item, policy)
+                        .map(|converted| (key.clone(), converted))
+                })
+                .collect::<crate::error::Result<_>>()?;
             serde_json::Value::Object(obj)
         }
         Value::Struct { fields, .. } => {
             let obj: serde_json::Map<String, serde_json::Value> = fields
                 .iter()
-                .map(|(k, v)| (k.clone(), intent_value_to_json(v)))
-                .collect();
+                .map(|(key, item)| {
+                    intent_value_to_json_with_policy(item, policy)
+                        .map(|converted| (key.clone(), converted))
+                })
+                .collect::<crate::error::Result<_>>()?;
             serde_json::Value::Object(obj)
         }
         Value::EnumValue {
@@ -65,15 +119,21 @@ pub fn intent_value_to_json(value: &Value) -> serde_json::Value {
             values,
         } if enum_name == "Option" => match variant.as_str() {
             "None" => serde_json::Value::Null,
-            "Some" => values
-                .first()
-                .map(intent_value_to_json)
-                .unwrap_or(serde_json::Value::Null),
+            "Some" => match values.first() {
+                Some(inner) => intent_value_to_json_with_policy(inner, policy)?,
+                None => serde_json::Value::Null,
+            },
             _ => serde_json::Value::String(value.to_string()),
         },
-        // For other types, convert to string representation
+        other if policy == SecretSerialization::Expose && other.contains_secret() => {
+            return Err(IntentError::type_error(
+                "Secret values in outbound JSON must be leaves inside maps, arrays, structs, or Option"
+                    .to_string(),
+            ))
+        }
+        // For other types, preserve the existing string representation.
         _ => serde_json::Value::String(value.to_string()),
-    }
+    })
 }
 
 /// Initialize the std/json module
@@ -161,7 +221,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             requires: None,
             func: |args| {
-                let json_val = intent_value_to_json(&args[0]);
+                let json_val = intent_value_to_json_reject(&args[0])?;
                 Ok(Value::String(json_val.to_string()))
             },
         },
@@ -188,7 +248,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             requires: None,
             func: |args| {
-                let json_val = intent_value_to_json(&args[0]);
+                let json_val = intent_value_to_json_reject(&args[0])?;
                 match serde_json::to_string_pretty(&json_val) {
                     Ok(s) => Ok(Value::String(s)),
                     Err(e) => Ok(Value::String(format!("{{\"error\": \"{}\"}}", e))),

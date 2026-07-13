@@ -1026,6 +1026,7 @@ impl TypeContext {
                 "Int" => Type::Int,
                 "Float" => Type::Float,
                 "String" => Type::String,
+                "Secret" => Type::Secret,
                 "Bool" => Type::Bool,
                 "Unit" | "()" => Type::Unit,
                 "Any" => Type::Any,
@@ -1405,6 +1406,15 @@ impl TypeContext {
                 type_params,
                 ..
             } => {
+                if name == "Secret" {
+                    let line = self.find_line_near("struct Secret");
+                    self.error(
+                        "'Secret' is reserved for opaque std/secrets values".to_string(),
+                        line,
+                        Some("Choose a different struct name".to_string()),
+                    );
+                    return;
+                }
                 // Store type parameter names for generic structs (e.g., struct Pair<A, B>)
                 let tp_names: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
                 if !tp_names.is_empty() {
@@ -1422,6 +1432,15 @@ impl TypeContext {
                 type_params: _,
                 ..
             } => {
+                if name == "Secret" {
+                    let line = self.find_line_near("enum Secret");
+                    self.error(
+                        "'Secret' is reserved for opaque std/secrets values".to_string(),
+                        line,
+                        Some("Choose a different enum name".to_string()),
+                    );
+                    return;
+                }
                 let variant_types: Vec<(String, Option<Vec<Type>>)> = variants
                     .iter()
                     .map(|v| {
@@ -1439,6 +1458,15 @@ impl TypeContext {
                 target,
                 type_params: _,
             } => {
+                if name == "Secret" {
+                    let line = self.find_line_near("type Secret");
+                    self.error(
+                        "'Secret' is reserved for opaque std/secrets values".to_string(),
+                        line,
+                        Some("Choose a different type alias name".to_string()),
+                    );
+                    return;
+                }
                 // Insert a placeholder first so self-references resolve to Type::Named(name)
                 // rather than Type::Any during resolution (supports recursive type aliases).
                 self.type_aliases
@@ -4316,6 +4344,15 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("load_env", ["path" => Type::String], Type::Unit);
             sig!("args", [], Type::Array(Box::new(Type::String)));
             sig!("cwd", [], Type::String);
+        }
+        "std/secrets" => {
+            let secret = Type::Secret;
+            sig!(
+                "get_secret",
+                ["name" => Type::String],
+                Type::Optional(Box::new(secret.clone()))
+            );
+            sig!("require_secret", ["name" => Type::String], secret);
         }
         "std/http" => {
             sig!("fetch", ["url_or_options" => Type::Union(vec![Type::String, Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }])], Type::Generic {

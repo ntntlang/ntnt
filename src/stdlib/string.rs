@@ -70,20 +70,27 @@ pub fn init() -> HashMap<String, Value> {
             arity: 2,
             max_arity: 2,
             requires: None,
-            func: |args| match (&args[0], &args[1]) {
-                (Value::Array(arr), Value::String(delim)) => {
-                    let parts: Vec<String> = arr
-                        .iter()
-                        .map(|v| match v {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        })
-                        .collect();
-                    Ok(Value::String(parts.join(delim)))
+            func: |args| {
+                if args[0].contains_secret() || args[1].contains_secret() {
+                    return Err(IntentError::type_error(
+                        "join() cannot stringify Secret values".to_string(),
+                    ));
                 }
-                _ => Err(IntentError::type_error(
-                    "join() requires array and string".to_string(),
-                )),
+                match (&args[0], &args[1]) {
+                    (Value::Array(arr), Value::String(delim)) => {
+                        let parts: Vec<String> = arr
+                            .iter()
+                            .map(|v| match v {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            })
+                            .collect();
+                        Ok(Value::String(parts.join(delim)))
+                    }
+                    _ => Err(IntentError::type_error(
+                        "join() requires array and string".to_string(),
+                    )),
+                }
             },
         },
     );
@@ -108,26 +115,33 @@ pub fn init() -> HashMap<String, Value> {
             arity: 2, // At least 2, but handles variadic via array
             max_arity: 2,
             requires: None,
-            func: |args| match &args[0] {
-                Value::Array(arr) => {
-                    let result: String = arr
-                        .iter()
-                        .map(|v| match v {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        })
-                        .collect();
-                    Ok(Value::String(result))
+            func: |args| {
+                if args[0].contains_secret() || args[1].contains_secret() {
+                    return Err(IntentError::type_error(
+                        "concat() cannot stringify Secret values".to_string(),
+                    ));
                 }
-                Value::String(s1) => match &args[1] {
-                    Value::String(s2) => Ok(Value::String(format!("{}{}", s1, s2))),
+                match &args[0] {
+                    Value::Array(arr) => {
+                        let result: String = arr
+                            .iter()
+                            .map(|v| match v {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            })
+                            .collect();
+                        Ok(Value::String(result))
+                    }
+                    Value::String(s1) => match &args[1] {
+                        Value::String(s2) => Ok(Value::String(format!("{}{}", s1, s2))),
+                        _ => Err(IntentError::type_error(
+                            "concat() requires strings".to_string(),
+                        )),
+                    },
                     _ => Err(IntentError::type_error(
-                        "concat() requires strings".to_string(),
+                        "concat() requires strings or array of strings".to_string(),
                     )),
-                },
-                _ => Err(IntentError::type_error(
-                    "concat() requires strings or array of strings".to_string(),
-                )),
+                }
             },
         },
     );

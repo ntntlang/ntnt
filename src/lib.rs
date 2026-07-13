@@ -14,6 +14,9 @@ pub mod intent_studio_server;
 pub mod interpreter;
 pub mod lexer;
 pub mod parser;
+mod secret;
+#[cfg(test)]
+mod std_secrets_tests;
 pub mod stdlib;
 pub mod typechecker;
 pub mod types;

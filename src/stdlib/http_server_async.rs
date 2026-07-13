@@ -1069,9 +1069,9 @@ async fn shutdown_signal() {
 
 // === Helper functions for creating NTNT response Values ===
 
-/// Create a JSON response Value
-pub fn create_json_response(data: &Value, status: i64) -> Value {
-    let json_value = crate::stdlib::json::intent_value_to_json(data);
+/// Create a JSON response Value, rejecting opaque secrets.
+pub fn create_json_response(data: &Value, status: i64) -> Result<Value> {
+    let json_value = crate::stdlib::json::intent_value_to_json_reject(data)?;
     let json_string = json_value.to_string();
     let mut headers = HashMap::new();
     // Default security headers
@@ -1100,7 +1100,7 @@ pub fn create_json_response(data: &Value, status: i64) -> Value {
     response.insert("status".to_string(), Value::Int(status));
     response.insert("headers".to_string(), Value::Map(headers));
     response.insert("body".to_string(), Value::String(json_string));
-    Value::Map(response)
+    Ok(Value::Map(response))
 }
 
 /// Create an error response Value
@@ -1199,6 +1199,23 @@ mod tests {
             "application/json; charset=utf-8"
         );
         assert_eq!(guess_mime_type("unknown"), "application/octet-stream");
+    }
+
+    #[test]
+    fn test_create_json_response_rejects_nested_secret_values() {
+        let data = Value::Map(HashMap::from([(
+            "token".to_string(),
+            Value::Secret(
+                crate::interpreter::SecretValue::new(
+                    "ASYNC_RESPONSE_SECRET",
+                    "async-response-canary",
+                )
+                .unwrap(),
+            ),
+        )]));
+        let error = create_json_response(&data, 200).expect_err("secret response must fail closed");
+        assert!(error.to_string().contains("Secret"));
+        assert!(!error.to_string().contains("async-response-canary"));
     }
 
     #[test]
