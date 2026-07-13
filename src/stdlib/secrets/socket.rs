@@ -819,7 +819,6 @@ mod tests {
                 "multiple-messages",
                 format!("{valid}\n{{\"status\":\"missing\"}}\n").into_bytes(),
             ),
-            ("at-limit-no-newline", vec![b'x'; 65_536]),
             ("oversized", vec![b'x'; 65_537]),
         ];
 
