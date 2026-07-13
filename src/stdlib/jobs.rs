@@ -721,6 +721,8 @@ fn try_fire_batch_callback(
 /// Returns `Ok(job_id)` on success, or an error if the batch doesn't exist,
 /// is complete, or is closed.
 fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Result<String> {
+    reject_secret_job_payload(&payload)?;
+
     // Step 1: Validate job type is registered (before any KV access).
     let job_def = JOB_RUNTIME.get_job(job_name)?.ok_or_else(|| {
         IntentError::runtime_error(format!(
@@ -1428,6 +1430,16 @@ fn execute_on_failure_in_worker(
     }
 }
 
+fn reject_secret_job_payload(payload: &Value) -> Result<()> {
+    if payload.contains_secret() {
+        return Err(IntentError::type_error(
+            "Secret values cannot be captured in job payloads; call require_secret() inside the job"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Convert an `EnqueueResult` to the `Value::ok(Value::String(job_id))` format
 /// expected by ntnt stdlib callers.
 fn enqueue_result_to_value(result: EnqueueResult) -> Value {
@@ -1483,6 +1495,8 @@ fn enqueue_internal_with_def(
     batch_id: Option<&str>,
     override_job_id: Option<&str>,
 ) -> Result<EnqueueResult> {
+    reject_secret_job_payload(&payload)?;
+
     // Resolve numeric priority from job options
     // Named: critical=5, high=25, normal=50 (default), low=85
     // Numeric: 0-99 inclusive
@@ -3847,6 +3861,7 @@ pub fn init() -> HashMap<String, Value> {
                                 ))
                             }
                         };
+                        reject_secret_job_payload(&payload)?;
                         let payload_json = serde_json::to_string(
                             &kv::value_to_json_public(&payload),
                         )
@@ -5699,6 +5714,21 @@ pub(crate) mod tests {
         JOB_RUNTIME.reset();
         BATCH_RUNTIME.reset();
         f();
+    }
+
+    #[test]
+    fn secret_values_are_rejected_from_job_payloads() {
+        let payload = Value::Map(HashMap::from([(
+            "token".to_string(),
+            Value::Secret(
+                crate::interpreter::SecretValue::new("JOB_SECRET", "job-secret-canary")
+                    .expect("valid secret"),
+            ),
+        )]));
+
+        let error = reject_secret_job_payload(&payload).expect_err("jobs must reject secrets");
+        assert!(error.to_string().contains("require_secret"));
+        assert!(!error.to_string().contains("job-secret-canary"));
     }
 
     /// Set up an isolated in-memory SQLite KV store for the duration of a test.

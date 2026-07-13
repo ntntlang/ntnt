@@ -26,6 +26,7 @@
 - [std/net](#stdnet)
 - [std/path](#stdpath)
 - [std/postgres](#stdpostgres)
+- [std/secrets](#stdsecrets)
 - [std/sqlite](#stdsqlite)
 - [std/string](#stdstring)
 - [std/time](#stdtime)
@@ -6732,7 +6733,7 @@ fetch(url_or_options: String | Map, options?: Map) -> Result<Response, String>
 
 Make an HTTP request to a URL.
 
-Accepts one or two arguments: - One argument: a URL string for a simple GET request, or an options map   with full control over method, headers, body, authentication, cookies, and timeout. - Two arguments: a URL string and an options map. The URL is merged into   the options map automatically. Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout.
+Accepts one or two arguments: - One argument: a URL string for a simple GET request, or an options map   with full control over method, headers, body, authentication, cookies, and timeout. - Two arguments: a URL string and an options map. The URL is merged into   the options map automatically. Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout. Opaque Secret values are accepted only in header values, cookie values, basic-auth fields, raw bodies, JSON leaves, and form values. Requests containing a Secret do not follow redirects, preventing credentials or 307/308 bodies from crossing origins.
 
 **Parameters:**
 
@@ -10877,6 +10878,85 @@ rollback(db)  // => true  // Roll back an active transaction
 **See also:** `begin`, `commit`
 
 *Since v0.2.0*
+
+---
+
+## std/secrets
+
+Provider-neutral secret lookup with opaque, redacted values
+
+```ntnt
+import { get_secret, require_secret } from "std/secrets"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`get_secret`](#getsecret) | Looks up a secret by its provider-neutral logical name. |
+| [`require_secret`](#requiresecret) | Looks up a required secret and fails closed when it is not configured. |
+
+#### `get_secret`
+
+```ntnt
+get_secret(name: String) -> Option<Secret>
+```
+
+Looks up a secret by its provider-neutral logical name.
+
+The v0.5.1 development-only environment provider reads the exact environment variable name and is disabled when `NTNT_ENV` is `production` or `prod`. Projects with an `ntnt.toml` must declare accessible names under `[secrets.<NAME>]`; undeclared lookups fail before contacting the provider. Declaration metadata may contain `label`, `description`, `required`, and `environments`; secret values are never accepted in the manifest. Secret values remain opaque and redact themselves in output and diagnostics.
+
+**Parameters:**
+
+- `name` — A validated logical secret name
+
+**Returns:** Some(Secret) when configured, otherwise None
+
+**Examples:**
+
+```ntnt
+get_secret("STRIPE_SECRET_KEY")  // => Some([REDACTED])  // Optional lookup
+```
+
+**Errors:**
+
+- **RuntimeError**: Unsupported secrets provider — *Fix: Set NTNT_SECRETS_PROVIDER=env for v0.5.1*
+
+**See also:** `require_secret`
+
+*Since v0.5.1*
+
+---
+
+#### `require_secret`
+
+```ntnt
+require_secret(name: String) -> Secret
+```
+
+Looks up a required secret and fails closed when it is not configured.
+
+Use this at startup or immediately before an approved secret-consuming sink. In v0.5.1, `std/http.fetch` accepts Secret values as header, cookie, basic-auth, raw body, JSON-leaf, and form values. Templates, public JSON, URL/CSV/string conversion, KV storage, and job payloads reject secrets. There is intentionally no general Secret-to-String reveal function. The error identifies only the logical name and never includes the value.
+
+**Parameters:**
+
+- `name` — A validated logical secret name
+
+**Returns:** The opaque Secret value
+
+**Examples:**
+
+```ntnt
+require_secret("STRIPE_SECRET_KEY")  // => [REDACTED]  // Required lookup
+```
+
+**Errors:**
+
+- **RuntimeError**: Required secret is not configured — *Fix: Configure the named secret in the selected provider*
+
+**See also:** `get_secret`
+
+*Since v0.5.1*
 
 ---
 

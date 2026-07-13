@@ -355,21 +355,28 @@ pub fn init() -> HashMap<String, Value> {
             arity: 1,
             max_arity: 1,
             requires: None,
-            func: |args| match &args[0] {
-                Value::Map(params) => {
-                    let pairs: Vec<String> = params
-                        .iter()
-                        .map(|(k, v)| {
-                            let key = url_encode_component(k);
-                            let value = url_encode_component(&v.to_string());
-                            format!("{}={}", key, value)
-                        })
-                        .collect();
-                    Ok(Value::String(pairs.join("&")))
+            func: |args| {
+                if args[0].contains_secret() {
+                    return Err(IntentError::type_error(
+                        "build_query() cannot serialize Secret values into URLs".to_string(),
+                    ));
                 }
-                _ => Err(IntentError::type_error(
-                    "build_query() requires a map".to_string(),
-                )),
+                match &args[0] {
+                    Value::Map(params) => {
+                        let pairs: Vec<String> = params
+                            .iter()
+                            .map(|(k, v)| {
+                                let key = url_encode_component(k);
+                                let value = url_encode_component(&v.to_string());
+                                format!("{}={}", key, value)
+                            })
+                            .collect();
+                        Ok(Value::String(pairs.join("&")))
+                    }
+                    _ => Err(IntentError::type_error(
+                        "build_query() requires a map".to_string(),
+                    )),
+                }
             },
         },
     );

@@ -55,9 +55,15 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// Serialize a Value to string for storage
-fn serialize_value(value: &Value) -> (String, String) {
-    match value {
+/// Serialize a Value to string for storage.
+fn serialize_value(value: &Value) -> Result<(String, String)> {
+    if value.contains_secret() {
+        return Err(IntentError::type_error(
+            "Secret values cannot be persisted in std/kv".to_string(),
+        ));
+    }
+
+    Ok(match value {
         Value::String(s) => (s.clone(), "string".to_string()),
         Value::Int(i) => (i.to_string(), "int".to_string()),
         Value::Float(f) => (f.to_string(), "float".to_string()),
@@ -71,14 +77,20 @@ fn serialize_value(value: &Value) -> (String, String) {
             (json, "map".to_string())
         }
         _ => (format!("{:?}", value), "unknown".to_string()),
-    }
+    })
 }
 
 /// Serialize a Value to a JSON envelope for Redis storage.
 /// Non-string types get wrapped: {"__ntnt_t":"<type>","v":<json_value>}
 /// Plain strings are stored as-is for backward compatibility and efficiency.
-fn serialize_value_envelope(value: &Value) -> String {
-    match value {
+fn serialize_value_envelope(value: &Value) -> Result<String> {
+    if value.contains_secret() {
+        return Err(IntentError::type_error(
+            "Secret values cannot be persisted in std/kv".to_string(),
+        ));
+    }
+
+    Ok(match value {
         Value::String(s) => s.clone(),
         Value::Int(i) => serde_json::json!({"__ntnt_t": "int", "v": i}).to_string(),
         Value::Float(f) => serde_json::json!({"__ntnt_t": "float", "v": f}).to_string(),
@@ -93,7 +105,7 @@ fn serialize_value_envelope(value: &Value) -> String {
             serde_json::json!({"__ntnt_t": type_name, "v": json_val}).to_string()
         }
         _ => format!("{:?}", value),
-    }
+    })
 }
 
 /// Deserialize a Redis value using envelope format, with backward compatibility.
@@ -257,7 +269,7 @@ impl SQLiteKV {
             return self.del(key).map(|_| ());
         }
 
-        let (serialized, type_hint) = serialize_value(value);
+        let (serialized, type_hint) = serialize_value(value)?;
         let expires_at = ttl_seconds.map(|ttl| now_unix() + ttl);
 
         self.conn
@@ -287,7 +299,7 @@ impl SQLiteKV {
                 IntentError::runtime_error(format!("KV set_nx delete expired error: {}", e))
             })?;
 
-        let (serialized, type_hint) = serialize_value(value);
+        let (serialized, type_hint) = serialize_value(value)?;
         let expires_at = ttl_seconds.map(|ttl| now + ttl);
 
         let changes = self
@@ -628,7 +640,7 @@ impl RedisKV {
         }
 
         // Use envelope format — single key, no __type sibling
-        let serialized = serialize_value_envelope(value);
+        let serialized = serialize_value_envelope(value)?;
 
         match ttl_seconds {
             Some(ttl) => {
@@ -655,7 +667,7 @@ impl RedisKV {
     /// Uses `SET key value NX [EX ttl]` — atomic in Redis.
     /// Returns `Ok(true)` if set, `Ok(false)` if the key already existed.
     pub fn set_nx(&mut self, key: &str, value: &Value, ttl_seconds: Option<i64>) -> Result<bool> {
-        let serialized = serialize_value_envelope(value);
+        let serialized = serialize_value_envelope(value)?;
 
         let result: Option<String> = match ttl_seconds {
             Some(ttl) => redis::cmd("SET")
@@ -3017,5 +3029,20 @@ mod tests {
             matches!(unwrap_err(r), Value::String(message) if message.contains("out of range")),
             "i64::MIN decr_by should not panic or wrap"
         );
+    }
+
+    #[test]
+    fn secret_values_cannot_be_serialized_for_kv_storage() {
+        let secret = Value::Secret(
+            crate::interpreter::SecretValue::new("KV_SECRET", "kv-secret-canary")
+                .expect("valid secret"),
+        );
+        let nested = Value::Map(HashMap::from([("secret".to_string(), secret)]));
+
+        let direct_error = serialize_value(&nested).expect_err("KV must reject nested secrets");
+        assert!(!direct_error.to_string().contains("kv-secret-canary"));
+        let envelope_error =
+            serialize_value_envelope(&nested).expect_err("Redis envelope must reject secrets");
+        assert!(!envelope_error.to_string().contains("kv-secret-canary"));
     }
 }

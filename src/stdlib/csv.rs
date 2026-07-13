@@ -149,6 +149,11 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             requires: None,
             func: |args| {
+                if args[0].contains_secret() {
+                    return Err(IntentError::type_error(
+                        "csv.stringify() cannot serialize Secret values".to_string(),
+                    ));
+                }
                 let rows = match &args[0] {
                     Value::Array(arr) => arr,
                     _ => {
@@ -220,6 +225,11 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             requires: None,
             func: |args| {
+                if args[0].contains_secret() || args[1].contains_secret() {
+                    return Err(IntentError::type_error(
+                        "csv.stringify_with_headers() cannot serialize Secret values".to_string(),
+                    ));
+                }
                 let rows = match &args[0] {
                     Value::Array(arr) => arr,
                     _ => {

@@ -27,6 +27,7 @@ pub mod math;
 pub mod net;
 pub mod path;
 pub mod postgres;
+pub mod secrets;
 pub mod sqlite;
 pub mod string;
 pub mod template;
@@ -48,6 +49,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/math".to_string(), math::init());
     modules.insert("std/collections".to_string(), collections::init());
     modules.insert("std/env".to_string(), env::init());
+    modules.insert("std/secrets".to_string(), secrets::init());
     modules.insert("std/fs".to_string(), fs::init());
     modules.insert("std/path".to_string(), path::init());
     modules.insert("std/json".to_string(), json::init());

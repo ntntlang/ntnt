@@ -1196,6 +1196,7 @@ fn print_repl_help() {
         "  {}         get_env, set_env, load_env, args, cwd",
         "std/env".cyan()
     );
+    println!("  {}     get_secret, require_secret", "std/secrets".cyan());
     println!(
         "  {}        join, dirname, basename, extname",
         "std/path".cyan()

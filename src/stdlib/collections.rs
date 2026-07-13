@@ -271,6 +271,11 @@ pub fn init() -> HashMap<String, Value> {
                         "sort() requires 1 or 2 arguments (arr, key_or_fn?)".to_string(),
                     ));
                 }
+                if args[0].contains_secret() {
+                    return Err(IntentError::type_error(
+                        "sort() cannot compare Secret values".to_string(),
+                    ));
+                }
 
                 match &args[0] {
                     Value::Array(arr) => {

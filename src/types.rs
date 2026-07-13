@@ -23,6 +23,9 @@ pub enum Type {
     /// String type
     String,
 
+    /// Opaque provider-backed secret type
+    Secret,
+
     /// Array type
     Array(Box<Type>),
 
@@ -114,6 +117,7 @@ impl Type {
             (Type::Int, Type::Float) | (Type::Float, Type::Int) => true, // Allow numeric coercion
             (Type::Bool, Type::Bool) => true,
             (Type::String, Type::String) => true,
+            (Type::Secret, Type::Secret) => true,
             (Type::Array(a), Type::Array(b)) => a.is_compatible(b),
             (Type::Optional(a), Type::Optional(b)) => a.is_compatible(b),
             (
@@ -160,6 +164,7 @@ impl Type {
             Type::Float => "Float".to_string(),
             Type::Bool => "Bool".to_string(),
             Type::String => "String".to_string(),
+            Type::Secret => "Secret".to_string(),
             Type::Array(inner) => format!("[{}]", inner.name()),
             Type::Tuple(types) => {
                 let names: Vec<_> = types.iter().map(|t| t.name()).collect();

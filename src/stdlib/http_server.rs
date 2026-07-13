@@ -1238,7 +1238,8 @@ fn headers_get_string(req_map: &HashMap<String, Value>, key: &str) -> Option<Str
     None
 }
 
-/// Convert Intent Value to JSON for response serialization
+/// Convert Intent Value to JSON for response serialization in module tests.
+#[cfg(test)]
 fn intent_value_to_json(value: &Value) -> serde_json::Value {
     crate::stdlib::json::intent_value_to_json(value)
 }
@@ -1472,7 +1473,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 }
 
-                let json_value = intent_value_to_json(&args[0]);
+                let json_value = crate::stdlib::json::intent_value_to_json_reject(&args[0])?;
                 let body = json_value.to_string();
                 let mut headers = HashMap::new();
                 headers.insert(

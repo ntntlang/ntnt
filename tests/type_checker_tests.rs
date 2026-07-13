@@ -1503,3 +1503,61 @@ print(a + b)
     );
     assert!(stdout.contains("amount > 0 is false"), "{stdout}");
 }
+
+#[test]
+fn test_std_secrets_require_secret_has_opaque_secret_type() {
+    let source = r#"import { require_secret } from "std/secrets"
+
+fn keep_secret(value: Secret) -> Secret {
+    return value
+}
+
+let token = require_secret("API_KEY")
+keep_secret(token)
+"#;
+    let (stdout, stderr, exit) = lint_strict_code(source);
+    assert_eq!(exit, 0, "stderr={stderr}\nstdout={stdout}");
+    assert!(!stdout.contains("type_error"), "{stdout}");
+}
+
+#[test]
+fn test_std_secrets_secret_is_not_compatible_with_string() {
+    let source = r#"import { require_secret } from "std/secrets"
+
+fn takes_string(value: String) -> String {
+    return value
+}
+
+let token = require_secret("API_KEY")
+takes_string(token)
+"#;
+    let (stdout, _stderr, _exit) = lint_strict_code(source);
+    assert!(
+        stdout.contains("\"rule\": \"type_check\""),
+        "expected type error: {stdout}"
+    );
+    assert!(stdout.contains("Secret"), "expected Secret type: {stdout}");
+    assert!(stdout.contains("String"), "expected String type: {stdout}");
+}
+
+#[test]
+fn test_std_secrets_type_cannot_collide_with_user_defined_secret() {
+    let source = r#"import { require_secret } from "std/secrets"
+
+struct Secret {
+    value: String
+}
+
+fn read_user_secret(value: Secret) -> String {
+    return value.value
+}
+
+let token = require_secret("API_KEY")
+read_user_secret(token)
+"#;
+    let (stdout, _stderr, _exit) = lint_strict_code(source);
+    assert!(
+        stdout.contains("\"rule\": \"type_check\""),
+        "provider Secret must not unify with a user-defined Secret: {stdout}"
+    );
+}

@@ -14,6 +14,7 @@ use crate::ast::*;
 use crate::config::{get_type_mode, type_warn_dedup, TypeMode};
 use crate::contracts::{ContractChecker, OldValues, StoredValue};
 use crate::error::{IntentError, Result, TypeContext};
+pub use crate::secret::SecretValue;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
@@ -56,6 +57,9 @@ pub enum Value {
 
     /// String value
     String(String),
+
+    /// Opaque secret value. Ordinary formatting is always redacted.
+    Secret(SecretValue),
 
     /// Array value
     Array(Vec<Value>),
@@ -205,6 +209,7 @@ impl Value {
             Value::Float(_) => true,
             // Empty collections are falsy
             Value::String(s) => !s.is_empty(),
+            Value::Secret(_) => true,
             Value::Array(a) => !a.is_empty(),
             Value::Map(m) => !m.is_empty(),
             // None is falsy, Some(x) is truthy
@@ -223,6 +228,7 @@ impl Value {
             Value::Float(_) => "Float",
             Value::Bool(_) => "Bool",
             Value::String(_) => "String",
+            Value::Secret(_) => "Secret",
             Value::Array(_) => "Array",
             Value::Map(_) => "Map",
             Value::Range { .. } => "Range",
@@ -240,6 +246,19 @@ impl Value {
             Value::Continue => "Continue",
         }
     }
+
+    /// Return true when this value directly or recursively contains a secret.
+    pub fn contains_secret(&self) -> bool {
+        match self {
+            Value::Secret(_) => true,
+            Value::Array(values) => values.iter().any(Value::contains_secret),
+            Value::Map(values) => values.values().any(Value::contains_secret),
+            Value::Struct { fields, .. } => fields.values().any(Value::contains_secret),
+            Value::EnumValue { values, .. } => values.iter().any(Value::contains_secret),
+            Value::Return(value) => value.contains_secret(),
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -250,6 +269,7 @@ impl fmt::Display for Value {
             Value::Float(n) => write!(f, "{}", n),
             Value::Bool(b) => write!(f, "{}", b),
             Value::String(s) => write!(f, "{}", s),
+            Value::Secret(secret) => write!(f, "{}", secret),
             Value::Array(arr) => {
                 let items: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
                 write!(f, "[{}]", items.join(", "))
@@ -1749,6 +1769,8 @@ impl Interpreter {
     /// Set the main source file for hot-reload tracking
     pub fn set_main_source_file(&mut self, path: &str) {
         self.main_source_file = Some(path.to_string());
+        #[cfg(not(test))]
+        crate::stdlib::secrets::configure_for_source(path);
         // Store the current mtime
         self.main_source_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
     }
@@ -8435,6 +8457,16 @@ impl Interpreter {
         result: &mut String,
     ) -> Result<bool> {
         match self.eval_expression(condition) {
+            Ok(v) if v.contains_secret() => {
+                Self::handle_template_error(
+                    IntentError::type_error(
+                        "Secret values cannot be used in template conditions".to_string(),
+                    ),
+                    context,
+                    result,
+                )?;
+                Ok(false)
+            }
             Ok(v) => Ok(v.is_truthy()),
             Err(IntentError::UndefinedVariable { .. }) => Ok(false),
             Err(e) => {
@@ -8458,6 +8490,16 @@ impl Interpreter {
                     //   forgiving → render empty string silently
                     match self.eval_expression(expr) {
                         Ok(v) => {
+                            if v.contains_secret() {
+                                Self::handle_template_error(
+                                    IntentError::type_error(
+                                        "Secret values cannot be rendered in templates".to_string(),
+                                    ),
+                                    "expression",
+                                    &mut result,
+                                )?;
+                                continue 'parts;
+                            }
                             let s = v.to_string();
                             result.push_str(&html_escape_string(&s));
                         }
@@ -8470,6 +8512,16 @@ impl Interpreter {
                     // Error boundary: behaviour depends on NTNT_TYPE_MODE.
                     match self.eval_expression(expr) {
                         Ok(v) => {
+                            if v.contains_secret() {
+                                Self::handle_template_error(
+                                    IntentError::type_error(
+                                        "Secret values cannot be rendered in templates".to_string(),
+                                    ),
+                                    "raw expression",
+                                    &mut result,
+                                )?;
+                                continue 'parts;
+                            }
                             result.push_str(&v.to_string());
                         }
                         // Undefined template variables render as empty string
@@ -8499,6 +8551,17 @@ impl Interpreter {
                             }
                         }
                     };
+                    if value.contains_secret() {
+                        Self::handle_template_error(
+                            IntentError::type_error(
+                                "Secret values cannot be passed through template filters"
+                                    .to_string(),
+                            ),
+                            "filtered expression",
+                            &mut result,
+                        )?;
+                        continue 'parts;
+                    }
                     let mut skip_escape = false;
                     for filter in filters {
                         if filter.name == "safe" || filter.name == "raw" {
@@ -8511,6 +8574,16 @@ impl Interpreter {
                                 continue 'parts;
                             }
                         }
+                    }
+                    if value.contains_secret() {
+                        Self::handle_template_error(
+                            IntentError::type_error(
+                                "Secret values cannot be rendered in templates".to_string(),
+                            ),
+                            "filtered expression result",
+                            &mut result,
+                        )?;
+                        continue 'parts;
                     }
                     let s = value.to_string();
                     if skip_escape {
@@ -8544,6 +8617,17 @@ impl Interpreter {
                             }
                         }
                     };
+                    if value.contains_secret() {
+                        Self::handle_template_error(
+                            IntentError::type_error(
+                                "Secret values cannot be passed through template filters"
+                                    .to_string(),
+                            ),
+                            "raw filtered expression",
+                            &mut result,
+                        )?;
+                        continue 'parts;
+                    }
                     for filter in filters {
                         match self.apply_template_filter(&value, filter) {
                             Ok(v) => value = v,
@@ -8552,6 +8636,16 @@ impl Interpreter {
                                 continue 'parts;
                             }
                         }
+                    }
+                    if value.contains_secret() {
+                        Self::handle_template_error(
+                            IntentError::type_error(
+                                "Secret values cannot be rendered in templates".to_string(),
+                            ),
+                            "raw filtered expression result",
+                            &mut result,
+                        )?;
+                        continue 'parts;
                     }
                     result.push_str(&value.to_string());
                 }
@@ -8574,6 +8668,16 @@ impl Interpreter {
                             continue;
                         }
                     };
+                    if iterable_value.contains_secret() {
+                        Self::handle_template_error(
+                            IntentError::type_error(
+                                "Secret values cannot be iterated in templates".to_string(),
+                            ),
+                            "for-loop iterable",
+                            &mut result,
+                        )?;
+                        continue 'parts;
+                    }
 
                     match iterable_value {
                         Value::Array(ref items) if items.is_empty() => {
@@ -10959,6 +11063,12 @@ impl Interpreter {
     }
 
     fn eval_binary_op(&self, op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value> {
+        if lhs.contains_secret() || rhs.contains_secret() {
+            return Err(IntentError::type_error(
+                "Secret values cannot be used with binary operators".to_string(),
+            ));
+        }
+
         // Handle EnumValue and handle type equality
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
             let lhs_is_enum = matches!(&lhs, Value::EnumValue { .. });

@@ -651,6 +651,152 @@ print(greeting)
 }
 
 #[test]
+fn test_secret_prints_redacted_without_exposing_plaintext() {
+    let code = r#"
+import { require_secret } from "std/secrets"
+let token = require_secret("NTNT_TEMPLATE_SECRET")
+print(token)
+"#;
+    let (stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_TEMPLATE_SECRET", "template-secret-canary")]);
+    assert_eq!(exit_code, 0, "stderr={stderr}");
+    assert!(stdout.contains("[REDACTED]"), "stdout={stdout}");
+    assert!(!stdout.contains("template-secret-canary"));
+    assert!(!stderr.contains("template-secret-canary"));
+}
+
+#[test]
+fn test_environment_secret_provider_is_disabled_in_production() {
+    let code = r#"
+import { require_secret } from "std/secrets"
+let token = require_secret("NTNT_PRODUCTION_SECRET")
+print(token)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(
+        code,
+        &[
+            ("NTNT_ENV", "production"),
+            ("NTNT_SECRETS_PROVIDER", "env"),
+            ("NTNT_PRODUCTION_SECRET", "production-secret-canary"),
+        ],
+    );
+    assert_ne!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(stderr.contains("development-only"), "stderr={stderr}");
+    assert!(!stdout.contains("production-secret-canary"));
+    assert!(!stderr.contains("production-secret-canary"));
+}
+
+#[test]
+fn test_secret_manifest_allows_declared_names_and_rejects_undeclared_names() {
+    let app_dir = unique_test_dir("secret_manifest");
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    let app_path = app_dir.join("main.tnt");
+    let manifest_path = app_dir.join("ntnt.toml");
+    write_test_file(
+        &app_path,
+        r#"
+import { require_secret } from "std/secrets"
+let token = require_secret("DECLARED_SECRET")
+print(token)
+"#,
+    );
+    write_test_file(
+        &manifest_path,
+        r#"
+[secrets.DECLARED_SECRET]
+label = "Declared test secret"
+required = true
+"#,
+    );
+
+    let (stdout, stderr, exit_code) =
+        run_ntnt_file(&app_path, &[("DECLARED_SECRET", "manifest-secret-canary")]);
+    assert_eq!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("[REDACTED]"));
+    assert!(!stdout.contains("manifest-secret-canary"));
+    assert!(!stderr.contains("manifest-secret-canary"));
+
+    write_test_file(
+        &app_path,
+        r#"
+import { require_secret } from "std/secrets"
+let token = require_secret("UNDECLARED_SECRET")
+print(token)
+"#,
+    );
+    let (stdout, stderr, exit_code) = run_ntnt_file(
+        &app_path,
+        &[("UNDECLARED_SECRET", "undeclared-secret-canary")],
+    );
+    assert_ne!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(stderr.contains("not declared"), "stderr={stderr}");
+    assert!(!stdout.contains("undeclared-secret-canary"));
+    assert!(!stderr.contains("undeclared-secret-canary"));
+
+    write_test_file(
+        &app_path,
+        r#"
+import { require_secret } from "std/secrets"
+let token = require_secret("DECLARED_SECRET")
+print(token)
+"#,
+    );
+    write_test_file(
+        &manifest_path,
+        r#"
+[secrets.DECLARED_SECRET]
+value = "manifest-value-canary"
+"#,
+    );
+    let (stdout, stderr, exit_code) =
+        run_ntnt_file(&app_path, &[("DECLARED_SECRET", "provider-value-canary")]);
+    assert_ne!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(stderr.contains("declarations") && stderr.contains("invalid"));
+    assert!(!stdout.contains("manifest-value-canary"));
+    assert!(!stderr.contains("manifest-value-canary"));
+    assert!(!stdout.contains("provider-value-canary"));
+    assert!(!stderr.contains("provider-value-canary"));
+
+    fs::remove_dir_all(&app_dir).ok();
+}
+
+#[test]
+fn test_template_rejects_secret_interpolation_in_strict_mode() {
+    let code = r#"
+import { require_secret } from "std/secrets"
+let token = require_secret("NTNT_TEMPLATE_SECRET")
+let body = """token={{token}}"""
+print(body)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(
+        code,
+        &[
+            ("NTNT_TEMPLATE_SECRET", "template-secret-canary"),
+            ("NTNT_TYPE_MODE", "strict"),
+        ],
+    );
+    assert_ne!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(!stdout.contains("template-secret-canary"));
+    assert!(!stderr.contains("template-secret-canary"));
+    assert!(stderr.contains("Secret"), "stderr={stderr}");
+}
+
+#[test]
+fn test_nested_secret_equality_is_rejected() {
+    let code = r#"
+import { require_secret } from "std/secrets"
+let token = require_secret("NTNT_TEMPLATE_SECRET")
+print(Some(token) == Some(token))
+"#;
+    let (stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_TEMPLATE_SECRET", "template-secret-canary")]);
+    assert_ne!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(!stdout.contains("template-secret-canary"));
+    assert!(!stderr.contains("template-secret-canary"));
+    assert!(stderr.contains("Secret"), "stderr={stderr}");
+}
+
+#[test]
 fn test_template_string_css_passthrough() {
     let code = r#"
 let css = """h1 { color: blue; }"""

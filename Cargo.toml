@@ -99,6 +99,7 @@ jsonwebtoken = "9"
 pulldown-cmark = "0.13.0"
 hickory-resolver = "0.24.4"
 socket2 = "0.6"
+zeroize = "1.8.2"
 
 [build-dependencies]
 # Doc comment scanner (build.rs extracts /// @ntnt blocks)
