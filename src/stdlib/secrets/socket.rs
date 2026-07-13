@@ -391,10 +391,13 @@ mod tests {
 
     fn socket_path(label: &str) -> PathBuf {
         let counter = SOCKET_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        PathBuf::from("/tmp").join(format!(
-            "ntnt-sp-{label}-{}-{counter}.sock",
-            std::process::id()
-        ))
+        std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join(format!(
+                "ntnt-sp-{label}-{}-{counter}.sock",
+                std::process::id()
+            ))
     }
 
     fn serve_responses(
