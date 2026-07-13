@@ -88,7 +88,8 @@ fn serve_secret_agent_once(
         assert!(request["request_id"].as_u64().is_some());
         assert_eq!(request["op"], "get");
         assert_eq!(request["name"], "PRODUCTION_SOCKET_SECRET");
-        assert_eq!(request.as_object().expect("request object").len(), 4);
+        assert_eq!(request["scope"], "deployment-a");
+        assert_eq!(request.as_object().expect("request object").len(), 5);
 
         writeln!(
             stream,

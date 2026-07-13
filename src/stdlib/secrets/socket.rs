@@ -177,6 +177,7 @@ impl SocketSecretProvider {
             request_id,
             op: "get",
             name,
+            scope: &self.authorization_scope,
         };
         serde_json::to_writer(&mut *writer, &request)
             .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
@@ -220,21 +221,29 @@ impl SocketSecretProvider {
                         stream
                             .set_nonblocking(true)
                             .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
-                        return match stream.read(&mut trailing[..]) {
-                            Ok(0) => Ok(response),
-                            Err(error)
-                                if matches!(
-                                    error.kind(),
-                                    std::io::ErrorKind::ConnectionReset
-                                        | std::io::ErrorKind::ConnectionAborted
-                                ) =>
-                            {
-                                Ok(response)
+                        loop {
+                            match stream.read(&mut trailing[..]) {
+                                Ok(0) => return Ok(response),
+                                Err(error)
+                                    if matches!(
+                                        error.kind(),
+                                        std::io::ErrorKind::ConnectionReset
+                                            | std::io::ErrorKind::ConnectionAborted
+                                    ) =>
+                                {
+                                    return Ok(response);
+                                }
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                    let remaining = remaining_until(deadline).map_err(|_| {
+                                        self.error(ProviderErrorKind::InvalidConfiguration)
+                                    })?;
+                                    std::thread::sleep(remaining.min(Duration::from_millis(1)));
+                                }
+                                Ok(_) | Err(_) => {
+                                    return Err(self.error(ProviderErrorKind::InvalidConfiguration));
+                                }
                             }
-                            Ok(_) | Err(_) => {
-                                Err(self.error(ProviderErrorKind::InvalidConfiguration))
-                            }
-                        };
+                        }
                     }
 
                     response.extend_from_slice(bytes);
@@ -254,6 +263,7 @@ struct SocketRequest<'a> {
     request_id: u64,
     op: &'static str,
     name: &'a str,
+    scope: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -991,6 +1001,7 @@ mod tests {
                 "protocol": 1,
                 "op": "get",
                 "name": "API_KEY",
+                "scope": "deployment-a",
             })
         );
 
