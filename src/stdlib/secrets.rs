@@ -44,23 +44,35 @@ fn declaration_state() -> &'static RwLock<DeclarationState> {
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) fn configure_for_source(source_path: &str) {
     let (identity, declarations) = load_declarations(Path::new(source_path));
-    if let Ok(mut state) = declaration_state().write() {
-        if matches!(
-            state.declarations,
-            SecretDeclarations::ConflictingApplication
-        ) {
+    let lock = declaration_state();
+    let mut state = match lock.write() {
+        Ok(state) => state,
+        Err(poisoned) => {
+            // Recover the guard only to record a durable fail-closed state. Clearing
+            // the poison makes later lookups report the explicit manifest error.
+            let mut state = poisoned.into_inner();
+            state.declarations = SecretDeclarations::Invalid;
+            drop(state);
+            lock.clear_poison();
             return;
         }
-        match &state.identity {
-            None => {
-                state.identity = Some(identity);
-                state.declarations = declarations;
-            }
-            Some(current) if current == &identity => state.declarations = declarations,
-            // A mixed application identity is a process-level security violation.
-            // Keep the state permanently poisoned; only a process restart may reset it.
-            Some(_) => state.declarations = SecretDeclarations::ConflictingApplication,
+    };
+
+    if matches!(
+        state.declarations,
+        SecretDeclarations::ConflictingApplication
+    ) {
+        return;
+    }
+    match &state.identity {
+        None => {
+            state.identity = Some(identity);
+            state.declarations = declarations;
         }
+        Some(current) if current == &identity => state.declarations = declarations,
+        // A mixed application identity is a process-level security violation.
+        // Keep the state permanently poisoned; only a process restart may reset it.
+        Some(_) => state.declarations = SecretDeclarations::ConflictingApplication,
     }
 }
 
@@ -80,25 +92,24 @@ fn load_declarations(source_path: &Path) -> (PathBuf, SecretDeclarations) {
     let Some(manifest) = manifest else {
         return (source_identity, SecretDeclarations::NoManifest);
     };
-    let identity = manifest.canonicalize().unwrap_or_else(|_| manifest.clone());
 
     let Ok(content) = std::fs::read_to_string(manifest) else {
-        return (identity, SecretDeclarations::Invalid);
+        return (source_identity, SecretDeclarations::Invalid);
     };
     let Ok(document) = content.parse::<toml::Value>() else {
-        return (identity, SecretDeclarations::Invalid);
+        return (source_identity, SecretDeclarations::Invalid);
     };
     let Some(secrets) = document.get("secrets") else {
-        return (identity, SecretDeclarations::Loaded(HashSet::new()));
+        return (source_identity, SecretDeclarations::Loaded(HashSet::new()));
     };
     let Some(table) = secrets.as_table() else {
-        return (identity, SecretDeclarations::Invalid);
+        return (source_identity, SecretDeclarations::Invalid);
     };
 
     let mut declared = HashSet::with_capacity(table.len());
     for (name, metadata) in table {
         let Some(metadata) = metadata.as_table() else {
-            return (identity, SecretDeclarations::Invalid);
+            return (source_identity, SecretDeclarations::Invalid);
         };
         if validate_secret_name(name).is_err()
             || metadata.keys().any(|key| {
@@ -120,11 +131,11 @@ fn load_declarations(source_path: &Path) -> (PathBuf, SecretDeclarations) {
                     .is_none_or(|items| items.iter().any(|item| !item.is_str()))
             })
         {
-            return (identity, SecretDeclarations::Invalid);
+            return (source_identity, SecretDeclarations::Invalid);
         }
         declared.insert(name.clone());
     }
-    (identity, SecretDeclarations::Loaded(declared))
+    (source_identity, SecretDeclarations::Loaded(declared))
 }
 
 fn enforce_declared(name: &str) -> Result<()> {
@@ -427,6 +438,34 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn declaration_identity_is_stable_when_manifest_appears() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ntnt-secret-identity-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create project");
+        let source = root.join("main.tnt");
+        std::fs::write(&source, "print(\"ok\")\n").expect("write source");
+
+        let (without_manifest, _) = load_declarations(&source);
+        std::fs::write(
+            root.join("ntnt.toml"),
+            "[secrets.API_KEY]\nrequired = true\n",
+        )
+        .expect("write manifest");
+        let (with_manifest, declarations) = load_declarations(&source);
+
+        assert_eq!(without_manifest, with_manifest);
+        assert!(matches!(declarations, SecretDeclarations::Loaded(_)));
+        std::fs::remove_dir_all(root).ok();
+    }
 
     struct MockProvider {
         endpoint: String,
