@@ -205,6 +205,9 @@ impl SocketSecretProvider {
             let remaining = MAX_RESPONSE_SIZE + 1 - response.len();
             let read_size = remaining.min(chunk.len());
             match stream.read(&mut chunk[..read_size]) {
+                Ok(0) if response.len() >= MAX_RESPONSE_SIZE => {
+                    return Err(self.error(ProviderErrorKind::InvalidConfiguration));
+                }
                 Ok(0) => return Err(self.error(ProviderErrorKind::Unavailable)),
                 Ok(bytes_read) => {
                     let bytes = &chunk[..bytes_read];
@@ -250,6 +253,16 @@ impl SocketSecretProvider {
                     if response.len() > MAX_RESPONSE_SIZE {
                         return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                     }
+                }
+                Err(error)
+                    if response.len() >= MAX_RESPONSE_SIZE
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        ) =>
+                {
+                    return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                 }
                 Err(_) => return Err(self.error(ProviderErrorKind::Unavailable)),
             }
@@ -792,6 +805,7 @@ mod tests {
                 "multiple-messages",
                 format!("{valid}\n{{\"status\":\"missing\"}}\n").into_bytes(),
             ),
+            ("at-limit-no-newline", vec![b'x'; 65_536]),
             ("oversized", vec![b'x'; 65_537]),
         ];
 
