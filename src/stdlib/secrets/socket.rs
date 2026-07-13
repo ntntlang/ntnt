@@ -306,6 +306,8 @@ impl SecretProvider for SocketSecretProvider {
     fn lookup(&self, name: &str) -> std::result::Result<ProviderLookup, ProviderError> {
         let deadline = Instant::now() + self.timeout;
         let mut stream = self.connect(deadline)?;
+        #[cfg(test)]
+        eprintln!("socket-test-stage=connected");
         let request_id = self.write_request(
             &mut DeadlineWriter {
                 stream: &mut stream,
@@ -313,15 +315,21 @@ impl SecretProvider for SocketSecretProvider {
             },
             name,
         )?;
+        #[cfg(test)]
+        eprintln!("socket-test-stage=request-written");
         stream
             .shutdown(Shutdown::Write)
             .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
 
         let response = self.read_response_frame(&mut stream, deadline)?;
+        #[cfg(test)]
+        eprintln!("socket-test-stage=frame-read bytes={}", response.len());
 
         let body = &response[..response.len() - 1];
         let parsed: SocketResponse = serde_json::from_slice(body)
             .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
+        #[cfg(test)]
+        eprintln!("socket-test-stage=frame-parsed");
         match parsed {
             SocketResponse::Found {
                 protocol,
