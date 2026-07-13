@@ -418,7 +418,7 @@ fn parse_socket_provider_config(
 ) -> Result<SocketProviderConfig> {
     let raw_endpoints = endpoints.ok_or_else(socket_config_error)?;
     let parts: Vec<&str> = raw_endpoints.split(',').map(str::trim).collect();
-    if parts.is_empty() || parts.len() > MAX_SOCKET_ENDPOINTS {
+    if parts.len() > MAX_SOCKET_ENDPOINTS {
         return Err(socket_config_error());
     }
 
@@ -678,6 +678,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(unix)]
     #[test]
     fn socket_provider_config_is_bounded_and_production_scoped() {
         let config = parse_socket_provider_config(
@@ -747,6 +748,22 @@ mod tests {
             parse_socket_provider_config(Some(&overlong), Some("deployment-a"), None, false,)
                 .is_err()
         );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn socket_provider_selector_fails_closed_off_unix() {
+        let error = configured_provider_group_from_values(
+            "larri-socket",
+            Some(r"C:\run\larri-secrets\agent.sock"),
+            Some("deployment-a"),
+            Some("250"),
+            false,
+        )
+        .expect_err("socket provider must be unavailable off Unix");
+        let rendered = error.to_string();
+        assert!(rendered.contains("configuration is invalid"));
+        assert!(!rendered.contains("agent.sock"));
     }
 
     #[cfg(unix)]

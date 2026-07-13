@@ -9,8 +9,8 @@
 //! `found`, `missing`, `access_denied`, `unavailable`, `invalid_request`, or
 //! `invalid_configuration`. Only `found` includes `value`.
 //!
-//! Frames are limited to 64 KiB, values to 32 KiB, and every connect/read/write
-//! operation is bounded by the configured timeout. Unknown fields, extra frames,
+//! Frames are limited to 64 KiB, values to 32 KiB, and the complete
+//! connect/write/read attempt is bounded by one configured deadline. Unknown fields, extra frames,
 //! version/request/scope mismatches, empty values, and malformed responses fail
 //! closed without rendering response bytes.
 
@@ -27,13 +27,44 @@ use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 const PROTOCOL_VERSION: u8 = 1;
 const MAX_RESPONSE_SIZE: usize = 65_536;
 const MAX_SECRET_SIZE: usize = 32_768;
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+fn remaining_until(deadline: Instant) -> std::io::Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "provider attempt deadline elapsed",
+            )
+        })
+}
+
+struct DeadlineWriter<'a> {
+    stream: &'a mut UnixStream,
+    deadline: Instant,
+}
+
+impl Write for DeadlineWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.stream
+            .set_write_timeout(Some(remaining_until(self.deadline)?))?;
+        self.stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream
+            .set_write_timeout(Some(remaining_until(self.deadline)?))?;
+        self.stream.flush()
+    }
+}
 
 pub(super) struct SocketSecretProvider {
     path: PathBuf,
@@ -79,7 +110,7 @@ impl SocketSecretProvider {
         ProviderError::new(kind, &self.endpoint)
     }
 
-    fn connect(&self) -> std::result::Result<UnixStream, ProviderError> {
+    fn connect(&self, deadline: Instant) -> std::result::Result<UnixStream, ProviderError> {
         if let Some(trusted_root) = &self.trusted_root {
             if self.path == *trusted_root
                 || !self.path.starts_with(trusted_root)
@@ -104,8 +135,10 @@ impl SocketSecretProvider {
             .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
         let address = SockAddr::unix(&self.path)
             .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
+        let connect_timeout =
+            remaining_until(deadline).map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
         socket
-            .connect_timeout(&address, self.timeout)
+            .connect_timeout(&address, connect_timeout)
             .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
 
         // SAFETY: ownership of the live stream descriptor moves from socket2 to
@@ -113,8 +146,6 @@ impl SocketSecretProvider {
         let stream = unsafe { UnixStream::from_raw_fd(socket.into_raw_fd()) };
         stream
             .set_nonblocking(false)
-            .and_then(|_| stream.set_read_timeout(Some(self.timeout)))
-            .and_then(|_| stream.set_write_timeout(Some(self.timeout)))
             .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
         Ok(stream)
     }
@@ -159,15 +190,21 @@ impl SocketSecretProvider {
     fn read_response_frame(
         &self,
         stream: &mut UnixStream,
+        deadline: Instant,
     ) -> std::result::Result<Zeroizing<Vec<u8>>, ProviderError> {
         let mut response = Zeroizing::new(Vec::with_capacity(1024));
         let mut chunk = Zeroizing::new([0_u8; 4096]);
 
         loop {
+            let read_timeout = remaining_until(deadline)
+                .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+            stream
+                .set_read_timeout(Some(read_timeout))
+                .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
             let remaining = MAX_RESPONSE_SIZE + 1 - response.len();
             let read_size = remaining.min(chunk.len());
             match stream.read(&mut chunk[..read_size]) {
-                Ok(0) => return Err(self.error(ProviderErrorKind::InvalidConfiguration)),
+                Ok(0) => return Err(self.error(ProviderErrorKind::Unavailable)),
                 Ok(bytes_read) => {
                     let bytes = &chunk[..bytes_read];
                     if bytes.contains(&b'\r') {
@@ -180,6 +217,11 @@ impl SocketSecretProvider {
                         }
 
                         let mut trailing = Zeroizing::new([0_u8; 1]);
+                        let eof_timeout = remaining_until(deadline)
+                            .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
+                        stream
+                            .set_read_timeout(Some(eof_timeout))
+                            .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
                         return match stream.read(&mut trailing[..]) {
                             Ok(0) => Ok(response),
                             Ok(_) | Err(_) => {
@@ -253,13 +295,20 @@ impl SecretProvider for SocketSecretProvider {
     }
 
     fn lookup(&self, name: &str) -> std::result::Result<ProviderLookup, ProviderError> {
-        let mut stream = self.connect()?;
-        let request_id = self.write_request(&mut stream, name)?;
+        let deadline = Instant::now() + self.timeout;
+        let mut stream = self.connect(deadline)?;
+        let request_id = self.write_request(
+            &mut DeadlineWriter {
+                stream: &mut stream,
+                deadline,
+            },
+            name,
+        )?;
         stream
             .shutdown(Shutdown::Write)
             .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
 
-        let response = self.read_response_frame(&mut stream)?;
+        let response = self.read_response_frame(&mut stream, deadline)?;
 
         let body = &response[..response.len() - 1];
         let parsed: SocketResponse = serde_json::from_slice(body)
@@ -340,9 +389,12 @@ mod tests {
     const REQUEST_ID_PLACEHOLDER: &str = "__REQUEST_ID__";
     static SOCKET_TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-    fn socket_path(_label: &str) -> PathBuf {
+    fn socket_path(label: &str) -> PathBuf {
         let counter = SOCKET_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        PathBuf::from("/tmp").join(format!("ntnt-sp-{}-{counter}.sock", std::process::id()))
+        PathBuf::from("/tmp").join(format!(
+            "ntnt-sp-{label}-{}-{counter}.sock",
+            std::process::id()
+        ))
     }
 
     fn serve_responses(
@@ -496,6 +548,22 @@ mod tests {
     }
 
     #[test]
+    fn socket_provider_classifies_incomplete_eof_as_unavailable() {
+        for (label, response) in [
+            ("empty-eof", b"".as_slice()),
+            ("partial-eof", b"{\"protocol\":1".as_slice()),
+        ] {
+            let (path, _requests, server) = serve_response(label, response.to_vec());
+            let Err(error) = provider(path.clone()).lookup("API_KEY") else {
+                panic!("incomplete EOF must fail");
+            };
+            assert_eq!(error.kind, ProviderErrorKind::Unavailable);
+            server.join().expect("incomplete EOF fixture");
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
     fn socket_provider_treats_complete_frame_without_eof_as_terminal_malformed() {
         let path = socket_path("complete-without-eof");
         let listener = UnixListener::bind(&path).expect("bind fixture socket");
@@ -584,6 +652,53 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    #[test]
+    fn socket_provider_applies_one_deadline_to_slow_drip_responses() {
+        let path = socket_path("slow-drip");
+        let listener = UnixListener::bind(&path).expect("bind slow-drip fixture");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept slow-drip request");
+            let mut request = String::new();
+            BufReader::new(&stream)
+                .read_line(&mut request)
+                .expect("read request");
+            let request: JsonValue =
+                serde_json::from_str(request.trim_end()).expect("request JSON");
+            let response = format!(
+                "{}\n",
+                serde_json::json!({
+                    "protocol": 1,
+                    "request_id": request["request_id"],
+                    "status": "found",
+                    "scope": "deployment-a",
+                    "value": SECRET_CANARY,
+                })
+            );
+            for byte in response.bytes() {
+                if stream.write_all(&[byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let Err(error) = SocketSecretProvider::new(
+            path.clone(),
+            ProviderEndpointLabel::socket(1),
+            "deployment-a".to_string(),
+            Duration::from_millis(40),
+        )
+        .lookup("API_KEY") else {
+            panic!("slow-drip response must exceed the attempt deadline");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Unavailable);
+        assert!(started.elapsed() < Duration::from_millis(250));
+
+        server.join().expect("slow-drip fixture");
+        std::fs::remove_file(path).ok();
+    }
+
     struct PartialWriteFailure {
         wrote_once: bool,
     }
@@ -659,7 +774,12 @@ mod tests {
             let Err(error) = provider(path.clone()).lookup("API_KEY") else {
                 panic!("malformed frame '{label}' must fail closed");
             };
-            assert_eq!(error.kind, ProviderErrorKind::InvalidConfiguration);
+            let expected = if label == "no-newline" {
+                ProviderErrorKind::Unavailable
+            } else {
+                ProviderErrorKind::InvalidConfiguration
+            };
+            assert_eq!(error.kind, expected);
             let rendered = format!("{error:?}");
             assert!(!rendered.contains(SECRET_CANARY));
             assert!(!rendered.contains(label));
