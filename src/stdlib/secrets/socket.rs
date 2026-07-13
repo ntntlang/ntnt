@@ -447,6 +447,9 @@ mod tests {
                 stream
                     .write_all(&response)
                     .expect("write provider response");
+                stream
+                    .shutdown(std::net::Shutdown::Write)
+                    .expect("close fixture response");
             }
         });
         (path, request_rx, server)
