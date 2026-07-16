@@ -20,12 +20,19 @@ pub struct SecretValue {
 
 impl SecretValue {
     /// Construct a secret after validating its logical name.
+    #[cfg(test)]
     pub(crate) fn new(name: impl Into<String>, value: impl Into<String>) -> Result<Self> {
+        Self::new_zeroizing(name, Zeroizing::new(value.into()))
+    }
+
+    /// Construct a secret from provider-owned zeroizing storage without copying
+    /// plaintext through an ordinary String at the provider boundary.
+    pub(crate) fn new_zeroizing(name: impl Into<String>, value: Zeroizing<String>) -> Result<Self> {
         let name = name.into();
         validate_secret_name(&name)?;
         Ok(Self {
             name: Arc::from(name),
-            value: Arc::new(Zeroizing::new(value.into())),
+            value: Arc::new(value),
         })
     }
 

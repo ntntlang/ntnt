@@ -4,11 +4,28 @@ use crate::error::{IntentError, Result};
 use crate::interpreter::{SecretValue, Value};
 use crate::secret::validate_secret_name;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::fmt;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Duration;
+use zeroize::Zeroizing;
+
+#[cfg(unix)]
+#[path = "secrets/socket.rs"]
+mod socket;
 
 const PROVIDER_ENV: &str = "NTNT_SECRETS_PROVIDER";
+const SOCKET_ENDPOINTS_ENV: &str = "NTNT_SECRETS_SOCKET_ENDPOINTS";
+const SOCKET_SCOPE_ENV: &str = "NTNT_SECRETS_AUTHORIZATION_SCOPE";
+const SOCKET_TIMEOUT_ENV: &str = "NTNT_SECRETS_TIMEOUT_MS";
 const DEFAULT_ATTEMPTS_PER_ENDPOINT: usize = 2;
+const DEFAULT_SOCKET_TIMEOUT_MS: u64 = 1_000;
+const MIN_SOCKET_TIMEOUT_MS: u64 = 10;
+const MAX_SOCKET_TIMEOUT_MS: u64 = 10_000;
+const MAX_SOCKET_ENDPOINTS: usize = 8;
+const MAX_SOCKET_PATH_BYTES: usize = 96;
+const MAX_AUTHORIZATION_SCOPE_BYTES: usize = 128;
+const PRODUCTION_SOCKET_ROOT: &str = "/run/ntnt-secrets";
 
 #[cfg_attr(test, allow(dead_code))]
 #[derive(Default)]
@@ -160,37 +177,66 @@ fn enforce_declared(name: &str) -> Result<()> {
 
 /// A provider result that is deliberately not `Debug`: the found payload is plaintext.
 enum ProviderLookup {
-    Found(String),
+    Found(Zeroizing<String>),
     Missing,
+}
+
+/// A non-sensitive provider identity safe for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderEndpointLabel(String);
+
+impl ProviderEndpointLabel {
+    fn env() -> Self {
+        Self("env".to_string())
+    }
+
+    #[cfg(unix)]
+    fn socket(index: usize) -> Self {
+        Self(format!("unix-socket-{index}"))
+    }
+
+    #[cfg(test)]
+    fn fixture(value: &str) -> Self {
+        assert!(value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-'));
+        Self(value.to_string())
+    }
+}
+
+impl fmt::Display for ProviderEndpointLabel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
 }
 
 /// Stable failure classes for HA failover. The v0.5.1 environment provider
 /// can only emit invalid configuration; socket providers use the remaining classes.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderErrorKind {
     Unavailable,
     AccessDenied,
+    InvalidRequest,
     InvalidConfiguration,
 }
 
 #[derive(Debug, Clone)]
 struct ProviderError {
     kind: ProviderErrorKind,
-    endpoint: String,
+    endpoint: ProviderEndpointLabel,
 }
 
 impl ProviderError {
-    fn new(kind: ProviderErrorKind, endpoint: impl Into<String>) -> Self {
+    fn new(kind: ProviderErrorKind, endpoint: &ProviderEndpointLabel) -> Self {
         Self {
             kind,
-            endpoint: sanitize_endpoint(&endpoint.into()),
+            endpoint: endpoint.clone(),
         }
     }
 }
 
 trait SecretProvider: Send + Sync {
-    fn endpoint(&self) -> &str;
+    fn endpoint(&self) -> &ProviderEndpointLabel;
     fn authorization_scope(&self) -> &str;
 
     /// Perform one endpoint lookup. Implementations must apply a bounded timeout
@@ -200,8 +246,9 @@ trait SecretProvider: Send + Sync {
 
 /// Ordered equivalent provider endpoints with classified failover.
 ///
-/// Only `Unavailable` advances to the next endpoint. Missing, denied, and invalid
-/// configuration results are terminal so failover cannot change authorization scope.
+/// Only `Unavailable` advances to the next endpoint. Missing, denied, invalid
+/// request, and invalid configuration results are terminal so failover cannot
+/// change authorization scope.
 struct ProviderGroup {
     providers: Vec<Arc<dyn SecretProvider>>,
     attempts_per_endpoint: usize,
@@ -239,7 +286,7 @@ impl ProviderGroup {
                 attempts += 1;
                 match provider.lookup(name) {
                     Ok(ProviderLookup::Found(value)) => {
-                        return SecretValue::new(name, value).map(Some)
+                        return SecretValue::new_zeroizing(name, value).map(Some)
                     }
                     Ok(ProviderLookup::Missing) => return Ok(None),
                     Err(error) => match error.kind {
@@ -258,6 +305,12 @@ impl ProviderGroup {
                                 error.endpoint
                             )))
                         }
+                        ProviderErrorKind::InvalidRequest => {
+                            return Err(IntentError::runtime_error(format!(
+                                "Secret provider rejected the request for '{name}' at endpoint '{}'",
+                                error.endpoint
+                            )))
+                        }
                         ProviderErrorKind::InvalidConfiguration => {
                             return Err(IntentError::runtime_error(format!(
                                 "Secret provider configuration is invalid for endpoint '{}'",
@@ -272,7 +325,11 @@ impl ProviderGroup {
         Err(IntentError::runtime_error(format!(
             "Secret provider unavailable after {attempts} bounded attempt(s) across {} endpoint(s): {}",
             unavailable.len(),
-            unavailable.join(", ")
+            unavailable
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         )))
     }
 }
@@ -280,8 +337,9 @@ impl ProviderGroup {
 struct EnvSecretProvider;
 
 impl SecretProvider for EnvSecretProvider {
-    fn endpoint(&self) -> &str {
-        "env"
+    fn endpoint(&self) -> &ProviderEndpointLabel {
+        static ENDPOINT: OnceLock<ProviderEndpointLabel> = OnceLock::new();
+        ENDPOINT.get_or_init(ProviderEndpointLabel::env)
     }
 
     fn authorization_scope(&self) -> &str {
@@ -291,7 +349,7 @@ impl SecretProvider for EnvSecretProvider {
     fn lookup(&self, name: &str) -> std::result::Result<ProviderLookup, ProviderError> {
         match std::env::var(name) {
             Ok(value) if value.is_empty() => Ok(ProviderLookup::Missing),
-            Ok(value) => Ok(ProviderLookup::Found(value)),
+            Ok(value) => Ok(ProviderLookup::Found(Zeroizing::new(value))),
             Err(std::env::VarError::NotPresent) => Ok(ProviderLookup::Missing),
             Err(std::env::VarError::NotUnicode(_)) => Err(ProviderError::new(
                 ProviderErrorKind::InvalidConfiguration,
@@ -301,16 +359,121 @@ impl SecretProvider for EnvSecretProvider {
     }
 }
 
-fn sanitize_endpoint(endpoint: &str) -> String {
-    if endpoint.is_empty()
-        || endpoint.len() > 64
-        || !endpoint
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-'))
-    {
-        return "unknown".to_string();
+struct SocketProviderConfig {
+    endpoints: Vec<PathBuf>,
+    authorization_scope: String,
+    timeout: Duration,
+}
+
+fn socket_config_error() -> IntentError {
+    IntentError::runtime_error("Unix-socket secrets provider configuration is invalid".to_string())
+}
+
+#[cfg(unix)]
+fn validate_no_symlink_components(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(socket_config_error());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(socket_config_error()),
+        }
     }
-    endpoint.to_string()
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_no_symlink_components(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_existing_socket_path(path: &Path) -> Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() => {
+            Err(socket_config_error())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(socket_config_error()),
+    }
+}
+
+#[cfg(not(unix))]
+fn validate_existing_socket_path(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn parse_socket_provider_config(
+    endpoints: Option<&str>,
+    authorization_scope: Option<&str>,
+    timeout_ms: Option<&str>,
+    production: bool,
+) -> Result<SocketProviderConfig> {
+    let raw_endpoints = endpoints.ok_or_else(socket_config_error)?;
+    let parts: Vec<&str> = raw_endpoints.split(',').map(str::trim).collect();
+    if parts.len() > MAX_SOCKET_ENDPOINTS {
+        return Err(socket_config_error());
+    }
+
+    let mut seen = HashSet::with_capacity(parts.len());
+    let mut parsed_endpoints = Vec::with_capacity(parts.len());
+    for endpoint in parts {
+        if endpoint.is_empty()
+            || endpoint.len() > MAX_SOCKET_PATH_BYTES
+            || endpoint.chars().any(char::is_control)
+        {
+            return Err(socket_config_error());
+        }
+        let path = PathBuf::from(endpoint);
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+            || (production
+                && (path == Path::new(PRODUCTION_SOCKET_ROOT)
+                    || !path.starts_with(PRODUCTION_SOCKET_ROOT)))
+            || !seen.insert(path.clone())
+        {
+            return Err(socket_config_error());
+        }
+        if production {
+            validate_no_symlink_components(&path)?;
+        }
+        validate_existing_socket_path(&path)?;
+        parsed_endpoints.push(path);
+    }
+
+    let authorization_scope = authorization_scope.ok_or_else(socket_config_error)?;
+    if authorization_scope != authorization_scope.trim()
+        || authorization_scope.is_empty()
+        || authorization_scope.len() > MAX_AUTHORIZATION_SCOPE_BYTES
+        || !authorization_scope.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | ':' | '-')
+        })
+    {
+        return Err(socket_config_error());
+    }
+
+    let timeout_ms = match timeout_ms {
+        Some(value) => value.parse::<u64>().map_err(|_| socket_config_error())?,
+        None => DEFAULT_SOCKET_TIMEOUT_MS,
+    };
+    if !(MIN_SOCKET_TIMEOUT_MS..=MAX_SOCKET_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(socket_config_error());
+    }
+
+    Ok(SocketProviderConfig {
+        endpoints: parsed_endpoints,
+        authorization_scope: authorization_scope.to_string(),
+        timeout: Duration::from_millis(timeout_ms),
+    })
 }
 
 fn is_production_mode() -> bool {
@@ -319,18 +482,83 @@ fn is_production_mode() -> bool {
         .unwrap_or(false)
 }
 
-fn configured_provider_group() -> Result<ProviderGroup> {
-    let provider = std::env::var(PROVIDER_ENV).unwrap_or_else(|_| "env".to_string());
-    match provider.as_str() {
-        "env" if is_production_mode() => Err(IntentError::runtime_error(
+fn configured_provider_group_from_values(
+    provider: &str,
+    socket_endpoints: Option<&str>,
+    authorization_scope: Option<&str>,
+    timeout_ms: Option<&str>,
+    production: bool,
+) -> Result<ProviderGroup> {
+    match provider {
+        "env" if production => Err(IntentError::runtime_error(
             "The environment secrets provider is development-only and is disabled in production"
                 .to_string(),
         )),
         "env" => ProviderGroup::new(vec![Arc::new(EnvSecretProvider)]),
+        "unix-socket" => {
+            let config = parse_socket_provider_config(
+                socket_endpoints,
+                authorization_scope,
+                timeout_ms,
+                production,
+            )?;
+            #[cfg(unix)]
+            {
+                let providers = config
+                    .endpoints
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, path)| {
+                        let endpoint = ProviderEndpointLabel::socket(index + 1);
+                        let provider = if production {
+                            socket::SocketSecretProvider::new_with_trusted_root(
+                                path,
+                                endpoint,
+                                config.authorization_scope.clone(),
+                                config.timeout,
+                                PathBuf::from(PRODUCTION_SOCKET_ROOT),
+                            )
+                        } else {
+                            socket::SocketSecretProvider::new(
+                                path,
+                                endpoint,
+                                config.authorization_scope.clone(),
+                                config.timeout,
+                            )
+                        };
+                        Arc::new(provider) as Arc<dyn SecretProvider>
+                    })
+                    .collect();
+                ProviderGroup::new(providers)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = config;
+                Err(IntentError::runtime_error(
+                    "The Unix-socket secrets provider is supported only on Unix platforms"
+                        .to_string(),
+                ))
+            }
+        }
         _ => Err(IntentError::runtime_error(
-            "Unsupported secrets provider; ntnt v0.5.1 supports 'env' in development".to_string(),
+            "Unsupported secrets provider; supported providers are 'env' and 'unix-socket'"
+                .to_string(),
         )),
     }
+}
+
+fn configured_provider_group() -> Result<ProviderGroup> {
+    let provider = std::env::var(PROVIDER_ENV).unwrap_or_else(|_| "env".to_string());
+    let socket_endpoints = std::env::var(SOCKET_ENDPOINTS_ENV).ok();
+    let authorization_scope = std::env::var(SOCKET_SCOPE_ENV).ok();
+    let timeout_ms = std::env::var(SOCKET_TIMEOUT_ENV).ok();
+    configured_provider_group_from_values(
+        &provider,
+        socket_endpoints.as_deref(),
+        authorization_scope.as_deref(),
+        timeout_ms.as_deref(),
+        is_production_mode(),
+    )
 }
 
 fn lookup_secret(name: &str) -> Result<Option<SecretValue>> {
@@ -360,8 +588,16 @@ pub fn init() -> HashMap<String, Value> {
     // @signature get_secret(name: String) -> Option<Secret>
     // Looks up a secret by its provider-neutral logical name.
     //
-    // The v0.5.1 development-only environment provider reads the exact environment
-    // variable name and is disabled when `NTNT_ENV` is `production` or `prod`.
+    // The environment provider reads the exact environment variable name and is
+    // disabled when `NTNT_ENV` is `production` or `prod`. Unix deployments can
+    // instead select the generic local secrets-agent provider with
+    // `NTNT_SECRETS_PROVIDER=unix-socket`, a comma-separated list of absolute
+    // `NTNT_SECRETS_SOCKET_ENDPOINTS`, and the expected non-credential deployment
+    // identifier in `NTNT_SECRETS_AUTHORIZATION_SCOPE`. Optional
+    // `NTNT_SECRETS_TIMEOUT_MS` is bounded from 10 through 10000 milliseconds.
+    // Production socket paths must be beneath `/run/ntnt-secrets`; endpoints are
+    // retried twice and failed over only for bounded unavailable results. Plaintext
+    // caching remains in the host agent rather than ntnt.
     // Projects with an `ntnt.toml` must declare accessible names under
     // `[secrets.<NAME>]`; undeclared lookups fail before contacting the provider.
     // Declaration metadata may contain `label`, `description`, `required`, and
@@ -373,7 +609,7 @@ pub fn init() -> HashMap<String, Value> {
     // @since v0.5.1
     // @tags #security, #secrets
     // @example get_secret("STRIPE_SECRET_KEY") => Some([REDACTED]) ~ "Optional lookup"
-    // @error RuntimeError ~ "Unsupported secrets provider" fix: "Set NTNT_SECRETS_PROVIDER=env for v0.5.1"
+    // @error RuntimeError ~ "Unsupported secrets provider" fix: "Select env for development or unix-socket with deployment-scoped socket configuration"
     module.insert(
         "get_secret".to_string(),
         Value::NativeFunction {
@@ -442,6 +678,117 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(unix)]
+    #[test]
+    fn socket_provider_config_is_bounded_and_production_scoped() {
+        let config = parse_socket_provider_config(
+            Some("/tmp/one.sock,/tmp/two.sock"),
+            Some("deployment-a"),
+            Some("250"),
+            false,
+        )
+        .expect("valid development socket config");
+        assert_eq!(config.endpoints.len(), 2);
+        assert_eq!(config.authorization_scope, "deployment-a");
+        assert_eq!(config.timeout, std::time::Duration::from_millis(250));
+        parse_socket_provider_config(
+            Some("/run/ntnt-secrets/agent.sock"),
+            Some("deployment-a"),
+            None,
+            true,
+        )
+        .expect("valid production socket root");
+
+        for (endpoints, scope, timeout, production) in [
+            (None, Some("deployment-a"), None, false),
+            (Some("/tmp/a.sock"), None, None, false),
+            (Some("/tmp/a.sock"), Some(" deployment-a "), None, false),
+            (Some("relative.sock"), Some("deployment-a"), None, false),
+            (Some("/tmp/bad\n.sock"), Some("deployment-a"), None, false),
+            (Some("/run/ntnt-secrets"), Some("deployment-a"), None, true),
+            (
+                Some("/tmp/a.sock,/tmp/a.sock"),
+                Some("deployment-a"),
+                None,
+                false,
+            ),
+            (
+                Some("/run/ntnt-secrets/../other.sock"),
+                Some("deployment-a"),
+                None,
+                true,
+            ),
+            (Some("/tmp/a.sock"), Some("deployment-a"), None, true),
+            (Some("/tmp/a.sock"), Some("deployment-a"), Some("9"), false),
+            (
+                Some("/tmp/a.sock"),
+                Some("deployment-a"),
+                Some("10001"),
+                false,
+            ),
+            (Some("/tmp/a.sock"), Some("deployment\nscope"), None, false),
+        ] {
+            assert!(
+                parse_socket_provider_config(endpoints, scope, timeout, production).is_err(),
+                "invalid socket configuration must fail closed"
+            );
+        }
+
+        let too_many = (0..9)
+            .map(|index| format!("/tmp/{index}.sock"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            parse_socket_provider_config(Some(&too_many), Some("deployment-a"), None, false,)
+                .is_err()
+        );
+
+        let overlong = format!("/tmp/{}.sock", "a".repeat(96));
+        assert!(
+            parse_socket_provider_config(Some(&overlong), Some("deployment-a"), None, false,)
+                .is_err()
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn socket_provider_selector_fails_closed_off_unix() {
+        let result = configured_provider_group_from_values(
+            "unix-socket",
+            Some(r"C:\run\ntnt-secrets\agent.sock"),
+            Some("deployment-a"),
+            Some("250"),
+            false,
+        );
+        let error = match result {
+            Ok(_) => panic!("socket provider must be unavailable off Unix"),
+            Err(error) => error,
+        };
+        let rendered = error.to_string();
+        assert!(rendered.contains("supported only on Unix platforms"));
+        assert!(!rendered.contains("agent.sock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_provider_rejects_symlinked_parent_components() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ntnt-socket-parent-{}-{suffix}",
+            std::process::id()
+        ));
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).expect("create real parent");
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("create parent symlink");
+
+        assert!(validate_no_symlink_components(&link.join("agent.sock")).is_err());
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn declaration_identity_is_stable_when_manifest_appears() {
         let suffix = SystemTime::now()
@@ -470,7 +817,7 @@ mod tests {
     }
 
     struct MockProvider {
-        endpoint: String,
+        endpoint: ProviderEndpointLabel,
         authorization_scope: String,
         calls: AtomicUsize,
         results: Mutex<VecDeque<std::result::Result<ProviderLookup, ProviderError>>>,
@@ -482,7 +829,7 @@ mod tests {
             results: Vec<std::result::Result<ProviderLookup, ProviderError>>,
         ) -> Self {
             Self {
-                endpoint: endpoint.to_string(),
+                endpoint: ProviderEndpointLabel::fixture(endpoint),
                 authorization_scope: "deployment-a".to_string(),
                 calls: AtomicUsize::new(0),
                 results: Mutex::new(results.into()),
@@ -500,7 +847,7 @@ mod tests {
     }
 
     impl SecretProvider for MockProvider {
-        fn endpoint(&self) -> &str {
+        fn endpoint(&self) -> &ProviderEndpointLabel {
             &self.endpoint
         }
 
@@ -516,6 +863,14 @@ mod tests {
                 .pop_front()
                 .expect("mock result")
         }
+    }
+
+    fn found(value: &str) -> ProviderLookup {
+        ProviderLookup::Found(Zeroizing::new(value.to_string()))
+    }
+
+    fn provider_error(kind: ProviderErrorKind, endpoint: &str) -> ProviderError {
+        ProviderError::new(kind, &ProviderEndpointLabel::fixture(endpoint))
     }
 
     #[test]
@@ -541,19 +896,13 @@ mod tests {
         let first = Arc::new(MockProvider::new(
             "socket-a",
             vec![
-                Err(ProviderError::new(
-                    ProviderErrorKind::Unavailable,
-                    "socket-a",
-                )),
-                Err(ProviderError::new(
-                    ProviderErrorKind::Unavailable,
-                    "socket-a",
-                )),
+                Err(provider_error(ProviderErrorKind::Unavailable, "socket-a")),
+                Err(provider_error(ProviderErrorKind::Unavailable, "socket-a")),
             ],
         ));
         let second = Arc::new(MockProvider::new(
             "socket-b",
-            vec![Ok(ProviderLookup::Found("secret-value".to_string()))],
+            vec![Ok(found("secret-value"))],
         ));
         let group = ProviderGroup::new(vec![first.clone(), second.clone()]).expect("group");
 
@@ -568,16 +917,13 @@ mod tests {
         let first = Arc::new(MockProvider::new(
             "socket-a",
             vec![
-                Err(ProviderError::new(
-                    ProviderErrorKind::Unavailable,
-                    "socket-a",
-                )),
-                Ok(ProviderLookup::Found("secret-value".to_string())),
+                Err(provider_error(ProviderErrorKind::Unavailable, "socket-a")),
+                Ok(found("secret-value")),
             ],
         ));
         let second = Arc::new(MockProvider::new(
             "socket-b",
-            vec![Ok(ProviderLookup::Found("must-not-read".to_string()))],
+            vec![Ok(found("must-not-read"))],
         ));
         let group = ProviderGroup::new(vec![first.clone(), second.clone()]).expect("group");
 
@@ -591,14 +937,14 @@ mod tests {
     fn provider_group_stops_on_access_denied() {
         let first = Arc::new(MockProvider::new(
             "socket-a",
-            vec![Err(ProviderError::new(
+            vec![Err(provider_error(
                 ProviderErrorKind::AccessDenied,
                 "socket-a",
             ))],
         ));
         let second = Arc::new(MockProvider::new(
             "socket-b",
-            vec![Ok(ProviderLookup::Found("must-not-read".to_string()))],
+            vec![Ok(found("must-not-read"))],
         ));
         let group = ProviderGroup::new(vec![first, second.clone()]).expect("group");
 
@@ -615,7 +961,7 @@ mod tests {
         ));
         let second = Arc::new(MockProvider::new(
             "socket-b",
-            vec![Ok(ProviderLookup::Found("must-not-read".to_string()))],
+            vec![Ok(found("must-not-read"))],
         ));
         let group = ProviderGroup::new(vec![first, second.clone()]).expect("group");
 
@@ -631,8 +977,8 @@ mod tests {
                 Arc::new(MockProvider::new(
                     endpoint,
                     vec![
-                        Err(ProviderError::new(ProviderErrorKind::Unavailable, endpoint)),
-                        Err(ProviderError::new(ProviderErrorKind::Unavailable, endpoint)),
+                        Err(provider_error(ProviderErrorKind::Unavailable, endpoint)),
+                        Err(provider_error(ProviderErrorKind::Unavailable, endpoint)),
                     ],
                 )) as Arc<dyn SecretProvider>
             })
