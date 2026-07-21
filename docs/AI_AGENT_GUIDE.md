@@ -3205,7 +3205,7 @@ NTNT_SECRETS_SOCKET_ENDPOINTS=/run/ntnt-secrets/agent.sock
 NTNT_SECRETS_AUTHORIZATION_SCOPE=deployment-a
 ```
 
-A `Secret` can enter approved `fetch()` header, cookie, auth, body, JSON-leaf, or form sinks. Secret-bearing requests require HTTPS and never follow redirects. Logging, diagnostics, display, and error rendering redact secret values. Templates, public responses, string/JSON/CSV conversion, URL query construction, caches, databases, KV, jobs, and task/channel payloads reject them. There is no general reveal-to-String function.
+A `Secret` can enter approved `fetch()` header, cookie, auth, body, JSON-leaf, or form sinks. Secret-bearing requests require HTTPS and never follow redirects. `str(secret)`, logging, diagnostics, display, and error rendering emit `[REDACTED]`. Templates, public responses, JSON/CSV serialization, URL query construction, caches, databases, KV, jobs, and task/channel payloads reject secret-bearing values. There is no general plaintext reveal function.
 
 See [the secrets-agent protocol](secrets-agent-protocol.md) and the [`std/secrets` reference](STDLIB_REFERENCE.md#stdsecrets) for the full provider and sink contracts.
 
@@ -3271,7 +3271,7 @@ let name = day_name(ts)                             // "Wednesday"
 
 ---
 
-> **Complete function listings:** For every function signature, parameter, and example across all 21 modules, see [STDLIB_REFERENCE.md](STDLIB_REFERENCE.md) or run `ntnt docs <module>` (e.g., `ntnt docs std/time`).
+> **Complete function listings:** For every function signature, parameter, and example across all 25 modules, see [STDLIB_REFERENCE.md](STDLIB_REFERENCE.md) or run `ntnt docs <module>` (e.g., `ntnt docs std/time`).
 
 ---
 

@@ -4341,7 +4341,14 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("get_env", ["name" => Type::String], Type::Optional(Box::new(Type::String)));
             sig!("set_env", ["name" => Type::String, "value" => Type::String], Type::Unit);
             sig!("all_env", [], Type::Any);
-            sig!("load_env", ["path" => Type::String], Type::Unit);
+            sig!(
+                "load_env",
+                ["path" => Type::String],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![Type::Unit, Type::String],
+                }
+            );
             sig!("args", [], Type::Array(Box::new(Type::String)));
             sig!("cwd", [], Type::String);
         }

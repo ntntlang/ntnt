@@ -57,7 +57,7 @@ Supported statuses:
 | `invalid_request` | The request is semantically invalid. | No |
 | `invalid_configuration` | The agent cannot safely serve the configured deployment. | No |
 
-Agents must not return backend error text, stack traces, paths, credentials, or secret fragments. ntnt validates the protocol version, request ID, exact scope, status shape, frame size, value size, and connection completion before exposing a value to `std/secrets`.
+Agents must not return backend error text, stack traces, paths, credentials, or secret fragments. ntnt validates the protocol version, request ID, exact scope, status shape, frame size, value size, newline frame completion, and any immediately available trailing byte before exposing a value to `std/secrets`.
 
 ## Deployment configuration
 

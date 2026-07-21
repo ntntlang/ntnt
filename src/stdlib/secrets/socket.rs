@@ -2,7 +2,8 @@
 //!
 //! Each lookup opens one Unix stream, writes exactly one newline-delimited JSON
 //! request, half-closes the write side, reads one bounded newline-delimited JSON
-//! response through EOF, and closes the stream. Requests contain only
+//! response, performs an immediate nonblocking trailing-byte check, and closes
+//! the stream. Requests contain only
 //! `protocol`, a non-credential numeric `request_id`, `op = "get"`, and the
 //! validated logical secret `name`. Responses echo `protocol` and `request_id`,
 //! include the expected deployment authorization `scope`, and use one of:

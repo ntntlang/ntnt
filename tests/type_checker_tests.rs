@@ -1563,6 +1563,21 @@ read_user_secret(token)
 }
 
 #[test]
+fn test_load_env_matches_documented_result_type() {
+    let source = r#"import { load_env } from "std/env"
+
+fn load_config(path: String) -> Result<Unit, String> {
+    return load_env(path)
+}
+
+load_config(".env")
+"#;
+    let (stdout, stderr, exit) = lint_strict_code(source);
+    assert_eq!(exit, 0, "stderr={stderr}\nstdout={stdout}");
+    assert!(!stdout.contains("type_check"), "{stdout}");
+}
+
+#[test]
 fn test_cache_fetch_accepts_documented_url_and_options_forms() {
     let source = r#"import { Cache, cache_fetch } from "std/http"
 
