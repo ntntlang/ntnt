@@ -289,6 +289,22 @@ fn normalized_proto(proto: &str) -> Option<String> {
     }
 }
 
+fn is_local_host(host: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    if host == "localhost"
+        || host.starts_with("localhost:")
+        || host == "::1"
+        || host == "[::1]"
+        || host.starts_with("[::1]:")
+    {
+        return true;
+    }
+
+    let ipv4 = host.split_once(':').map_or(host.as_str(), |(host, _)| host);
+    ipv4.parse::<std::net::Ipv4Addr>()
+        .is_ok_and(|address| address.is_loopback())
+}
+
 fn normalized_host(host: &str) -> Option<String> {
     let trimmed = host.trim();
     if trimmed.is_empty()
@@ -327,37 +343,34 @@ pub(super) fn get_host_and_proto(req: &Value) -> (String, String) {
             })
             .unwrap_or_else(|| "localhost:8080".to_string());
 
-        let proto = req_map
-            .get("protocol")
-            .and_then(|v| {
-                if let Value::String(s) = v {
-                    normalized_proto(s)
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                req_map.get("headers").and_then(|h| {
-                    if let Value::Map(headers) = h {
-                        headers.get("x-forwarded-proto").and_then(|v| {
-                            if let Value::String(s) = v {
-                                normalized_proto(s)
-                            } else {
-                                None
-                            }
-                        })
-                    } else {
-                        None
-                    }
+        let local_host = is_local_host(&host);
+        let proto = if local_host {
+            req_map
+                .get("protocol")
+                .and_then(|v| match v {
+                    Value::String(value) => normalized_proto(value),
+                    _ => None,
                 })
-            })
-            .unwrap_or_else(|| {
-                if host.contains("localhost") || host.starts_with("127.") {
-                    "http".to_string()
-                } else {
-                    "https".to_string()
-                }
-            });
+                .or_else(|| {
+                    req_map.get("headers").and_then(|headers| match headers {
+                        Value::Map(headers) => {
+                            headers
+                                .get("x-forwarded-proto")
+                                .and_then(|value| match value {
+                                    Value::String(value) => normalized_proto(value),
+                                    _ => None,
+                                })
+                        }
+                        _ => None,
+                    })
+                })
+                .unwrap_or_else(|| "http".to_string())
+        } else {
+            // Public OAuth callbacks should be HTTPS unless the deployment owner
+            // explicitly chooses another canonical origin with SITE_URL. The HTTP
+            // server's request protocol can be synthetic behind a TLS terminator.
+            "https".to_string()
+        };
 
         (host, proto)
     } else {

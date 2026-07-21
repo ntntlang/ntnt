@@ -1561,3 +1561,21 @@ read_user_secret(token)
         "provider Secret must not unify with a user-defined Secret: {stdout}"
     );
 }
+
+#[test]
+fn test_cache_fetch_accepts_documented_url_and_options_forms() {
+    let source = r#"import { Cache, cache_fetch } from "std/http"
+
+let cache = Cache(60)
+let from_url = cache_fetch(cache, "https://api.example.com/data")
+let from_options = cache_fetch(cache, map {
+    "url": "https://api.example.com/data",
+    "headers": map { "Accept": "application/json" }
+})
+print(from_url)
+print(from_options)
+"#;
+    let (stdout, stderr, exit) = lint_strict_code(source);
+    assert_eq!(exit, 0, "stderr={stderr}\nstdout={stdout}");
+    assert!(!stdout.contains("type_check"), "{stdout}");
+}

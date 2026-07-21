@@ -1,6 +1,8 @@
 # Local secrets-agent protocol v1
 
-ntnt's `unix-socket` secrets provider can use any local agent that implements this protocol. The protocol is backend-neutral: an agent may obtain values from a managed secrets service, an operating-system key store, an HSM-backed service, or another deployment-owned source.
+ntnt's opt-in `unix-socket` secrets provider can use any local agent that implements this protocol. The protocol is backend-neutral: an agent may obtain values from a managed secrets service, an operating-system key store, an HSM-backed service, or another deployment-owned source.
+
+This provider does not replace or alter `std/env`: existing `get_env`, `load_env`, and `.env` workflows remain available in development and production. An application needs this protocol only when it deliberately calls `get_secret(...)` or `require_secret(...)` with `NTNT_SECRETS_PROVIDER=unix-socket`.
 
 This is an integration contract for `std/secrets`; it is not a general socket API for ntnt programs.
 

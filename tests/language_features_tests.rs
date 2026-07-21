@@ -177,6 +177,50 @@ fn run_ntnt_file(path: &std::path::Path, env_vars: &[(&str, &str)]) -> (String, 
     (stdout, stderr, exit_code)
 }
 
+#[test]
+fn test_std_env_dotenv_remains_available_in_production_when_secrets_are_unused() {
+    let project = unique_test_dir("dotenv_compat");
+    fs::create_dir_all(&project).expect("create dotenv compatibility project");
+    let dotenv = project.join(".env");
+    let source = project.join("main.tnt");
+    let variable = format!(
+        "NTNT_DOTENV_COMPAT_{}_{}",
+        std::process::id(),
+        TEST_COUNTER.fetch_add(1, Ordering::SeqCst)
+    );
+    fs::write(&dotenv, format!("{variable}=still-works\n")).expect("write .env fixture");
+    let dotenv_path = dotenv.to_string_lossy().replace('\\', "\\\\");
+    write_test_file(
+        &source,
+        &format!(
+            r#"import {{ get_env, load_env }} from "std/env"
+import {{ get_secret }} from "std/secrets"
+
+let loaded = load_env("{dotenv_path}")
+print(is_ok(loaded))
+print(get_env("{variable}") ?? "missing")
+"#,
+        ),
+    );
+
+    let (stdout, stderr, exit) = run_ntnt_file(
+        &source,
+        &[
+            ("NTNT_ENV", "production"),
+            ("APP_ENV", "production"),
+            ("NTNT_SECRETS_PROVIDER", "not-a-provider"),
+        ],
+    );
+
+    assert_eq!(exit, 0, "stderr={stderr}\nstdout={stdout}");
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        ["true", "still-works"],
+        "std/env .env loading changed under production mode"
+    );
+    fs::remove_dir_all(project).ok();
+}
+
 /// Helper to run ntnt with a code string
 fn run_ntnt_code(code: &str) -> (String, String, i32) {
     let test_file = unique_test_file("feature_test");

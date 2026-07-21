@@ -30,7 +30,7 @@ Environment variables that control NTNT runtime behavior
 | `NTNT_MAX_RECURSION` | integer | 256 | Maximum recursion depth for function calls. Prevents stack overflow from runaway recursion. |
 | `NTNT_NET_ALLOW_PRIVATE` | `1`, `true`, `yes` | unset (disabled — private targets blocked) | Process-level opt-in for `std/net` probes (`ping`, `tcp_connect`, `reachable`, `port_scan`, `tls_info`, `traceroute`) against private/internal targets. Each call must also pass `allow_private: true`. Special-purpose targets such as cloud metadata, multicast, broadcast, unspecified, and documentation ranges remain blocked. This is separate from `NTNT_ALLOW_PRIVATE_IPS`, which only applies to `fetch()`. |
 | `NTNT_SECRETS_AUTHORIZATION_SCOPE` | opaque ASCII deployment identifier | unset (required for unix-socket) | Trusted non-credential deployment scope expected in every secrets-agent response. It detects endpoint miswiring but is not authentication and is never rendered in diagnostics. Leading or trailing whitespace is rejected. |
-| `NTNT_SECRETS_PROVIDER` | `env`, `unix-socket` | env | Selects the provider behind `std/secrets`. The exact-name environment provider is development-only and is rejected when `NTNT_ENV` is `production` or `prod`. `unix-socket` is Unix-only and talks to any local secrets agent implementing the documented protocol, without depending directly on a secrets backend. |
+| `NTNT_SECRETS_PROVIDER` | `env`, `unix-socket` | env | Selects the provider behind the opt-in `std/secrets` API. This setting does not affect `std/env`, `get_env`, `load_env`, or existing `.env` workflows. Provider configuration is evaluated only when an application calls `get_secret` or `require_secret`. The exact-name environment provider is development-only and is rejected when `NTNT_ENV` is `production` or `prod`; that restriction applies only to `std/secrets`. `unix-socket` is Unix-only and talks to any local secrets agent implementing the documented protocol, without depending directly on a secrets backend. |
 | `NTNT_SECRETS_SOCKET_ENDPOINTS` | comma-separated absolute Unix socket paths | unset (required for unix-socket) | Ordered local secrets-agent endpoints for secret lookup. One through eight unique paths are allowed. Each endpoint is tried twice, and failover occurs only for bounded unavailable results. Production paths must be beneath the host-controlled `/run/ntnt-secrets` root; raw paths are never included in runtime diagnostics. |
 | `NTNT_SECRETS_TIMEOUT_MS` | integer (milliseconds) | 1000 | Per-attempt Unix-socket connect, write, and read timeout. Values must be between 10 and 10000 milliseconds. |
 | `NTNT_STRICT` | `1`, `true` | unset (disabled) | **Deprecated — use `NTNT_LINT_MODE=strict` instead.** Enable strict type checking. Still works but emits a deprecation warning. |
@@ -61,7 +61,7 @@ NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
 # Trusted non-credential deployment scope expected in every secrets-agent response
 NTNT_SECRETS_AUTHORIZATION_SCOPE=deployment-a
 
-# Selects the provider behind `std/secrets`
+# Selects the provider behind the opt-in `std/secrets` API
 NTNT_SECRETS_PROVIDER=unix-socket ntnt run server.tnt
 
 # Ordered local secrets-agent endpoints for secret lookup

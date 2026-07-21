@@ -44,19 +44,19 @@ let doubled = transform(numbers, fn(x) { x * 2 })
 print("Doubled: " + str(doubled))
 
 // === find ===
-let found = find(people, fn(p) { p["name"] == "Bob" })
+let found = find(people, fn(p) { str(p["name"]) == "Bob" })
 match found {
     Some(p) => print("Found: " + p["name"] + ", age " + str(p["age"])),
     None => print("Not found")
 }
 
 // === any / all ===
-let has_senior = any(people, fn(p) { p["age"] >= 35 })
-let all_adults = all(people, fn(p) { p["age"] >= 18 })
+let has_senior = any(people, fn(p) { (int(p["age"]) ?? 0) >= 35 })
+let all_adults = all(people, fn(p) { (int(p["age"]) ?? 0) >= 18 })
 print("Has senior: " + str(has_senior) + ", All adults: " + str(all_adults))
 
 // === count ===
-let over_25 = count(people, fn(p) { p["age"] > 25 })
+let over_25 = count(people, fn(p) { (int(p["age"]) ?? 0) > 25 })
 print("Over 25: " + str(over_25))
 
 // === reduce ===

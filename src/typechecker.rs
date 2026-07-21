@@ -4361,7 +4361,16 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             }, variadic);
             sig!("download", ["url" => Type::String, "path" => Type::String], Type::Any);
             sig!("Cache", ["ttl" => Type::Int], Type::Any);
-            sig!("cache_fetch", ["cache" => Type::Any, "url" => Type::String], Type::Any, variadic);
+            sig!("cache_fetch", [
+                "cache" => Type::Any,
+                "url_or_options" => Type::Union(vec![
+                    Type::String,
+                    Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                ])
+            ], Type::Any, variadic);
         }
         "std/http/server" => {
             sig!("json", ["data" => Type::Any], Type::Named("Response".to_string()), variadic);

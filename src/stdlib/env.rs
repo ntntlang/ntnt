@@ -15,7 +15,8 @@ pub fn init() -> HashMap<String, Value> {
     // Gets an environment variable by name.
     //
     // Returns Some(value) if the variable is set, or None if it is not defined
-    // in the current process environment.
+    // in the current process environment. This API is independent of optional
+    // `std/secrets` providers and remains available when `NTNT_ENV=production`.
     // @param name The environment variable name
     // @returns Option containing the value or None
     // @see_also load_env
@@ -98,7 +99,8 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Reads the file line by line, parsing KEY=VALUE pairs. Lines starting
     // with # are treated as comments and skipped. Variables are set in
-    // the current process environment.
+    // the current process environment. Loading `.env` files remains supported
+    // in production and is not replaced or restricted by optional `std/secrets`.
     // @param path Path to the .env file
     // @returns Result indicating success or file read error
     // @see_also get_env

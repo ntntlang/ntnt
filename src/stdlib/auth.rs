@@ -5749,6 +5749,40 @@ mod tests {
     static AUTH_TEST_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
+    struct TestEnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvVarGuard {
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for TestEnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     fn reset_auth_test_state() {
         let mut store = SESSION_STORE.lock().unwrap();
         store.sessions.clear();
@@ -13985,7 +14019,9 @@ response.status
     }
 
     #[test]
-    fn test_get_host_and_proto_prefers_request_protocol_field() {
+    fn test_get_host_and_proto_does_not_downgrade_public_https_from_forwarded_header() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let _site_url = TestEnvVarGuard::unset("SITE_URL");
         let req = Value::Map(HashMap::from([
             ("protocol".to_string(), Value::String("https".to_string())),
             (
@@ -14007,12 +14043,74 @@ response.status
     }
 
     #[test]
+    fn test_get_host_and_proto_does_not_use_synthetic_http_for_public_host() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let _site_url = TestEnvVarGuard::unset("SITE_URL");
+        let req = Value::Map(HashMap::from([
+            ("protocol".to_string(), Value::String("http".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "host".to_string(),
+                    Value::String("public.example.com".to_string()),
+                )])),
+            ),
+        ]));
+
+        assert_eq!(
+            get_host_and_proto(&req),
+            ("public.example.com".to_string(), "https".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_host_and_proto_does_not_treat_localhost_substring_as_local() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let _site_url = TestEnvVarGuard::unset("SITE_URL");
+        let req = Value::Map(HashMap::from([
+            ("protocol".to_string(), Value::String("http".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "host".to_string(),
+                    Value::String("notlocalhost.example.com".to_string()),
+                )])),
+            ),
+        ]));
+
+        assert_eq!(
+            get_host_and_proto(&req),
+            ("notlocalhost.example.com".to_string(), "https".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_host_and_proto_keeps_http_for_localhost() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let _site_url = TestEnvVarGuard::unset("SITE_URL");
+        for host in ["localhost:8080", "127.0.0.1:8080", "::1", "[::1]:8080"] {
+            let req = Value::Map(HashMap::from([
+                ("protocol".to_string(), Value::String("http".to_string())),
+                (
+                    "headers".to_string(),
+                    Value::Map(HashMap::from([(
+                        "host".to_string(),
+                        Value::String(host.to_string()),
+                    )])),
+                ),
+            ]));
+
+            assert_eq!(
+                get_host_and_proto(&req),
+                (host.to_string(), "http".to_string())
+            );
+        }
+    }
+
+    #[test]
     fn test_get_host_and_proto_prefers_site_url_when_present() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
-        let previous = std::env::var("SITE_URL").ok();
-        unsafe {
-            std::env::set_var("SITE_URL", "https://canonical.example.com/app");
-        }
+        let _site_url = TestEnvVarGuard::set("SITE_URL", "http://canonical.example.com/app");
 
         let req = Value::Map(HashMap::from([(
             "headers".to_string(),
@@ -14024,13 +14122,8 @@ response.status
 
         assert_eq!(
             get_host_and_proto(&req),
-            ("canonical.example.com".to_string(), "https".to_string())
+            ("canonical.example.com".to_string(), "http".to_string())
         );
-
-        match previous {
-            Some(val) => unsafe { std::env::set_var("SITE_URL", val) },
-            None => unsafe { std::env::remove_var("SITE_URL") },
-        }
     }
 
     #[test]

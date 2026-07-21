@@ -1909,7 +1909,7 @@ The most-used stdlib functions are auto-injected — no import needed:
 | `std/time` | `now`, `format` |
 | `std/crypto` | `uuid`, `sha256` |
 
-**NOT in prelude** (still need explicit import): `fetch` (std/http), `std/net` IPAM/probe helpers, `connect`/`query`/`execute` (database modules), `set_cookie`/`get_cookie`/`with_cookie` (std/http/server), `sort_by`/`first`/`last`/`push`/`pop` (std/collections), KV, jobs, fs, csv, concurrent.
+**NOT in prelude** (still need explicit import): `fetch` (std/http), `get_secret`/`require_secret` (std/secrets), `std/net` IPAM/probe helpers, `connect`/`query`/`execute` (database modules), `set_cookie`/`get_cookie`/`with_cookie` (std/http/server), `sort_by`/`first`/`last`/`push`/`pop` (std/collections), KV, jobs, fs, csv, concurrent.
 
 Explicit imports still work — prelude just makes them unnecessary for common functions.
 
@@ -3163,6 +3163,54 @@ let sig = hmac_sha256("message", "secret-key")      // HMAC signature
 
 ---
 
+## Environment Configuration and Optional Secrets
+
+Existing environment-variable configuration remains the default compatibility path:
+
+```ntnt
+import { get_env, load_env } from "std/env"
+
+load_env(".env")?
+let database_url = get_env("DATABASE_URL") ?? "sqlite:./app.db"
+```
+
+`std/env` is unchanged in v0.5.1. `get_env`, `load_env`, and `.env` files continue to work when `NTNT_ENV=production`. The optional `std/secrets` subsystem does not intercept, migrate, disable, or reinterpret those values.
+
+Use `std/secrets` only when the application deliberately wants opaque values with restricted sinks:
+
+```ntnt
+import { require_secret } from "std/secrets"
+import { fetch } from "std/http"
+
+let authorization = require_secret("PAYMENTS_AUTHORIZATION")
+let response = fetch(map {
+    "url": "https://payments.example.com/v1/account",
+    "headers": map { "Authorization": authorization }
+})?
+```
+
+When an `ntnt.toml` exists, declare each logical name without storing its value:
+
+```toml
+[secrets.PAYMENTS_AUTHORIZATION]
+required = true
+description = "Complete payments Authorization header value"
+```
+
+`NTNT_SECRETS_PROVIDER` is consulted only by `get_secret(...)` and `require_secret(...)`. Applications that do not call those functions require no provider or deployment changes. The development `env` provider performs exact-name lookup and is intentionally unavailable through `std/secrets` in production; this does **not** affect ordinary `std/env` access. Production Unix deployments can select the generic local-agent protocol:
+
+```text
+NTNT_SECRETS_PROVIDER=unix-socket
+NTNT_SECRETS_SOCKET_ENDPOINTS=/run/ntnt-secrets/agent.sock
+NTNT_SECRETS_AUTHORIZATION_SCOPE=deployment-a
+```
+
+A `Secret` can enter approved `fetch()` header, cookie, auth, body, JSON-leaf, or form sinks. Secret-bearing requests require HTTPS and never follow redirects. Logging, diagnostics, display, and error rendering redact secret values. Templates, public responses, string/JSON/CSV conversion, URL query construction, caches, databases, KV, jobs, and task/channel payloads reject them. There is no general reveal-to-String function.
+
+See [the secrets-agent protocol](secrets-agent-protocol.md) and the [`std/secrets` reference](STDLIB_REFERENCE.md#stdsecrets) for the full provider and sink contracts.
+
+---
+
 ## File System (`std/fs`)
 
 ```ntnt
@@ -3474,6 +3522,7 @@ import { fetch, download } from "std/http"
 import { read_file, write_file, exists } from "std/fs"
 import { parse_json, stringify } from "std/json"
 import { get_env, load_env } from "std/env"
+import { get_secret, require_secret } from "std/secrets"
 import { now, format } from "std/time"
 import { sha256, uuid } from "std/crypto"
 import { first, last, keys, values, entries, has_key, get_key, get_index } from "std/collections"
