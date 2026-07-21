@@ -14043,17 +14043,23 @@ response.status
     }
 
     #[test]
-    fn test_get_host_and_proto_does_not_use_synthetic_http_for_public_host() {
+    fn test_get_host_and_proto_uses_forwarded_https_over_synthetic_public_http() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         let _site_url = TestEnvVarGuard::unset("SITE_URL");
         let req = Value::Map(HashMap::from([
             ("protocol".to_string(), Value::String("http".to_string())),
             (
                 "headers".to_string(),
-                Value::Map(HashMap::from([(
-                    "host".to_string(),
-                    Value::String("public.example.com".to_string()),
-                )])),
+                Value::Map(HashMap::from([
+                    (
+                        "host".to_string(),
+                        Value::String("public.example.com".to_string()),
+                    ),
+                    (
+                        "x-forwarded-proto".to_string(),
+                        Value::String("https".to_string()),
+                    ),
+                ])),
             ),
         ]));
 
@@ -14064,7 +14070,7 @@ response.status
     }
 
     #[test]
-    fn test_get_host_and_proto_does_not_treat_localhost_substring_as_local() {
+    fn test_get_host_and_proto_preserves_public_http_without_proxy_signal() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         let _site_url = TestEnvVarGuard::unset("SITE_URL");
         let req = Value::Map(HashMap::from([
@@ -14073,10 +14079,28 @@ response.status
                 "headers".to_string(),
                 Value::Map(HashMap::from([(
                     "host".to_string(),
-                    Value::String("notlocalhost.example.com".to_string()),
+                    Value::String("plain-http.example.com".to_string()),
                 )])),
             ),
         ]));
+
+        assert_eq!(
+            get_host_and_proto(&req),
+            ("plain-http.example.com".to_string(), "http".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_host_and_proto_does_not_treat_localhost_substring_as_local() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        let _site_url = TestEnvVarGuard::unset("SITE_URL");
+        let req = Value::Map(HashMap::from([(
+            "headers".to_string(),
+            Value::Map(HashMap::from([(
+                "host".to_string(),
+                Value::String("notlocalhost.example.com".to_string()),
+            )])),
+        )]));
 
         assert_eq!(
             get_host_and_proto(&req),

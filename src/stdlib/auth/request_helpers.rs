@@ -343,33 +343,36 @@ pub(super) fn get_host_and_proto(req: &Value) -> (String, String) {
             })
             .unwrap_or_else(|| "localhost:8080".to_string());
 
-        let local_host = is_local_host(&host);
-        let proto = if local_host {
-            req_map
-                .get("protocol")
-                .and_then(|v| match v {
+        let request_proto = req_map.get("protocol").and_then(|value| match value {
+            Value::String(value) => normalized_proto(value),
+            _ => None,
+        });
+        let forwarded_proto = req_map.get("headers").and_then(|headers| match headers {
+            Value::Map(headers) => headers
+                .get("x-forwarded-proto")
+                .and_then(|value| match value {
                     Value::String(value) => normalized_proto(value),
                     _ => None,
-                })
-                .or_else(|| {
-                    req_map.get("headers").and_then(|headers| match headers {
-                        Value::Map(headers) => {
-                            headers
-                                .get("x-forwarded-proto")
-                                .and_then(|value| match value {
-                                    Value::String(value) => normalized_proto(value),
-                                    _ => None,
-                                })
-                        }
-                        _ => None,
-                    })
-                })
+                }),
+            _ => None,
+        });
+
+        let proto = if is_local_host(&host) {
+            request_proto
+                .or(forwarded_proto)
                 .unwrap_or_else(|| "http".to_string())
-        } else {
-            // Public OAuth callbacks should be HTTPS unless the deployment owner
-            // explicitly chooses another canonical origin with SITE_URL. The HTTP
-            // server's request protocol can be synthetic behind a TLS terminator.
+        } else if request_proto.as_deref() == Some("https")
+            || forwarded_proto.as_deref() == Some("https")
+        {
+            // Never downgrade an HTTPS request, and allow a TLS terminator's
+            // forwarded HTTPS signal to upgrade the origin server's synthetic HTTP.
             "https".to_string()
+        } else {
+            // Preserve existing public plain-HTTP deployments when there is no
+            // HTTPS proxy signal. SITE_URL remains the explicit canonical override.
+            request_proto
+                .or(forwarded_proto)
+                .unwrap_or_else(|| "https".to_string())
         };
 
         (host, proto)
