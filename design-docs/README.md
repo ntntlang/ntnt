@@ -20,7 +20,8 @@ This folder contains planning and design documents for NTNT features.
 | [dd-060-ai-native-developer-experience.md](dd-060-ai-native-developer-experience.md) | 📋 Draft | AI-native developer experience roadmap |
 | [dd-061-interpreter-performance-roadmap.md](dd-061-interpreter-performance-roadmap.md) | 🔶 In Review | Current-use-case performance roadmap: template contract cleanup, benchmark harness, automatic template cache, template loop/scope cleanup, call/lookup fast paths |
 | [dd-062-secure-compiled-extension-libraries.md](dd-062-secure-compiled-extension-libraries.md) | 📋 Draft | Secure compiled extension libraries: stdlib-grade Rust modules, signed module universes, build provenance, and app-enforced trust requirements |
-| [dd-078-intent-verification-runtime.md](dd-078-intent-verification-runtime.md) | 📋 Draft | Project-neutral truthful Intent evidence, pure-NTNT verification, hermetic resources/providers, and a reusable adoption protocol; Larrimon migration is tracked in a separate consumer plan |
+| [dd-077-correctness-primitives-roadmap.md](dd-077-correctness-primitives-roadmap.md) | ✅ Approved | Correctness primitives for durable applications: scoped transactions/outbox, distributed work, network capabilities, strict contracts, PostgreSQL streaming, observability, migrations, and pure reducers |
+| [dd-078-intent-verification-runtime.md](dd-078-intent-verification-runtime.md) | ✅ Approved | Project-neutral truthful Intent evidence, pure-NTNT verification, hermetic resources/providers, and a reusable adoption protocol; Larrimon migration is tracked in a separate consumer plan |
 | [language_comparison.md](language_comparison.md) | ✅ Complete | NTNT vs other languages |
 | [INTENT_DRIVEN_DEVELOPMENT.md](INTENT_DRIVEN_DEVELOPMENT.md) | ✅ Complete | IDD philosophy and workflow |
 | [INTENT_ASSERTION_LANGUAGE.md](INTENT_ASSERTION_LANGUAGE.md) | ✅ Complete | IAL spec v1.0.0 |
