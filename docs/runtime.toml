@@ -23,7 +23,7 @@ affects = ["hot-reload"]
 [env_vars.NTNT_SECRETS_PROVIDER]
 values = ["env", "unix-socket"]
 default = "env"
-description = "Selects the provider behind `std/secrets`. The exact-name environment provider is development-only and is rejected when `NTNT_ENV` is `production` or `prod`. `unix-socket` is Unix-only and talks to any local secrets agent implementing the documented protocol, without depending directly on a secrets backend."
+description = "Selects the provider behind the opt-in `std/secrets` API. This setting does not affect `std/env`, `get_env`, `load_env`, or existing `.env` workflows. Provider configuration is evaluated only when an application calls `get_secret` or `require_secret`. The exact-name environment provider is development-only and is rejected when `NTNT_ENV` is `production` or `prod`; that restriction applies only to `std/secrets`. `unix-socket` is Unix-only and talks to any local secrets agent implementing the documented protocol, without depending directly on a secrets backend."
 example = "NTNT_SECRETS_PROVIDER=unix-socket ntnt run server.tnt"
 affects = ["std-secrets", "security"]
 

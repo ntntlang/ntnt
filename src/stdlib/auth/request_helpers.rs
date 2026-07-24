@@ -289,6 +289,22 @@ fn normalized_proto(proto: &str) -> Option<String> {
     }
 }
 
+fn is_local_host(host: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    if host == "localhost"
+        || host.starts_with("localhost:")
+        || host == "::1"
+        || host == "[::1]"
+        || host.starts_with("[::1]:")
+    {
+        return true;
+    }
+
+    let ipv4 = host.split_once(':').map_or(host.as_str(), |(host, _)| host);
+    ipv4.parse::<std::net::Ipv4Addr>()
+        .is_ok_and(|address| address.is_loopback())
+}
+
 fn normalized_host(host: &str) -> Option<String> {
     let trimmed = host.trim();
     if trimmed.is_empty()
@@ -327,37 +343,37 @@ pub(super) fn get_host_and_proto(req: &Value) -> (String, String) {
             })
             .unwrap_or_else(|| "localhost:8080".to_string());
 
-        let proto = req_map
-            .get("protocol")
-            .and_then(|v| {
-                if let Value::String(s) = v {
-                    normalized_proto(s)
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                req_map.get("headers").and_then(|h| {
-                    if let Value::Map(headers) = h {
-                        headers.get("x-forwarded-proto").and_then(|v| {
-                            if let Value::String(s) = v {
-                                normalized_proto(s)
-                            } else {
-                                None
-                            }
-                        })
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or_else(|| {
-                if host.contains("localhost") || host.starts_with("127.") {
-                    "http".to_string()
-                } else {
-                    "https".to_string()
-                }
-            });
+        let request_proto = req_map.get("protocol").and_then(|value| match value {
+            Value::String(value) => normalized_proto(value),
+            _ => None,
+        });
+        let forwarded_proto = req_map.get("headers").and_then(|headers| match headers {
+            Value::Map(headers) => headers
+                .get("x-forwarded-proto")
+                .and_then(|value| match value {
+                    Value::String(value) => normalized_proto(value),
+                    _ => None,
+                }),
+            _ => None,
+        });
+
+        let proto = if is_local_host(&host) {
+            request_proto
+                .or(forwarded_proto)
+                .unwrap_or_else(|| "http".to_string())
+        } else if request_proto.as_deref() == Some("https")
+            || forwarded_proto.as_deref() == Some("https")
+        {
+            // Never downgrade an HTTPS request, and allow a TLS terminator's
+            // forwarded HTTPS signal to upgrade the origin server's synthetic HTTP.
+            "https".to_string()
+        } else {
+            // Preserve existing public plain-HTTP deployments when there is no
+            // HTTPS proxy signal. SITE_URL remains the explicit canonical override.
+            request_proto
+                .or(forwarded_proto)
+                .unwrap_or_else(|| "https".to_string())
+        };
 
         (host, proto)
     } else {

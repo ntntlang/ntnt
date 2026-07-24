@@ -135,6 +135,23 @@ impl Type {
             // A concrete value is compatible with a union TARGET if it matches ANY member
             (other, Type::Union(types)) => types.iter().any(|t| other.is_compatible(t)),
             (Type::Named(a), Type::Named(b)) => a == b,
+            (
+                Type::Generic {
+                    name: name_a,
+                    args: args_a,
+                },
+                Type::Generic {
+                    name: name_b,
+                    args: args_b,
+                },
+            ) => {
+                name_a == name_b
+                    && args_a.len() == args_b.len()
+                    && args_a
+                        .iter()
+                        .zip(args_b.iter())
+                        .all(|(a, b)| a.is_compatible(b))
+            }
             (Type::Tuple(a), Type::Tuple(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.is_compatible(y))
             }

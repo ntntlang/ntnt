@@ -74,6 +74,7 @@ pub fn set_default_type_mode(mode: TypeMode) {
     let _ = TYPE_MODE_DEFAULT.set(mode);
 }
 
+#[cfg(not(test))]
 fn read_type_mode_from_env() -> TypeMode {
     match std::env::var("NTNT_TYPE_MODE").as_deref() {
         Ok("strict") => TypeMode::Strict,

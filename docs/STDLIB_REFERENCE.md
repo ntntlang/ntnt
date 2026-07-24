@@ -5906,7 +5906,7 @@ get_env(name: String) -> Option<String>
 
 Gets an environment variable by name.
 
-Returns Some(value) if the variable is set, or None if it is not defined in the current process environment.
+Returns Some(value) if the variable is set, or None if it is not defined in the current process environment. This API is independent of optional `std/secrets` providers and remains available when `NTNT_ENV=production`.
 
 **Parameters:**
 
@@ -5935,7 +5935,7 @@ load_env(path: String) -> Result<Unit, String>
 
 Loads environment variables from a .env file.
 
-Reads the file line by line, parsing KEY=VALUE pairs. Lines starting with # are treated as comments and skipped. Variables are set in the current process environment.
+Reads the file line by line, parsing KEY=VALUE pairs. Lines starting with # are treated as comments and skipped. Variables are set in the current process environment. Loading `.env` files remains supported in production and is not replaced or restricted by optional `std/secrets`.
 
 **Parameters:**
 
@@ -10904,6 +10904,8 @@ get_secret(name: String) -> Option<Secret>
 ```
 
 Looks up a secret by its provider-neutral logical name.
+
+`std/secrets` is opt-in and independent of `std/env`: existing `get_env`, `load_env`, and `.env` workflows keep the same behavior in every runtime mode. Secrets-provider configuration is evaluated only when an application calls `get_secret` or `require_secret`.
 
 The environment provider reads the exact environment variable name and is disabled when `NTNT_ENV` is `production` or `prod`. Unix deployments can instead select the generic local secrets-agent provider with `NTNT_SECRETS_PROVIDER=unix-socket`, a comma-separated list of absolute `NTNT_SECRETS_SOCKET_ENDPOINTS`, and the expected non-credential deployment identifier in `NTNT_SECRETS_AUTHORIZATION_SCOPE`. Optional `NTNT_SECRETS_TIMEOUT_MS` is bounded from 10 through 10000 milliseconds. Production socket paths must be beneath `/run/ntnt-secrets`; endpoints are retried twice and failed over only for bounded unavailable results. Plaintext caching remains in the host agent rather than ntnt. Projects with an `ntnt.toml` must declare accessible names under `[secrets.<NAME>]`; undeclared lookups fail before contacting the provider. Declaration metadata may contain `label`, `description`, `required`, and `environments`; secret values are never accepted in the manifest. Secret values remain opaque and redact themselves in output and diagnostics.
 

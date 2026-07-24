@@ -416,6 +416,22 @@ fn parse_socket_provider_config(
     timeout_ms: Option<&str>,
     production: bool,
 ) -> Result<SocketProviderConfig> {
+    parse_socket_provider_config_with_root(
+        endpoints,
+        authorization_scope,
+        timeout_ms,
+        production,
+        Path::new(PRODUCTION_SOCKET_ROOT),
+    )
+}
+
+fn parse_socket_provider_config_with_root(
+    endpoints: Option<&str>,
+    authorization_scope: Option<&str>,
+    timeout_ms: Option<&str>,
+    production: bool,
+    production_root: &Path,
+) -> Result<SocketProviderConfig> {
     let raw_endpoints = endpoints.ok_or_else(socket_config_error)?;
     let parts: Vec<&str> = raw_endpoints.split(',').map(str::trim).collect();
     if parts.len() > MAX_SOCKET_ENDPOINTS {
@@ -436,9 +452,7 @@ fn parse_socket_provider_config(
             || path
                 .components()
                 .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-            || (production
-                && (path == Path::new(PRODUCTION_SOCKET_ROOT)
-                    || !path.starts_with(PRODUCTION_SOCKET_ROOT)))
+            || (production && (path == production_root || !path.starts_with(production_root)))
             || !seen.insert(path.clone())
         {
             return Err(socket_config_error());
@@ -588,6 +602,11 @@ pub fn init() -> HashMap<String, Value> {
     // @signature get_secret(name: String) -> Option<Secret>
     // Looks up a secret by its provider-neutral logical name.
     //
+    // `std/secrets` is opt-in and independent of `std/env`: existing `get_env`,
+    // `load_env`, and `.env` workflows keep the same behavior in every runtime mode.
+    // Secrets-provider configuration is evaluated only when an application calls
+    // `get_secret` or `require_secret`.
+    //
     // The environment provider reads the exact environment variable name and is
     // disabled when `NTNT_ENV` is `production` or `prod`. Unix deployments can
     // instead select the generic local secrets-agent provider with
@@ -681,6 +700,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn socket_provider_config_is_bounded_and_production_scoped() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::path::PathBuf::from("/tmp")
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let production_root =
+            temp_root.join(format!("ntnt-secrets-{}-{suffix}", std::process::id()));
+        std::fs::create_dir_all(&production_root).expect("create production root");
+        let production_endpoint = production_root.join("agent.sock");
+
         let config = parse_socket_provider_config(
             Some("/tmp/one.sock,/tmp/two.sock"),
             Some("deployment-a"),
@@ -691,11 +722,12 @@ mod tests {
         assert_eq!(config.endpoints.len(), 2);
         assert_eq!(config.authorization_scope, "deployment-a");
         assert_eq!(config.timeout, std::time::Duration::from_millis(250));
-        parse_socket_provider_config(
-            Some("/run/ntnt-secrets/agent.sock"),
+        parse_socket_provider_config_with_root(
+            Some(production_endpoint.to_string_lossy().as_ref()),
             Some("deployment-a"),
             None,
             true,
+            &production_root,
         )
         .expect("valid production socket root");
 
@@ -748,6 +780,7 @@ mod tests {
             parse_socket_provider_config(Some(&overlong), Some("deployment-a"), None, false,)
                 .is_err()
         );
+        std::fs::remove_dir_all(production_root).ok();
     }
 
     #[cfg(not(unix))]
