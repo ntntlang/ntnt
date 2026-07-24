@@ -5,6 +5,8 @@
 **Created:** 2026-03-28
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md) (Jobs System), [DD-051](dd-051-rate-limiting-concurrency-pause.md) (Production Hardening)
 
+> **Supersession note (2026-07-24):** Sections 4 (Rolling Restarts) and 5 (Leader Election), plus their priority-table entries, remain historical planning context but are no longer the implementation authority. [DD-077](dd-077-correctness-primitives-roadmap.md) item 2 and Wave 2F–2H supersede those unimplemented plans with renewable leases, fencing, explicit Redis/SQLite deployment boundaries, cooperative ownership-loss semantics, schedule-occurrence idempotency, queue admission, and bounded drain behavior. Do not implement sections 4–5 directly from this DD.
+
 ---
 
 ## Overview

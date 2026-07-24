@@ -107,11 +107,39 @@ This DD does not add monitoring-specific syntax or types. Ntnt should not gain `
 | PostgreSQL queries | Fully materialized query arrays and single-statement execute/query APIs | Cursor batches, `COPY`, batched execution, cancellation and cleanup |
 | Operations | Structured logs and request logger | Scoped context, metrics, traces, readiness/liveness registration |
 | Migrations | `ntnt migrate` is a source-syntax migration command, not a DB migration system | Checksummed raw-SQL migration lifecycle under `ntnt db ...` |
-| Determinism | Runtime contracts and runtime enum-match exhaustiveness | Static purity/effect checking, static exhaustive match, reducer helpers |
+| Determinism | Runtime contracts plus existing typechecker/runtime exhaustiveness checks for enums, `Option`, and `Result`; guard and duplicate-arm handling remain incomplete | Effect checking, guard-aware exhaustiveness, unreachable/duplicate diagnostics, reducer helpers |
+
+## Release Targeting
+
+As of 2026-07-24, v0.5.1 release-readiness PR #166 is merged into `main`, `Cargo.toml` is already `0.5.1`, all release checks are green, there are no open PRs, and only the tag/release remain pending. **No DD-077 runtime feature should be added to v0.5.1 now.** The patch release has reached its freeze point; reopening it for an interpreter, PostgreSQL, job, network, validation, or health subsystem would invalidate the compatibility pass that just completed.
+
+Work permitted before the v0.5.1 tag is limited to documentation and non-shipping design evidence:
+
+- [x] finish DD-077 review corrections and release slicing;
+- [ ] perform Wave 0B's transport-binding spike without production code;
+- [ ] perform Wave 0C's effect-classification inventory without syntax/runtime changes;
+- [ ] triage a newly proven security defect if one is discovered. Any such fix must be narrowly scoped, tested against v0.5.0 compatibility, and rerun the full v0.5.1 release-readiness matrix. It is not permission to land the complete network-capability track.
+
+Recommended implementation targets:
+
+| DD-077 slice | Earliest sensible target | Rationale |
+|---|---|---|
+| Wave 0A callback bridge + scoped `Tx` from item 1 | **v0.5.2 primary candidate** | Highest-leverage correctness primitive, additive public API, but it touches interpreter callback and PostgreSQL ownership internals and needs a full feature-release test matrix |
+| Item 1 transactional outbox | **v0.5.3+** | Depends on scoped transactions, migration support, and atomic/reconcilable job acceptance |
+| Item 2 distributed job hardening | **v0.5.3+** | Cross-backend lease, fencing, leadership, drain, and backpressure semantics are too broad for the pending patch |
+| Item 3 network capabilities | **v0.5.3+** | Requires trusted configuration and policy-bound transport; a narrowly proven vulnerability fix may ship earlier without the new capability API |
+| Item 4 strict nested schemas | **v0.5.2 candidate** | Stage 1 can be additive; typed decode and purity-proven upcasters remain later slices |
+| Item 5 PostgreSQL streaming/COPY | **v0.5.2 candidate after callback/transaction foundations** | Additive and useful, but cursor callbacks and bounded-memory claims depend on settled resource ownership |
+| Item 6 context/metrics/tracing/health | **v0.5.3+** | Runtime context propagation and native health isolation cut across HTTP and job workers |
+| Item 7 database migrations | **v0.5.2 or v0.5.3 feature slice** | Additive CLI, but cluster locking and dirty non-transactional lifecycle deserve their own release-sized implementation |
+| Item 8 match hardening | **v0.5.2 candidate** | Improves an existing checker; guard/unreachable diagnostics can change strict-mode outcomes and therefore do not belong in v0.5.1 |
+| Item 8 effect system and `pure fn` | **v0.6.0 candidate** | New syntax and transitive static semantics deserve a language-feature release rather than a patch/minor tail-end addition |
+
+For v0.5.2, choose one primary runtime track rather than packing every candidate into the release. The recommended first track is **Wave 0A plus scoped PostgreSQL transactions**. Strict schemas, PostgreSQL streaming/COPY, migration tooling, and match hardening are independently useful follow-on candidates, not automatic passengers.
 
 ## Relationship to Existing DDs
 
-- **DD-037 and DD-052 remain the job-system design/implementation records.** DD-077 narrows the next distributed-correctness slices and should link merged job PRs back into those records rather than maintaining contradictory status claims in two places.
+- **DD-037 and DD-052 remain the job-system history for shipped behavior.** DD-077 item 2 and Wave 2F–2H supersede DD-052's unimplemented sections 4 (Rolling Restarts) and 5 (Leader Election), because the newer design adds backend boundaries, renewable leases, fencing, cooperative ownership loss, schedule idempotency, and drain semantics. Merged job PRs must truth-sync both records rather than maintaining two future authorities.
 - **DD-046 remains the shipped `std/net` baseline.** DD-077 adds shared authority and transport-binding semantics; it does not reopen the monitoring-protocol scope.
 - **DD-058 remains the general stdlib gap inventory.** DD-077 deepens its shipped validation work into durable boundary contracts.
 - **DD-060 provides the AI-native product rationale.** DD-077 turns part of that rationale into concrete runtime safety work.
@@ -190,14 +218,18 @@ work_outbox()
 
 ### `with_transaction`
 
+- The callback receives a distinct opaque, generation-bound `Tx` handle, not another clone of the current map-shaped base connection handle.
+- Query/execute functions accept `Tx`, but ordinary values cannot forge or deserialize it.
 - Commit only when the callback returns successfully.
 - Roll back on `Err`, `?` propagation, runtime error, contract violation, or callback failure.
 - Always release the pinned pool connection.
-- Reject use of the transaction handle after callback exit.
+- Invalidate the `Tx` generation on callback exit; escaped aliases fail deterministically.
+- While a scoped transaction is active, operations through any alias of its base connection are rejected instead of silently joining the transaction.
+- Manual `commit()` and `rollback()` reject scoped transactions; only `with_transaction()` owns their terminal state.
 - Validate isolation level and timeout bounds; never interpolate them into SQL unchecked.
 - Apply `set_local` through parameter-safe `set_config(..., true)` or an equivalent safe mechanism.
 - Prevent transaction-local values from leaking to the next pooled borrower.
-- Define nested calls explicitly. Recommended v1: nested `with_transaction()` on the same logical connection creates a savepoint; nesting on another connection is independent.
+- Define nesting against the scoped handle. Recommended v1: `with_transaction(tx, ...)` creates a savepoint; calling `with_transaction(base_connection, ...)` while that base connection already has an active scoped transaction is rejected. A different base connection is independent.
 - Preserve the original failure if rollback also fails, while attaching rollback failure as secondary diagnostic context.
 - Report commit failure as indeterminate when PostgreSQL cannot prove whether commit reached the server.
 
@@ -212,8 +244,9 @@ work_outbox()
 - Payloads reject nested `Secret` values.
 - Payload and metadata size are bounded.
 - Poison messages move to a bounded dead state with operator-visible diagnostics.
-- Enqueueing a job after claim must not create a silent claim→enqueue crash gap. The relay either uses a PostgreSQL-backed sink, or records a deterministic downstream enqueue key and retries until the sink confirms acceptance.
-- The jobs dispatcher may add one narrow explicit-idempotency enqueue API in the outbox PR. It must not rely only on the current time-bounded payload dedup option, which is insufficient as a durable relay acknowledgement contract.
+- The jobs dispatcher is unavailable until ntnt has an atomic/reconcilable job-acceptance primitive. A deterministic ID alone is insufficient because the current enqueue path writes its dedup key, job record, and pending index separately.
+- Job acceptance must atomically commit the idempotency key, job record, and pending index: one SQLite transaction for the SQLite backend and one Redis/Valkey Lua transaction for the Redis backend. It must detect and repair legacy/orphan dedup records rather than reporting a nonexistent job as accepted.
+- After atomic acceptance exists, the relay derives a stable downstream enqueue key from the outbox record and retries until acceptance is confirmed.
 - No exactly-once claim. Downstream consumers remain idempotent.
 
 ## Storage decision
@@ -245,7 +278,8 @@ The final schema needs a dedicated review. This sample is a starting point, not 
 
 ## Implementation starting points
 
-- Modify `src/stdlib/postgres.rs` for scoped transaction lifecycle and callback plumbing.
+- Modify `src/stdlib/postgres.rs` for scoped transaction lifecycle, base-handle exclusion, generation checks, and callback plumbing.
+- Add an opaque `Tx` runtime value in `src/interpreter.rs`/`src/types.rs`; do not model scoped authority as another cloneable connection map.
 - Modify `src/interpreter.rs` to provide one reusable, internal closure-invocation bridge for native stdlib functions instead of adding another one-off special case.
 - Create `src/stdlib/outbox.rs`.
 - Modify `src/stdlib/mod.rs` and `src/typechecker.rs` for module registration and signatures.
@@ -257,7 +291,9 @@ The final schema needs a dedicated review. This sample is a starting point, not 
 - [ ] Callback success commits exactly once.
 - [ ] Every callback failure shape rolls back and returns the original error.
 - [ ] Pool reuse after success and failure shows no leaked transaction or local setting.
-- [ ] Nested same-connection behavior is regression-tested.
+- [ ] Base-connection aliases cannot join, commit, or roll back an active scoped transaction.
+- [ ] Escaped and stale-generation `Tx` handles fail after scope exit.
+- [ ] Nested savepoints work only through the active `Tx` handle and preserve outer ownership.
 - [ ] Commit-disconnect ambiguity has a distinct error class/message.
 - [ ] Outbox insert rolls back with application state.
 - [ ] Duplicate idempotency key produces one logical record.
@@ -344,9 +380,9 @@ ntnt workers drain --timeout 30
 ## Required guarantees
 
 - Lease renewal is bounded and stops on cancellation/shutdown.
-- Loss of lease cancels or marks the active work as ownership-lost before further protected operations.
+- Loss of lease sets cooperative cancellation/ownership-lost state, observed at documented interpreter and stdlib yield points. Ntnt cannot preempt arbitrary blocking native/database/network work already in progress.
 - Fencing tokens are monotonically increasing per lease key.
-- The runtime does not claim that a fencing token protects arbitrary external effects; applications must include it in guarded state changes.
+- The runtime does not claim that a fencing token protects arbitrary external effects. A protected sink must atomically compare/store the token with its state change; stale-write rejection is tested separately.
 - Key extraction is declarative from validated payload fields, not arbitrary closures.
 - Missing or invalid key fields fail before enqueue or execution according to the declared contract.
 - Keyed counters are atomic across workers for Redis/Valkey and SQLite backends.
@@ -359,7 +395,16 @@ ntnt workers drain --timeout 30
 
 ## Backend scope
 
-V1 must preserve current Redis/Valkey and SQLite support. If a guarantee cannot be implemented honestly on both, the API must expose backend capability rather than degrade silently.
+V1 preserves current Redis/Valkey and SQLite support without pretending they provide identical deployment guarantees:
+
+| Guarantee | Redis/Valkey | SQLite |
+|---|---|---|
+| Atomic job/keyed-limit operations | Supported across clients through server-side atomic operations | Supported for processes sharing the same database file through SQLite transactions |
+| Lease renewal and fencing | Supported across hosts using one reachable deployment store | Supported only inside the explicit shared-file/process-host boundary |
+| Cluster leadership | Supported across hosts | Rejected unless every participant demonstrably coordinates through the same supported shared store; ordinary per-host SQLite files are not a cluster |
+| Multi-host failure domain | External coordinated store | Not claimed; file availability/locking define the boundary |
+
+Backend capability is exposed explicitly. Cluster mode fails configuration when the selected backend cannot establish the requested coordination boundary; it never degrades to one leader per host silently.
 
 A PostgreSQL job backend is deliberately deferred. The transactional outbox is the initial bridge between canonical PostgreSQL state and the existing job system. Add a PostgreSQL backend only after multiple applications prove it is preferable to that bridge.
 
@@ -396,9 +441,19 @@ The current HTTP safety path validates the initial URL and its resolved addresse
 
 ## Proposed model
 
-Network authority is declared in trusted deployment configuration and obtained as an opaque runtime value. Request data cannot mint or widen authority.
+Network authority is requested by application configuration, granted by trusted deployment configuration, and obtained as an opaque runtime value. Request data and application-controlled working directories cannot mint or widen authority.
 
-Conceptual `ntnt.toml`:
+Conceptual application `ntnt.toml` request metadata:
+
+```toml
+[network.requests.public-probes]
+policy = "public-probes"
+
+[network.requests.site-private]
+policy = "site-private"
+```
+
+Conceptual deployment policy, selected explicitly by the operator rather than discovered from the current working directory:
 
 ```toml
 [network.policies.public-probes]
@@ -418,6 +473,8 @@ deny_cidrs = ["10.20.99.0/24"]
 deny_metadata = true
 ports = [22, 80, 443, 5432]
 ```
+
+The runtime grants only the intersection of the application's named request and the deployment policy. In production, the policy path is an explicit startup/deployment input, canonicalized once, loaded before untrusted application code, and required to satisfy documented ownership/permission rules. Symlink/path replacement, CLI/environment precedence, reload behavior, and failure mode are part of PR 2C's configuration-security contract. V1 should load once and fail closed rather than hot-reload authority. A development-only self-grant mode may exist only behind an explicit development environment boundary and must never become the production default.
 
 Ntnt surface:
 
@@ -458,6 +515,8 @@ The existing `src/stdlib/net/policy.rs` is the likely home for the shared target
 ## Required guarantees
 
 - Application data cannot create, widen, clone into a broader, or deserialize a capability.
+- Application manifests may request named authority but cannot grant it; production grants come only from the explicitly selected trusted deployment policy.
+- `require_net_capability()` is not exported until at least one policy-bound transport consumes the resulting handle. Possessing a decorative capability that the transport ignores would be worse than no API.
 - Capabilities reject JSON, templates, logs, database parameters, caches, and cross-process serialization unless a future explicit delegation protocol is designed.
 - Every address the transport may connect to passes policy.
 - The transport connects to an approved address rather than re-resolving without policy binding.
@@ -480,7 +539,7 @@ Legacy environment flags should become compatibility inputs to the default polic
 - Modify `src/stdlib/net/mod.rs`, `probe.rs`, `transport.rs`, and `traceroute.rs` to accept opaque policies where applicable.
 - Modify `src/stdlib/http.rs` to use a redirect-denying or per-hop-validating client and approved-address binding.
 - Add `NetCapability` handling to `src/interpreter.rs`, `src/types.rs`, serialization guards, and typechecker signatures.
-- Extend `src/config.rs` or add a focused manifest module for trusted policy declarations.
+- Add a focused configuration-security layer for explicit deployment-policy selection, canonicalization, ownership/permission validation, request/grant intersection, precedence, and fail-closed startup behavior; current `src/config.rs` is not yet a general trusted-manifest loader.
 - Add deterministic loopback DNS/HTTP fixtures covering redirect and rebinding behavior.
 
 ## Acceptance criteria
@@ -522,19 +581,24 @@ import {
     enum_of,
     literal,
     optional,
+    string,
+    uuid_string,
+    datetime_string,
+    float_value,
+    any_value,
     decode,
     json_schema
 } from "std/validate"
 
 let ObservationV1 = object_schema(map {
     "schema_version": literal(1),
-    "probe_run_id": uuid,
-    "observed_at": datetime,
+    "probe_run_id": uuid_string(),
+    "observed_at": datetime_string(),
     "status": enum_of(["healthy", "degraded", "failed", "unknown"]),
-    "latency_ms": optional(float),
+    "latency_ms": optional(float_value()),
     "evidence": array_of(object_schema(map {
-        "kind": string,
-        "value": any
+        "kind": string(),
+        "value": any_value()
     }, map { "strict": true }))
 }, map {
     "strict": true,
@@ -545,22 +609,9 @@ let ObservationV1 = object_schema(map {
 let observation = decode(ObservationV1, payload)?
 ```
 
-### Stage 2: typed decode
+### Stage 2: typed decode requires a separate type-level decision
 
-After the stdlib shape proves itself, allow a schema to construct a declared struct or infer a structural type:
-
-```ntnt
-struct Observation {
-    schema_version: Int
-    probe_run_id: String
-    observed_at: String
-    status: ObservationStatus
-    latency_ms: Float?
-    evidence: Array<Evidence>
-}
-
-let observation: Observation = decode_as(Observation, ObservationV1, payload)?
-```
+Do not ship the earlier conceptual `decode_as(Observation, schema, payload)` form as an ordinary stdlib function. Ntnt cannot currently pass a type as a runtime value or derive a dependent return type from a function argument. Typed decode requires a focused compiler API decision—such as generic/type-argument syntax or a compiler intrinsic—after Stage 1 proves the runtime contract. Until then, `decode()` returns the canonical validated map and callers may construct a typed struct explicitly.
 
 Do not begin with new `schema` grammar. Add syntax only if the function-composed API proves materially repetitive and the typechecker integration has a clear contract.
 
@@ -576,7 +627,7 @@ Do not begin with new `schema` grammar. Add syntax only if the function-composed
 - maximum depth, fields, array length, and string/byte size;
 - canonical cleaned output;
 - schema version dispatch;
-- explicit, pure upcasters between adjacent versions;
+- explicit upcasters between adjacent versions; Wave 1 treats determinism as a documented/tested callback contract, and compiler-enforced purity is added only after `pure fn` ships;
 - JSON Schema export for the supported subset;
 - schema fingerprint/version metadata for jobs and APIs;
 - rejection of `Secret` values in ordinary data schemas unless a specific secret-aware sink contract accepts them.
@@ -620,7 +671,7 @@ Decode should preserve original version metadata for audit while returning the c
 
 - Refactor `src/stdlib/validate.rs` from flat rules into explicit schema node variants while retaining the current API.
 - Add schema runtime values to `src/interpreter.rs` only if opaque values materially simplify validation and export; avoid another ordinary map convention if it cannot enforce invariants.
-- Extend `src/types.rs` and `src/typechecker.rs` for typed decode in the second stage.
+- Defer typed decode until a focused compiler/type-level DD selects a sound API; do not add runtime type reification as an incidental validation feature.
 - Add focused tests to `tests/validate_tests.rs` and new typechecker cases to `tests/type_checker_tests.rs`.
 - Generate documentation from public `@ntnt` blocks and add boundary examples to `docs/AI_AGENT_GUIDE.md`.
 
@@ -630,9 +681,9 @@ Decode should preserve original version metadata for audit while returning the c
 - [ ] Nested paths and multiple errors are stable and machine-readable.
 - [ ] Strict schemas reject unknown fields; permissive schemas document preservation or dropping.
 - [ ] Resource limits reject adversarial deep/wide payloads before unbounded allocation.
-- [ ] Version dispatch and adjacent upcasters are deterministic.
-- [ ] JSON Schema output matches runtime acceptance for the supported subset.
-- [ ] Typed decode cannot produce a value that violates the declared struct fields.
+- [ ] Version dispatch and adjacent upcasters are deterministic under replay tests; compiler-enforced purity is explicitly deferred until item 8.
+- [ ] JSON Schema output matches runtime acceptance for the supported subset, and schemas containing non-exportable custom predicates return an explicit export error.
+- [ ] Stage 1 returns canonical validated maps; typed decode remains blocked on a separate type-level API decision.
 - [ ] Job/HTTP examples use one shared schema object rather than duplicated validation.
 
 ---
@@ -655,6 +706,8 @@ each_query_batch(db,
     [tenant_id],
     map {
         "batch_size": 1000,
+        "max_row_bytes": 1048576,
+        "max_batch_bytes": 8388608,
         "statement_timeout_ms": 30000
     },
     fn(rows) {
@@ -691,9 +744,10 @@ let results = execute_batch(db, [
 
 ## Required guarantees
 
-- Bounded memory proportional to configured batch size.
-- Batch size and row/byte counts are clamped.
+- Bounded delivered row count and batch byte budget. Driver memory is bounded by the configured batch plus the largest single PostgreSQL row already decoded; `max_row_bytes` rejects oversized decoded rows but cannot prevent the driver from allocating that one row first. The DD does not claim a hard transport-level memory cap PostgreSQL cannot enforce.
+- Batch size, per-row decoded bytes, total batch bytes, and input row/byte counts are clamped.
 - Early return, `Err`, cancellation, or panic closes the cursor and releases transaction resources.
+- The implementation fetches a batch, releases every PostgreSQL client mutex/borrow, and only then invokes the ntnt callback. The callback may issue sequential queries through the same active `Tx` without deadlocking; nested concurrent use remains rejected by transaction ownership rules.
 - Cursor ordering is caller-defined; the API does not imply deterministic order without SQL `ORDER BY`.
 - Cursor transaction/isolation semantics are explicit.
 - `copy_rows` validates table/column identifiers against a strict identifier grammar and quotes them safely.
@@ -702,20 +756,24 @@ let results = execute_batch(db, [
 - No hidden partial-success mode.
 - Batched calls preserve parameterization.
 - Cancellation is checked between batches and during long transport operations where the PostgreSQL client supports it.
-- Metrics expose row count, batch count, elapsed time, and failures without high-cardinality SQL text.
+- After PR 3B provides the metrics registry, a follow-up integration exposes row count, batch count, elapsed time, and failures without high-cardinality SQL text. Metrics are not a blocker for PR 2A/2B.
 
 ## Implementation starting points
 
+- PR 2A depends on PR 0A's callback bridge and PR 1A's scoped transaction ownership model.
 - Modify `src/stdlib/postgres.rs`.
 - Use `tokio-postgres` cursor/portal or transaction query streaming where lifetime ownership can be made explicit.
+- Fetch into the bounded batch, release the client guard, invoke the callback, then reacquire for the next fetch; add a regression proving callback queries through the same `Tx` do not deadlock.
 - Use `tokio-postgres` COPY APIs rather than constructing multi-value SQL strings.
 - Reuse the scoped transaction callback bridge from item 1 for batch callbacks.
 - Add PostgreSQL integration tests for bounded batches, early exit, cancellation, type errors, transaction interaction, and pool reuse.
 
 ## Acceptance criteria
 
-- [ ] Replay memory remains bounded as total row count grows.
+- [ ] Replay memory remains bounded by configured batch budgets plus the largest decoded row, independent of total result count.
+- [ ] Oversized rows/batches fail with stable diagnostics under the documented post-decode limitation.
 - [ ] Early callback exit closes cursor state and reuses the pool connection safely.
+- [ ] A callback can issue a sequential query through the same active `Tx` without a held client guard or deadlock.
 - [ ] `copy_rows` inserts a valid batch atomically.
 - [ ] One invalid row aborts the batch with stable row/column diagnostics.
 - [ ] Identifier injection attempts are rejected.
@@ -778,14 +836,22 @@ with_span("reduce_observation", fn(span) {
 
 ```ntnt
 import {
-    register_liveness_check,
+    postgres_health_check,
+    jobs_health_check,
     register_readiness_check,
+    register_readiness_state,
+    set_readiness_state,
     enable_health_routes
 } from "std/health"
 
-register_liveness_check("runtime", fn() { Ok(true) })
-register_readiness_check("postgres", fn() { postgres_ready(db) })
-register_readiness_check("jobs", fn() { queue_ready() })
+register_readiness_check("postgres", postgres_health_check(db, map {
+    "timeout_ms": 500
+}))
+register_readiness_check("jobs", jobs_health_check(map {
+    "timeout_ms": 500
+}))
+register_readiness_state("scheduler", map { "max_age_ms": 30000 })
+set_readiness_state("scheduler", true, map { "summary": "fresh" })
 
 enable_health_routes(map {
     "health": "/health",
@@ -793,6 +859,8 @@ enable_health_routes(map {
     "ready": "/readyz"
 })
 ```
+
+V1 does not run arbitrary ntnt closures on the health request path. Native check constructors return opaque, deadline-aware `HealthCheck` values. Application-specific work publishes bounded cached readiness state with an expiry; the request path reads that state rather than invoking application code.
 
 ## Context contract
 
@@ -828,10 +896,12 @@ enable_health_routes(map {
 
 ## Health contract
 
-- `/livez` answers whether the process/event loop can serve.
-- `/readyz` answers whether this instance should receive traffic.
+- `/livez` is a runtime-native fast path outside the interpreter worker queue. It answers whether the process/event loop can serve and is not gated by application callbacks or dependency checks.
+- `/readyz` answers whether this instance should receive traffic using cached state from bounded native checks and expiring application-published readiness values.
 - `/health` provides bounded internal dependency summary suitable for authenticated/operator use; public detail is configurable and redacted.
-- Checks have deadlines and cannot block health indefinitely.
+- Runtime-native checks use deadline-aware I/O. The request path never waits on arbitrary ntnt code.
+- Application-specific readiness is cooperative: application code publishes state with a maximum age. Stale state fails readiness; it does not run or preempt a callback during the probe.
+- Health refresh has bounded concurrency. A stuck native refresh is timed out/quarantined without consuming the `/livez` path or spawning unbounded replacements.
 - Health endpoints do not expose secret names, values, connection strings, tenant data, or raw exception chains.
 
 ## Implementation starting points
@@ -840,7 +910,8 @@ enable_health_routes(map {
 - Add scoped context storage to interpreter/request/job execution state rather than a mutable process-global map.
 - Modify `src/stdlib/log.rs` to merge safe context fields.
 - Modify `src/stdlib/jobs.rs` and outbox implementation for explicit propagation.
-- Modify `src/stdlib/http_server.rs`, `http_server_async.rs`, and `http_bridge.rs` for root request context and health routes.
+- Modify `src/stdlib/http_server.rs`, `http_server_async.rs`, and `http_bridge.rs` for root request context, runtime-native `/livez`, and cached readiness/health routes.
+- Add native deadline-aware health-check constructors plus expiring application-published readiness state; do not execute arbitrary ntnt closures on probe requests.
 - Add a small metrics registry before selecting an exporter dependency.
 - Add integration tests proving worker/context cleanup and bounded health behavior.
 
@@ -853,7 +924,8 @@ enable_health_routes(map {
 - [ ] Runtime and application metrics expose valid OpenMetrics text.
 - [ ] Cardinality limits reject abuse without crashing the process.
 - [ ] Trace IDs propagate across an HTTP→outbox→job test.
-- [ ] Liveness remains available during dependency failure while readiness fails.
+- [ ] Liveness remains available during dependency failure, interpreter saturation, and a stuck readiness refresh while readiness fails.
+- [ ] Readiness uses native checks or expiring published state; arbitrary closures cannot block the probe path.
 - [ ] Health output is bounded and redacted.
 
 ---
@@ -902,6 +974,7 @@ ntnt db plan
 ntnt db migrate
 ntnt db verify
 ntnt db migrate --to 202607240003
+ntnt db repair 202607240004 --mark-applied --checksum <sha256>
 ```
 
 Use `ntnt db ...` to avoid colliding with source-code `ntnt migrate`.
@@ -915,6 +988,9 @@ Use `ntnt db ...` to avoid colliding with source-code `ntnt migrate`.
 - Transactional by default.
 - Explicit `transaction: false` for operations such as `CREATE INDEX CONCURRENTLY`.
 - Dirty/incomplete non-transactional migrations block progress until resolved explicitly.
+- Before non-transactional SQL runs, the runner commits a `running` ledger row. Success changes it to `applied`; failure changes it to `dirty` with a redacted error summary.
+- A stale `running` row is treated as dirty after lock acquisition; elapsed wall time alone never marks it applied.
+- `ntnt db repair` is an explicit operator acknowledgement after manual inspection/repair. Marking applied requires the expected file checksum and is audit-visible; the runner never guesses that partial SQL is safe.
 - Statement and lock timeouts are configurable and bounded.
 - Migration table lives in a versioned `_ntnt` schema.
 - `plan` is read-only and shows pending/blocked state.
@@ -934,9 +1010,14 @@ CREATE TABLE _ntnt.schema_migrations_v1 (
     checksum_sha256 TEXT NOT NULL,
     phase TEXT NOT NULL,
     transactional BOOLEAN NOT NULL,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    state TEXT NOT NULL CHECK (state IN ('running', 'applied', 'dirty')),
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at TIMESTAMPTZ,
     app_version TEXT NOT NULL,
-    execution_ms BIGINT NOT NULL
+    execution_ms BIGINT,
+    error_summary TEXT,
+    repaired_at TIMESTAMPTZ,
+    repaired_by TEXT
 );
 ```
 
@@ -1023,37 +1104,36 @@ Recommended rule:
 
 ### Values and mutation
 
-Purity means no externally observable effect and deterministic output for the same inputs. Local mutation of newly created arrays/maps may be allowed if it does not mutate captured/shared state. Reading immutable constants is allowed. Reading process configuration, current time, randomness, or mutable module state is not.
+Purity means no externally observable effect and deterministic output for the same inputs. V1 conservatively rejects assignment, index mutation, mutable captures, and module-state mutation inside `pure fn`; current typechecker scopes do not track enough binding provenance or alias escape to prove a mutation is confined to a fresh local value. Reading immutable constants is allowed. Reading process configuration, current time, randomness, or mutable module state is not. A later DD may permit proven-local mutation after dedicated binding-provenance/capture analysis exists.
 
 ## Static match exhaustiveness
 
-Enum matches are currently checked at runtime when evaluating an enum value. Move known-enum exhaustiveness into lint/typecheck:
+The typechecker already checks known enum, `Option`, and `Result` matches, and the runtime retains a defense-in-depth enum check. This roadmap hardens the existing checker rather than introducing a new subsystem:
 
-- missing variants produce a source-located diagnostic;
-- a wildcard arm is explicit and suppresses future-variant diagnostics by design;
-- unreachable duplicate arms warn;
-- guards do not count as total coverage unless an unguarded arm covers the variant;
-- `Result` and `Option` receive the same treatment.
+- missing variants keep producing source-located diagnostics;
+- guarded variants do not count as total coverage unless an unguarded arm covers the variant;
+- wildcard behavior is explicit and tested;
+- duplicate and unreachable arms produce stable diagnostics;
+- strict/default severity and source ranges remain compatibility-reviewed.
 
-This is valuable independently of reducers and should ship before or with `pure fn`.
+This hardening is valuable independently of reducers and should ship before or with `pure fn`.
 
 ## Reducer helpers
 
 Keep persistence application-owned. `std/reducer` should provide small pure helpers rather than an event-sourcing framework:
 
 ```ntnt
-import { replay, replay_with_checkpoints } from "std/reducer"
+import { replay, replay_batches } from "std/reducer"
 
 let state = replay(initial_state, events, reduce_check)?
 ```
 
-Potential helpers:
+V1 helpers are intentionally limited to:
 
 - `replay(initial, events, reducer)`;
-- `replay_batches(initial, batches, reducer)`;
-- `state_hash(value)` using canonical serialization;
-- `assert_reducer_idempotent(...)` for test mode where an idempotency contract is declared;
-- checkpoint verification helpers that compare event position and canonical state hash.
+- `replay_batches(initial, batches, reducer)`.
+
+Canonical state hashing, persisted checkpoint formats, and idempotence test helpers each require independent semantic contracts. They remain focused follow-ups rather than being smuggled into the purity PR. Generic reducers are not necessarily idempotent when the same event is applied twice, and a sample-based helper must not claim to prove otherwise.
 
 The reducer module must not own application tables, event schemas, topology, suppression, or alert behavior.
 
@@ -1064,9 +1144,8 @@ The reducer module must not own application tables, event schemas, topology, sup
 - Recursive functions converge under call-graph analysis.
 - Pure functions cannot call unknown dynamic functions in strict verification.
 - Diagnostics show the shortest effect path: `reduce_check → classify → now`.
-- Pure functions cannot access `Secret`, connections, network capabilities, task handles, channels, or mutable runtime state except as opaque values they cannot inspect/use; recommended v1 is to reject these parameter/result types entirely.
-- Canonical state hashing rejects unsupported/opaque values and is deterministic across map insertion order.
-- Canonical state hashing defines float (`NaN`, infinities, and negative zero), Unicode, struct/enum tag, integer, and map-key encoding explicitly before it becomes a persisted checkpoint contract.
+- Pure functions cannot access `Secret`, connections, network capabilities, task handles, channels, or mutable runtime state; recommended v1 rejects these parameter/result types entirely.
+- V1 rejects assignment, index mutation, and mutable captures inside `pure fn` until binding-provenance/alias analysis can prove local mutation safe.
 - Reducer helpers do not hide ordering; callers supply ordered events.
 
 ## Implementation starting points
@@ -1075,7 +1154,7 @@ The reducer module must not own application tables, event schemas, topology, sup
 - Add effect metadata to native-function definitions in `src/interpreter.rs`; avoid overloading `RuntimeCapability`.
 - Extend module/type information in `src/typechecker.rs` to compute user-function effect sets and static match exhaustiveness.
 - Add dedicated diagnostics in `src/error.rs` and machine-readable lint rule IDs.
-- Create `src/stdlib/reducer.rs` for pure replay/hash helpers.
+- Create `src/stdlib/reducer.rs` for pure `replay`/`replay_batches` helpers only.
 - Add language tests to `tests/language_features_tests.rs`, type/effect tests to `tests/type_checker_tests.rs`, and diagnostic rendering cases to `tests/diagnostics_tests.rs`.
 - Update syntax, stdlib, and agent guides with generated-doc drift checks.
 
@@ -1088,7 +1167,7 @@ The reducer module must not own application tables, event schemas, topology, sup
 - [ ] Unknown dynamic calls follow the documented strict/default behavior.
 - [ ] Static match diagnostics cover enums, `Option`, and `Result`.
 - [ ] Runtime exhaustiveness remains as defense in depth.
-- [ ] Canonical state hashing is stable across map insertion order.
+- [ ] Assignment, index mutation, and mutable captures are rejected in v1 pure functions.
 - [ ] Reducer replay processes bounded batches without owning persistence.
 
 ---
@@ -1117,7 +1196,7 @@ A network-policy map is configuration, not authority. Runtime-created `NetCapabi
 
 ## AD-6: Schema functions before schema syntax
 
-Expand `std/validate` first. Add language grammar only after the schema runtime and typed-decode behavior are proven.
+Expand `std/validate` first. Add language grammar only after the runtime schema contract is proven; typed decode requires its own compiler/type-level decision rather than being implied by stdlib syntax.
 
 ## AD-7: Observability context is not authorization
 
@@ -1180,53 +1259,62 @@ The eight items are grouped into four release waves. Each PR must be independent
 
 ### PR 1A — Scoped PostgreSQL transactions
 
-- [ ] `with_transaction()` callback API.
+- [ ] `with_transaction()` callback API with opaque generation-bound `Tx`.
+- [ ] Base-handle exclusion and scoped manual commit/rollback rejection.
 - [ ] Isolation/timeout/`set_local` validation.
 - [ ] rollback/commit ambiguity diagnostics.
-- [ ] same-connection savepoints.
-- [ ] PostgreSQL integration failure matrix.
+- [ ] savepoints only through active `Tx`.
+- [ ] Alias, concurrent-use, escaped-handle, and PostgreSQL failure-matrix tests.
 
 ### PR 1B — Database migration runner foundation
 
 - [ ] `ntnt db status|plan|migrate|verify`.
 - [ ] checksums and advisory lock.
 - [ ] transactional migrations.
-- [ ] internal `_ntnt` schema bootstrap.
+- [ ] internal `_ntnt` schema bootstrap with `running | applied | dirty` lifecycle fields from the start.
 - [ ] CLI and concurrent-migrator tests.
 
 ### PR 1C — Non-transactional migration hardening
 
 - [ ] metadata headers.
-- [ ] dirty-state handling.
-- [ ] timeout controls.
-- [ ] expand/migrate/contract phase metadata.
+- [ ] committed `running` row before non-transactional execution.
+- [ ] dirty/stale-running detection and progress blocking.
+- [ ] explicit checksum-bound `ntnt db repair` acknowledgement.
+- [ ] timeout controls and expand/migrate/contract phase metadata.
 - [ ] operator recovery documentation.
 
 ### PR 1D — Strict nested schemas
 
-- [ ] schema-node representation.
+- [ ] schema-node representation and explicit primitive constructors.
 - [ ] nested objects/arrays/enums/literals.
 - [ ] strict unknown-field policy.
 - [ ] structured error paths.
 - [ ] depth/width/length bounds.
 - [ ] backward compatibility for current `validate()`.
 
-### PR 1E — Versioned and typed data contracts
+### PR 1E — Versioned data contracts
 
-- [ ] version dispatch and adjacent upcasters.
-- [ ] JSON Schema export.
+- [ ] version dispatch and adjacent ordinary upcaster callbacks.
+- [ ] JSON Schema export for the supported subset with explicit non-exportable-schema errors.
 - [ ] schema fingerprints.
-- [ ] typed struct decode.
 - [ ] HTTP/job reuse examples.
+- [ ] defer purity enforcement to PR 4C and typed decode to a focused compiler/type-level decision.
 
-### PR 1F — Transactional outbox
+### PR 1F — Atomic/reconcilable job acceptance
 
-**Depends on:** PR 1A and migration foundation.
+- [ ] Explicit durable idempotency key API.
+- [ ] One SQLite transaction or Redis/Valkey Lua operation atomically commits idempotency key, job record, and pending index.
+- [ ] Detect and repair legacy/orphan dedup records instead of reporting nonexistent jobs as accepted.
+- [ ] Crash-injection and backend-parity tests.
+
+### PR 1G — Transactional outbox
+
+**Depends on:** PR 1A, migration foundation, and PR 1F atomic job acceptance.
 
 - [ ] `_ntnt.outbox_v1` migration.
 - [ ] `outbox_emit()`.
 - [ ] claim/lease/retry/dead lifecycle.
-- [ ] jobs dispatcher with deterministic enqueue key.
+- [ ] jobs dispatcher with deterministic key and confirmed atomic acceptance.
 - [ ] relay crash matrix and secret rejection.
 
 **Wave 1 exit criteria:** Applications can validate a versioned payload, execute a scoped tenant/RLS transaction, commit canonical state plus an outbox event, and migrate the supporting schema safely.
@@ -1237,8 +1325,11 @@ The eight items are grouped into four release waves. Each PR must be independent
 
 ### PR 2A — PostgreSQL cursor batches
 
+**Depends on:** PR 0A callback bridge and PR 1A scoped transaction ownership.
+
 - [ ] `each_query_batch()`.
-- [ ] bounded fetch size.
+- [ ] bounded fetch count plus per-row and per-batch decoded-byte limits.
+- [ ] release the PostgreSQL client guard before callback invocation; same-`Tx` sequential query regression.
 - [ ] callback early-exit cleanup.
 - [ ] cancellation and transaction interaction.
 - [ ] replay/export examples.
@@ -1251,22 +1342,27 @@ The eight items are grouped into four release waves. Each PR must be independent
 - [ ] `execute_batch()` if the implementation remains materially smaller than repeated app calls.
 - [ ] ingestion benchmarks and diagnostics.
 
-### PR 2C — Network policy core and opaque capability
+### PR 2C — Trusted network configuration and internal capability core
 
 **Depends on:** transport spike 0B.
 
-- [ ] trusted manifest declarations.
-- [ ] opaque `NetCapability` value/type.
+- [ ] application request versus deployment grant model.
+- [ ] explicit policy path, canonicalization, owner/permission checks, precedence, load-once/fail-closed behavior.
+- [ ] opaque internal `NetCapability` value/type.
 - [ ] shared target classification and reason codes.
 - [ ] serialization/log/template/cache/DB rejection.
 - [ ] default-policy compatibility tests.
+- [ ] keep `require_net_capability()` unexported until PR 2D provides an enforcing transport.
 
-### PR 2D — Policy-bound HTTP transport
+### PR 2D — Policy-bound HTTP transport and public capability API
+
+**Depends on:** PR 2C.
 
 - [ ] approved-address binding.
 - [ ] redirect revalidation.
 - [ ] proxy behavior contract.
 - [ ] response-size and redirect clamps.
+- [ ] export `require_net_capability()` only with an end-to-end enforcing sink.
 - [ ] secret-bearing request compatibility matrix.
 
 ### PR 2E — `std/net` capability integration
@@ -1279,9 +1375,9 @@ The eight items are grouped into four release waves. Each PR must be independent
 ### PR 2F — Job lease heartbeat and fencing
 
 - [ ] renewable active-job leases.
-- [ ] ownership-loss cancellation.
-- [ ] fencing-token API.
-- [ ] Redis/SQLite atomic operations.
+- [ ] cooperative ownership-loss state at documented yield points.
+- [ ] fencing-token API plus atomic guarded-sink examples/tests.
+- [ ] Redis cross-host operations and SQLite shared-file/process-host operations with explicit backend capability reporting.
 - [ ] stale-worker race tests.
 
 ### PR 2G — Keyed limits and queue admission
@@ -1318,7 +1414,8 @@ The eight items are grouped into four release waves. Each PR must be independent
 - [ ] counter/gauge/histogram APIs.
 - [ ] OpenMetrics exposition.
 - [ ] cardinality guard.
-- [ ] liveness/readiness/health registration and routes.
+- [ ] runtime-native `/livez` outside the interpreter queue.
+- [ ] native deadline-aware readiness checks plus expiring application-published state; no arbitrary closure execution on probe requests.
 
 ### PR 3C — Tracing
 
@@ -1334,11 +1431,12 @@ The eight items are grouped into four release waves. Each PR must be independent
 
 ## Wave 4: Deterministic logic
 
-### PR 4A — Static enum-match exhaustiveness
+### PR 4A — Harden existing static match exhaustiveness
 
-- [ ] typechecker/lint diagnostics for known enums, `Option`, and `Result`.
-- [ ] guard and wildcard semantics.
-- [ ] unreachable/duplicate arm diagnostics.
+- [ ] preserve existing enum, `Option`, and `Result` checks.
+- [ ] guard-aware coverage and explicit wildcard semantics.
+- [ ] unreachable/duplicate arm diagnostics with stable source locations.
+- [ ] strict/default severity compatibility tests.
 - [ ] runtime check retained.
 
 ### PR 4B — Effect metadata and transitive analysis
@@ -1350,23 +1448,24 @@ The eight items are grouped into four release waves. Each PR must be independent
 - [ ] user-function call-graph inference.
 - [ ] import and recursion handling.
 - [ ] machine-readable diagnostics with effect paths.
+- [ ] document that binding-provenance/alias analysis is not present in v1; do not claim proven-local mutation.
 
 ### PR 4C — `pure fn`
 
 - [ ] lexer/parser/AST modifier.
 - [ ] strict/default behavior for unknown calls.
 - [ ] opaque value restrictions.
+- [ ] conservatively reject assignment, index mutation, and mutable captures.
 - [ ] syntax/type/docs tests.
 - [ ] no runtime claim stronger than static analysis supports.
 
-### PR 4D — Reducer helpers
+### PR 4D — Minimal reducer helpers
 
-- [ ] pure replay and batch replay.
-- [ ] canonical state hashing.
-- [ ] checkpoint verification helpers.
+- [ ] pure `replay` and bounded `replay_batches` only.
 - [ ] deterministic examples without application persistence.
+- [ ] defer canonical hashing, checkpoint formats, and idempotence helpers to focused follow-up designs.
 
-**Wave 4 exit criteria:** Ntnt can reject impure reducers before execution, diagnose missing event variants statically, and provide small reusable replay/checkpoint helpers.
+**Wave 4 exit criteria:** Ntnt can reject impure reducers before execution, diagnose guarded/missing event variants statically, and provide small reusable replay helpers.
 
 ---
 
@@ -1445,7 +1544,7 @@ git diff --exit-code docs/
 - import effect;
 - recursion;
 - unknown dynamic call;
-- local-only mutation;
+- assignment/index/capture rejection;
 - opaque value use;
 - missing enum variant and guarded arms.
 
@@ -1471,7 +1570,7 @@ git diff --exit-code docs/
 | Roadmap becomes one giant release | High | Four waves, small standalone PRs, no all-or-nothing branch |
 | Scoped callback APIs multiply interpreter special cases | High | Land one reusable callback bridge first |
 | Outbox claims exactly-once semantics | High | Explicit at-least-once contract and crash matrix |
-| Network capabilities become maps in disguise | High | Opaque non-serializable runtime type, trusted manifest minting only |
+| Network capabilities become maps in disguise or app manifests self-grant authority | High | Opaque non-serializable runtime type plus explicit trusted deployment grants intersected with app requests |
 | Redirect/rebinding fix breaks TLS or proxies | High | Transport spike and inverse compatibility matrix before public API |
 | Schema work turns into a second type system | High | Stdlib schema nodes first; typed decode is a later narrow layer |
 | Migration runner becomes an ORM | Medium | Raw SQL only; lifecycle metadata and verification are the product |
@@ -1494,6 +1593,9 @@ These remain good ideas but are outside this DD's implementation roadmap:
 - WebSocket/streaming expansion;
 - PostgreSQL job backend;
 - optional `std/netmon` promotion;
+- typed schema decode after a focused compiler/type-level API decision;
+- binding-provenance/alias analysis to permit proven-local mutation in `pure fn`;
+- canonical reducer state hashing, persisted checkpoint formats, and narrowly named sample-based idempotence test assistance;
 - workflow/state-machine DSLs.
 
 They should not be smuggled into the eight selected tracks during implementation review. Scope creep is still scope creep when wearing a correctness badge.
