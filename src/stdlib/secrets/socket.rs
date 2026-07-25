@@ -451,17 +451,15 @@ mod tests {
                     .expect("set fixture write timeout");
 
                 let mut request = String::new();
-                BufReader::new(&stream)
+                let mut reader = BufReader::new(&stream);
+                reader
                     .read_line(&mut request)
                     .expect("read provider request");
-                let mut trailing_request = [0_u8; 1];
-                assert_eq!(
-                    stream
-                        .read(&mut trailing_request)
-                        .expect("read request EOF"),
-                    0,
-                    "provider request must half-close after one frame"
+                assert!(
+                    reader.buffer().is_empty(),
+                    "provider request must contain exactly one frame"
                 );
+                drop(reader);
                 if let Ok(text) = String::from_utf8(response.clone()) {
                     if text.contains(REQUEST_ID_PLACEHOLDER) {
                         let parsed: JsonValue =
