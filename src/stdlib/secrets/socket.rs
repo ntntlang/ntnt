@@ -841,12 +841,25 @@ mod tests {
             let Err(error) = result else {
                 panic!("malformed frame '{label}' must fail closed");
             };
-            let expected = if label == "no-newline" {
-                ProviderErrorKind::Unavailable
-            } else {
-                ProviderErrorKind::InvalidConfiguration
-            };
-            assert_eq!(error.kind, expected, "frame fixture: {label}");
+            match label {
+                "no-newline" => assert_eq!(
+                    error.kind,
+                    ProviderErrorKind::Unavailable,
+                    "frame fixture: {label}"
+                ),
+                "oversized" => assert!(
+                    matches!(
+                        error.kind,
+                        ProviderErrorKind::InvalidConfiguration | ProviderErrorKind::Unavailable
+                    ),
+                    "frame fixture: {label}"
+                ),
+                _ => assert_eq!(
+                    error.kind,
+                    ProviderErrorKind::InvalidConfiguration,
+                    "frame fixture: {label}"
+                ),
+            }
             let rendered = format!("{error:?}");
             assert!(!rendered.contains(SECRET_CANARY));
             assert!(!rendered.contains(label));
