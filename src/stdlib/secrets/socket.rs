@@ -820,13 +820,15 @@ mod tests {
             // Oversized responses must transfer the full 64 KiB boundary before
             // they can be classified. Keep this bounded, but allow hosted macOS
             // runners enough scheduling headroom to exercise the protocol check.
-            let Err(error) = SocketSecretProvider::new(
+            let result = SocketSecretProvider::new(
                 path.clone(),
                 ProviderEndpointLabel::socket(1),
                 "deployment-a".to_string(),
                 Duration::from_secs(2),
             )
-            .lookup("API_KEY") else {
+            .lookup("API_KEY");
+            server.join().expect("fixture server");
+            let Err(error) = result else {
                 panic!("malformed frame '{label}' must fail closed");
             };
             let expected = if label == "no-newline" {
@@ -839,7 +841,6 @@ mod tests {
             assert!(!rendered.contains(SECRET_CANARY));
             assert!(!rendered.contains(label));
 
-            server.join().expect("fixture server");
             std::fs::remove_file(path).ok();
         }
     }
