@@ -411,7 +411,7 @@ mod tests {
     };
     use super::SocketSecretProvider;
     use serde_json::Value as JsonValue;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -480,6 +480,18 @@ mod tests {
                 stream
                     .shutdown(std::net::Shutdown::Write)
                     .expect("close fixture response");
+
+                // Drain the provider's request half-close only after sending the
+                // response. On macOS, closing with that EOF unread can reset the
+                // connection and truncate a response larger than the socket buffer.
+                let mut trailing_request = [0_u8; 1];
+                assert_eq!(
+                    stream
+                        .read(&mut trailing_request)
+                        .expect("read request EOF"),
+                    0,
+                    "provider request must half-close after one frame"
+                );
             }
         });
         (path, request_rx, server)
