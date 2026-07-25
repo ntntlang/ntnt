@@ -411,7 +411,7 @@ mod tests {
     };
     use super::SocketSecretProvider;
     use serde_json::Value as JsonValue;
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
