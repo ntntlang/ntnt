@@ -24,6 +24,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       examples: ${{ steps.filter.outputs.examples }}
       docs: ${{ steps.filter.outputs.docs }}
+      macos_socket: ${{ steps.filter.outputs.macos_socket }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -47,6 +48,28 @@ jobs:
               - 'docs/**'
               - 'stdlib.toml'
               - 'src/**'
+            macos_socket:
+              - 'src/stdlib/secrets/socket.rs'
+              - '.github/workflows/release.yml'
+
+  macos-release-socket:
+    name: macOS Release Socket Regression
+    needs: changes
+    if: needs.changes.outputs.macos_socket == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-release-socket
+
+      - name: Run release-profile socket framing regression
+        run: cargo test --release --locked --lib stdlib::secrets::socket::tests::socket_provider_rejects_malformed_or_ambiguous_frames -- --exact --nocapture --test-threads=1
 
   test:
     name: Test (${{ matrix.os }})
@@ -212,12 +235,12 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [test, auth-backends, lint, docs-and-examples]
+    needs: [test, auth-backends, lint, docs-and-examples, macos-release-socket]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI results
         run: |
-          results=("${{ needs.test.result }}" "${{ needs['auth-backends'].result }}" "${{ needs.lint.result }}" "${{ needs['docs-and-examples'].result }}")
+          results=("${{ needs.test.result }}" "${{ needs['auth-backends'].result }}" "${{ needs.lint.result }}" "${{ needs['docs-and-examples'].result }}" "${{ needs['macos-release-socket'].result }}")
           for result in "${results[@]}"; do
             if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
               echo "::error::CI job failed or was cancelled: $result"

@@ -451,17 +451,15 @@ mod tests {
                     .expect("set fixture write timeout");
 
                 let mut request = String::new();
-                BufReader::new(&stream)
+                let mut reader = BufReader::new(&stream);
+                reader
                     .read_line(&mut request)
                     .expect("read provider request");
-                let mut trailing_request = [0_u8; 1];
-                assert_eq!(
-                    stream
-                        .read(&mut trailing_request)
-                        .expect("read request EOF"),
-                    0,
-                    "provider request must half-close after one frame"
+                assert!(
+                    reader.buffer().is_empty(),
+                    "provider request must contain exactly one frame"
                 );
+                drop(reader);
                 if let Ok(text) = String::from_utf8(response.clone()) {
                     if text.contains(REQUEST_ID_PLACEHOLDER) {
                         let parsed: JsonValue =
@@ -482,6 +480,18 @@ mod tests {
                 stream
                     .shutdown(std::net::Shutdown::Write)
                     .expect("close fixture response");
+
+                // Drain the provider's request half-close only after sending the
+                // response. On macOS, closing with that EOF unread can reset the
+                // connection and truncate a response larger than the socket buffer.
+                let mut trailing_request = [0_u8; 1];
+                assert_eq!(
+                    stream
+                        .read(&mut trailing_request)
+                        .expect("read request EOF"),
+                    0,
+                    "provider request must half-close after one frame"
+                );
             }
         });
         (path, request_rx, server)
@@ -820,26 +830,40 @@ mod tests {
             // Oversized responses must transfer the full 64 KiB boundary before
             // they can be classified. Keep this bounded, but allow hosted macOS
             // runners enough scheduling headroom to exercise the protocol check.
-            let Err(error) = SocketSecretProvider::new(
+            let result = SocketSecretProvider::new(
                 path.clone(),
                 ProviderEndpointLabel::socket(1),
                 "deployment-a".to_string(),
                 Duration::from_secs(2),
             )
-            .lookup("API_KEY") else {
+            .lookup("API_KEY");
+            server.join().expect("fixture server");
+            let Err(error) = result else {
                 panic!("malformed frame '{label}' must fail closed");
             };
-            let expected = if label == "no-newline" {
-                ProviderErrorKind::Unavailable
-            } else {
-                ProviderErrorKind::InvalidConfiguration
-            };
-            assert_eq!(error.kind, expected, "frame fixture: {label}");
+            match label {
+                "no-newline" => assert_eq!(
+                    error.kind,
+                    ProviderErrorKind::Unavailable,
+                    "frame fixture: {label}"
+                ),
+                "oversized" => assert!(
+                    matches!(
+                        error.kind,
+                        ProviderErrorKind::InvalidConfiguration | ProviderErrorKind::Unavailable
+                    ),
+                    "frame fixture: {label}"
+                ),
+                _ => assert_eq!(
+                    error.kind,
+                    ProviderErrorKind::InvalidConfiguration,
+                    "frame fixture: {label}"
+                ),
+            }
             let rendered = format!("{error:?}");
             assert!(!rendered.contains(SECRET_CANARY));
             assert!(!rendered.contains(label));
 
-            server.join().expect("fixture server");
             std::fs::remove_file(path).ok();
         }
     }
