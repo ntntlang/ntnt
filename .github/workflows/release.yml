@@ -98,7 +98,12 @@ jobs:
           ls -la target/${{ matrix.target }}/release/
           test -f target/${{ matrix.target }}/release/${{ matrix.binary }}
 
-      - name: Run unit tests (skip integration tests that spawn servers)
+      - name: Run unit tests (macOS, serialized local-socket fixtures)
+        if: runner.os == 'macOS'
+        run: cargo test --release --locked --target ${{ matrix.target }} --lib -- --test-threads=1
+
+      - name: Run unit tests
+        if: runner.os != 'macOS'
         run: cargo test --release --locked --target ${{ matrix.target }} --lib
 
       - name: Package (Unix)
