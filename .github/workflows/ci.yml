@@ -69,7 +69,7 @@ jobs:
           key: macos-release-socket
 
       - name: Run release-profile socket framing regression
-        run: cargo test --release --locked --lib socket_provider_rejects_malformed_or_ambiguous_frames -- --exact --nocapture --test-threads=1
+        run: cargo test --release --locked --lib stdlib::secrets::socket::tests::socket_provider_rejects_malformed_or_ambiguous_frames -- --exact --nocapture --test-threads=1
 
   test:
     name: Test (${{ matrix.os }})
