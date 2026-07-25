@@ -817,7 +817,16 @@ mod tests {
 
         for (label, frame) in frames {
             let (path, _request_rx, server) = serve_response(label, frame);
-            let Err(error) = provider(path.clone()).lookup("API_KEY") else {
+            // Oversized responses must transfer the full 64 KiB boundary before
+            // they can be classified. Keep this bounded, but allow hosted macOS
+            // runners enough scheduling headroom to exercise the protocol check.
+            let Err(error) = SocketSecretProvider::new(
+                path.clone(),
+                ProviderEndpointLabel::socket(1),
+                "deployment-a".to_string(),
+                Duration::from_secs(2),
+            )
+            .lookup("API_KEY") else {
                 panic!("malformed frame '{label}' must fail closed");
             };
             let expected = if label == "no-newline" {
