@@ -1,18 +1,19 @@
 # DD-047: `std/netmon` — Network Monitoring Toolkit
 
-**Status:** Draft / private-library candidate
+**Status:** In progress — bundled standard-library module
 **Author:** Larri
 **Created:** 2026-06-02
+**Updated:** 2026-07-26
 **Related:** [DD-046: `std/net`](dd-046-std-net.md)
-**Target baseline:** after DD-046 Phase 2+ primitives stabilize
+**Target baseline:** post-v0.5.1; first public surface targets v0.5.2
 
 ---
 
 ## Summary
 
-Design a `std/netmon` module for building real network monitoring systems in ntnt: SNMP device telemetry, interface counters, topology hints, check orchestration helpers, alert-state modeling, and opinionated monitoring data shapes.
+Design and incrementally ship a bundled `std/netmon` module for building real network monitoring systems in ntnt: bounded SNMP device telemetry first, followed by interface counters, topology hints, composite checks, and carefully scoped monitoring data helpers.
 
-Unlike DD-046, this is **not necessarily part of the default standard library**. The current recommendation is to treat `std/netmon` as a private or separately distributed library first, then promote stable pieces only if they prove broadly useful and safe enough for the standard distribution.
+The packaging decision is now settled: `std/netmon` is a standard-library module. That makes its contracts compatibility-sensitive, so each protocol and data-shape slice must be independently useful, bounded, and fixture-tested before the next layer lands.
 
 DD-046 gives ntnt safe network primitives. DD-047 is where those primitives become an MSP/ISP-grade monitoring toolkit instead of a polite loop that asks routers whether they are alive and then shrugs.
 
@@ -47,15 +48,32 @@ DD-047 owns higher-level monitoring concerns:
 
 ## Product Positioning
 
-`std/netmon` has three possible packaging modes:
+`std/netmon` ships as a bundled, explicitly imported standard-library module.
 
-1. **Private library first** — preferred initial path. Iterate fast, support real-world device weirdness, and avoid making unstable SNMP/device contracts part of ntnt's default stdlib promise.
-2. **Optional bundled library** — ships with ntnt but is explicitly optional/experimental, similar to a batteries-included contrib module.
-3. **Promoted standard module** — only after the API shape has survived real monitoring apps, device diversity, and operational abuse.
+That decision does **not** make it a monitoring product framework. The stdlib owns reusable protocol, normalization, policy, and bounded-computation primitives. Applications continue to own device inventories, tenants, schedules, incidents, notification delivery, persistence schemas, and product-specific state machines.
 
-Recommendation: start as a private library using the public module path `std/netmon` in examples/design so the eventual promotion path is clean, but do not commit to bundling it in the default standard library yet.
+The implementation is intentionally sliced:
 
----
+1. secure, bounded protocol primitives with stable normalized output;
+2. reusable interface/inventory normalization;
+3. composition over `std/net` and `std/jobs` without a new scheduler;
+4. only broadly reusable state helpers whose contracts survive real applications.
+
+APIs remain additive. Experimental breadth belongs in applications or extension libraries until its contract is ready for the standard-library compatibility promise.
+
+Future app-local libraries may add vendor adapters or product abstractions without expanding the bundled module. Promotion to prelude remains explicitly out of scope.
+
+### Strategic alignment with DD-077
+
+The correctness-primitives roadmap is broader than this module, but five parts apply now:
+
+- protocol calls are bounded operations with strict option maps and one global deadline;
+- target authorization is connection-bound: Slice 1 accepts literal IP addresses and connects transport only to the policy-checked `SocketAddr`;
+- credentials are opaque `Secret` capabilities exposed only at the protocol sink, with credential-bearing application buffers zeroized after use;
+- normalized varbinds use storage-friendly shapes and preserve values such as `Counter64` without truncation;
+- scheduling, durable retry state, incidents, notifications, and tenant policy remain application concerns.
+
+DD-077's future general `NetCapability` object is not invented locally here. `std/netmon` reuses DD-046's deployed network policy until that cross-cutting capability boundary is designed and shipped.
 
 ## Design Principles
 
@@ -71,7 +89,7 @@ Recommendation: start as a private library using the public module path `std/net
 
 6. **Make failure states first-class.** Timeouts, auth failures, noSuchName/noSuchObject, counter wraps, stale data, and partial polls are monitoring data, not just errors.
 
-7. **No secrets in design-level configs.** Community strings, SNMPv3 credentials, webhook tokens, and device credentials must come from env/secret stores, not checked-in examples.
+7. **Credentials are opaque capabilities.** Community strings, SNMPv3 credentials, webhook tokens, and device credentials enter protocol sinks as `Secret` values from `std/secrets`. Public APIs do not accept plaintext compatibility fallbacks.
 
 8. **Prefer jobs over request-path polling.** Heavy polling belongs in `std/jobs` / worker loops, not HTTP route handlers.
 
@@ -79,34 +97,40 @@ Recommendation: start as a private library using the public module path `std/net
 
 ## Security and Deployment Model
 
-`std/netmon` is intentionally for internal monitoring. It still needs guardrails.
+`std/netmon` is explicitly imported and each poll names one bounded target and OID set. Every protocol call also requires the process-level `NTNT_NETMON_ENABLE=1` gate. Slice 1 reuses DD-046's target policy rather than weakening or duplicating address classification.
 
-Recommended process-level opt-in:
+Private/internal targets require both deployment and call-site intent:
 
 ```bash
 NTNT_NETMON_ENABLE=1 NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
 ```
 
-Suggested policy:
+`NTNT_NETMON_ENABLE=1` is required for public and private calls. Private calls must also pass `allow_private: true` and set `NTNT_NET_ALLOW_PRIVATE=1`.
 
-- `std/netmon` refuses to poll unless `NTNT_NETMON_ENABLE=1` is set.
-- Private targets still require DD-046's private-network opt-in where DD-046 primitives are used.
-- Per-call target lists or subnets must be explicit and bounded.
-- Discovery/sweep helpers require stricter opt-ins than single-device checks.
-- Secrets must be passed as secret references or loaded from env, never embedded in examples.
-- Default examples use local/mock agents or documentation-only sample targets.
+Policy:
 
-Open question: whether `std/netmon` should also require an app-level config object like `netmon_configure(...)` before any polling. Recommendation: yes for private-library v1; explicit setup makes accidental usage harder.
+- Public targets are allowed only after the netmon process gate is enabled.
+- Private, loopback, link-local, and unique-local targets require the dual opt-in.
+- Metadata, multicast, broadcast, unspecified, and documentation targets remain denied even with opt-in.
+- Slice 1 accepts literal IPv4/IPv6 addresses only. Hostname resolution is deferred until one outer deadline can bound all resolver candidates and A/AAAA activity.
+- UDP transport is connected directly to the checked `SocketAddr`; there is no second resolution step.
+- OID lists, encoded requests (8 KiB), response datagrams (8 KiB), timeouts, retries, and normalized results are bounded.
+- SNMP communities must be opaque `Secret` values. Validation and transport errors never render them, and credential-bearing request/response buffers are zeroized after use.
+- The strict ntnt-owned codec verifies response version, community, request ID, PDU type, complete BER consumption, exact varbind count, and requested OID order.
+- `Secret` handling does not make SNMPv2c confidential on the wire; deploy it only on trusted management networks or protected tunnels.
+- Default examples perform no traffic; protocol tests use a deterministic localhost mock agent.
+
+A future deployment-issued `NetCapability` can replace process-global authority once that cross-cutting contract ships. DD-047 does not invent a monitoring-only capability system first.
 
 ---
 
 ## Proposed Module: `std/netmon`
 
-### Configuration
+### Future configuration
 
-#### `netmon_configure(opts) -> Result<Map, String>`
+#### `netmon_configure(opts) -> Result<Map, String>` *(deferred)*
 
-Configure global monitoring behavior for the current process.
+A process-global monitoring configuration remains a possible future convenience for multi-poll applications. Slice 1 deliberately keeps policy and bounds explicit per call; this helper must not become an authority bypass.
 
 ```ntnt
 import { netmon_configure } from "std/netmon"
@@ -138,7 +162,7 @@ let router = device("10.0.50.1", map {
     "role": "router",
     "site": "home-lab",
     "vendor": "mikrotik",
-    "snmp": map { "community_env": "CORE_ROUTER_SNMP_COMMUNITY" }
+    "snmp": map { "credential": "CORE_ROUTER_SNMP_COMMUNITY" }
 })
 ```
 
@@ -155,55 +179,74 @@ Recommended fields:
 
 ### SNMP primitives
 
-#### `snmp_get(target, oid, opts?) -> Result<Map, String>`
+#### `snmp_get(target, auth, oids, opts?) -> Result<Map, String>` *(Slice 1)*
 
-Read one OID from a device.
+Read one bounded set of numeric OIDs from a literal IPv4/IPv6 SNMP agent target. Slice 1 supports SNMPv2c only and requires `NTNT_NETMON_ENABLE=1`.
 
 ```ntnt
+import { require_secret } from "std/secrets"
 import { snmp_get } from "std/netmon"
 
-let sys_name = snmp_get("10.0.50.1", "1.3.6.1.2.1.1.5.0", map {
+let auth = map {
     "version": "2c",
-    "community_env": "ROUTER_SNMP_COMMUNITY"
-})
+    "community": require_secret("ROUTER_SNMP_COMMUNITY")
+}
+let system = snmp_get(
+    "10.0.50.1",
+    auth,
+    ["1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.5.0"],
+    map { "allow_private": true }
+)
 ```
+
+The auth map is strict: `version` must be `"2c"`, `community` must be an opaque `Secret`, and unknown fields fail closed. The options map accepts only:
+
+- `port`: default 161, range 1–65535
+- `timeout_ms`: one global request-encoding, UDP send/receive, and retry budget; default 2000, range 50–30000
+- `retries`: additional bounded attempts, default 0, maximum 3
+- `allow_private`: default false; still requires `NTNT_NET_ALLOW_PRIVATE=1`
+
+The OID array accepts 1–64 unique numeric OIDs, each at most 255 bytes and 128 unsigned 32-bit arcs. Named MIB syntax is deferred. Encoded requests are capped at 8 KiB and response datagrams at 8 KiB. Explicit values outside any bound fail rather than clamp.
 
 Result shape:
 
 ```ntnt
 Ok(map {
     "target": "10.0.50.1",
-    "oid": "1.3.6.1.2.1.1.5.0",
-    "name": "sysName.0",
-    "type": "OctetString",
-    "value": "core-router",
-    "latency_ms": 12.4,
-    "timestamp": "2026-06-02T12:00:00Z"
+    "address": "10.0.50.1",
+    "port": 161,
+    "version": "2c",
+    "duration_ms": 12,
+    "attempts": 1,
+    "values": [
+        map {
+            "oid": "1.3.6.1.2.1.1.1.0",
+            "type": "octet_string",
+            "encoding": "utf8",
+            "value": "RouterOS"
+        }
+    ]
 })
 ```
 
-#### `snmp_walk(target, oid, opts?) -> Result<Array<Map>, String>`
+`Counter64` values use decimal strings so ntnt's signed 64-bit `Int` cannot truncate them, including legal values above `i64::MAX`. Binary octet strings and opaque values use lowercase hex with explicit encoding metadata. Protocol exceptions such as `no_such_object` retain their type and use `None` as the value. Agent `error_status`/`error_index`, transport timeouts, malformed BER, and authentication mismatches return `Err(String)` rather than partial telemetry.
 
-Walk a subtree with strict row/result caps.
+#### `snmp_walk(target, auth, oid, opts?) -> Result<Array<Map>, String>` *(next slice)*
 
-Options:
+Walk a subtree with strict row/result caps. This follows GET rather than sharing its first compatibility commit.
 
-- `max_results`: default 2048, hard cap 20000 for private-library v1
-- `timeout_ms`: default 1500, clamp to shared netmon max
-- `retries`: default 1, hard cap 3
-- `version`: `"2c"` first; SNMPv3 later
-- `community_env`: environment variable containing community string
+Planned options add `max_results` with a conservative default and hard cap. WALK reuses the same strict auth contract, global timeout budget, checked-address transport binding, and normalized varbind shapes.
 
-#### `snmp_bulk_walk(target, oid, opts?) -> Result<Array<Map>, String>`
+#### `snmp_bulk_walk(target, auth, oid, opts?) -> Result<Array<Map>, String>`
 
 Optional optimization after basic walk is stable. SNMP GETBULK can reduce polling overhead but should not be in PR 1 unless the implementation stays small and testable.
 
-#### `snmp_capabilities(target, opts?) -> Result<Map, String>`
+#### `snmp_capabilities(target, auth, opts?) -> Result<Map, String>`
 
 Probe SNMP availability and supported basics without doing a full inventory poll.
 
 ```ntnt
-snmp_capabilities("10.0.50.1", map { "community_env": "ROUTER_SNMP_COMMUNITY" })
+snmp_capabilities("10.0.50.1", auth)
 // Ok(map { "reachable": true, "version": "2c", "sys_object_id": "...", "vendor_hint": "mikrotik" })
 ```
 
@@ -511,52 +554,67 @@ Some of these may become useful later, but they carry OS permissions, abuse risk
 
 ### Status Dashboard
 
-- [ ] **PR 0 — packaging decision and private-library skeleton**
-- [ ] **PR 1 — SNMP v2c basics**
+- [x] **Slice 0 — standard-library packaging and security contract**
+- [x] **Slice 1A — bounded SNMPv2c GET**
+- [ ] **Slice 1B — bounded SNMP WALK**
 - [ ] **PR 2 — interface inventory and counters**
 - [ ] **PR 3 — counter-rate normalization**
 - [ ] **PR 4 — device identity and inventory bundle**
 - [ ] **PR 5 — topology hints from LLDP**
 - [ ] **PR 6 — composite checks over DD-046 primitives**
-- [ ] **PR 7 — alert-state helpers**
+- [ ] **PR 7 — broadly reusable alert-state helpers, if proven**
 - [ ] **PR 8 — reference monitoring app / examples**
 
-### PR 0 — Packaging Decision and Skeleton
+### Slice 0 — Standard-Library Packaging and Security Contract
 
-Scope:
+Shipped with Slice 1A:
 
-- [ ] Decide private library vs optional bundled module for first implementation.
-- [ ] Choose module layout and import path strategy for `std/netmon`.
-- [ ] Add a small private-library skeleton or experimental module gate.
-- [ ] Define credential-reference conventions (`community_env`, later secret refs).
-- [ ] Add deterministic mock SNMP fixture plan.
-- [ ] Add README/docs caveat that this is not default stdlib until promoted.
-
-Acceptance:
-
-- [ ] Consumers can import the private module in a documented way.
-- [ ] No raw secrets appear in examples, tests, or generated docs.
-- [ ] `NTNT_NETMON_ENABLE=1` requirement is documented or implemented.
-- [ ] DD-046 boundary is preserved.
-
-### PR 1 — SNMP v2c Basics
-
-Scope:
-
-- [ ] `snmp_get(target, oid, opts?)`
-- [ ] `snmp_walk(target, oid, opts?)`
-- [ ] Basic ASN.1/BER value decoding or dependency choice.
-- [ ] SNMP response/error normalization.
-- [ ] Timeout and retry clamps.
-- [ ] Mock SNMP agent test fixture.
+- [x] Package `std/netmon` as an explicitly imported bundled stdlib module.
+- [x] Preserve DD-046's low-level boundary and share its outbound target policy.
+- [x] Use `std/secrets` opaque `Secret` values at credential-bearing sinks.
+- [x] Require `NTNT_NETMON_ENABLE=1` before any protocol call.
+- [x] Reject plaintext community strings and unknown auth/option keys.
+- [x] Accept literal IP targets and connect protocol transport directly to the checked address.
+- [x] Add a deterministic localhost mock-agent fixture.
+- [x] Keep scheduling, storage, incidents, tenants, and notification delivery in applications.
 
 Acceptance:
 
-- [ ] GET returns normalized map for scalar OIDs.
-- [ ] WALK returns ordered rows with strict result cap.
-- [ ] noSuchObject/noSuchName/timeouts produce monitoring-useful results.
-- [ ] Tests do not require a real network device.
-- [ ] Community strings are loaded via env/secret references only.
+- [x] `std/netmon` is importable through the normal module registry.
+- [x] No raw credentials appear in examples, generated docs, stdout, stderr, or errors.
+- [x] Private targets retain the deployment-plus-call-site opt-in.
+- [x] Special-purpose targets remain denied.
+- [x] Public API and typechecker signatures agree.
+
+### Slice 1A — SNMPv2c GET
+
+Scope:
+
+- [x] `snmp_get(target, auth, oids, opts?)`
+- [x] Small ntnt-owned SNMPv2c GET codec with complete BER validation and zeroizing credential buffers.
+- [x] Strict numeric OID parsing, canonicalization, deduplication, and a 64-OID cap.
+- [x] Stable value normalization, including lossless `Counter64` and binary octets.
+- [x] Global timeout budget, retry cap, request/response byte caps, and exact response OID/count checks.
+- [x] Mock UDP SNMP agent fixture exercising the ntnt runtime end to end.
+- [x] Independent golden BER coverage for BOOLEAN, full-width Counter64, wrong version/PDU/request ID/community, malformed lengths, truncation, and trailing bytes.
+
+Acceptance:
+
+- [x] GET returns normalized ordered varbinds for a bounded OID set.
+- [x] Protocol exceptions retain explicit types rather than becoming fabricated values.
+- [x] Timeouts, policy failures, malformed responses, and agent errors return `Err(String)`.
+- [x] Tests require no real network device.
+- [x] Community material enters only as `Secret`.
+
+### Slice 1B — SNMP WALK
+
+Scope:
+
+- [ ] `snmp_walk(target, auth, oid, opts?)`
+- [ ] Strict subtree and result-count enforcement.
+- [ ] GETNEXT first; GETBULK only after equivalent fixture coverage.
+- [ ] Loop, out-of-subtree, malformed-order, and premature-end detection.
+- [ ] Reuse Slice 1A auth, policy, timeout, and normalization contracts.
 
 ### PR 2 — Interface Inventory and Counters
 
@@ -675,19 +733,23 @@ Acceptance:
 
 ## Dependencies / Implementation Choices
 
-SNMP implementation options:
+Slice 1A uses a small ntnt-owned SNMPv2c GET codec instead of a general SNMP dependency:
 
-1. Use an existing Rust SNMP crate if it is maintained, dependency-light, supports v2c cleanly, and can be tested with fixtures.
-2. Implement minimal SNMP v2c GET/WALK encoding/decoding directly if dependency quality is poor.
-3. Defer SNMPv3 until v2c and data shapes are stable.
+- only definite-length BER forms required for strict SNMPv2c GET/RESPONSE are accepted;
+- the complete outer message, PDU, varbind list, and each varbind must be consumed with no trailing or silently truncated fields;
+- version, community, request ID, response PDU type, agent status, varbind count, and exact OID order are verified;
+- legal unsigned `Counter64` values through `u64::MAX` and correctly tagged BOOLEAN values decode losslessly;
+- request and receive buffers that contain the community are wrapped in `Zeroizing` and cleared on every exit path;
+- no Tokio, OpenSSL, SNMPv3 crypto, MIB loading, or trap dependency is pulled in.
 
-Recommendation: evaluate crates during PR 0/1, but bias toward a small, auditable implementation path. SNMP v2c is not pretty, but it is finite. Unlike humans in meetings.
+SNMPv3 remains deferred until the v2c data shapes and failure contract survive real use. WALK/GETBULK must reuse this boundary rather than exposing the dependency directly.
 
-Potential helper crates/features:
+Supporting test infrastructure:
 
-- ASN.1/BER encoder/decoder if direct implementation wins
-- fixed test clock helper for rate and alert tests
-- mock UDP SNMP agent fixture for CI
+- deterministic localhost UDP mock agent in default CI;
+- hand-authored golden BER packets independent of the production codec;
+- fixed clocks when rate and alert helpers arrive;
+- optional real-device tests behind explicit environment gates.
 
 ---
 
@@ -697,11 +759,12 @@ Default CI must not require private network access or real devices.
 
 Required tests:
 
-- [ ] mock SNMP GET scalar success
+- [x] mock SNMP GET scalar success
 - [ ] mock SNMP WALK table success
-- [ ] timeout / retry behavior
-- [ ] malformed SNMP response handling
-- [ ] noSuchObject/noSuchName normalization
+- [x] timeout / retry behavior
+- [x] malformed or mismatched SNMP response handling
+- [x] complete BER consumption, version/PDU/request/community correlation, and full-width Counter64 decoding
+- [x] noSuchObject/noSuchName normalization
 - [ ] interface inventory normalization
 - [ ] 32-bit and 64-bit counter snapshots
 - [ ] counter wrap/reset detection
@@ -719,13 +782,9 @@ Optional/manual tests:
 
 ## Open Decisions
 
-1. **Packaging:** private library only, optional bundled module, or experimental stdlib module?
+1. **Packaging — resolved:** bundled, explicitly imported standard-library module. Product-specific monitoring state remains application-owned.
 
-   Recommendation: private library first, preserving `std/netmon` as the intended import path.
-
-2. **SNMP dependency:** external crate or direct minimal v2c implementation?
-
-   Recommendation: decide after crate spike. Prefer boring-maintained over clever-abandoned.
+2. **SNMP dependency — resolved for v2c GET:** use the small ntnt-owned strict codec. The previously evaluated `snmp2` path could not prove complete BER consumption, full-width Counter64 decoding, or zeroized credential buffers.
 
 3. **SNMPv3 timing:** include in initial module or defer?
 
@@ -747,6 +806,6 @@ Optional/manual tests:
 
 ## Bottom Line
 
-`std/netmon` should make ntnt credible for network monitoring by adding SNMP/device telemetry and monitoring-specific state helpers on top of DD-046's safe primitives.
+`std/netmon` is now the standard-library home for bounded monitoring protocols and reusable normalization on top of DD-046's safe network policy.
 
-Start private. Keep the API honest. Normalize the data shapes. Avoid pretending a full NMS is a stdlib function. That way we get a useful monitoring toolkit without turning ntnt's default stdlib into a closet full of enterprise networking adapters wearing one trench coat.
+Start narrow. Keep credentials opaque. Bind transport to checked addresses. Normalize without truncating. Let applications own the monitoring product around those primitives. This gives ntnt a credible SNMP foundation without turning the default stdlib into a closet full of enterprise networking adapters wearing one trench coat.

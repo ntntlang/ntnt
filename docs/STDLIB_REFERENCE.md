@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.5.1
+> Last updated: v0.5.2
 
 ## Table of Contents
 
@@ -24,6 +24,7 @@
 - [std/markdown](#stdmarkdown)
 - [std/math](#stdmath)
 - [std/net](#stdnet)
+- [std/netmon](#stdnetmon)
 - [std/path](#stdpath)
 - [std/postgres](#stdpostgres)
 - [std/secrets](#stdsecrets)
@@ -10292,6 +10293,57 @@ traceroute("example.com", map { "method": "tcp", "port": 443 })  // TCP-SYN trac
 ```
 
 *Since v0.4.10*
+
+---
+
+## std/netmon
+
+Bounded network-monitoring protocols with opaque credentials and normalized results
+
+```ntnt
+import { snmp_get } from "std/netmon"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`snmp_get`](#snmpget) | Reads one bounded set of numeric OIDs from an SNMP agent. Slice 1 supports SNMPv2c only. The strict auth map must contain `version: "2c"` and a `community` Secret, normally returned by `require_secret()`; plaintext community strings are rejected. Unknown auth and option keys are rejected. SNMPv2c does not encrypt or authenticate its community or payload; use this slice only on trusted management networks or protected tunnels. |
+
+#### `snmp_get`
+
+```ntnt
+snmp_get(target: String, auth: Map, oids: Array<String>, opts?: Map) -> Result<Map, String>
+```
+
+Reads one bounded set of numeric OIDs from an SNMP agent. Slice 1 supports SNMPv2c only. The strict auth map must contain `version: "2c"` and a `community` Secret, normally returned by `require_secret()`; plaintext community strings are rejected. Unknown auth and option keys are rejected. SNMPv2c does not encrypt or authenticate its community or payload; use this slice only on trusted management networks or protected tunnels.
+
+`NTNT_NETMON_ENABLE=1` is required for every call. Slice 1 accepts literal IPv4 and IPv6 targets only, eliminating unbounded hostname resolution. Private/internal targets additionally require `NTNT_NET_ALLOW_PRIVATE=1` and `allow_private: true`; special-purpose targets remain denied. `timeout_ms` is one global budget across request encoding, UDP send/receive, and retries. Encoded requests are capped at 8 KiB; responses are capped at 8 KiB and must be complete, strict SNMPv2c BER with exactly the requested OIDs in order.
+
+**Parameters:**
+
+- `target` — Literal IPv4 or IPv6 address without a port
+- `auth` — Strict map with version (`"2c"`) and community (Secret)
+- `oids` — One to 64 unique numeric OIDs
+- `opts` — Optional strict map with port (default 161), timeout_ms (default 2000), retries (default 0, max 3), and allow_private
+
+**Returns:** Result containing target, checked address, port, version, duration_ms, attempts, and normalized values
+
+**Examples:**
+
+```ntnt
+snmp_get("10.0.50.1", map { "version": "2c", "community": require_secret("SNMP_COMMUNITY") }, ["1.3.6.1.2.1.1.1.0"], map { "allow_private": true })  // Read sysDescr using an opaque community
+```
+
+**Errors:**
+
+- **TypeError**: snmp_get() argument 1 must be String — *Fix: Pass an IPv4 or IPv6 literal*
+- **RuntimeError**: std/netmon is disabled — *Fix: Set NTNT_NETMON_ENABLE=1 for the process*
+- **RuntimeError**: snmp_get() auth.community must be Secret — *Fix: Load the community with std/secrets.require_secret()*
+
+**See also:** `require_secret`, `net_capabilities`
+
+*Since v0.5.2*
 
 ---
 

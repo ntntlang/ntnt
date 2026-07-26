@@ -1,0 +1,39 @@
+// std/netmon Slice 1: bounded SNMPv2c GET without performing traffic on import.
+import { snmp_get } from "std/netmon"
+
+fn read_system_info(
+    target: String,
+    community: Secret,
+    allow_private: Bool
+) -> Result<Map<String, Any>, String>
+requires len(target) > 0
+{
+    let auth = map {
+        "version": "2c",
+        "community": community
+    }
+    return snmp_get(
+        target,
+        auth,
+        [
+            "1.3.6.1.2.1.1.1.0", // sysDescr.0
+            "1.3.6.1.2.1.1.3.0", // sysUpTime.0
+            "1.3.6.1.2.1.1.5.0"  // sysName.0
+        ],
+        map {
+            "timeout_ms": 2000,
+            "retries": 1,
+            "allow_private": allow_private
+        }
+    )
+}
+
+// At the application boundary, enable protocol calls with NTNT_NETMON_ENABLE=1.
+// Private targets also require NTNT_NET_ALLOW_PRIVATE=1 and allow_private: true.
+// Slice 1 accepts literal IPv4 and IPv6 targets; hostname resolution is deferred.
+// import { require_secret } from "std/secrets"
+// let result = read_system_info(
+//     "10.0.50.1",
+//     require_secret("ROUTER_SNMP_COMMUNITY"),
+//     true
+// )

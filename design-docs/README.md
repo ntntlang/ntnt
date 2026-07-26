@@ -15,7 +15,7 @@ This folder contains planning and design documents for NTNT features.
 | [dd-040-fetch-stdlib-friction.md](dd-040-fetch-stdlib-friction.md) | 🔶 Partial | 4/6 issues resolved in v0.4.4; 2 remain |
 | [dd-043-auth-excellence.md](dd-043-auth-excellence.md) | ✅ Shipped in v0.4.9 | `std/auth` local auth, reset, TOTP, session, API/page protection baseline; WebAuthn remains future planning |
 | [dd-046-std-net.md](dd-046-std-net.md) | ✅ Complete | Safe `std/net` primitives shipped in v0.4.10 track: IPAM-grade IPv4/IPv6 CIDR math, protocol-honest ping, TCP probes, DNS, bounded scans, TLS inspection |
-| [dd-047-std-netmon.md](dd-047-std-netmon.md) | 📋 Draft | `std/netmon` private-library candidate for SNMP/device telemetry, interface counters, topology hints, composite checks, and alert-state helpers |
+| [dd-047-std-netmon.md](dd-047-std-netmon.md) | 🔶 In Progress | Bundled `std/netmon`; Slice 1 adds gated, bounded SNMPv2c GET with strict BER, opaque credentials, and stable telemetry |
 | [dd-059-auth-crypto-boundary.md](dd-059-auth-crypto-boundary.md) | ✅ Complete | `std/auth` / `std/crypto` helper boundary in the v0.4.9 auth baseline |
 | [dd-060-ai-native-developer-experience.md](dd-060-ai-native-developer-experience.md) | 📋 Draft | AI-native developer experience roadmap |
 | [dd-061-interpreter-performance-roadmap.md](dd-061-interpreter-performance-roadmap.md) | 🔶 In Review | Current-use-case performance roadmap: template contract cleanup, benchmark harness, automatic template cache, template loop/scope cleanup, call/lookup fast paths |

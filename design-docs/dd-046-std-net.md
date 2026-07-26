@@ -156,7 +156,7 @@ That option should only work when the process-level config also allows private t
 
 - Public IP/hostname target: allowed by default.
 - Loopback/private/link-local target: denied by default in all server/runtime modes.
-- Loopback/private/link-local target with `allow_private: true` but no process-level opt-in: `Err("Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1 for std/net probes (NTNT_ALLOW_PRIVATE_IPS only applies to fetch())")`.
+- Loopback/private/link-local target with `allow_private: true` but no process-level opt-in: `Err("Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1 for std/net and std/netmon probes (NTNT_ALLOW_PRIVATE_IPS only applies to fetch())")`.
 - Loopback/private/link-local target with process-level opt-in and `allow_private: true`: allowed.
 - Cloud metadata, multicast, broadcast, unspecified, and documentation targets: never allowed, even with private-network opt-in.
 - User-controlled target strings in public web apps: still the app's responsibility to validate input, but stdlib policy blocks the worst SSRF targets by default.
@@ -978,7 +978,7 @@ Remote command execution is too privileged for `std/net`. If added, it should li
 
 SNMP and higher-level monitoring concerns are covered by [DD-047: `std/netmon`](dd-047-std-netmon.md). Keep them out of the initial `std/net` module. `std/net` should provide safe primitives; `std/netmon` can build SNMP/device telemetry, interface counters, topology hints, composite checks, and alert-state helpers on top.
 
-SNMP is a real network-monitoring need, but it is its own protocol family. It should likely start as a private or separately distributed `std/netmon` library rather than default stdlib surface area. Do not make the first `std/net` PR carry BER/ASN.1 and SNMP semantics.
+SNMP is a real network-monitoring need, but it is its own protocol family. DD-047 now places it in a bundled, explicitly imported `std/netmon` module with a separate process enable gate; `std/net` still does not carry BER/ASN.1 or SNMP semantics.
 
 ---
 
