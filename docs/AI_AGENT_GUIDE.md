@@ -935,7 +935,7 @@ server 8080 {
 | `NTNT_ENV` | `production`, `prod` | Disables hot-reload for better performance |
 | `NTNT_STRICT` | `1`, `true` | Blocks execution on type errors (runs type checker before `ntnt run`) |
 | `NTNT_ALLOW_PRIVATE_IPS` | `true` | Allows `fetch()` to connect to private/internal IPs (see below) |
-| `NTNT_NET_ALLOW_PRIVATE` | `1`, `true`, `yes` | Process-level opt-in for `std/net` probes (`ping`, `tcp_connect`, `reachable`, `port_scan`, `tls_info`, `traceroute`) to private/internal targets; calls still need `allow_private: true` |
+| `NTNT_NET_ALLOW_PRIVATE` | `1`, `true`, `yes` | Process-level opt-in for `std/net` and `std/netmon` calls to private/internal targets; calls still need `allow_private: true` |
 | `NTNT_WORKERS` | `1` (dev) / CPU cores (prod) | Number of interpreter worker threads. Auto-scales in production. |
 
 ```bash
@@ -1162,7 +1162,42 @@ let result = tcp_connect("10.0.0.5", 443, map { "allow_private": true })
 
 Special-purpose and high-risk targets such as cloud metadata endpoints, multicast, broadcast, unspecified, and documentation ranges remain blocked even with private-network opt-in.
 
-Do not pipe user-controlled hostnames directly into `std/net` probes in public web apps. The stdlib blocks the worst SSRF targets by default, but app-level validation is still required.
+Do not pipe user-controlled hostnames directly into `std/net` or `std/netmon` calls in public web apps. The stdlib blocks the worst SSRF targets by default, but app-level validation is still required.
+
+### Network Monitoring (`std/netmon`)
+
+`std/netmon` begins with a bounded SNMPv2c GET primitive. Authentication and options are strict maps; the community must be an opaque `Secret`, never a plaintext string. That protects application handling and diagnostics, not the wire: SNMPv2c is unencrypted and belongs on trusted management networks or protected tunnels.
+
+```ntnt
+import { require_secret } from "std/secrets"
+import { snmp_get } from "std/netmon"
+
+let auth = map {
+    "version": "2c",
+    "community": require_secret("ROUTER_SNMP_COMMUNITY")
+}
+
+match snmp_get(
+    "10.0.50.1",
+    auth,
+    [
+        "1.3.6.1.2.1.1.1.0", // sysDescr.0
+        "1.3.6.1.2.1.1.5.0"  // sysName.0
+    ],
+    map {
+        "timeout_ms": 2000,
+        "retries": 1,
+        "allow_private": true
+    }
+) {
+    Ok(result) => print(result["values"]),
+    Err(error) => print("SNMP poll failed: " + error)
+}
+```
+
+`snmp_get(target, auth, oids, opts?)` accepts 1–64 unique numeric OIDs. Options are `port`, `timeout_ms`, `retries`, and `allow_private`; unknown fields are rejected. The timeout is one global budget across checked-address fallback and retries. The result identifies both the requested `target` and the checked `address` that answered. Returned varbinds use stable `oid`, `type`, `value`, and optional `encoding` fields. `Counter64` values are decimal strings to avoid signed-integer overflow; binary values are hex encoded.
+
+Private agents require both `NTNT_NET_ALLOW_PRIVATE=1` and `allow_private: true`. Special-purpose targets remain blocked, and all resolved addresses are checked before the UDP transport is bound. Keep polling in jobs/workers rather than HTTP request handlers.
 
 ### JSON Body Parsing
 
@@ -1909,7 +1944,7 @@ The most-used stdlib functions are auto-injected — no import needed:
 | `std/time` | `now`, `format` |
 | `std/crypto` | `uuid`, `sha256` |
 
-**NOT in prelude** (still need explicit import): `fetch` (std/http), `get_secret`/`require_secret` (std/secrets), `std/net` IPAM/probe helpers, `connect`/`query`/`execute` (database modules), `set_cookie`/`get_cookie`/`with_cookie` (std/http/server), `sort_by`/`first`/`last`/`push`/`pop` (std/collections), KV, jobs, fs, csv, concurrent.
+**NOT in prelude** (still need explicit import): `fetch` (std/http), `get_secret`/`require_secret` (std/secrets), `std/net` IPAM/probe helpers, `std/netmon` monitoring protocol helpers, `connect`/`query`/`execute` (database modules), `set_cookie`/`get_cookie`/`with_cookie` (std/http/server), `sort_by`/`first`/`last`/`push`/`pop` (std/collections), KV, jobs, fs, csv, concurrent.
 
 Explicit imports still work — prelude just makes them unnecessary for common functions.
 
@@ -3271,7 +3306,7 @@ let name = day_name(ts)                             // "Wednesday"
 
 ---
 
-> **Complete function listings:** For every function signature, parameter, and example across all 25 modules, see [STDLIB_REFERENCE.md](STDLIB_REFERENCE.md) or run `ntnt docs <module>` (e.g., `ntnt docs std/time`).
+> **Complete function listings:** For every function signature, parameter, and example across all 26 modules, see [STDLIB_REFERENCE.md](STDLIB_REFERENCE.md) or run `ntnt docs <module>` (e.g., `ntnt docs std/time`).
 
 ---
 

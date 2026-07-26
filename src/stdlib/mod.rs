@@ -25,6 +25,7 @@ pub mod log;
 pub mod markdown;
 pub mod math;
 pub mod net;
+pub mod netmon;
 pub mod path;
 pub mod postgres;
 pub mod secrets;
@@ -57,6 +58,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/crypto".to_string(), crypto::init());
     modules.insert("std/url".to_string(), url::init());
     modules.insert("std/net".to_string(), net::init());
+    modules.insert("std/netmon".to_string(), netmon::init());
     modules.insert("std/http".to_string(), http::init());
     modules.insert("std/http/server".to_string(), http_server::init());
     modules.insert("std/db/postgres".to_string(), postgres::init());

@@ -156,7 +156,7 @@ That option should only work when the process-level config also allows private t
 
 - Public IP/hostname target: allowed by default.
 - Loopback/private/link-local target: denied by default in all server/runtime modes.
-- Loopback/private/link-local target with `allow_private: true` but no process-level opt-in: `Err("Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1 for std/net probes (NTNT_ALLOW_PRIVATE_IPS only applies to fetch())")`.
+- Loopback/private/link-local target with `allow_private: true` but no process-level opt-in: `Err("Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1 for std/net and std/netmon probes (NTNT_ALLOW_PRIVATE_IPS only applies to fetch())")`.
 - Loopback/private/link-local target with process-level opt-in and `allow_private: true`: allowed.
 - Cloud metadata, multicast, broadcast, unspecified, and documentation targets: never allowed, even with private-network opt-in.
 - User-controlled target strings in public web apps: still the app's responsibility to validate input, but stdlib policy blocks the worst SSRF targets by default.

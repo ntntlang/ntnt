@@ -24,6 +24,7 @@
 - [std/markdown](#stdmarkdown)
 - [std/math](#stdmath)
 - [std/net](#stdnet)
+- [std/netmon](#stdnetmon)
 - [std/path](#stdpath)
 - [std/postgres](#stdpostgres)
 - [std/secrets](#stdsecrets)
@@ -10292,6 +10293,56 @@ traceroute("example.com", map { "method": "tcp", "port": 443 })  // TCP-SYN trac
 ```
 
 *Since v0.4.10*
+
+---
+
+## std/netmon
+
+Bounded network-monitoring protocols with opaque credentials and normalized results
+
+```ntnt
+import { snmp_get } from "std/netmon"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`snmp_get`](#snmpget) | Reads one bounded set of numeric OIDs from an SNMP agent. Slice 1 supports SNMPv2c only. The strict auth map must contain `version: "2c"` and a `community` Secret, normally returned by `require_secret()`; plaintext community strings are rejected. Unknown auth and option keys are rejected. SNMPv2c does not encrypt its community or payload; use this slice only on trusted management networks or protected tunnels while SNMPv3 is deferred. |
+
+#### `snmp_get`
+
+```ntnt
+snmp_get(target: String, auth: Map, oids: Array<String>, opts?: Map) -> Result<Map, String>
+```
+
+Reads one bounded set of numeric OIDs from an SNMP agent. Slice 1 supports SNMPv2c only. The strict auth map must contain `version: "2c"` and a `community` Secret, normally returned by `require_secret()`; plaintext community strings are rejected. Unknown auth and option keys are rejected. SNMPv2c does not encrypt its community or payload; use this slice only on trusted management networks or protected tunnels while SNMPv3 is deferred.
+
+Public targets are allowed by default. Private/internal targets require both `NTNT_NET_ALLOW_PRIVATE=1` and `allow_private: true`; metadata, multicast, broadcast, unspecified, and documentation targets remain denied. The timeout is a global budget across address fallback and retries.
+
+**Parameters:**
+
+- `target` — DNS hostname or IPv4/IPv6 address without a port
+- `auth` — Strict map with version (`"2c"`) and community (Secret)
+- `oids` — One to 64 numeric OIDs
+- `opts` — Optional strict map with port (default 161), timeout_ms (default 2000), retries (default 0, max 3), and allow_private
+
+**Returns:** Result containing target, checked address, port, version, duration_ms, attempts, and normalized values
+
+**Examples:**
+
+```ntnt
+snmp_get("router.example.com", map { "version": "2c", "community": require_secret("SNMP_COMMUNITY") }, ["1.3.6.1.2.1.1.1.0"])  // Read sysDescr using an opaque community
+```
+
+**Errors:**
+
+- **TypeError**: snmp_get() argument 1 must be String — *Fix: Pass a hostname or IP address*
+- **RuntimeError**: snmp_get() auth.community must be Secret — *Fix: Load the community with std/secrets.require_secret()*
+
+**See also:** `require_secret`, `net_capabilities`
+
+*Since v0.5.2*
 
 ---
 

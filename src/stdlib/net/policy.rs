@@ -57,7 +57,7 @@ pub(super) fn classify_ip(ip: IpAddr) -> IpClassification {
     }
 }
 
-pub(in crate::stdlib::net) fn enforce_resolved_target_policy(
+pub(crate) fn enforce_resolved_target_policy(
     targets: &[(u16, SocketAddr)],
     allow_private: bool,
 ) -> Result<(), String> {
@@ -89,7 +89,7 @@ fn enforce_target_policy(ip: IpAddr, allow_private: bool) -> Result<(), String> 
     }
     if !allow_private || !process_allows_private_targets() {
         return Err(
-            "Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1 for std/net probes (NTNT_ALLOW_PRIVATE_IPS only applies to fetch())"
+            "Network target denied by policy: private targets require NTNT_NET_ALLOW_PRIVATE=1 for std/net and std/netmon probes (NTNT_ALLOW_PRIVATE_IPS only applies to fetch())"
                 .to_string(),
         );
     }

@@ -4545,6 +4545,27 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("dns_reverse", ["ip" => Type::String, "opts" => opts.clone()], result_string_array, required(1));
             sig!("tls_info", ["host" => Type::String, "opts" => opts], result_map, required(1));
         }
+        "std/netmon" => {
+            let map = Type::Map {
+                key_type: Box::new(Type::String),
+                value_type: Box::new(Type::Any),
+            };
+            let result_map = Type::Generic {
+                name: "Result".to_string(),
+                args: vec![map.clone(), Type::String],
+            };
+            sig!(
+                "snmp_get",
+                [
+                    "target" => Type::String,
+                    "auth" => map.clone(),
+                    "oids" => Type::Array(Box::new(Type::String)),
+                    "opts" => map
+                ],
+                result_map,
+                required(3)
+            );
+        }
         "std/path" => {
             sig!("join_path", ["parts" => Type::String], Type::String, variadic);
             sig!("join", ["parts" => Type::String], Type::String, variadic); // deprecated alias

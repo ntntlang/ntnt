@@ -6,6 +6,8 @@ mod probe;
 mod traceroute;
 mod transport;
 
+pub(crate) use policy::enforce_resolved_target_policy;
+
 use crate::error::IntentError;
 use crate::interpreter::Value;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -13,7 +15,7 @@ use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::error::{ResolveError, ResolveErrorKind};
 use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::Resolver;
-use policy::{classify_ip, enforce_resolved_target_policy};
+use policy::classify_ip;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
 use rustls::{

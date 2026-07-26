@@ -100,6 +100,7 @@ pulldown-cmark = "0.13.0"
 hickory-resolver = "0.24.4"
 socket2 = "0.6"
 zeroize = { version = "1.8.2", features = ["serde"] }
+snmp2 = { version = "0.5.2", default-features = false }
 
 [build-dependencies]
 # Doc comment scanner (build.rs extracts /// @ntnt blocks)

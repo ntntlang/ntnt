@@ -538,7 +538,7 @@ sudo systemctl start ntnt-web ntnt-worker
 | `NTNT_SSRF_PROTECTION` | `true` (prod) | Block SSRF in `fetch()` |
 | `NTNT_DB_POOL_SIZE` | `5` | Database connections per pool per worker |
 | `NTNT_DETAILED_ERRORS` | `true` (dev) | Show stack traces in error responses |
-| `NTNT_NET_ALLOW_PRIVATE` | unset | Process-level opt-in for `std/net` probes against private/loopback targets (each call must also pass `allow_private: true`) |
+| `NTNT_NET_ALLOW_PRIVATE` | unset | Process-level opt-in for `std/net` and `std/netmon` calls against private/loopback targets (each call must also pass `allow_private: true`) |
 
 ---
 
@@ -582,6 +582,35 @@ let caps = net_capabilities()
 
 When a capability is missing, `ping()` and `traceroute()` return a clear
 `Err(String)` naming the problem instead of degrading silently.
+
+### SNMP monitoring (`std/netmon`)
+
+`snmp_get()` uses ordinary UDP sockets and does not require `NET_RAW`. Private
+device addresses use the same dual opt-in as `std/net`: set
+`NTNT_NET_ALLOW_PRIVATE=1` for the process and pass `allow_private: true` to
+the call. The SNMPv2c community must be loaded as an opaque `Secret`; plaintext
+strings are rejected. This protects application handling, not the wire protocol:
+SNMPv2c sends the community and payload without encryption, so use it only on a
+trusted management network or protected tunnel.
+
+```ntnt
+import { require_secret } from "std/secrets"
+import { snmp_get } from "std/netmon"
+
+let result = snmp_get(
+    "10.0.50.1",
+    map {
+        "version": "2c",
+        "community": require_secret("ROUTER_SNMP_COMMUNITY")
+    },
+    ["1.3.6.1.2.1.1.1.0"],
+    map { "allow_private": true, "timeout_ms": 2000 }
+)
+```
+
+Do not place community values directly in source, `.env` examples, command
+arguments, or job payloads. Use `std/secrets` and declare the logical secret in
+`ntnt.toml` for manifest-backed applications.
 
 ---
 
