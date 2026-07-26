@@ -28,7 +28,9 @@ requires len(target) > 0
     )
 }
 
-// At the application boundary:
+// At the application boundary, enable protocol calls with NTNT_NETMON_ENABLE=1.
+// Private targets also require NTNT_NET_ALLOW_PRIVATE=1 and allow_private: true.
+// Slice 1 accepts literal IPv4 and IPv6 targets; hostname resolution is deferred.
 // import { require_secret } from "std/secrets"
 // let result = read_system_info(
 //     "10.0.50.1",

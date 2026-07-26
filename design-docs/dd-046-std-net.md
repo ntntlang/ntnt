@@ -978,7 +978,7 @@ Remote command execution is too privileged for `std/net`. If added, it should li
 
 SNMP and higher-level monitoring concerns are covered by [DD-047: `std/netmon`](dd-047-std-netmon.md). Keep them out of the initial `std/net` module. `std/net` should provide safe primitives; `std/netmon` can build SNMP/device telemetry, interface counters, topology hints, composite checks, and alert-state helpers on top.
 
-SNMP is a real network-monitoring need, but it is its own protocol family. It should likely start as a private or separately distributed `std/netmon` library rather than default stdlib surface area. Do not make the first `std/net` PR carry BER/ASN.1 and SNMP semantics.
+SNMP is a real network-monitoring need, but it is its own protocol family. DD-047 now places it in a bundled, explicitly imported `std/netmon` module with a separate process enable gate; `std/net` still does not carry BER/ASN.1 or SNMP semantics.
 
 ---
 

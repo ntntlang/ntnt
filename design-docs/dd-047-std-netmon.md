@@ -5,7 +5,7 @@
 **Created:** 2026-06-02
 **Updated:** 2026-07-26
 **Related:** [DD-046: `std/net`](dd-046-std-net.md)
-**Target baseline:** post-v0.5.1
+**Target baseline:** post-v0.5.1; first public surface targets v0.5.2
 
 ---
 
@@ -68,8 +68,8 @@ Future app-local libraries may add vendor adapters or product abstractions witho
 The correctness-primitives roadmap is broader than this module, but five parts apply now:
 
 - protocol calls are bounded operations with strict option maps and one global deadline;
-- target authorization is connection-bound: resolution and policy checks happen before transport is bound to a checked `SocketAddr`;
-- credentials are opaque `Secret` capabilities exposed only at the protocol sink;
+- target authorization is connection-bound: Slice 1 accepts literal IP addresses and connects transport only to the policy-checked `SocketAddr`;
+- credentials are opaque `Secret` capabilities exposed only at the protocol sink, with credential-bearing application buffers zeroized after use;
 - normalized varbinds use storage-friendly shapes and preserve values such as `Counter64` without truncation;
 - scheduling, durable retry state, incidents, notifications, and tenant policy remain application concerns.
 
@@ -97,24 +97,26 @@ DD-077's future general `NetCapability` object is not invented locally here. `st
 
 ## Security and Deployment Model
 
-`std/netmon` is explicitly imported and each poll names one bounded target and OID set. Slice 1 reuses DD-046's outbound policy rather than adding a second global trust switch.
+`std/netmon` is explicitly imported and each poll names one bounded target and OID set. Every protocol call also requires the process-level `NTNT_NETMON_ENABLE=1` gate. Slice 1 reuses DD-046's target policy rather than weakening or duplicating address classification.
 
 Private/internal targets require both deployment and call-site intent:
 
 ```bash
-NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
+NTNT_NETMON_ENABLE=1 NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
 ```
 
-The call must also pass `allow_private: true`.
+`NTNT_NETMON_ENABLE=1` is required for public and private calls. Private calls must also pass `allow_private: true` and set `NTNT_NET_ALLOW_PRIVATE=1`.
 
 Policy:
 
-- Public targets are allowed for explicit single-target protocol calls.
+- Public targets are allowed only after the netmon process gate is enabled.
 - Private, loopback, link-local, and unique-local targets require the dual opt-in.
 - Metadata, multicast, broadcast, unspecified, and documentation targets remain denied even with opt-in.
-- All resolved addresses are checked before a request; the UDP session is bound to one checked `SocketAddr` so DNS cannot redirect the transport after policy evaluation.
-- Per-call OID lists, timeouts, retries, and result sizes are bounded.
-- SNMP communities must be opaque `Secret` values. Validation and transport errors never render them.
+- Slice 1 accepts literal IPv4/IPv6 addresses only. Hostname resolution is deferred until one outer deadline can bound all resolver candidates and A/AAAA activity.
+- UDP transport is connected directly to the checked `SocketAddr`; there is no second resolution step.
+- OID lists, encoded requests (8 KiB), response datagrams (16 KiB), timeouts, retries, and normalized results are bounded.
+- SNMP communities must be opaque `Secret` values. Validation and transport errors never render them, and credential-bearing request/response buffers are zeroized after use.
+- The strict ntnt-owned codec verifies response version, community, request ID, PDU type, complete BER consumption, exact varbind count, and requested OID order.
 - `Secret` handling does not make SNMPv2c confidential on the wire; deploy it only on trusted management networks or protected tunnels.
 - Default examples perform no traffic; protocol tests use a deterministic localhost mock agent.
 
@@ -179,7 +181,7 @@ Recommended fields:
 
 #### `snmp_get(target, auth, oids, opts?) -> Result<Map, String>` *(Slice 1)*
 
-Read one bounded set of numeric OIDs from an SNMP agent. Slice 1 supports SNMPv2c only.
+Read one bounded set of numeric OIDs from a literal IPv4/IPv6 SNMP agent target. Slice 1 supports SNMPv2c only and requires `NTNT_NETMON_ENABLE=1`.
 
 ```ntnt
 import { require_secret } from "std/secrets"
@@ -200,11 +202,11 @@ let system = snmp_get(
 The auth map is strict: `version` must be `"2c"`, `community` must be an opaque `Secret`, and unknown fields fail closed. The options map accepts only:
 
 - `port`: default 161, range 1–65535
-- `timeout_ms`: one global DNS-resolution, address-fallback, and request budget; default 2000, range 50–30000
+- `timeout_ms`: one global request-encoding, UDP send/receive, and retry budget; default 2000, range 50–30000
 - `retries`: additional bounded attempts, default 0, maximum 3
 - `allow_private`: default false; still requires `NTNT_NET_ALLOW_PRIVATE=1`
 
-The OID array accepts 1–64 unique numeric OIDs. Named MIB syntax is deferred.
+The OID array accepts 1–64 unique numeric OIDs, each at most 255 bytes and 128 unsigned 32-bit arcs. Named MIB syntax is deferred. Encoded requests are capped at 8 KiB and response datagrams at 16 KiB. Explicit values outside any bound fail rather than clamp.
 
 Result shape:
 
@@ -227,7 +229,7 @@ Ok(map {
 })
 ```
 
-`Counter64` values use decimal strings so ntnt's signed 64-bit `Int` cannot truncate them. Binary octet strings and opaque values use lowercase hex with explicit encoding metadata. Protocol exceptions such as `no_such_object` retain their type and use `None` as the value.
+`Counter64` values use decimal strings so ntnt's signed 64-bit `Int` cannot truncate them, including legal values above `i64::MAX`. Binary octet strings and opaque values use lowercase hex with explicit encoding metadata. Protocol exceptions such as `no_such_object` retain their type and use `None` as the value. Agent `error_status`/`error_index`, transport timeouts, malformed BER, and authentication mismatches return `Err(String)` rather than partial telemetry.
 
 #### `snmp_walk(target, auth, oid, opts?) -> Result<Array<Map>, String>` *(next slice)*
 
@@ -570,8 +572,9 @@ Shipped with Slice 1A:
 - [x] Package `std/netmon` as an explicitly imported bundled stdlib module.
 - [x] Preserve DD-046's low-level boundary and share its outbound target policy.
 - [x] Use `std/secrets` opaque `Secret` values at credential-bearing sinks.
+- [x] Require `NTNT_NETMON_ENABLE=1` before any protocol call.
 - [x] Reject plaintext community strings and unknown auth/option keys.
-- [x] Bind protocol transport to addresses checked before the request.
+- [x] Accept literal IP targets and connect protocol transport directly to the checked address.
 - [x] Add a deterministic localhost mock-agent fixture.
 - [x] Keep scheduling, storage, incidents, tenants, and notification delivery in applications.
 
@@ -588,11 +591,12 @@ Acceptance:
 Scope:
 
 - [x] `snmp_get(target, auth, oids, opts?)`
-- [x] Dependency-light synchronous SNMPv2c client with optional features disabled.
+- [x] Small ntnt-owned SNMPv2c GET codec with complete BER validation and zeroizing credential buffers.
 - [x] Strict numeric OID parsing, canonicalization, deduplication, and a 64-OID cap.
 - [x] Stable value normalization, including lossless `Counter64` and binary octets.
-- [x] Global timeout budget, retry/address fallback cap, and exact response OID/count checks.
+- [x] Global timeout budget, retry cap, request/response byte caps, and exact response OID/count checks.
 - [x] Mock UDP SNMP agent fixture exercising the ntnt runtime end to end.
+- [x] Independent golden BER coverage for BOOLEAN, full-width Counter64, wrong version/PDU/request ID/community, malformed lengths, truncation, and trailing bytes.
 
 Acceptance:
 
@@ -729,18 +733,21 @@ Acceptance:
 
 ## Dependencies / Implementation Choices
 
-Slice 1A uses `snmp2` 0.5.2 with default features disabled:
+Slice 1A uses a small ntnt-owned SNMPv2c GET codec instead of a general SNMP dependency:
 
-- synchronous SNMPv2c GET is the only enabled surface;
-- Tokio, SNMPv3 crypto, OpenSSL, MIB loading, and trap features are not pulled in;
-- the crate's request-ID/community validation and bounded fixed receive buffer are retained;
-- ntnt adds its own strict contracts, address policy, global deadline, response OID/count checks, credential redaction, and normalized values.
+- only definite-length BER forms required for strict SNMPv2c GET/RESPONSE are accepted;
+- the complete outer message, PDU, varbind list, and each varbind must be consumed with no trailing or silently truncated fields;
+- version, community, request ID, response PDU type, agent status, varbind count, and exact OID order are verified;
+- legal unsigned `Counter64` values through `u64::MAX` and correctly tagged BOOLEAN values decode losslessly;
+- request and receive buffers that contain the community are wrapped in `Zeroizing` and cleared on every exit path;
+- no Tokio, OpenSSL, SNMPv3 crypto, MIB loading, or trap dependency is pulled in.
 
 SNMPv3 remains deferred until the v2c data shapes and failure contract survive real use. WALK/GETBULK must reuse this boundary rather than exposing the dependency directly.
 
 Supporting test infrastructure:
 
 - deterministic localhost UDP mock agent in default CI;
+- hand-authored golden BER packets independent of the production codec;
 - fixed clocks when rate and alert helpers arrive;
 - optional real-device tests behind explicit environment gates.
 
@@ -756,6 +763,7 @@ Required tests:
 - [ ] mock SNMP WALK table success
 - [x] timeout / retry behavior
 - [x] malformed or mismatched SNMP response handling
+- [x] complete BER consumption, version/PDU/request/community correlation, and full-width Counter64 decoding
 - [x] noSuchObject/noSuchName normalization
 - [ ] interface inventory normalization
 - [ ] 32-bit and 64-bit counter snapshots
@@ -776,7 +784,7 @@ Optional/manual tests:
 
 1. **Packaging — resolved:** bundled, explicitly imported standard-library module. Product-specific monitoring state remains application-owned.
 
-2. **SNMP dependency — resolved for v2c GET:** `snmp2` with default features disabled, wrapped behind ntnt-owned contracts and fixtures.
+2. **SNMP dependency — resolved for v2c GET:** use the small ntnt-owned strict codec. The previously evaluated `snmp2` path could not prove complete BER consumption, full-width Counter64 decoding, or zeroized credential buffers.
 
 3. **SNMPv3 timing:** include in initial module or defer?
 

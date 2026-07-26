@@ -1409,36 +1409,6 @@ fn dns_resolver(opts: Option<&HashMap<String, Value>>) -> Result<Resolver, Strin
         .map_err(|e| format!("failed to initialize DNS resolver: {}", e))
 }
 
-pub(crate) fn resolve_host_targets_with_timeout(
-    host: &str,
-    port: u16,
-    timeout: Duration,
-) -> Result<Vec<SocketAddr>, String> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(vec![SocketAddr::new(ip, port)]);
-    }
-
-    let (config, mut resolver_opts) = system_resolver_config()?;
-    resolver_opts.timeout = timeout;
-    resolver_opts.attempts = 1;
-    let resolver = Resolver::new(config, resolver_opts)
-        .map_err(|error| format!("failed to initialize DNS resolver: {error}"))?;
-    let lookup = resolver
-        .lookup_ip(host)
-        .map_err(|error| format!("DNS resolution failed: {error}"))?;
-    let mut addresses: Vec<SocketAddr> =
-        lookup.iter().map(|ip| SocketAddr::new(ip, port)).collect();
-    addresses.sort_unstable();
-    addresses.dedup();
-    if addresses.is_empty() {
-        return Err("DNS resolution returned no addresses".to_string());
-    }
-    if addresses.len() > 32 {
-        return Err("DNS resolution returned more than 32 addresses".to_string());
-    }
-    Ok(addresses)
-}
-
 fn system_resolver_config() -> Result<(ResolverConfig, ResolverOpts), String> {
     #[cfg(any(unix, target_os = "windows"))]
     {

@@ -59,7 +59,7 @@ Code examples demonstrating NTNT language features.
 | [csv_test.tnt](csv_test.tnt) | CSV parsing |
 | [data_processing.tnt](data_processing.tnt) | Data transformation |
 | [environment.tnt](environment.tnt) | Environment variables |
-| [netmon_snmp.tnt](netmon_snmp.tnt) | Bounded SNMPv2c GET with an opaque `Secret` community |
+| [netmon_snmp.tnt](netmon_snmp.tnt) | Gated, bounded SNMPv2c GET for literal IP targets with an opaque `Secret` community |
 
 ## Running Examples
 
