@@ -6,10 +6,10 @@
 
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
-use crate::stdlib::net::enforce_resolved_target_policy;
+use crate::stdlib::net::{enforce_resolved_target_policy, resolve_host_targets_with_timeout};
 use snmp2::{Oid, SyncSession, Value as SnmpValue};
 use std::collections::{HashMap, HashSet};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 const DEFAULT_SNMP_PORT: u16 = 161;
@@ -53,7 +53,8 @@ pub fn init() -> HashMap<String, Value> {
     // Public targets are allowed by default. Private/internal targets require
     // both `NTNT_NET_ALLOW_PRIVATE=1` and `allow_private: true`; metadata,
     // multicast, broadcast, unspecified, and documentation targets remain denied.
-    // The timeout is a global budget across address fallback and retries.
+    // `timeout_ms` is one global budget covering DNS resolution, address fallback,
+    // and retries. Each successful response must contain exactly the requested OIDs.
     // @param target DNS hostname or IPv4/IPv6 address without a port
     // @param auth Strict map with version (`"2c"`) and community (Secret)
     // @param oids One to 64 numeric OIDs
@@ -101,7 +102,9 @@ fn snmp_get(
     let auth = parse_v2c_auth(auth)?;
     let options = parse_options(opts)?;
     let parsed_oids = parse_oids(oid_values)?;
-    let addresses = resolve_targets(target, options.port)?;
+    let started = Instant::now();
+    let deadline = started + options.timeout;
+    let addresses = resolve_targets(target, options.port, deadline)?;
     let policy_targets: Vec<_> = addresses
         .iter()
         .copied()
@@ -114,8 +117,6 @@ fn snmp_get(
         .len()
         .saturating_add(options.retries)
         .clamp(1, MAX_ATTEMPTS);
-    let started = Instant::now();
-    let deadline = started + options.timeout;
     let mut last_error = "request failed".to_string();
     let mut attempts_made = 0usize;
 
@@ -410,18 +411,21 @@ fn parse_oids(values: &[Value]) -> std::result::Result<Vec<Oid<'static>>, String
     Ok(parsed)
 }
 
-fn resolve_targets(target: &str, port: u16) -> std::result::Result<Vec<SocketAddr>, String> {
-    let mut addresses: Vec<_> = (target, port)
-        .to_socket_addrs()
-        .map_err(|_| "snmp_get() target could not be resolved".to_string())?
-        .collect();
-    addresses.sort_unstable();
-    addresses.dedup();
-    if addresses.is_empty() {
-        Err("snmp_get() target resolved to no addresses".to_string())
-    } else {
-        Ok(addresses)
+fn resolve_targets(
+    target: &str,
+    port: u16,
+    deadline: Instant,
+) -> std::result::Result<Vec<SocketAddr>, String> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| "snmp_get() global timeout expired during target resolution".to_string())?;
+    let addresses = resolve_host_targets_with_timeout(target, port, remaining)
+        .map_err(|error| format!("snmp_get() target resolution failed: {error}"))?;
+    if Instant::now() >= deadline {
+        return Err("snmp_get() global timeout expired during target resolution".to_string());
     }
+    Ok(addresses)
 }
 
 fn normalize_varbind(oid: &str, value: SnmpValue<'_>) -> std::result::Result<Value, String> {
@@ -629,6 +633,18 @@ mod tests {
 
         assert!(parse_oids(&[Value::String(" 1.3.6.1".to_string())]).is_err());
         assert!(validate_target(" router.example.com").is_err());
+    }
+
+    #[test]
+    fn target_resolution_is_inside_the_global_deadline() {
+        let error = resolve_targets("localhost", 161, Instant::now())
+            .expect_err("expired resolution budget must fail before DNS");
+        assert!(error.contains("global timeout expired during target resolution"));
+
+        let addresses = resolve_targets("localhost", 161, Instant::now() + Duration::from_secs(2))
+            .expect("system resolver should resolve localhost within the budget");
+        assert!(!addresses.is_empty());
+        assert!(addresses.iter().all(|address| address.port() == 161));
     }
 
     #[test]

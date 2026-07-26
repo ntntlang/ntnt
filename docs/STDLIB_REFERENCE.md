@@ -10318,7 +10318,7 @@ snmp_get(target: String, auth: Map, oids: Array<String>, opts?: Map) -> Result<M
 
 Reads one bounded set of numeric OIDs from an SNMP agent. Slice 1 supports SNMPv2c only. The strict auth map must contain `version: "2c"` and a `community` Secret, normally returned by `require_secret()`; plaintext community strings are rejected. Unknown auth and option keys are rejected. SNMPv2c does not encrypt its community or payload; use this slice only on trusted management networks or protected tunnels while SNMPv3 is deferred.
 
-Public targets are allowed by default. Private/internal targets require both `NTNT_NET_ALLOW_PRIVATE=1` and `allow_private: true`; metadata, multicast, broadcast, unspecified, and documentation targets remain denied. The timeout is a global budget across address fallback and retries.
+Public targets are allowed by default. Private/internal targets require both `NTNT_NET_ALLOW_PRIVATE=1` and `allow_private: true`; metadata, multicast, broadcast, unspecified, and documentation targets remain denied. `timeout_ms` is one global budget covering DNS resolution, address fallback, and retries. Each successful response must contain exactly the requested OIDs.
 
 **Parameters:**
 

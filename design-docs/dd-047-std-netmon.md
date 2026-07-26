@@ -200,7 +200,7 @@ let system = snmp_get(
 The auth map is strict: `version` must be `"2c"`, `community` must be an opaque `Secret`, and unknown fields fail closed. The options map accepts only:
 
 - `port`: default 161, range 1–65535
-- `timeout_ms`: global budget, default 2000, range 50–30000
+- `timeout_ms`: one global DNS-resolution, address-fallback, and request budget; default 2000, range 50–30000
 - `retries`: additional bounded attempts, default 0, maximum 3
 - `allow_private`: default false; still requires `NTNT_NET_ALLOW_PRIVATE=1`
 

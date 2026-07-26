@@ -1195,7 +1195,7 @@ match snmp_get(
 }
 ```
 
-`snmp_get(target, auth, oids, opts?)` accepts 1–64 unique numeric OIDs. Options are `port`, `timeout_ms`, `retries`, and `allow_private`; unknown fields are rejected. The timeout is one global budget across checked-address fallback and retries. The result identifies both the requested `target` and the checked `address` that answered. Returned varbinds use stable `oid`, `type`, `value`, and optional `encoding` fields. `Counter64` values are decimal strings to avoid signed-integer overflow; binary values are hex encoded.
+`snmp_get(target, auth, oids, opts?)` accepts 1–64 unique numeric OIDs. Options are `port`, `timeout_ms`, `retries`, and `allow_private`; unknown fields are rejected. The timeout is one global budget covering DNS resolution, checked-address fallback, and retries. The result identifies both the requested `target` and the checked `address` that answered. Returned varbinds use stable `oid`, `type`, `value`, and optional `encoding` fields. `Counter64` values are decimal strings to avoid signed-integer overflow; binary values are hex encoded.
 
 Private agents require both `NTNT_NET_ALLOW_PRIVATE=1` and `allow_private: true`. Special-purpose targets remain blocked, and all resolved addresses are checked before the UDP transport is bound. Keep polling in jobs/workers rather than HTTP request handlers.
 
