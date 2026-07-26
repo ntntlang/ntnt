@@ -238,7 +238,7 @@ fn start_mock_snmp_agent(behavior: AgentBehavior) -> (u16, std::thread::JoinHand
                     response[layout.version_value_offset] = 0;
                 }
                 AgentBehavior::TrailingBytes => response.push(0),
-                AgentBehavior::OversizedResponse => response = vec![0; 16 * 1024 + 1],
+                AgentBehavior::OversizedResponse => response = vec![0; 8 * 1024 + 1],
                 AgentBehavior::Respond | AgentBehavior::DropFirst | AgentBehavior::Silent => {}
             }
             let _ = socket.send_to(&response, peer);
@@ -367,7 +367,7 @@ fn snmp_get_rejects_unrequested_oid_wrong_version_and_trailing_bytes() {
         (AgentBehavior::TrailingBytes, "trailing byte"),
         (
             AgentBehavior::OversizedResponse,
-            "response exceeds 16384 bytes",
+            "response exceeds 8192 bytes",
         ),
     ] {
         let (port, agent) = start_mock_snmp_agent(behavior);

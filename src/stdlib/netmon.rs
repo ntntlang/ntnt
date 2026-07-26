@@ -29,7 +29,7 @@ const MAX_OIDS: usize = 64;
 const MAX_OID_BYTES: usize = 255;
 const MAX_OID_SEGMENTS: usize = 128;
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
-const MAX_RESPONSE_BYTES: usize = 16 * 1024;
+const MAX_RESPONSE_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 struct SnmpOptions {
@@ -69,7 +69,7 @@ pub fn init() -> HashMap<String, Value> {
     // and `allow_private: true`; special-purpose targets remain denied.
     // `timeout_ms` is one global budget across request encoding, UDP send/receive,
     // and retries. Encoded requests are capped at 8 KiB; responses are capped at
-    // 16 KiB and must be complete, strict SNMPv2c BER with exactly the requested
+    // 8 KiB and must be complete, strict SNMPv2c BER with exactly the requested
     // OIDs in order.
     // @param target Literal IPv4 or IPv6 address without a port
     // @param auth Strict map with version (`"2c"`) and community (Secret)

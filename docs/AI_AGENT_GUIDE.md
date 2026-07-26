@@ -1201,7 +1201,7 @@ match snmp_get(
 }
 ```
 
-`snmp_get(target, auth, oids, opts?)` accepts 1–64 unique numeric OIDs and a literal IP target. Options are `port`, `timeout_ms`, `retries`, and `allow_private`; unknown fields are rejected. The timeout is one global budget covering request encoding, UDP send/receive, and retries. Requests are capped at 8 KiB and responses at 16 KiB. The result identifies both the requested `target` and checked `address`. Returned varbinds use stable `oid`, `type`, `value`, and optional `encoding` fields. `Counter64` values are decimal strings to avoid signed-integer overflow; binary values are hex encoded.
+`snmp_get(target, auth, oids, opts?)` accepts 1–64 unique numeric OIDs and a literal IP target. Options are `port`, `timeout_ms`, `retries`, and `allow_private`; unknown fields are rejected. The timeout is one global budget covering request encoding, UDP send/receive, and retries. Requests are capped at 8 KiB and responses at 8 KiB. The result identifies both the requested `target` and checked `address`. Returned varbinds use stable `oid`, `type`, `value`, and optional `encoding` fields. `Counter64` values are decimal strings to avoid signed-integer overflow; binary values are hex encoded.
 
 Private agents require `NTNT_NETMON_ENABLE=1`, `NTNT_NET_ALLOW_PRIVATE=1`, and `allow_private: true`. Special-purpose targets remain blocked, and transport is connected directly to the policy-checked literal address. Keep polling in jobs/workers rather than HTTP request handlers.
 

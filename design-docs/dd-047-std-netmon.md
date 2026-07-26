@@ -114,7 +114,7 @@ Policy:
 - Metadata, multicast, broadcast, unspecified, and documentation targets remain denied even with opt-in.
 - Slice 1 accepts literal IPv4/IPv6 addresses only. Hostname resolution is deferred until one outer deadline can bound all resolver candidates and A/AAAA activity.
 - UDP transport is connected directly to the checked `SocketAddr`; there is no second resolution step.
-- OID lists, encoded requests (8 KiB), response datagrams (16 KiB), timeouts, retries, and normalized results are bounded.
+- OID lists, encoded requests (8 KiB), response datagrams (8 KiB), timeouts, retries, and normalized results are bounded.
 - SNMP communities must be opaque `Secret` values. Validation and transport errors never render them, and credential-bearing request/response buffers are zeroized after use.
 - The strict ntnt-owned codec verifies response version, community, request ID, PDU type, complete BER consumption, exact varbind count, and requested OID order.
 - `Secret` handling does not make SNMPv2c confidential on the wire; deploy it only on trusted management networks or protected tunnels.
@@ -206,7 +206,7 @@ The auth map is strict: `version` must be `"2c"`, `community` must be an opaque 
 - `retries`: additional bounded attempts, default 0, maximum 3
 - `allow_private`: default false; still requires `NTNT_NET_ALLOW_PRIVATE=1`
 
-The OID array accepts 1–64 unique numeric OIDs, each at most 255 bytes and 128 unsigned 32-bit arcs. Named MIB syntax is deferred. Encoded requests are capped at 8 KiB and response datagrams at 16 KiB. Explicit values outside any bound fail rather than clamp.
+The OID array accepts 1–64 unique numeric OIDs, each at most 255 bytes and 128 unsigned 32-bit arcs. Named MIB syntax is deferred. Encoded requests are capped at 8 KiB and response datagrams at 8 KiB. Explicit values outside any bound fail rather than clamp.
 
 Result shape:
 
