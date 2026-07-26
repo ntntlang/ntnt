@@ -129,10 +129,10 @@ A future deployment-issued `NetCapability` can replace process-global authority 
 
 Third-party updates are distributed as operator-owned source bundles, but raw ASN.1/SMI text is never parsed on a poll, HTTP request, or ordinary stdlib call. ntnt uses two stages:
 
-1. `ntnt netmon mib compile <source-root> --output <catalog>` validates bounded MIB/profile/plan source in an offline compiler process and emits one canonical catalog.
+1. `ntnt netmon mib compile <source-root> --output-dir <directory>` validates bounded MIB/profile/plan source in an isolated offline compiler worker and emits one immutable content-addressed catalog.
 2. Application startup loads only that canonical catalog from the application manifest. Runtime readers clone one immutable `Arc<CatalogSnapshot>` for the complete operation.
 
-The compiler performs no network fetch, system MIB-directory discovery, shell execution, dynamic library loading, template evaluation, or `.tnt` execution. A parser crash, memory exhaustion, or timeout can fail the compiler process without replacing the application's last-known-good runtime catalog.
+The compiler performs no network fetch, system MIB-directory discovery, shell execution, dynamic library loading, template evaluation, or `.tnt` execution. A parser crash, memory-budget failure, or timeout cannot publish a new immutable artifact or change application configuration; previously selected artifacts remain untouched.
 
 ### Three separately typed layers
 
@@ -146,7 +146,7 @@ MIB source cannot define recognition or polling behavior. Profiles cannot contai
 
 The catalog is published atomically only after every profile and plan recompiles against the candidate MIB schema. A MIB-only update that invalidates an active profile or plan rejects the complete candidate.
 
-### Source and compiled formats
+### Source schemas
 
 The source root contains an explicit manifest and separately typed files:
 
@@ -162,50 +162,218 @@ netmon/
     └── acme-switch-inventory.toml
 ```
 
-The manifest lists every file and expected module/profile/plan identity. Imports resolve only within the candidate source set plus ntnt's synthetic SMI foundation modules. Absolute paths, parent components, symlinks, duplicate paths, case/Unicode-normalization collisions, unknown fields, duplicate module/profile/plan IDs, unresolved required imports, and cycles fail closed.
+`catalog.toml` v1 is a closed schema:
 
-Plans use module-qualified symbols such as `IF-MIB::ifName`. Unqualified lookup succeeds only when exactly one candidate exists. Exact `sysObjectID` matches precede longest-prefix matches; equal top matches are compile-time ambiguity errors rather than file-order tie breakers.
+```toml
+schema = 1
+id = "acme-network"
+version = "2026.07.26"
 
-The compiler emits a bounded canonical catalog with a magic/version header, canonical serialized payload, payload length, and SHA-256 integrity digest. Runtime revalidates the header, length, digest, compiler-semantics version, structural bounds, sorted uniqueness, and OID depth before publication. Raw source descriptions remain inert provenance and are omitted from ordinary runtime results.
+[[mibs]]
+path = "mibs/ACME-SMI.mib"
+module = "ACME-SMI"
 
-### Resource ceilings
+[[mibs]]
+path = "mibs/ACME-SWITCH-MIB.mib"
+module = "ACME-SWITCH-MIB"
+
+[[profiles]]
+path = "profiles/acme-switch.toml"
+id = "acme-switch"
+
+[[plans]]
+path = "plans/acme-switch-inventory.toml"
+id = "acme-switch-inventory"
+```
+
+Every file and expected module/profile/plan identity is explicit; each profile or plan file contains exactly one top-level record. Imports resolve only within the candidate source set plus ntnt's synthetic SMI foundation modules. Absolute paths, parent components, symlinks, duplicate paths, case/Unicode-normalization collisions, unknown fields, duplicate identities, unresolved required imports, and cycles fail closed.
+
+A device profile is classification data only:
+
+```toml
+schema = 1
+id = "acme-switch"
+version = "1"
+vendor = "Acme"
+family = "Switch"
+model = "1000 series"
+plans = ["acme-switch-inventory"]
+default_plan = "acme-switch-inventory"
+
+[match]
+sys_object_ids = ["ACME-SWITCH-MIB::acmeSwitch1000"]
+sys_object_id_prefixes = ["1.3.6.1.4.1.424242.10"]
+
+[[match.sys_descr]]
+op = "contains"
+value = "ACME Switch"
+ascii_case_insensitive = true
+```
+
+Profile v1 permits only `equals`, `prefix`, and `contains` literal `sysDescr` operators over a compiler-capped 512-byte value. It has no regex, inheritance, includes, priorities, negation, or executable predicates. Recognition precedence is exact `sysObjectID`, longest `sysObjectID` prefix, then `sysDescr`. Multiple profiles matching at the winning tier return runtime `ambiguous`; duplicate exact rules and equal static prefixes are rejected during compilation.
+
+An inventory plan is finite read-only acquisition data:
+
+```toml
+schema = 1
+id = "acme-switch-inventory"
+version = "1"
+
+[[sections]]
+id = "interfaces"
+kind = "table"
+root = "IF-MIB::ifTable"
+index = "IF-MIB::ifIndex"
+required = true
+max_results = 1024
+
+[[sections.fields]]
+name = "name"
+oid = "IF-MIB::ifName"
+format = "string"
+
+[[sections.fields]]
+name = "in_octets"
+oid = "IF-MIB::ifHCInOctets"
+format = "counter"
+```
+
+Section v1 permits `scalars` and `table` only. Field formats are the allowlisted values `string`, `integer`, `unsigned`, `counter`, `enum`, `bits`, `mac`, `ipv4`, `ipv6`, `oid`, and `hex`. Every symbol is module-qualified and compiles to a numeric OID. V1 has no joins, callbacks, general expressions, templates, includes, inheritance, scripts, targets, credentials, SNMP SET, or data-dependent expansion.
+
+All source objects use closed TOML schemas; unknown or duplicate keys are errors. IDs are 1–128-byte ASCII values matching `[A-Za-z0-9][A-Za-z0-9._-]*`; versions are 1–128-byte strings; paths are 1–512-byte normalized relative paths. Additional normative fields and constraints are:
+
+| Record | Required fields | Optional fields | Cross-field constraints |
+|---|---|---|---|
+| Manifest | `schema=1`, `id`, `version`, `mibs`, `profiles`, `plans` | none | `mibs` has 1–128 unique `(module,path)` entries; `profiles` and `plans` each have 1–256 entries; their combined source-file count is at most 512; profile/plan entry IDs and paths are unique and match the referenced file's top-level ID |
+| MIB entry | `path`, `module` | none | `module` follows SMI module-identifier syntax and exactly matches parsed module identity |
+| Profile/plan entry | `path`, `id` | none | referenced file contains exactly one record with that ID |
+| Profile | `schema=1`, `id`, `version`, `vendor`, `family`, `plans`, `default_plan`, `match` | `model` | `plans` has 1–32 unique IDs; `default_plan` is a member of `plans`; at least one matcher exists |
+| Match set | `sys_object_ids`, `sys_object_id_prefixes`, `sys_descr` | none | arrays may individually be empty; OID entries are unique, numeric or module-qualified, and compile to at most 128 arcs |
+| `sys_descr` matcher | `op`, `value`, `ascii_case_insensitive` | none | `op` is `equals`, `prefix`, or `contains`; `value` is 1–512 bytes |
+| Plan | `schema=1`, `id`, `version`, `sections` | none | 1–32 sections with unique IDs; aggregate request formula below must fit |
+| Section | `id`, `kind`, `root`, `required`, `max_results`, `fields` | `index` | `max_results` is 1–2,048; `fields` has 1–256 unique names/OIDs; `index` is required for `table` and forbidden for `scalars` |
+| Field | `name`, `oid`, `format` | none | `name` is a unique ID; `oid` is module-qualified; `format` is from the v1 allowlist and compatible with resolved syntax |
+
+### Canonical catalog artifact
+
+`ntnt netmon mib compile <source-root> --output-dir <directory>` compiles all three source schemas together. There is no independently published MIB-only intermediate: compiler and runtime reader for `netmon.catalog/v1` ship in the same slice.
+
+The artifact extension is `.ntntc`, not JSON. Its framing is exactly:
+
+```text
+8 bytes   magic = "NTNTMIB\0"
+2 bytes   format_version, unsigned big-endian = 1
+2 bytes   compiler_semantics_version, unsigned big-endian = 1
+8 bytes   payload_length, unsigned big-endian
+32 bytes  payload_sha256
+N bytes   canonical UTF-8 JSON payload
+```
+
+Canonical JSON uses RFC 8785 JSON Canonicalization Scheme (JCS), with the additional restrictions that ntnt emits no floating-point values and accepts only valid Unicode scalar-value strings. JCS defines UTF-8 encoding, object-key ordering, string escaping, and integer rendering; no alternate escaping is accepted as canonical output.
+
+Array order is also normative: modules by `name`; symbols by `(module, name)`; profiles and plans by `id`; profile plan IDs and aliases by UTF-8 bytes; numeric OID rules by numeric arc sequence; secondary rules by `(op, value, ascii_case_insensitive)`; sections and fields by `id` and `name`; enums and bits by numeric value/bit then label. Runtime rejects any noncanonical array order.
+
+The payload is a closed object with these required top-level keys:
+
+```text
+schema: "netmon.catalog/v1"
+format_version: 1
+compiler_semantics_version: 1
+catalog: { id: String, version: String }
+hashes: { mib_hash, profiles_hash, plans_hash, catalog_hash }
+modules: Array<ModuleRecord>
+symbols: Array<SymbolRecord>
+profiles: Array<ResolvedProfileRecord>
+plans: Array<ResolvedPlanRecord>
+```
+
+`ModuleRecord` requires `name`, `language`, and `module_hash`. `SymbolRecord` requires `module`, `name`, `qualified_name`, canonical numeric `oid`, `kind`, `syntax`, `access`, `status`, sorted `aliases`, nullable table/index metadata, sorted enum/bit metadata, and `symbol_hash`. `ResolvedProfileRecord` requires ID/version/hash, vendor/family/model labels, default/supported plan IDs, numeric exact/prefix rules, and literal secondary rules. `ResolvedPlanRecord` requires ID/version/hash and sorted sections; each section contains ID/kind/numeric root/index, required flag, result ceiling, and sorted fields with name/numeric OID/format. Nullable fields are explicit JSON `null`; omitted keys and unknown keys are invalid.
+
+Every record hash is computed from a named **hashless preimage record** containing every field above except its own `*_hash` field. Define the framing function:
+
+```text
+H(domain, parts...) = SHA256(
+    u16be(len(domain_utf8)) || domain_utf8 ||
+    for each part: u64be(len(part)) || part
+)
+```
+
+Versions are two-byte unsigned big-endian parts. Digests passed to `H` are raw 32-byte values, never hexadecimal text. Digest fields stored in canonical JSON and manifest configuration are lowercase 64-character hexadecimal.
+
+Hash definitions are:
+
+```text
+symbol_hash  = H("ntnt-netmon-symbol-v1", JCS(hashless SymbolRecord))
+module_hash  = H("ntnt-netmon-module-v1",
+                 JCS(hashless ModuleRecord),
+                 each raw symbol_hash for that module in canonical symbol order)
+profile_hash = H("ntnt-netmon-profile-v1", JCS(hashless ResolvedProfileRecord))
+plan_hash    = H("ntnt-netmon-plan-v1", JCS(hashless ResolvedPlanRecord))
+mib_hash      = H("ntnt-netmon-mibs-v1", each raw module_hash in canonical module order)
+profiles_hash = H("ntnt-netmon-profiles-v1", each raw profile_hash in canonical profile order)
+plans_hash    = H("ntnt-netmon-plans-v1", each raw plan_hash in canonical plan order)
+catalog_hash  = H("ntnt-netmon-catalog-v1",
+                  u16be(format_version), u16be(compiler_semantics_version),
+                  raw mib_hash, raw profiles_hash, raw plans_hash)
+payload_sha256  = SHA256(the exact canonical payload bytes)
+artifact_sha256 = SHA256(the complete framed artifact bytes)
+```
+
+The 32-byte header field is raw `payload_sha256`. Runtime reconstructs every hashless record, recomputes every symbol/module/profile/plan and aggregate hash, compares all stored digest fields, and only then publishes the snapshot. This binds unreferenced symbol/type/table metadata as strongly as profile-referenced data.
+
+`expected_sha256` always means `artifact_sha256`, never `payload_sha256` or semantic `catalog_hash`. Filesystem metadata, installation paths, source ordering, and timestamps do not affect semantic hashes. Declared versions are human labels, not identity; the compiler rejects a same-ID/version artifact with a different `catalog_hash` when that prior artifact is present in the selected output directory, and deployment policy must otherwise use hashes as authority.
+
+### Compiler and runtime ceilings
 
 Initial hard ceilings are defensive implementation limits rather than SMI-standard limits:
 
 | Resource | Hard cap |
 |---|---:|
+| Manifest bytes | 256 KiB |
 | Source files | 512 |
-| One source file | 4 MiB |
-| Total source bytes | 64 MiB |
+| One MIB source file | 4 MiB |
+| Total MIB source bytes | 64 MiB |
+| One profile or plan source | 256 KiB |
+| Total profile source bytes | 4 MiB |
+| Total plan source bytes | 4 MiB |
+| Lexical tokens | 1,000,000 total |
+| Identifier/path bytes | 128 / 512 |
+| Quoted string bytes | 1 MiB |
 | MIB modules | 128 |
-| Definitions/symbols | 100,000 |
-| Imports per module | 256 |
+| Definitions/symbols/AST nodes | 100,000 / 100,000 / 250,000 |
+| Imports per module / total import edges | 256 / 4,096 |
 | Import/type/OID chain depth | 64 |
 | OID arcs | 128 |
-| Profiles | 1,024 |
-| Recognition rules | 8,192 |
-| Plans | 4,096 |
-| Walk roots per plan | 32 |
-| Collected diagnostics | 10,000 |
+| Profiles / recognition rules | 256 / 8,192 |
+| Plans / sections / fields | 256 / 4,096 / 100,000 |
+| Sections per plan | 32 |
+| Collected diagnostics / diagnostic text | 10,000 / 256 bytes each |
+| Compiler wall clock | 30 seconds default / 120 seconds hard |
+| Compiler worker tracked heap | 512 MiB |
 | Canonical catalog bytes | 64 MiB |
-| Estimated runtime registry heap | 256 MiB |
+| Runtime registry tracked heap | 256 MiB |
 
-Compiler code uses checked counters before collection growth, iterative/depth-bounded graph traversal, deterministic `BTreeMap`/sorted-vector output, and a single parser worker by default. Diagnostics expose bounded code/module/line metadata without absolute host paths, source excerpts, or terminal control characters.
+The CLI parent directly spawns a hidden compiler-worker mode of the same executable, never a shell. The parent enforces the wall-clock deadline and kills the worker on expiry. The worker uses one parser thread by default, a counting allocator for its heap ceiling, pre-parser byte/token/string checks, checked counters before collection growth, and iterative/depth-bounded graph traversal. Worker crash, timeout, or budget failure leaves no publishable candidate. Diagnostics expose bounded code/module/line metadata without absolute host paths, source excerpts, or terminal control characters.
 
-### Catalog identity and update semantics
+### Publication, startup, and job semantics
 
-Content hashes use SHA-256 with domain separation and canonical serialization:
+The compiler writes a same-directory temporary artifact with exclusive creation, validates it through the production runtime reader, and fsyncs the file. Publication uses an OS/filesystem atomic **no-replace** primitive; environments that cannot guarantee no-replace fail closed. On `AlreadyExists`, the compiler opens the existing destination, validates its complete bytes and `artifact_sha256`, and discards the temporary file only when they are identical. It never replaces an existing path. After successful publication it fsyncs the output directory and never changes application configuration. Existing content-addressed artifacts therefore remain the deployment-owned rollback set.
 
-- `mib_registry_hash`
-- `profiles_hash`
-- `plans_hash`
-- `catalog_hash = SHA256(domain || format_version || compiler_semantics_version || mib_hash || profiles_hash || plans_hash)`
+The optional application manifest configuration is:
 
-Filesystem metadata, installation paths, source ordering, and timestamps do not affect identity. Declared versions are human labels, not content identity. Reusing one catalog ID/version with different content is rejected unless deployment explicitly selects a new version.
+```toml
+[netmon.catalog]
+path = "netmon/catalogs/<artifact_sha256>.ntntc"
+expected_sha256 = "<artifact_sha256>"
+```
 
-Production v1 uses restart or rolling restart after an external updater stages, fsyncs, and atomically renames a validated catalog. Runtime never auto-downloads updates. Each process loads its own snapshot and reports the catalog hash through readiness/telemetry; an expected hash mismatch fails readiness. Live reload may follow only with serialized candidate compilation/loading, compare-and-swap generation checks, and last-known-good retention.
+The path is interpreted beneath the canonical directory containing the closest `ntnt.toml`. Absolute paths, `..`, empty/control-character components, symlinks in any component, non-regular files, and artifacts larger than the framing bytes plus 64 MiB payload cap are rejected. Runtime opens through a rooted directory handle with no-follow semantics and validates length, complete `artifact_sha256`, payload, and registry from that same opened file handle, so a path swap cannot change the validated bytes.
 
-Queued monitoring runs persist the selected catalog/profile/plan hashes. A delayed worker must load the exact retained version or fail/retry; it must not silently reinterpret a run through whichever catalog is current later.
+A new common application-bootstrap step runs before main-source execution in `run`, `test`, HTTP server workers, `ntnt worker`, and job-worker startup. Repeated configuration for the same canonical application root and artifact is idempotent; a second distinct root or artifact in one process fails as `conflicting_application`. If the section is absent, numeric `snmp_get`/`snmp_walk` remain usable and catalog APIs return `Err("catalog_not_configured")`. If the section is present but its path, digest, format, or contents are invalid, process startup fails before serving traffic or claiming jobs. This is a specific netmon bootstrap contract, not a claim that ntnt already has a generic readiness subsystem.
+
+Every process loads one active immutable `Arc<CatalogSnapshot>` and reports both `artifact_sha256` and `catalog_hash` through `netmon_catalog_info()`. Live reload and runtime garbage collection are deferred. Deployment performs a rolling restart to select a new immutable artifact and retains/removes old files by application policy.
+
+Queued monitoring runs persist catalog/profile/plan IDs and hashes, but Slice 1C does not alter generic `std/jobs` retry semantics or claim a netmon pre-execution hook. PR 2 adds an optional closed `expected` hash fence to `device_inventory`; on mismatch it performs no network I/O and returns an `Ok` inventory envelope with `poll_status="catalog_mismatch"`. The application job handler records that terminal outcome and returns success to `std/jobs`, then may explicitly create a new run under the current catalog. Omitting `expected` remains valid for immediate interactive calls. Multi-version runtime lookup, leases, and garbage collection are deferred.
 
 ---
 
@@ -320,7 +488,16 @@ Ok(map {
 
 Walk a numeric subtree with strict row, request, byte, and result caps. This follows GET rather than sharing its first compatibility commit. Low-level transport stays numeric and never resolves a mutable MIB symbol implicitly.
 
-Planned options add `max_results` (default 256, hard maximum 2,048) and `on_limit` (`"error"` by default; optional `"partial"`). WALK reuses the same strict auth contract, global timeout budget, checked-address transport binding, and normalized varbind shapes.
+Options add `max_results` (default 256, hard maximum 2,048) and `on_limit` (`"error"` by default; optional `"partial"`). WALK reuses the same strict auth contract, global timeout budget, checked-address transport binding, and normalized varbind shapes.
+
+Before transport, compute:
+
+```text
+logical_request_ceiling = max_results + 1       # includes mandatory look-ahead
+datagram_attempt_ceiling = logical_request_ceiling * (retries + 1)
+```
+
+Reject the option set when checked arithmetic overflows or `datagram_attempt_ceiling > 4,096`. Therefore `max_results = 2,048` is valid with `retries = 0`; callers requesting retries must lower `max_results`. The 8 MiB actual cumulative receive-byte ceiling and 4 MiB conservative normalized-output ceiling are dynamic independent budgets: exceeding either returns `Err` even when the count ceilings have not been reached. A count maximum is not a promise that maximum-size values fit the byte budgets.
 
 Result shape:
 
@@ -340,9 +517,24 @@ Ok(map {
 })
 ```
 
-GETNEXT requests use one cursor and require one response varbind. Every accepted OID must be lexicographically greater than the prior cursor. Equal, descending, or repeated OIDs are protocol errors. `endOfMibView` and the first OID outside the requested subtree are successful completion and are not included. A walk that reaches exactly `max_results` may perform one bounded look-ahead request to distinguish complete from truncated.
+`requests` counts logical GETNEXT cursors, including look-ahead. `attempts` counts every transmitted datagram, including retries. GETNEXT requests use one cursor and require exactly one response varbind. Every accepted OID must be lexicographically greater than the prior cursor. Equal, descending, or repeated OIDs are protocol errors.
 
-The one global deadline begins before first request construction and covers every cursor, retry, decode, normalization step, and final result build. `max_results + 1` logical requests, 4,096 datagrams, 8 MiB cumulative receive bytes, and 4 MiB cumulative normalized output are hard ceilings; option combinations that could exceed them fail before transport.
+The one global deadline begins before first request construction and covers every cursor, retry, decode, normalization step, mandatory look-ahead, and final result build. Terminal behavior is normative:
+
+| Condition | Return | `complete` | `stop_reason` | Include terminal varbind? |
+|---|---|---:|---|---:|
+| First OID outside root subtree | `Ok` | `true` | `out_of_subtree` | no |
+| `endOfMibView` | `Ok` | `true` | `end_of_mib_view` | no |
+| `noSuchObject` | `Ok` | `true` | `no_such_object` | no |
+| `noSuchInstance` | `Ok` | `true` | `no_such_instance` | no |
+| Empty walk terminated by any row above | same `Ok` shape with empty `values` | `true` | corresponding reason | no |
+| Exactly `max_results`, look-ahead terminates | `Ok` | `true` | look-ahead reason | no |
+| Exactly `max_results`, look-ahead finds another valid in-subtree value and `on_limit="partial"` | `Ok` | `false` | `max_results` | no |
+| Same condition and `on_limit="error"` | `Err` | n/a | n/a | no |
+| Deadline, datagram, receive-byte, or output budget exhausted, including during look-ahead | `Err` | n/a | n/a | no |
+| Agent error status, malformed BER, wrong correlation, invalid OID progression, or transport failure | `Err` | n/a | n/a | no |
+
+The look-ahead request is mandatory whenever `max_results` values have been accepted and completion is to be claimed. Low-level WALK never returns mid-operation transport/protocol failures as partial telemetry.
 
 #### `snmp_bulk_walk(target, auth, oid, opts?) -> Result<Map, String>`
 
@@ -359,19 +551,11 @@ snmp_capabilities("10.0.50.1", auth)
 
 ### Catalog and recognition APIs
 
-The active catalog is configured by deployment, not loaded from a path supplied by ordinary ntnt code:
-
-```toml
-[netmon.catalog]
-path = "netmon/catalog.ntnt.json"
-expected_sha256 = "..."
-```
-
-The path is relative to the closest `ntnt.toml`. Absolute paths, parent traversal, missing files, symlink escape, oversize input, digest mismatch, and conflicting application roots fail closed during startup. One process-global immutable snapshot is shared by HTTP interpreter workers; separate worker processes load and report their own copy.
+The active catalog is configured by deployment, not loaded from a path supplied by ordinary ntnt code. The manifest points at an immutable `.ntntc` artifact and pins the SHA-256 of the entire framed file as defined above. Catalog absence leaves numeric SNMP primitives available; invalid configured catalog data aborts application startup.
 
 #### `netmon_catalog_info() -> Result<Map, String>`
 
-Return only schema/compiler versions, declared catalog identity, content hashes, counts, and load state. Never return host paths, source text, or the full registry.
+Return only schema/compiler versions, declared catalog identity, `artifact_sha256`, semantic hashes, counts, and load state. Never return host paths, source text, or the full registry. When no catalog is configured, return `Err("catalog_not_configured")`.
 
 #### `mib_resolve(symbol_or_oid) -> Result<Map, String>`
 
@@ -391,17 +575,70 @@ mib_resolve("IF-MIB::ifHCInOctets")
 
 The result may include bounded access, status, table/index, enum, bit, and alias metadata. Ambiguous names are errors; there is no file-order primary symbol.
 
+#### `profile_match(identity) -> Result<Map, String>`
+
+Purely classify an already observed identity map without network I/O. The closed input requires `sys_object_id: String`, permits `sys_descr: String`, and rejects unknown keys. The result always has one of these shapes:
+
+```ntnt
+Ok(map {
+    "status": "matched",
+    "catalog_hash": "...",
+    "profile_id": "acme-switch",
+    "profile_hash": "...",
+    "default_plan_id": "acme-switch-inventory",
+    "evidence": [map { "field": "sys_object_id", "kind": "exact", "rule": "..." }]
+})
+
+Ok(map { "status": "no_match", "catalog_hash": "...", "evidence": [] })
+
+Ok(map {
+    "status": "ambiguous",
+    "catalog_hash": "...",
+    "candidate_profile_ids": ["acme-a", "acme-b"],
+    "evidence": [...]
+})
+```
+
+Candidate IDs and evidence are deterministically sorted. Static duplicate exact/prefix rules fail compilation; runtime ambiguity remains possible for overlapping literal `sysDescr` rules and is never broken by file order.
+
 #### `device_recognize(target, auth, opts?) -> Result<Map, String>`
 
-Read a fixed bounded SYSTEM identity set, then classify observed data through exact `sysObjectID`, longest-prefix `sysObjectID`, and optional bounded secondary matchers. Return profile ID/hash, confidence class, catalog hash, and matched evidence. Device-controlled identity is advisory and never changes target policy, credentials, port, hard caps, or protocol authority.
+Read a fixed bounded SYSTEM identity set, then pass its closed identity map through `profile_match`. Return the same recognition envelope plus sanitized observed identity. Device-controlled identity is advisory and never changes target policy, credentials, port, hard caps, or protocol authority.
 
-#### `device_walk_plan(identity_or_profile, opts?) -> Result<Array<Map>, String>`
+#### `device_walk_plan(profile_id, plan_id, opts?) -> Result<Map, String>`
 
-Return the selected plan's precompiled numeric roots and caller-visible limits without performing network I/O. Callers may lower limits but cannot raise plan or runtime hard caps. A persisted job stores the catalog/profile/plan hashes returned here.
+Return one selected plan's precompiled numeric sections without network I/O:
+
+```ntnt
+Ok(map {
+    "catalog": map { "artifact_sha256": "...", "catalog_hash": "..." },
+    "profile": map { "id": "acme-switch", "hash": "..." },
+    "plan": map { "id": "acme-switch-inventory", "hash": "..." },
+    "limits": map {
+        "timeout_ms": 30000,
+        "max_requests": 4096,
+        "max_attempts": 4096,
+        "max_rows": 4096,
+        "max_received_bytes": 8388608,
+        "max_output_bytes": 4194304,
+        "max_concurrency": 1
+    },
+    "sections": [map {
+        "id": "interfaces",
+        "kind": "table",
+        "root_oid": "1.3.6.1.2.1.2.2",
+        "required": true,
+        "max_results": 1024,
+        "fields": [...]
+    }]
+})
+```
+
+Callers may lower effective limits through the closed options map but cannot raise plan or runtime hard caps. The explicit profile and plan IDs avoid a forgeable union-shaped `identity_or_profile` argument. The function rejects unknown profiles, plans not listed by that profile, and invalid options. Persisted jobs store the returned IDs and hashes.
 
 #### `mib_walk(target, auth, root, opts?) -> Result<Map, String>`
 
-Resolve one module-qualified root against the active catalog snapshot, then execute `snmp_walk` numerically while reporting the catalog hash. Symbol resolution occurs once at operation start; reload cannot change the walk mid-operation.
+Resolve one module-qualified root against the active catalog snapshot, then execute `snmp_walk` numerically while reporting `artifact_sha256` and `catalog_hash`. Symbol resolution occurs once at operation start; restart/reconfiguration cannot change the walk mid-operation.
 
 ### Interface telemetry
 
@@ -480,36 +717,91 @@ Read basic identity:
 
 #### `device_inventory(target, auth, opts?) -> Result<Map, String>`
 
+The closed options map may include `expected`, a closed all-or-none map containing `artifact_sha256`, `catalog_hash`, `profile_id`, `profile_hash`, `plan_id`, and `plan_hash`. Before any identity probe or other network I/O, runtime compares those values with the active snapshot and referenced profile/plan records. Any mismatch returns the terminal `Ok` envelope described below with `poll_status="catalog_mismatch"`; invalid field types or partial expected maps return `Err`. Applications pass this map for queued runs and may omit it for immediate calls.
+
 Higher-level inventory bundle:
 
 ```ntnt
 Ok(map {
     "schema_version": "netmon.inventory/v1",
     "catalog": map {
+        "artifact_sha256": "...",
         "catalog_hash": "...",
         "mib_hash": "...",
         "profiles_hash": "...",
         "plans_hash": "..."
     },
     "recognition": map {
+        "status": "matched",
         "profile_id": "acme-switch",
         "profile_hash": "...",
-        "confidence": "exact_sys_object_id",
         "evidence": [...]
+    },
+    "plan": map {
+        "id": "acme-switch-inventory",
+        "hash": "..."
     },
     "identity": map { ... },
     "interfaces": [...],
     "neighbors": [...],
     "routes_summary": map { ... },
     "poll_status": "partial",
-    "sections": [
-        map { "name": "interfaces", "status": "complete", "rows": 24 }
-    ],
-    "warnings": [map { "code": "lldp_unavailable", "section": "neighbors" }]
+    "sections": [map {
+        "id": "interfaces",
+        "plan_id": "acme-switch-inventory",
+        "plan_hash": "...",
+        "root_oid": "1.3.6.1.2.1.2.2",
+        "status": "complete",
+        "rows": 24,
+        "walk_complete": true,
+        "walk_stop_reason": "out_of_subtree",
+        "requests": 25,
+        "attempts": 25
+    }],
+    "warnings": [map { "code": "lldp_unsupported", "section": "neighbors" }]
 })
 ```
 
-V1 should tolerate partial results. A device that refuses LLDP should not discard interface counters. Malformed or capped tables never report `complete`; warning/error codes are stable and prose is secondary. Device-controlled text is sanitized and capped, raw enum codes are preserved beside optional MIB labels, and raw varbinds are omitted by default.
+Hash-fence mismatch shape:
+
+```ntnt
+Ok(map {
+    "schema_version": "netmon.inventory/v1",
+    "poll_status": "catalog_mismatch",
+    "network_attempted": false,
+    "expected": map { ... },
+    "actual": map {
+        "artifact_sha256": "...",
+        "catalog_hash": "...",
+        "profile_id": "...",
+        "profile_hash": "...",
+        "plan_id": "...",
+        "plan_hash": "..."
+    },
+    "sections": [],
+    "warnings": [map { "code": "catalog_mismatch" }]
+})
+```
+
+One `device_inventory` call holds one catalog snapshot and one whole-operation budget across recognition and every plan section:
+
+| Inventory resource | Hard cap |
+|---|---:|
+| Whole-operation timeout | 30,000 ms |
+| Recognition probes | 8 |
+| Plan sections | 32 |
+| Concurrent section walks | 1 |
+| Logical requests, including probes/look-aheads | 4,096 |
+| Datagram attempts, including retries | 4,096 |
+| Accepted rows across all sections | 4,096 |
+| Actual received bytes | 8 MiB |
+| Conservative normalized output | 4 MiB |
+
+The compiler requires `recognition_probe_ceiling + Σ(section.max_results + 1) <= 4,096`, where each `+ 1` reserves mandatory WALK look-ahead. Runtime recomputes the same checked equation from caller-lowered section limits, then multiplies every probe/section request ceiling by `(retries + 1)` and rejects the call before transport if its datagram-attempt ceiling exceeds 4,096. Each section's effective result limit is the lower of its compiled limit, caller-lowered limit, and remaining aggregate row/request budget. Recognition probes consume the same deadline/request/attempt/receive-byte budgets as inventory walks.
+
+V1 tolerates only explicit optional-section absence as partial inventory: `noSuchObject`, `noSuchInstance`, or an agent's supported-table absence marks an optional section `unsupported` and continues. The same outcome for a required section returns `Err`. Any authentication/policy failure, malformed or mismatched protocol response, transport failure, whole-operation deadline, aggregate budget exhaustion, or required-section truncation returns `Err`; it is never disguised as partial inventory. Optional-section truncation returns `Ok` with `poll_status="partial"`, `walk_complete=false`, and the exact stop reason. A fully executed plan returns `complete`; `no_match` or `ambiguous` recognition returns a stable non-inventory `Ok` envelope without executing a plan.
+
+Device-controlled text is sanitized and capped, raw enum codes are preserved beside optional MIB labels, raw varbinds are omitted by default, and every section preserves plan/root/WALK completion provenance.
 
 ### Topology hints
 
@@ -728,8 +1020,7 @@ Some of these may become useful later, but they carry OS permissions, abuse risk
 - [x] **Slice 0 — standard-library packaging and security contract**
 - [x] **Slice 1A — bounded SNMPv2c GET**
 - [ ] **Slice 1B — bounded numeric SNMP WALK**
-- [ ] **Slice 1C — offline MIB compiler and fixture corpus**
-- [ ] **Slice 1D — immutable catalog, symbol resolution, profiles, and plans**
+- [ ] **Slice 1C — canonical MIB catalog compiler, runtime registry, profiles, and plans**
 - [ ] **PR 2 — device recognition and inventory execution**
 - [ ] **PR 3 — interface inventory and counters**
 - [ ] **PR 4 — counter-rate normalization**
@@ -798,40 +1089,34 @@ Acceptance:
 - [ ] Mid-walk transport/protocol failure returns `Err` rather than apparently complete telemetry.
 - [ ] Independent UDP fixtures cover malicious loops, subtree escape, retries, caps, and valid termination.
 
-### Slice 1C — Offline MIB Compiler and Fixture Corpus
+### Slice 1C — Canonical MIB Catalog Compiler and Runtime Registry
 
-Scope:
+Compiler scope:
 
-- [ ] `ntnt netmon mib compile <source-root> --output <catalog>`.
+- [ ] `ntnt netmon mib compile <source-root> --output-dir <directory>` parent/isolated-worker command.
 - [ ] ntnt-controlled pinned/vendor SMIv1/SMIv2 parser-resolver substrate with one parser worker by default.
-- [ ] Explicit source manifest, bounded bytes/files/modules/tokens/definitions/imports/depth, and deterministic import index.
-- [ ] No runtime/request-path ASN.1 parsing, implicit directory recursion, system MIB discovery, network fetch, shell, plugin, or dynamic library.
-- [ ] Canonical, versioned, length-prefixed, SHA-256-protected catalog output.
-- [ ] Valid, malformed, cyclic, conflicting, deeply nested, and vendor-sloppy fixture corpus.
+- [ ] Closed manifest/profile/plan v1 schemas, explicit sources, all documented byte/token/node/import/depth/time/heap limits, and deterministic import index.
+- [ ] No request-path ASN.1 parsing, implicit directory recursion, system MIB discovery, network fetch, shell, plugin, or dynamic library.
+- [ ] Exact `.ntntc` framing, RFC 8785 canonical payload, per-symbol/record/aggregate hashes, atomic no-replace content-addressed publication, and production-reader validation before publication.
+- [ ] Valid, malformed, cyclic, conflicting, deeply nested, vendor-sloppy, timeout, memory-cap, and crash fixture coverage.
+
+Runtime scope:
+
+- [ ] Optional `[netmon.catalog]` manifest parsing and one common fallible bootstrap used by `run`, `test`, HTTP server, `ntnt worker`, and job workers.
+- [ ] Process-global immutable `Arc<CatalogSnapshot>` with exact artifact-hash enforcement; no public mutable `mib_load(path)` API.
+- [ ] `netmon_catalog_info()`, `mib_resolve(symbol_or_oid)`, pure `profile_match(identity)`, and `device_walk_plan(profile_id, plan_id, opts?)`.
+- [ ] Separately typed MIB/profile/plan records compiled and published together against one snapshot.
+- [ ] Restart/rolling-restart selection of immutable artifacts and catalog inspection for application-owned hash persistence; live reload, job enforcement, and multi-version runtime retention deferred.
 
 Acceptance:
 
-- [ ] Compiler failure cannot replace an existing runtime catalog.
-- [ ] Duplicate/ambiguous definitions and unresolved required imports fail closed.
-- [ ] Output and hashes are deterministic across file creation/order and Linux/macOS/Windows.
-- [ ] Diagnostics are bounded, sanitized, and contain no absolute source paths or excerpts.
-
-### Slice 1D — Immutable Catalog, Profiles, and Plans
-
-Scope:
-
-- [ ] Startup-configured process-global `Arc<CatalogSnapshot>` with expected-hash readiness enforcement.
-- [ ] `netmon_catalog_info()` and `mib_resolve(symbol_or_oid)`.
-- [ ] Separately typed device profiles and walk/inventory plans compiled against one MIB snapshot.
-- [ ] `device_walk_plan(identity_or_profile, opts?)` with precompiled numeric roots.
-- [ ] Exact/longest-prefix recognition precedence and compile-time tie rejection.
-- [ ] Restart/rolling-restart update model with last-known-good retention; no ordinary `mib_load(path)` API.
-
-Acceptance:
-
-- [ ] All interpreter workers in one process observe the same catalog hash.
-- [ ] Separate web/job processes report deterministic matching hashes or fail readiness.
-- [ ] Invalid catalog/profile/plan updates never clear or partially mutate the live snapshot.
+- [ ] Compiler failure cannot overwrite or select an application catalog.
+- [ ] Duplicate/ambiguous definitions, unresolved imports/symbols, invalid profile ties, and plans exceeding aggregate caps fail closed.
+- [ ] Artifact bytes and every semantic hash are deterministic across source creation/order and Linux/macOS/Windows.
+- [ ] Diagnostics are bounded and sanitized; parser crash/timeout/heap exhaustion remains outside the application runtime.
+- [ ] Missing catalog configuration leaves numeric GET/WALK working while catalog APIs return `catalog_not_configured`.
+- [ ] Invalid configured artifacts abort every application/worker startup path before traffic or job claims.
+- [ ] All interpreter workers in one process observe the same hashes; separate processes either report matching hashes or fail their configured hash check.
 - [ ] Plans cannot contain credentials, targets, cap increases, callbacks, code, or SNMP SET.
 
 ### PR 2 — Device Recognition and Inventory Execution
@@ -841,7 +1126,7 @@ Scope:
 - [ ] `device_recognize(target, auth, opts?)`.
 - [ ] `mib_walk(target, auth, root, opts?)`.
 - [ ] `device_identity(target, auth, opts?)`.
-- [ ] `device_inventory(target, auth, opts?)`.
+- [ ] `device_inventory(target, auth, opts?)` with the optional all-or-none `expected` catalog/profile/plan hash fence.
 - [ ] Fixed bounded SYSTEM identity probes, profile matching, and profile-selected finite plan execution.
 - [ ] Versioned normalized envelope with catalog/profile/plan hashes and section-level partial status.
 
@@ -850,6 +1135,7 @@ Acceptance:
 - [ ] Recognition returns exact evidence and ambiguity rather than treating device-controlled identity as authorization.
 - [ ] Inventory preserves complete/partial/failed section status and stable warning codes.
 - [ ] Every persisted run can record the exact catalog/profile/plan hashes used.
+- [ ] A queued run passing mismatched `expected` hashes performs zero network I/O, returns terminal `catalog_mismatch`, and can be acknowledged successfully by the application handler without `std/jobs` retrying it.
 - [ ] Optional table failure does not discard independently complete sections.
 
 ### PR 3 — Interface Inventory and Counters
@@ -993,9 +1279,10 @@ Required tests:
 - [ ] MIB source manifest path/symlink/collision and byte/count/depth ceilings
 - [ ] SMIv1/SMIv2 imports, table/index/type chains, cycles, conflicts, and vendor-sloppy fixtures
 - [ ] deterministic canonical catalog bytes and hashes across source ordering/platforms
-- [ ] runtime catalog length/digest/version/structural validation and expected-hash readiness
-- [ ] profile recognition precedence, ambiguity rejection, and plan-to-numeric compilation
-- [ ] multi-worker/process catalog hash consistency and failed-update last-known-good retention
+- [ ] runtime catalog framing/length/digest/version/structural validation and configured-artifact startup failure
+- [ ] profile recognition precedence, no-match/ambiguity envelopes, and plan-to-numeric compilation
+- [ ] multi-worker/process catalog hash consistency and immutable artifact rollback
+- [ ] queued-run expected-hash mismatch with zero network I/O and application-owned terminal acknowledgement
 - [ ] interface inventory normalization
 - [ ] 32-bit and 64-bit counter snapshots
 - [ ] counter wrap/reset detection
