@@ -23,18 +23,8 @@ fn unique_test_file(prefix: &str) -> String {
         .to_string()
 }
 
-fn ntnt_binary() -> String {
-    let exe = std::env::consts::EXE_SUFFIX;
-    for path in [
-        format!("./target/debug/ntnt{exe}"),
-        format!("./target/dev-release/ntnt{exe}"),
-        format!("./target/release/ntnt{exe}"),
-    ] {
-        if std::path::Path::new(&path).exists() {
-            return path;
-        }
-    }
-    panic!("No ntnt binary found. Run 'cargo build' first.");
+fn ntnt_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_ntnt")
 }
 
 fn run_ntnt_code(code: &str, envs: &[(&str, &str)]) -> (String, String, i32) {
@@ -104,6 +94,7 @@ fn read_tlv(bytes: &[u8], offset: &mut usize) -> Option<(u8, usize, Range<usize>
 struct RequestLayout {
     pdu_tag_offset: usize,
     version_value_offset: usize,
+    error_index_value_offset: usize,
 }
 
 fn inspect_get_request(bytes: &[u8]) -> Option<RequestLayout> {
@@ -137,7 +128,7 @@ fn inspect_get_request(bytes: &[u8]) -> Option<RequestLayout> {
         || error_status_tag != 0x02
         || &bytes[error_status] != [0]
         || error_index_tag != 0x02
-        || &bytes[error_index] != [0]
+        || bytes[error_index.clone()] != [0]
         || varbind_list_tag != 0x30
         || pdu_offset != pdu.end
     {
@@ -171,6 +162,7 @@ fn inspect_get_request(bytes: &[u8]) -> Option<RequestLayout> {
     Some(RequestLayout {
         pdu_tag_offset,
         version_value_offset: version.start,
+        error_index_value_offset: error_index.start,
     })
 }
 
@@ -191,6 +183,7 @@ enum AgentBehavior {
     WrongVersion,
     TrailingBytes,
     OversizedResponse,
+    NonzeroSuccessIndex,
 }
 
 fn start_mock_snmp_agent(behavior: AgentBehavior) -> (u16, std::thread::JoinHandle<usize>) {
@@ -239,6 +232,10 @@ fn start_mock_snmp_agent(behavior: AgentBehavior) -> (u16, std::thread::JoinHand
                 }
                 AgentBehavior::TrailingBytes => response.push(0),
                 AgentBehavior::OversizedResponse => response = vec![0; 8 * 1024 + 1],
+                AgentBehavior::NonzeroSuccessIndex => {
+                    let layout = inspect_get_request(&request[..length]).expect("validated layout");
+                    response[layout.error_index_value_offset] = 1;
+                }
                 AgentBehavior::Respond | AgentBehavior::DropFirst | AgentBehavior::Silent => {}
             }
             let _ = socket.send_to(&response, peer);
@@ -368,6 +365,10 @@ fn snmp_get_rejects_unrequested_oid_wrong_version_and_trailing_bytes() {
         (
             AgentBehavior::OversizedResponse,
             "response exceeds 8192 bytes",
+        ),
+        (
+            AgentBehavior::NonzeroSuccessIndex,
+            "error index must be zero",
         ),
     ] {
         let (port, agent) = start_mock_snmp_agent(behavior);

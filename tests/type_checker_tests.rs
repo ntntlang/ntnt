@@ -1222,6 +1222,54 @@ let bad_oids = snmp_get("router.example.com", map {}, "1.3.6.1.2.1.1.1.0")
     assert_ne!(exit_code, 0);
 }
 
+#[test]
+fn test_std_netmon_snmp_walk_signature_accepts_valid_usage() {
+    let source = r#"
+import { require_secret } from "std/secrets"
+import { snmp_walk } from "std/netmon"
+
+let auth = map {
+    "version": "2c",
+    "community": require_secret("SNMP_COMMUNITY")
+}
+let result: Result<Map<String, Any>, String> = snmp_walk(
+    "10.0.0.1",
+    auth,
+    "1.3.6.1.2.1.2.2",
+    map { "max_results": 128, "on_limit": "partial" }
+)
+"#;
+    let (stdout, _stderr, _exit_code) = lint_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert_eq!(
+        errors, 0,
+        "valid std/netmon WALK usage should not type error: {stdout}"
+    );
+}
+
+#[test]
+fn test_std_netmon_snmp_walk_signature_rejects_wrong_argument_types() {
+    let source = r#"
+import { snmp_walk } from "std/netmon"
+
+let bad_target = snmp_walk(123, map {}, "1.3.6.1")
+let bad_auth = snmp_walk("10.0.0.1", "public", "1.3.6.1")
+let bad_oid = snmp_walk("10.0.0.1", map {}, ["1.3.6.1"])
+let bad_opts = snmp_walk("10.0.0.1", map {}, "1.3.6.1", 5)
+let too_few = snmp_walk("10.0.0.1", map {})
+let too_many = snmp_walk("10.0.0.1", map {}, "1.3.6.1", map {}, map {})
+"#;
+    let (stdout, _stderr, exit_code) = lint_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert!(
+        errors >= 6,
+        "wrong std/netmon WALK argument types or arity should error: {stdout}"
+    );
+    assert_ne!(exit_code, 0);
+}
+
 // ===========================================================================
 // Unknown-method lint (DD-063 Rec 4b)
 // ===========================================================================
