@@ -11,7 +11,7 @@
 
 ## Summary
 
-Design and incrementally ship a bundled `std/netmon` module for building real network monitoring systems in ntnt: bounded SNMP device telemetry first, followed by interface counters, topology hints, composite checks, and carefully scoped monitoring data helpers.
+Design and incrementally ship a bundled `std/netmon` module for building real network monitoring systems in ntnt: bounded SNMP device telemetry first, followed by offline-compiled third-party MIB catalogs, data-driven device recognition and inventory plans, interface counters, topology hints, composite checks, and carefully scoped monitoring data helpers.
 
 The packaging decision is now settled: `std/netmon` is a standard-library module. That makes its contracts compatibility-sensitive, so each protocol and data-shape slice must be independently useful, bounded, and fixture-tested before the next layer lands.
 
@@ -35,6 +35,7 @@ DD-046 owns the low-level, generally safe primitives:
 DD-047 owns higher-level monitoring concerns:
 
 - SNMP polling/walking
+- offline-compiled MIB schemas, device profiles, and finite walk plans
 - interface telemetry and counter normalization
 - device inventory and profile helpers
 - topology hints from LLDP/CDP/SNMP tables
@@ -50,7 +51,7 @@ DD-047 owns higher-level monitoring concerns:
 
 `std/netmon` ships as a bundled, explicitly imported standard-library module.
 
-That decision does **not** make it a monitoring product framework. The stdlib owns reusable protocol, normalization, policy, and bounded-computation primitives. Applications continue to own device inventories, tenants, schedules, incidents, notification delivery, persistence schemas, and product-specific state machines.
+That decision does **not** make it a monitoring product framework. The stdlib owns reusable protocol, schema/catalog, normalization, policy, and bounded-computation primitives. Applications continue to own target inventories, tenants, schedules, incidents, notification delivery, persistence schemas, catalog rollout policy, and product-specific state machines.
 
 The implementation is intentionally sliced:
 
@@ -93,6 +94,8 @@ DD-077's future general `NetCapability` object is not invented locally here. `st
 
 8. **Prefer jobs over request-path polling.** Heavy polling belongs in `std/jobs` / worker loops, not HTTP route handlers.
 
+9. **MIB schema is not execution policy.** MIB modules describe names, types, tables, indexes, access, and display semantics. Separate declarative device profiles classify observed identity, and separate finite inventory plans select read-only walks. No layer may contain credentials, targets, callbacks, templates, shell commands, or arbitrary ntnt code.
+
 ---
 
 ## Security and Deployment Model
@@ -121,6 +124,88 @@ Policy:
 - Default examples perform no traffic; protocol tests use a deterministic localhost mock agent.
 
 A future deployment-issued `NetCapability` can replace process-global authority once that cross-cutting contract ships. DD-047 does not invent a monitoring-only capability system first.
+
+## Third-Party MIB Catalog Model
+
+Third-party updates are distributed as operator-owned source bundles, but raw ASN.1/SMI text is never parsed on a poll, HTTP request, or ordinary stdlib call. ntnt uses two stages:
+
+1. `ntnt netmon mib compile <source-root> --output <catalog>` validates bounded MIB/profile/plan source in an offline compiler process and emits one canonical catalog.
+2. Application startup loads only that canonical catalog from the application manifest. Runtime readers clone one immutable `Arc<CatalogSnapshot>` for the complete operation.
+
+The compiler performs no network fetch, system MIB-directory discovery, shell execution, dynamic library loading, template evaluation, or `.tnt` execution. A parser crash, memory exhaustion, or timeout can fail the compiler process without replacing the application's last-known-good runtime catalog.
+
+### Three separately typed layers
+
+One catalog publishes three independently validated snapshots together:
+
+1. **MIB schemas** — modules, imports, qualified symbols, numeric OIDs, syntax, textual conventions, enum/bit metadata, table/index relationships, access, and provenance.
+2. **Device profiles** — advisory exact/prefix `sysObjectID` and bounded secondary identity matchers plus vendor/family/model labels. Recognition never grants network authority or selects credentials.
+3. **Walk/inventory plans** — finite read-only roots and an allowlisted normalization DSL compiled to numeric OIDs against the candidate MIB snapshot.
+
+MIB source cannot define recognition or polling behavior. Profiles cannot contain targets, ports, credentials, protocol authority, SNMP SET operations, cap increases, or executable hooks. Plans cannot contain callbacks, general expressions, or data-dependent unbounded expansion.
+
+The catalog is published atomically only after every profile and plan recompiles against the candidate MIB schema. A MIB-only update that invalidates an active profile or plan rejects the complete candidate.
+
+### Source and compiled formats
+
+The source root contains an explicit manifest and separately typed files:
+
+```text
+netmon/
+├── catalog.toml
+├── mibs/
+│   ├── ACME-SMI.mib
+│   └── ACME-SWITCH-MIB.mib
+├── profiles/
+│   └── acme-switch.toml
+└── plans/
+    └── acme-switch-inventory.toml
+```
+
+The manifest lists every file and expected module/profile/plan identity. Imports resolve only within the candidate source set plus ntnt's synthetic SMI foundation modules. Absolute paths, parent components, symlinks, duplicate paths, case/Unicode-normalization collisions, unknown fields, duplicate module/profile/plan IDs, unresolved required imports, and cycles fail closed.
+
+Plans use module-qualified symbols such as `IF-MIB::ifName`. Unqualified lookup succeeds only when exactly one candidate exists. Exact `sysObjectID` matches precede longest-prefix matches; equal top matches are compile-time ambiguity errors rather than file-order tie breakers.
+
+The compiler emits a bounded canonical catalog with a magic/version header, canonical serialized payload, payload length, and SHA-256 integrity digest. Runtime revalidates the header, length, digest, compiler-semantics version, structural bounds, sorted uniqueness, and OID depth before publication. Raw source descriptions remain inert provenance and are omitted from ordinary runtime results.
+
+### Resource ceilings
+
+Initial hard ceilings are defensive implementation limits rather than SMI-standard limits:
+
+| Resource | Hard cap |
+|---|---:|
+| Source files | 512 |
+| One source file | 4 MiB |
+| Total source bytes | 64 MiB |
+| MIB modules | 128 |
+| Definitions/symbols | 100,000 |
+| Imports per module | 256 |
+| Import/type/OID chain depth | 64 |
+| OID arcs | 128 |
+| Profiles | 1,024 |
+| Recognition rules | 8,192 |
+| Plans | 4,096 |
+| Walk roots per plan | 32 |
+| Collected diagnostics | 10,000 |
+| Canonical catalog bytes | 64 MiB |
+| Estimated runtime registry heap | 256 MiB |
+
+Compiler code uses checked counters before collection growth, iterative/depth-bounded graph traversal, deterministic `BTreeMap`/sorted-vector output, and a single parser worker by default. Diagnostics expose bounded code/module/line metadata without absolute host paths, source excerpts, or terminal control characters.
+
+### Catalog identity and update semantics
+
+Content hashes use SHA-256 with domain separation and canonical serialization:
+
+- `mib_registry_hash`
+- `profiles_hash`
+- `plans_hash`
+- `catalog_hash = SHA256(domain || format_version || compiler_semantics_version || mib_hash || profiles_hash || plans_hash)`
+
+Filesystem metadata, installation paths, source ordering, and timestamps do not affect identity. Declared versions are human labels, not content identity. Reusing one catalog ID/version with different content is rejected unless deployment explicitly selects a new version.
+
+Production v1 uses restart or rolling restart after an external updater stages, fsyncs, and atomically renames a validated catalog. Runtime never auto-downloads updates. Each process loads its own snapshot and reports the catalog hash through readiness/telemetry; an expected hash mismatch fails readiness. Live reload may follow only with serialized candidate compilation/loading, compare-and-swap generation checks, and last-known-good retention.
+
+Queued monitoring runs persist the selected catalog/profile/plan hashes. A delayed worker must load the exact retained version or fail/retry; it must not silently reinterpret a run through whichever catalog is current later.
 
 ---
 
@@ -206,7 +291,7 @@ The auth map is strict: `version` must be `"2c"`, `community` must be an opaque 
 - `retries`: additional bounded attempts, default 0, maximum 3
 - `allow_private`: default false; still requires `NTNT_NET_ALLOW_PRIVATE=1`
 
-The OID array accepts 1–64 unique numeric OIDs, each at most 255 bytes and 128 unsigned 32-bit arcs. Named MIB syntax is deferred. Encoded requests are capped at 8 KiB and response datagrams at 8 KiB. Explicit values outside any bound fail rather than clamp.
+The OID array accepts 1–64 unique numeric OIDs, each at most 255 bytes and 128 unsigned 32-bit arcs. `snmp_get` remains numeric; named resolution is provided separately through the immutable catalog APIs. Encoded requests are capped at 8 KiB and response datagrams at 8 KiB. Explicit values outside any bound fail rather than clamp.
 
 Result shape:
 
@@ -231,13 +316,35 @@ Ok(map {
 
 `Counter64` values use decimal strings so ntnt's signed 64-bit `Int` cannot truncate them, including legal values above `i64::MAX`. Binary octet strings and opaque values use lowercase hex with explicit encoding metadata. Protocol exceptions such as `no_such_object` retain their type and use `None` as the value. Agent `error_status`/`error_index`, transport timeouts, malformed BER, and authentication mismatches return `Err(String)` rather than partial telemetry.
 
-#### `snmp_walk(target, auth, oid, opts?) -> Result<Array<Map>, String>` *(next slice)*
+#### `snmp_walk(target, auth, oid, opts?) -> Result<Map, String>` *(next slice)*
 
-Walk a subtree with strict row/result caps. This follows GET rather than sharing its first compatibility commit.
+Walk a numeric subtree with strict row, request, byte, and result caps. This follows GET rather than sharing its first compatibility commit. Low-level transport stays numeric and never resolves a mutable MIB symbol implicitly.
 
-Planned options add `max_results` with a conservative default and hard cap. WALK reuses the same strict auth contract, global timeout budget, checked-address transport binding, and normalized varbind shapes.
+Planned options add `max_results` (default 256, hard maximum 2,048) and `on_limit` (`"error"` by default; optional `"partial"`). WALK reuses the same strict auth contract, global timeout budget, checked-address transport binding, and normalized varbind shapes.
 
-#### `snmp_bulk_walk(target, auth, oid, opts?) -> Result<Array<Map>, String>`
+Result shape:
+
+```ntnt
+Ok(map {
+    "target": "10.0.50.1",
+    "address": "10.0.50.1",
+    "port": 161,
+    "version": "2c",
+    "root_oid": "1.3.6.1.2.1.2.2",
+    "duration_ms": 123,
+    "requests": 17,
+    "attempts": 18,
+    "complete": true,
+    "stop_reason": "out_of_subtree",
+    "values": [...]
+})
+```
+
+GETNEXT requests use one cursor and require one response varbind. Every accepted OID must be lexicographically greater than the prior cursor. Equal, descending, or repeated OIDs are protocol errors. `endOfMibView` and the first OID outside the requested subtree are successful completion and are not included. A walk that reaches exactly `max_results` may perform one bounded look-ahead request to distinguish complete from truncated.
+
+The one global deadline begins before first request construction and covers every cursor, retry, decode, normalization step, and final result build. `max_results + 1` logical requests, 4,096 datagrams, 8 MiB cumulative receive bytes, and 4 MiB cumulative normalized output are hard ceilings; option combinations that could exceed them fail before transport.
+
+#### `snmp_bulk_walk(target, auth, oid, opts?) -> Result<Map, String>`
 
 Optional optimization after basic walk is stable. SNMP GETBULK can reduce polling overhead but should not be in PR 1 unless the implementation stays small and testable.
 
@@ -250,9 +357,55 @@ snmp_capabilities("10.0.50.1", auth)
 // Ok(map { "reachable": true, "version": "2c", "sys_object_id": "...", "vendor_hint": "mikrotik" })
 ```
 
+### Catalog and recognition APIs
+
+The active catalog is configured by deployment, not loaded from a path supplied by ordinary ntnt code:
+
+```toml
+[netmon.catalog]
+path = "netmon/catalog.ntnt.json"
+expected_sha256 = "..."
+```
+
+The path is relative to the closest `ntnt.toml`. Absolute paths, parent traversal, missing files, symlink escape, oversize input, digest mismatch, and conflicting application roots fail closed during startup. One process-global immutable snapshot is shared by HTTP interpreter workers; separate worker processes load and report their own copy.
+
+#### `netmon_catalog_info() -> Result<Map, String>`
+
+Return only schema/compiler versions, declared catalog identity, content hashes, counts, and load state. Never return host paths, source text, or the full registry.
+
+#### `mib_resolve(symbol_or_oid) -> Result<Map, String>`
+
+Resolve a module-qualified symbol, unambiguous bare symbol, or numeric OID against one snapshot:
+
+```ntnt
+mib_resolve("IF-MIB::ifHCInOctets")
+// Ok(map {
+//   "oid": "1.3.6.1.2.1.31.1.1.1.6",
+//   "qualified_symbol": "IF-MIB::ifHCInOctets",
+//   "module": "IF-MIB",
+//   "kind": "column",
+//   "syntax": "Counter64",
+//   "catalog_hash": "..."
+// })
+```
+
+The result may include bounded access, status, table/index, enum, bit, and alias metadata. Ambiguous names are errors; there is no file-order primary symbol.
+
+#### `device_recognize(target, auth, opts?) -> Result<Map, String>`
+
+Read a fixed bounded SYSTEM identity set, then classify observed data through exact `sysObjectID`, longest-prefix `sysObjectID`, and optional bounded secondary matchers. Return profile ID/hash, confidence class, catalog hash, and matched evidence. Device-controlled identity is advisory and never changes target policy, credentials, port, hard caps, or protocol authority.
+
+#### `device_walk_plan(identity_or_profile, opts?) -> Result<Array<Map>, String>`
+
+Return the selected plan's precompiled numeric roots and caller-visible limits without performing network I/O. Callers may lower limits but cannot raise plan or runtime hard caps. A persisted job stores the catalog/profile/plan hashes returned here.
+
+#### `mib_walk(target, auth, root, opts?) -> Result<Map, String>`
+
+Resolve one module-qualified root against the active catalog snapshot, then execute `snmp_walk` numerically while reporting the catalog hash. Symbol resolution occurs once at operation start; reload cannot change the walk mid-operation.
+
 ### Interface telemetry
 
-#### `interface_list(target, opts?) -> Result<Array<Map>, String>`
+#### `interface_list(target, auth, opts?) -> Result<Array<Map>, String>`
 
 Return normalized interface inventory from IF-MIB.
 
@@ -270,7 +423,7 @@ Recommended fields:
 - `mac`
 - `last_change`
 
-#### `interface_counters(target, opts?) -> Result<Array<Map>, String>`
+#### `interface_counters(target, auth, opts?) -> Result<Array<Map>, String>`
 
 Return 64-bit counters where available, falling back to 32-bit with explicit metadata.
 
@@ -311,7 +464,7 @@ This helper is important enough to design early. Good monitoring lives on rates,
 
 ### Device inventory
 
-#### `device_identity(target, opts?) -> Result<Map, String>`
+#### `device_identity(target, auth, opts?) -> Result<Map, String>`
 
 Read basic identity:
 
@@ -325,30 +478,46 @@ Read basic identity:
 - `model_hint`
 - `os_hint`
 
-#### `device_inventory(target, opts?) -> Result<Map, String>`
+#### `device_inventory(target, auth, opts?) -> Result<Map, String>`
 
 Higher-level inventory bundle:
 
 ```ntnt
 Ok(map {
+    "schema_version": "netmon.inventory/v1",
+    "catalog": map {
+        "catalog_hash": "...",
+        "mib_hash": "...",
+        "profiles_hash": "...",
+        "plans_hash": "..."
+    },
+    "recognition": map {
+        "profile_id": "acme-switch",
+        "profile_hash": "...",
+        "confidence": "exact_sys_object_id",
+        "evidence": [...]
+    },
     "identity": map { ... },
     "interfaces": [...],
     "neighbors": [...],
     "routes_summary": map { ... },
     "poll_status": "partial",
-    "warnings": ["LLDP table unavailable"]
+    "sections": [
+        map { "name": "interfaces", "status": "complete", "rows": 24 }
+    ],
+    "warnings": [map { "code": "lldp_unavailable", "section": "neighbors" }]
 })
 ```
 
-V1 should tolerate partial results. A device that refuses LLDP should not discard interface counters.
+V1 should tolerate partial results. A device that refuses LLDP should not discard interface counters. Malformed or capped tables never report `complete`; warning/error codes are stable and prose is secondary. Device-controlled text is sanitized and capped, raw enum codes are preserved beside optional MIB labels, and raw varbinds are omitted by default.
 
 ### Topology hints
 
-#### `lldp_neighbors(target, opts?) -> Result<Array<Map>, String>`
+#### `lldp_neighbors(target, auth, opts?) -> Result<Array<Map>, String>`
 
 Read LLDP-MIB where available.
 
-#### `cdp_neighbors(target, opts?) -> Result<Array<Map>, String>`
+#### `cdp_neighbors(target, auth, opts?) -> Result<Array<Map>, String>`
 
 Optional Cisco CDP support. Candidate for vendor-profile phase, not initial core.
 
@@ -386,7 +555,7 @@ Wrapper over DD-046 DNS helpers with latency and expected-record matching.
 
 Wrapper over DD-046 `tls_info()` with expiry thresholds.
 
-#### `check_snmp(target, opts?) -> Result<Map, String>`
+#### `check_snmp(target, auth, opts?) -> Result<Map, String>`
 
 SNMP liveness/identity check.
 
@@ -518,6 +687,8 @@ Retention, rollups, dashboards, and notification delivery should live in the ref
 ### `std/netmon` / DD-047
 
 - SNMP device telemetry
+- offline-compiled MIB catalogs and symbol metadata
+- data-driven device recognition and finite walk plans
 - interface counters/rates
 - topology hints
 - device inventory normalization
@@ -556,10 +727,12 @@ Some of these may become useful later, but they carry OS permissions, abuse risk
 
 - [x] **Slice 0 — standard-library packaging and security contract**
 - [x] **Slice 1A — bounded SNMPv2c GET**
-- [ ] **Slice 1B — bounded SNMP WALK**
-- [ ] **PR 2 — interface inventory and counters**
-- [ ] **PR 3 — counter-rate normalization**
-- [ ] **PR 4 — device identity and inventory bundle**
+- [ ] **Slice 1B — bounded numeric SNMP WALK**
+- [ ] **Slice 1C — offline MIB compiler and fixture corpus**
+- [ ] **Slice 1D — immutable catalog, symbol resolution, profiles, and plans**
+- [ ] **PR 2 — device recognition and inventory execution**
+- [ ] **PR 3 — interface inventory and counters**
+- [ ] **PR 4 — counter-rate normalization**
 - [ ] **PR 5 — topology hints from LLDP**
 - [ ] **PR 6 — composite checks over DD-046 primitives**
 - [ ] **PR 7 — broadly reusable alert-state helpers, if proven**
@@ -606,38 +779,101 @@ Acceptance:
 - [x] Tests require no real network device.
 - [x] Community material enters only as `Secret`.
 
-### Slice 1B — SNMP WALK
+### Slice 1B — Bounded Numeric SNMP WALK
 
 Scope:
 
-- [ ] `snmp_walk(target, auth, oid, opts?)`
-- [ ] Strict subtree and result-count enforcement.
-- [ ] GETNEXT first; GETBULK only after equivalent fixture coverage.
-- [ ] Loop, out-of-subtree, malformed-order, and premature-end detection.
-- [ ] Reuse Slice 1A auth, policy, timeout, and normalization contracts.
+- [ ] `snmp_walk(target, auth, oid, opts?) -> Result<Map, String>`.
+- [ ] GETNEXT with one cursor and exactly one correlated response varbind.
+- [ ] Strict subtree, monotonic-order, result, request, datagram, cumulative-byte, and normalized-output enforcement.
+- [ ] Explicit `complete` and `stop_reason` output, including bounded look-ahead at `max_results`.
+- [ ] Loop, equal/descending OID, malformed-order, `endOfMibView`, and out-of-subtree handling.
+- [ ] One whole-operation deadline covering retries, decode, normalization, and result construction.
+- [ ] Reuse Slice 1A auth, target policy, packet caps, and normalization contracts.
+- [ ] GETBULK only after equivalent fixture coverage.
 
-### PR 2 — Interface Inventory and Counters
+Acceptance:
+
+- [ ] No walk can silently return a truncated table as complete.
+- [ ] Mid-walk transport/protocol failure returns `Err` rather than apparently complete telemetry.
+- [ ] Independent UDP fixtures cover malicious loops, subtree escape, retries, caps, and valid termination.
+
+### Slice 1C — Offline MIB Compiler and Fixture Corpus
 
 Scope:
 
-- [ ] `interface_list(target, opts?)`
-- [ ] `interface_counters(target, opts?)`
-- [ ] IF-MIB OID constants/helpers.
+- [ ] `ntnt netmon mib compile <source-root> --output <catalog>`.
+- [ ] ntnt-controlled pinned/vendor SMIv1/SMIv2 parser-resolver substrate with one parser worker by default.
+- [ ] Explicit source manifest, bounded bytes/files/modules/tokens/definitions/imports/depth, and deterministic import index.
+- [ ] No runtime/request-path ASN.1 parsing, implicit directory recursion, system MIB discovery, network fetch, shell, plugin, or dynamic library.
+- [ ] Canonical, versioned, length-prefixed, SHA-256-protected catalog output.
+- [ ] Valid, malformed, cyclic, conflicting, deeply nested, and vendor-sloppy fixture corpus.
+
+Acceptance:
+
+- [ ] Compiler failure cannot replace an existing runtime catalog.
+- [ ] Duplicate/ambiguous definitions and unresolved required imports fail closed.
+- [ ] Output and hashes are deterministic across file creation/order and Linux/macOS/Windows.
+- [ ] Diagnostics are bounded, sanitized, and contain no absolute source paths or excerpts.
+
+### Slice 1D — Immutable Catalog, Profiles, and Plans
+
+Scope:
+
+- [ ] Startup-configured process-global `Arc<CatalogSnapshot>` with expected-hash readiness enforcement.
+- [ ] `netmon_catalog_info()` and `mib_resolve(symbol_or_oid)`.
+- [ ] Separately typed device profiles and walk/inventory plans compiled against one MIB snapshot.
+- [ ] `device_walk_plan(identity_or_profile, opts?)` with precompiled numeric roots.
+- [ ] Exact/longest-prefix recognition precedence and compile-time tie rejection.
+- [ ] Restart/rolling-restart update model with last-known-good retention; no ordinary `mib_load(path)` API.
+
+Acceptance:
+
+- [ ] All interpreter workers in one process observe the same catalog hash.
+- [ ] Separate web/job processes report deterministic matching hashes or fail readiness.
+- [ ] Invalid catalog/profile/plan updates never clear or partially mutate the live snapshot.
+- [ ] Plans cannot contain credentials, targets, cap increases, callbacks, code, or SNMP SET.
+
+### PR 2 — Device Recognition and Inventory Execution
+
+Scope:
+
+- [ ] `device_recognize(target, auth, opts?)`.
+- [ ] `mib_walk(target, auth, root, opts?)`.
+- [ ] `device_identity(target, auth, opts?)`.
+- [ ] `device_inventory(target, auth, opts?)`.
+- [ ] Fixed bounded SYSTEM identity probes, profile matching, and profile-selected finite plan execution.
+- [ ] Versioned normalized envelope with catalog/profile/plan hashes and section-level partial status.
+
+Acceptance:
+
+- [ ] Recognition returns exact evidence and ambiguity rather than treating device-controlled identity as authorization.
+- [ ] Inventory preserves complete/partial/failed section status and stable warning codes.
+- [ ] Every persisted run can record the exact catalog/profile/plan hashes used.
+- [ ] Optional table failure does not discard independently complete sections.
+
+### PR 3 — Interface Inventory and Counters
+
+Scope:
+
+- [ ] `interface_list(target, auth, opts?)`.
+- [ ] `interface_counters(target, auth, opts?)`.
+- [ ] IF-MIB table/index normalization through compiled catalog metadata.
 - [ ] Prefer high-capacity 64-bit counters when present.
 - [ ] Explicit fallback metadata for 32-bit counters.
 
 Acceptance:
 
-- [ ] Interfaces have stable normalized fields.
+- [ ] Interfaces have stable normalized fields and deterministic numeric-index ordering.
 - [ ] Counters include timestamp and counter width.
 - [ ] Missing optional fields degrade gracefully.
 - [ ] Fixture covers up/down/admin-down interfaces.
 
-### PR 3 — Counter-Rate Normalization
+### PR 4 — Counter-Rate Normalization
 
 Scope:
 
-- [ ] `interface_rates(previous, current, opts?)`
+- [ ] `interface_rates(previous, current, opts?)`.
 - [ ] Counter wrap/reset detection.
 - [ ] Utilization percentage from speed when available.
 - [ ] Invalid delta filtering.
@@ -649,26 +885,11 @@ Acceptance:
 - [ ] Negative/impossible deltas do not produce bogus traffic spikes.
 - [ ] Tests cover missing speed and zero interval.
 
-### PR 4 — Device Identity and Inventory Bundle
-
-Scope:
-
-- [ ] `device_identity(target, opts?)`
-- [ ] `device_inventory(target, opts?)`
-- [ ] sysDescr/sysObjectID/vendor-hint mapping.
-- [ ] Partial-result warnings.
-
-Acceptance:
-
-- [ ] Identity includes name, description, object ID, location/contact, uptime, vendor hint.
-- [ ] Inventory bundle returns partial data rather than failing the whole poll when optional tables are unavailable.
-- [ ] Vendor-hint mapping is data-driven and easy to extend.
-
 ### PR 5 — Topology Hints from LLDP
 
 Scope:
 
-- [ ] `lldp_neighbors(target, opts?)`
+- [ ] `lldp_neighbors(target, auth, opts?)`
 - [ ] `topology_edges(devices, opts?)`
 - [ ] Normalize neighbor identities and local/remote port names.
 - [ ] Optional CDP design stub, but do not implement unless tiny.
@@ -744,6 +965,10 @@ Slice 1A uses a small ntnt-owned SNMPv2c GET codec instead of a general SNMP dep
 
 SNMPv3 remains deferred until the v2c data shapes and failure contract survive real use. WALK/GETBULK must reuse this boundary rather than exposing the dependency directly.
 
+Raw MIB compilation uses an ntnt-controlled, exact-source snapshot derived from the MIT-licensed `mib-rs` SMIv1/SMIv2 parser/resolver. A direct upstream parser API is not exposed to ntnt programs or the polling runtime. The compiler wrapper disables default CLI/Serde features not needed by ntnt, removes implicit/system path sources, fixes parser parallelism to one by default, adds checked resource budgets and graph-depth limits, and normalizes only the catalog records ntnt needs. If those controls cannot be maintained as a pinned fork/vendor snapshot with three-platform corpus coverage, the compiler slice does not ship.
+
+The runtime catalog reader is ntnt-owned and does not depend on the ASN.1 parser. It validates only the canonical format and publishes immutable sorted schema/profile/plan data.
+
 Supporting test infrastructure:
 
 - deterministic localhost UDP mock agent in default CI;
@@ -765,6 +990,12 @@ Required tests:
 - [x] malformed or mismatched SNMP response handling
 - [x] complete BER consumption, version/PDU/request/community correlation, and full-width Counter64 decoding
 - [x] noSuchObject/noSuchName normalization
+- [ ] MIB source manifest path/symlink/collision and byte/count/depth ceilings
+- [ ] SMIv1/SMIv2 imports, table/index/type chains, cycles, conflicts, and vendor-sloppy fixtures
+- [ ] deterministic canonical catalog bytes and hashes across source ordering/platforms
+- [ ] runtime catalog length/digest/version/structural validation and expected-hash readiness
+- [ ] profile recognition precedence, ambiguity rejection, and plan-to-numeric compilation
+- [ ] multi-worker/process catalog hash consistency and failed-update last-known-good retention
 - [ ] interface inventory normalization
 - [ ] 32-bit and 64-bit counter snapshots
 - [ ] counter wrap/reset detection
@@ -790,9 +1021,7 @@ Optional/manual tests:
 
    Recommendation: defer. v2c still dominates small/internal monitoring; v3 adds auth/privacy/key-handling complexity that should not block normalized telemetry shapes.
 
-4. **OID/MIB strategy:** ship hardcoded IF-MIB/SYSTEM/LLDP constants or parse MIB files?
-
-   Recommendation: hardcoded curated constants first. MIB parsing is a swamp with paperwork.
+4. **OID/MIB strategy — resolved:** use hardcoded numeric OIDs only for fixed bootstrap probes such as `sysObjectID.0`; compile third-party SMIv1/SMIv2 source offline into one canonical catalog for general symbols, table metadata, profiles, and plans. Ordinary ntnt code cannot load raw MIB paths, and polling never parses ASN.1.
 
 5. **Discovery scope:** should `std/netmon` include subnet discovery?
 
@@ -808,4 +1037,4 @@ Optional/manual tests:
 
 `std/netmon` is now the standard-library home for bounded monitoring protocols and reusable normalization on top of DD-046's safe network policy.
 
-Start narrow. Keep credentials opaque. Bind transport to checked addresses. Normalize without truncating. Let applications own the monitoring product around those primitives. This gives ntnt a credible SNMP foundation without turning the default stdlib into a closet full of enterprise networking adapters wearing one trench coat.
+Start narrow. Keep credentials opaque. Bind transport to checked addresses. Compile untrusted MIB source outside the polling runtime. Publish schema, recognition, and finite plan data as one immutable catalog. Normalize without truncating, and let applications own target inventory and the monitoring product around those primitives. This gives ntnt a credible third-party SNMP inventory foundation without turning the default stdlib into a closet full of enterprise networking adapters wearing one trench coat.
