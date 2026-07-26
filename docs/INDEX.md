@@ -39,6 +39,7 @@ Source files:
 | Document | Description |
 |----------|-------------|
 | [Roadmap](../ROADMAP.md) | Implementation phases and progress |
+| [v0.5.2 Release Notes](release-notes/v0.5.2.md) | Gated, bounded SNMPv2c GET through the new explicitly imported `std/netmon` module |
 | [v0.5.1 Release Notes](release-notes/v0.5.1.md) | Passwordless magic-link flow, opaque provider-neutral secrets, compatibility guarantees, and auth hardening |
 | [v0.5.0 Release Notes](release-notes/v0.5.0.md) | Verification, validation, email, and multi-worker improvements |
 | [v0.4.9 Release Notes](release-notes/v0.4.9.md) | Local auth primitives, backend support, demo, and upgrade guidance |
