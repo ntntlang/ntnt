@@ -17,3 +17,7 @@ net-fixtures = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'binary(std_net_tests)'
 test-group = 'net-fixtures'
+
+[[profile.default.overrides]]
+filter = 'test(/(stdlib::http::tests::|test_unix_socket_secret_provider_end_to_end|test_app_development_loopback_secret_http_bypasses_system_proxy)/)'
+test-group = 'net-fixtures'

@@ -10,6 +10,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::mpsc;
 
 #[cfg(unix)]
 use std::io::{BufRead, BufReader};
@@ -70,7 +72,11 @@ fn serve_secret_agent_once(
     fs::create_dir_all(&directory).expect("create socket fixture directory");
     let path = directory.join("agent.sock");
     let listener = UnixListener::bind(&path).expect("bind secret agent fixture");
+    let (ready_tx, ready_rx) = mpsc::channel();
     let server = std::thread::spawn(move || {
+        ready_tx
+            .send(())
+            .expect("announce secret fixture readiness");
         let (mut stream, _) = listener.accept().expect("accept secret lookup");
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
@@ -104,6 +110,9 @@ fn serve_secret_agent_once(
         )
         .expect("write secret response");
     });
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("secret fixture became ready");
     (path, server)
 }
 
