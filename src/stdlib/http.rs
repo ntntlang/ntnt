@@ -21,7 +21,7 @@
 //! - `auth`: Map with `user` and `pass` for Basic auth
 //! - `cookies`: Map of cookies to send
 //! - `timeout`: Timeout in seconds (default: 30)
-//! - `follow_redirects`: Follow redirects when true (default: false; ignored for Secret-bearing requests)
+//! - `follow_redirects`: Must be false; automatic redirect following is disabled
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
@@ -605,15 +605,13 @@ fn read_response_body_limited(
 }
 
 fn build_http_client(
-    follow_redirects: bool,
     cookie_store: bool,
     direct_loopback_http: bool,
     url: &str,
 ) -> Result<reqwest::blocking::Client> {
-    let mut builder = reqwest::blocking::Client::builder().cookie_store(cookie_store);
-    if !follow_redirects {
-        builder = builder.redirect(reqwest::redirect::Policy::none());
-    }
+    let mut builder = reqwest::blocking::Client::builder()
+        .cookie_store(cookie_store)
+        .redirect(reqwest::redirect::Policy::none());
     if direct_loopback_http {
         // Plaintext development traffic must remain on loopback even when the process
         // has system proxy settings or a nonstandard localhost resolver.
@@ -652,7 +650,7 @@ fn http_get(url: &str) -> Result<Value> {
         ))));
     }
 
-    let client = build_http_client(false, false, false, url)?;
+    let client = build_http_client(false, false, url)?;
     match client.get(url).send() {
         Ok(response) => match read_response_body_limited(response) {
             Ok((body, status, headers, final_url)) => {
@@ -770,6 +768,22 @@ pub(crate) fn http_fetch_with_app_env(
         }
     };
 
+    match opts.get("follow_redirects") {
+        Some(Value::Bool(false)) | None => {}
+        Some(Value::Bool(true)) => {
+            return Err(IntentError::type_error(
+                "fetch() automatic redirect following is disabled; inspect each 3xx response and validate the next URL explicitly"
+                    .to_string(),
+            ))
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "fetch() follow_redirects must be a Bool, got {}",
+                other.type_name()
+            )))
+        }
+    }
+
     let contains_secret = opts.values().any(Value::contains_secret);
     let direct_loopback_http = validate_secret_transport(&url, contains_secret, app_env)?;
 
@@ -791,26 +805,10 @@ pub(crate) fn http_fetch_with_app_env(
             )))
         }
     };
-    let follow_redirects = match opts.get("follow_redirects") {
-        Some(Value::Bool(value)) => *value,
-        None => false,
-        Some(other) => {
-            return Err(IntentError::type_error(format!(
-                "fetch() follow_redirects must be a Bool, got {}",
-                other.type_name()
-            )))
-        }
-    };
 
-    // Redirects are returned to the caller by default so every destination can be
-    // validated explicitly. Secret-bearing requests remain non-following even when
-    // follow_redirects is requested, preventing credential or 307/308 body forwarding.
-    let client = build_http_client(
-        follow_redirects && !contains_secret,
-        true,
-        direct_loopback_http,
-        &url,
-    )?;
+    // Redirects are always returned to the caller so every destination can be
+    // validated explicitly before credentials or a 307/308 body can be forwarded.
+    let client = build_http_client(true, direct_loopback_http, &url)?;
 
     let mut request = match method.as_str() {
         "GET" => client.get(&url),
@@ -997,7 +995,7 @@ fn http_download(url: &str, file_path: &str) -> Result<Value> {
         }
     }
 
-    let client = build_http_client(false, false, false, url)?;
+    let client = build_http_client(false, false, url)?;
     match client.get(url).send() {
         Ok(response) => {
             let status = response.status().as_u16();
@@ -1062,9 +1060,9 @@ pub fn init() -> HashMap<String, Value> {
     // - Two arguments: a URL string and an options map. The URL is merged into
     //   the options map automatically.
     // Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout, follow_redirects.
-    // Redirects are returned as 3xx responses by default so callers can validate each hop.
-    // Set follow_redirects to true only for trusted destinations. Secret-bearing requests
-    // never follow redirects, even when the option is true.
+    // Redirects are returned as 3xx responses so callers can validate each hop.
+    // follow_redirects may be omitted or false; true is rejected because reqwest cannot
+    // apply NTNT's SSRF policy to every redirect destination before connecting.
     // Opaque Secret values are accepted only in header values, cookie values, basic-auth
     // fields, raw bodies, JSON leaves, and form values. Secret-bearing requests require
     // HTTPS; APP_ENV=development permits direct HTTP only for localhost and loopback IPs,
@@ -1093,6 +1091,7 @@ pub fn init() -> HashMap<String, Value> {
     // @error TypeError ~ "fetch() requires a URL string or options map" fix: "Pass a String URL or a Map with request options"
     // @error TypeError ~ "fetch() requires 'url' option" fix: "Include 'url' key in the options map"
     // @error TypeError ~ "fetch() follow_redirects must be a Bool" fix: "Pass true or false for follow_redirects"
+    // @error TypeError ~ "automatic redirect following is disabled" fix: "Inspect the 3xx response, validate Location, and issue the next request explicitly"
     // @error TypeError ~ "Secret-bearing HTTP requests require HTTPS" fix: "Use HTTPS, or set APP_ENV=development for localhost/loopback HTTP"
     // @error RuntimeError ~ "Unsupported HTTP method: ..." fix: "Use GET, POST, PUT, DELETE, PATCH, or HEAD"
     module.insert(
@@ -1366,9 +1365,9 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{mpsc, Arc};
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     fn response_status(value: Value) -> i64 {
         let Value::EnumValue {
@@ -1393,6 +1392,7 @@ mod tests {
     struct RedirectFixture {
         url: String,
         destination_hits: Arc<AtomicUsize>,
+        destination_done: mpsc::Sender<()>,
         redirect_thread: thread::JoinHandle<()>,
         destination_thread: thread::JoinHandle<()>,
     }
@@ -1400,6 +1400,9 @@ mod tests {
     impl RedirectFixture {
         fn finish(self) -> usize {
             self.redirect_thread.join().expect("redirect thread");
+            self.destination_done
+                .send(())
+                .expect("stop destination listener");
             self.destination_thread.join().expect("destination thread");
             self.destination_hits.load(Ordering::SeqCst)
         }
@@ -1448,24 +1451,26 @@ mod tests {
         let destination_url = format!("http://{}/private", destination.local_addr().unwrap());
         let destination_hits = Arc::new(AtomicUsize::new(0));
         let hits = Arc::clone(&destination_hits);
-        let destination_thread = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_millis(250);
-            while Instant::now() < deadline {
-                match destination.accept() {
-                    Ok((mut stream, _)) => {
-                        hits.fetch_add(1, Ordering::SeqCst);
-                        stream
-                            .write_all(
-                                b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nprivate",
-                            )
-                            .expect("write destination response");
-                        return;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("accept destination request: {error}"),
+        let (destination_done, destination_done_rx) = mpsc::channel();
+        let destination_thread = thread::spawn(move || loop {
+            if destination_done_rx.try_recv().is_ok() {
+                break;
+            }
+            match destination.accept() {
+                Ok((mut stream, _)) => {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    drain_http_request(&mut stream);
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\ndestination",
+                        )
+                        .expect("write destination response");
+                    break;
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("destination accept failed: {error}"),
             }
         });
 
@@ -1485,6 +1490,7 @@ mod tests {
         RedirectFixture {
             url,
             destination_hits,
+            destination_done,
             redirect_thread,
             destination_thread,
         }
@@ -1544,16 +1550,19 @@ mod tests {
     }
 
     #[test]
-    fn fetch_options_follow_redirects_only_when_explicitly_enabled() {
-        let fixture = redirect_fixture(302);
-        let result = http_fetch(&HashMap::from([
-            ("url".to_string(), Value::String(fixture.url.clone())),
+    fn fetch_rejects_automatic_redirect_following() {
+        let error = http_fetch(&HashMap::from([
+            (
+                "url".to_string(),
+                Value::String("http://127.0.0.1:1/not-requested".to_string()),
+            ),
             ("follow_redirects".to_string(), Value::Bool(true)),
         ]))
-        .expect("fetch should return a Result value");
+        .expect_err("automatic redirect following must stay disabled");
 
-        assert_eq!(response_status(result), 200);
-        assert_eq!(fixture.finish(), 1, "explicit redirect policy must follow");
+        assert!(error
+            .to_string()
+            .contains("automatic redirect following is disabled"));
     }
 
     #[test]
@@ -1563,7 +1572,7 @@ mod tests {
             &HashMap::from([
                 ("url".to_string(), Value::String(fixture.url.clone())),
                 ("method".to_string(), Value::String("POST".to_string())),
-                ("follow_redirects".to_string(), Value::Bool(true)),
+                ("follow_redirects".to_string(), Value::Bool(false)),
                 (
                     "body".to_string(),
                     Value::Secret(

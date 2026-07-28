@@ -6734,7 +6734,7 @@ fetch(url_or_options: String | Map, options?: Map) -> Result<Response, String>
 
 Make an HTTP request to a URL.
 
-Accepts one or two arguments: - One argument: a URL string for a simple GET request, or an options map   with full control over method, headers, body, authentication, cookies, and timeout. - Two arguments: a URL string and an options map. The URL is merged into   the options map automatically. Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout, follow_redirects. Redirects are returned as 3xx responses by default so callers can validate each hop. Set follow_redirects to true only for trusted destinations. Secret-bearing requests never follow redirects, even when the option is true. Opaque Secret values are accepted only in header values, cookie values, basic-auth fields, raw bodies, JSON leaves, and form values. Secret-bearing requests require HTTPS; APP_ENV=development permits direct HTTP only for localhost and loopback IPs, bypassing system proxies.
+Accepts one or two arguments: - One argument: a URL string for a simple GET request, or an options map   with full control over method, headers, body, authentication, cookies, and timeout. - Two arguments: a URL string and an options map. The URL is merged into   the options map automatically. Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout, follow_redirects. Redirects are returned as 3xx responses so callers can validate each hop. follow_redirects may be omitted or false; true is rejected because reqwest cannot apply NTNT's SSRF policy to every redirect destination before connecting. Opaque Secret values are accepted only in header values, cookie values, basic-auth fields, raw bodies, JSON leaves, and form values. Secret-bearing requests require HTTPS; APP_ENV=development permits direct HTTP only for localhost and loopback IPs, bypassing system proxies.
 
 **Parameters:**
 
@@ -6768,6 +6768,7 @@ fetch("https://api.example.com", map {
 - **TypeError**: fetch() requires a URL string or options map — *Fix: Pass a String URL or a Map with request options*
 - **TypeError**: fetch() requires 'url' option — *Fix: Include 'url' key in the options map*
 - **TypeError**: fetch() follow_redirects must be a Bool — *Fix: Pass true or false for follow_redirects*
+- **TypeError**: automatic redirect following is disabled — *Fix: Inspect the 3xx response, validate Location, and issue the next request explicitly*
 - **TypeError**: Secret-bearing HTTP requests require HTTPS — *Fix: Use HTTPS, or set APP_ENV=development for localhost/loopback HTTP*
 - **RuntimeError**: Unsupported HTTP method: ... — *Fix: Use GET, POST, PUT, DELETE, PATCH, or HEAD*
 
