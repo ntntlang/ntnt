@@ -1415,10 +1415,19 @@ mod tests {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 1024];
         loop {
-            let read = stream.read(&mut buffer).expect("read request");
-            if read == 0 {
-                return;
-            }
+            let read = match stream.read(&mut buffer) {
+                Ok(0) => return,
+                Ok(read) => read,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return;
+                }
+                Err(error) => panic!("read request: {error}"),
+            };
             request.extend_from_slice(&buffer[..read]);
 
             let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
@@ -1441,6 +1450,19 @@ mod tests {
                 return;
             }
         }
+    }
+
+    #[test]
+    fn drain_http_request_treats_an_incomplete_request_timeout_as_completion() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind timeout fixture");
+        let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap())
+            .expect("connect timeout fixture");
+        client
+            .write_all(b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n")
+            .expect("write incomplete request");
+        let (mut server, _) = listener.accept().expect("accept timeout fixture");
+
+        drain_http_request(&mut server);
     }
 
     fn redirect_fixture(status: u16) -> RedirectFixture {
