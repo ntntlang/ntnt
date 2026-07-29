@@ -1,5 +1,5 @@
-// std/netmon Slice 1: bounded SNMPv2c GET without performing traffic on import.
-import { snmp_get } from "std/netmon"
+// std/netmon Slice 1B: bounded SNMPv2c GET and GETNEXT WALK without traffic on import.
+import { snmp_get, snmp_walk } from "std/netmon"
 
 fn read_system_info(
     target: String,
@@ -24,6 +24,30 @@ requires len(target) > 0
             "timeout_ms": 2000,
             "retries": 1,
             "allow_private": allow_private
+        }
+    )
+}
+
+fn walk_interface_table(
+    target: String,
+    community: Secret,
+    allow_private: Bool
+) -> Result<Map<String, Any>, String>
+requires len(target) > 0
+{
+    return snmp_walk(
+        target,
+        map {
+            "version": "2c",
+            "community": community
+        },
+        "1.3.6.1.2.1.2.2.1", // IF-MIB::ifEntry
+        map {
+            "timeout_ms": 5000,
+            "retries": 0,
+            "allow_private": allow_private,
+            "max_results": 512,
+            "on_limit": "partial"
         }
     )
 }

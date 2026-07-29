@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.5.2
+> Last updated: v0.5.3
 
 ## Table of Contents
 
@@ -10303,7 +10303,7 @@ traceroute("example.com", map { "method": "tcp", "port": 443 })  // TCP-SYN trac
 Bounded network-monitoring protocols with opaque credentials and normalized results
 
 ```ntnt
-import { snmp_get } from "std/netmon"
+import { snmp_get, snmp_walk } from "std/netmon"
 ```
 
 ### Functions
@@ -10311,6 +10311,7 @@ import { snmp_get } from "std/netmon"
 | Function | Description |
 |----------|-------------|
 | [`snmp_get`](#snmpget) | Reads one bounded set of numeric OIDs from an SNMP agent. Slice 1 supports SNMPv2c only. The strict auth map must contain `version: "2c"` and a `community` Secret, normally returned by `require_secret()`; plaintext community strings are rejected. Unknown auth and option keys are rejected. SNMPv2c does not encrypt or authenticate its community or payload; use this slice only on trusted management networks or protected tunnels. |
+| [`snmp_walk`](#snmpwalk) | Walks one numeric OID subtree with bounded SNMPv2c GETNEXT requests. The community must be an opaque Secret. SNMPv2c is plaintext; use a trusted management network or protected tunnel. Every call requires `NTNT_NETMON_ENABLE=1`; private targets also require the shared process opt-in and `allow_private: true`. |
 
 #### `snmp_get`
 
@@ -10346,6 +10347,44 @@ snmp_get("10.0.50.1", map { "version": "2c", "community": require_secret("SNMP_C
 **See also:** `require_secret`, `net_capabilities`
 
 *Since v0.5.2*
+
+---
+
+#### `snmp_walk`
+
+```ntnt
+snmp_walk(target: String, auth: Map, oid: String, opts?: Map) -> Result<Map, String>
+```
+
+Walks one numeric OID subtree with bounded SNMPv2c GETNEXT requests. The community must be an opaque Secret. SNMPv2c is plaintext; use a trusted management network or protected tunnel. Every call requires `NTNT_NETMON_ENABLE=1`; private targets also require the shared process opt-in and `allow_private: true`.
+
+The closed options map accepts the common SNMP options plus `max_results` (default 256, hard maximum 2048) and `on_limit` (`"error"`, the default, or `"partial"`). One global deadline covers all cursors, retries, response validation, the mandatory limit look-ahead, normalization, and result construction. Requests and responses are capped at 8 KiB, cumulative received bytes at 8 MiB, and conservative normalized output at 4 MiB.
+
+A successful map has exactly: `target: String`, `address: String`, `port: Int`, `version: String` (`"2c"`), `root_oid: String`, `duration_ms: Int`, `requests: Int`, `attempts: Int`, `complete: Bool`, `stop_reason: String`, and `values: Array<Map>`. Each value uses the same normalized `oid`, `type`, `value`, and optional `encoding` fields as `snmp_get`. `stop_reason` is one of `out_of_subtree`, `end_of_mib_view`, `no_such_object`, `no_such_instance`, or `max_results`. Only `max_results` has `complete: false`, and it is returned only when `on_limit: "partial"`; all transport, protocol, ordering, deadline, and byte-budget failures are `Err(String)` without prior-row telemetry.
+
+**Parameters:**
+
+- `target` — Literal IPv4 or IPv6 address without a port
+- `auth` — Strict map with version (`"2c"`) and community (Secret)
+- `oid` — Numeric root OID in dotted notation
+- `opts` — Optional strict map with port, timeout_ms, retries, allow_private, max_results, and on_limit
+
+**Returns:** Result whose Ok map has exactly target, address, port, version, root_oid, duration_ms, requests, attempts, complete, stop_reason, and values
+
+**Examples:**
+
+```ntnt
+snmp_walk("10.0.50.1", map { "version": "2c", "community": require_secret("SNMP_COMMUNITY") }, "1.3.6.1.2.1.2.2", map { "allow_private": true, "max_results": 128 })  // Walk a bounded interface table
+```
+
+**Errors:**
+
+- **RuntimeError**: std/netmon is disabled — *Fix: Set NTNT_NETMON_ENABLE=1 for the process*
+- **RuntimeError**: snmp_walk() auth.community must be Secret — *Fix: Load it with std/secrets.require_secret()*
+
+**See also:** `snmp_get`, `require_secret`, `net_capabilities`
+
+*Since v0.5.3*
 
 ---
 

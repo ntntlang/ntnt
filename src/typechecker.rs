@@ -4560,6 +4560,17 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     "target" => Type::String,
                     "auth" => map.clone(),
                     "oids" => Type::Array(Box::new(Type::String)),
+                    "opts" => map.clone()
+                ],
+                result_map.clone(),
+                required(3)
+            );
+            sig!(
+                "snmp_walk",
+                [
+                    "target" => Type::String,
+                    "auth" => map.clone(),
+                    "oid" => Type::String,
                     "opts" => map
                 ],
                 result_map,
