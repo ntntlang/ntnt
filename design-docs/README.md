@@ -20,10 +20,11 @@ This folder contains planning and design documents for NTNT features.
 | [dd-060-ai-native-developer-experience.md](dd-060-ai-native-developer-experience.md) | 📋 Draft | AI-native developer experience roadmap |
 | [dd-061-interpreter-performance-roadmap.md](dd-061-interpreter-performance-roadmap.md) | 🔶 In Review | Current-use-case performance roadmap: template contract cleanup, benchmark harness, automatic template cache, template loop/scope cleanup, call/lookup fast paths |
 | [dd-062-secure-compiled-extension-libraries.md](dd-062-secure-compiled-extension-libraries.md) | 📋 Draft | Secure compiled extension libraries: stdlib-grade Rust modules, signed module universes, build provenance, and app-enforced trust requirements |
+| [dd-078-intent-verification-runtime.md](dd-078-intent-verification-runtime.md) | 📋 Draft | Truthful Intent evidence, pure-NTNT project testing, hermetic resources, providers, browser/database/process verification, and the Larrimon migration contract |
 | [language_comparison.md](language_comparison.md) | ✅ Complete | NTNT vs other languages |
 | [INTENT_DRIVEN_DEVELOPMENT.md](INTENT_DRIVEN_DEVELOPMENT.md) | ✅ Complete | IDD philosophy and workflow |
 | [INTENT_ASSERTION_LANGUAGE.md](INTENT_ASSERTION_LANGUAGE.md) | ✅ Complete | IAL spec v1.0.0 |
-| [ial_vision_v2.md](ial_vision_v2.md) | 📋 Planning | Future IAL capabilities |
+| [ial_vision_v2.md](ial_vision_v2.md) | 📦 Superseded in part | Historical IAL vision; DD-078 now owns execution, evidence, resource, and delivery sequencing |
 | [dd-037-concurrency-and-jobs.md](dd-037-concurrency-and-jobs.md) | 🔶 In Progress | Concurrency primitives + job system (master roadmap) |
 | [background_jobs.md](background_jobs.md) | 📦 Archived | Original job system design (superseded by DD-037) |
 | [http_updates.md](http_updates.md) | 📋 Planning | HTTP library improvements |
