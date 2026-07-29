@@ -250,61 +250,75 @@ fn validate_created_module_registration(plan: &str, graph: &SliceGraph) -> Resul
             .map(|offset| index + 1 + offset)
             .unwrap_or(lines.len());
         let section = lines[index..end].join("\n");
-        let Some(create_start) = section.find("**Create") else {
-            continue;
-        };
-        let after_create = &section[create_start..];
-        let create_end = ["\n**Modify", "\n**RED", "\n**GREEN", "\n**Gate"]
+        let mut remainder = section.as_str();
+        while let Some(create_start) = remainder.find("**Create") {
+            let after_create = &remainder[create_start..];
+            let create_end = [
+                "\n**Create",
+                "\n**Modify",
+                "\n**RED",
+                "\n**GREEN",
+                "\n**REFACTOR",
+                "\n**Gate",
+                "\n**Verify",
+                "\n**Acceptance",
+            ]
             .iter()
             .filter_map(|marker| after_create.find(marker))
             .min()
             .unwrap_or(after_create.len());
-        let create_block = &after_create[..create_end];
-        for path in create_block
-            .split('`')
-            .filter(|part| part.starts_with("src/") && part.ends_with(".rs"))
-        {
-            let required = if path.starts_with("src/verification/provider/")
-                && path != "src/verification/provider/mod.rs"
+            let create_block = &after_create[..create_end];
+            for path in create_block
+                .split('`')
+                .filter(|part| part.starts_with("src/") && part.ends_with(".rs"))
             {
-                Some("src/verification/provider/mod.rs")
-            } else if path.starts_with("src/verification/") && path != "src/verification/mod.rs" {
-                Some("src/verification/mod.rs")
-            } else if path.starts_with("src/stdlib/test/") {
-                Some("src/stdlib/test.rs")
-            } else if path.starts_with("src/stdlib/") && path != "src/stdlib/mod.rs" {
-                Some("src/stdlib/mod.rs")
-            } else if path.starts_with("src/project_env/") && path != "src/project_env/mod.rs" {
-                Some("src/project_env/mod.rs")
-            } else if path.matches('/').count() == 1
-                && path != "src/main.rs"
-                && !path.starts_with("src/bin/")
-            {
-                Some("src/lib.rs")
-            } else {
-                None
-            };
-            if let Some(required) = required {
-                if !section.contains(required) {
-                    return Err(format!(
-                        "owner {heading} creates {path} without parent registration {required}"
-                    ));
-                }
-                let creator = match required {
-                    "src/verification/mod.rs" => Some("1A"),
-                    "src/stdlib/test.rs" => Some("3D"),
-                    "src/verification/provider/mod.rs" => Some("5A"),
-                    "src/project_env/mod.rs" => Some("14D"),
-                    _ => None,
+                let required = if path.starts_with("src/verification/provider/")
+                    && path != "src/verification/provider/mod.rs"
+                {
+                    Some("src/verification/provider/mod.rs")
+                } else if path.starts_with("src/verification/") && path != "src/verification/mod.rs"
+                {
+                    Some("src/verification/mod.rs")
+                } else if path.starts_with("src/stdlib/test/") {
+                    Some("src/stdlib/test.rs")
+                } else if path.starts_with("src/stdlib/") && path != "src/stdlib/mod.rs" {
+                    Some("src/stdlib/mod.rs")
+                } else if path.starts_with("src/project_env/") && path != "src/project_env/mod.rs" {
+                    Some("src/project_env/mod.rs")
+                } else if path.matches('/').count() == 1
+                    && path != "src/main.rs"
+                    && !path.starts_with("src/bin/")
+                {
+                    Some("src/lib.rs")
+                } else {
+                    None
                 };
-                if let (Some(owner), Some(creator)) = (owner.as_deref(), creator) {
-                    if owner != creator && !depends_transitively(graph, owner, creator) {
+                if let Some(required) = required {
+                    if !section.contains(required) {
                         return Err(format!(
-                            "owner {heading} creates {path}, but parent {required} is owned by non-dependency {creator}"
+                            "owner {heading} creates {path} without parent registration {required}"
                         ));
+                    }
+                    let creator = match required {
+                        "src/verification/mod.rs" => Some("1A"),
+                        "src/stdlib/test.rs" => Some("3D"),
+                        "src/verification/provider/mod.rs" => Some("5A"),
+                        "src/project_env/mod.rs" => Some("14D"),
+                        _ => None,
+                    };
+                    if let (Some(owner), Some(creator)) = (owner.as_deref(), creator) {
+                        if owner != creator && !depends_transitively(graph, owner, creator) {
+                            return Err(format!(
+                                "owner {heading} creates {path}, but parent {required} is owned by non-dependency {creator}"
+                            ));
+                        }
                     }
                 }
             }
+            if create_end == after_create.len() {
+                break;
+            }
+            remainder = &after_create[create_end..];
         }
     }
     Ok(())
@@ -674,4 +688,12 @@ fn dd078_plan_validator_rejects_representative_drift() {
     );
     let nested_graph = parse_graph(&nested_slice_after_spike).unwrap();
     assert!(validate_spikes(&nested_slice_after_spike, &nested_graph).is_ok());
+
+    let second_create_block = PLAN.replace(
+        "**Gate:** focused scanner parity/root-escape tests, existing inspector/Studio tests, fmt/clippy, and immutable review.",
+        "**Create:** `src/verification/provider/late.rs`\n\n**Gate:** focused scanner parity/root-escape tests, existing inspector/Studio tests, fmt/clippy, and immutable review.",
+    );
+    assert!(validate_plan(&second_create_block)
+        .unwrap_err()
+        .contains("without parent registration src/verification/provider/mod.rs"));
 }
