@@ -13,6 +13,7 @@ const TAG_TIMETICKS: u8 = 0x43;
 const TAG_OPAQUE: u8 = 0x44;
 const TAG_COUNTER64: u8 = 0x46;
 const TAG_GET_REQUEST: u8 = 0xa0;
+const TAG_GET_NEXT_REQUEST: u8 = 0xa1;
 const TAG_GET_RESPONSE: u8 = 0xa2;
 const TAG_NO_SUCH_OBJECT: u8 = 0x80;
 const TAG_NO_SUCH_INSTANCE: u8 = 0x81;
@@ -54,6 +55,29 @@ pub(crate) fn encode_get_request(
     community: &[u8],
     oids: &[Vec<u32>],
 ) -> Result<Zeroizing<Vec<u8>>, String> {
+    encode_request(request_id, community, oids, TAG_GET_REQUEST)
+}
+
+pub(crate) fn encode_get_next_request(
+    request_id: i32,
+    community: &[u8],
+    oid: &[u32],
+) -> Result<Zeroizing<Vec<u8>>, String> {
+    let oid = oid.to_vec();
+    encode_request(
+        request_id,
+        community,
+        std::slice::from_ref(&oid),
+        TAG_GET_NEXT_REQUEST,
+    )
+}
+
+fn encode_request(
+    request_id: i32,
+    community: &[u8],
+    oids: &[Vec<u32>],
+    pdu_tag: u8,
+) -> Result<Zeroizing<Vec<u8>>, String> {
     let mut varbind_list = Vec::new();
     for oid in oids {
         let mut varbind = Vec::new();
@@ -76,7 +100,7 @@ pub(crate) fn encode_get_request(
     let mut message = Zeroizing::new(Vec::with_capacity(message_capacity));
     append_tlv(&mut message, TAG_INTEGER, &[1]);
     append_tlv(&mut message, TAG_OCTET_STRING, community);
-    append_tlv(&mut message, TAG_GET_REQUEST, &pdu);
+    append_tlv(&mut message, pdu_tag, &pdu);
     debug_assert_eq!(message.len(), message_capacity);
 
     let request_capacity = tlv_size(message.len());
@@ -91,6 +115,24 @@ pub(crate) fn decode_response<'a>(
     expected_request_id: i32,
     expected_community: &[u8],
 ) -> Result<DecodedResponse<'a>, String> {
+    decode_response_internal(packet, expected_request_id, expected_community, false)?
+        .ok_or_else(|| "SNMP response request id mismatch".to_string())
+}
+
+pub(crate) fn decode_response_allow_stale<'a>(
+    packet: &'a [u8],
+    expected_request_id: i32,
+    expected_community: &[u8],
+) -> Result<Option<DecodedResponse<'a>>, String> {
+    decode_response_internal(packet, expected_request_id, expected_community, true)
+}
+
+fn decode_response_internal<'a>(
+    packet: &'a [u8],
+    expected_request_id: i32,
+    expected_community: &[u8],
+    allow_stale_request_id: bool,
+) -> Result<Option<DecodedResponse<'a>>, String> {
     let mut packet_reader = Reader::new(packet);
     let message_bytes = packet_reader.expect(TAG_SEQUENCE, "SNMP message")?;
     packet_reader.finish("SNMP datagram")?;
@@ -117,12 +159,20 @@ pub(crate) fn decode_response<'a>(
     let mut pdu = Reader::new(pdu_bytes);
     let request_id = decode_signed_integer(pdu.expect(TAG_INTEGER, "request id")?)?;
     if request_id != i64::from(expected_request_id) {
+        if allow_stale_request_id {
+            return Ok(None);
+        }
         return Err(format!(
             "SNMP response request id mismatch: expected {expected_request_id}, got {request_id}"
         ));
     }
     let error_status = decode_nonnegative_u32(pdu.expect(TAG_INTEGER, "error status")?)?;
     let error_index = decode_nonnegative_u32(pdu.expect(TAG_INTEGER, "error index")?)?;
+    if error_status == 0 && error_index != 0 {
+        return Err(format!(
+            "SNMP response error index must be zero when error status is zero, got {error_index}"
+        ));
+    }
     let varbind_list = pdu.expect(TAG_SEQUENCE, "varbind list")?;
     pdu.finish("SNMP response PDU")?;
 
@@ -138,11 +188,11 @@ pub(crate) fn decode_response<'a>(
         varbinds.push(DecodedVarbind { oid, value });
     }
 
-    Ok(DecodedResponse {
+    Ok(Some(DecodedResponse {
         error_status,
         error_index,
         varbinds,
-    })
+    }))
 }
 
 fn decode_value<'a>(tag: u8, bytes: &'a [u8]) -> Result<DecodedValue<'a>, String> {
@@ -471,6 +521,8 @@ mod tests {
 
     const RESPONSE_HEX: &str = "30550201010406736563726574a248020412345678020100020100303a300d06082b060102010101000101ff301506082b06010201010300460900ffffffffffffffff301206082b060102010105000406726f75746572";
     const REQUEST_HEX: &str = "30370201010406736563726574a02a020412345678020100020100301c300c06082b060102010101000500300c06082b060102010105000500";
+    const GET_NEXT_REQUEST_HEX: &str =
+        "30290201010406736563726574a11c020412345678020100020100300e300c06082b060102010101000500";
 
     fn response() -> Vec<u8> {
         hex::decode(RESPONSE_HEX).expect("valid golden response")
@@ -488,6 +540,13 @@ mod tests {
         )
         .expect("request encodes");
         assert_eq!(hex::encode(encoded.as_slice()), REQUEST_HEX);
+    }
+
+    #[test]
+    fn encodes_canonical_v2c_get_next_request() {
+        let encoded = encode_get_next_request(0x1234_5678, b"secret", &[1, 3, 6, 1, 2, 1, 1, 1, 0])
+            .expect("GETNEXT request encodes");
+        assert_eq!(hex::encode(encoded.as_slice()), GET_NEXT_REQUEST_HEX);
     }
 
     #[test]
@@ -512,6 +571,9 @@ mod tests {
         assert!(decode_response(&packet, 7, b"secret")
             .expect_err("request id mismatch")
             .contains("request id"));
+        assert!(decode_response_allow_stale(&packet, 7, b"secret")
+            .expect("stale response is classified")
+            .is_none());
         assert!(decode_response(&packet, 0x1234_5678, b"wrong")
             .expect_err("community mismatch")
             .contains("community"));

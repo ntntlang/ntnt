@@ -484,7 +484,7 @@ Ok(map {
 
 `Counter64` values use decimal strings so ntnt's signed 64-bit `Int` cannot truncate them, including legal values above `i64::MAX`. Binary octet strings and opaque values use lowercase hex with explicit encoding metadata. Protocol exceptions such as `no_such_object` retain their type and use `None` as the value. Agent `error_status`/`error_index`, transport timeouts, malformed BER, and authentication mismatches return `Err(String)` rather than partial telemetry.
 
-#### `snmp_walk(target, auth, oid, opts?) -> Result<Map, String>` *(next slice)*
+#### `snmp_walk(target, auth, oid, opts?) -> Result<Map, String>` *(implemented in v0.5.3)*
 
 Walk a numeric subtree with strict row, request, byte, and result caps. This follows GET rather than sharing its first compatibility commit. Low-level transport stays numeric and never resolves a mutable MIB symbol implicitly.
 
@@ -517,7 +517,7 @@ Ok(map {
 })
 ```
 
-`requests` counts logical GETNEXT cursors, including look-ahead. `attempts` counts every transmitted datagram, including retries. GETNEXT requests use one cursor and require exactly one response varbind. Every accepted OID must be lexicographically greater than the prior cursor. Equal, descending, or repeated OIDs are protocol errors.
+`requests` counts logical GETNEXT cursors, including look-ahead. `attempts` counts every transmitted datagram, including retries. GETNEXT requests use one cursor and require exactly one response varbind. Every accepted ordinary-value OID must be lexicographically greater than the prior cursor. Equal, descending, or repeated OIDs are protocol errors. Terminal exception OIDs must equal the requested cursor. A same-agent datagram carrying an older request ID is ignored on the same connected socket while the current attempt deadline and cumulative receive-byte budget continue to apply.
 
 The one global deadline begins before first request construction and covers every cursor, retry, decode, normalization step, mandatory look-ahead, and final result build. Terminal behavior is normative:
 
@@ -1019,7 +1019,7 @@ Some of these may become useful later, but they carry OS permissions, abuse risk
 
 - [x] **Slice 0 — standard-library packaging and security contract**
 - [x] **Slice 1A — bounded SNMPv2c GET**
-- [ ] **Slice 1B — bounded numeric SNMP WALK**
+- [x] **Slice 1B — bounded numeric SNMP WALK**
 - [ ] **Slice 1C — canonical MIB catalog compiler, runtime registry, profiles, and plans**
 - [ ] **PR 2 — device recognition and inventory execution**
 - [ ] **PR 3 — interface inventory and counters**
@@ -1074,20 +1074,20 @@ Acceptance:
 
 Scope:
 
-- [ ] `snmp_walk(target, auth, oid, opts?) -> Result<Map, String>`.
-- [ ] GETNEXT with one cursor and exactly one correlated response varbind.
-- [ ] Strict subtree, monotonic-order, result, request, datagram, cumulative-byte, and normalized-output enforcement.
-- [ ] Explicit `complete` and `stop_reason` output, including bounded look-ahead at `max_results`.
-- [ ] Loop, equal/descending OID, malformed-order, `endOfMibView`, and out-of-subtree handling.
-- [ ] One whole-operation deadline covering retries, decode, normalization, and result construction.
-- [ ] Reuse Slice 1A auth, target policy, packet caps, and normalization contracts.
-- [ ] GETBULK only after equivalent fixture coverage.
+- [x] `snmp_walk(target, auth, oid, opts?) -> Result<Map, String>`.
+- [x] GETNEXT with one cursor and exactly one correlated response varbind.
+- [x] Strict subtree, monotonic-order, result, request, datagram, cumulative-byte, and normalized-output enforcement.
+- [x] Explicit `complete` and `stop_reason` output, including bounded look-ahead at `max_results`.
+- [x] Loop, equal/descending OID, malformed-order, `endOfMibView`, and out-of-subtree handling.
+- [x] One whole-operation deadline covering retries, decode, normalization, and result construction.
+- [x] Reuse Slice 1A auth, target policy, packet caps, and normalization contracts.
+- [x] GETBULK remains deferred until equivalent fixture coverage exists.
 
 Acceptance:
 
-- [ ] No walk can silently return a truncated table as complete.
-- [ ] Mid-walk transport/protocol failure returns `Err` rather than apparently complete telemetry.
-- [ ] Independent UDP fixtures cover malicious loops, subtree escape, retries, caps, and valid termination.
+- [x] No walk can silently return a truncated table as complete.
+- [x] Mid-walk transport/protocol failure returns `Err` rather than apparently complete telemetry.
+- [x] Independent UDP fixtures cover malicious loops, subtree escape, retries, caps, forged sources, delayed request IDs, and valid termination.
 
 ### Slice 1C — Canonical MIB Catalog Compiler and Runtime Registry
 
