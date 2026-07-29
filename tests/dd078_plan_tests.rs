@@ -740,6 +740,14 @@ fn validate_plan(plan: &str) -> Result<(), String> {
 #[test]
 fn dd078_plan_is_dependency_closed_and_owner_consistent() {
     validate_plan(PLAN).unwrap();
+
+    let plan_crlf = PLAN.replace("\r\n", "\n").replace('\n', "\r\n");
+    let adoption_crlf = LARRIMON_ADOPTION
+        .replace("\r\n", "\n")
+        .replace('\n', "\r\n");
+    let design_crlf = DESIGN.replace("\r\n", "\n").replace('\n', "\r\n");
+    let graph = parse_graph(&plan_crlf).unwrap();
+    validate_adoption_boundary(&plan_crlf, &adoption_crlf, &design_crlf, &graph).unwrap();
 }
 
 #[test]
@@ -804,51 +812,56 @@ fn dd078_plan_validator_rejects_representative_drift() {
         );
     assert!(validate_plan(&external_owner_drift).is_err());
 
-    let adoption_boundary_drift = LARRIMON_ADOPTION.replace(
+    let plan_lf = PLAN.replace("\r\n", "\n");
+    let adoption_lf = LARRIMON_ADOPTION.replace("\r\n", "\n");
+    let design_lf = DESIGN.replace("\r\n", "\n");
+    let adoption_boundary_drift = adoption_lf.replace(
         "does not participate in the DD-078 core dependency DAG, release sequence, or definition of done",
         "participates in the DD-078 release sequence",
     );
-    let graph = parse_graph(PLAN).unwrap();
-    assert!(validate_adoption_boundary(PLAN, &adoption_boundary_drift, DESIGN, &graph).is_err());
+    let graph = parse_graph(&plan_lf).unwrap();
+    assert!(
+        validate_adoption_boundary(&plan_lf, &adoption_boundary_drift, &design_lf, &graph).is_err()
+    );
 
-    let core_scope_drift = PLAN.replace(
+    let core_scope_drift = plan_lf.replace(
         "DD-078 is implemented when:\n",
         "DD-078 is implemented when:\n\n0. Larrimon has completed Wave E;\n",
     );
     assert!(
-        validate_adoption_boundary(&core_scope_drift, LARRIMON_ADOPTION, DESIGN, &graph)
+        validate_adoption_boundary(&core_scope_drift, &adoption_lf, &design_lf, &graph)
             .unwrap_err()
             .contains("core definition of done")
     );
 
-    let acceptance_scope_drift = DESIGN.replace(
+    let acceptance_scope_drift = design_lf.replace(
         "## 25. Acceptance criteria\n",
         "## 25. Acceptance criteria\n\n- [ ] Larrimon has completed Wave E.\n",
     );
     assert!(
-        validate_adoption_boundary(PLAN, LARRIMON_ADOPTION, &acceptance_scope_drift, &graph)
+        validate_adoption_boundary(&plan_lf, &adoption_lf, &acceptance_scope_drift, &graph)
             .unwrap_err()
             .contains("core acceptance criteria")
     );
 
-    let migration_matrix_drift = LARRIMON_ADOPTION.replace(
+    let migration_matrix_drift = adoption_lf.replace(
         "Run old migration checks and native `ntnt db`/`.tnt` evidence on one immutable Larrimon revision across:",
         "Run whichever migration examples are convenient.",
     );
     assert!(
-        validate_adoption_boundary(PLAN, &migration_matrix_drift, DESIGN, &graph)
+        validate_adoption_boundary(&plan_lf, &migration_matrix_drift, &design_lf, &graph)
             .unwrap_err()
             .contains("Larrimon Slice 16M")
     );
 
-    let (before_consumer_dod, _) = LARRIMON_ADOPTION
+    let (before_consumer_dod, _) = adoption_lf
         .split_once("## 10. Larrimon definition of done\n")
         .unwrap();
     let collapsed_consumer_dod = format!(
         "{before_consumer_dod}## 10. Larrimon definition of done\n\nThe migration is declared complete.\n"
     );
     assert!(
-        validate_adoption_boundary(PLAN, &collapsed_consumer_dod, DESIGN, &graph)
+        validate_adoption_boundary(&plan_lf, &collapsed_consumer_dod, &design_lf, &graph)
             .unwrap_err()
             .contains("Larrimon definition of done")
     );
