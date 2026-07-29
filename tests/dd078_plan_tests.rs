@@ -571,11 +571,8 @@ fn validate_spikes(plan: &str, graph: &SliceGraph) -> Result<(), String> {
     Ok(())
 }
 
-fn reviewed_section<'a>(
-    document: &'a str,
-    start: &str,
-    end: Option<&str>,
-) -> Result<&'a str, String> {
+fn reviewed_section(document: &str, start: &str, end: Option<&str>) -> Result<String, String> {
+    let document = document.replace("\r\n", "\n");
     let start_count = document.matches(start).count();
     if start_count != 1 {
         return Err(format!(
@@ -600,10 +597,12 @@ fn reviewed_section<'a>(
     } else {
         tail
     };
-    Ok(section.trim())
+    Ok(section.trim().to_string())
 }
 
 fn require_reviewed_snapshot(name: &str, actual: &str, expected: &str) -> Result<(), String> {
+    let actual = actual.replace("\r\n", "\n");
+    let expected = expected.replace("\r\n", "\n");
     if actual.trim() != expected.trim() {
         return Err(format!(
             "reviewed DD-078 safety snapshot drifted: {name}; inspect the source/fixture diff before updating"
@@ -679,7 +678,7 @@ fn validate_adoption_boundary(
     }
     require_reviewed_snapshot(
         "core acceptance criteria",
-        reviewed_section(
+        &reviewed_section(
             design,
             "## 25. Acceptance criteria\n",
             Some("## 26. Open implementation questions\n"),
@@ -688,12 +687,12 @@ fn validate_adoption_boundary(
     )?;
     require_reviewed_snapshot(
         "core definition of done",
-        reviewed_section(plan, "## Definition of done\n", None)?,
+        &reviewed_section(plan, "## Definition of done\n", None)?,
         CORE_DOD_SNAPSHOT,
     )?;
     require_reviewed_snapshot(
         "Larrimon Slice 16M",
-        reviewed_section(
+        &reviewed_section(
             adoption,
             "## 6. Adoption Slice 16M — production migration compatibility\n",
             Some("## 7. Wave E — project policy and one-command CI\n"),
@@ -702,7 +701,7 @@ fn validate_adoption_boundary(
     )?;
     require_reviewed_snapshot(
         "Larrimon definition of done",
-        reviewed_section(adoption, "## 10. Larrimon definition of done\n", None)?,
+        &reviewed_section(adoption, "## 10. Larrimon definition of done\n", None)?,
         LARRIMON_DOD_SNAPSHOT,
     )?;
     Ok(())
