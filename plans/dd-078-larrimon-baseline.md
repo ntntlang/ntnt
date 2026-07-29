@@ -1,6 +1,6 @@
 # DD-078 Larrimon audit baseline
 
-This appendix makes the external pressure-test facts in DD-078 reproducible. It is an input baseline, not permission to delete files and not a substitute for the invariant/mutation ledger required before each migration deletion.
+This appendix makes DD-078's first external reference-adoption facts reproducible. Larrimon is a demanding validation corpus for generalized ntnt mechanisms, not the scope or naming source for those mechanisms. This is an input baseline, not permission to delete files and not a substitute for the invariant/mutation ledger required before each migration deletion. Other adopters produce an equivalent appendix bound to their own repository, inventory, and invariants.
 
 - Repository: `https://github.com/larimonious/larrimon.git`
 - Commit: `ceadfd992d1435ac27afb054968ff5569d697ce1`

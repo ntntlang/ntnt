@@ -8,10 +8,10 @@ struct SliceGraph {
     scopes: BTreeMap<String, String>,
 }
 
-fn expand_id(value: &str) -> Vec<String> {
+fn expand_id(value: &str) -> Result<Vec<String>, String> {
     let value = value.trim();
     let Some((start, end)) = value.split_once('–') else {
-        return vec![value.to_string()];
+        return Ok(vec![value.to_string()]);
     };
 
     let prefix_len = start
@@ -26,27 +26,33 @@ fn expand_id(value: &str) -> Vec<String> {
         && start_suffix.as_bytes()[0].is_ascii_alphabetic()
         && end_suffix.as_bytes()[0].is_ascii_alphabetic()
     {
-        return (start_suffix.as_bytes()[0]..=end_suffix.as_bytes()[0])
+        let start_byte = start_suffix.as_bytes()[0];
+        let end_byte = end_suffix.as_bytes()[0];
+        if start_byte > end_byte {
+            return Err(format!("reversed slice range {value}"));
+        }
+        return Ok((start_byte..=end_byte)
             .map(|suffix| format!("{prefix}{}", suffix as char))
-            .collect();
+            .collect());
     }
 
-    vec![start.to_string(), end.to_string()]
+    Ok(vec![start.to_string(), end.to_string()])
 }
 
-fn dependency_tokens(value: &str) -> BTreeSet<String> {
-    value
+fn dependency_tokens(value: &str) -> Result<BTreeSet<String>, String> {
+    let mut tokens = BTreeSet::new();
+    for item in value
         .split(',')
-        .flat_map(|item| {
-            let item = item.trim();
-            if item.is_empty() || item.starts_with("DD-") || item.starts_with("Task ") {
-                vec![item.to_string()]
-            } else {
-                expand_id(item)
-            }
-        })
+        .map(str::trim)
         .filter(|item| !item.is_empty())
-        .collect()
+    {
+        if item.starts_with("DD-") || item.starts_with("Task ") {
+            tokens.insert(item.to_string());
+        } else {
+            tokens.extend(expand_id(item)?);
+        }
+    }
+    Ok(tokens)
 }
 
 fn internal_dependencies(value: &BTreeSet<String>) -> Vec<String> {
@@ -93,8 +99,8 @@ fn parse_graph(plan: &str) -> Result<SliceGraph, String> {
         if columns.len() != 3 {
             return Err(format!("malformed slice row: {line}"));
         }
-        let row_dependencies = dependency_tokens(columns[2]);
-        for id in expand_id(columns[0]) {
+        let row_dependencies = dependency_tokens(columns[2])?;
+        for id in expand_id(columns[0])? {
             if dependencies
                 .insert(id.clone(), row_dependencies.clone())
                 .is_some()
@@ -153,13 +159,11 @@ fn heading_ids(line: &str) -> Result<Option<Vec<String>>, String> {
         return Ok(None);
     };
 
-    Ok(Some(
-        declaration
-            .replace(" and ", ",")
-            .split(',')
-            .flat_map(|part| expand_id(part.trim()))
-            .collect(),
-    ))
+    let mut ids = Vec::new();
+    for part in declaration.replace(" and ", ",").split(',') {
+        ids.extend(expand_id(part.trim())?);
+    }
+    Ok(Some(ids))
 }
 
 fn validate_owners(plan: &str, graph: &SliceGraph) -> Result<(), String> {
@@ -205,7 +209,7 @@ fn validate_owners(plan: &str, graph: &SliceGraph) -> Result<(), String> {
                 "owner heading {line} must have exactly one Table dependencies line"
             ));
         }
-        let owner_dependencies = dependency_tokens(dependency_lines[0]);
+        let owner_dependencies = dependency_tokens(dependency_lines[0])?;
         for id in known_ids {
             *owners.entry(id.clone()).or_default() += 1;
             if owner_dependencies != graph.dependencies[id] {
@@ -526,13 +530,16 @@ fn validate_spikes(plan: &str, graph: &SliceGraph) -> Result<(), String> {
             return Err(format!("{implementation} does not depend on spike {spike}"));
         }
         let marker = format!("## Task {spike}:");
-        let section = plan
+        let body = plan
             .split_once(&marker)
             .ok_or_else(|| format!("missing spike owner {spike}"))?
-            .1
-            .split_once("\n## Task ")
-            .map(|(body, _)| body)
-            .unwrap_or_else(|| plan.split_once(&marker).expect("marker exists").1);
+            .1;
+        let end = [body.find("\n## Task "), body.find("\n### Slice ")]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(body.len());
+        let section = &body[..end];
         if !section.contains("**Artifact:**")
             || !(section.contains("no public") || section.contains("no production"))
             || section.contains("**Create:** `src/")
@@ -655,4 +662,16 @@ fn dd078_plan_validator_rejects_representative_drift() {
             "**Table dependencies:** 2G, 13A",
         );
     assert!(validate_plan(&parent_creator_dependency_drift).is_err());
+
+    let reversed_range = PLAN.replacen("6B, 8, 10A–10B", "6B, 8, 10B–10A", 1);
+    assert!(validate_plan(&reversed_range)
+        .unwrap_err()
+        .contains("reversed slice range 10B–10A"));
+
+    let nested_slice_after_spike = PLAN.replace(
+        "## Task 7A: Frozen out-of-process provider protocol",
+        "### Slice 16M: synthetic spike-boundary fixture\n\n**Create:** `src/not-part-of-spike.rs`\n\n## Task 7A: Frozen out-of-process provider protocol",
+    );
+    let nested_graph = parse_graph(&nested_slice_after_spike).unwrap();
+    assert!(validate_spikes(&nested_slice_after_spike, &nested_graph).is_ok());
 }

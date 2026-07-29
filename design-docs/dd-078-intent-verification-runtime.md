@@ -3,7 +3,7 @@
 **Status:** Draft / architecture decision
 **Authors:** Larri + Josh
 **Created:** 2026-07-28
-**Origin:** Larrimon/Jarri application-verification audit
+**Origin:** General-purpose application-verification architecture, pressure-tested by the Larrimon audit
 **Related:** [IAL v1](INTENT_ASSERTION_LANGUAGE.md), [IAL vision v2](ial_vision_v2.md), [DD-037: Concurrency and Jobs](dd-037-concurrency-and-jobs.md), [DD-062: Secure Compiled Extensions](dd-062-secure-compiled-extension-libraries.md), [DD-063: Language Assessment](dd-063-language-assessment.md), DD-077: Correctness Primitives for Durable Applications
 
 ---
@@ -35,7 +35,9 @@ This DD supersedes the execution roadmap in `ial_vision_v2.md`. That document re
 
 ## 2. Why this is needed
 
-Larrimon is a serious pressure test: authenticated multi-tenant HTTP, PostgreSQL RLS, immutable evidence, durable jobs, scheduler races, browser reconciliation, migrations, provenance, network protocols, alerts, AI inference, multi-node control planes, retention, and eventual HA/on-prem operation.
+Production applications routinely need verification across HTTP state, databases, migrations, queues, browser behavior, external protocols, project policy, lifecycle, and failure recovery. Ntnt currently has useful pieces, but not a general runtime that can plan those resources, execute typed cases, preserve authority boundaries, and report current behavioral evidence truthfully.
+
+Larrimon is the first reference adoption and a deliberately demanding pressure test: authenticated multi-tenant HTTP, PostgreSQL RLS, immutable evidence, durable jobs, scheduler races, browser reconciliation, migrations, provenance, network protocols, alerts, AI inference, multi-node control planes, retention, and eventual HA/on-prem operation. It validates the generalized mechanisms; it does not define their public names, schemas, semantics, or release boundaries.
 
 The [immutable Larrimon audit baseline](../plans/dd-078-larrimon-baseline.md) binds these findings to repository `https://github.com/larimonious/larrimon.git` at commit `ceadfd992d1435ac27afb054968ff5569d697ce1`. At that commit:
 
@@ -47,7 +49,7 @@ The [immutable Larrimon audit baseline](../plans/dd-078-larrimon-baseline.md) bi
 - 27 project-owned shell, Python, and JavaScript/MJS support/test programs totaled 4,149 lines, and 3 SQL-only test inputs added 400 lines, for 30 replacement artifacts/4,549 lines; the audited `tests/` executable/spec set totaled 4,935 lines versus 4,827 lines of non-test production `.tnt`;
 - most compensating code was lifecycle, fixture, assertion, polling, concurrency, database, browser, or policy plumbing rather than product-specific reasoning.
 
-The baseline records every path, full-file range, line count, Git blob, retained product-asset classification, and canonical inventory digest. Dirty-worktree bytes were excluded. A changed Larrimon base invalidates the counts and paths and requires a regenerated baseline plus protected contract before migration or deletion.
+The baseline records every path, full-file range, line count, Git blob, retained product-asset classification, and canonical inventory digest. Dirty-worktree bytes were excluded. A changed Larrimon base invalidates the counts and paths and requires a regenerated baseline plus protected contract before migration or deletion. Other projects adopt the same generalized inventory, protected-contract, parity, and deletion protocol with their own repository identities and pressure profiles.
 
 The compensation is rational. Current ntnt can parse and lint intent, resolve glossary terms, run simple HTTP checks, call simple functions, expand tabular data, and trace `@implements`. It cannot yet safely own an application verification run.
 
@@ -98,7 +100,7 @@ curl/grep/psql polling loops
 handwritten JUnit conversion
 ```
 
-The runtime should support Larrimon's current contracts and the next planned classes of work:
+The runtime should support these general application-verification classes, with Larrimon supplying the first concrete acceptance corpus:
 
 - auth, tenant isolation, CSRF/origin, sessions, role changes, and revocation;
 - HTTP/HTMX/full-page/no-JavaScript/browser reconciliation behavior;
@@ -125,8 +127,8 @@ The runtime should support Larrimon's current contracts and the next planned cla
 7. Keep authority explicit, capability-gated, root-confined, bounded, redacted, and reviewable before execution.
 8. Preserve external specialist engines behind typed provider boundaries while keeping project test code in ntnt.
 9. Produce stable JSON and JUnit evidence with source locations, timings, hashes, and diagnostics.
-10. Let Larrimon delete compensating test harnesses incrementally, with each deletion gated by equivalent or stronger evidence.
-11. Remain general-purpose: ntnt gains reusable verification mechanics, not monitoring-specific syntax.
+10. Let any adopting project delete compensating test harnesses incrementally, with each deletion gated by equivalent or stronger evidence; prove the protocol first with Larrimon.
+11. Remain general-purpose: ntnt gains reusable verification mechanics, not application-, monitoring-, or Larrimon-specific syntax.
 12. Work on Linux first without making unearned portability claims; define Windows/macOS behavior and explicit unsupported capabilities.
 
 ## 5. Non-goals
@@ -1014,9 +1016,11 @@ DD-078 truth-accounting, project, policy, contract, purity, snapshot, and concre
 
 ---
 
-## 22. Larrimon migration contract
+## 22. General adoption contract and Larrimon reference profile
 
-Larrimon migration is part of acceptance, not an anecdote. Each wave deletes compensating code only after equivalent evidence passes on clean CI.
+The generalized adoption protocol is: pin an immutable project inventory, classify every relevant path exactly once, bind a protected contract and execution snapshot to that identity, dual-run old and new checks, require semantic mutation/fault witnesses, and delete compensating code only after equivalent or stronger evidence passes on clean CI. This protocol applies to any ntnt application.
+
+Larrimon is the first concrete reference profile for that protocol. The waves below are application-specific acceptance data, not ntnt runtime API or required domain structure. A different project supplies its own inventory, invariant families, resources, and deletion waves while using the same planner, authority, evidence, parity, and cleanup contracts.
 
 ### Wave A: truth and pure cases
 
@@ -1154,11 +1158,11 @@ The final HA, restore, live-network, and private-device profiles are environment
 - [ ] Managed processes support readiness, expected failure, logs, restart, exit, and process-tree cleanup.
 - [ ] Local HTTP/SMTP/webhook/TCP/UDP fixtures support strict scripted behavior.
 - [ ] Eventual assertions use one bounded deadline and report attempts/final observation.
-- [ ] Named actors/barriers reproduce at least the Larrimon claim/scheduler/projection races without sleeps.
+- [ ] Named actors/barriers reproduce application-defined claim/scheduler/projection races without sleeps; the Larrimon corpus supplies the first acceptance cases.
 - [ ] Browser cases cover authenticated, HTMX, no-JavaScript, focus/history, and reconciliation behavior from `.tnt`.
 - [ ] Project/provider facts replace the audited Python provenance and architecture checks without granting arbitrary shell.
 
-### Larrimon proof
+### Reference-adoption proof: Larrimon
 
 - [ ] All current 27 scenarios and 38 audited assertion/outcome lines are either verified or explicitly corrected/superseded; none vanish silently.
 - [ ] The current shell, Python, JavaScript test, and SQL-only test invariant inventory has a destination and parity evidence.
@@ -1222,4 +1226,4 @@ Implementation is split into reviewable, test-first PRs in the companion plan:
 
 [DD-078 implementation plan](../plans/dd-078-intent-verification-implementation.md)
 
-The design PR authorizes no production implementation by itself. Each runtime slice needs its own focused PR, security review proportional to new authority, full regression gates, generated-document truth sync, and a concrete Larrimon deletion gate.
+The design PR authorizes no production implementation by itself. Each runtime slice needs its own focused PR, security review proportional to new authority, full regression gates, generated-document truth sync, a generalized acceptance corpus, and—where a reference migration consumes it—a concrete project deletion gate. Larrimon is the first such consumer, not a privileged runtime mode.
