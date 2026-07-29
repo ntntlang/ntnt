@@ -515,6 +515,14 @@ fn validate_releases(plan: &str, graph: &SliceGraph) -> Result<(), String> {
     assert_release_closed("monitoring", &["18P", "18A", "18B"], &mut available, graph)?;
     assert_release_closed("reliability", &["19A", "19B", "19C"], &mut available, graph)?;
     assert_release_closed("ha", &["20P", "20A", "20B", "20C"], &mut available, graph)?;
+    let all_slices: BTreeSet<_> = graph.dependencies.keys().cloned().collect();
+    if available != all_slices {
+        let unreleased: Vec<_> = all_slices.difference(&available).cloned().collect();
+        let unknown: Vec<_> = available.difference(&all_slices).cloned().collect();
+        return Err(format!(
+            "release groups must cover every core slice exactly: unreleased={unreleased:?}, unknown={unknown:?}"
+        ));
+    }
     Ok(())
 }
 
@@ -697,6 +705,20 @@ fn dd078_plan_validator_rejects_representative_drift() {
         1,
     );
     assert!(validate_plan(&release_drift).is_err());
+
+    let unreleased_slice = PLAN
+        .replacen(
+            "| 1B | JSON/human report schema and exit parity | 1A |",
+            "| 1B | JSON/human report schema and exit parity | 1A |\n| 21 | synthetic unreleased slice | 1A |",
+            1,
+        )
+        .replace(
+            "# Reference-adoption plans",
+            "## Task 21: Synthetic unreleased slice\n\n**Table dependencies:** 1A\n\n**Modify:** documentation only.\n\n---\n\n# Reference-adoption plans",
+        );
+    assert!(validate_plan(&unreleased_slice)
+        .unwrap_err()
+        .contains("unreleased=[\"21\"]"));
 
     let external_owner_drift = PLAN
         .replace(
