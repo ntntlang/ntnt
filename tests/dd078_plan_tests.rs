@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 const PLAN: &str = include_str!("../plans/dd-078-intent-verification-implementation.md");
+const LARRIMON_ADOPTION: &str = include_str!("../plans/dd-078-larrimon-adoption.md");
+const DESIGN: &str = include_str!("../design-docs/dd-078-intent-verification-runtime.md");
 
 #[derive(Debug)]
 struct SliceGraph {
@@ -378,13 +380,7 @@ fn validate_external_prerequisites(plan: &str, graph: &SliceGraph) -> Result<(),
 }
 
 fn validate_task_dependencies(plan: &str, graph: &SliceGraph) -> Result<(), String> {
-    let allowed = BTreeMap::from([
-        ("Task 0", "## Task 0:"),
-        (
-            "Task 16 DB conversion",
-            "## Task 16: Larrimon Waves B–D — HTTP, database/jobs, browser",
-        ),
-    ]);
+    let allowed = BTreeMap::from([("Task 0", "## Task 0:")]);
     for dependency in graph.dependencies.values().flatten() {
         if !dependency.starts_with("Task ") {
             continue;
@@ -448,7 +444,6 @@ fn validate_releases(plan: &str, graph: &SliceGraph) -> Result<(), String> {
         "following feature release",
         "browser/project feature release",
         "project-environment feature release",
-        "Larrimon pure-project deletion",
         "future monitoring/reliability releases",
     ];
     if rows.keys().copied().collect::<BTreeSet<_>>()
@@ -468,10 +463,6 @@ fn validate_releases(plan: &str, graph: &SliceGraph) -> Result<(), String> {
             "Slices 12P, 12A–12B, 13A–13E, and 14A–14B",
         ),
         ("project-environment feature release", "Slices 14C–14D"),
-        (
-            "Larrimon pure-project deletion",
-            "Slices 14C–14D and migration compatibility Slice 16M before Task 17",
-        ),
         (
             "future monitoring/reliability releases",
             "Slices 18P, 18A–18B, then 19A–19C, then 20P, 20A–20C",
@@ -521,7 +512,6 @@ fn validate_releases(plan: &str, graph: &SliceGraph) -> Result<(), String> {
         &mut available,
         graph,
     )?;
-    assert_release_closed("larrimon-deletion", &["16M"], &mut available, graph)?;
     assert_release_closed("monitoring", &["18P", "18A", "18B"], &mut available, graph)?;
     assert_release_closed("reliability", &["19A", "19B", "19C"], &mut available, graph)?;
     assert_release_closed("ha", &["20P", "20A", "20B", "20C"], &mut available, graph)?;
@@ -569,6 +559,73 @@ fn validate_spikes(plan: &str, graph: &SliceGraph) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_adoption_boundary(
+    plan: &str,
+    adoption: &str,
+    graph: &SliceGraph,
+) -> Result<(), String> {
+    if graph.dependencies.contains_key("16M") {
+        return Err("consumer Slice 16M entered the core DD-078 DAG".to_string());
+    }
+    for forbidden in [
+        "## Task 15: Larrimon",
+        "## Task 16: Larrimon",
+        "## Task 17: Larrimon",
+        "### Slice 16M:",
+        "| Larrimon pure-project deletion |",
+        "**Larrimon gate",
+        "**Reference-adoption gate (Larrimon)",
+        "**Reference-adoption deletion gate (Larrimon)",
+    ] {
+        if plan.contains(forbidden) {
+            return Err(format!(
+                "consumer-specific adoption requirement remained in core plan: {forbidden}"
+            ));
+        }
+    }
+    for required in [
+        "does not participate in the DD-078 core dependency DAG, release sequence, or definition of done",
+        "## 6. Adoption Slice 16M — production migration compatibility",
+        "**Exclusive deletion authority:**",
+        "scripts/migrate.sh",
+        "scripts/migrate-prod.sh",
+        "scripts/check-migration-checksums.py",
+        "tests/migrate_prod_integration.sh",
+        "## 10. Larrimon definition of done",
+    ] {
+        if !adoption.contains(required) {
+            return Err(format!(
+                "standalone Larrimon adoption plan lost required boundary or gate: {required}"
+            ));
+        }
+    }
+    if !plan.contains("[`dd-078-larrimon-adoption.md`](dd-078-larrimon-adoption.md)") {
+        return Err("core plan does not link the standalone adoption plan".to_string());
+    }
+    for forbidden in [
+        "### Reference-adoption proof: Larrimon",
+        "Task 17 cannot claim pure-ntnt",
+    ] {
+        if DESIGN.contains(forbidden) {
+            return Err(format!(
+                "consumer-specific completion requirement remained in core design: {forbidden}"
+            ));
+        }
+    }
+    for required in [
+        "No particular application inventory, migration wave, helper deletion, or adoption completion date participates in the DD-078 core DAG, release sequence, or definition of done.",
+        "plans/dd-078-larrimon-adoption.md",
+        "### Adoption portability",
+    ] {
+        if !DESIGN.contains(required) {
+            return Err(format!(
+                "core design lost its generalized adoption boundary: {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_plan(plan: &str) -> Result<(), String> {
     let graph = parse_graph(plan)?;
     for (id, dependencies) in &graph.dependencies {
@@ -591,6 +648,7 @@ fn validate_plan(plan: &str) -> Result<(), String> {
     validate_task_dependencies(plan, &graph)?;
     validate_releases(plan, &graph)?;
     validate_spikes(plan, &graph)?;
+    validate_adoption_boundary(plan, LARRIMON_ADOPTION, &graph)?;
     if !plan.contains("f0132afcff984bb43305be39122d7e74a6850396") || plan.contains("DD-077 Slice 0")
     {
         return Err("DD-077 immutable identity/owner naming drift".to_string());
@@ -640,9 +698,6 @@ fn dd078_plan_validator_rejects_representative_drift() {
     );
     assert!(validate_plan(&release_drift).is_err());
 
-    let task_owner_drift = PLAN.replace("Task 16 DB conversion", "Task 999 DB conversion");
-    assert!(validate_plan(&task_owner_drift).is_err());
-
     let external_owner_drift = PLAN
         .replace(
             "| 18B | monitoring protocol, catalog, and inventory acceptance profiles | 18A, 13A, DD-047 Slice 1C, DD-047 PR 2 |",
@@ -654,11 +709,12 @@ fn dd078_plan_validator_rejects_representative_drift() {
         );
     assert!(validate_plan(&external_owner_drift).is_err());
 
-    let larrimon_boundary_drift = PLAN.replace(
-        "All relevant slices above plus Slices 14C–14D and migration compatibility Slice 16M before Task 17",
-        "All relevant slices above plus Slices 14C–14D before Task 17",
+    let adoption_boundary_drift = LARRIMON_ADOPTION.replace(
+        "does not participate in the DD-078 core dependency DAG, release sequence, or definition of done",
+        "participates in the DD-078 release sequence",
     );
-    assert!(validate_plan(&larrimon_boundary_drift).is_err());
+    let graph = parse_graph(PLAN).unwrap();
+    assert!(validate_adoption_boundary(PLAN, &adoption_boundary_drift, &graph).is_err());
 
     let module_registration_drift = PLAN.replace(
         "**Modify:** `src/verification/mod.rs` registration and report claim-scope/input-identity fields only;",

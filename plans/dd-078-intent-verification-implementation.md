@@ -1,6 +1,6 @@
 # DD-078 Intent Verification Runtime — Implementation Plan
 
-> **For Hermes and ntnt contributors:** Execute in order with RED → GREEN → REFACTOR. Keep generalized ntnt runtime changes and project-adoption migrations in separate PRs. Larrimon is the first reference adoption; do not delete one of its old checks until the replacement has parity evidence from the same clean revision.
+> **For Hermes and ntnt contributors:** Execute core slices in dependency order with RED → GREEN → REFACTOR. Keep generalized ntnt runtime changes and consumer-adoption migrations in separate PRs; consumer plans may use only pinned, reviewed runtime commits.
 
 **Goal:** Deliver the DD-078 Intent Verification Runtime so a production application can declare durable behavior in `.intent`, implement all project-owned tests in `.tnt`, declare resources/profiles in `ntnt.toml`, and run the complete suite through `ntnt intent check .` without project-local Bash, Python, JavaScript test, or SQL-only test harnesses.
 
@@ -8,9 +8,9 @@
 
 **Baseline:** `origin/main` at plan authoring was `79c61dd98b0f10e3f6c1bce4f1d6e4df2343a21f` (ntnt 0.5.3). Rebase each implementation branch onto current `origin/main` before work. The audited DD-077 candidate is in `https://github.com/ntntlang/ntnt.git` at commit `f0132afcff984bb43305be39122d7e74a6850396`, document `design-docs/dd-077-correctness-primitives-roadmap.md`, Git blob `31a6d82f79e6051a7f00bfb182c979e5e78f2c3f`, on a separate unmerged lineage; it is not an ancestor of this plan. Only DD-077's literal owning sections/PR identifiers below are dependencies. Their owning design and implementations must merge, and their exact merge commits must replace the candidate SHA in this ledger, before any dependent DD-078 branch starts. No DD-078 fallback contract is permitted.
 
-**Reference adoption / primary pressure test:** [`larimonious/larrimon`](https://github.com/larimonious/larrimon) at immutable commit `ceadfd992d1435ac27afb054968ff5569d697ce1`, recorded in [`dd-078-larrimon-baseline.md`](dd-078-larrimon-baseline.md), especially its seven `.intent` files, `tests/`, `ARCHITECTURE.md`, and `design-docs/dd-001-larrimon-mvp.md` §21.4/§22. Dirty-worktree bytes are not baseline evidence. Any changed base requires regenerating the canonical inventories and protected contract before deletion.
+**Reference adoption / primary pressure test:** [`larimonious/larrimon`](https://github.com/larimonious/larrimon) at immutable commit `ceadfd992d1435ac27afb054968ff5569d697ce1`, recorded in [`dd-078-larrimon-baseline.md`](dd-078-larrimon-baseline.md) and governed by the standalone [`dd-078-larrimon-adoption.md`](dd-078-larrimon-adoption.md). Dirty-worktree bytes are not baseline evidence. Any changed base requires regenerating the canonical inventories and protected contract before deletion.
 
-**Generalization boundary:** The dependency table and Tracks A–F define reusable ntnt mechanisms. Tracks G–H and every Larrimon-labeled gate are a separate consumer acceptance profile: they may prove that the mechanisms are sufficient, but they may not introduce Larrimon-specific public APIs, schemas, keywords, defaults, fixture semantics, or privileged runtime modes. Every runtime slice lands with project-neutral fixtures and tests before a Larrimon migration consumes it. Another project can provide its own immutable inventory and adoption waves without modifying the runtime architecture.
+**Generalization boundary:** The dependency table and Tracks A–G define reusable ntnt mechanisms. Application adoption plans are separate consumers: they may prove that the mechanisms are sufficient, but they do not participate in the core DAG, release sequence, or definition of done and may not introduce project-specific public APIs, schemas, keywords, defaults, fixture semantics, or privileged runtime modes. Every runtime slice lands with project-neutral fixtures and tests before an adoption plan consumes it.
 
 **Baseline gate note:** On the authoring host with Rust 1.94, `cargo nextest run` passed 1,962/1,962 tests (including the two-test DD-078 plan-consistency binary), but `cargo clippy --all-targets -- -D warnings` is already red on three unchanged `build.rs` lints (`collapsible_if` and two `manual_strip`). Before Task 1, either repair those baseline warnings in a separate narrow hygiene PR or pin/document the supported Rust toolchain that remains green. Do not bury baseline repair in the first verification feature diff.
 
@@ -99,7 +99,6 @@ DD-077 Design spike 0C and PR 4B own static effect-metadata coverage/transitive 
 | 14B | JUnit renderer, Studio, docs, editor migration | 14A |
 | 14C | typed project-state, locks/leases, allocation transaction substrate | 2G, 6B |
 | 14D | typed `ntnt project env` init/up/down/status OCI lifecycle, brokered daemon allocation/ingress, and effective-config validation | DD-077 PR 1C, 7A, 13D, 14C |
-| 16M | Larrimon production migration/legacy-ledger/upgrade compatibility matrix | DD-077 PR 1C, 8, Task 16 DB conversion |
 | 18P | streaming/event-source feasibility spike: NETCONF, HTTP/2/gRPC, TLS/syslog, flow control | 7A, 7D |
 | 18A | typed streaming/event-source fixture/provider contracts | 18P, 7A |
 | 18B | monitoring protocol, catalog, and inventory acceptance profiles | 18A, 13A, DD-047 Slice 1C, DD-047 PR 2 |
@@ -171,11 +170,11 @@ The exact split may be adjusted to keep files coherent. Shared operational suppo
 1. Add DD-078 and this plan.
 2. Mark the execution phase order in `ial_vision_v2.md` as superseded by DD-078; retain historical term-rewriting/Studio material.
 3. Register DD-078 in the design-document index.
-4. Add tests that parse the table and every owner, expand ranges, and reject duplicate/unknown/cyclic dependencies, owner/table drift, generalized external-ledger or task-owner drift, incomplete release closure including Larrimon/16M, missing parent-module registration or transitive parent-creator dependency, production-bearing feasibility spikes, fictional aliases, identity loss, and missing/duplicate owners; include negative mutation fixtures for representative failures.
+4. Add tests that parse the table and every owner, expand ranges, and reject duplicate/unknown/cyclic dependencies, owner/table drift, generalized external-ledger or task-owner drift, incomplete core release closure, missing parent-module registration or transitive parent-creator dependency, production-bearing feasibility spikes, fictional aliases, identity loss, and missing/duplicate owners; include negative mutation fixtures for representative failures.
 5. Run Markdown/link checks, the focused DAG test, and `cargo fmt --check`; the only Rust change is non-runtime plan validation.
 6. Obtain architecture, security, and implementation-plan review against the exact staged diff.
 
-**Acceptance:** Design has explicit generalized pure-project scope and project-neutral runtime fixtures, authority model, provider boundary, a separate Larrimon reference-adoption/deletion profile, real DD-077 owner identifiers, report truth model, and mechanically valid implementation DAG. No runtime behavior changes.
+**Acceptance:** Design has explicit generalized pure-project scope and project-neutral runtime fixtures, authority model, provider boundary, a linked but non-gating consumer-adoption protocol, real DD-077 owner identifiers, report truth model, and mechanically valid implementation DAG. No runtime behavior changes.
 
 ---
 
@@ -207,7 +206,6 @@ The exact split may be adjusted to keep files coherent. Shared operational suppo
 
 **Gate:** `cargo test verification_truth`, full Intent and Studio tests, committed schema validation, fmt/clippy, and immutable review.
 
-**Reference-adoption gate (Larrimon):** Run its current Intent files through the new static ledger and capture the exact inventory of declared, documentation-only, linked, unbound, executable, and verified obligations. Delete nothing.
 
 ---
 
@@ -291,7 +289,6 @@ The exact split may be adjusted to keep files coherent. Shared operational suppo
 
 **Gate:** planner/manifest/secret tests, no-execution proof, CLI schema/docs, fmt/clippy, and immutable review.
 
-**Reference-adoption gate (Larrimon):** Add a non-executing draft `[verification]` section in a separate Larrimon branch and prove the full resource/test inventory plans without startup. Do not merge it until the consuming runtime PR is pinned.
 
 ---
 
@@ -342,7 +339,6 @@ The exact split may be adjusted to keep files coherent. Shared operational suppo
 
 **Verify:** full interpreter, stdlib, typechecker, language-feature, and verification policy tests; then full nextest because every native registration is touched mechanically.
 
-**Reference-adoption gate (Larrimon):** none yet. This is the authority floor required before project verification code can execute safely.
 
 ---
 
@@ -399,7 +395,6 @@ The exact split may be adjusted to keep files coherent. Shared operational suppo
 
 **Gate:** `cargo test verification_assertion`, case/function compatibility tests, docs validation, full applicable nextest, fmt/clippy, and immutable review.
 
-**Reference-adoption deletion gate (Larrimon) A1:** Convert representative reducer, validation, probe-shape, and application-service files to discovered `.tnt` cases. Run old and new together. Once all 18 current direct `ntnt run` cases have parity, remove their manual print/pass conventions and the 18-run loop from `tests/intent.sh`.
 
 ---
 
@@ -441,8 +436,6 @@ The exact split may be adjusted to keep files coherent. Shared operational suppo
 
 **Verify:** focused fixture tests, verification planner/case tests, docs generation, fmt, clippy.
 
-**Larrimon gate A2:** Replace repeated scalar seed/setup builders used by pure `.tnt` cases. Resource-backed database/auth fixtures wait for Tasks 8–9.
-
 ---
 
 ## Task 4 / Slice 4: Table/property execution and deterministic test observations
@@ -472,7 +465,6 @@ The exact split may be adjusted to keep files coherent. Shared operational suppo
 
 **Verify:** focused tests, full Intent tests, docs generation, clippy.
 
-**Reference-adoption gate (Larrimon):** Move large validation matrices and reducer golden streams into typed data fixtures without growing hand-written assertion helpers.
 
 ---
 
@@ -502,7 +494,6 @@ The exact split may be adjusted to keep files coherent. Shared operational suppo
 
 **Gate:** focused session/capture/taint/assertion tests, full Intent HTTP and Studio compatibility tests, docs, fmt/clippy, and immutable review.
 
-**Reference-adoption deletion gate (Larrimon) B1:** Migrate public health, headers, origin/HTMX, form fallback, auth request/consume, cookie, role, and multiple-identity cases. Keep server lifecycle in the old harness until Task 6.
 
 ---
 
@@ -571,7 +562,6 @@ Adversarially prove the implementable guarantees and unsupported-platform behavi
 
 **REFACTOR:** Remove null stdout/stderr spawning and fixed-port assumptions from `run_intent_check_command`.
 
-**Reference-adoption deletion gate (Larrimon) B2:** Move server/config/startup-failure and authenticated HTTP suites to manifest-managed app resources. Remove equivalent process, port, wait, and curl helpers from shell.
 
 ---
 
@@ -612,7 +602,6 @@ Before Slice 7A, adversarially prove inherited stdin/stdout pipe handling on Lin
 
 **RED/GREEN:** Add finite loopback-only request scripts, exact method/path/header/body matching, response/redirect/delay/disconnect scripts, generated ephemeral HTTPS identity, webhook signature/attempt capture, consumption counts, strict unexpected/unused-traffic failures, byte/deadline caps, taint/redaction, and bounded request evidence. No SMTP or generic TCP behavior enters this PR.
 
-**Reference-adoption gate (Larrimon):** Replace redirect/resend HTTP mocks and webhook receiver programs after mutation parity.
 
 ---
 
@@ -624,7 +613,6 @@ Before Slice 7A, adversarially prove inherited stdin/stdout pipe handling on Lin
 
 **RED/GREEN:** Implement a finite loopback SMTP script/capture with envelope/header/body/attachment assertions, delayed/rejected/disconnected replies, message/byte/deadline limits, required-message consumption, and recursive secret redaction. No queue observation or HTTP fixture code enters this PR.
 
-**Reference-adoption gate (Larrimon):** Replace the project-owned SMTP capture program after magic-link and alert-delivery mutation parity.
 
 ---
 
@@ -701,7 +689,6 @@ Before Slice 7A, adversarially prove inherited stdin/stdout pipe handling on Lin
 4. Integrate migrations through one versioned interface.
 5. Add optional managed OCI mode after the external mode is green.
 
-**Reference-adoption deletion gate (Larrimon) C1:** Migrate schema, migration, checksum, RLS, security-definer, immutability, tenant-isolation, rollback, and role cases. Commit a file/range-level old-to-new ledger for every migration invariant. Task 16 owns replacement/deletion of `tests/assertions.sql`, `tests/probe_run_state_fixture.sql`, and `tests/security_definer_tenant_case.sql` after same-revision positive, negative, race, cleanup, and mutation parity. Run old migration checks and Slice 16M on the same revision with injected failures; keep only `scripts/migrate.sh`, `scripts/migrate-prod.sh`, `scripts/check-migration-checksums.py`, and `tests/migrate_prod_integration.sh` until the landed production runner and supported legacy/upgrade matrix pass.
 
 ---
 
@@ -727,9 +714,8 @@ Before Slice 7A, adversarially prove inherited stdin/stdout pipe handling on Lin
 6. Reject mutable shared fixture parallelism without an explicit reset/serialization policy.
 7. Prove secret-bearing payloads and supervisor/admin Redis credentials never enter app/test code or reports; stale cleanup acts on the exact disposable-instance ledger object, never keys discovered by logical DB or prefix scans.
 
-**GREEN:** Implement disposable Redis lifecycle plus project-neutral queue/mail/webhook observations; validate them with generic fixture applications before using Larrimon as the reference-adoption corpus. Attached Redis remains visibly non-verifying unless a future enforcing broker proves exact transactional key ownership and cleanup.
+**GREEN:** Implement disposable Redis lifecycle plus project-neutral queue/mail/webhook observations; validate them with generic fixture applications before any consumer adoption. Attached Redis remains visibly non-verifying unless a future enforcing broker proves exact transactional key ownership and cleanup.
 
-**Reference-adoption deletion gate (Larrimon) C2:** Migrate magic-link email, queue wakeup/reconciliation, alert delivery, and resource cleanup cases.
 
 ---
 
@@ -783,8 +769,6 @@ Inventory every wall/monotonic clock, sleep, auth/job expiry, UUID/random, retry
 
 **Gate:** focused lifecycle/crash/cleanup tests, full supervisor tests, fmt/clippy, and immutable review.
 
-**Larrimon gate C3:** Replace sleeps/poll loops for queued/running/terminal runs, readiness, session revocation, alert delivery, and scheduler recovery.
-
 ---
 
 ## Task 11 / Slice 11A: Actors, barriers, and deterministic coordination
@@ -817,7 +801,6 @@ Inventory every wall/monotonic clock, sleep, auth/job expiry, UUID/random, retry
 
 **GREEN:** Implement bounded actor groups/barriers and provider hold/release integration.
 
-**Reference-adoption deletion gate (Larrimon) C4:** Port every background/FIFO/`xargs -P` race case. No sleep-based race may be deleted until the replacement forces the intended interleaving.
 
 ---
 
@@ -895,7 +878,6 @@ Inventory every wall/monotonic clock, sleep, auth/job expiry, UUID/random, retry
 
 **GREEN:** Expose the typed API and evidence; keep provider internals unavailable to project code.
 
-**Reference-adoption deletion gate (Larrimon) D:** Rewrite reconciliation and staging browser smoke in `.tnt`; cover desktop/mobile, HTMX/full-page, no-JavaScript, focus, URL, abort/replacement, mutation ambiguity, and auth. Remove project test `.js`/`.mjs` after parity.
 
 ---
 
@@ -962,7 +944,6 @@ Inventory every wall/monotonic clock, sleep, auth/job expiry, UUID/random, retry
 
 **Gate:** syntax decision, parser/binder diagnostics, docs, fmt/clippy, and immutable review.
 
-**Reference-adoption deletion gate (Larrimon) E1:** Port `architecture_cases.py`, CI policy, assets, runtime/image provenance, and Compose/project assertions. Dual-run the new migration-checksum facts through 13D, but retain `scripts/check-migration-checksums.py`; only Slice 16M may authorize its removal after Task 8 and the landed migration matrix pass. Compare exact findings against old Python on the same immutable revision, then remove only the architecture/CI/assets/runtime-image Python files with demonstrated parity. Staging-state files are owned only by Slice 14C's gate.
 
 ---
 
@@ -990,7 +971,6 @@ Inventory every wall/monotonic clock, sleep, auth/job expiry, UUID/random, retry
 
 **Gate:** focused JUnit/replay/Studio schema tests, full report tests, fmt/clippy, and immutable review.
 
-**Reference-adoption gate (Larrimon):** CI uploads one versioned JSON report and optional JUnit; no shell post-processing infers coverage or status.
 
 ---
 
@@ -1020,7 +1000,6 @@ Inventory every wall/monotonic clock, sleep, auth/job expiry, UUID/random, retry
 
 **GREEN:** Implement the versioned state service and opaque typed `std/project/environment` handle used by native project-environment commands; do not expose generic key/value storage, arbitrary paths, process execution, or OCI commands.
 
-**Reference-adoption deletion gate (Larrimon):** Port every state/transition invariant and mutation from `scripts/staging-state.py` and `tests/staging_state_cases.py`; preserve worktree identity, legacy-state upgrade, restrictive permissions, and foreign-state rejection. Do not delete either file until 14D also proves effective interpolation and atomic OCI port/subnet allocation parity.
 
 ---
 
@@ -1053,126 +1032,16 @@ Inventory every wall/monotonic clock, sleep, auth/job expiry, UUID/random, retry
 
 **GREEN:** Implement one typed OCI/Compose lifecycle provider, durable ingress broker, exact creation receipts/recovery, and the CLI. Dev/staging behavior is data in the project manifest; no placeholder-socket handoff, shell-wrapper provider, or arbitrary command escape exists.
 
-**Reference-adoption deletion gate (Larrimon):** Replace `scripts/dev-up.sh`, `dev-down.sh`, `staging-up.sh`, and `staging-down.sh` only after same-revision positive, negative, partial-failure, cleanup, and mutation parity. `staging-smoke.sh` remains until its HTTP/browser evidence also migrates.
 
 ---
 
-# Track G — Reference adoption: Larrimon conversion and product proof
+# Reference-adoption plans
 
-## Task 15: Larrimon Wave A — Intent truth and native cases
-
-**Repository:** Larrimon only
-**Depends on ntnt:** Tasks 1–4
-
-**Files:**
-
-- Modify all seven current `.intent` files with stable scenario/outcome IDs and missing behavioral scenarios.
-- Add/convert `.tnt` files under `verification/`.
-- Modify `ntnt.toml` profiles.
-- Modify CI to run old and new tiers together temporarily.
-- Remove obsolete manual assertion/pass wrappers only after parity.
-
-**Required additions:** Include currently under-covered wrong-tenant session, readiness dependency failure, internal dispatch denial, request-path no-probe, persistence rollback, concurrent projection serialization, enqueue failure reconciliation, and audit immutability contracts.
-
-**Gate:** Every audited obligation is verified or explicitly documentation-only with rationale. `@implements` coverage is no longer presented as behavioral verification.
+Application migrations do not participate in the DD-078 core DAG, release sequence, or definition of done. The first consumer profile—including Larrimon Waves A–E, production-migration compatibility, deletion authority, immutable inventory, and future pressure cases—is maintained separately in [`dd-078-larrimon-adoption.md`](dd-078-larrimon-adoption.md). Other projects define equivalent adoption plans without changing ntnt runtime slices.
 
 ---
 
-## Task 16: Larrimon Waves B–D — HTTP, database/jobs, browser
-
-**Depends on ntnt:** Tasks 5–12B
-
-Execute separate focused Larrimon PRs:
-
-1. HTTP/auth/server conversion.
-2. PostgreSQL/migration/RLS conversion.
-3. Jobs/eventual/restart conversion.
-4. Deterministic concurrency conversion.
-5. Browser/reconciliation conversion.
-
-For each PR:
-
-1. Inventory old cases with stable IDs.
-2. Add failing `.tnt` equivalents.
-3. Run old/new on the same clean database/runtime/image.
-4. Compare positive, negative, timing, cleanup, and race behavior.
-5. Apply representative semantic mutations/faults and prove both old and new checks fail with equivalent useful detection evidence.
-6. Delete only the replaced slice; every non-dual-runnable exception names the exact blocker and reviewer-approved alternative witness.
-7. Update Intent bindings and architecture/testing docs.
-
-**Gate:** No project-owned Node/Playwright test files or non-migration SQL-only test case files remain after Wave D. Production JavaScript and SQL migrations remain where required. Migration fixtures/support scripts remain until Slice 16M passes.
-
-### Slice 16M: Larrimon production migration compatibility
-
-**Table dependencies:** DD-077 PR 1C, 8, Task 16 DB conversion
-
-Run the old migration suite and native `ntnt db`/`.tnt` evidence on one immutable revision across fresh install, idempotent rerun, every supported legacy ledger, checksum backfill, pre-package unverifiable rows, unknown-ledger rejection before mutation, malformed/missing manifests, missing/mutated applied files, database checksum enforcement, concurrent migrators/advisory locks, per-migration rollback, dirty recovery, cancellation, role configuration, and each supported old/new application-schema upgrade matrix. Inject failures/mutations for every family and retain paired reports.
-
-**Gate:** Only this slice may authorize removal of `scripts/migrate.sh`, `scripts/migrate-prod.sh`, `scripts/check-migration-checksums.py`, and `tests/migrate_prod_integration.sh`. It owns no SQL-only application test fixture; those exact three files belong to Task 16. A later Task 20 may expand operational matrices, but the supported production matrix cannot be deferred past this deletion.
-
----
-
-## Task 17: Larrimon Wave E — project policy and one-command CI
-
-**Depends on ntnt:** Tasks 13–14, Slices 14C–14D and 16M, and prior Larrimon waves
-
-**Files:**
-
-- Convert Python/static/provenance checks to `.tnt`.
-- Inventory every remaining project-owned `.sh`/`.py` outside the historical test tree; convert operational helpers to ordinary `.tnt` CLI programs or direct typed ntnt/provider commands. Any externally owned non-support artifact exclusion must come from the operator-controlled origin/digest lock; project-generated support cannot be retained.
-- Replace suite shell wrappers with `ntnt.toml` profiles.
-- Simplify `.github/workflows/ci.yml` to pinned host-installed/setup/verify actions that invoke named ntnt profiles through typed inputs; no inline `run:` script, shell block, or project wrapper.
-- Update `README.md`, `ARCHITECTURE.md`, and testing docs.
-
-**Audited replacement ledger:** The immutable path/range/line/blob inventory is [`dd-078-larrimon-baseline.md`](dd-078-larrimon-baseline.md), bound to Larrimon commit `ceadfd992d1435ac27afb054968ff5569d697ce1`. The grouped table below is a destination summary only. Before deletion, regenerate the baseline from the exact migration base and require its digest, protected-contract base, and execution snapshot base to match.
-
-| Current project-owned files | Required native destination |
-|---|---|
-| `tests/{all,fast,intent,db}.sh` | `ntnt.toml` profiles and pinned typed CI action entries for `ntnt intent check` |
-| `tests/integration.sh`, `tests/server-smoke.sh`, `scripts/staging-smoke.sh` | linked `.tnt` HTTP/DB/process/browser cases under the corresponding profile |
-| `tests/migrate_prod_integration.sh` | Slice 16M only, after landed DD-077 PRs 1B–1C: native migration-runner compatibility, legacy/upgrade/failure matrix, and same-revision evidence |
-| `scripts/{migrate,migrate-prod}.sh` | DD-077 `ntnt db` migration/apply/verify commands plus linked migration evidence |
-| `scripts/{dev-up,dev-down,staging-up,staging-down}.sh` | Slices 14C–14D typed `ntnt project env` state/OCI lifecycle; never a generic native command or shell-wrapper provider |
-| `scripts/staging-state.py`, `tests/staging_state_cases.py` | Slice 14C typed root-bound state/lock/lease substrate plus Slice 14D OCI allocation and `.tnt` cases |
-| `scripts/check-migration-checksums.py` | Task 8 migration observations plus Slice 16M's landed DD-077 compatibility matrix; only 16M authorizes deletion |
-| `tests/{architecture_cases,ci_cases,assets_provenance,runtime_provenance,runtime_image_provenance}.py` | `std/test/project`, Git/YAML/OCI/migration facts, and linked `.tnt` constraints |
-| `tests/{smtp_mock,redirect_mock,resend_mock}.py` | Slices 7B–7C built-in SMTP and scripted HTTP fixture providers |
-| `tests/reconciliation_cases.js`, `tests/staging-browser-smoke.mjs` | `std/test/browser` `.tnt` cases; production `public/larrimon.js` remains product code |
-| `tests/{assertions,probe_run_state_fixture,security_definer_tenant_case}.sql` | Task 16 typed PostgreSQL assertions/seed fixtures and role/RLS/security-definer `.tnt` cases; deleted before Slice 16M |
-
-Before deletion, expand this table to invariant-level rows with old line/range, stable invariant ID, replacement obligation/case IDs, resources/environment, positive result, deliberate mutation/fault witness, and retained report digest. The path inventory is a floor, not permission to batch-delete by filename count.
-
-**Final commands:**
-
-```bash
-ntnt intent lint .
-ntnt intent plan . --profile full --json
-ntnt intent check . --profile fast
-ntnt intent check . --profile full --report-json verification-report.json
-```
-
-Environment-backed gated profiles remain explicit:
-
-```bash
-# Operator-installed wrapper chooses fixed profile/policy/contract outside the checkout.
-/usr/local/bin/ntnt-protected-verify live-public-network
-/usr/local/bin/ntnt-protected-verify ha-game-day
-```
-
-**Final deletion gate:**
-
-- zero project-owned `.sh` files; any externally owned artifact exclusion is operator-locked by origin/digest and is not verification/support;
-- zero project-owned `.py` files under the same rule; project-generated support is never exempt;
-- zero project-local browser/reconciliation test `.js`/`.mjs` files;
-- zero SQL-only test case files;
-- all suite orchestration represented by ntnt profiles;
-- all required obligations current and verified;
-- complete old-to-new invariant ledger retained in project docs/history.
-- representative mutation/fault witnesses retained for every deleted invariant family.
-
----
-
-# Track H — Extended generalized pressure cases, validated by Larrimon
+# Track G — Extended generalized verification capabilities
 
 These are acceptance applications for the runtime, not reasons to add product-specific primitives.
 
@@ -1318,10 +1187,9 @@ Do not put this portfolio into a patch release. Recommended feature sequence:
 | following feature release | Landed DD-077 PRs 1B–1C plus DD-078 Slices 7P, 7A–7F, 8–9, 10P, 10A–10C, and 11A: provider protocol/fixtures, PostgreSQL/Redis/migration evidence, eventual/clock/lifecycle, and coordination |
 | browser/project feature release | Slices 12P, 12A–12B, 13A–13E, and 14A–14B after their spikes and security review |
 | project-environment feature release | Slices 14C–14D after process/provider foundations and DD-077 migration runner |
-| Larrimon pure-project deletion | All relevant slices above plus Slices 14C–14D and migration compatibility Slice 16M before Task 17 |
 | future monitoring/reliability releases | Slices 18P, 18A–18B, then 19A–19C, then 20P, 20A–20C; 18B also waits for pinned landed DD-047 Slice 1C/PR 2 identities, and every public provider waits for its feasibility spike and exact dependency closure |
 
-Larrimon can begin deletion after each pinned release; it does not need to wait for the entire portfolio. The final pure-project claim waits for Task 17.
+Consumer adoption plans may begin their own evidence-backed migrations after each pinned release. Their deletion schedules and pure-project claims do not gate this core release sequence.
 
 ---
 
@@ -1335,9 +1203,9 @@ DD-078 is implemented when:
 4. native `.tnt` verification covers typed unit, HTTP, database, process, fixture, eventual, concurrency, browser, and project-policy cases;
 5. capabilities are externally granted, root-confined, bounded, redacted, and cleaned up through authenticated host-ledger ownership;
 6. external providers are versioned, pinned, explicitly sandboxed or trusted-uncontained, and fail closed; protected PR lanes admit only allowed containment classes;
-7. project-neutral fixture applications exercise every public mechanism without importing Larrimon code, names, data models, or policies;
-8. Larrimon, as the first reference adoption, has executable ntnt paths for its current and planned invariant families;
-9. that reference adoption has removed all project-owned Bash/Python support and orchestration plus the other compensating test-language files identified by its immutable inventory; only operator-locked externally owned non-support artifacts may be excluded;
+7. project-neutral fixture applications exercise every public mechanism without importing consumer code, names, data models, or policies;
+8. the generalized adoption protocol binds an arbitrary immutable fixture repository, exact-once inventory, protected contract, and execution snapshot to one canonical identity;
+9. old/new parity plus deliberate mutation/fault witnesses produce machine-readable deletion-eligibility evidence without automatically deleting consumer files;
 10. fast, full, live-network, and environment-backed profiles state their evidence, claim level, containment, and hermeticity honestly;
 11. full ntnt regression, docs, hosted-platform, and independent security/architecture reviews pass against immutable commits;
-12. Larrimon counts, paths, ranges, and deletion claims bind the same exact repository commit and canonical inventory digest used by the protected contract and execution snapshot. A second adopter can repeat the protocol with a different identity and inventory without changing ntnt runtime APIs.
+12. at least two project-neutral adoption fixtures with different identities and inventories complete the protocol without changing ntnt runtime APIs. Consumer-specific adoption completion remains outside DD-078.

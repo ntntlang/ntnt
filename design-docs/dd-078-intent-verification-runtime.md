@@ -100,7 +100,7 @@ curl/grep/psql polling loops
 handwritten JUnit conversion
 ```
 
-The runtime should support these general application-verification classes, with Larrimon supplying the first concrete acceptance corpus:
+The runtime should support these general application-verification classes through project-neutral acceptance fixtures. Larrimon supplies a separate external consumer corpus:
 
 - auth, tenant isolation, CSRF/origin, sessions, role changes, and revocation;
 - HTTP/HTMX/full-page/no-JavaScript/browser reconciliation behavior;
@@ -127,7 +127,7 @@ The runtime should support these general application-verification classes, with 
 7. Keep authority explicit, capability-gated, root-confined, bounded, redacted, and reviewable before execution.
 8. Preserve external specialist engines behind typed provider boundaries while keeping project test code in ntnt.
 9. Produce stable JSON and JUnit evidence with source locations, timings, hashes, and diagnostics.
-10. Let any adopting project delete compensating test harnesses incrementally, with each deletion gated by equivalent or stronger evidence; prove the protocol first with Larrimon.
+10. Let any adopting project delete compensating test harnesses incrementally, with each deletion gated by equivalent or stronger evidence; prove the protocol with project-neutral fixtures before any consumer migration.
 11. Remain general-purpose: ntnt gains reusable verification mechanics, not application-, monitoring-, or Larrimon-specific syntax.
 12. Work on Linux first without making unearned portability claims; define Windows/macOS behavior and explicit unsupported capabilities.
 
@@ -772,7 +772,7 @@ Browser navigation and subresource requests use the same network policy as other
 
 Screenshots and traces can contain secret pixels or page content that generic string redaction cannot repair. They are sensitive artifacts: disabled unless the profile/policy permits them, written with restrictive permissions, masked with configured private selectors where possible, bounded, and labeled with retention/export policy. Ntnt MUST NOT claim arbitrary screenshot pixels are safely redacted.
 
-Larrimon's reconciliation JavaScript, HTMX fragment behavior, mobile/desktop rendering, focus transfer, no-JavaScript fallback, and authenticated browser smoke can then be expressed in `.tnt` rather than `.js`/`.mjs`.
+Consumer adoption plans can then express reconciliation, fragment behavior, responsive rendering, focus transfer, no-JavaScript fallback, and authenticated browser smoke in `.tnt`. The Larrimon plan is the first concrete consumer of that generalized capability.
 
 ---
 
@@ -829,7 +829,7 @@ cleanup = "exact-owned-objects"
 
 `ntnt project env init|up|down|status NAME` parses and renders effective configuration through a typed OCI provider. Pure mode rejects shell interpreters/operators and project-owned shell/Python entrypoints or lifecycle hooks in that rendered configuration. `down` acts only on exact state-ledger object IDs after root/manifest/generation/ownership revalidation; it never trusts a project name, label prefix, or repository-supplied cleanup target. Crashes, concurrent worktrees, occupied ports/subnets, partial starts, migration failure, cancellation, stale state, and provider drift produce explicit recoverable dispositions. Host policy grants OCI/socket/build/network authority; untrusted PR profiles lacking that grant can plan but cannot execute the environment.
 
-These slices are the concrete replacements for Larrimon `dev-up/down`, `staging-up/down`, `staging-state.py`, and `staging_state_cases.py`. Task 17 cannot claim pure-ntnt until their invariant/mutation ledger passes.
+These slices provide the generalized replacement surface for project-owned environment lifecycle and state programs. The standalone Larrimon adoption plan maps its concrete files and pure-project claim to these capabilities without making that migration a DD-078 release gate.
 
 ---
 
@@ -1016,59 +1016,19 @@ DD-078 truth-accounting, project, policy, contract, purity, snapshot, and concre
 
 ---
 
-## 22. General adoption contract and Larrimon reference profile
+## 22. General adoption contract
 
-The generalized adoption protocol is: pin an immutable project inventory, classify every relevant path exactly once, bind a protected contract and execution snapshot to that identity, dual-run old and new checks, require semantic mutation/fault witnesses, and delete compensating code only after equivalent or stronger evidence passes on clean CI. This protocol applies to any ntnt application.
+DD-078 defines a project-neutral adoption protocol: pin an immutable project inventory, classify every relevant path exactly once, bind a protected contract and execution snapshot to that identity, dual-run old and new checks, require semantic mutation/fault witnesses, and delete compensating code only after equivalent or stronger evidence passes on clean CI.
 
-Larrimon is the first concrete reference profile for that protocol. The waves below are application-specific acceptance data, not ntnt runtime API or required domain structure. A different project supplies its own inventory, invariant families, resources, and deletion waves while using the same planner, authority, evidence, parity, and cleanup contracts.
+The protocol itself is normative and is accepted with project-neutral fixture repositories. No particular application inventory, migration wave, helper deletion, or adoption completion date participates in the DD-078 core DAG, release sequence, or definition of done. Consumer projects maintain separate adoption plans that bind their own invariants to landed DD-078 capabilities.
 
-### Wave A: truth and pure cases
-
-- run every current `.intent` obligation or mark it explicitly documentation-only/unproven;
-- replace manual `require`/`expect_*` helpers and 18 `ntnt run` invocations with discovered `.tnt` verification cases;
-- replace `tests/intent.sh` with `ntnt intent check . --profile fast` in CI;
-- delete no scenario merely because the old runner cannot express it.
-
-### Wave B: HTTP/auth/server
-
-- migrate public HTTP, startup validation, magic-link, session, CSRF/origin, role, HTMX, and authenticated server cases;
-- replace curl/grep/process loops with session/resource APIs;
-- remove the corresponding shell harness sections.
-
-### Wave C: database/jobs/concurrency
-
-- migrate schema, migration, RLS, security-definer, tenant isolation, scheduler, probe-run, lock, rollback, restart, and reconciliation cases;
-- use committed fixtures visible to app pools and held transactions only where appropriate;
-- replace and delete the exact application/schema test inputs `tests/assertions.sql`, `tests/probe_run_state_fixture.sql`, and `tests/security_definer_tenant_case.sql` after same-revision positive, negative, race, cleanup, and mutation parity; retain only the named migration-runner scripts/checksum/integration programs in the immutable baseline until landed DD-077 PRs 1B–1C and Slice 16M's legacy/upgrade matrix pass.
-
-### Wave D: browser and JavaScript behavior
-
-- rewrite reconciliation and browser smoke as `.tnt` browser cases;
-- prove desktop/mobile, JavaScript/no-JavaScript, focus, URL, abort/replacement, and network-failure behavior;
-- remove project-owned Node/Playwright test files.
-
-### Wave E: project/provenance/CI
-
-- migrate architecture, staging-state, migration checksum, asset, CI, runtime, and image-provenance checks to `.tnt` project/provider cases;
-- replace suite shell wrappers with manifest profiles;
-- reduce CI to ntnt build/install plus one or more `ntnt intent check` profile commands;
-- delete Python and remaining shell test/support files. Project-owned operational helpers outside the audited test tree are converted to ordinary `.tnt` CLI programs or direct ntnt/provider commands rather than smuggled into a general task runner.
-
-Every deletion gate requires a checked-in old-to-new invariant ledger containing the old file and line/range, stable invariant ID, replacement obligation/case IDs, environment/resources, expected positive result, deliberate violation/fault witness, and retained evidence. Deletion requires:
-
-1. stable obligation IDs and no unexplained old invariant;
-2. new positive evidence in the same clean environment;
-3. old and new checks run together for every technically runnable invariant; any exception names the exact blocker and receives a reviewer-approved alternative witness rather than the phrase “where possible”;
-4. representative mutations/faults make both old and new checks fail with useful evidence, proving detection rather than count parity;
-5. no reduction in negative, race, cleanup, security, timing-boundary, or failure-injection cases;
-6. report artifacts retained for review;
-7. exact file-count and line-count evidence showing what was removed and what remains.
+Larrimon is the first reference consumer. Its immutable baseline, Waves A–E, migration compatibility Slice 16M, deletion authority, and future pressure corpus are tracked in [`plans/dd-078-larrimon-adoption.md`](../plans/dd-078-larrimon-adoption.md). That plan may expose missing generalized capabilities, but cannot change ntnt APIs or block completion of the project-neutral runtime.
 
 ---
 
-## 23. Future-pressure acceptance matrix
+## 23. Illustrative future-pressure matrix (non-normative)
 
-| Larrimon direction | Required DD-078 mechanism |
+| Reference-consumer pressure | Generalized DD-078 mechanism |
 |---|---|
 | pure reducer, replay, backtest | typed values, golden fixtures, deterministic seed/time, property/subcase reports |
 | signup/invite/Turnstile | stateful HTTP, independent identity/IP/purpose rate-limit actors, provider stub, verified-email membership fixture, transactional side-effect/rollback evidence |
@@ -1158,23 +1118,16 @@ The final HA, restore, live-network, and private-device profiles are environment
 - [ ] Managed processes support readiness, expected failure, logs, restart, exit, and process-tree cleanup.
 - [ ] Local HTTP/SMTP/webhook/TCP/UDP fixtures support strict scripted behavior.
 - [ ] Eventual assertions use one bounded deadline and report attempts/final observation.
-- [ ] Named actors/barriers reproduce application-defined claim/scheduler/projection races without sleeps; the Larrimon corpus supplies the first acceptance cases.
+- [ ] Named actors/barriers reproduce application-defined claim/scheduler/projection races without sleeps in project-neutral fixture applications.
 - [ ] Browser cases cover authenticated, HTMX, no-JavaScript, focus/history, and reconciliation behavior from `.tnt`.
 - [ ] Project/provider facts replace the audited Python provenance and architecture checks without granting arbitrary shell.
 
-### Reference-adoption proof: Larrimon
+### Adoption portability
 
-- [ ] All current 27 scenarios and 38 audited assertion/outcome lines are either verified or explicitly corrected/superseded; none vanish silently.
-- [ ] The current shell, Python, JavaScript test, and SQL-only test invariant inventory has a destination and parity evidence.
-- [ ] The replacement ledger proves representative semantic mutations/faults are detected before each old file is deleted.
-- [ ] `tests/intent.sh` and suite wrappers are removed.
-- [ ] Project-owned `.sh` and `.py` files are zero. Any externally owned artifact exclusion is operator-locked by origin/digest and proven not to be verification/support; project-generated support is never waived.
-- [ ] Project-local browser/reconciliation test `.js`/`.mjs` and SQL-only test files are zero.
-- [ ] Typed project-state and `ntnt project env` slices replace dev/staging lifecycle and staging-state programs with allocation, failure, cleanup, and mutation parity.
-- [ ] The path/range/blob inventory, protected contract, candidate base, and execution snapshot bind the same exact Larrimon commit and canonical inventory digest.
-- [ ] Fast and full profiles run through ntnt with current verified coverage at the configured threshold.
-- [ ] The Larrimon DD-001 test plan and future-pressure matrix have an executable ntnt path.
-- [ ] Specialist external resources remain pinned, capability-scoped, and visible in reports.
+- [ ] A project-neutral fixture repository exercises the complete adoption protocol: immutable inventory, exact-once classification, protected contract/snapshot binding, old/new parity, mutation/fault witnesses, and evidence-backed deletion eligibility.
+- [ ] The adoption protocol produces reusable machine-readable inputs and reports without project names or paths in public APIs, schemas, defaults, policies, fixture semantics, or privileged modes.
+- [ ] A consumer adoption plan can bind its own inventory and migration waves to landed capabilities without joining or changing the DD-078 core DAG, releases, or completion criteria.
+- [ ] The Larrimon reference-adoption checklist remains separately reviewable in [`plans/dd-078-larrimon-adoption.md`](../plans/dd-078-larrimon-adoption.md) and is not evidence that the project-neutral runtime itself passed.
 
 ---
 
@@ -1226,4 +1179,4 @@ Implementation is split into reviewable, test-first PRs in the companion plan:
 
 [DD-078 implementation plan](../plans/dd-078-intent-verification-implementation.md)
 
-The design PR authorizes no production implementation by itself. Each runtime slice needs its own focused PR, security review proportional to new authority, full regression gates, generated-document truth sync, a generalized acceptance corpus, and—where a reference migration consumes it—a concrete project deletion gate. Larrimon is the first such consumer, not a privileged runtime mode.
+The design PR authorizes no production implementation by itself. Each runtime slice needs its own focused PR, security review proportional to new authority, full regression gates, generated-document truth sync, and a project-neutral acceptance corpus. Consumer migrations and their deletion gates land in separate adoption PRs against pinned runtime commits; Larrimon is the first such consumer, not a privileged runtime mode or core completion gate.
