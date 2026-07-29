@@ -3,6 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 const PLAN: &str = include_str!("../plans/dd-078-intent-verification-implementation.md");
 const LARRIMON_ADOPTION: &str = include_str!("../plans/dd-078-larrimon-adoption.md");
 const DESIGN: &str = include_str!("../design-docs/dd-078-intent-verification-runtime.md");
+const CORE_ACCEPTANCE_SNAPSHOT: &str = include_str!("fixtures/dd078/core-acceptance-criteria.md");
+const CORE_DOD_SNAPSHOT: &str = include_str!("fixtures/dd078/core-definition-of-done.md");
+const LARRIMON_16M_SNAPSHOT: &str = include_str!("fixtures/dd078/larrimon-slice-16m.md");
+const LARRIMON_DOD_SNAPSHOT: &str = include_str!("fixtures/dd078/larrimon-definition-of-done.md");
 
 #[derive(Debug)]
 struct SliceGraph {
@@ -567,9 +571,51 @@ fn validate_spikes(plan: &str, graph: &SliceGraph) -> Result<(), String> {
     Ok(())
 }
 
+fn reviewed_section<'a>(
+    document: &'a str,
+    start: &str,
+    end: Option<&str>,
+) -> Result<&'a str, String> {
+    let start_count = document.matches(start).count();
+    if start_count != 1 {
+        return Err(format!(
+            "reviewed section heading {start:?} must occur exactly once, found {start_count}"
+        ));
+    }
+    let start_offset = document
+        .find(start)
+        .ok_or_else(|| format!("missing reviewed section heading {start:?}"))?;
+    let tail = &document[start_offset..];
+    let section = if let Some(end) = end {
+        let end_count = tail.matches(end).count();
+        if end_count != 1 {
+            return Err(format!(
+                "reviewed section terminator {end:?} must occur exactly once after {start:?}, found {end_count}"
+            ));
+        }
+        let end_offset = tail
+            .find(end)
+            .ok_or_else(|| format!("missing reviewed section terminator {end:?}"))?;
+        &tail[..end_offset]
+    } else {
+        tail
+    };
+    Ok(section.trim())
+}
+
+fn require_reviewed_snapshot(name: &str, actual: &str, expected: &str) -> Result<(), String> {
+    if actual.trim() != expected.trim() {
+        return Err(format!(
+            "reviewed DD-078 safety snapshot drifted: {name}; inspect the source/fixture diff before updating"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_adoption_boundary(
     plan: &str,
     adoption: &str,
+    design: &str,
     graph: &SliceGraph,
 ) -> Result<(), String> {
     if graph.dependencies.contains_key("16M") {
@@ -614,7 +660,7 @@ fn validate_adoption_boundary(
         "### Reference-adoption proof: Larrimon",
         "Task 17 cannot claim pure-ntnt",
     ] {
-        if DESIGN.contains(forbidden) {
+        if design.contains(forbidden) {
             return Err(format!(
                 "consumer-specific completion requirement remained in core design: {forbidden}"
             ));
@@ -625,12 +671,40 @@ fn validate_adoption_boundary(
         "plans/dd-078-larrimon-adoption.md",
         "### Adoption portability",
     ] {
-        if !DESIGN.contains(required) {
+        if !design.contains(required) {
             return Err(format!(
                 "core design lost its generalized adoption boundary: {required}"
             ));
         }
     }
+    require_reviewed_snapshot(
+        "core acceptance criteria",
+        reviewed_section(
+            design,
+            "## 25. Acceptance criteria\n",
+            Some("## 26. Open implementation questions\n"),
+        )?,
+        CORE_ACCEPTANCE_SNAPSHOT,
+    )?;
+    require_reviewed_snapshot(
+        "core definition of done",
+        reviewed_section(plan, "## Definition of done\n", None)?,
+        CORE_DOD_SNAPSHOT,
+    )?;
+    require_reviewed_snapshot(
+        "Larrimon Slice 16M",
+        reviewed_section(
+            adoption,
+            "## 6. Adoption Slice 16M — production migration compatibility\n",
+            Some("## 7. Wave E — project policy and one-command CI\n"),
+        )?,
+        LARRIMON_16M_SNAPSHOT,
+    )?;
+    require_reviewed_snapshot(
+        "Larrimon definition of done",
+        reviewed_section(adoption, "## 10. Larrimon definition of done\n", None)?,
+        LARRIMON_DOD_SNAPSHOT,
+    )?;
     Ok(())
 }
 
@@ -656,7 +730,7 @@ fn validate_plan(plan: &str) -> Result<(), String> {
     validate_task_dependencies(plan, &graph)?;
     validate_releases(plan, &graph)?;
     validate_spikes(plan, &graph)?;
-    validate_adoption_boundary(plan, LARRIMON_ADOPTION, &graph)?;
+    validate_adoption_boundary(plan, LARRIMON_ADOPTION, DESIGN, &graph)?;
     if !plan.contains("f0132afcff984bb43305be39122d7e74a6850396") || plan.contains("DD-077 Slice 0")
     {
         return Err("DD-077 immutable identity/owner naming drift".to_string());
@@ -736,7 +810,49 @@ fn dd078_plan_validator_rejects_representative_drift() {
         "participates in the DD-078 release sequence",
     );
     let graph = parse_graph(PLAN).unwrap();
-    assert!(validate_adoption_boundary(PLAN, &adoption_boundary_drift, &graph).is_err());
+    assert!(validate_adoption_boundary(PLAN, &adoption_boundary_drift, DESIGN, &graph).is_err());
+
+    let core_scope_drift = PLAN.replace(
+        "DD-078 is implemented when:\n",
+        "DD-078 is implemented when:\n\n0. Larrimon has completed Wave E;\n",
+    );
+    assert!(
+        validate_adoption_boundary(&core_scope_drift, LARRIMON_ADOPTION, DESIGN, &graph)
+            .unwrap_err()
+            .contains("core definition of done")
+    );
+
+    let acceptance_scope_drift = DESIGN.replace(
+        "## 25. Acceptance criteria\n",
+        "## 25. Acceptance criteria\n\n- [ ] Larrimon has completed Wave E.\n",
+    );
+    assert!(
+        validate_adoption_boundary(PLAN, LARRIMON_ADOPTION, &acceptance_scope_drift, &graph)
+            .unwrap_err()
+            .contains("core acceptance criteria")
+    );
+
+    let migration_matrix_drift = LARRIMON_ADOPTION.replace(
+        "Run old migration checks and native `ntnt db`/`.tnt` evidence on one immutable Larrimon revision across:",
+        "Run whichever migration examples are convenient.",
+    );
+    assert!(
+        validate_adoption_boundary(PLAN, &migration_matrix_drift, DESIGN, &graph)
+            .unwrap_err()
+            .contains("Larrimon Slice 16M")
+    );
+
+    let (before_consumer_dod, _) = LARRIMON_ADOPTION
+        .split_once("## 10. Larrimon definition of done\n")
+        .unwrap();
+    let collapsed_consumer_dod = format!(
+        "{before_consumer_dod}## 10. Larrimon definition of done\n\nThe migration is declared complete.\n"
+    );
+    assert!(
+        validate_adoption_boundary(PLAN, &collapsed_consumer_dod, DESIGN, &graph)
+            .unwrap_err()
+            .contains("Larrimon definition of done")
+    );
 
     let module_registration_drift = PLAN.replace(
         "**Modify:** `src/verification/mod.rs` registration and report claim-scope/input-identity fields only;",
