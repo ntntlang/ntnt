@@ -1,8 +1,12 @@
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 const PLAN: &str = include_str!("../plans/dd-078-intent-verification-implementation.md");
 const LARRIMON_ADOPTION: &str = include_str!("../plans/dd-078-larrimon-adoption.md");
 const DESIGN: &str = include_str!("../design-docs/dd-078-intent-verification-runtime.md");
+const CORE_PLAN_SHA256: &str = include_str!("fixtures/dd078/core-plan.sha256");
+const CORE_DESIGN_SHA256: &str = include_str!("fixtures/dd078/core-design.sha256");
+const LARRIMON_ADOPTION_SHA256: &str = include_str!("fixtures/dd078/larrimon-adoption.sha256");
 const CORE_ACCEPTANCE_SNAPSHOT: &str = include_str!("fixtures/dd078/core-acceptance-criteria.md");
 const CORE_DOD_SNAPSHOT: &str = include_str!("fixtures/dd078/core-definition-of-done.md");
 const LARRIMON_16M_SNAPSHOT: &str = include_str!("fixtures/dd078/larrimon-slice-16m.md");
@@ -571,8 +575,12 @@ fn validate_spikes(plan: &str, graph: &SliceGraph) -> Result<(), String> {
     Ok(())
 }
 
+fn canonical_lf(document: &str) -> String {
+    document.replace("\r\n", "\n")
+}
+
 fn reviewed_section(document: &str, start: &str, end: Option<&str>) -> Result<String, String> {
-    let document = document.replace("\r\n", "\n");
+    let document = canonical_lf(document);
     let start_count = document.matches(start).count();
     if start_count != 1 {
         return Err(format!(
@@ -601,11 +609,26 @@ fn reviewed_section(document: &str, start: &str, end: Option<&str>) -> Result<St
 }
 
 fn require_reviewed_snapshot(name: &str, actual: &str, expected: &str) -> Result<(), String> {
-    let actual = actual.replace("\r\n", "\n");
-    let expected = expected.replace("\r\n", "\n");
+    let actual = canonical_lf(actual);
+    let expected = canonical_lf(expected);
     if actual.trim() != expected.trim() {
         return Err(format!(
             "reviewed DD-078 safety snapshot drifted: {name}; inspect the source/fixture diff before updating"
+        ));
+    }
+    Ok(())
+}
+
+fn require_reviewed_envelope_digest(
+    name: &str,
+    document: &str,
+    expected_hex: &str,
+) -> Result<(), String> {
+    let canonical = canonical_lf(document);
+    let actual = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+    if actual != expected_hex.trim() {
+        return Err(format!(
+            "reviewed DD-078 normative envelope drifted: {name}; inspect the complete source and digest fixture diff before updating"
         ));
     }
     Ok(())
@@ -703,6 +726,13 @@ fn validate_adoption_boundary(
         "Larrimon definition of done",
         &reviewed_section(adoption, "## 10. Larrimon definition of done\n", None)?,
         LARRIMON_DOD_SNAPSHOT,
+    )?;
+    require_reviewed_envelope_digest("core design", design, CORE_DESIGN_SHA256)?;
+    require_reviewed_envelope_digest("core implementation plan", plan, CORE_PLAN_SHA256)?;
+    require_reviewed_envelope_digest(
+        "standalone Larrimon adoption plan",
+        adoption,
+        LARRIMON_ADOPTION_SHA256,
     )?;
     Ok(())
 }
@@ -864,6 +894,29 @@ fn dd078_plan_validator_rejects_representative_drift() {
         validate_adoption_boundary(&plan_lf, &collapsed_consumer_dod, &design_lf, &graph)
             .unwrap_err()
             .contains("Larrimon definition of done")
+    );
+
+    let completion_bypass_before_dod = plan_lf.replace(
+        "\n## Definition of done\n",
+        "\nDD-078 remains incomplete until Larrimon finishes Wave E.\n\n## Definition of done\n",
+    );
+    assert!(validate_adoption_boundary(
+        &completion_bypass_before_dod,
+        &adoption_lf,
+        &design_lf,
+        &graph,
+    )
+    .unwrap_err()
+    .contains("core implementation plan"));
+
+    let deletion_bypass_before_16m = adoption_lf.replace(
+        "## 6. Adoption Slice 16M — production migration compatibility\n",
+        "DD-078 owner 8 may delete all four protected migration files before the compatibility matrix or consumer definition of done passes.\n\n## 6. Adoption Slice 16M — production migration compatibility\n",
+    );
+    assert!(
+        validate_adoption_boundary(&plan_lf, &deletion_bypass_before_16m, &design_lf, &graph,)
+            .unwrap_err()
+            .contains("standalone Larrimon adoption plan")
     );
 
     let module_registration_drift = PLAN.replace(
