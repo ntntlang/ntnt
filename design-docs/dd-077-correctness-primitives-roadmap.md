@@ -1,6 +1,6 @@
 # DD-077: Correctness Primitives for Durable Applications
 
-**Status:** Draft / implementation roadmap
+**Status:** Approved / implementation roadmap
 **Author:** Larri + Josh
 **Created:** 2026-07-24
 **Origin:** Larrimon DD-001 architecture review
