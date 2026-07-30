@@ -280,3 +280,53 @@ fn compatibility_parser_does_not_reinterpret_constraint_metadata() {
         4
     );
 }
+
+#[test]
+fn outcome_statement_can_quote_documentation_only_syntax() {
+    let content = r#"Feature: Parser documentation
+  id: feature.parser-documentation
+
+  Scenario: Explain invalid suppression
+    id: scenario.parser-documentation.invalid-suppression
+    When syntax is documented
+    → id: outcome.parser-documentation.message; parser rejects 'verification: documentation-only' on non-feature nodes
+"#;
+
+    let intent = IntentFile::parse_content_with_id_mode(
+        content,
+        "parser-documentation.intent".to_string(),
+        IdMode::Strict,
+    )
+    .expect("quoted syntax is prose, not an outcome-level directive");
+
+    assert!(
+        intent.features[0].scenarios[0].outcomes[0].contains("'verification: documentation-only'")
+    );
+}
+
+#[test]
+fn compatibility_outcome_warning_points_to_the_outcome_marker() {
+    let content = r#"Feature: Source spans
+  id: feature.source-spans
+
+  Scenario: Derive an outcome ID
+    id: scenario.source-spans.derived-outcome
+    When source locations are recorded
+    → the widget id: field is set
+"#;
+
+    let intent = IntentFile::parse_content_with_id_mode(
+        content,
+        "source-spans.intent".to_string(),
+        IdMode::Compatibility,
+    )
+    .unwrap();
+    let warning = intent
+        .verification_warnings
+        .iter()
+        .find(|warning| warning.message.contains("derived outcome ID"))
+        .expect("outcome warning");
+
+    assert_eq!(warning.span.start_line, 7);
+    assert_eq!(warning.span.start_column, 5);
+}

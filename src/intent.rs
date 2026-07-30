@@ -3894,13 +3894,15 @@ impl IntentFile {
         scenario_name: &str,
         ordinal: usize,
     ) -> Result<(String, OutcomeMetadata), IntentError> {
-        let source = Self::line_span(source_path, line_number, line, "id:");
-        if raw_outcome.contains("verification: documentation-only") {
-            return Err(Self::verification_error(
-                &source,
-                "documentation-only is valid only on a feature",
-            ));
-        }
+        let has_explicit_id = raw_outcome.starts_with("id:");
+        let source_marker = if has_explicit_id {
+            "id:"
+        } else if line.contains('→') {
+            "→"
+        } else {
+            "->"
+        };
+        let source = Self::line_span(source_path, line_number, line, source_marker);
 
         let (statement, id) = if let Some(id_declaration) = raw_outcome.strip_prefix("id:") {
             let Some((id, statement)) = id_declaration.split_once(';') else {
@@ -3931,6 +3933,13 @@ impl IntentFile {
                 ),
             )
         };
+
+        if statement == "verification: documentation-only" {
+            return Err(Self::verification_error(
+                &source,
+                "documentation-only is valid only on a feature",
+            ));
+        }
 
         Ok((
             statement,

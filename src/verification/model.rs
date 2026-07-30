@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Serialize;
 
 use crate::intent::{FeatureVerification, IntentFile};
@@ -246,12 +248,18 @@ impl VerificationTruth {
         else {
             return false;
         };
+        let obligations_by_id: HashMap<&str, &Obligation> = self
+            .obligations
+            .iter()
+            .map(|obligation| (obligation.id.as_str(), obligation))
+            .collect();
+
         feature.declaration == DeclarationStatus::Declared
             && !feature.obligation_ids.is_empty()
             && feature.obligation_ids.iter().all(|obligation_id| {
-                self.obligations
-                    .iter()
-                    .any(|obligation| obligation.id == *obligation_id && obligation.is_verified())
+                obligations_by_id
+                    .get(obligation_id.as_str())
+                    .is_some_and(|obligation| obligation.is_verified())
             })
     }
 
