@@ -330,3 +330,36 @@ fn compatibility_outcome_warning_points_to_the_outcome_marker() {
     assert_eq!(warning.span.start_line, 7);
     assert_eq!(warning.span.start_column, 5);
 }
+
+#[test]
+fn constraint_boundary_preserves_an_active_component_scenario() {
+    let content = r#"Component: Reusable check
+  id: component.reusable-check
+
+  Scenario: Existing component behavior
+    id: scenario.component.existing-behavior
+    When the component runs
+    → id: outcome.component.existing-behavior; result is valid
+
+Constraint: Legacy boundary
+  id: constraint.legacy-boundary
+
+Feature: Following feature
+  id: feature.following
+"#;
+
+    let intent = IntentFile::parse_content_with_id_mode(
+        content,
+        "component-constraint.intent".to_string(),
+        IdMode::Strict,
+    )
+    .expect("Constraint must not discard the active component scenario");
+
+    assert_eq!(intent.components.len(), 1);
+    assert_eq!(intent.components[0].scenarios.len(), 1);
+    assert_eq!(
+        intent.components[0].scenarios[0].verification_id.as_str(),
+        "scenario.component.existing-behavior"
+    );
+    assert_eq!(intent.components[0].scenarios[0].outcomes.len(), 1);
+}

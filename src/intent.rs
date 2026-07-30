@@ -3162,6 +3162,8 @@ impl IntentFile {
                 if let Some(scenario) = current_scenario.take() {
                     if let Some(feature) = current_feature.as_mut() {
                         feature.scenarios.push(scenario);
+                    } else if let Some(component) = current_component.as_mut() {
+                        component.scenarios.push(scenario);
                     }
                 }
                 in_constraint = true;
