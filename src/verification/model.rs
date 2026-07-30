@@ -76,7 +76,6 @@ impl EvidenceBinding {
     /// produced at least one current evidence atom.
     pub fn satisfies_obligation(&self) -> bool {
         self.declaration == DeclarationStatus::Declared
-            && self.linkage == LinkageStatus::Linked
             && self.binding == BindingStatus::Bound
             && self.executability == ExecutabilityStatus::Executable
             && self.disposition == Disposition::Passed
@@ -106,7 +105,6 @@ pub struct Obligation {
 impl Obligation {
     pub fn is_verified(&self) -> bool {
         self.declaration == DeclarationStatus::Declared
-            && self.linkage == LinkageStatus::Linked
             && self.binding == BindingStatus::Bound
             && self.executability == ExecutabilityStatus::Executable
             && self.disposition == Disposition::Passed

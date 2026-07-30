@@ -2921,6 +2921,11 @@ impl IntentFile {
         let mut in_component_inherent = false;
         let mut in_invariant_assertions = false;
         let mut in_test_data_table = false;
+        // Constraints are a legacy Intent declaration parsed only indirectly by
+        // this module. Track their context so their `id:` and `rationale:`
+        // fields are not reinterpreted as verification metadata for the
+        // preceding feature.
+        let mut in_constraint = false;
         let mut test_data_columns: Vec<String> = Vec::new();
         let mut _in_glossary_bindings = false;
         // Technical bindings parsing state
@@ -3149,8 +3154,23 @@ impl IntentFile {
                 continue;
             }
 
+            // Legacy constraint declaration. Preserve the existing behavior
+            // where constraint scenarios remain visible to the preceding
+            // feature, but do not treat constraint metadata as feature
+            // verification metadata.
+            if trimmed.starts_with("Constraint:") {
+                if let Some(scenario) = current_scenario.take() {
+                    if let Some(feature) = current_feature.as_mut() {
+                        feature.scenarios.push(scenario);
+                    }
+                }
+                in_constraint = true;
+                continue;
+            }
+
             // Feature declaration
             if trimmed.starts_with("Feature:") {
+                in_constraint = false;
                 // Save previous component
                 if let Some(mut comp) = current_component.take() {
                     if let Some(scenario) = current_scenario.take() {
@@ -3205,6 +3225,7 @@ impl IntentFile {
 
             // Component declaration
             if trimmed.starts_with("Component:") {
+                in_constraint = false;
                 // Save previous component
                 if let Some(mut comp) = current_component.take() {
                     if let Some(scenario) = current_scenario.take() {
@@ -3252,6 +3273,7 @@ impl IntentFile {
 
             // Invariant declaration
             if trimmed.starts_with("Invariant:") {
+                in_constraint = false;
                 // Save previous feature
                 if let Some(mut feat) = current_feature.take() {
                     if let Some(test) = current_test.take() {
@@ -3579,6 +3601,10 @@ impl IntentFile {
                         scenario.verification_id =
                             Self::explicit_id(id, IdKind::Scenario, &id_source)?;
                         scenario.verification_id_source = id_source;
+                    } else if in_constraint {
+                        // Keep legacy serialized IDs stable without promoting a
+                        // constraint ID into feature verification identity.
+                        feature.id = Some(id.to_string());
                     } else {
                         feature.verification_id =
                             Self::explicit_id(id, IdKind::Feature, &id_source)?;
@@ -3608,7 +3634,8 @@ impl IntentFile {
                     continue;
                 }
 
-                if trimmed.starts_with("rationale:") && current_scenario.is_none() {
+                if trimmed.starts_with("rationale:") && current_scenario.is_none() && !in_constraint
+                {
                     let rationale = trimmed
                         .trim_start_matches("rationale:")
                         .trim()

@@ -231,3 +231,52 @@ fn truth_dimensions_remain_orthogonal() {
     assert_eq!(binding.freshness, Freshness::Stale);
     assert!(!binding.satisfies_obligation());
 }
+
+#[test]
+fn behavioral_evidence_does_not_require_implementation_linkage() {
+    let binding = EvidenceBinding {
+        id: "binding.behavioral".to_string(),
+        obligation_id: "outcome.behavioral".to_string(),
+        source: SourceSpan::single_line("verification.tnt", 9, 1, 20),
+        declaration: DeclarationStatus::Declared,
+        linkage: LinkageStatus::Unlinked,
+        binding: BindingStatus::Bound,
+        executability: ExecutabilityStatus::Executable,
+        disposition: Disposition::Passed,
+        freshness: Freshness::Current,
+        assertion_resolution: AssertionResolution::Resolved,
+        evidence_atoms: 1,
+    };
+
+    assert!(binding.satisfies_obligation());
+
+    let intent =
+        IntentFile::parse_with_id_mode(&fixture("linked_unexecuted.intent"), IdMode::Strict)
+            .unwrap();
+    let mut truth = VerificationTruth::from_intent(&intent);
+    let obligation = &mut truth.obligations[0];
+    obligation.linkage = LinkageStatus::Unlinked;
+    obligation.binding = BindingStatus::Bound;
+    obligation.executability = ExecutabilityStatus::Executable;
+    obligation.disposition = Disposition::Passed;
+    obligation.freshness = Freshness::Current;
+    obligation.evidence_bindings.push(binding);
+
+    assert!(obligation.is_verified());
+}
+
+#[test]
+fn compatibility_parser_does_not_reinterpret_constraint_metadata() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/crypto_chart/crypto.intent");
+    let intent = IntentFile::parse(&path).expect("legacy Constraint declarations must still lint");
+
+    assert_eq!(intent.features.len(), 4);
+    assert_eq!(
+        intent
+            .features
+            .iter()
+            .map(|feature| feature.scenarios.len())
+            .sum::<usize>(),
+        4
+    );
+}
