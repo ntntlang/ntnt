@@ -1,0 +1,12 @@
+Feature: Duplicate scenarios
+  id: feature.duplicate-scenarios
+
+  Scenario: First scenario
+    id: scenario.duplicate
+    When something happens
+    → id: outcome.duplicate-scenarios.first; the first result is observed
+
+  Scenario: Second scenario
+    id: scenario.duplicate
+    When something else happens
+    → id: outcome.duplicate-scenarios.second; the second result is observed

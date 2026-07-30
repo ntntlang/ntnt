@@ -20,5 +20,6 @@ mod std_secrets_tests;
 pub mod stdlib;
 pub mod typechecker;
 pub mod types;
+pub mod verification;
 
 pub use error::{IntentError, Result};

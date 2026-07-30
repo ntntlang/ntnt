@@ -1,0 +1,7 @@
+Feature: Linked behavior
+  id: feature.linked
+
+  Scenario: Linked scenario
+    id: scenario.linked
+    When something happens
+    → id: outcome.linked.result; a result is observed

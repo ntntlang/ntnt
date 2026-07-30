@@ -1,0 +1,7 @@
+Feature: Invalid suppression
+  id: feature.invalid-suppression
+
+  Scenario: Promised behavior
+    id: scenario.invalid-suppression
+    When something happens
+    → id: outcome.invalid-suppression.promise; verification: documentation-only

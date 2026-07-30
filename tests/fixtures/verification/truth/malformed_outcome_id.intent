@@ -1,0 +1,7 @@
+Feature: Malformed outcome identifier
+  id: feature.malformed-outcome
+
+  Scenario: Bad outcome identifier
+    id: scenario.malformed-outcome
+    When something happens
+    → id: outcome.BAD; a result is observed

@@ -1,0 +1,8 @@
+Feature: Duplicate outcomes
+  id: feature.duplicate-outcomes
+
+  Scenario: Duplicate result declarations
+    id: scenario.duplicate-outcomes
+    When something happens
+    → id: outcome.duplicate; the first result is observed
+    → id: outcome.duplicate; the second result is observed

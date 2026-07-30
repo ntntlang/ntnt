@@ -45,6 +45,7 @@ use crate::ial::{self, standard_vocabulary, Context as IalContext, Term, Vocabul
 use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
 use crate::parser::Parser as IntentParser;
+use crate::verification::ids::{IdKind, IdMode, IdOrigin, IdWarning, SourceSpan, StableId};
 
 // ============================================================================
 // GLOSSARY SYSTEM (IAL Core)
@@ -2187,9 +2188,33 @@ pub struct Invariant {
 // SCENARIO SYSTEM (Natural Language Tests)
 // ============================================================================
 
+/// Feature-level verification declaration. Documentation-only is deliberately
+/// unavailable on scenarios and outcomes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum FeatureVerification {
+    Behavioral,
+    DocumentationOnly { rationale: String },
+}
+
+/// Stable identity and location paired with an existing outcome string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OutcomeMetadata {
+    pub id: StableId,
+    pub source: SourceSpan,
+}
+
 /// A natural language scenario that can be executed as a test
 #[derive(Debug, Clone, Serialize)]
 pub struct Scenario {
+    /// Explicit source spelling, absent for compatibility-derived IDs.
+    #[serde(skip)]
+    pub id: Option<String>,
+    #[serde(skip)]
+    pub verification_id: StableId,
+    #[serde(skip)]
+    pub verification_id_source: SourceSpan,
+    #[serde(skip)]
+    pub source: SourceSpan,
     /// Scenario name (e.g., "Successful login")
     pub name: String,
     /// Optional description explaining why this scenario exists
@@ -2202,6 +2227,9 @@ pub struct Scenario {
     pub when_clause: String,
     /// The outcome clauses (each "→" line)
     pub outcomes: Vec<String>,
+    /// Stable IDs and locations corresponding one-for-one with `outcomes`.
+    #[serde(skip)]
+    pub outcome_metadata: Vec<OutcomeMetadata>,
     /// Resolved test case (after glossary term resolution)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_test: Option<TestCase>,
@@ -2654,8 +2682,16 @@ pub struct TestCase {
 #[derive(Debug, Clone, Serialize)]
 pub struct Feature {
     pub id: Option<String>,
+    #[serde(skip)]
+    pub verification_id: StableId,
+    #[serde(skip)]
+    pub verification_id_source: SourceSpan,
+    #[serde(skip)]
+    pub source: SourceSpan,
     pub name: String,
     pub description: Option<String>,
+    #[serde(skip)]
+    pub verification: FeatureVerification,
     /// Traditional test cases (technical format)
     pub tests: Vec<TestCase>,
     /// Natural language scenarios (IAL format)
@@ -2683,6 +2719,9 @@ pub struct IntentFile {
     /// Test data sections (for unit testing)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub test_data: Vec<TestDataSection>,
+    /// Source-located warnings emitted only for compatibility-derived IDs.
+    #[serde(skip)]
+    pub verification_warnings: Vec<IdWarning>,
 }
 
 /// A section of test data linked to a feature/scenario
@@ -2788,13 +2827,18 @@ pub struct FeatureCoverage {
 }
 
 impl IntentFile {
-    /// Parse an intent file from a path
+    /// Parse an intent file from a path while preserving legacy behavior.
     pub fn parse(path: &Path) -> Result<Self, IntentError> {
+        Self::parse_with_id_mode(path, IdMode::Compatibility)
+    }
+
+    /// Parse an intent file with explicit stable-ID policy.
+    pub fn parse_with_id_mode(path: &Path, id_mode: IdMode) -> Result<Self, IntentError> {
         let content = fs::read_to_string(path).map_err(|e| {
             IntentError::runtime_error(format!("Failed to read intent file: {}", e))
         })?;
 
-        Self::parse_content(&content, path.to_string_lossy().to_string())
+        Self::parse_content_with_id_mode(&content, path.to_string_lossy().to_string(), id_mode)
     }
 
     /// Look up test data by ID.
@@ -2847,8 +2891,17 @@ impl IntentFile {
             .collect()
     }
 
-    /// Parse intent file content
+    /// Parse intent file content while preserving legacy behavior.
     pub fn parse_content(content: &str, source_path: String) -> Result<Self, IntentError> {
+        Self::parse_content_with_id_mode(content, source_path, IdMode::Compatibility)
+    }
+
+    /// Parse intent file content with explicit stable-ID policy.
+    pub fn parse_content_with_id_mode(
+        content: &str,
+        source_path: String,
+        id_mode: IdMode,
+    ) -> Result<Self, IntentError> {
         let mut features = Vec::new();
         let mut components = Vec::new();
         let mut invariants: Vec<Invariant> = Vec::new();
@@ -2874,7 +2927,8 @@ impl IntentFile {
         let mut current_binding_term: Option<(String, TechnicalBinding)> = None;
         let mut in_binding_assert_list = false;
 
-        for line in content.lines() {
+        for (line_index, line) in content.lines().enumerate() {
+            let line_number = line_index + 1;
             let trimmed = line.trim();
 
             // Skip empty lines
@@ -3122,10 +3176,19 @@ impl IntentFile {
                 }
 
                 let name = trimmed.trim_start_matches("Feature:").trim().to_string();
+                let source = Self::line_span(&source_path, line_number, line, "Feature:");
                 current_feature = Some(Feature {
                     id: None,
+                    verification_id: StableId::compatibility_derived(
+                        IdKind::Feature,
+                        &[&name],
+                        features.len(),
+                    ),
+                    verification_id_source: source.clone(),
+                    source,
                     name,
                     description: None,
+                    verification: FeatureVerification::Behavioral,
                     tests: Vec::new(),
                     scenarios: Vec::new(),
                 });
@@ -3371,7 +3434,7 @@ impl IntentFile {
             // Inside a component
             if let Some(ref mut component) = current_component {
                 // Component ID
-                if trimmed.starts_with("id:") {
+                if trimmed.starts_with("id:") && current_scenario.is_none() {
                     let id = trimmed.trim_start_matches("id:").trim();
                     component.id = id.to_string();
                     continue;
@@ -3415,12 +3478,22 @@ impl IntentFile {
                     }
 
                     let name = trimmed.trim_start_matches("Scenario:").trim().to_string();
+                    let source = Self::line_span(&source_path, line_number, line, "Scenario:");
                     current_scenario = Some(Scenario {
+                        id: None,
+                        verification_id: StableId::compatibility_derived(
+                            IdKind::Scenario,
+                            &[&component.name, &name],
+                            component.scenarios.len(),
+                        ),
+                        verification_id_source: source.clone(),
+                        source,
                         name,
                         description: None,
                         given_clause: None,
                         when_clause: String::new(),
                         outcomes: Vec::new(),
+                        outcome_metadata: Vec::new(),
                         resolved_test: None,
                         component_refs: Vec::new(),
                     });
@@ -3429,6 +3502,16 @@ impl IntentFile {
 
                 // Inside component scenario
                 if let Some(ref mut scenario) = current_scenario {
+                    if trimmed.starts_with("id:") {
+                        let id = trimmed.trim_start_matches("id:").trim();
+                        let id_source = Self::line_span(&source_path, line_number, line, "id:");
+                        scenario.id = Some(id.to_string());
+                        scenario.verification_id =
+                            Self::explicit_id(id, IdKind::Scenario, &id_source)?;
+                        scenario.verification_id_source = id_source;
+                        continue;
+                    }
+
                     // Description
                     if trimmed.starts_with("description:") {
                         let desc = trimmed.trim_start_matches("description:").trim();
@@ -3451,12 +3534,20 @@ impl IntentFile {
 
                     // Outcome clause
                     if trimmed.starts_with("→") || trimmed.starts_with("->") {
-                        let outcome = trimmed
+                        let raw_outcome = trimmed
                             .trim_start_matches("→")
                             .trim_start_matches("->")
-                            .trim()
-                            .to_string();
+                            .trim();
+                        let (outcome, metadata) = Self::parse_outcome(
+                            &source_path,
+                            line_number,
+                            line,
+                            raw_outcome,
+                            &scenario.name,
+                            scenario.outcomes.len(),
+                        )?;
                         scenario.outcomes.push(outcome);
+                        scenario.outcome_metadata.push(metadata);
                         continue;
                     }
                 }
@@ -3479,10 +3570,61 @@ impl IntentFile {
 
             // Inside a feature
             if let Some(ref mut feature) = current_feature {
-                // Feature ID
+                // Scenario ID must be handled before the enclosing feature ID.
                 if trimmed.starts_with("id:") {
                     let id = trimmed.trim_start_matches("id:").trim();
-                    feature.id = Some(id.to_string());
+                    let id_source = Self::line_span(&source_path, line_number, line, "id:");
+                    if let Some(scenario) = current_scenario.as_mut() {
+                        scenario.id = Some(id.to_string());
+                        scenario.verification_id =
+                            Self::explicit_id(id, IdKind::Scenario, &id_source)?;
+                        scenario.verification_id_source = id_source;
+                    } else {
+                        feature.verification_id =
+                            Self::explicit_id(id, IdKind::Feature, &id_source)?;
+                        feature.verification_id_source = id_source;
+                        feature.id = Some(id.to_string());
+                    }
+                    continue;
+                }
+
+                if trimmed.starts_with("verification:") {
+                    if current_scenario.is_some() {
+                        return Err(Self::verification_error(
+                            &Self::line_span(&source_path, line_number, line, "verification:"),
+                            "documentation-only is valid only on a feature",
+                        ));
+                    }
+                    let value = trimmed.trim_start_matches("verification:").trim();
+                    if value != "documentation-only" {
+                        return Err(Self::verification_error(
+                            &Self::line_span(&source_path, line_number, line, "verification:"),
+                            format!("unknown feature verification declaration '{value}'"),
+                        ));
+                    }
+                    feature.verification = FeatureVerification::DocumentationOnly {
+                        rationale: String::new(),
+                    };
+                    continue;
+                }
+
+                if trimmed.starts_with("rationale:") && current_scenario.is_none() {
+                    let rationale = trimmed
+                        .trim_start_matches("rationale:")
+                        .trim()
+                        .trim_matches('"')
+                        .to_string();
+                    match &mut feature.verification {
+                        FeatureVerification::DocumentationOnly {
+                            rationale: feature_rationale,
+                        } => *feature_rationale = rationale,
+                        FeatureVerification::Behavioral => {
+                            return Err(Self::verification_error(
+                                &Self::line_span(&source_path, line_number, line, "rationale:"),
+                                "rationale requires 'verification: documentation-only'",
+                            ));
+                        }
+                    }
                     continue;
                 }
 
@@ -3507,12 +3649,22 @@ impl IntentFile {
                     }
 
                     let name = trimmed.trim_start_matches("Scenario:").trim().to_string();
+                    let source = Self::line_span(&source_path, line_number, line, "Scenario:");
                     current_scenario = Some(Scenario {
+                        id: None,
+                        verification_id: StableId::compatibility_derived(
+                            IdKind::Scenario,
+                            &[&feature.name, &name],
+                            feature.scenarios.len(),
+                        ),
+                        verification_id_source: source.clone(),
+                        source,
                         name,
                         description: None,
                         given_clause: None,
                         when_clause: String::new(),
                         outcomes: Vec::new(),
+                        outcome_metadata: Vec::new(),
                         resolved_test: None,
                         component_refs: Vec::new(),
                     });
@@ -3544,12 +3696,20 @@ impl IntentFile {
 
                     // Outcome clause (→ or ->)
                     if trimmed.starts_with("→") || trimmed.starts_with("->") {
-                        let outcome = trimmed
+                        let raw_outcome = trimmed
                             .trim_start_matches("→")
                             .trim_start_matches("->")
-                            .trim()
-                            .to_string();
+                            .trim();
+                        let (outcome, metadata) = Self::parse_outcome(
+                            &source_path,
+                            line_number,
+                            line,
+                            raw_outcome,
+                            &scenario.name,
+                            scenario.outcomes.len(),
+                        )?;
                         scenario.outcomes.push(outcome);
+                        scenario.outcome_metadata.push(metadata);
                         continue;
                     }
                 }
@@ -3653,6 +3813,14 @@ impl IntentFile {
             test_data_sections.push(td);
         }
 
+        let mut verification_warnings = Vec::new();
+        Self::finalize_verification_ids(
+            &features,
+            &components,
+            id_mode,
+            &mut verification_warnings,
+        )?;
+
         Ok(IntentFile {
             features,
             source_path,
@@ -3661,7 +3829,219 @@ impl IntentFile {
             components,
             invariants,
             test_data: test_data_sections,
+            verification_warnings,
         })
+    }
+
+    fn line_span(source_path: &str, line_number: usize, line: &str, marker: &str) -> SourceSpan {
+        let start_column = line
+            .find(marker)
+            .map_or(1, |byte_index| line[..byte_index].chars().count() + 1);
+        SourceSpan::single_line(
+            source_path,
+            line_number,
+            start_column,
+            line.chars().count() + 1,
+        )
+    }
+
+    fn verification_error(span: &SourceSpan, message: impl AsRef<str>) -> IntentError {
+        IntentError::runtime_error(format!("{}: {}", span.location(), message.as_ref()))
+    }
+
+    fn explicit_id(
+        value: &str,
+        kind: IdKind,
+        source: &SourceSpan,
+    ) -> Result<StableId, IntentError> {
+        StableId::explicit(value, kind).map_err(|reason| {
+            Self::verification_error(source, format!("malformed {kind} ID '{value}': {reason}"))
+        })
+    }
+
+    fn parse_outcome(
+        source_path: &str,
+        line_number: usize,
+        line: &str,
+        raw_outcome: &str,
+        scenario_name: &str,
+        ordinal: usize,
+    ) -> Result<(String, OutcomeMetadata), IntentError> {
+        let source = Self::line_span(source_path, line_number, line, "id:");
+        if raw_outcome.contains("verification: documentation-only") {
+            return Err(Self::verification_error(
+                &source,
+                "documentation-only is valid only on a feature",
+            ));
+        }
+
+        let (statement, id) = if let Some(id_declaration) = raw_outcome.strip_prefix("id:") {
+            let Some((id, statement)) = id_declaration.split_once(';') else {
+                return Err(Self::verification_error(
+                    &source,
+                    "outcome ID must be followed by ';' and an outcome statement",
+                ));
+            };
+            let id = id.trim();
+            let statement = statement.trim();
+            if statement.is_empty() {
+                return Err(Self::verification_error(
+                    &source,
+                    "outcome statement must not be empty",
+                ));
+            }
+            (
+                statement.to_string(),
+                Self::explicit_id(id, IdKind::Outcome, &source)?,
+            )
+        } else {
+            (
+                raw_outcome.to_string(),
+                StableId::compatibility_derived(
+                    IdKind::Outcome,
+                    &[scenario_name, raw_outcome],
+                    ordinal,
+                ),
+            )
+        };
+
+        Ok((
+            statement,
+            OutcomeMetadata {
+                id,
+                source: source.clone(),
+            },
+        ))
+    }
+
+    fn finalize_verification_ids(
+        features: &[Feature],
+        components: &[Component],
+        id_mode: IdMode,
+        warnings: &mut Vec<IdWarning>,
+    ) -> Result<(), IntentError> {
+        let mut feature_ids = HashMap::<String, SourceSpan>::new();
+        let mut scenario_ids = HashMap::<String, SourceSpan>::new();
+        let mut outcome_ids = HashMap::<String, SourceSpan>::new();
+
+        for feature in features {
+            Self::check_id_policy(&feature.verification_id, &feature.source, id_mode, warnings)?;
+            Self::register_unique_id(
+                &mut feature_ids,
+                &feature.verification_id,
+                &feature.verification_id_source,
+            )?;
+
+            if let FeatureVerification::DocumentationOnly { rationale } = &feature.verification {
+                if rationale.trim().is_empty() {
+                    return Err(Self::verification_error(
+                        &feature.source,
+                        "verification: documentation-only requires a non-empty rationale",
+                    ));
+                }
+                if !feature.scenarios.is_empty() || !feature.tests.is_empty() {
+                    let span = feature
+                        .scenarios
+                        .first()
+                        .map(|scenario| &scenario.source)
+                        .unwrap_or(&feature.source);
+                    return Err(Self::verification_error(
+                        span,
+                        "documentation-only is valid only for a feature with no behavioral outcomes or tests",
+                    ));
+                }
+            }
+
+            for scenario in &feature.scenarios {
+                Self::check_id_policy(
+                    &scenario.verification_id,
+                    &scenario.source,
+                    id_mode,
+                    warnings,
+                )?;
+                Self::register_unique_id(
+                    &mut scenario_ids,
+                    &scenario.verification_id,
+                    &scenario.verification_id_source,
+                )?;
+
+                for outcome in &scenario.outcome_metadata {
+                    Self::check_id_policy(&outcome.id, &outcome.source, id_mode, warnings)?;
+                    Self::register_unique_id(&mut outcome_ids, &outcome.id, &outcome.source)?;
+                }
+            }
+        }
+
+        for component in components {
+            for scenario in &component.scenarios {
+                Self::check_id_policy(
+                    &scenario.verification_id,
+                    &scenario.source,
+                    id_mode,
+                    warnings,
+                )?;
+                Self::register_unique_id(
+                    &mut scenario_ids,
+                    &scenario.verification_id,
+                    &scenario.verification_id_source,
+                )?;
+                for outcome in &scenario.outcome_metadata {
+                    Self::check_id_policy(&outcome.id, &outcome.source, id_mode, warnings)?;
+                    Self::register_unique_id(&mut outcome_ids, &outcome.id, &outcome.source)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_id_policy(
+        id: &StableId,
+        source: &SourceSpan,
+        id_mode: IdMode,
+        warnings: &mut Vec<IdWarning>,
+    ) -> Result<(), IntentError> {
+        if id.origin() == IdOrigin::Explicit {
+            return Ok(());
+        }
+        if id_mode == IdMode::Strict {
+            return Err(Self::verification_error(
+                source,
+                format!(
+                    "missing {} ID; strict mode requires a stable explicit ID",
+                    id.kind()
+                ),
+            ));
+        }
+        warnings.push(IdWarning {
+            message: format!(
+                "derived {} ID '{}' for compatibility; renaming or reordering changes identity",
+                id.kind(),
+                id
+            ),
+            id: id.clone(),
+            span: source.clone(),
+        });
+        Ok(())
+    }
+
+    fn register_unique_id(
+        seen: &mut HashMap<String, SourceSpan>,
+        id: &StableId,
+        source: &SourceSpan,
+    ) -> Result<(), IntentError> {
+        if let Some(first) = seen.get(id.as_str()) {
+            return Err(Self::verification_error(
+                source,
+                format!(
+                    "duplicate {} ID '{}'; first declared at {}",
+                    id.kind(),
+                    id,
+                    first.location()
+                ),
+            ));
+        }
+        seen.insert(id.to_string(), source.clone());
+        Ok(())
     }
 
     /// Parse a single assertion line
@@ -7080,11 +7460,27 @@ Feature: API
         }];
 
         let scenario = Scenario {
+            id: None,
+            verification_id: StableId::compatibility_derived(
+                IdKind::Scenario,
+                &["test-slugify-function"],
+                0,
+            ),
+            verification_id_source: SourceSpan::single_line("test.intent", 1, 1, 1),
+            source: SourceSpan::single_line("test.intent", 1, 1, 1),
             name: "Test slugify function".to_string(),
             description: None,
             given_clause: None,
             when_clause: "testing slugify".to_string(),
             outcomes: vec!["result is valid".to_string()],
+            outcome_metadata: vec![OutcomeMetadata {
+                id: StableId::compatibility_derived(
+                    IdKind::Outcome,
+                    &["test-slugify-function", "result-is-valid"],
+                    0,
+                ),
+                source: SourceSpan::single_line("test.intent", 2, 1, 1),
+            }],
             resolved_test: None,
             component_refs: vec![],
         };

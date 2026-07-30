@@ -1,0 +1,3 @@
+Feature: Promised behavior without outcomes
+  id: feature.zero-outcomes
+  description: "This behavioral promise has no evidence obligations yet"

@@ -1,0 +1,2 @@
+Feature: Malformed feature identifier
+  id: feature.Bad ID
