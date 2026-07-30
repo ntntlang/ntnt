@@ -1,8 +1,15 @@
 # IAL Vision V2: Beyond Unit Testing
 
-**Status:** Planning
+**Status:** Historical planning; execution roadmap superseded by DD-078
 **Date:** January 2026
 **Prerequisites:** V1 Complete (Phases 0-5)
+
+> **Supersession note (2026-07-28):** [DD-078](dd-078-intent-verification-runtime.md)
+> now owns the obligation truth model, executable evidence, project verification
+> runtime, capability/resource boundaries, provider model, and implementation
+> sequence. This document remains useful historical context for glossary term
+> rewriting, agent protocol ideas, and Intent Studio presentation, but its
+> UI-first delivery order is no longer current.
 
 ---
 
