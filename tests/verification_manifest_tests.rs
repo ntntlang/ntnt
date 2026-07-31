@@ -3,7 +3,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ntnt::config::load_project_manifest;
-use ntnt::project::ProjectRoot;
+use ntnt::project::{ProjectError, ProjectRoot};
 use ntnt::verification::{
     FileClass, ProjectDiscovery, VerificationManifest, VERIFICATION_MANIFEST_VERSION,
 };
@@ -94,6 +94,29 @@ fn ambiguous_directory_roots_report_the_canonical_directory() {
             .contains(&canonical_outside.to_string_lossy().to_string()),
         "{error}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_only_file_roots_report_the_lexical_parent_directory() {
+    use std::os::unix::fs::symlink;
+
+    let project = TempProject::new("[verification]\nversion = 1\nfiles = []\n");
+    let source = project.write("src/app.tnt", "fn app() {}\n");
+    let outside = TempProject::new("[verification]\nversion = 1\nfiles = []\n");
+    std::fs::remove_file(outside.path.join("ntnt.toml")).unwrap();
+    let alias = outside.path.join("app-alias.tnt");
+    symlink(source, &alias).unwrap();
+
+    let error = ProjectRoot::discover(&alias).unwrap_err();
+
+    match error {
+        ProjectError::AmbiguousRoots { first, second } => {
+            assert_eq!(first, outside.path);
+            assert_eq!(second, project.path.canonicalize().unwrap());
+        }
+        other => panic!("expected ambiguous roots, got {other}"),
+    }
 }
 
 #[test]
