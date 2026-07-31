@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ntnt::intent::IntentFile;
+use ntnt::intent::{FeatureVerification, IntentFile};
 use ntnt::verification::{
     AssertionResolution, BindingStatus, DeclarationStatus, Disposition, EvidenceBinding,
     ExecutabilityStatus, Freshness, IdMode, IdOrigin, LinkageStatus, SourceSpan, VerificationTruth,
@@ -356,10 +356,39 @@ Feature: Following feature
     .expect("Constraint must not discard the active component scenario");
 
     assert_eq!(intent.components.len(), 1);
+    assert_eq!(intent.components[0].id, "component.reusable-check");
     assert_eq!(intent.components[0].scenarios.len(), 1);
     assert_eq!(
         intent.components[0].scenarios[0].verification_id.as_str(),
         "scenario.component.existing-behavior"
     );
     assert_eq!(intent.components[0].scenarios[0].outcomes.len(), 1);
+}
+
+#[test]
+fn constraint_metadata_cannot_change_feature_verification() {
+    let content = r#"Feature: Behavioral feature
+  id: feature.behavioral
+
+  Scenario: Existing behavior
+    id: scenario.behavioral.existing
+    When the feature runs
+    → id: outcome.behavioral.existing; result is valid
+
+Constraint: Legacy boundary
+  verification: documentation-only
+  rationale: this belongs to the constraint
+"#;
+
+    let intent = IntentFile::parse_content_with_id_mode(
+        content,
+        "feature-constraint.intent".to_string(),
+        IdMode::Strict,
+    )
+    .expect("constraint metadata must not alter feature verification");
+
+    assert!(matches!(
+        intent.features[0].verification,
+        FeatureVerification::Behavioral
+    ));
 }
