@@ -138,7 +138,10 @@ pub(crate) fn has_multiple_hardlinks(path: &Path, _metadata: &std::fs::Metadata)
 
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn has_multiple_hardlinks(_path: &Path, _metadata: &std::fs::Metadata) -> bool {
-    false
+    // These platforms expose no supported link-count API here. Treat an
+    // unverifiable identity as unsafe rather than silently disabling the
+    // manifest and resource hardlink guards.
+    true
 }
 
 /// Runtime type safety mode, controlled by the `NTNT_TYPE_MODE` env var.

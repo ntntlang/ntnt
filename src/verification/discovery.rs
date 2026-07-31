@@ -48,6 +48,8 @@ pub enum DiscoveryError {
     AmbiguousRoot(PathBuf),
     #[error("discovered path '{0}' is an unsafe symlink escape")]
     SymlinkEscape(PathBuf),
+    #[error("discovered directory symlink '{0}' is ambiguous")]
+    DirectorySymlink(PathBuf),
     #[error("discovered path '{0}' is an unsafe hardlink")]
     Hardlink(PathBuf),
     #[error("discovered path '{0}' has build-output ambiguity")]
@@ -162,6 +164,9 @@ fn collect_automatic(
                 .expect("confined discovery path must remain beneath root");
             if contains_build_output_component(canonical_relative) {
                 return Err(DiscoveryError::BuildOutput(relative));
+            }
+            if canonical.is_dir() {
+                return Err(DiscoveryError::DirectorySymlink(relative));
             }
             canonical.is_file()
         } else {

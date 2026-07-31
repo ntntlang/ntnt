@@ -495,6 +495,27 @@ fn automatic_discovery_rejects_symlink_escape() {
 
 #[cfg(unix)]
 #[test]
+fn automatic_discovery_rejects_directory_symlinks_explicitly() {
+    use std::os::unix::fs::symlink;
+
+    let project = TempProject::new("[verification]\nversion = 1\nfiles = []\n");
+    project.write("specs/app.intent", "Feature: App\n");
+    symlink(project.path.join("specs"), project.path.join("specs-alias")).unwrap();
+    let root = project.root();
+    let manifest = VerificationManifest::load(&root).unwrap();
+
+    let error = ProjectDiscovery::discover(&root, &manifest).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("directory symlink 'specs-alias' is ambiguous"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn automatic_discovery_rejects_unsafe_hardlinks() {
     let project = TempProject::new("[verification]\nversion = 1\nfiles = []\n");
     let outside = project.path.with_extension("outside-hardlink.intent");
