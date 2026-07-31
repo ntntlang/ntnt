@@ -6172,7 +6172,7 @@ pub fn print_intent_results(result: &IntentCheckResult) {
 }
 
 /// Format an assertion for display
-fn format_assertion(assertion: &Assertion) -> String {
+pub(crate) fn format_assertion(assertion: &Assertion) -> String {
     match assertion {
         Assertion::Status(code) => format!("status: {}", code),
         Assertion::BodyContains(text) => format!("body contains \"{}\"", text),

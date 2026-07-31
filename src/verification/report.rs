@@ -395,45 +395,39 @@ impl RunReport {
         let mut evidence = Vec::new();
         for obligation in &truth.obligations {
             if obligation.evidence_bindings.is_empty() {
-                evidence.push(
-                    EvidenceResult::recorded(
-                        format!("binding.unbound.{}", obligation.id),
-                        obligation.id.to_string(),
-                        obligation.source.clone(),
-                        EvidenceRequirement::Required,
-                        EvidenceSelection::Selected,
-                        obligation.declaration,
-                        obligation.linkage,
-                        BindingStatus::Unbound,
-                        obligation.executability,
-                        obligation.freshness,
-                        AssertionResolution::Unresolved,
-                        Vec::new(),
-                    )
-                    .qualify(profile),
-                );
+                evidence.push(EvidenceResult::recorded(
+                    format!("binding.unbound.{}", obligation.id),
+                    obligation.id.to_string(),
+                    obligation.source.clone(),
+                    EvidenceRequirement::Required,
+                    EvidenceSelection::Selected,
+                    obligation.declaration,
+                    obligation.linkage,
+                    BindingStatus::Unbound,
+                    obligation.executability,
+                    obligation.freshness,
+                    AssertionResolution::Unresolved,
+                    Vec::new(),
+                ));
             } else {
                 for binding in &obligation.evidence_bindings {
                     // Slice 1A stores only a summary atom count. It is intentionally
                     // not expanded into evidence: only executor/live compatibility
                     // paths carrying concrete assertion atoms may verify coverage.
-                    evidence.push(
-                        EvidenceResult::recorded(
-                            binding.id.clone(),
-                            obligation.id.to_string(),
-                            binding.source.clone(),
-                            EvidenceRequirement::Required,
-                            EvidenceSelection::Selected,
-                            binding.declaration,
-                            binding.linkage,
-                            binding.binding,
-                            binding.executability,
-                            binding.freshness,
-                            binding.assertion_resolution,
-                            Vec::new(),
-                        )
-                        .qualify(profile),
-                    );
+                    evidence.push(EvidenceResult::recorded(
+                        binding.id.clone(),
+                        obligation.id.to_string(),
+                        binding.source.clone(),
+                        EvidenceRequirement::Required,
+                        EvidenceSelection::Selected,
+                        binding.declaration,
+                        binding.linkage,
+                        binding.binding,
+                        binding.executability,
+                        binding.freshness,
+                        binding.assertion_resolution,
+                        Vec::new(),
+                    ));
                 }
             }
         }
@@ -459,21 +453,26 @@ impl RunReport {
     ) -> Self {
         let mut truth = VerificationTruth::from_intent(intent);
         let mut evidence = Vec::new();
+        let mut compatibility_obligations = Vec::new();
+        let mut report_features = truth
+            .features
+            .iter()
+            .map(ReportFeature::from)
+            .collect::<Vec<_>>();
 
         for (feature_index, feature) in truth.features.iter_mut().enumerate() {
-            let (Some(intent_feature), Some(live_feature)) = (
-                intent.features.get(feature_index),
-                live.features.get(feature_index),
-            ) else {
+            let Some(intent_feature) = intent.features.get(feature_index) else {
                 continue;
             };
+            let live_feature = live.features.get(feature_index);
             let expected_live_id = intent_feature.id.as_deref().unwrap_or("unknown");
-            if live_feature.feature_id != expected_live_id
-                || live_feature.feature_name != intent_feature.name
+            let exact_feature_mapping = live_feature.is_some_and(|candidate| {
+                candidate.feature_id == expected_live_id
+                    && candidate.feature_name == intent_feature.name
+            });
+            let linkage = if exact_feature_mapping
+                && live_feature.is_some_and(|candidate| candidate.has_implementation)
             {
-                continue;
-            }
-            let linkage = if live_feature.has_implementation {
                 LinkageStatus::Linked
             } else {
                 LinkageStatus::Unlinked
@@ -486,51 +485,321 @@ impl RunReport {
                 obligation.linkage = linkage;
             }
 
+            append_legacy_test_projection(
+                &mut evidence,
+                &mut compatibility_obligations,
+                intent_feature,
+                live_feature.filter(|_| exact_feature_mapping),
+                linkage,
+            );
+
+            let Some(live_feature) = live_feature else {
+                continue;
+            };
+            if !exact_feature_mapping {
+                append_unmapped_feature_results(
+                    &mut evidence,
+                    &mut compatibility_obligations,
+                    intent_feature,
+                    live_feature,
+                    feature_index,
+                    "live feature identity does not match parsed feature declaration",
+                );
+                continue;
+            }
+
+            let mut consumed_live_scenarios = BTreeSet::new();
             for scenario in &intent_feature.scenarios {
-                let matching: Vec<&LiveScenarioResult> = live_feature
+                let matching: Vec<(usize, &LiveScenarioResult)> = live_feature
                     .scenarios
                     .iter()
+                    .enumerate()
                     .filter(|candidate| {
-                        candidate.name == scenario.name
-                            || candidate.name.starts_with(&format!("{} [", scenario.name))
+                        live_scenario_name_matches(&candidate.1.name, &scenario.name)
+                            && intent_feature
+                                .scenarios
+                                .iter()
+                                .filter(|parsed| {
+                                    live_scenario_name_matches(&candidate.1.name, &parsed.name)
+                                })
+                                .count()
+                                == 1
                     })
                     .collect();
-                for (run_index, live_scenario) in matching.iter().enumerate() {
-                    append_live_scenario_evidence(
+                for (run_index, (live_index, live_scenario)) in matching.iter().enumerate() {
+                    consumed_live_scenarios.insert(*live_index);
+                    if scenario.outcome_metadata.is_empty() {
+                        append_mapping_failure(
+                            &mut evidence,
+                            &mut compatibility_obligations,
+                            format!(
+                                "outcome.compat.{}.run.{}.undeclared",
+                                scenario.verification_id,
+                                run_index + 1
+                            ),
+                            format!(
+                                "binding.compat.{}.run.{}.undeclared",
+                                scenario.verification_id,
+                                run_index + 1
+                            ),
+                            intent_feature.verification_id.to_string(),
+                            scenario.source.clone(),
+                            format!("scenario result '{}'", live_scenario.name),
+                            linkage,
+                            "live scenario result has no declared outcome obligation",
+                            live_scenario
+                                .test_result
+                                .as_ref()
+                                .map(live_test_atoms)
+                                .unwrap_or_default(),
+                        );
+                    } else {
+                        append_live_scenario_evidence(
+                            &mut evidence,
+                            scenario,
+                            live_scenario,
+                            linkage,
+                            run_index,
+                        );
+                    }
+                }
+            }
+
+            for (live_index, live_scenario) in live_feature.scenarios.iter().enumerate() {
+                if !consumed_live_scenarios.contains(&live_index) {
+                    append_mapping_failure(
                         &mut evidence,
-                        scenario,
-                        live_scenario,
+                        &mut compatibility_obligations,
+                        format!(
+                            "outcome.compat.{}.unmapped-scenario.{}",
+                            intent_feature.verification_id,
+                            live_index + 1
+                        ),
+                        format!(
+                            "binding.compat.{}.unmapped-scenario.{}",
+                            intent_feature.verification_id,
+                            live_index + 1
+                        ),
+                        intent_feature.verification_id.to_string(),
+                        intent_feature.source.clone(),
+                        format!("unmapped live scenario '{}'", live_scenario.name),
                         linkage,
-                        profile,
-                        run_index,
+                        "live scenario cannot map exactly to a parsed scenario declaration",
+                        live_scenario
+                            .test_result
+                            .as_ref()
+                            .map(live_test_atoms)
+                            .unwrap_or_default(),
                     );
                 }
             }
         }
 
+        for (feature_index, live_feature) in
+            live.features.iter().enumerate().skip(intent.features.len())
+        {
+            let source = SourceSpan::single_line(&intent.source_path, 1, 1, 1);
+            append_unmapped_live_feature(
+                &mut evidence,
+                &mut compatibility_obligations,
+                live_feature,
+                feature_index,
+                source,
+                "live feature has no parsed feature declaration",
+            );
+        }
+
+        for (component_index, component) in intent.components.iter().enumerate() {
+            if component.scenarios.is_empty() {
+                continue;
+            }
+            let component_feature_id = compatibility_component_id(component, component_index);
+            let component_source = component
+                .scenarios
+                .first()
+                .map(|scenario| scenario.source.clone())
+                .unwrap_or_else(|| SourceSpan::single_line(&intent.source_path, 1, 1, 1));
+            report_features.push(ReportFeature {
+                id: component_feature_id.clone(),
+                name: format!("Component: {}", component.name),
+                source: component_source,
+                declaration: DeclarationStatus::Declared,
+                rationale: None,
+            });
+            for scenario in &component.scenarios {
+                for (statement, metadata) in
+                    scenario.outcomes.iter().zip(&scenario.outcome_metadata)
+                {
+                    compatibility_obligations.push(ReportObligation {
+                        id: metadata.id.to_string(),
+                        feature_id: component_feature_id.clone(),
+                        scenario_id: scenario.verification_id.to_string(),
+                        statement: statement.clone(),
+                        source: metadata.source.clone(),
+                        declaration: DeclarationStatus::Declared,
+                        linkage: LinkageStatus::Linked,
+                        binding: BindingStatus::Unbound,
+                        executability: ExecutabilityStatus::Unsupported,
+                        disposition: Disposition::NoResult,
+                        freshness: Freshness::Current,
+                    });
+                }
+            }
+
+            let live_component = live.components.get(component_index);
+            let exact_component_mapping = live_component.is_some_and(|candidate| {
+                candidate.component_id == component.id && candidate.component_name == component.name
+            });
+            let Some(live_component) = live_component else {
+                continue;
+            };
+            if !exact_component_mapping {
+                append_unmapped_component_results(
+                    &mut evidence,
+                    &mut compatibility_obligations,
+                    &component_feature_id,
+                    component,
+                    live_component,
+                    component_index,
+                    "live component identity does not match parsed component declaration",
+                );
+                continue;
+            }
+
+            let mut consumed_live_scenarios = BTreeSet::new();
+            for scenario in &component.scenarios {
+                let matching = live_component
+                    .scenarios
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, candidate)| {
+                        live_scenario_name_matches(&candidate.name, &scenario.name)
+                            && component
+                                .scenarios
+                                .iter()
+                                .filter(|parsed| {
+                                    live_scenario_name_matches(&candidate.name, &parsed.name)
+                                })
+                                .count()
+                                == 1
+                    })
+                    .collect::<Vec<_>>();
+                for (run_index, (live_index, live_scenario)) in matching.iter().enumerate() {
+                    consumed_live_scenarios.insert(*live_index);
+                    if scenario.outcome_metadata.is_empty() {
+                        append_mapping_failure(
+                            &mut evidence,
+                            &mut compatibility_obligations,
+                            format!(
+                                "outcome.compat.{}.run.{}.undeclared",
+                                scenario.verification_id,
+                                run_index + 1
+                            ),
+                            format!(
+                                "binding.compat.{}.run.{}.undeclared",
+                                scenario.verification_id,
+                                run_index + 1
+                            ),
+                            component_feature_id.clone(),
+                            scenario.source.clone(),
+                            format!("component scenario result '{}'", live_scenario.name),
+                            LinkageStatus::Linked,
+                            "live component scenario result has no declared outcome obligation",
+                            live_scenario
+                                .test_result
+                                .as_ref()
+                                .map(live_test_atoms)
+                                .unwrap_or_default(),
+                        );
+                    } else {
+                        append_live_scenario_evidence(
+                            &mut evidence,
+                            scenario,
+                            live_scenario,
+                            LinkageStatus::Linked,
+                            run_index,
+                        );
+                    }
+                }
+            }
+            for (live_index, live_scenario) in live_component.scenarios.iter().enumerate() {
+                if !consumed_live_scenarios.contains(&live_index) {
+                    append_mapping_failure(
+                        &mut evidence,
+                        &mut compatibility_obligations,
+                        format!(
+                            "outcome.compat.{}.unmapped-scenario.{}",
+                            component_feature_id,
+                            live_index + 1
+                        ),
+                        format!(
+                            "binding.compat.{}.unmapped-scenario.{}",
+                            component_feature_id,
+                            live_index + 1
+                        ),
+                        component_feature_id.clone(),
+                        component
+                            .scenarios
+                            .first()
+                            .map(|scenario| scenario.source.clone())
+                            .unwrap_or_else(|| {
+                                SourceSpan::single_line(&intent.source_path, 1, 1, 1)
+                            }),
+                        format!("unmapped live scenario '{}'", live_scenario.name),
+                        LinkageStatus::Linked,
+                        "live component scenario cannot map exactly to a parsed declaration",
+                        live_scenario
+                            .test_result
+                            .as_ref()
+                            .map(live_test_atoms)
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+        }
+
+        for (component_index, live_component) in live
+            .components
+            .iter()
+            .enumerate()
+            .skip(intent.components.len())
+        {
+            append_unmapped_live_component(
+                &mut evidence,
+                &mut compatibility_obligations,
+                live_component,
+                component_index,
+                SourceSpan::single_line(&intent.source_path, 1, 1, 1),
+                "live component has no parsed component declaration",
+            );
+        }
+
+        let mut report_obligations = truth
+            .obligations
+            .iter()
+            .map(ReportObligation::from)
+            .collect::<Vec<_>>();
+        report_obligations.extend(compatibility_obligations);
         let evidenced: BTreeSet<String> = evidence
             .iter()
             .map(|result| result.obligation_id.clone())
             .collect();
-        for obligation in &truth.obligations {
-            if !evidenced.contains(obligation.id.as_str()) {
-                evidence.push(
-                    EvidenceResult::recorded(
-                        format!("binding.unbound.{}", obligation.id),
-                        obligation.id.to_string(),
-                        obligation.source.clone(),
-                        EvidenceRequirement::Required,
-                        EvidenceSelection::Selected,
-                        obligation.declaration,
-                        obligation.linkage,
-                        BindingStatus::Unbound,
-                        ExecutabilityStatus::Unsupported,
-                        Freshness::Current,
-                        AssertionResolution::Unresolved,
-                        Vec::new(),
-                    )
-                    .qualify(profile),
-                );
+        for obligation in &report_obligations {
+            if !evidenced.contains(&obligation.id) {
+                evidence.push(EvidenceResult::recorded(
+                    format!("binding.unbound.{}", obligation.id),
+                    obligation.id.clone(),
+                    obligation.source.clone(),
+                    EvidenceRequirement::Required,
+                    EvidenceSelection::Selected,
+                    obligation.declaration,
+                    obligation.linkage,
+                    BindingStatus::Unbound,
+                    ExecutabilityStatus::Unsupported,
+                    Freshness::Current,
+                    AssertionResolution::Unresolved,
+                    Vec::new(),
+                ));
             }
         }
 
@@ -538,12 +807,8 @@ impl RunReport {
             profile,
             strict,
             evidence,
-            truth.features.iter().map(ReportFeature::from).collect(),
-            truth
-                .obligations
-                .iter()
-                .map(ReportObligation::from)
-                .collect(),
+            report_features,
+            report_obligations,
             CoverageThresholds::default(),
         )
     }
@@ -579,8 +844,6 @@ impl RunReport {
         }
         let mut report = Self::from_truth(&truth, "implementation", false);
         report.thresholds = thresholds;
-        report.coverage =
-            coverage_from_ledger(&report.features, &report.obligations, &report.evidence);
         let has_unproven_behavioral_feature = report.features.iter().any(|feature| {
             feature.declaration == DeclarationStatus::Declared
                 && !report
@@ -790,12 +1053,519 @@ impl RunReport {
     }
 }
 
+fn live_scenario_name_matches(live_name: &str, parsed_name: &str) -> bool {
+    live_name == parsed_name || live_name.starts_with(&format!("{parsed_name} ["))
+}
+
+fn legacy_test_obligation_id(
+    feature: &crate::intent::Feature,
+    test_index: usize,
+    assertion_index: usize,
+) -> String {
+    format!(
+        "outcome.compat.{}.test.{}.assertion.{}",
+        feature.verification_id,
+        test_index + 1,
+        assertion_index + 1
+    )
+}
+
+fn legacy_test_binding_id(
+    feature: &crate::intent::Feature,
+    test_index: usize,
+    assertion_index: usize,
+) -> String {
+    format!(
+        "binding.compat.{}.test.{}.assertion.{}",
+        feature.verification_id,
+        test_index + 1,
+        assertion_index + 1
+    )
+}
+
+fn append_legacy_test_projection(
+    evidence: &mut Vec<EvidenceResult>,
+    obligations: &mut Vec<ReportObligation>,
+    feature: &crate::intent::Feature,
+    live_feature: Option<&crate::intent::LiveFeatureResult>,
+    linkage: LinkageStatus,
+) {
+    for (test_index, test) in feature.tests.iter().enumerate() {
+        let assertion_count = test.assertions.len().max(1);
+        let live_test = live_feature.and_then(|candidate| candidate.tests.get(test_index));
+        let exact_test_mapping =
+            live_test.is_some_and(|candidate| {
+                candidate.method == test.method
+                    && candidate.path == test.path
+                    && candidate.preconditions.len() == test.preconditions.len()
+                    && test.preconditions.iter().zip(&candidate.preconditions).all(
+                        |(expected, actual)| {
+                            crate::intent::format_assertion(expected) == actual.assertion_text
+                        },
+                    )
+                    && candidate.assertions.len() == test.assertions.len()
+                    && test.assertions.iter().zip(&candidate.assertions).all(
+                        |(expected, actual)| {
+                            crate::intent::format_assertion(expected) == actual.assertion_text
+                        },
+                    )
+            });
+
+        for assertion_index in 0..assertion_count {
+            let obligation_id = legacy_test_obligation_id(feature, test_index, assertion_index);
+            let binding_id = legacy_test_binding_id(feature, test_index, assertion_index);
+            let statement = test
+                .assertions
+                .get(assertion_index)
+                .map(crate::intent::format_assertion)
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} {} produces concrete assertion evidence",
+                        test.method, test.path
+                    )
+                });
+            obligations.push(ReportObligation {
+                id: obligation_id.clone(),
+                feature_id: feature.verification_id.to_string(),
+                scenario_id: format!(
+                    "scenario.compat.{}.test.{}",
+                    feature.verification_id,
+                    test_index + 1
+                ),
+                statement,
+                source: feature.source.clone(),
+                declaration: DeclarationStatus::Declared,
+                linkage,
+                binding: BindingStatus::Unbound,
+                executability: ExecutabilityStatus::Unsupported,
+                disposition: Disposition::NoResult,
+                freshness: Freshness::Current,
+            });
+
+            let Some(live_test) = live_test else {
+                evidence.push(EvidenceResult::recorded(
+                    binding_id,
+                    obligation_id,
+                    feature.source.clone(),
+                    EvidenceRequirement::Required,
+                    EvidenceSelection::Selected,
+                    DeclarationStatus::Declared,
+                    linkage,
+                    BindingStatus::Unbound,
+                    ExecutabilityStatus::Unsupported,
+                    Freshness::Current,
+                    AssertionResolution::Unresolved,
+                    vec![EvidenceAttempt {
+                        sequence: 1,
+                        disposition: Disposition::NoResult,
+                        evidence_atoms: Vec::new(),
+                        diagnostic: Some(
+                            "parsed technical test has no corresponding live result".to_string(),
+                        ),
+                    }],
+                ));
+                continue;
+            };
+
+            if !exact_test_mapping {
+                let expected = test.assertions.len();
+                let actual = live_test.assertions.len();
+                evidence.push(EvidenceResult::recorded(
+                    binding_id,
+                    obligation_id,
+                    feature.source.clone(),
+                    EvidenceRequirement::Required,
+                    EvidenceSelection::Selected,
+                    DeclarationStatus::Declared,
+                    linkage,
+                    BindingStatus::Ambiguous,
+                    ExecutabilityStatus::Executable,
+                    Freshness::Current,
+                    AssertionResolution::Unresolved,
+                    vec![EvidenceAttempt {
+                        sequence: 1,
+                        disposition: Disposition::NoResult,
+                        evidence_atoms: live_test_atoms(live_test),
+                        diagnostic: Some(format!(
+                            "cannot safely map live technical test {} {} with {actual} assertions \
+                             to parsed declaration {} {} with {expected} assertions",
+                            live_test.method, live_test.path, test.method, test.path
+                        )),
+                    }],
+                ));
+                continue;
+            }
+
+            let Some(live_assertion) = live_test.assertions.get(assertion_index) else {
+                // A zero-assertion technical test has no concrete evidence atom
+                // and therefore cannot satisfy its compatibility obligation.
+                evidence.push(EvidenceResult::recorded(
+                    binding_id,
+                    obligation_id,
+                    feature.source.clone(),
+                    EvidenceRequirement::Required,
+                    EvidenceSelection::Selected,
+                    DeclarationStatus::Declared,
+                    linkage,
+                    BindingStatus::Bound,
+                    ExecutabilityStatus::Executable,
+                    Freshness::Current,
+                    AssertionResolution::Unresolved,
+                    vec![EvidenceAttempt {
+                        sequence: 1,
+                        disposition: Disposition::NoResult,
+                        evidence_atoms: live_test_atoms(live_test),
+                        diagnostic: Some(
+                            "technical test produced no concrete assertion evidence".to_string(),
+                        ),
+                    }],
+                ));
+                continue;
+            };
+
+            let mut atoms = live_precondition_atoms(live_test, &binding_id);
+            atoms.push(EvidenceAtom {
+                id: format!("{binding_id}.assertion.{}", assertion_index + 1),
+                assertion: live_assertion.assertion_text.clone(),
+                passed: live_assertion.passed,
+                diagnostic: live_assertion.message.clone(),
+            });
+            let failed_precondition = live_test
+                .preconditions
+                .iter()
+                .any(|precondition| !precondition.passed);
+            let disposition = if failed_precondition || !live_assertion.passed {
+                Disposition::Failed
+            } else {
+                Disposition::Passed
+            };
+            evidence.push(EvidenceResult::recorded(
+                binding_id,
+                obligation_id,
+                feature.source.clone(),
+                EvidenceRequirement::Required,
+                EvidenceSelection::Selected,
+                DeclarationStatus::Declared,
+                linkage,
+                BindingStatus::Bound,
+                if failed_precondition {
+                    ExecutabilityStatus::Blocked
+                } else {
+                    ExecutabilityStatus::Executable
+                },
+                Freshness::Current,
+                AssertionResolution::Resolved,
+                vec![EvidenceAttempt {
+                    sequence: 1,
+                    disposition,
+                    evidence_atoms: atoms,
+                    diagnostic: failed_precondition
+                        .then(|| "one or more test preconditions failed".to_string()),
+                }],
+            ));
+        }
+    }
+
+    let Some(live_feature) = live_feature else {
+        return;
+    };
+    for (test_index, live_test) in live_feature
+        .tests
+        .iter()
+        .enumerate()
+        .skip(feature.tests.len())
+    {
+        append_mapping_failure(
+            evidence,
+            obligations,
+            format!(
+                "outcome.compat.{}.unmapped-test.{}",
+                feature.verification_id,
+                test_index + 1
+            ),
+            format!(
+                "binding.compat.{}.unmapped-test.{}",
+                feature.verification_id,
+                test_index + 1
+            ),
+            feature.verification_id.to_string(),
+            feature.source.clone(),
+            format!(
+                "unmapped live technical test {} {}",
+                live_test.method, live_test.path
+            ),
+            linkage,
+            "live technical test has no parsed test declaration",
+            live_test_atoms(live_test),
+        );
+    }
+}
+
+fn live_precondition_atoms(
+    live_test: &crate::intent::LiveTestResult,
+    binding_id: &str,
+) -> Vec<EvidenceAtom> {
+    live_test
+        .preconditions
+        .iter()
+        .enumerate()
+        .map(|(index, result)| EvidenceAtom {
+            id: format!("{binding_id}.precondition.{}", index + 1),
+            assertion: result.assertion_text.clone(),
+            passed: result.passed,
+            diagnostic: result.message.clone(),
+        })
+        .collect()
+}
+
+fn live_test_atoms(live_test: &crate::intent::LiveTestResult) -> Vec<EvidenceAtom> {
+    let mut atoms = live_precondition_atoms(live_test, "atom.compat.unmapped");
+    atoms.extend(
+        live_test
+            .assertions
+            .iter()
+            .enumerate()
+            .map(|(index, result)| EvidenceAtom {
+                id: format!("atom.compat.unmapped.assertion.{}", index + 1),
+                assertion: result.assertion_text.clone(),
+                passed: result.passed,
+                diagnostic: result.message.clone(),
+            }),
+    );
+    atoms
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_mapping_failure(
+    evidence: &mut Vec<EvidenceResult>,
+    obligations: &mut Vec<ReportObligation>,
+    obligation_id: String,
+    binding_id: String,
+    feature_id: String,
+    source: SourceSpan,
+    statement: String,
+    linkage: LinkageStatus,
+    diagnostic: &str,
+    atoms: Vec<EvidenceAtom>,
+) {
+    obligations.push(ReportObligation {
+        id: obligation_id.clone(),
+        feature_id,
+        scenario_id: format!("scenario.{obligation_id}"),
+        statement,
+        source: source.clone(),
+        declaration: DeclarationStatus::Declared,
+        linkage,
+        binding: BindingStatus::Ambiguous,
+        executability: ExecutabilityStatus::Unsupported,
+        disposition: Disposition::NoResult,
+        freshness: Freshness::Current,
+    });
+    evidence.push(EvidenceResult::recorded(
+        binding_id,
+        obligation_id,
+        source,
+        EvidenceRequirement::Required,
+        EvidenceSelection::Selected,
+        DeclarationStatus::Declared,
+        linkage,
+        BindingStatus::Ambiguous,
+        ExecutabilityStatus::Unsupported,
+        Freshness::Current,
+        AssertionResolution::Unresolved,
+        vec![EvidenceAttempt {
+            sequence: 1,
+            disposition: Disposition::NoResult,
+            evidence_atoms: atoms,
+            diagnostic: Some(diagnostic.to_string()),
+        }],
+    ));
+}
+
+fn append_unmapped_feature_results(
+    evidence: &mut Vec<EvidenceResult>,
+    obligations: &mut Vec<ReportObligation>,
+    feature: &crate::intent::Feature,
+    live_feature: &crate::intent::LiveFeatureResult,
+    feature_index: usize,
+    diagnostic: &str,
+) {
+    append_unmapped_live_feature(
+        evidence,
+        obligations,
+        live_feature,
+        feature_index,
+        feature.source.clone(),
+        diagnostic,
+    );
+}
+
+fn append_unmapped_live_feature(
+    evidence: &mut Vec<EvidenceResult>,
+    obligations: &mut Vec<ReportObligation>,
+    live_feature: &crate::intent::LiveFeatureResult,
+    feature_index: usize,
+    source: SourceSpan,
+    diagnostic: &str,
+) {
+    for (test_index, live_test) in live_feature.tests.iter().enumerate() {
+        append_mapping_failure(
+            evidence,
+            obligations,
+            format!(
+                "outcome.compat.unmapped-feature.{}.test.{}",
+                feature_index + 1,
+                test_index + 1
+            ),
+            format!(
+                "binding.compat.unmapped-feature.{}.test.{}",
+                feature_index + 1,
+                test_index + 1
+            ),
+            if live_feature.feature_id.is_empty() {
+                format!("feature.compat.unmapped.{}", feature_index + 1)
+            } else {
+                live_feature.feature_id.clone()
+            },
+            source.clone(),
+            format!(
+                "unmapped live technical test {} {}",
+                live_test.method, live_test.path
+            ),
+            LinkageStatus::Unlinked,
+            diagnostic,
+            live_test_atoms(live_test),
+        );
+    }
+    for (scenario_index, live_scenario) in live_feature.scenarios.iter().enumerate() {
+        append_mapping_failure(
+            evidence,
+            obligations,
+            format!(
+                "outcome.compat.unmapped-feature.{}.scenario.{}",
+                feature_index + 1,
+                scenario_index + 1
+            ),
+            format!(
+                "binding.compat.unmapped-feature.{}.scenario.{}",
+                feature_index + 1,
+                scenario_index + 1
+            ),
+            if live_feature.feature_id.is_empty() {
+                format!("feature.compat.unmapped.{}", feature_index + 1)
+            } else {
+                live_feature.feature_id.clone()
+            },
+            source.clone(),
+            format!("unmapped live scenario '{}'", live_scenario.name),
+            LinkageStatus::Unlinked,
+            diagnostic,
+            live_scenario
+                .test_result
+                .as_ref()
+                .map(live_test_atoms)
+                .unwrap_or_default(),
+        );
+    }
+}
+
+fn compatibility_component_id(component: &crate::intent::Component, index: usize) -> String {
+    if component.id.is_empty() {
+        format!("component.compat.{}", index + 1)
+    } else {
+        component.id.clone()
+    }
+}
+
+fn append_unmapped_component_results(
+    evidence: &mut Vec<EvidenceResult>,
+    obligations: &mut Vec<ReportObligation>,
+    component_feature_id: &str,
+    component: &crate::intent::Component,
+    live_component: &crate::intent::LiveComponentResult,
+    component_index: usize,
+    diagnostic: &str,
+) {
+    let source = component
+        .scenarios
+        .first()
+        .map(|scenario| scenario.source.clone())
+        .unwrap_or_else(|| SourceSpan::single_line("", 1, 1, 1));
+    append_unmapped_live_component_with_id(
+        evidence,
+        obligations,
+        live_component,
+        component_index,
+        component_feature_id,
+        source,
+        diagnostic,
+    );
+}
+
+fn append_unmapped_live_component(
+    evidence: &mut Vec<EvidenceResult>,
+    obligations: &mut Vec<ReportObligation>,
+    live_component: &crate::intent::LiveComponentResult,
+    component_index: usize,
+    source: SourceSpan,
+    diagnostic: &str,
+) {
+    append_unmapped_live_component_with_id(
+        evidence,
+        obligations,
+        live_component,
+        component_index,
+        &format!("component.compat.unmapped.{}", component_index + 1),
+        source,
+        diagnostic,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_unmapped_live_component_with_id(
+    evidence: &mut Vec<EvidenceResult>,
+    obligations: &mut Vec<ReportObligation>,
+    live_component: &crate::intent::LiveComponentResult,
+    component_index: usize,
+    component_feature_id: &str,
+    source: SourceSpan,
+    diagnostic: &str,
+) {
+    for (scenario_index, live_scenario) in live_component.scenarios.iter().enumerate() {
+        append_mapping_failure(
+            evidence,
+            obligations,
+            format!(
+                "outcome.compat.{}.unmapped-component.{}.scenario.{}",
+                component_feature_id,
+                component_index + 1,
+                scenario_index + 1
+            ),
+            format!(
+                "binding.compat.{}.unmapped-component.{}.scenario.{}",
+                component_feature_id,
+                component_index + 1,
+                scenario_index + 1
+            ),
+            component_feature_id.to_string(),
+            source.clone(),
+            format!("unmapped live component scenario '{}'", live_scenario.name),
+            LinkageStatus::Linked,
+            diagnostic,
+            live_scenario
+                .test_result
+                .as_ref()
+                .map(live_test_atoms)
+                .unwrap_or_default(),
+        );
+    }
+}
+
 fn append_live_scenario_evidence(
     evidence: &mut Vec<EvidenceResult>,
     scenario: &crate::intent::Scenario,
     live: &LiveScenarioResult,
     linkage: LinkageStatus,
-    profile: &str,
     run_index: usize,
 ) {
     let assertions = live
@@ -803,94 +1573,160 @@ fn append_live_scenario_evidence(
         .as_ref()
         .map(|result| result.assertions.as_slice())
         .unwrap_or_default();
-    let exact_mapping = assertions.len() == scenario.outcome_metadata.len();
+    let exact_mapping =
+        assertions.len() == scenario.outcome_metadata.len() && live.outcomes == scenario.outcomes;
 
     for (outcome_index, metadata) in scenario.outcome_metadata.iter().enumerate() {
-        let (binding, executability, resolution, attempts) = match live.status.as_str() {
-            "skip" => (
+        let binding_id = format!(
+            "binding.compat.{}.{}.{}",
+            scenario.verification_id,
+            run_index + 1,
+            outcome_index + 1
+        );
+        let failed_precondition = live.test_result.as_ref().is_some_and(|result| {
+            result
+                .preconditions
+                .iter()
+                .any(|precondition| !precondition.passed)
+        });
+        let all_atoms = live
+            .test_result
+            .as_ref()
+            .map(|test| {
+                let mut atoms = live_precondition_atoms(test, &binding_id);
+                if let Some(assertion) = test.assertions.get(outcome_index) {
+                    atoms.push(EvidenceAtom {
+                        id: format!("{binding_id}.assertion.{}", outcome_index + 1),
+                        assertion: assertion.assertion_text.clone(),
+                        passed: assertion.passed,
+                        diagnostic: assertion.message.clone(),
+                    });
+                }
+                atoms
+            })
+            .unwrap_or_default();
+        let (binding, executability, resolution, attempts) = if failed_precondition {
+            (
                 BindingStatus::Bound,
-                ExecutabilityStatus::Executable,
+                ExecutabilityStatus::Blocked,
                 AssertionResolution::Resolved,
                 vec![EvidenceAttempt {
                     sequence: 1,
-                    disposition: Disposition::Skipped,
-                    evidence_atoms: Vec::new(),
-                    diagnostic: Some("precondition was not met".to_string()),
+                    disposition: Disposition::Failed,
+                    evidence_atoms: all_atoms,
+                    diagnostic: Some("one or more scenario preconditions failed".to_string()),
                 }],
-            ),
-            "pass" | "fail" if exact_mapping => {
-                let assertion = &assertions[outcome_index];
-                let disposition = if assertion.passed {
-                    Disposition::Passed
-                } else {
-                    Disposition::Failed
-                };
-                (
+            )
+        } else {
+            match live.status.as_str() {
+                "pass" | "fail" if exact_mapping => {
+                    let assertion = &assertions[outcome_index];
+                    let disposition = if live.status == "pass" && assertion.passed {
+                        Disposition::Passed
+                    } else {
+                        Disposition::Failed
+                    };
+                    (
+                        BindingStatus::Bound,
+                        ExecutabilityStatus::Executable,
+                        AssertionResolution::Resolved,
+                        vec![EvidenceAttempt {
+                            sequence: 1,
+                            disposition,
+                            evidence_atoms: all_atoms,
+                            diagnostic: None,
+                        }],
+                    )
+                }
+                "pass" | "fail" => (
+                    BindingStatus::Ambiguous,
+                    ExecutabilityStatus::Executable,
+                    AssertionResolution::Unresolved,
+                    vec![EvidenceAttempt {
+                        sequence: 1,
+                        disposition: Disposition::NoResult,
+                        evidence_atoms: live
+                            .test_result
+                            .as_ref()
+                            .map(live_test_atoms)
+                            .unwrap_or_default(),
+                        diagnostic: Some(format!(
+                            "cannot safely map {} assertions to {} outcomes",
+                            assertions.len(),
+                            scenario.outcome_metadata.len()
+                        )),
+                    }],
+                ),
+                "warning" => (
                     BindingStatus::Bound,
                     ExecutabilityStatus::Executable,
+                    AssertionResolution::Unresolved,
+                    vec![EvidenceAttempt {
+                        sequence: 1,
+                        disposition: Disposition::NoResult,
+                        evidence_atoms: live
+                            .test_result
+                            .as_ref()
+                            .map(live_test_atoms)
+                            .unwrap_or_default(),
+                        diagnostic: Some(if live.unresolved_outcomes.is_empty() {
+                            "scenario completed with unresolved warning status".to_string()
+                        } else {
+                            format!(
+                                "scenario has unresolved outcomes: {}",
+                                live.unresolved_outcomes.join(", ")
+                            )
+                        }),
+                    }],
+                ),
+                "skip" => (
+                    BindingStatus::Bound,
+                    ExecutabilityStatus::Blocked,
                     AssertionResolution::Resolved,
                     vec![EvidenceAttempt {
                         sequence: 1,
-                        disposition,
-                        evidence_atoms: vec![EvidenceAtom {
-                            id: format!(
-                                "atom.{}.{}.{}",
-                                metadata.id,
-                                run_index + 1,
-                                outcome_index + 1
-                            ),
-                            assertion: assertion.assertion_text.clone(),
-                            passed: assertion.passed,
-                            diagnostic: assertion.message.clone(),
-                        }],
-                        diagnostic: None,
+                        disposition: Disposition::Skipped,
+                        evidence_atoms: live
+                            .test_result
+                            .as_ref()
+                            .map(live_test_atoms)
+                            .unwrap_or_default(),
+                        diagnostic: Some("precondition was not met".to_string()),
                     }],
-                )
-            }
-            "pass" | "fail" => (
-                BindingStatus::Bound,
-                ExecutabilityStatus::Executable,
-                AssertionResolution::Unresolved,
-                vec![EvidenceAttempt {
-                    sequence: 1,
-                    disposition: Disposition::NoResult,
-                    evidence_atoms: Vec::new(),
-                    diagnostic: Some(format!(
-                        "cannot safely map {} assertions to {} outcomes",
-                        assertions.len(),
-                        scenario.outcome_metadata.len()
-                    )),
-                }],
-            ),
-            _ => (
-                BindingStatus::Unbound,
-                ExecutabilityStatus::Unsupported,
-                AssertionResolution::Unresolved,
-                Vec::new(),
-            ),
-        };
-        evidence.push(
-            EvidenceResult::recorded(
-                format!(
-                    "binding.compat.{}.{}.{}",
-                    scenario.verification_id,
-                    run_index + 1,
-                    outcome_index + 1
                 ),
-                metadata.id.to_string(),
-                metadata.source.clone(),
-                EvidenceRequirement::Required,
-                EvidenceSelection::Selected,
-                DeclarationStatus::Declared,
-                linkage,
-                binding,
-                executability,
-                Freshness::Current,
-                resolution,
-                attempts,
-            )
-            .qualify(profile),
-        );
+                status => (
+                    BindingStatus::Unbound,
+                    ExecutabilityStatus::Unsupported,
+                    AssertionResolution::Unresolved,
+                    vec![EvidenceAttempt {
+                        sequence: 1,
+                        disposition: Disposition::NoResult,
+                        evidence_atoms: live
+                            .test_result
+                            .as_ref()
+                            .map(live_test_atoms)
+                            .unwrap_or_default(),
+                        diagnostic: Some(format!(
+                            "scenario produced non-verifying status '{status}'"
+                        )),
+                    }],
+                ),
+            }
+        };
+        evidence.push(EvidenceResult::recorded(
+            binding_id,
+            metadata.id.to_string(),
+            metadata.source.clone(),
+            EvidenceRequirement::Required,
+            EvidenceSelection::Selected,
+            DeclarationStatus::Declared,
+            linkage,
+            binding,
+            executability,
+            Freshness::Current,
+            resolution,
+            attempts,
+        ));
     }
 }
 
@@ -1122,6 +1958,9 @@ fn decide_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::intent::{
+        LiveAssertionResult, LiveComponentResult, LiveFeatureResult, LiveTestResult,
+    };
     use crate::verification::{
         AssertionResolution, BindingStatus, DeclarationStatus, Disposition, EvidenceBinding,
         ExecutabilityStatus, Freshness, IdMode, LinkageStatus, SourceSpan, VerificationTruth,
@@ -1176,6 +2015,79 @@ mod tests {
 
     fn report(profile: &str, evidence: Vec<EvidenceResult>) -> RunReport {
         RunReport::assemble_for_tests(profile, true, evidence)
+    }
+
+    fn live_assertion(text: &str, passed: bool) -> LiveAssertionResult {
+        LiveAssertionResult {
+            assertion_text: text.to_string(),
+            passed,
+            message: (!passed).then(|| format!("{text} failed")),
+            resolution_trace: None,
+            checks: Vec::new(),
+        }
+    }
+
+    fn live_test(
+        method: &str,
+        path: &str,
+        passed: bool,
+        assertions: Vec<LiveAssertionResult>,
+    ) -> LiveTestResult {
+        LiveTestResult {
+            method: method.to_string(),
+            path: path.to_string(),
+            passed,
+            assertions,
+            preconditions: Vec::new(),
+            scenario_name: None,
+        }
+    }
+
+    fn live_scenario(
+        name: &str,
+        status: &str,
+        assertions: Option<Vec<LiveAssertionResult>>,
+    ) -> LiveScenarioResult {
+        LiveScenarioResult {
+            name: name.to_string(),
+            description: None,
+            given_clause: None,
+            when_clause: "the check runs".to_string(),
+            outcomes: assertions
+                .as_ref()
+                .map(|assertions| {
+                    assertions
+                        .iter()
+                        .map(|assertion| assertion.assertion_text.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            status: status.to_string(),
+            test_result: assertions
+                .map(|assertions| live_test("GET", "/", status == "pass", assertions)),
+            unresolved_outcomes: Vec::new(),
+            component_refs: Vec::new(),
+        }
+    }
+
+    fn live_results(
+        features: Vec<LiveFeatureResult>,
+        components: Vec<LiveComponentResult>,
+    ) -> LiveTestResults {
+        LiveTestResults {
+            features,
+            components,
+            // Deliberately nonsensical: compatibility projection must consume
+            // concrete results, never these cached summaries.
+            total_assertions: 0,
+            passed_assertions: 0,
+            failed_assertions: 999,
+            linked_features: 0,
+            total_features: 999,
+            title: None,
+            glossary: None,
+            summary: None,
+        }
     }
 
     #[test]
@@ -1482,6 +2394,559 @@ mod tests {
             }
         );
         assert!(report.evidence()[0].satisfies_required());
+    }
+
+    #[test]
+    fn legacy_technical_tests_are_required_with_deterministic_qualified_ids() {
+        let intent = IntentFile::parse_content_with_id_mode(
+            r#"Feature: Legacy technical
+  id: feature.legacy-technical
+  test:
+    - request: GET /health
+      assert:
+        - status: 200
+        - body contains "ok"
+"#,
+            "legacy-technical.intent".to_string(),
+            IdMode::Compatibility,
+        )
+        .unwrap();
+        let feature = |assertions: Vec<LiveAssertionResult>| {
+            let test_passed = assertions.iter().all(|assertion| assertion.passed);
+            LiveFeatureResult {
+                feature_id: "feature.legacy-technical".to_string(),
+                feature_name: "Legacy technical".to_string(),
+                description: None,
+                // This cached feature boolean deliberately lies.
+                passed: false,
+                tests: vec![live_test("GET", "/health", test_passed, assertions)],
+                scenarios: Vec::new(),
+                has_implementation: true,
+            }
+        };
+
+        let passing = RunReport::from_live_results(
+            &intent,
+            &live_results(
+                vec![feature(vec![
+                    live_assertion("status: 200", true),
+                    live_assertion("body contains \"ok\"", true),
+                ])],
+                Vec::new(),
+            ),
+            "legacy-live",
+            true,
+        );
+        assert_eq!(passing.exit_code(), 0);
+        assert_eq!(passing.evidence().len(), 2);
+        assert!(passing
+            .evidence()
+            .iter()
+            .all(EvidenceResult::satisfies_required));
+        assert_eq!(
+            passing.evidence()[0].obligation_id(),
+            "outcome.compat.feature.legacy-technical.test.1.assertion.1"
+        );
+        assert_eq!(
+            passing.evidence()[0].id(),
+            "binding.compat.feature.legacy-technical.test.1.assertion.1"
+        );
+        assert_eq!(passing.evidence()[0].profile(), "legacy-live");
+        assert_eq!(passing.evidence()[0].source.path, "legacy-technical.intent");
+
+        let failing = RunReport::from_live_results(
+            &intent,
+            &live_results(
+                vec![feature(vec![
+                    live_assertion("status: 200", true),
+                    live_assertion("body contains \"ok\"", false),
+                ])],
+                Vec::new(),
+            ),
+            "legacy-live",
+            true,
+        );
+        assert_eq!(failing.exit_code(), 1);
+        assert_eq!(failing.coverage().required_bindings.total, 2);
+        assert_eq!(failing.coverage().required_bindings.covered, 1);
+    }
+
+    #[test]
+    fn legacy_technical_mapping_is_fail_closed_for_missing_extra_and_mismatched_results() {
+        let intent = IntentFile::parse_content_with_id_mode(
+            r#"Feature: Mapping
+  id: feature.mapping
+  test:
+    - request: GET /mapped
+      assert:
+        - status: 200
+        - body contains "mapped"
+"#,
+            "mapping.intent".to_string(),
+            IdMode::Compatibility,
+        )
+        .unwrap();
+        let report_for = |tests| {
+            RunReport::from_live_results(
+                &intent,
+                &live_results(
+                    vec![LiveFeatureResult {
+                        feature_id: "feature.mapping".to_string(),
+                        feature_name: "Mapping".to_string(),
+                        description: None,
+                        passed: true,
+                        tests,
+                        scenarios: Vec::new(),
+                        has_implementation: true,
+                    }],
+                    Vec::new(),
+                ),
+                "legacy-live",
+                true,
+            )
+        };
+
+        for (case, tests) in [
+            (
+                "missing assertion",
+                vec![live_test(
+                    "GET",
+                    "/mapped",
+                    true,
+                    vec![live_assertion("status: 200", true)],
+                )],
+            ),
+            (
+                "extra assertion",
+                vec![live_test(
+                    "GET",
+                    "/mapped",
+                    true,
+                    vec![
+                        live_assertion("status: 200", true),
+                        live_assertion("body contains \"mapped\"", true),
+                        live_assertion("unexpected", true),
+                    ],
+                )],
+            ),
+            (
+                "mismatched test",
+                vec![live_test(
+                    "POST",
+                    "/different",
+                    true,
+                    vec![
+                        live_assertion("status: 200", true),
+                        live_assertion("body contains \"mapped\"", true),
+                    ],
+                )],
+            ),
+            (
+                "mismatched assertions",
+                vec![live_test(
+                    "GET",
+                    "/mapped",
+                    true,
+                    vec![
+                        live_assertion("body contains \"mapped\"", true),
+                        live_assertion("status: 200", true),
+                    ],
+                )],
+            ),
+            ("missing test", Vec::new()),
+            (
+                "extra test",
+                vec![
+                    live_test(
+                        "GET",
+                        "/mapped",
+                        true,
+                        vec![
+                            live_assertion("status: 200", true),
+                            live_assertion("body contains \"mapped\"", true),
+                        ],
+                    ),
+                    live_test(
+                        "GET",
+                        "/extra",
+                        true,
+                        vec![live_assertion("extra result", true)],
+                    ),
+                ],
+            ),
+        ] {
+            let report = report_for(tests);
+            assert_eq!(report.exit_code(), 1, "{case}");
+            assert!(
+                report.evidence().iter().any(|result| {
+                    result.disposition() == Disposition::NoResult
+                        || result.assertion_resolution == AssertionResolution::Unresolved
+                }),
+                "{case}: {:?}",
+                report.evidence()
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_technical_preconditions_must_map_exactly() {
+        let mut intent = IntentFile::parse_content_with_id_mode(
+            r#"Feature: Preconditions
+  id: feature.technical-preconditions
+  test:
+    - request: GET /guarded
+      assert:
+        - status: 200
+"#,
+            "technical-preconditions.intent".to_string(),
+            IdMode::Compatibility,
+        )
+        .unwrap();
+        intent.features[0].tests[0].preconditions = vec![crate::intent::Assertion::Status(204)];
+
+        let report_for = |preconditions: Vec<LiveAssertionResult>| {
+            let mut test = live_test(
+                "GET",
+                "/guarded",
+                true,
+                vec![live_assertion("status: 200", true)],
+            );
+            test.preconditions = preconditions;
+            RunReport::from_live_results(
+                &intent,
+                &live_results(
+                    vec![LiveFeatureResult {
+                        feature_id: "feature.technical-preconditions".to_string(),
+                        feature_name: "Preconditions".to_string(),
+                        description: None,
+                        passed: true,
+                        tests: vec![test],
+                        scenarios: Vec::new(),
+                        has_implementation: true,
+                    }],
+                    Vec::new(),
+                ),
+                "legacy-live",
+                true,
+            )
+        };
+
+        assert_eq!(
+            report_for(vec![live_assertion("status: 204", true)]).exit_code(),
+            0
+        );
+        assert_eq!(report_for(Vec::new()).exit_code(), 1);
+        assert_eq!(
+            report_for(vec![
+                live_assertion("status: 204", true),
+                live_assertion("extra", true),
+            ])
+            .exit_code(),
+            1
+        );
+        assert_eq!(
+            report_for(vec![live_assertion("status: 205", true)]).exit_code(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_preconditions_override_passing_outcome_atoms() {
+        let intent = IntentFile::parse_content_with_id_mode(
+            r#"Feature: Preconditions
+  id: feature.preconditions
+
+  Scenario: Protected action
+    id: scenario.preconditions.protected
+    Given access is allowed
+    When the check runs
+    → id: outcome.preconditions.completed; action completes
+"#,
+            "preconditions.intent".to_string(),
+            IdMode::Strict,
+        )
+        .unwrap();
+        let mut scenario = live_scenario(
+            "Protected action",
+            "fail",
+            Some(vec![live_assertion("action completes", true)]),
+        );
+        scenario.test_result.as_mut().unwrap().preconditions =
+            vec![live_assertion("access is allowed", false)];
+        let report = RunReport::from_live_results(
+            &intent,
+            &live_results(
+                vec![LiveFeatureResult {
+                    feature_id: "feature.preconditions".to_string(),
+                    feature_name: "Preconditions".to_string(),
+                    description: None,
+                    passed: false,
+                    tests: Vec::new(),
+                    scenarios: vec![scenario],
+                    has_implementation: true,
+                }],
+                Vec::new(),
+            ),
+            "legacy-live",
+            true,
+        );
+
+        assert_eq!(report.exit_code(), 1);
+        assert_eq!(report.evidence()[0].disposition(), Disposition::Failed);
+        assert!(report.evidence()[0].attempts()[0]
+            .evidence_atoms()
+            .iter()
+            .any(|atom| !atom.passed()));
+    }
+
+    #[test]
+    fn warning_pending_and_unresolved_scenarios_never_become_no_evidence_successes() {
+        let intent = IntentFile::parse_content_with_id_mode(
+            r#"Feature: Incomplete
+  id: feature.incomplete
+
+  Scenario: Resolve me
+    id: scenario.incomplete.resolve
+    When the check runs
+    → id: outcome.incomplete.resolved; result resolves
+"#,
+            "incomplete.intent".to_string(),
+            IdMode::Strict,
+        )
+        .unwrap();
+        for status in ["warning", "pending", "unresolved", "unknown"] {
+            let mut scenario = live_scenario(
+                "Resolve me",
+                status,
+                (status == "warning").then(|| vec![live_assertion("result resolves", true)]),
+            );
+            scenario.unresolved_outcomes = vec!["result resolves".to_string()];
+            let report = RunReport::from_live_results(
+                &intent,
+                &live_results(
+                    vec![LiveFeatureResult {
+                        feature_id: "feature.incomplete".to_string(),
+                        feature_name: "Incomplete".to_string(),
+                        description: None,
+                        passed: true,
+                        tests: Vec::new(),
+                        scenarios: vec![scenario],
+                        has_implementation: true,
+                    }],
+                    Vec::new(),
+                ),
+                "legacy-live",
+                true,
+            );
+            assert_eq!(report.exit_code(), 1, "{status}");
+            assert!(!report.evidence()[0].satisfies_required(), "{status}");
+        }
+    }
+
+    #[test]
+    fn every_expanded_scenario_run_is_a_required_binding() {
+        let intent = IntentFile::parse_content_with_id_mode(
+            r#"Feature: Expanded
+  id: feature.expanded
+
+  Scenario: Row check
+    id: scenario.expanded.row-check
+    When the check runs
+    → id: outcome.expanded.row-valid; row is valid
+"#,
+            "expanded.intent".to_string(),
+            IdMode::Strict,
+        )
+        .unwrap();
+        let feature = |second_passes| LiveFeatureResult {
+            feature_id: "feature.expanded".to_string(),
+            feature_name: "Expanded".to_string(),
+            description: None,
+            passed: second_passes,
+            tests: Vec::new(),
+            scenarios: vec![
+                live_scenario(
+                    "Row check [first]",
+                    "pass",
+                    Some(vec![live_assertion("row is valid", true)]),
+                ),
+                live_scenario(
+                    "Row check [second]",
+                    if second_passes { "pass" } else { "fail" },
+                    Some(vec![live_assertion("row is valid", second_passes)]),
+                ),
+            ],
+            has_implementation: true,
+        };
+
+        let passing = RunReport::from_live_results(
+            &intent,
+            &live_results(vec![feature(true)], Vec::new()),
+            "legacy-live",
+            true,
+        );
+        assert_eq!(passing.exit_code(), 0);
+        assert_eq!(passing.coverage().required_bindings.total, 2);
+
+        let failing = RunReport::from_live_results(
+            &intent,
+            &live_results(vec![feature(false)], Vec::new()),
+            "legacy-live",
+            true,
+        );
+        assert_eq!(failing.exit_code(), 1);
+        assert_eq!(failing.coverage().required_bindings.covered, 1);
+    }
+
+    #[test]
+    fn component_scenario_outcomes_use_explicit_ids_and_fail_closed() {
+        let intent = IntentFile::parse_content_with_id_mode(
+            r#"Component: Reusable
+  id: component.reusable
+
+  Scenario: Component check
+    id: scenario.component.reusable-check
+    When the check runs
+    → id: outcome.component.reusable-valid; component is valid
+
+Feature: Host
+  id: feature.host
+  verification: documentation-only
+  rationale: Component-only compatibility fixture
+"#,
+            "component.intent".to_string(),
+            IdMode::Strict,
+        )
+        .unwrap();
+        let component = |status, assertion_passes| LiveComponentResult {
+            component_id: "component.reusable".to_string(),
+            component_name: "Reusable".to_string(),
+            description: String::new(),
+            inherent_behavior: Vec::new(),
+            passed: assertion_passes,
+            scenarios: vec![live_scenario(
+                "Component check",
+                status,
+                Some(vec![live_assertion("component is valid", assertion_passes)]),
+            )],
+        };
+
+        let passing = RunReport::from_live_results(
+            &intent,
+            &live_results(Vec::new(), vec![component("pass", true)]),
+            "legacy-live",
+            true,
+        );
+        assert_eq!(passing.exit_code(), 0);
+        assert_eq!(
+            passing.evidence()[0].obligation_id(),
+            "outcome.component.reusable-valid"
+        );
+        assert_eq!(passing.evidence()[0].profile(), "legacy-live");
+        assert_eq!(passing.evidence()[0].source.start_line, 7);
+
+        for failing_component in [
+            component("fail", false),
+            component("warning", true),
+            LiveComponentResult {
+                scenarios: Vec::new(),
+                ..component("pass", true)
+            },
+        ] {
+            let failing = RunReport::from_live_results(
+                &intent,
+                &live_results(Vec::new(), vec![failing_component]),
+                "legacy-live",
+                true,
+            );
+            assert_eq!(failing.exit_code(), 1);
+        }
+    }
+
+    #[test]
+    fn component_mapping_preconditions_and_repeated_runs_are_all_required() {
+        let intent = IntentFile::parse_content_with_id_mode(
+            r#"Component: Expanded component
+  id: component.expanded
+
+  Scenario: Component row
+    id: scenario.component.expanded-row
+    Given component access is allowed
+    When the check runs
+    → id: outcome.component.expanded-valid; component row is valid
+
+Feature: Host
+  id: feature.host
+  verification: documentation-only
+  rationale: Component-only compatibility fixture
+"#,
+            "component-expanded.intent".to_string(),
+            IdMode::Strict,
+        )
+        .unwrap();
+        let component_report = |scenarios| {
+            RunReport::from_live_results(
+                &intent,
+                &live_results(
+                    Vec::new(),
+                    vec![LiveComponentResult {
+                        component_id: "component.expanded".to_string(),
+                        component_name: "Expanded component".to_string(),
+                        description: String::new(),
+                        inherent_behavior: Vec::new(),
+                        passed: true,
+                        scenarios,
+                    }],
+                ),
+                "legacy-live",
+                true,
+            )
+        };
+
+        let passing = component_report(vec![
+            live_scenario(
+                "Component row [first]",
+                "pass",
+                Some(vec![live_assertion("component row is valid", true)]),
+            ),
+            live_scenario(
+                "Component row [second]",
+                "pass",
+                Some(vec![live_assertion("component row is valid", true)]),
+            ),
+        ]);
+        assert_eq!(passing.exit_code(), 0);
+        assert_eq!(passing.coverage().required_bindings.total, 2);
+
+        let mut failed_precondition = live_scenario(
+            "Component row",
+            "fail",
+            Some(vec![live_assertion("component row is valid", true)]),
+        );
+        failed_precondition
+            .test_result
+            .as_mut()
+            .unwrap()
+            .preconditions = vec![live_assertion("component access is allowed", false)];
+        assert_eq!(component_report(vec![failed_precondition]).exit_code(), 1);
+
+        for assertions in [
+            Vec::new(),
+            vec![
+                live_assertion("component row is valid", true),
+                live_assertion("extra", true),
+            ],
+        ] {
+            assert_eq!(
+                component_report(vec![live_scenario(
+                    "Component row",
+                    "pass",
+                    Some(assertions),
+                )])
+                .exit_code(),
+                1
+            );
+        }
     }
 
     #[test]

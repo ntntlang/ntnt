@@ -82,12 +82,14 @@ fn validate_schema_node(
             return Err(format!("{path}: string is shorter than {minimum}"));
         }
     }
-    if schema.get("pattern").and_then(serde_json::Value::as_str) == Some("^profile:.+$")
-        && !instance
-            .as_str()
-            .is_some_and(|value| value.starts_with("profile:") && value.len() > 8)
-    {
-        return Err(format!("{path}: invalid profile qualification"));
+    if let Some(pattern) = schema.get("pattern").and_then(serde_json::Value::as_str) {
+        let regex = regex::Regex::new(pattern)
+            .map_err(|error| format!("{path}: invalid schema pattern {pattern:?}: {error}"))?;
+        if !instance.as_str().is_some_and(|value| regex.is_match(value)) {
+            return Err(format!(
+                "{path}: value does not match schema pattern {pattern:?}"
+            ));
+        }
     }
     if let Some(object) = instance.as_object() {
         if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
@@ -675,6 +677,93 @@ Feature: Bad Test
         "intent check should fail when assertions don't match.\nOutput:\n{}",
         output
     );
+}
+
+#[test]
+fn test_intent_check_projects_legacy_test_blocks_into_the_report_ledger() {
+    let fixture_stem = format!("ntnt_legacy_report_{}", std::process::id());
+    let test_tnt = std::env::temp_dir().join(format!("{fixture_stem}.tnt"));
+    let test_intent = std::env::temp_dir().join(format!("{fixture_stem}.intent"));
+    fs::write(
+        &test_tnt,
+        r#"
+import { html } from "std/http/server"
+
+// @implements: feature.legacy-report
+fn handler(req) {
+    return html("<html><body>legacy ok</body></html>")
+}
+
+get("/", handler)
+listen(8080)
+"#,
+    )
+    .unwrap();
+    let write_intent = |expected: &str| {
+        fs::write(
+            &test_intent,
+            format!(
+                r#"Feature: Legacy report
+  id: feature.legacy-report
+  test:
+    - request: GET /
+      assert:
+        - status: 200
+        - body contains "{expected}"
+"#
+            ),
+        )
+        .unwrap();
+    };
+    let tnt_path = test_tnt.to_string_lossy().to_string();
+
+    write_intent("legacy ok");
+    let (passing_stdout, passing_stderr, passing_code) =
+        run_ntnt(&["intent", "check", &tnt_path, "--port", "18093", "--json"]);
+    assert_eq!(
+        passing_code, 0,
+        "passing legacy test block must verify:\n{passing_stdout}\n{passing_stderr}"
+    );
+    let passing: serde_json::Value =
+        serde_json::from_str(&passing_stdout).expect("passing report JSON");
+    validate_report_schema(&passing).expect("passing compatibility report must match schema");
+    assert_eq!(passing["coverage"]["required_bindings"]["total"], 2);
+    assert_eq!(passing["coverage"]["required_bindings"]["covered"], 2);
+    assert!(passing["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|result| {
+            result["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("binding.compat.feature.legacy-report.test.1."))
+                && result["profile"] == "legacy-live"
+        }));
+
+    write_intent("never returned");
+    let (failing_stdout, failing_stderr, failing_code) =
+        run_ntnt(&["intent", "check", &tnt_path, "--port", "18094", "--json"]);
+    fs::remove_file(&test_tnt).ok();
+    fs::remove_file(&test_intent).ok();
+
+    assert_ne!(
+        failing_code, 0,
+        "failing legacy test block must remain selected evidence:\n{failing_stdout}\n{failing_stderr}"
+    );
+    let failing: serde_json::Value =
+        serde_json::from_str(&failing_stdout).expect("failing report JSON");
+    validate_report_schema(&failing).expect("failing compatibility report must match schema");
+    assert_eq!(failing["exit"]["code"], failing_code);
+    assert!(failing["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|result| {
+            result["disposition"] == "Failed"
+                && result["obligation_id"].as_str().is_some_and(|id| {
+                    id.starts_with("outcome.compat.feature.legacy-report.test.1.")
+                })
+        }));
 }
 
 #[test]
