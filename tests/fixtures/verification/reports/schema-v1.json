@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ntnt.dev/schemas/verification/run-report-v1.json",
+  "title": "NTNT verification RunReport v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "ntnt_version",
+    "ntnt_commit",
+    "profile",
+    "profile_qualification",
+    "freshness",
+    "strict",
+    "coverage",
+    "thresholds",
+    "features",
+    "obligations",
+    "evidence",
+    "unmet_required_binding_ids",
+    "exit"
+  ],
+  "properties": {
+    "schema": { "const": "https://ntnt.dev/schemas/verification/run-report-v1.json" },
+    "schema_version": { "const": 1 },
+    "ntnt_version": { "type": "string", "minLength": 1 },
+    "ntnt_commit": { "type": ["string", "null"] },
+    "profile": { "type": "string", "minLength": 1 },
+    "profile_qualification": { "type": "string", "pattern": "^profile:.+$" },
+    "freshness": { "enum": ["Current", "Stale"] },
+    "strict": { "type": "boolean" },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "thresholds": { "$ref": "#/$defs/thresholds" },
+    "features": { "type": "array", "items": { "$ref": "#/$defs/feature" } },
+    "obligations": { "type": "array", "items": { "$ref": "#/$defs/obligation" } },
+    "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
+    "unmet_required_binding_ids": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "exit": { "$ref": "#/$defs/exit" }
+  },
+  "$defs": {
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["covered", "total"],
+      "properties": {
+        "covered": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "implementation",
+        "executable",
+        "verified",
+        "required_bindings",
+        "documentation_only_features",
+        "advisory_bindings",
+        "excluded_bindings",
+        "evidence_atoms"
+      ],
+      "properties": {
+        "implementation": { "$ref": "#/$defs/metric" },
+        "executable": { "$ref": "#/$defs/metric" },
+        "verified": { "$ref": "#/$defs/metric" },
+        "required_bindings": { "$ref": "#/$defs/metric" },
+        "documentation_only_features": { "type": "integer", "minimum": 0 },
+        "advisory_bindings": { "type": "integer", "minimum": 0 },
+        "excluded_bindings": { "type": "integer", "minimum": 0 },
+        "evidence_atoms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["implementation", "executable", "verified"],
+      "properties": {
+        "implementation": { "type": "number", "minimum": 0, "maximum": 100 },
+        "executable": { "type": "number", "minimum": 0, "maximum": 100 },
+        "verified": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "start_line", "start_column", "end_line", "end_column"],
+      "properties": {
+        "path": { "type": "string" },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "start_column": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "end_column": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "feature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "source", "declaration"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "source": { "$ref": "#/$defs/span" },
+        "declaration": { "enum": ["Declared", "DocumentationOnly"] },
+        "rationale": { "type": "string", "minLength": 1 }
+      }
+    },
+    "obligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "feature_id",
+        "scenario_id",
+        "statement",
+        "source",
+        "declaration",
+        "linkage",
+        "binding",
+        "executability",
+        "disposition",
+        "freshness"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "feature_id": { "type": "string", "minLength": 1 },
+        "scenario_id": { "type": "string", "minLength": 1 },
+        "statement": { "type": "string" },
+        "source": { "$ref": "#/$defs/span" },
+        "declaration": { "enum": ["Declared", "DocumentationOnly"] },
+        "linkage": { "enum": ["Linked", "Unlinked"] },
+        "binding": { "enum": ["Bound", "Unbound", "Ambiguous"] },
+        "executability": { "enum": ["Executable", "Unsupported", "Blocked"] },
+        "disposition": {
+          "enum": ["Planned", "Running", "Passed", "Failed", "Flaky", "Skipped", "Cancelled", "NoResult"]
+        },
+        "freshness": { "enum": ["Current", "Stale"] }
+      }
+    },
+    "atom": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "assertion", "passed"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "assertion": { "type": "string" },
+        "passed": { "type": "boolean" },
+        "diagnostic": { "type": "string" }
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "disposition", "evidence_atoms"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "disposition": {
+          "enum": ["Planned", "Running", "Passed", "Failed", "Flaky", "Skipped", "Cancelled", "NoResult"]
+        },
+        "evidence_atoms": { "type": "array", "items": { "$ref": "#/$defs/atom" } },
+        "diagnostic": { "type": "string" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "obligation_id",
+        "source",
+        "profile",
+        "requirement",
+        "selection",
+        "declaration",
+        "linkage",
+        "binding",
+        "executability",
+        "disposition",
+        "freshness",
+        "assertion_resolution",
+        "evidence_atoms",
+        "attempts"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "obligation_id": { "type": "string", "minLength": 1 },
+        "source": { "$ref": "#/$defs/span" },
+        "profile": { "type": "string", "minLength": 1 },
+        "requirement": { "enum": ["required", "advisory"] },
+        "selection": { "enum": ["selected", "excluded"] },
+        "declaration": { "enum": ["Declared", "DocumentationOnly"] },
+        "linkage": { "enum": ["Linked", "Unlinked"] },
+        "binding": { "enum": ["Bound", "Unbound", "Ambiguous"] },
+        "executability": { "enum": ["Executable", "Unsupported", "Blocked"] },
+        "disposition": {
+          "enum": ["Planned", "Running", "Passed", "Failed", "Flaky", "Skipped", "Cancelled", "NoResult"]
+        },
+        "freshness": { "enum": ["Current", "Stale"] },
+        "assertion_resolution": { "enum": ["Resolved", "Unknown", "Unresolved"] },
+        "evidence_atoms": { "type": "integer", "minimum": 0 },
+        "attempts": { "type": "array", "items": { "$ref": "#/$defs/attempt" } }
+      }
+    },
+    "exit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "reason"],
+      "properties": {
+        "code": { "enum": [0, 1, 2, 3] },
+        "reason": { "enum": ["success", "verification-failed", "threshold-failed"] }
+      }
+    }
+  }
+}

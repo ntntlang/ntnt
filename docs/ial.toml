@@ -561,6 +561,22 @@ description = "Known limitations and workarounds for assertion terms"
 notes = 'Uses regex matching on the response body. Works for single-line and multiline JSON. For more reliable JSON validation, prefer `content-type is json` (checks the Content-Type header) or `body has field "key"` (checks for a specific field).'
 
 # =============================================================================
+# VERIFICATION REPORTS
+# =============================================================================
+
+[verification_reports]
+description = "`ntnt intent check` and `ntnt intent coverage` render one versioned `RunReport` evidence ledger. Human totals, JSON totals, coverage, thresholds, and process exit status are projections of that same ledger."
+details = [
+  "`ntnt intent check <file> --json` writes banner-free schema-v1 JSON to stdout. Compatibility live checks are profile-qualified as `legacy-live` and cannot be promoted to a global or `full` claim.",
+  "`ntnt intent coverage <file> --json` reports implementation, executable, and current verified obligation coverage separately. Use `--min-implementation PERCENT`, `--min-executable PERCENT`, and `--min-verified PERCENT` to set explicit thresholds.",
+  "A selected required binding satisfies an obligation only when it is bound, executable, current, assertion-resolved, passed, and contains at least one concrete evidence atom. Every selected required binding must satisfy this rule.",
+  "Unbound, unsupported, blocked, skipped, stale, failed, flaky, cancelled, and zero-assertion (`no-result`) evidence fails strict verification. A fail-then-pass remains flaky with both attempts retained.",
+  "Advisory and profile-excluded bindings remain visible but never satisfy required obligations. `@implements` remains linkage metadata, not execution evidence."
+]
+schema = "tests/fixtures/verification/reports/schema-v1.json"
+note = "JUnit output is intentionally deferred; future renderers must consume the same ledger."
+
+# =============================================================================
 # COMMANDS
 # =============================================================================
 
@@ -569,7 +585,7 @@ description = "CLI commands for IAL"
 
 [commands.check]
 command = "ntnt intent check <file>"
-description = "Run tests defined in intent file against implementation"
+description = "Run tests and enforce every required binding through the shared evidence ledger; `--json` emits only schema-v1 JSON"
 example = "ntnt intent check server.tnt"
 
 [commands.lint]
@@ -579,7 +595,7 @@ example = "ntnt intent lint server.intent"
 
 [commands.coverage]
 command = "ntnt intent coverage <file>"
-description = "Show which features have implementations"
+description = "Render implementation, executable, and verified obligation coverage; supports `--json` and minimum coverage threshold flags"
 example = "ntnt intent coverage server.tnt"
 
 [commands.init]

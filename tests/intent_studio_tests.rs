@@ -15,6 +15,135 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+fn validate_report_schema(instance: &serde_json::Value) -> Result<(), String> {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/verification/reports/schema-v1.json"))
+            .map_err(|error| error.to_string())?;
+    validate_schema_node(&schema, instance, &schema, "$")
+}
+
+fn validate_schema_node(
+    schema: &serde_json::Value,
+    instance: &serde_json::Value,
+    root: &serde_json::Value,
+    path: &str,
+) -> Result<(), String> {
+    if let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) {
+        let pointer = reference
+            .strip_prefix('#')
+            .ok_or_else(|| format!("unsupported external schema reference {reference}"))?;
+        let target = root
+            .pointer(pointer)
+            .ok_or_else(|| format!("unknown schema reference {reference}"))?;
+        return validate_schema_node(target, instance, root, path);
+    }
+    if let Some(expected) = schema.get("const") {
+        if instance != expected {
+            return Err(format!(
+                "{path}: expected constant {expected}, got {instance}"
+            ));
+        }
+    }
+    if let Some(values) = schema.get("enum").and_then(serde_json::Value::as_array) {
+        if !values.contains(instance) {
+            return Err(format!("{path}: {instance} is not in enum {values:?}"));
+        }
+    }
+    if let Some(expected) = schema.get("type") {
+        let matches = match expected {
+            serde_json::Value::String(kind) => json_type_matches(instance, kind),
+            serde_json::Value::Array(kinds) => kinds
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|kind| json_type_matches(instance, kind)),
+            _ => false,
+        };
+        if !matches {
+            return Err(format!(
+                "{path}: value {instance} has wrong type for {expected}"
+            ));
+        }
+    }
+    if let Some(minimum) = schema.get("minimum").and_then(serde_json::Value::as_f64) {
+        if instance.as_f64().is_some_and(|value| value < minimum) {
+            return Err(format!("{path}: value is below {minimum}"));
+        }
+    }
+    if let Some(maximum) = schema.get("maximum").and_then(serde_json::Value::as_f64) {
+        if instance.as_f64().is_some_and(|value| value > maximum) {
+            return Err(format!("{path}: value is above {maximum}"));
+        }
+    }
+    if let Some(minimum) = schema.get("minLength").and_then(serde_json::Value::as_u64) {
+        if instance
+            .as_str()
+            .is_some_and(|value| value.chars().count() < minimum as usize)
+        {
+            return Err(format!("{path}: string is shorter than {minimum}"));
+        }
+    }
+    if schema.get("pattern").and_then(serde_json::Value::as_str) == Some("^profile:.+$")
+        && !instance
+            .as_str()
+            .is_some_and(|value| value.starts_with("profile:") && value.len() > 8)
+    {
+        return Err(format!("{path}: invalid profile qualification"));
+    }
+    if let Some(object) = instance.as_object() {
+        if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
+            for field in required.iter().filter_map(serde_json::Value::as_str) {
+                if !object.contains_key(field) {
+                    return Err(format!("{path}: missing required field {field}"));
+                }
+            }
+        }
+        if let Some(properties) = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+        {
+            if schema.get("additionalProperties") == Some(&serde_json::Value::Bool(false)) {
+                for field in object.keys() {
+                    if !properties.contains_key(field) {
+                        return Err(format!("{path}: unexpected field {field}"));
+                    }
+                }
+            }
+            for (field, value) in object {
+                if let Some(property_schema) = properties.get(field) {
+                    validate_schema_node(property_schema, value, root, &format!("{path}.{field}"))?;
+                }
+            }
+        }
+    }
+    if let (Some(items), Some(array)) = (schema.get("items"), instance.as_array()) {
+        for (index, value) in array.iter().enumerate() {
+            validate_schema_node(items, value, root, &format!("{path}[{index}]"))?;
+        }
+        if schema.get("uniqueItems") == Some(&serde_json::Value::Bool(true)) {
+            let mut seen = std::collections::BTreeSet::new();
+            for value in array {
+                if !seen.insert(value.to_string()) {
+                    return Err(format!("{path}: duplicate array item {value}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn json_type_matches(value: &serde_json::Value, kind: &str) -> bool {
+    match kind {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "boolean" => value.is_boolean(),
+        "number" => value.is_number(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "null" => value.is_null(),
+        _ => false,
+    }
+}
+
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -430,23 +559,27 @@ fn test_intent_check_json_flag() {
         "--json",
     ]);
 
+    assert!(
+        stdout.trim_start().starts_with('{'),
+        "JSON must be banner-free: {stdout}"
+    );
+    assert!(!stdout.contains("NTNT Intent Check"), "{stdout}");
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("--json should output valid JSON");
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/verification/reports/schema-v1.json"))
+            .expect("committed report schema must be valid JSON");
 
-    assert!(json["features"].is_array(), "Should have features array");
-    assert!(
-        json["total_assertions"].is_number(),
-        "Should have total_assertions"
-    );
-    assert!(
-        json["passed_assertions"].is_number(),
-        "Should have passed_assertions"
-    );
-    assert!(
-        json["failed_assertions"].is_number(),
-        "Should have failed_assertions"
-    );
-    assert_eq!(code, 0, "Simple server tests should pass");
+    assert_eq!(json["schema"], schema["$id"]);
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["profile"], "legacy-live");
+    assert_eq!(json["profile_qualification"], "profile:legacy-live");
+    assert!(json["coverage"]["verified"]["covered"].is_number());
+    assert!(json["coverage"]["required_bindings"]["total"].is_number());
+    assert!(json["evidence"].is_array());
+    assert_eq!(json["exit"]["code"], code);
+    validate_report_schema(&json).expect("check JSON must validate against committed schema");
+    assert_eq!(code, 0, "Simple server tests should pass: {stdout}");
 }
 
 #[test]
@@ -745,18 +878,39 @@ fn test_intent_check_valid_file() {
 
 #[test]
 fn test_intent_coverage_command() {
-    let (stdout, stderr, code) =
-        run_ntnt(&["intent", "coverage", "examples/intent_demo/server.tnt"]);
+    let (stdout, stderr, code) = run_ntnt(&[
+        "intent",
+        "coverage",
+        "examples/intent_demo/server.tnt",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.trim_start().starts_with('{'), "{stdout}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid report JSON");
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["profile"], "implementation");
+    assert!(json["coverage"]["implementation"]["total"].is_number());
+    assert!(json["coverage"]["executable"]["total"].is_number());
+    assert!(json["coverage"]["verified"]["total"].is_number());
+    validate_report_schema(&json).expect("coverage JSON must validate against committed schema");
+}
 
-    if code == 0 {
-        assert!(
-            stdout.contains("%")
-                || stderr.contains("%")
-                || stdout.contains("Feature")
-                || stderr.contains("Feature"),
-            "Coverage should show percentage or feature info"
-        );
-    }
+#[test]
+fn intent_coverage_threshold_flags_share_the_report_exit_decision() {
+    let (stdout, stderr, code) = run_ntnt(&[
+        "intent",
+        "coverage",
+        "examples/intent_demo/server.tnt",
+        "--json",
+        "--min-verified",
+        "100",
+    ]);
+    assert_eq!(code, 1, "{stderr}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid report JSON");
+    assert_eq!(json["thresholds"]["verified"], 100.0);
+    assert_eq!(json["exit"]["code"], code);
+    assert_eq!(json["exit"]["reason"], "threshold-failed");
+    validate_report_schema(&json).expect("threshold JSON must validate against committed schema");
 }
 
 // ============================================================================

@@ -14,6 +14,7 @@ IAL is a term rewriting engine that translates natural language assertions into 
 - [Context Paths](#context-paths)
 - [Glossary System](#glossary-system)
 - [Intent File Format](#intent-file-format)
+- [Verification Reports](#verification-reports)
 - [Commands](#commands)
 
 ---
@@ -456,15 +457,29 @@ Known limitations and workarounds for assertion terms
 |----------------|-------|
 | `response is valid JSON` | Uses regex matching on the response body. Works for single-line and multiline JSON. For more reliable JSON validation, prefer `content-type is json` (checks the Content-Type header) or `body has field "key"` (checks for a specific field). |
 
+## Verification Reports
+
+`ntnt intent check` and `ntnt intent coverage` render one versioned `RunReport` evidence ledger. Human totals, JSON totals, coverage, thresholds, and process exit status are projections of that same ledger.
+
+- `ntnt intent check <file> --json` writes banner-free schema-v1 JSON to stdout. Compatibility live checks are profile-qualified as `legacy-live` and cannot be promoted to a global or `full` claim.
+- `ntnt intent coverage <file> --json` reports implementation, executable, and current verified obligation coverage separately. Use `--min-implementation PERCENT`, `--min-executable PERCENT`, and `--min-verified PERCENT` to set explicit thresholds.
+- A selected required binding satisfies an obligation only when it is bound, executable, current, assertion-resolved, passed, and contains at least one concrete evidence atom. Every selected required binding must satisfy this rule.
+- Unbound, unsupported, blocked, skipped, stale, failed, flaky, cancelled, and zero-assertion (`no-result`) evidence fails strict verification. A fail-then-pass remains flaky with both attempts retained.
+- Advisory and profile-excluded bindings remain visible but never satisfy required obligations. `@implements` remains linkage metadata, not execution evidence.
+
+The committed JSON Schema is `tests/fixtures/verification/reports/schema-v1.json`.
+
+JUnit output is intentionally deferred; future renderers must consume the same ledger.
+
 ## Commands
 
 CLI commands for IAL
 
 | Command | Description |
 |---------|-------------|
-| `ntnt intent check <file>` | Run tests defined in intent file against implementation |
+| `ntnt intent check <file>` | Run tests and enforce every required binding through the shared evidence ledger; `--json` emits only schema-v1 JSON |
 | `ntnt intent lint <file>` | Statically validate glossary and scenarios without running tests: unresolved terms and when-clauses (with did-you-mean suggestions), definition cycles, and orphan glossary entries. Exit 1 on unresolved terms or cycles; orphans are warnings only. --json for CI |
-| `ntnt intent coverage <file>` | Show which features have implementations |
+| `ntnt intent coverage <file>` | Render implementation, executable, and verified obligation coverage; supports `--json` and minimum coverage threshold flags |
 | `ntnt intent init <file.intent> -o <output.tnt>` | Generate code scaffolding from intent file |
 | `ntnt intent studio <file.intent>` | Visual preview with live test execution |
 
