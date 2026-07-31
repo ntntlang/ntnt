@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
@@ -923,10 +923,42 @@ impl RunReport {
         obligations: Vec<ReportObligation>,
         thresholds: CoverageThresholds,
     ) -> Self {
-        let evidence: Vec<_> = evidence
+        let duplicate_obligation_ids = duplicate_obligation_ids(&obligations);
+        let mut evidence: Vec<_> = evidence
             .into_iter()
             .map(|result| result.qualify(profile))
             .collect();
+        for (index, obligation_id) in duplicate_obligation_ids.iter().enumerate() {
+            let obligation = obligations
+                .iter()
+                .find(|obligation| obligation.id == *obligation_id)
+                .expect("duplicate obligation id came from this ledger");
+            evidence.push(
+                EvidenceResult::recorded(
+                    format!("binding.obligation-id-collision.{}", index + 1),
+                    obligation_id.clone(),
+                    obligation.source.clone(),
+                    EvidenceRequirement::Required,
+                    EvidenceSelection::Selected,
+                    DeclarationStatus::Declared,
+                    LinkageStatus::Unlinked,
+                    BindingStatus::Ambiguous,
+                    ExecutabilityStatus::Unsupported,
+                    Freshness::Current,
+                    AssertionResolution::Unresolved,
+                    vec![EvidenceAttempt {
+                        sequence: 1,
+                        disposition: Disposition::NoResult,
+                        evidence_atoms: Vec::new(),
+                        diagnostic: Some(format!(
+                            "duplicate obligation id '{obligation_id}' cannot be verified"
+                        )),
+                    }],
+                )
+                .in_scenario("Obligation identity collision")
+                .qualify(profile),
+            );
+        }
         let obligations = obligations
             .into_iter()
             .map(|obligation| summarize_obligation(obligation, &evidence))
@@ -1155,7 +1187,16 @@ impl RunReport {
         }
 
         let mut scenarios = Vec::new();
+        let duplicate_ids = duplicate_obligation_ids(&self.obligations);
         for scenario in declared {
+            if scenario
+                .obligations
+                .iter()
+                .any(|obligation| duplicate_ids.contains(&obligation.id))
+            {
+                scenarios.push(scenario);
+                continue;
+            }
             let matching = self
                 .evidence
                 .iter()
@@ -2038,6 +2079,17 @@ fn aggregate_disposition(evidence: &[&EvidenceResult]) -> Disposition {
     Disposition::Passed
 }
 
+fn duplicate_obligation_ids(obligations: &[ReportObligation]) -> BTreeSet<String> {
+    let mut counts = BTreeMap::new();
+    for obligation in obligations {
+        *counts.entry(obligation.id.clone()).or_insert(0usize) += 1;
+    }
+    counts
+        .into_iter()
+        .filter_map(|(id, count)| (count > 1).then_some(id))
+        .collect()
+}
+
 fn satisfies_ledger(result: &EvidenceResult, evidence: &[EvidenceResult]) -> bool {
     result.satisfies_required() && selected_binding_id_count(result, evidence) == 1
 }
@@ -2063,13 +2115,19 @@ fn coverage_from_ledger(
         .filter(|obligation| obligation.declaration == DeclarationStatus::Declared)
         .collect();
     let total = behavioral_obligations.len();
+    let duplicate_ids = duplicate_obligation_ids(obligations);
     let implementation = behavioral_obligations
         .iter()
-        .filter(|obligation| obligation.linkage == LinkageStatus::Linked)
+        .filter(|obligation| {
+            !duplicate_ids.contains(&obligation.id) && obligation.linkage == LinkageStatus::Linked
+        })
         .count();
     let executable = behavioral_obligations
         .iter()
         .filter(|obligation| {
+            if duplicate_ids.contains(&obligation.id) {
+                return false;
+            }
             let selected = evidence
                 .iter()
                 .filter(|result| {
@@ -2088,6 +2146,9 @@ fn coverage_from_ledger(
     let verified = behavioral_obligations
         .iter()
         .filter(|obligation| {
+            if duplicate_ids.contains(&obligation.id) {
+                return false;
+            }
             let selected: Vec<_> = evidence
                 .iter()
                 .filter(|result| {
@@ -3344,6 +3405,72 @@ Feature: Host
             ),
             "{human}"
         );
+    }
+
+    #[test]
+    fn generated_inherent_ids_cannot_collide_into_a_false_pass() {
+        let intent = IntentFile::parse_content_with_id_mode(
+            r#"Component: Collision
+  id: component.collision
+  Inherent Behavior:
+    → status 200
+
+  Scenario: Concrete check
+    id: scenario.component.collision.concrete
+    When the component is requested
+    → id: outcome.compat.component.collision.inherent.1; status 200
+
+Feature: Host
+  id: feature.host
+  verification: documentation-only
+  rationale: Component-only compatibility fixture
+"#,
+            "component-collision.intent".to_string(),
+            IdMode::Strict,
+        )
+        .unwrap();
+        let live_component = LiveComponentResult {
+            component_id: "component.collision".to_string(),
+            component_name: "Collision".to_string(),
+            description: String::new(),
+            inherent_behavior: intent.components[0].inherent_behavior.clone(),
+            passed: true,
+            scenarios: vec![live_scenario(
+                "Concrete check",
+                "pass",
+                Some(vec![live_assertion("status 200", true)]),
+            )],
+        };
+
+        let report = RunReport::from_live_results(
+            &intent,
+            &live_results(Vec::new(), vec![live_component]),
+            "legacy-live",
+            true,
+        );
+
+        assert_eq!(report.exit_code(), 1);
+        assert_eq!(report.coverage().implementation.covered, 0);
+        assert_eq!(report.coverage().executable.covered, 0);
+        assert_eq!(report.coverage().verified.covered, 0);
+        assert_eq!(report.coverage().required_bindings.total, 2);
+        assert_eq!(report.coverage().required_bindings.covered, 1);
+        assert!(report
+            .unmet_required_binding_ids
+            .iter()
+            .any(|id| id.starts_with("binding.obligation-id-collision.")));
+        assert!(report.evidence().iter().any(|result| {
+            result
+                .attempts()
+                .iter()
+                .filter_map(EvidenceAttempt::diagnostic)
+                .any(|diagnostic| diagnostic.contains("duplicate obligation id"))
+        }));
+        let human = report.render_human(1);
+        assert!(human.contains("[FAIL] Component: Collision"), "{human}");
+        assert!(human.contains("[NO RESULT] Concrete check"), "{human}");
+        assert!(human.contains("[NO RESULT] Inherent behavior"), "{human}");
+        assert!(human.contains("duplicate obligation id"), "{human}");
     }
 
     #[test]
