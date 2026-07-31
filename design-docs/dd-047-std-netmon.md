@@ -999,7 +999,7 @@ DD-047 does not design or implement gNMI, NETCONF, YANG, Syslog, or a generic st
 - [ ] **Create a Syslog DD** — specify RFC 3164/5424 parsing, UDP/TCP/TLS listeners, framing, sender admission, message/connection/rate bounds, spoofing and loss semantics, batching, backpressure, and supervised collector lifecycle. Decide private `netops/syslog` packaging versus a generic future `std/syslog` module.
 - [ ] **Create an optional `ntnt-netops` packaging DD or packaging section in the first protocol DD** — decide whether the private modules ship together while preserving separate import namespaces and independent promotion paths.
 
-Each follow-on DD must apply the primitive/stdlib-worthiness test from DD-077, state its runtime/stdlib/application boundary, and define crash, reconnect, loss, duplication, ordering, backpressure, secret, and network-authority semantics before implementation begins. Completing these checklist items means creating and registering the DDs; it does not expand DD-047's implementation scope.
+Each follow-on DD must apply the primitive/stdlib-worthiness test from [DD-077](dd-077-correctness-primitives-roadmap.md), state its runtime/stdlib/application boundary, and define crash, reconnect, loss, duplication, ordering, backpressure, secret, and network-authority semantics before implementation begins. Completing these checklist items means creating and registering the DDs; it does not expand DD-047's implementation scope.
 
 ### Reference app, not library
 
