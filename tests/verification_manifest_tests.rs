@@ -74,6 +74,28 @@ fn resources_from_distinct_project_roots_are_ambiguous() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn ambiguous_directory_roots_report_the_canonical_directory() {
+    use std::os::unix::fs::symlink;
+
+    let project = TempProject::new("[verification]\nversion = 1\nfiles = []\n");
+    let outside = TempProject::new("[verification]\nversion = 1\nfiles = []\n");
+    std::fs::remove_file(outside.path.join("ntnt.toml")).unwrap();
+    let alias = project.path.join("outside-alias");
+    symlink(&outside.path, &alias).unwrap();
+
+    let error = ProjectRoot::discover(&alias).unwrap_err();
+    let canonical_outside = outside.path.canonicalize().unwrap();
+
+    assert!(
+        error
+            .to_string()
+            .contains(&canonical_outside.to_string_lossy().to_string()),
+        "{error}"
+    );
+}
+
 #[test]
 fn versioned_manifest_loads_exhaustive_file_classes() {
     let root = ProjectRoot::discover(project_fixture("canonical")).unwrap();
@@ -406,7 +428,12 @@ fn automatic_and_configured_resources_cannot_overlap() {
 
     let error = ProjectDiscovery::discover(&root, &manifest).unwrap_err();
 
-    assert!(error.to_string().contains("duplicate resource"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("automatically discovered resource 'specs/app.intent' is also declared"),
+        "{error}"
+    );
 }
 
 #[test]

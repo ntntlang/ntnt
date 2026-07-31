@@ -45,6 +45,11 @@ impl ProjectRoot {
                 source,
             })?;
         let canonical_manifest = load_project_manifest(&canonical)?;
+        let canonical_start = if canonical.is_dir() {
+            canonical.as_path()
+        } else {
+            canonical.parent().unwrap_or(&canonical)
+        };
         let selected = match (lexical_manifest, canonical_manifest) {
             (Some(lexical), Some(canonical)) if lexical.root() == canonical.root() => canonical,
             (Some(lexical), Some(canonical)) => {
@@ -56,7 +61,7 @@ impl ProjectRoot {
             (Some(lexical), None) => {
                 return Err(ProjectError::AmbiguousRoots {
                     first: lexical.root().to_path_buf(),
-                    second: canonical.parent().unwrap_or(&canonical).to_path_buf(),
+                    second: canonical_start.to_path_buf(),
                 });
             }
             (None, Some(canonical_manifest)) => {
