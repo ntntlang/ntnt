@@ -3458,7 +3458,7 @@ impl IntentFile {
             // Inside a component
             if let Some(ref mut component) = current_component {
                 // Component ID
-                if trimmed.starts_with("id:") && current_scenario.is_none() {
+                if trimmed.starts_with("id:") && current_scenario.is_none() && !in_constraint {
                     let id = trimmed.trim_start_matches("id:").trim();
                     component.id = id.to_string();
                     continue;
@@ -3616,7 +3616,7 @@ impl IntentFile {
                     continue;
                 }
 
-                if trimmed.starts_with("verification:") {
+                if trimmed.starts_with("verification:") && !in_constraint {
                     if current_scenario.is_some() {
                         return Err(Self::verification_error(
                             &Self::line_span(&source_path, line_number, line, "verification:"),
