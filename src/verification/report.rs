@@ -85,6 +85,8 @@ impl EvidenceAttempt {
 pub struct EvidenceResult {
     id: String,
     obligation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scenario_name: Option<String>,
     source: SourceSpan,
     profile: String,
     requirement: EvidenceRequirement,
@@ -123,6 +125,7 @@ impl EvidenceResult {
         Self {
             id: id.into(),
             obligation_id: obligation_id.into(),
+            scenario_name: None,
             source,
             profile: String::new(),
             requirement,
@@ -141,6 +144,11 @@ impl EvidenceResult {
 
     fn qualify(mut self, profile: &str) -> Self {
         self.profile = profile.to_string();
+        self
+    }
+
+    fn in_scenario(mut self, name: &str) -> Self {
+        self.scenario_name = Some(name.to_string());
         self
     }
 
@@ -309,6 +317,7 @@ struct ReportObligation {
     id: String,
     feature_id: String,
     scenario_id: String,
+    scenario_name: String,
     statement: String,
     source: SourceSpan,
     declaration: DeclarationStatus,
@@ -319,12 +328,25 @@ struct ReportObligation {
     freshness: Freshness,
 }
 
-impl From<&Obligation> for ReportObligation {
-    fn from(obligation: &Obligation) -> Self {
+impl ReportObligation {
+    fn from_obligation(obligation: &Obligation, intent: Option<&IntentFile>) -> Self {
+        let scenario_name = intent
+            .and_then(|intent| {
+                intent
+                    .features
+                    .iter()
+                    .flat_map(|feature| &feature.scenarios)
+                    .find(|scenario| scenario.verification_id == obligation.scenario_id)
+            })
+            .map_or_else(
+                || obligation.scenario_id.to_string(),
+                |scenario| scenario.name.clone(),
+            );
         Self {
             id: obligation.id.to_string(),
             feature_id: obligation.feature_id.to_string(),
             scenario_id: obligation.scenario_id.to_string(),
+            scenario_name,
             statement: obligation.statement.clone(),
             source: obligation.source.clone(),
             declaration: obligation.declaration,
@@ -345,6 +367,14 @@ struct ReportFeature {
     declaration: DeclarationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     rationale: Option<String>,
+}
+
+struct HumanScenario<'a> {
+    id: &'a str,
+    name: &'a str,
+    obligations: Vec<&'a ReportObligation>,
+    evidence_name: Option<&'a str>,
+    split_by_evidence_name: bool,
 }
 
 impl From<&FeatureTruth> for ReportFeature {
@@ -391,7 +421,12 @@ impl RunReport {
         Self::from_live_results(intent, &live, "legacy-live", true)
     }
 
-    fn from_truth(truth: &VerificationTruth, profile: &str, strict: bool) -> Self {
+    fn from_truth(
+        truth: &VerificationTruth,
+        intent: Option<&IntentFile>,
+        profile: &str,
+        strict: bool,
+    ) -> Self {
         let mut evidence = Vec::new();
         for obligation in &truth.obligations {
             if obligation.evidence_bindings.is_empty() {
@@ -439,7 +474,7 @@ impl RunReport {
             truth
                 .obligations
                 .iter()
-                .map(ReportObligation::from)
+                .map(|obligation| ReportObligation::from_obligation(obligation, intent))
                 .collect(),
             CoverageThresholds::default(),
         )
@@ -602,11 +637,15 @@ impl RunReport {
         }
 
         for (component_index, component) in intent.components.iter().enumerate() {
-            if component.scenarios.is_empty() {
+            if component.scenarios.is_empty() && component.inherent_behavior.is_empty() {
                 continue;
             }
             let component_feature_id = compatibility_component_id(component, component_index);
-            let component_source = component.scenarios[0].source.clone();
+            let component_source = component
+                .scenarios
+                .first()
+                .map(|scenario| scenario.source.clone())
+                .unwrap_or_else(|| SourceSpan::single_line(&intent.source_path, 1, 1, 1));
             report_features.push(ReportFeature {
                 id: component_feature_id.clone(),
                 name: format!("Component: {}", component.name),
@@ -622,16 +661,37 @@ impl RunReport {
                         id: metadata.id.to_string(),
                         feature_id: component_feature_id.clone(),
                         scenario_id: scenario.verification_id.to_string(),
+                        scenario_name: scenario.name.clone(),
                         statement: statement.clone(),
                         source: metadata.source.clone(),
                         declaration: DeclarationStatus::Declared,
-                        linkage: LinkageStatus::Linked,
+                        linkage: LinkageStatus::Unlinked,
                         binding: BindingStatus::Unbound,
                         executability: ExecutabilityStatus::Unsupported,
                         disposition: Disposition::NoResult,
                         freshness: Freshness::Current,
                     });
                 }
+            }
+            for (behavior_index, statement) in component.inherent_behavior.iter().enumerate() {
+                compatibility_obligations.push(ReportObligation {
+                    id: format!(
+                        "outcome.compat.{}.inherent.{}",
+                        component_feature_id,
+                        behavior_index + 1
+                    ),
+                    feature_id: component_feature_id.clone(),
+                    scenario_id: format!("scenario.compat.{}.inherent", component_feature_id),
+                    scenario_name: "Inherent behavior".to_string(),
+                    statement: statement.clone(),
+                    source: component_source.clone(),
+                    declaration: DeclarationStatus::Declared,
+                    linkage: LinkageStatus::Unlinked,
+                    binding: BindingStatus::Unbound,
+                    executability: ExecutabilityStatus::Unsupported,
+                    disposition: Disposition::NoResult,
+                    freshness: Freshness::Current,
+                });
             }
 
             let live_component = live.components.get(component_index);
@@ -691,7 +751,7 @@ impl RunReport {
                             component_feature_id.clone(),
                             scenario.source.clone(),
                             format!("component scenario result '{}'", live_scenario.name),
-                            LinkageStatus::Linked,
+                            LinkageStatus::Unlinked,
                             "live component scenario result has no declared outcome obligation",
                             live_scenario_atoms(live_scenario),
                         );
@@ -700,7 +760,7 @@ impl RunReport {
                             &mut evidence,
                             scenario,
                             live_scenario,
-                            LinkageStatus::Linked,
+                            LinkageStatus::Unlinked,
                             run_index,
                         );
                     }
@@ -724,7 +784,7 @@ impl RunReport {
                         component_feature_id.clone(),
                         component_source.clone(),
                         format!("unmapped live scenario '{}'", live_scenario.name),
-                        LinkageStatus::Linked,
+                        LinkageStatus::Unlinked,
                         "live component scenario cannot map exactly to a parsed declaration",
                         live_scenario_atoms(live_scenario),
                     );
@@ -752,29 +812,46 @@ impl RunReport {
         let mut report_obligations = truth
             .obligations
             .iter()
-            .map(ReportObligation::from)
+            .map(|obligation| ReportObligation::from_obligation(obligation, Some(intent)))
             .collect::<Vec<_>>();
         report_obligations.extend(compatibility_obligations);
+        for obligation in &report_obligations {
+            if !report_features
+                .iter()
+                .any(|feature| feature.id == obligation.feature_id)
+            {
+                report_features.push(ReportFeature {
+                    id: obligation.feature_id.clone(),
+                    name: format!("Unmapped {}", obligation.feature_id),
+                    source: obligation.source.clone(),
+                    declaration: DeclarationStatus::Declared,
+                    rationale: None,
+                });
+            }
+        }
         let evidenced: BTreeSet<String> = evidence
             .iter()
             .map(|result| result.obligation_id.clone())
             .collect();
         for obligation in &report_obligations {
             if !evidenced.contains(&obligation.id) {
-                evidence.push(EvidenceResult::recorded(
-                    format!("binding.unbound.{}", obligation.id),
-                    obligation.id.clone(),
-                    obligation.source.clone(),
-                    EvidenceRequirement::Required,
-                    EvidenceSelection::Selected,
-                    obligation.declaration,
-                    obligation.linkage,
-                    BindingStatus::Unbound,
-                    ExecutabilityStatus::Unsupported,
-                    Freshness::Current,
-                    AssertionResolution::Unresolved,
-                    Vec::new(),
-                ));
+                evidence.push(
+                    EvidenceResult::recorded(
+                        format!("binding.unbound.{}", obligation.id),
+                        obligation.id.clone(),
+                        obligation.source.clone(),
+                        EvidenceRequirement::Required,
+                        EvidenceSelection::Selected,
+                        obligation.declaration,
+                        obligation.linkage,
+                        BindingStatus::Unbound,
+                        ExecutabilityStatus::Unsupported,
+                        Freshness::Current,
+                        AssertionResolution::Unresolved,
+                        Vec::new(),
+                    )
+                    .in_scenario(&obligation.scenario_name),
+                );
             }
         }
 
@@ -817,7 +894,7 @@ impl RunReport {
                 }
             }
         }
-        let mut report = Self::from_truth(&truth, "implementation", false);
+        let mut report = Self::from_truth(&truth, Some(intent), "implementation", false);
         report.thresholds = thresholds;
         let has_unproven_behavioral_feature = report.features.iter().any(|feature| {
             feature.declaration == DeclarationStatus::Declared
@@ -860,7 +937,7 @@ impl RunReport {
             .filter(|result| {
                 result.requirement == EvidenceRequirement::Required
                     && ((result.selection == EvidenceSelection::Selected
-                        && !result.satisfies_required())
+                        && !satisfies_ledger(result, &evidence))
                         || (profile == "full" && result.selection == EvidenceSelection::Excluded))
             })
             .map(|result| result.id.clone())
@@ -920,6 +997,7 @@ impl RunReport {
                 id,
                 feature_id: "feature.report".to_string(),
                 scenario_id: "scenario.report".to_string(),
+                scenario_name: "Report scenario".to_string(),
                 statement: "report truth".to_string(),
                 source: SourceSpan::single_line("report.intent", 1, 1, 1),
                 declaration: DeclarationStatus::Declared,
@@ -965,40 +1043,66 @@ impl RunReport {
     pub fn render_human(&self, verbosity: usize) -> String {
         let passed = self.coverage.required_bindings.covered;
         let failed = self.coverage.required_bindings.total - passed;
+        let mut scenario_total = 0;
+        let mut scenario_passed = 0;
         let mut output = String::new();
         output.push_str("=== NTNT Intent Verification ===\n");
         output.push_str(&format!(
             "Profile: {} ({})\n",
             self.profile, self.profile_qualification
         ));
-        if verbosity > 0 {
-            for result in &self.evidence {
+
+        for feature in &self.features {
+            if feature.declaration == DeclarationStatus::DocumentationOnly {
                 output.push_str(&format!(
-                    "- {} [{}]: {:?}\n",
-                    result.obligation_id, result.id, result.disposition
+                    "[DOCS] {} (documentation-only, non-verifying",
+                    human_feature_name(&feature.name)
                 ));
-                if verbosity > 1 {
-                    for attempt in &result.attempts {
-                        output.push_str(&format!(
-                            "  attempt {}: {:?}, {} evidence atoms\n",
-                            attempt.sequence,
-                            attempt.disposition,
-                            attempt.evidence_atoms.len()
-                        ));
-                        for atom in &attempt.evidence_atoms {
-                            output.push_str(&format!(
-                                "    {} {}\n",
-                                if atom.passed { "pass" } else { "fail" },
-                                atom.assertion
-                            ));
-                            if let Some(diagnostic) = &atom.diagnostic {
-                                output.push_str(&format!("      {diagnostic}\n"));
-                            }
-                        }
+                if let Some(rationale) = &feature.rationale {
+                    output.push_str(&format!(": {rationale}"));
+                }
+                output.push_str(")\n");
+                continue;
+            }
+
+            let scenarios = self.human_scenarios(&feature.id);
+            let feature_passed = !scenarios.is_empty()
+                && scenarios.iter().all(|scenario| {
+                    self.human_scenario_disposition(scenario) == Disposition::Passed
+                });
+            let passed_in_feature = scenarios
+                .iter()
+                .filter(|scenario| self.human_scenario_disposition(scenario) == Disposition::Passed)
+                .count();
+            scenario_total += scenarios.len();
+            scenario_passed += passed_in_feature;
+            output.push_str(&format!(
+                "[{}] {} ({passed_in_feature}/{} scenarios passed)\n",
+                if feature_passed { "PASS" } else { "FAIL" },
+                human_feature_name(&feature.name),
+                scenarios.len()
+            ));
+
+            if verbosity > 0 {
+                for scenario in scenarios {
+                    let disposition = self.human_scenario_disposition(&scenario);
+                    output.push_str(&format!(
+                        "  [{}] {}\n",
+                        human_disposition(disposition),
+                        scenario.name
+                    ));
+                    if verbosity > 1 {
+                        self.render_scenario_attempts(&mut output, &scenario);
+                    } else if disposition != Disposition::Passed {
+                        self.render_scenario_failure(&mut output, &scenario);
                     }
                 }
             }
         }
+
+        output.push_str(&format!(
+            "Scenarios: {scenario_passed}/{scenario_total} passed\n"
+        ));
         output.push_str(&format!(
             "Obligations: {} verified, {} unmet; features: {} documentation-only\n",
             self.coverage.verified.covered,
@@ -1025,6 +1129,222 @@ impl RunReport {
             self.exit.code, self.exit.reason
         ));
         output
+    }
+
+    fn human_scenarios<'a>(&'a self, feature_id: &str) -> Vec<HumanScenario<'a>> {
+        let mut declared: Vec<HumanScenario<'a>> = Vec::new();
+        for obligation in self
+            .obligations
+            .iter()
+            .filter(|obligation| obligation.feature_id == feature_id)
+        {
+            if let Some(scenario) = declared
+                .iter_mut()
+                .find(|scenario| scenario.id == obligation.scenario_id)
+            {
+                scenario.obligations.push(obligation);
+            } else {
+                declared.push(HumanScenario {
+                    id: &obligation.scenario_id,
+                    name: &obligation.scenario_name,
+                    obligations: vec![obligation],
+                    evidence_name: None,
+                    split_by_evidence_name: false,
+                });
+            }
+        }
+
+        let mut scenarios = Vec::new();
+        for scenario in declared {
+            let matching = self
+                .evidence
+                .iter()
+                .filter(|result| {
+                    result.requirement == EvidenceRequirement::Required
+                        && result.selection == EvidenceSelection::Selected
+                        && scenario
+                            .obligations
+                            .iter()
+                            .any(|obligation| obligation.id == result.obligation_id)
+                })
+                .collect::<Vec<_>>();
+            let mut names = Vec::new();
+            for name in matching
+                .iter()
+                .filter_map(|result| result.scenario_name.as_deref())
+            {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            if names.is_empty() {
+                scenarios.push(scenario);
+                continue;
+            }
+            for name in names {
+                scenarios.push(HumanScenario {
+                    id: scenario.id,
+                    name,
+                    obligations: scenario.obligations.clone(),
+                    evidence_name: Some(name),
+                    split_by_evidence_name: true,
+                });
+            }
+            if matching.iter().any(|result| result.scenario_name.is_none()) {
+                scenarios.push(HumanScenario {
+                    split_by_evidence_name: true,
+                    ..scenario
+                });
+            }
+        }
+        scenarios
+    }
+
+    fn scenario_contains_result(scenario: &HumanScenario<'_>, result: &EvidenceResult) -> bool {
+        scenario
+            .obligations
+            .iter()
+            .any(|obligation| obligation.id == result.obligation_id)
+            && (!scenario.split_by_evidence_name
+                || result.scenario_name.as_deref() == scenario.evidence_name)
+    }
+
+    fn selected_scenario_evidence<'a>(
+        &'a self,
+        scenario: &HumanScenario<'_>,
+    ) -> Vec<&'a EvidenceResult> {
+        self.evidence
+            .iter()
+            .filter(|result| {
+                result.requirement == EvidenceRequirement::Required
+                    && result.selection == EvidenceSelection::Selected
+                    && Self::scenario_contains_result(scenario, result)
+            })
+            .collect()
+    }
+
+    fn human_scenario_disposition(&self, scenario: &HumanScenario<'_>) -> Disposition {
+        let selected = self.selected_scenario_evidence(scenario);
+        if !selected.is_empty()
+            && selected
+                .iter()
+                .all(|result| satisfies_ledger(result, &self.evidence))
+        {
+            return Disposition::Passed;
+        }
+        match aggregate_disposition(&selected) {
+            Disposition::Passed => Disposition::NoResult,
+            disposition => disposition,
+        }
+    }
+
+    fn render_scenario_failure(&self, output: &mut String, scenario: &HumanScenario<'_>) {
+        let mut rendered = BTreeSet::new();
+        for result in self
+            .selected_scenario_evidence(scenario)
+            .into_iter()
+            .filter(|result| !satisfies_ledger(result, &self.evidence))
+        {
+            let rendered_before = rendered.len();
+            if selected_binding_id_count(result, &self.evidence) > 1 {
+                let line = format!(
+                    "    Diagnostic: duplicate selected binding id '{}'",
+                    result.id
+                );
+                if rendered.insert(line.clone()) {
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+            }
+            for attempt in &result.attempts {
+                for atom in attempt.evidence_atoms.iter().filter(|atom| !atom.passed) {
+                    let line = format!("    FAIL {}", atom.assertion);
+                    if rendered.insert(line.clone()) {
+                        output.push_str(&line);
+                        output.push('\n');
+                    }
+                    if let Some(diagnostic) = &atom.diagnostic {
+                        let line = format!("      {diagnostic}");
+                        if rendered.insert(line.clone()) {
+                            output.push_str(&line);
+                            output.push('\n');
+                        }
+                    }
+                }
+                if let Some(diagnostic) = &attempt.diagnostic {
+                    let line = format!("    Diagnostic: {diagnostic}");
+                    if rendered.insert(line.clone()) {
+                        output.push_str(&line);
+                        output.push('\n');
+                    }
+                }
+            }
+            if rendered.len() == rendered_before {
+                if let Some(obligation) = scenario
+                    .obligations
+                    .iter()
+                    .find(|obligation| obligation.id == result.obligation_id)
+                {
+                    output.push_str(&format!("    Unmet: {}\n", obligation.statement));
+                }
+            }
+        }
+    }
+
+    fn render_scenario_attempts(&self, output: &mut String, scenario: &HumanScenario<'_>) {
+        for result in self
+            .evidence
+            .iter()
+            .filter(|result| Self::scenario_contains_result(scenario, result))
+        {
+            output.push_str(&format!(
+                "    Evidence: {} [{}]\n",
+                result.id,
+                human_disposition(result.disposition)
+            ));
+            for attempt in &result.attempts {
+                output.push_str(&format!(
+                    "      Attempt {}: {} ({} atoms)\n",
+                    attempt.sequence,
+                    human_disposition(effective_attempt_disposition(attempt)),
+                    attempt.evidence_atoms.len()
+                ));
+                for atom in &attempt.evidence_atoms {
+                    output.push_str(&format!(
+                        "        {} {}\n",
+                        if atom.passed { "PASS" } else { "FAIL" },
+                        atom.assertion
+                    ));
+                    if let Some(diagnostic) = &atom.diagnostic {
+                        output.push_str(&format!("          {diagnostic}\n"));
+                    }
+                }
+                if let Some(diagnostic) = &attempt.diagnostic {
+                    output.push_str(&format!("        Diagnostic: {diagnostic}\n"));
+                }
+            }
+        }
+    }
+}
+
+fn human_feature_name(name: &str) -> String {
+    if name.starts_with("Component: ") {
+        name.to_string()
+    } else {
+        format!("Feature: {name}")
+    }
+}
+
+fn human_disposition(disposition: Disposition) -> &'static str {
+    match disposition {
+        Disposition::Planned => "PLANNED",
+        Disposition::Running => "RUNNING",
+        Disposition::Passed => "PASS",
+        Disposition::Failed => "FAIL",
+        Disposition::Flaky => "FLAKY",
+        Disposition::Skipped => "SKIP",
+        Disposition::Cancelled => "CANCELLED",
+        Disposition::NoResult => "NO RESULT",
     }
 }
 
@@ -1106,6 +1426,12 @@ fn append_legacy_test_projection(
                     "scenario.compat.{}.test.{}",
                     feature.verification_id,
                     test_index + 1
+                ),
+                scenario_name: format!(
+                    "Technical test {}: {} {}",
+                    test_index + 1,
+                    test.method,
+                    test.path
                 ),
                 statement,
                 source: feature.source.clone(),
@@ -1334,6 +1660,7 @@ fn append_mapping_failure(
         id: obligation_id.clone(),
         feature_id,
         scenario_id: format!("scenario.{obligation_id}"),
+        scenario_name: statement.clone(),
         statement,
         source: source.clone(),
         declaration: DeclarationStatus::Declared,
@@ -1466,7 +1793,7 @@ fn append_unmapped_live_component_with_id(
             component_feature_id.to_string(),
             source.clone(),
             format!("unmapped live component scenario '{}'", live_scenario.name),
-            LinkageStatus::Linked,
+            LinkageStatus::Unlinked,
             diagnostic,
             live_scenario_atoms(live_scenario),
         );
@@ -1609,20 +1936,23 @@ fn append_live_scenario_evidence(
                 ),
             }
         };
-        evidence.push(EvidenceResult::recorded(
-            binding_id,
-            metadata.id.to_string(),
-            metadata.source.clone(),
-            EvidenceRequirement::Required,
-            EvidenceSelection::Selected,
-            DeclarationStatus::Declared,
-            linkage,
-            binding,
-            executability,
-            Freshness::Current,
-            resolution,
-            attempts,
-        ));
+        evidence.push(
+            EvidenceResult::recorded(
+                binding_id,
+                metadata.id.to_string(),
+                metadata.source.clone(),
+                EvidenceRequirement::Required,
+                EvidenceSelection::Selected,
+                DeclarationStatus::Declared,
+                linkage,
+                binding,
+                executability,
+                Freshness::Current,
+                resolution,
+                attempts,
+            )
+            .in_scenario(&live.name),
+        );
     }
 }
 
@@ -1708,6 +2038,21 @@ fn aggregate_disposition(evidence: &[&EvidenceResult]) -> Disposition {
     Disposition::Passed
 }
 
+fn satisfies_ledger(result: &EvidenceResult, evidence: &[EvidenceResult]) -> bool {
+    result.satisfies_required() && selected_binding_id_count(result, evidence) == 1
+}
+
+fn selected_binding_id_count(result: &EvidenceResult, evidence: &[EvidenceResult]) -> usize {
+    evidence
+        .iter()
+        .filter(|candidate| {
+            candidate.requirement == EvidenceRequirement::Required
+                && candidate.selection == EvidenceSelection::Selected
+                && candidate.id == result.id
+        })
+        .count()
+}
+
 fn coverage_from_ledger(
     features: &[ReportFeature],
     obligations: &[ReportObligation],
@@ -1751,7 +2096,10 @@ fn coverage_from_ledger(
                         && result.selection == EvidenceSelection::Selected
                 })
                 .collect();
-            !selected.is_empty() && selected.iter().all(|result| result.satisfies_required())
+            !selected.is_empty()
+                && selected
+                    .iter()
+                    .all(|result| satisfies_ledger(result, evidence))
         })
         .count();
     let selected_required: Vec<_> = evidence
@@ -1778,7 +2126,7 @@ fn coverage_from_ledger(
         required_bindings: CoverageMetric {
             covered: selected_required
                 .iter()
-                .filter(|result| result.satisfies_required())
+                .filter(|result| satisfies_ledger(result, evidence))
                 .count(),
             total: selected_required.len(),
         },
@@ -1820,7 +2168,7 @@ fn decide_exit(
                 || (coverage.verified.total > 0 && selected_required.is_empty())
                 || selected_required
                     .iter()
-                    .any(|result| !result.satisfies_required())))
+                    .any(|result| !satisfies_ledger(result, evidence))))
     {
         return ExitDecision {
             code: 1,
@@ -1984,6 +2332,143 @@ mod tests {
             glossary: None,
             summary: None,
         }
+    }
+
+    fn human_renderer_report() -> RunReport {
+        let intent = IntentFile::parse_content_with_id_mode(
+            r#"Feature: Passing feature
+  id: feature.human-pass
+
+  Scenario: Accepted request
+    id: scenario.human-pass.accepted
+    When the request is checked
+    → id: outcome.human-pass.accepted; response is accepted
+
+Feature: Failing feature
+  id: feature.human-fail
+
+  Scenario: Denied request
+    id: scenario.human-fail.denied
+    When the request is checked
+    → id: outcome.human-fail.denied; response is denied
+
+Feature: Handbook
+  id: feature.handbook
+  verification: documentation-only
+  rationale: Explains the operator workflow
+"#,
+            "human-renderer.intent".to_string(),
+            IdMode::Strict,
+        )
+        .unwrap();
+        RunReport::from_live_results(
+            &intent,
+            &live_results(
+                vec![
+                    LiveFeatureResult {
+                        feature_id: "feature.human-pass".to_string(),
+                        feature_name: "Passing feature".to_string(),
+                        description: None,
+                        passed: true,
+                        tests: Vec::new(),
+                        scenarios: vec![live_scenario(
+                            "Accepted request",
+                            "pass",
+                            Some(vec![live_assertion("response is accepted", true)]),
+                        )],
+                        has_implementation: true,
+                    },
+                    LiveFeatureResult {
+                        feature_id: "feature.human-fail".to_string(),
+                        feature_name: "Failing feature".to_string(),
+                        description: None,
+                        passed: true,
+                        tests: Vec::new(),
+                        scenarios: vec![live_scenario(
+                            "Denied request",
+                            "fail",
+                            Some(vec![live_assertion("response is denied", false)]),
+                        )],
+                        has_implementation: true,
+                    },
+                    LiveFeatureResult {
+                        feature_id: "feature.handbook".to_string(),
+                        feature_name: "Handbook".to_string(),
+                        description: None,
+                        passed: true,
+                        tests: Vec::new(),
+                        scenarios: Vec::new(),
+                        has_implementation: false,
+                    },
+                ],
+                Vec::new(),
+            ),
+            "legacy-live",
+            true,
+        )
+    }
+
+    #[test]
+    fn human_verbosity_zero_exactly_restores_feature_scenario_counts_and_totals() {
+        let report = human_renderer_report();
+
+        assert_eq!(
+            report.render_human(0),
+            "\
+=== NTNT Intent Verification ===
+Profile: legacy-live (profile:legacy-live)
+[PASS] Feature: Passing feature (1/1 scenarios passed)
+[FAIL] Feature: Failing feature (0/1 scenarios passed)
+[DOCS] Feature: Handbook (documentation-only, non-verifying: Explains the operator workflow)
+Scenarios: 1/2 passed
+Obligations: 1 verified, 1 unmet; features: 1 documentation-only
+Required bindings: 1 passed, 1 failed
+Coverage: implementation 100.0%, executable 100.0%, verified 50.0%
+Exit: 1 (VerificationFailed)
+"
+        );
+    }
+
+    #[test]
+    fn human_verbosity_one_exactly_shows_scenarios_and_failed_diagnostics() {
+        let report = human_renderer_report();
+
+        assert_eq!(
+            report.render_human(1),
+            "\
+=== NTNT Intent Verification ===
+Profile: legacy-live (profile:legacy-live)
+[PASS] Feature: Passing feature (1/1 scenarios passed)
+  [PASS] Accepted request
+[FAIL] Feature: Failing feature (0/1 scenarios passed)
+  [FAIL] Denied request
+    FAIL response is denied
+      response is denied failed
+[DOCS] Feature: Handbook (documentation-only, non-verifying: Explains the operator workflow)
+Scenarios: 1/2 passed
+Obligations: 1 verified, 1 unmet; features: 1 documentation-only
+Required bindings: 1 passed, 1 failed
+Coverage: implementation 100.0%, executable 100.0%, verified 50.0%
+Exit: 1 (VerificationFailed)
+"
+        );
+    }
+
+    #[test]
+    fn human_verbosity_two_includes_all_atoms_and_attempt_history() {
+        let human = human_renderer_report().render_human(2);
+
+        assert!(human.contains(concat!(
+            "Evidence: binding.compat.scenario.human-pass.accepted.1.1 [PASS]\n",
+            "      Attempt 1: PASS (1 atoms)\n",
+            "        PASS response is accepted"
+        )));
+        assert!(human.contains(concat!(
+            "Evidence: binding.compat.scenario.human-fail.denied.1.1 [FAIL]\n",
+            "      Attempt 1: FAIL (1 atoms)\n",
+            "        FAIL response is denied\n",
+            "          response is denied failed"
+        )));
     }
 
     #[test]
@@ -2196,7 +2681,9 @@ mod tests {
         );
 
         assert_eq!(report("full", vec![passed.clone(), failed]).exit_code(), 1);
-        assert_eq!(report("full", vec![passed.clone(), passed]).exit_code(), 0);
+        let mut second_passed = passed.clone();
+        second_passed.id = "binding.passed-second".to_string();
+        assert_eq!(report("full", vec![passed, second_passed]).exit_code(), 0);
     }
 
     #[test]
@@ -2222,6 +2709,11 @@ mod tests {
             result.attempts()[0].evidence_atoms[0].diagnostic.as_deref(),
             Some("first failed")
         );
+        let human = report.render_human(2);
+        assert!(human.contains("Attempt 1: FAIL (1 atoms)"), "{human}");
+        assert!(human.contains("Attempt 2: PASS (1 atoms)"), "{human}");
+        assert!(human.contains("FAIL assertion first"), "{human}");
+        assert!(human.contains("PASS assertion second"), "{human}");
         assert_eq!(report.exit_code(), 1);
     }
 
@@ -2349,6 +2841,14 @@ mod tests {
         );
         assert_eq!(passing.evidence()[0].profile(), "legacy-live");
         assert_eq!(passing.evidence()[0].source.path, "legacy-technical.intent");
+        assert!(passing.render_human(1).contains(concat!(
+            "[PASS] Feature: Legacy technical (1/1 scenarios passed)\n",
+            "  [PASS] Technical test 1: GET /health"
+        )));
+        assert_eq!(
+            serde_json::to_value(&passing).unwrap()["obligations"][0]["scenario_name"],
+            "Technical test 1: GET /health"
+        );
 
         let failing = RunReport::from_live_results(
             &intent,
@@ -2481,6 +2981,8 @@ mod tests {
                 "{case}: {:?}",
                 report.evidence()
             );
+            let human = report.render_human(1);
+            assert!(human.contains("Diagnostic:"), "{case}: {human}");
         }
     }
 
@@ -2649,6 +3151,7 @@ mod tests {
     id: scenario.expanded.row-check
     When the check runs
     → id: outcome.expanded.row-valid; row is valid
+    → id: outcome.expanded.value-valid; value is valid
 "#,
             "expanded.intent".to_string(),
             IdMode::Strict,
@@ -2664,12 +3167,18 @@ mod tests {
                 live_scenario(
                     "Row check [first]",
                     "pass",
-                    Some(vec![live_assertion("row is valid", true)]),
+                    Some(vec![
+                        live_assertion("row is valid", true),
+                        live_assertion("value is valid", true),
+                    ]),
                 ),
                 live_scenario(
                     "Row check [second]",
                     if second_passes { "pass" } else { "fail" },
-                    Some(vec![live_assertion("row is valid", second_passes)]),
+                    Some(vec![
+                        live_assertion("row is valid", true),
+                        live_assertion("value is valid", second_passes),
+                    ]),
                 ),
             ],
             has_implementation: true,
@@ -2682,7 +3191,12 @@ mod tests {
             true,
         );
         assert_eq!(passing.exit_code(), 0);
-        assert_eq!(passing.coverage().required_bindings.total, 2);
+        assert_eq!(passing.coverage().required_bindings.total, 4);
+        assert!(passing.render_human(1).contains(concat!(
+            "[PASS] Feature: Expanded (2/2 scenarios passed)\n",
+            "  [PASS] Row check [first]\n",
+            "  [PASS] Row check [second]"
+        )));
 
         let failing = RunReport::from_live_results(
             &intent,
@@ -2691,7 +3205,12 @@ mod tests {
             true,
         );
         assert_eq!(failing.exit_code(), 1);
-        assert_eq!(failing.coverage().required_bindings.covered, 1);
+        assert_eq!(failing.coverage().required_bindings.covered, 2);
+        assert!(failing.render_human(1).contains(concat!(
+            "[FAIL] Feature: Expanded (1/2 scenarios passed)\n",
+            "  [PASS] Row check [first]\n",
+            "  [FAIL] Row check [second]"
+        )));
     }
 
     #[test]
@@ -2740,6 +3259,16 @@ Feature: Host
         );
         assert_eq!(passing.evidence()[0].profile(), "legacy-live");
         assert_eq!(passing.evidence()[0].source.start_line, 7);
+        assert_eq!(passing.evidence()[0].linkage, LinkageStatus::Unlinked);
+        assert_eq!(passing.obligations[0].linkage, LinkageStatus::Unlinked);
+        assert_eq!(passing.coverage().implementation.covered, 0);
+        let human = passing.render_human(1);
+        assert!(
+            human.contains(
+                "[PASS] Component: Reusable (1/1 scenarios passed)\n  [PASS] Component check"
+            ),
+            "{human}"
+        );
 
         for failing_component in [
             component("fail", false),
@@ -2757,6 +3286,64 @@ Feature: Host
             );
             assert_eq!(failing.exit_code(), 1);
         }
+    }
+
+    #[test]
+    fn inherent_component_behavior_is_visible_unlinked_and_unverified() {
+        let intent = IntentFile::parse_content_with_id_mode(
+            r#"Component: Required behavior
+  id: component.required-behavior
+  Inherent Behavior:
+    → status 418
+    → body contains "never returned"
+
+Feature: Host
+  id: feature.host
+  verification: documentation-only
+  rationale: Component-only compatibility fixture
+"#,
+            "component-inherent.intent".to_string(),
+            IdMode::Strict,
+        )
+        .unwrap();
+        let live_component = LiveComponentResult {
+            component_id: "component.required-behavior".to_string(),
+            component_name: "Required behavior".to_string(),
+            description: String::new(),
+            inherent_behavior: intent.components[0].inherent_behavior.clone(),
+            passed: true,
+            scenarios: Vec::new(),
+        };
+
+        let report = RunReport::from_live_results(
+            &intent,
+            &live_results(Vec::new(), vec![live_component]),
+            "legacy-live",
+            true,
+        );
+
+        assert_eq!(report.exit_code(), 1);
+        assert_eq!(report.coverage().required_bindings.total, 2);
+        assert_eq!(report.coverage().required_bindings.covered, 0);
+        assert_eq!(report.coverage().implementation.covered, 0);
+        assert_eq!(report.coverage().verified.covered, 0);
+        assert!(report.obligations.iter().all(|obligation| {
+            obligation.linkage == LinkageStatus::Unlinked
+                && obligation.scenario_name == "Inherent behavior"
+        }));
+        assert!(report.evidence().iter().all(|result| {
+            result.linkage == LinkageStatus::Unlinked
+                && result.binding == BindingStatus::Unbound
+                && result.disposition() == Disposition::NoResult
+                && result.scenario_name.as_deref() == Some("Inherent behavior")
+        }));
+        let human = report.render_human(1);
+        assert!(
+            human.contains(
+                "[FAIL] Component: Required behavior (0/1 scenarios passed)\n  [NO RESULT] Inherent behavior"
+            ),
+            "{human}"
+        );
     }
 
     #[test]
@@ -3006,6 +3593,28 @@ Feature: Host
     }
 
     #[test]
+    fn duplicate_selected_binding_ids_cannot_produce_a_human_or_ledger_pass() {
+        let duplicated = evidence(
+            "binding.duplicated",
+            EvidenceRequirement::Required,
+            EvidenceSelection::Selected,
+            BindingStatus::Bound,
+            ExecutabilityStatus::Executable,
+            Freshness::Current,
+            vec![attempt(1, Disposition::Passed, vec![atom("pass", true)])],
+        );
+
+        let report = report("full", vec![duplicated.clone(), duplicated]);
+
+        assert_eq!(report.coverage().verified.covered, 0);
+        assert_eq!(report.coverage().required_bindings.covered, 0);
+        assert_eq!(report.exit_code(), 1);
+        assert!(report
+            .render_human(0)
+            .contains("[FAIL] Feature: Report (0/1 scenarios passed)"));
+    }
+
+    #[test]
     fn advisory_and_excluded_bindings_remain_visible_but_never_satisfy() {
         let advisory = evidence(
             "binding.advisory",
@@ -3127,7 +3736,7 @@ Feature: Host
             evidence_atoms: 99,
         });
 
-        let report = RunReport::from_truth(&truth, "full", true);
+        let report = RunReport::from_truth(&truth, None, "full", true);
         assert_eq!(report.coverage().verified.covered, 0);
         assert_eq!(report.evidence()[0].disposition(), Disposition::NoResult);
         assert_eq!(report.exit_code(), 1);

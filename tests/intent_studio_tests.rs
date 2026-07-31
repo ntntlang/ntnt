@@ -579,6 +579,16 @@ fn test_intent_check_json_flag() {
     assert!(json["coverage"]["verified"]["covered"].is_number());
     assert!(json["coverage"]["required_bindings"]["total"].is_number());
     assert!(json["evidence"].is_array());
+    assert!(
+        json["obligations"]
+            .as_array()
+            .is_some_and(|obligations| obligations
+                .iter()
+                .all(|obligation| obligation["scenario_name"]
+                    .as_str()
+                    .is_some_and(|name| !name.is_empty()))),
+        "every serialized obligation needs a human scenario name"
+    );
     assert_eq!(json["exit"]["code"], code);
     validate_report_schema(&json).expect("check JSON must validate against committed schema");
     assert_eq!(code, 0, "Simple server tests should pass: {stdout}");

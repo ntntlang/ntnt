@@ -117,6 +117,7 @@
         "id",
         "feature_id",
         "scenario_id",
+        "scenario_name",
         "statement",
         "source",
         "declaration",
@@ -130,6 +131,7 @@
         "id": { "type": "string", "minLength": 1 },
         "feature_id": { "type": "string", "minLength": 1 },
         "scenario_id": { "type": "string", "minLength": 1 },
+        "scenario_name": { "type": "string", "minLength": 1 },
         "statement": { "type": "string" },
         "source": { "$ref": "#/$defs/span" },
         "declaration": { "enum": ["Declared", "DocumentationOnly"] },
@@ -189,6 +191,7 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "obligation_id": { "type": "string", "minLength": 1 },
+        "scenario_name": { "type": "string", "minLength": 1 },
         "source": { "$ref": "#/$defs/span" },
         "profile": { "type": "string", "minLength": 1 },
         "requirement": { "enum": ["required", "advisory"] },
