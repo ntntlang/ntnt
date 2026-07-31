@@ -497,12 +497,12 @@ impl RunReport {
                 continue;
             };
             if !exact_feature_mapping {
-                append_unmapped_feature_results(
+                append_unmapped_live_feature(
                     &mut evidence,
                     &mut compatibility_obligations,
-                    intent_feature,
                     live_feature,
                     feature_index,
+                    intent_feature.source.clone(),
                     "live feature identity does not match parsed feature declaration",
                 );
                 continue;
@@ -547,11 +547,7 @@ impl RunReport {
                             format!("scenario result '{}'", live_scenario.name),
                             linkage,
                             "live scenario result has no declared outcome obligation",
-                            live_scenario
-                                .test_result
-                                .as_ref()
-                                .map(live_test_atoms)
-                                .unwrap_or_default(),
+                            live_scenario_atoms(live_scenario),
                         );
                     } else {
                         append_live_scenario_evidence(
@@ -585,11 +581,7 @@ impl RunReport {
                         format!("unmapped live scenario '{}'", live_scenario.name),
                         linkage,
                         "live scenario cannot map exactly to a parsed scenario declaration",
-                        live_scenario
-                            .test_result
-                            .as_ref()
-                            .map(live_test_atoms)
-                            .unwrap_or_default(),
+                        live_scenario_atoms(live_scenario),
                     );
                 }
             }
@@ -614,15 +606,11 @@ impl RunReport {
                 continue;
             }
             let component_feature_id = compatibility_component_id(component, component_index);
-            let component_source = component
-                .scenarios
-                .first()
-                .map(|scenario| scenario.source.clone())
-                .unwrap_or_else(|| SourceSpan::single_line(&intent.source_path, 1, 1, 1));
+            let component_source = component.scenarios[0].source.clone();
             report_features.push(ReportFeature {
                 id: component_feature_id.clone(),
                 name: format!("Component: {}", component.name),
-                source: component_source,
+                source: component_source.clone(),
                 declaration: DeclarationStatus::Declared,
                 rationale: None,
             });
@@ -654,13 +642,13 @@ impl RunReport {
                 continue;
             };
             if !exact_component_mapping {
-                append_unmapped_component_results(
+                append_unmapped_live_component_with_id(
                     &mut evidence,
                     &mut compatibility_obligations,
-                    &component_feature_id,
-                    component,
                     live_component,
                     component_index,
+                    &component_feature_id,
+                    component_source.clone(),
                     "live component identity does not match parsed component declaration",
                 );
                 continue;
@@ -705,11 +693,7 @@ impl RunReport {
                             format!("component scenario result '{}'", live_scenario.name),
                             LinkageStatus::Linked,
                             "live component scenario result has no declared outcome obligation",
-                            live_scenario
-                                .test_result
-                                .as_ref()
-                                .map(live_test_atoms)
-                                .unwrap_or_default(),
+                            live_scenario_atoms(live_scenario),
                         );
                     } else {
                         append_live_scenario_evidence(
@@ -738,21 +722,11 @@ impl RunReport {
                             live_index + 1
                         ),
                         component_feature_id.clone(),
-                        component
-                            .scenarios
-                            .first()
-                            .map(|scenario| scenario.source.clone())
-                            .unwrap_or_else(|| {
-                                SourceSpan::single_line(&intent.source_path, 1, 1, 1)
-                            }),
+                        component_source.clone(),
                         format!("unmapped live scenario '{}'", live_scenario.name),
                         LinkageStatus::Linked,
                         "live component scenario cannot map exactly to a parsed declaration",
-                        live_scenario
-                            .test_result
-                            .as_ref()
-                            .map(live_test_atoms)
-                            .unwrap_or_default(),
+                        live_scenario_atoms(live_scenario),
                     );
                 }
             }
@@ -764,11 +738,12 @@ impl RunReport {
             .enumerate()
             .skip(intent.components.len())
         {
-            append_unmapped_live_component(
+            append_unmapped_live_component_with_id(
                 &mut evidence,
                 &mut compatibility_obligations,
                 live_component,
                 component_index,
+                &format!("component.compat.unmapped.{}", component_index + 1),
                 SourceSpan::single_line(&intent.source_path, 1, 1, 1),
                 "live component has no parsed component declaration",
             );
@@ -1335,6 +1310,13 @@ fn live_test_atoms(live_test: &crate::intent::LiveTestResult) -> Vec<EvidenceAto
     atoms
 }
 
+fn live_scenario_atoms(live: &LiveScenarioResult) -> Vec<EvidenceAtom> {
+    live.test_result
+        .as_ref()
+        .map(live_test_atoms)
+        .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_mapping_failure(
     evidence: &mut Vec<EvidenceResult>,
@@ -1380,24 +1362,6 @@ fn append_mapping_failure(
             diagnostic: Some(diagnostic.to_string()),
         }],
     ));
-}
-
-fn append_unmapped_feature_results(
-    evidence: &mut Vec<EvidenceResult>,
-    obligations: &mut Vec<ReportObligation>,
-    feature: &crate::intent::Feature,
-    live_feature: &crate::intent::LiveFeatureResult,
-    feature_index: usize,
-    diagnostic: &str,
-) {
-    append_unmapped_live_feature(
-        evidence,
-        obligations,
-        live_feature,
-        feature_index,
-        feature.source.clone(),
-        diagnostic,
-    );
 }
 
 fn append_unmapped_live_feature(
@@ -1460,11 +1424,7 @@ fn append_unmapped_live_feature(
             format!("unmapped live scenario '{}'", live_scenario.name),
             LinkageStatus::Unlinked,
             diagnostic,
-            live_scenario
-                .test_result
-                .as_ref()
-                .map(live_test_atoms)
-                .unwrap_or_default(),
+            live_scenario_atoms(live_scenario),
         );
     }
 }
@@ -1475,50 +1435,6 @@ fn compatibility_component_id(component: &crate::intent::Component, index: usize
     } else {
         component.id.clone()
     }
-}
-
-fn append_unmapped_component_results(
-    evidence: &mut Vec<EvidenceResult>,
-    obligations: &mut Vec<ReportObligation>,
-    component_feature_id: &str,
-    component: &crate::intent::Component,
-    live_component: &crate::intent::LiveComponentResult,
-    component_index: usize,
-    diagnostic: &str,
-) {
-    let source = component
-        .scenarios
-        .first()
-        .map(|scenario| scenario.source.clone())
-        .unwrap_or_else(|| SourceSpan::single_line("", 1, 1, 1));
-    append_unmapped_live_component_with_id(
-        evidence,
-        obligations,
-        live_component,
-        component_index,
-        component_feature_id,
-        source,
-        diagnostic,
-    );
-}
-
-fn append_unmapped_live_component(
-    evidence: &mut Vec<EvidenceResult>,
-    obligations: &mut Vec<ReportObligation>,
-    live_component: &crate::intent::LiveComponentResult,
-    component_index: usize,
-    source: SourceSpan,
-    diagnostic: &str,
-) {
-    append_unmapped_live_component_with_id(
-        evidence,
-        obligations,
-        live_component,
-        component_index,
-        &format!("component.compat.unmapped.{}", component_index + 1),
-        source,
-        diagnostic,
-    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1552,11 +1468,7 @@ fn append_unmapped_live_component_with_id(
             format!("unmapped live component scenario '{}'", live_scenario.name),
             LinkageStatus::Linked,
             diagnostic,
-            live_scenario
-                .test_result
-                .as_ref()
-                .map(live_test_atoms)
-                .unwrap_or_default(),
+            live_scenario_atoms(live_scenario),
         );
     }
 }
@@ -1645,11 +1557,7 @@ fn append_live_scenario_evidence(
                     vec![EvidenceAttempt {
                         sequence: 1,
                         disposition: Disposition::NoResult,
-                        evidence_atoms: live
-                            .test_result
-                            .as_ref()
-                            .map(live_test_atoms)
-                            .unwrap_or_default(),
+                        evidence_atoms: live_scenario_atoms(live),
                         diagnostic: Some(format!(
                             "cannot safely map {} assertions to {} outcomes",
                             assertions.len(),
@@ -1664,11 +1572,7 @@ fn append_live_scenario_evidence(
                     vec![EvidenceAttempt {
                         sequence: 1,
                         disposition: Disposition::NoResult,
-                        evidence_atoms: live
-                            .test_result
-                            .as_ref()
-                            .map(live_test_atoms)
-                            .unwrap_or_default(),
+                        evidence_atoms: live_scenario_atoms(live),
                         diagnostic: Some(if live.unresolved_outcomes.is_empty() {
                             "scenario completed with unresolved warning status".to_string()
                         } else {
@@ -1686,11 +1590,7 @@ fn append_live_scenario_evidence(
                     vec![EvidenceAttempt {
                         sequence: 1,
                         disposition: Disposition::Skipped,
-                        evidence_atoms: live
-                            .test_result
-                            .as_ref()
-                            .map(live_test_atoms)
-                            .unwrap_or_default(),
+                        evidence_atoms: live_scenario_atoms(live),
                         diagnostic: Some("precondition was not met".to_string()),
                     }],
                 ),
@@ -1701,11 +1601,7 @@ fn append_live_scenario_evidence(
                     vec![EvidenceAttempt {
                         sequence: 1,
                         disposition: Disposition::NoResult,
-                        evidence_atoms: live
-                            .test_result
-                            .as_ref()
-                            .map(live_test_atoms)
-                            .unwrap_or_default(),
+                        evidence_atoms: live_scenario_atoms(live),
                         diagnostic: Some(format!(
                             "scenario produced non-verifying status '{status}'"
                         )),
