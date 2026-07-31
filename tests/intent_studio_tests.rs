@@ -995,6 +995,54 @@ fn test_intent_coverage_command() {
 }
 
 #[test]
+fn intent_coverage_human_output_uses_linkage_status() {
+    let (stdout, stderr, code) =
+        run_ntnt(&["intent", "coverage", "examples/intent_demo/server.tnt"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("Profile: implementation"), "{stdout}");
+    assert!(stdout.contains("[LINKED]"), "{stdout}");
+    assert!(!stdout.contains("[FAIL]"), "{stdout}");
+    assert!(stdout.contains("Coverage: implementation"), "{stdout}");
+}
+
+#[test]
+fn legacy_feature_ids_retain_implementation_coverage() {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let directory = std::env::temp_dir().join(format!(
+        "ntnt_legacy_coverage_{}_{}",
+        std::process::id(),
+        counter
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("app.tnt");
+    let intent = directory.join("app.intent");
+    fs::write(
+        &source,
+        "// @implements: home_page\nfn home() { return 1 }\n",
+    )
+    .unwrap();
+    fs::write(
+        &intent,
+        "Feature: Home Page\n  Scenario: Render home\n    When home renders\n    → result is visible\n",
+    )
+    .unwrap();
+
+    let source_arg = source.to_string_lossy().into_owned();
+    let (stdout, stderr, code) = run_ntnt(&["intent", "coverage", &source_arg, "--json"]);
+    fs::remove_dir_all(&directory).ok();
+
+    assert_eq!(code, 0, "{stderr}\n{stdout}");
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid report JSON");
+    assert!(
+        json["coverage"]["implementation"]["covered"]
+            .as_u64()
+            .is_some_and(|covered| covered > 0),
+        "{json}"
+    );
+}
+
+#[test]
 fn intent_coverage_threshold_flags_share_the_report_exit_decision() {
     let (stdout, stderr, code) = run_ntnt(&[
         "intent",
