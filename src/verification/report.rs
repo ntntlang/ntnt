@@ -883,12 +883,17 @@ impl RunReport {
         thresholds: CoverageThresholds,
     ) -> Self {
         let mut truth = VerificationTruth::from_intent(intent);
-        for feature in &legacy.features {
-            if !feature.implementations.is_empty() {
+        if legacy.features.len() == intent.features.len() {
+            for (feature, intent_feature) in legacy.features.iter().zip(&intent.features) {
+                if feature.feature_name != intent_feature.name || feature.implementations.is_empty()
+                {
+                    continue;
+                }
+                let verification_id = intent_feature.verification_id.as_str();
                 for obligation in truth
                     .obligations
                     .iter_mut()
-                    .filter(|obligation| obligation.feature_id.as_str() == feature.feature_id)
+                    .filter(|obligation| obligation.feature_id.as_str() == verification_id)
                 {
                     obligation.linkage = LinkageStatus::Linked;
                 }
@@ -1073,6 +1078,9 @@ impl RunReport {
     }
 
     pub fn render_human(&self, verbosity: usize) -> String {
+        if self.profile == "implementation" {
+            return self.render_implementation_human();
+        }
         let passed = self.coverage.required_bindings.covered;
         let failed = self.coverage.required_bindings.total - passed;
         let mut scenario_total = 0;
@@ -1156,6 +1164,67 @@ impl RunReport {
                 self.coverage.advisory_bindings, self.coverage.excluded_bindings
             ));
         }
+        output.push_str(&format!(
+            "Exit: {} ({:?})\n",
+            self.exit.code, self.exit.reason
+        ));
+        output
+    }
+
+    fn render_implementation_human(&self) -> String {
+        let mut output = String::new();
+        let mut linked_features = 0;
+        let mut unlinked_features = 0;
+        output.push_str("=== NTNT Intent Verification ===\n");
+        output.push_str(&format!(
+            "Profile: {} ({})\n",
+            self.profile, self.profile_qualification
+        ));
+
+        for feature in &self.features {
+            if feature.declaration == DeclarationStatus::DocumentationOnly {
+                output.push_str(&format!(
+                    "[DOCS] {} (documentation-only, non-verifying)\n",
+                    human_feature_name(&feature.name)
+                ));
+                continue;
+            }
+            let obligations = self
+                .obligations
+                .iter()
+                .filter(|obligation| obligation.feature_id == feature.id)
+                .collect::<Vec<_>>();
+            let linked = !obligations.is_empty()
+                && obligations
+                    .iter()
+                    .all(|obligation| obligation.linkage == LinkageStatus::Linked);
+            let linked_obligations = obligations
+                .iter()
+                .filter(|obligation| obligation.linkage == LinkageStatus::Linked)
+                .count();
+            if linked {
+                linked_features += 1;
+            } else {
+                unlinked_features += 1;
+            }
+            output.push_str(&format!(
+                "[{}] {} ({linked_obligations}/{} obligations linked)\n",
+                if linked { "LINKED" } else { "UNLINKED" },
+                human_feature_name(&feature.name),
+                obligations.len()
+            ));
+        }
+
+        output.push_str(&format!(
+            "Features: {linked_features} linked, {unlinked_features} unlinked; {} documentation-only\n",
+            self.coverage.documentation_only_features
+        ));
+        output.push_str(&format!(
+            "Coverage: implementation {:.1}%, executable {:.1}%, verified {:.1}%\n",
+            self.coverage.implementation.percentage(),
+            self.coverage.executable.percentage(),
+            self.coverage.verified.percentage()
+        ));
         output.push_str(&format!(
             "Exit: {} ({:?})\n",
             self.exit.code, self.exit.reason
