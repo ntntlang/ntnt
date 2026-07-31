@@ -3,11 +3,17 @@
 //! Slice 1A deliberately contains no renderer, schema, threshold, policy,
 //! planner, executor, or exit-status behavior.
 
+pub mod discovery;
 pub mod ids;
+pub mod manifest;
 pub mod model;
 mod report;
 
+pub use discovery::{DiscoveredFile, DiscoveryError, ProjectDiscovery};
 pub use ids::{IdKind, IdMode, IdOrigin, IdWarning, SourceSpan, StableId};
+pub use manifest::{
+    FileClass, ManifestError, ManifestFile, VerificationManifest, VERIFICATION_MANIFEST_VERSION,
+};
 pub use model::{
     AssertionResolution, BindingStatus, DeclarationStatus, Disposition, EvidenceBinding,
     ExecutabilityStatus, ExecutableCoverage, FeatureProofStatus, FeatureTruth, Freshness,

@@ -1949,6 +1949,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webpki-root-certs",
+ "windows-sys 0.59.0",
  "x509-parser",
  "zeroize",
 ]

@@ -1,0 +1,7 @@
+Feature: Nested discovery
+  id: feature.nested-discovery
+
+  Scenario: Discover a nested Intent file
+    id: scenario.nested-discovery.intent
+    When the project is scanned
+    → id: outcome.nested-discovery.intent; the Intent file is listed

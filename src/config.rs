@@ -6,6 +6,141 @@
 //! re-read on every call in test builds so that tests can manipulate env vars
 //! with isolation.
 
+use std::path::{Path, PathBuf};
+
+use thiserror::Error;
+
+/// One parsed `ntnt.toml` selected by closest-ancestor lookup.
+#[derive(Debug, Clone)]
+pub struct ProjectManifestDocument {
+    path: PathBuf,
+    root: PathBuf,
+    document: toml::Value,
+}
+
+impl ProjectManifestDocument {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn document(&self) -> &toml::Value {
+        &self.document
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ProjectManifestError {
+    #[error("cannot read project manifest '{path}': {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot parse project manifest '{path}': {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error(
+        "unsafe project manifest link or special file at '{0}'; expected one unique regular file"
+    )]
+    NonRegular(PathBuf),
+}
+
+/// Load the closest ancestor `ntnt.toml` for a file or directory.
+pub fn load_project_manifest(
+    start: impl AsRef<Path>,
+) -> Result<Option<ProjectManifestDocument>, ProjectManifestError> {
+    let start = start.as_ref();
+    let directory = if start.is_file() {
+        start.parent().unwrap_or(start)
+    } else {
+        start
+    };
+    for ancestor in directory.ancestors() {
+        let path = ancestor.join(crate::project::PROJECT_MANIFEST_NAME);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink()
+                    || !metadata.is_file()
+                    || has_multiple_hardlinks(&path, &metadata) =>
+            {
+                return Err(ProjectManifestError::NonRegular(path));
+            }
+            Ok(_) => return load_project_manifest_file(path).map(Some),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(ProjectManifestError::Read { path, source }),
+        }
+    }
+    Ok(None)
+}
+
+/// Read and parse one exact project manifest without ancestor fallback.
+pub fn load_project_manifest_file(
+    path: impl AsRef<Path>,
+) -> Result<ProjectManifestDocument, ProjectManifestError> {
+    let path = path.as_ref();
+    let content = std::fs::read_to_string(path).map_err(|source| ProjectManifestError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let document =
+        content
+            .parse::<toml::Value>()
+            .map_err(|source| ProjectManifestError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let root = parent
+        .canonicalize()
+        .map_err(|source| ProjectManifestError::Read {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    let path = root.join(path.file_name().unwrap_or_default());
+    Ok(ProjectManifestDocument {
+        path,
+        root,
+        document,
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn has_multiple_hardlinks(_path: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink() > 1
+}
+
+#[cfg(windows)]
+pub(crate) fn has_multiple_hardlinks(path: &Path, _metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let Ok(file) = std::fs::File::open(path) else {
+        return true;
+    };
+    let mut information = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    let succeeded = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    succeeded == 0 || information.nNumberOfLinks > 1
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn has_multiple_hardlinks(_path: &Path, _metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 /// Runtime type safety mode, controlled by the `NTNT_TYPE_MODE` env var.
 ///
 /// Controls how runtime type mismatches are handled in:

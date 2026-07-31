@@ -1,5 +1,6 @@
 //! Provider-neutral secret lookup for ntnt applications.
 
+use crate::config::load_project_manifest;
 use crate::error::{IntentError, Result};
 use crate::interpreter::{SecretValue, Value};
 use crate::secret::validate_secret_name;
@@ -102,20 +103,12 @@ fn load_declarations(source_path: &Path) -> (PathBuf, SecretDeclarations) {
     };
 
     let source_identity = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-    let manifest = start
-        .ancestors()
-        .map(|directory| directory.join("ntnt.toml"))
-        .find(|candidate| candidate.is_file());
-    let Some(manifest) = manifest else {
-        return (source_identity, SecretDeclarations::NoManifest);
+    let loaded = match load_project_manifest(start) {
+        Ok(Some(loaded)) => loaded,
+        Ok(None) => return (source_identity, SecretDeclarations::NoManifest),
+        Err(_) => return (source_identity, SecretDeclarations::Invalid),
     };
-
-    let Ok(content) = std::fs::read_to_string(manifest) else {
-        return (source_identity, SecretDeclarations::Invalid);
-    };
-    let Ok(document) = content.parse::<toml::Value>() else {
-        return (source_identity, SecretDeclarations::Invalid);
-    };
+    let document = loaded.document();
     let Some(secrets) = document.get("secrets") else {
         return (source_identity, SecretDeclarations::Loaded(HashSet::new()));
     };
@@ -847,6 +840,78 @@ mod tests {
         assert_eq!(without_manifest, with_manifest);
         assert!(matches!(declarations, SecretDeclarations::Loaded(_)));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn nested_sources_keep_closest_ancestor_secret_declarations() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("ntnt-secret-root-{}-{suffix}", std::process::id()));
+        let inner = root.join("inner");
+        let nested = inner.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested project");
+        std::fs::write(root.join("ntnt.toml"), "[secrets.OUTER]\nrequired = true\n")
+            .expect("write outer manifest");
+        std::fs::write(
+            inner.join("ntnt.toml"),
+            "[secrets.INNER]\nrequired = true\n",
+        )
+        .expect("write inner manifest");
+        let source = nested.join("app.tnt");
+        std::fs::write(&source, "print(\"nested\")\n").expect("write source");
+
+        let (_, declarations) = load_declarations(&source);
+
+        match declarations {
+            SecretDeclarations::Loaded(names) => {
+                assert!(names.contains("INNER"));
+                assert!(!names.contains("OUTER"));
+            }
+            _ => panic!("closest ancestor declarations must load"),
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_regular_nearest_manifests_block_outer_secret_declarations() {
+        use std::os::unix::fs::symlink;
+
+        for (case, target) in [
+            ("dangling", Some("missing.toml")),
+            ("readable", Some("../ntnt.toml")),
+            ("hardlink", None),
+        ] {
+            let suffix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "ntnt-secret-link-{}-{suffix}-{case}",
+                std::process::id()
+            ));
+            let nested = root.join("inner/src");
+            std::fs::create_dir_all(&nested).expect("create nested project");
+            std::fs::write(root.join("ntnt.toml"), "[secrets.OUTER]\nrequired = true\n")
+                .expect("write outer manifest");
+            let inner_manifest = root.join("inner/ntnt.toml");
+            if let Some(target) = target {
+                symlink(target, &inner_manifest).expect("create symbolic manifest marker");
+            } else {
+                std::fs::hard_link(root.join("ntnt.toml"), &inner_manifest)
+                    .expect("create hardlinked manifest marker");
+            }
+            let source = nested.join("app.tnt");
+            std::fs::write(&source, "print(\"nested\")\n").expect("write source");
+
+            let (_, declarations) = load_declarations(&source);
+
+            assert!(matches!(declarations, SecretDeclarations::Invalid));
+            std::fs::remove_dir_all(root).ok();
+        }
     }
 
     struct MockProvider {

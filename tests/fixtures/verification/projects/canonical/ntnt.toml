@@ -1,0 +1,14 @@
+[verification]
+version = 1
+
+[[verification.files]]
+path = "src/nested/app.tnt"
+class = "application"
+
+[[verification.files]]
+path = "verification/smoke.tnt"
+class = "verification"
+
+[[verification.files]]
+path = "fixtures/request.json"
+class = "product-assets"

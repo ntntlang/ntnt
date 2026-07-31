@@ -4724,34 +4724,17 @@ fn run_intent_studio_command(
 
     server_result
 }
-/// Collect all .tnt files from a path (file or directory)
-/// Read project config from ntnt.toml (searches path's directory and ancestors)
+/// Read project config from the closest ancestor ntnt.toml.
 fn read_project_config_strict(path: &PathBuf) -> bool {
-    // Start from the path (or its parent if it's a file) and walk up
-    let start_dir = if path.is_file() {
-        path.parent().unwrap_or(path).to_path_buf()
-    } else {
-        path.to_path_buf()
+    let Ok(Some(config)) = ntnt::config::load_project_manifest(path) else {
+        return false;
     };
-
-    let mut dir = Some(start_dir.as_path());
-    while let Some(d) = dir {
-        let config_path = d.join("ntnt.toml");
-        if config_path.exists() {
-            if let Ok(content) = fs::read_to_string(&config_path) {
-                if let Ok(config) = content.parse::<toml::Value>() {
-                    return config
-                        .get("lint")
-                        .and_then(|l| l.get("strict"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                }
-            }
-            return false;
-        }
-        dir = d.parent();
-    }
-    false
+    config
+        .document()
+        .get("lint")
+        .and_then(|lint| lint.get("strict"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn collect_tnt_files(path: &PathBuf) -> anyhow::Result<Vec<PathBuf>> {
