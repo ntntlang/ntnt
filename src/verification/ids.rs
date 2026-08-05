@@ -1,8 +1,7 @@
-use serde::Serialize;
 use std::fmt;
 
 /// Source range for a declaration or diagnostic.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceSpan {
     pub path: String,
     pub start_line: usize,
@@ -45,7 +44,7 @@ pub enum IdMode {
     Compatibility,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IdKind {
     Feature,
     Scenario,
@@ -68,14 +67,14 @@ impl fmt::Display for IdKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IdOrigin {
     Explicit,
     CompatibilityDerived,
 }
 
 /// A validated verification identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StableId {
     value: String,
     kind: IdKind,
@@ -112,6 +111,37 @@ impl StableId {
         }
     }
 
+    /// Derive a compatibility identity beneath an already unique parent.
+    pub(crate) fn compatibility_child(
+        kind: IdKind,
+        parent: &Self,
+        labels: &[&str],
+        ordinal: usize,
+    ) -> Self {
+        let label = labels
+            .iter()
+            .map(|label| slug(label))
+            .filter(|label| !label.is_empty())
+            .collect::<Vec<_>>()
+            .join(".");
+        let label = if label.is_empty() {
+            "unnamed".to_string()
+        } else {
+            label
+        };
+        Self {
+            value: format!(
+                "{}.compat.{}.{}.{}",
+                kind.prefix(),
+                parent.value,
+                label,
+                ordinal + 1
+            ),
+            kind,
+            origin: IdOrigin::CompatibilityDerived,
+        }
+    }
+
     pub fn as_str(&self) -> &str {
         &self.value
     }
@@ -139,7 +169,7 @@ impl AsRef<str> for StableId {
 
 /// A compatibility diagnostic. Derived identity is deliberately visible because
 /// it changes when legacy declarations are renamed or reordered.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdWarning {
     pub message: String,
     pub id: StableId,
