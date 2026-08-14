@@ -139,14 +139,21 @@ fn is_link_local_ipv6(ip: &Ipv6Addr) -> bool {
     (segments[0] & 0xffc0) == 0xfe80
 }
 
-/// Validate a URL for SSRF protection
-/// Returns Ok(()) if the URL is safe to fetch, or Err with a description if blocked
-fn validate_url_for_ssrf(url: &str) -> std::result::Result<(), String> {
+#[derive(Debug)]
+struct ValidatedHttpTarget {
+    host: String,
+    addresses: Vec<SocketAddr>,
+}
+
+/// Validate and resolve a URL for SSRF protection.
+/// The returned addresses are safe to pin into the HTTP client, closing the gap
+/// between validation-time DNS and connection-time DNS.
+fn validated_http_target(url: &str) -> std::result::Result<Option<ValidatedHttpTarget>, String> {
     let config = get_ssrf_config();
 
-    // If protection is disabled, allow everything
+    // If protection is disabled, allow everything without overriding resolution.
     if !config.enabled {
-        return Ok(());
+        return Ok(None);
     }
 
     // Parse the URL
@@ -194,23 +201,21 @@ fn validate_url_for_ssrf(url: &str) -> std::result::Result<(), String> {
         .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
     let socket_addrs = format!("{}:{}", host, port);
 
-    // Try to resolve DNS
-    let addrs: Vec<IpAddr> = match socket_addrs.to_socket_addrs() {
-        Ok(iter) => iter.map(|s| s.ip()).collect(),
-        Err(_) => {
-            // DNS resolution failed - might be a blocked internal hostname
-            // In production, block; in dev with allow_localhost, permit
-            if config.allow_localhost {
-                return Ok(());
-            }
-            return Err(format!("Could not resolve hostname: {}", host));
-        }
+    // Resolve once, validate every address, and return this exact set to the
+    // client builder so connection-time DNS cannot rebind the target.
+    let addrs: Vec<SocketAddr> = match socket_addrs.to_socket_addrs() {
+        Ok(iter) => iter.collect(),
+        Err(_) => return Err(format!("Could not resolve hostname: {}", host)),
     };
+    if addrs.is_empty() {
+        return Err(format!("Could not resolve hostname: {}", host));
+    }
 
-    // Check all resolved IPs
-    for ip in &addrs {
+    // Check all resolved IPs.
+    for address in &addrs {
+        let ip = address.ip();
         let is_loopback = ip.is_loopback();
-        let is_private = is_private_ip(ip);
+        let is_private = is_private_ip(&ip);
 
         // Check localhost
         if is_loopback && !config.allow_localhost {
@@ -229,7 +234,15 @@ fn validate_url_for_ssrf(url: &str) -> std::result::Result<(), String> {
         }
     }
 
-    Ok(())
+    Ok(Some(ValidatedHttpTarget {
+        host,
+        addresses: addrs,
+    }))
+}
+
+/// Validate a URL for SSRF protection without retaining its resolved target.
+fn validate_url_for_ssrf(url: &str) -> std::result::Result<(), String> {
+    validated_http_target(url).map(|_| ())
 }
 
 /// Cached raw response data (thread-safe, no Value references)
@@ -612,23 +625,19 @@ fn build_http_client(
     let mut builder = reqwest::blocking::Client::builder()
         .cookie_store(cookie_store)
         .redirect(reqwest::redirect::Policy::none());
+
+    if let Some(target) = validated_http_target(url).map_err(IntentError::runtime_error)? {
+        // A configured proxy would resolve the hostname independently and reopen the
+        // validation-to-connection gap, so protected requests always connect directly.
+        builder = builder
+            .no_proxy()
+            .resolve_to_addrs(&target.host, &target.addresses);
+    }
+
     if direct_loopback_http {
         // Plaintext development traffic must remain on loopback even when the process
-        // has system proxy settings or a nonstandard localhost resolver.
+        // has system proxy settings.
         builder = builder.no_proxy();
-
-        let parsed = reqwest::Url::parse(url).expect("secret transport URL was validated");
-        if parsed
-            .host_str()
-            .is_some_and(|host| host.eq_ignore_ascii_case("localhost"))
-        {
-            // reqwest uses the URL's port; zero is only a DNS-override placeholder.
-            let loopback = [
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
-            ];
-            builder = builder.resolve_to_addrs("localhost", &loopback);
-        }
     }
     builder.build().map_err(|error| {
         IntentError::runtime_error(format!("Failed to create HTTP client: {error}"))
