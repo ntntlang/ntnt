@@ -1912,16 +1912,17 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
             )))
         }
     };
-    // Handles cannot be sent through channels (they're process-local references)
+    // Process handles are runtime-local references and cannot cross channel boundaries.
     if matches!(
         value,
         Value::TaskHandle(_)
+            | Value::ProcessHandle(_)
             | Value::TxChannelHandle(_, _)
             | Value::RxChannelHandle(_)
             | Value::ScheduleHandle(_)
     ) {
         return Err(IntentError::type_error(
-            "Handles (Task, TxChannel, RxChannel, Schedule) cannot be sent through channels"
+            "Handles (Task, Process, TxChannel, RxChannel, Schedule) cannot be sent through channels"
                 .to_string(),
         ));
     }

@@ -871,6 +871,11 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
     }
 }
 
+fn exit_with_runtime_cleanup(code: i32) -> ! {
+    ntnt::stdlib::shutdown_runtimes();
+    std::process::exit(code)
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -961,9 +966,14 @@ fn main() {
         }
     };
 
+    // Always close process-local runtimes, including REPL exits and command errors.
+    // Individual server paths may shut down earlier so their children stop with the server;
+    // these calls are intentionally idempotent.
+    ntnt::stdlib::shutdown_runtimes();
+
     if let Err(e) = result {
         format_error(&e, file_hint.as_ref());
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
 }
 
@@ -1307,15 +1317,14 @@ fn run_file_with_workers(
             "blocked".red().bold(),
             errors.len()
         );
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
 
     let result = interpreter.eval(&ast);
 
     // Shutdown concurrency runtime unconditionally — cancel all tasks and schedules
     // even on eval error, so schedules/tasks don't outlive the program (rule 28)
-    ntnt::stdlib::concurrent::RUNTIME.shutdown();
-    ntnt::stdlib::process::RUNTIME.shutdown();
+    ntnt::stdlib::shutdown_runtimes();
 
     result?;
 
@@ -1373,7 +1382,7 @@ fn run_worker_command(
             "blocked".red().bold(),
             errors.len()
         );
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
 
     // Evaluate the file to register all job definitions
@@ -1419,8 +1428,7 @@ fn run_worker_command(
 
         // Block until Ctrl-C, then shut down all workers
         let _ = rx.recv();
-        ntnt::stdlib::concurrent::RUNTIME.shutdown();
-        ntnt::stdlib::process::RUNTIME.shutdown();
+        ntnt::stdlib::shutdown_runtimes();
         return Ok(());
     }
 
@@ -1430,8 +1438,7 @@ fn run_worker_command(
         _ => anyhow::bail!("work_jobs not found in std/jobs module"),
     };
     func(&[ntnt::interpreter::Value::Map(opts)])?;
-    ntnt::stdlib::concurrent::RUNTIME.shutdown();
-    ntnt::stdlib::process::RUNTIME.shutdown();
+    ntnt::stdlib::shutdown_runtimes();
     Ok(())
 }
 
@@ -1686,7 +1693,7 @@ fn jobs_load_kv(path: &PathBuf) -> anyhow::Result<ntnt::interpreter::Value> {
             "blocked".red().bold(),
             errors.len()
         );
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
 
     // Evaluate in Worker mode — suppresses listen(), work_async(), enqueue(),
@@ -1861,7 +1868,7 @@ fn run_jobs_inspect_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> 
         Value::Map(m) => m,
         Value::Unit => {
             eprintln!("{}: Job '{}' not found", "error".red().bold(), job_id);
-            std::process::exit(1);
+            exit_with_runtime_cleanup(1);
         }
         _ => anyhow::bail!("Unexpected value type for job data"),
     };
@@ -1958,11 +1965,11 @@ fn run_jobs_retry_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
                 job_id,
                 status
             );
-            std::process::exit(1);
+            exit_with_runtime_cleanup(1);
         }
         Err(e) => {
             eprintln!("{}: {}", "error".red().bold(), e);
-            std::process::exit(1);
+            exit_with_runtime_cleanup(1);
         }
     }
 }
@@ -1999,11 +2006,11 @@ fn run_jobs_cancel_command(path: &PathBuf, job_id: &str, force: bool) -> anyhow:
                     status
                 );
             }
-            std::process::exit(1);
+            exit_with_runtime_cleanup(1);
         }
         Err(e) => {
             eprintln!("{}: {}", "error".red().bold(), e);
-            std::process::exit(1);
+            exit_with_runtime_cleanup(1);
         }
     }
 }
@@ -2021,7 +2028,7 @@ fn run_jobs_clear_command(
             "{}: Clearing active jobs is not safe — workers are currently processing them.\n  Stop all workers first, then retry.",
             "error".red().bold()
         );
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
 
     let older_than_secs = if let Some(dur) = older_than {
@@ -2083,7 +2090,7 @@ fn run_jobs_clear_command(
         }
         Err(e) => {
             eprintln!("{}: {}", "error".red().bold(), e);
-            std::process::exit(1);
+            exit_with_runtime_cleanup(1);
         }
     }
 }
@@ -2189,7 +2196,7 @@ fn run_jobs_batch_command(
         Ok(b) => b,
         Err(e) => {
             eprintln!("{}: {}", "error".red().bold(), e);
-            std::process::exit(1);
+            exit_with_runtime_cleanup(1);
         }
     };
 
@@ -2618,8 +2625,7 @@ fn test_http_server(
     let _ = interpreter.eval(&ast);
 
     // Shutdown concurrency runtime to prevent leaked tasks/schedules
-    ntnt::stdlib::concurrent::RUNTIME.shutdown();
-    ntnt::stdlib::process::RUNTIME.shutdown();
+    ntnt::stdlib::shutdown_runtimes();
 
     // Wait for request thread to finish
     request_handle.join().ok();
@@ -2688,7 +2694,7 @@ fn test_http_server(
     println!("Server shutdown.");
 
     if failed > 0 {
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
 
     Ok(())
@@ -3386,7 +3392,7 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
 
     // Exit with error code if any errors
     if error_count > 0 {
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
 
     Ok(())
@@ -3623,7 +3629,7 @@ fn lint_project(
 
     // Exit with error code if any errors
     if error_count > 0 {
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
 
     Ok(())
@@ -4184,7 +4190,7 @@ fn run_intent_lint_command(input_path: &PathBuf, json_output: bool) -> anyhow::R
     // Orphans are warnings and never fail the run (legacy direct-pattern
     // fallback makes orphan detection imperfect)
     if !report.errors.is_empty() {
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
     Ok(())
 }
@@ -4341,7 +4347,7 @@ fn run_intent_check_command(
 
         // Exit with appropriate code
         if results.failed_assertions > 0 {
-            std::process::exit(1);
+            exit_with_runtime_cleanup(1);
         }
         return Ok(());
     }
@@ -4672,7 +4678,7 @@ fn run_intent_coverage_command(
 
     // Exit with error if coverage is 0%
     if report.covered_features == 0 && report.total_features > 0 {
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
 
     Ok(())
@@ -8291,7 +8297,7 @@ fn run_learn_command(platform: Option<String>, check: bool, update: bool) -> any
                 "Or run {} to print rules to stdout (works with any agent).",
                 "ntnt learn".cyan()
             );
-            std::process::exit(1);
+            exit_with_runtime_cleanup(1);
         }
     }
 }
@@ -8693,7 +8699,7 @@ fn learn_check() -> anyhow::Result<()> {
     println!();
 
     if stale > 0 {
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
     Ok(())
 }
@@ -8748,7 +8754,7 @@ fn learn_update() -> anyhow::Result<()> {
     }
     println!();
     if failures > 0 {
-        std::process::exit(1);
+        exit_with_runtime_cleanup(1);
     }
     Ok(())
 }

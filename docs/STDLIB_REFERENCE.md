@@ -6699,7 +6699,7 @@ download(url_or_options: String | Map, file_path: String, file_options?: Map) ->
 
 Stream an HTTP response to a file and promote it atomically.
 
-A String performs the legacy GET behavior, including parent creation and overwrite. A request Map accepts the same request fields and safety rules as fetch(). Its safe file defaults reject overwrite and missing parents. file_options can set overwrite and create_parent. Failed requests leave an existing destination unchanged.
+A String performs the legacy GET behavior, including parent creation, overwrite, and preservation of Unix regular-file permissions when replacing a destination. A request Map accepts the same request fields and safety rules as fetch(). Its safe file defaults reject overwrite and missing parents. file_options can set overwrite and create_parent. Failed requests leave an existing destination unchanged.
 
 **Parameters:**
 
@@ -11057,7 +11057,7 @@ import { run, start, wait } from "std/process"
 |----------|-------------|
 | [`kill`](#kill) | Force termination of a supervised process. |
 | [`run`](#run) | Run a native program directly and wait for its bounded result. |
-| [`start`](#start) | Start a supervised native process and return an opaque handle. |
+| [`start`](#start) | Start a supervised native process and return an opaque handle. The runtime monitors exit, timeout, and captured-output limits without caller polling. On Unix, the child leads a process group so timeout and shutdown also terminate descendants. start() accepts the same options as run(), but stdout/stderr default to inherit instead of capture. |
 | [`terminate`](#terminate) | Request graceful termination of a supervised process. |
 | [`try_wait`](#trywait) | Inspect a supervised process without blocking. |
 | [`wait`](#wait) | Wait for a supervised process and return its cached final result. |
@@ -11094,7 +11094,7 @@ run(program: String, args: Array<String>, options?: Map) -> Result<Map, String>
 
 Run a native program directly and wait for its bounded result.
 
-The operating-system process API receives every argument literally; no shell is invoked. Execution requires NTNT_PROCESS_ENABLE=1 and respects NTNT_PROCESS_ALLOW.
+The operating-system process API receives every argument literally; no shell is invoked. Execution requires NTNT_PROCESS_ENABLE=1 and respects NTNT_PROCESS_ALLOW. Options: cwd (String), env (Map<String, String | Secret>), clear_env (Bool), stdin/stdout/stderr mode maps, timeout_ms, termination_grace_ms, and max_output_bytes. stdin modes are null, inherit, file, string, and bytes; stdout/stderr modes are capture, inherit, null, and file. File modes require path, output files optionally accept append, and string/bytes input requires data. run() has no default timeout; set timeout_ms whenever execution must be time-bounded.
 
 **Parameters:**
 
@@ -11113,6 +11113,7 @@ run("/usr/bin/ffmpeg", ["-version"])  // => Ok({...})  // Run without a shell
 **Errors:**
 
 - **RuntimeError**: process execution is disabled — *Fix: Set NTNT_PROCESS_ENABLE=1 for a trusted application*
+- **RuntimeError**: Windows batch scripts are not direct executables — *Fix: Invoke an explicitly allowlisted cmd.exe only when shell authority is intentional*
 
 *Since v0.5.3*
 
@@ -11124,7 +11125,7 @@ run("/usr/bin/ffmpeg", ["-version"])  // => Ok({...})  // Run without a shell
 start(program: String, args: Array<String>, options?: Map) -> Result<Process, String>
 ```
 
-Start a supervised native process and return an opaque handle.
+Start a supervised native process and return an opaque handle. The runtime monitors exit, timeout, and captured-output limits without caller polling. On Unix, the child leads a process group so timeout and shutdown also terminate descendants. start() accepts the same options as run(), but stdout/stderr default to inherit instead of capture.
 
 **Parameters:**
 
@@ -11143,6 +11144,8 @@ start("mlx_audio.server", [])  // => Ok(Process(1))  // Start a supervised servi
 **Gotchas:**
 
 - start defaults stdout and stderr to inherit; select capture only when output is bounded and will be collected
+
+**See also:** `run`, `wait`, `try_wait`, `terminate`, `kill`
 
 *Since v0.5.3*
 

@@ -1023,6 +1023,16 @@ fn promote_download(
         return std::fs::remove_file(temporary_path);
     }
 
+    #[cfg(unix)]
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            std::fs::set_permissions(temporary_path, metadata.permissions())?;
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
     #[cfg(not(windows))]
     {
         std::fs::rename(temporary_path, destination)
@@ -1336,7 +1346,8 @@ pub fn init() -> HashMap<String, Value> {
     // @signature download(url_or_options: String | Map, file_path: String, file_options?: Map) -> Result<Map, String>
     // Stream an HTTP response to a file and promote it atomically.
     //
-    // A String performs the legacy GET behavior, including parent creation and overwrite.
+    // A String performs the legacy GET behavior, including parent creation, overwrite,
+    // and preservation of Unix regular-file permissions when replacing a destination.
     // A request Map accepts the same request fields and safety rules as fetch(). Its safe
     // file defaults reject overwrite and missing parents. file_options can set overwrite
     // and create_parent. Failed requests leave an existing destination unchanged.
@@ -2215,6 +2226,50 @@ mod tests {
             result_map(result).get("bytes_written"),
             Some(Value::Int(8))
         ));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_preserves_existing_destination_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let expected = b"replacement".to_vec();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            expected.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(expected.clone())
+        .collect();
+        let (url, server) = raw_response_fixture(response);
+        let directory = download_directory("overwrite-permissions");
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("artifact");
+        std::fs::write(&destination, b"original").unwrap();
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o751)).unwrap();
+
+        let result = download_from_args(&[
+            Value::String(url),
+            Value::String(destination.to_string_lossy().into_owned()),
+        ])
+        .expect("download result");
+
+        server.join().unwrap();
+        assert!(matches!(
+            result_map(result).get("bytes_written"),
+            Some(Value::Int(11))
+        ));
+        assert_eq!(std::fs::read(&destination).unwrap(), expected);
+        assert_eq!(
+            std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o751
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 

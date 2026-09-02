@@ -43,6 +43,12 @@ use std::collections::HashMap;
 /// Type alias for stdlib module initialization functions
 pub type StdlibModule = HashMap<String, Value>;
 
+/// Stop process-local runtimes before the host exits.
+pub fn shutdown_runtimes() {
+    concurrent::RUNTIME.shutdown();
+    process::RUNTIME.shutdown();
+}
+
 /// Initialize all standard library modules
 pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     let mut modules = HashMap::new();

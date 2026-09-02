@@ -937,6 +937,8 @@ server 8080 {
 | `NTNT_ALLOW_PRIVATE_IPS` | `true` | Allows `fetch()` to connect to private/internal IPs (see below) |
 | `NTNT_NETMON_ENABLE` | `1`, `true`, `yes`, `on` | Explicitly enables `std/netmon` protocol calls for the process |
 | `NTNT_NET_ALLOW_PRIVATE` | `1`, `true`, `yes` | Process-level opt-in for `std/net` and `std/netmon` calls to private/internal targets; calls still need `allow_private: true` |
+| `NTNT_PROCESS_ENABLE` | `1`, `true`, `yes`, `on` | Explicitly enables native `std/process` execution |
+| `NTNT_PROCESS_ALLOW` | platform-delimited paths | Optionally restricts `std/process` to exact canonical executable paths |
 | `NTNT_WORKERS` | `1` (dev) / CPU cores (prod) | Number of interpreter worker threads. Auto-scales in production. |
 
 ```bash
@@ -3786,7 +3788,7 @@ let result = download(map {
 })
 ```
 
-Failed statuses, cancellation, truncated responses, and write errors preserve an existing destination. The legacy two-string form retains its original overwrite and parent-creation behavior.
+Failed statuses, cancellation, truncated responses, and write errors preserve an existing destination. The legacy two-string form retains its original overwrite and parent-creation behavior and preserves Unix regular-file permissions when replacing a destination.
 
 ## Native Processes
 
@@ -3816,6 +3818,15 @@ match start("mlx_audio.server", [], map {
 }
 ```
 
-`run` defaults to captured stdout/stderr and enforces an 8 MiB limit per stream. `start` defaults to inherited output to avoid unbounded service logs. Timeouts request graceful termination, wait for `termination_grace_ms`, force-kill survivors, and reap the child. On Unix graceful termination sends `SIGTERM`; Windows uses the closest supported child termination operation.
+`run` defaults to captured stdout/stderr and enforces an 8 MiB limit per stream. `start` defaults to inherited output to avoid unbounded service logs. A supervisor monitors every started process even when application code never calls `wait` or `try_wait`; deadlines and output limits are therefore enforced autonomously and final results remain available through the handle. All active `run` and `start` commands are registered with the process runtime so runtime shutdown and direct CLI exit paths cannot leave an untracked child behind. Timeouts request graceful termination, wait for `termination_grace_ms`, force-kill survivors, and reap the child. On Unix each launch gets a process group so termination also closes descendants that could otherwise keep captured pipes open. Windows uses the closest supported child termination operation and rejects `.bat`/`.cmd` targets because the OS would invoke `cmd.exe` implicitly.
+
+Process options are a closed top-level map:
+
+- `cwd: String`, `env: Map<String, String | Secret>`, and `clear_env: Bool`
+- `stdin: map { "mode": "null" | "inherit" | "file" | "string" | "bytes", ... }`
+- `stdout` / `stderr: map { "mode": "capture" | "inherit" | "null" | "file", ... }`
+- `timeout_ms: Int`, `termination_grace_ms: Int`, and `max_output_bytes: Int`
+
+File stdio maps use `path`; output files also accept `append`. String/byte input maps use `data`. `run` has no default deadline, so set `timeout_ms` whenever execution must be time-bounded.
 
 Invoking a shell explicitly, such as `run("/bin/sh", ["-c", command])`, grants access to everything that shell can execute under the NTNT process account. Only allowlist a shell when that authority is intentional.

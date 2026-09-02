@@ -380,14 +380,20 @@ fn parse_markdown_blocks(input: &str) -> Vec<MarkdownBlock> {
                     active.end = active.end.max(range.end);
                 }
             }
-            Event::Rule => blocks.push(MarkdownBlock {
-                kind: "thematic_break".to_string(),
-                start: range.start,
-                end: range.end,
-                source: input[range.clone()].to_string(),
-                text: String::new(),
-                meta: HashMap::new(),
-            }),
+            Event::Rule => {
+                if let Some(active) = pending.as_mut() {
+                    active.end = active.end.max(range.end);
+                } else {
+                    blocks.push(MarkdownBlock {
+                        kind: "thematic_break".to_string(),
+                        start: range.start,
+                        end: range.end,
+                        source: input[range.clone()].to_string(),
+                        text: String::new(),
+                        meta: HashMap::new(),
+                    });
+                }
+            }
             Event::TaskListMarker(checked) => {
                 if let Some(active) = pending.as_mut() {
                     active.text.push_str(if checked { "[x] " } else { "[ ] " });
@@ -583,6 +589,21 @@ mod tests {
         assert_eq!(blocks[0].kind, "blockquote");
         assert_eq!(blocks[0].text, "A quoted line.");
         assert_eq!(blocks[1].kind, "table");
+        assert!(blocks.windows(2).all(|pair| pair[0].end <= pair[1].start));
+        for block in blocks {
+            assert_eq!(block.source, input[block.start..block.end]);
+        }
+    }
+
+    #[test]
+    fn parse_blocks_keeps_nested_rules_inside_their_container() {
+        let input = "> ---\n\n- before\n  ---\n  after\n";
+        let blocks = parse_markdown_blocks(input);
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].kind, "blockquote");
+        assert_eq!(blocks[0].source, "> ---");
+        assert_eq!(blocks[1].kind, "list");
         assert!(blocks.windows(2).all(|pair| pair[0].end <= pair[1].start));
         for block in blocks {
             assert_eq!(block.source, input[block.start..block.end]);

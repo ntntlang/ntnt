@@ -76,6 +76,20 @@ description = "Process-level opt-in for `std/net` probes (`ping`, `tcp_connect`,
 example = "NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt"
 affects = ["std-net", "std-netmon", "security"]
 
+[env_vars.NTNT_PROCESS_ENABLE]
+values = ["1", "true", "yes", "on"]
+default = "unset (disabled — std/process calls rejected)"
+description = "Explicitly enables native process execution through `std/process`. Arguments are passed directly to approved executables without an implicit shell."
+example = "NTNT_PROCESS_ENABLE=1 NTNT_PROCESS_ALLOW=/usr/bin/ffmpeg ntnt run audio.tnt"
+affects = ["std-process", "security"]
+
+[env_vars.NTNT_PROCESS_ALLOW]
+type = "platform-path-delimited executable paths"
+default = "unset (all executables allowed after NTNT_PROCESS_ENABLE opt-in)"
+description = "Optional exact allowlist for `std/process`, separated with the platform path delimiter (`:` on Unix and `;` on Windows). Both configured entries and requested executables are canonicalized before comparison. On Windows, `.bat` and `.cmd` files are rejected because the OS invokes `cmd.exe` implicitly; explicitly allowlist and invoke `cmd.exe` only when shell authority is intentional."
+example = "NTNT_PROCESS_ENABLE=1 NTNT_PROCESS_ALLOW=/usr/bin/ffmpeg:/usr/bin/sox ntnt run audio.tnt"
+affects = ["std-process", "security"]
+
 [env_vars.NTNT_MAX_RECURSION]
 type = "integer"
 default = "256"

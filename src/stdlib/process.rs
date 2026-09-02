@@ -1,4 +1,10 @@
 //! Supervised native process execution.
+//!
+//! `run()` waits for one command; `start()` returns an opaque `Process` handle for
+//! `wait()`, `try_wait()`, `terminate()`, and `kill()`. Both launch executables
+//! directly, require `NTNT_PROCESS_ENABLE`, and honor an optional exact-path
+//! `NTNT_PROCESS_ALLOW` allowlist. All active commands are registered for runtime
+//! shutdown, and started processes are monitored autonomously.
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
@@ -7,7 +13,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -19,7 +25,6 @@ type OutputReader = JoinHandle<OutputReadResult>;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_TERMINATION_GRACE_MS: u64 = 5_000;
 
-#[derive(Clone)]
 enum StdinMode {
     Null,
     Inherit,
@@ -27,7 +32,6 @@ enum StdinMode {
     Data(Vec<u8>),
 }
 
-#[derive(Clone)]
 enum OutputMode {
     Capture,
     Inherit,
@@ -35,7 +39,6 @@ enum OutputMode {
     File { path: PathBuf, append: bool },
 }
 
-#[derive(Clone)]
 struct ProcessOptions {
     cwd: Option<PathBuf>,
     env: HashMap<String, String>,
@@ -79,7 +82,8 @@ struct ProcessEntry {
     stdin_writer: Mutex<Option<JoinHandle<std::result::Result<(), String>>>>,
     output_error: Arc<Mutex<Option<String>>>,
     started_at: Instant,
-    options: ProcessOptions,
+    timeout: Option<Duration>,
+    termination_grace: Duration,
     monitor: Mutex<()>,
     terminal: Mutex<Option<std::result::Result<ProcessSummary, String>>>,
 }
@@ -121,6 +125,7 @@ impl ProcessSummary {
 
 pub struct ProcessRuntime {
     next_id: AtomicU64,
+    shutting_down: AtomicBool,
     entries: Mutex<HashMap<u64, Arc<ProcessEntry>>>,
 }
 
@@ -358,7 +363,7 @@ fn resolve_program(program: &str) -> std::result::Result<PathBuf, String> {
             });
         }
         #[cfg(windows)]
-        for extension in ["exe", "cmd", "bat", "com"] {
+        for extension in ["exe", "com"] {
             let candidate = directory.join(format!("{program}.{extension}"));
             if candidate.is_file() {
                 return std::fs::canonicalize(&candidate).map_err(|error| {
@@ -371,10 +376,19 @@ fn resolve_program(program: &str) -> std::result::Result<PathBuf, String> {
 }
 
 fn authorize_program(program: &str) -> std::result::Result<PathBuf, String> {
-    if std::env::var("NTNT_PROCESS_ENABLE").as_deref() != Ok("1") {
+    let enabled = std::env::var("NTNT_PROCESS_ENABLE")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
+    if !enabled {
         return Err("process execution is disabled; set NTNT_PROCESS_ENABLE=1".to_string());
     }
     let resolved = resolve_program(program)?;
+    validate_windows_program(&resolved)?;
     let Some(allowlist) = std::env::var_os("NTNT_PROCESS_ALLOW") else {
         return Ok(resolved);
     };
@@ -388,6 +402,26 @@ fn authorize_program(program: &str) -> std::result::Result<PathBuf, String> {
         ));
     }
     Ok(resolved)
+}
+
+#[cfg(windows)]
+fn validate_windows_program(program: &Path) -> std::result::Result<(), String> {
+    let extension = program
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    if extension.eq_ignore_ascii_case("bat") || extension.eq_ignore_ascii_case("cmd") {
+        return Err(format!(
+            "Windows batch scripts are not direct executables: {}; invoke an explicitly allowlisted cmd.exe only when shell authority is intentional",
+            program.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn validate_windows_program(_program: &Path) -> std::result::Result<(), String> {
+    Ok(())
 }
 
 fn output_stdio(mode: &OutputMode) -> std::result::Result<Stdio, String> {
@@ -453,6 +487,11 @@ fn spawn_process(
         command.env_clear();
     }
     command.envs(&options.env);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     command.stdout(output_stdio(&options.stdout)?);
     command.stderr(output_stdio(&options.stderr)?);
     match &options.stdin {
@@ -502,6 +541,8 @@ fn spawn_process(
         }
         _ => None,
     };
+    let timeout = options.timeout;
+    let termination_grace = options.termination_grace;
     Ok(Arc::new(ProcessEntry {
         child: Mutex::new(child),
         stdout_reader: Mutex::new(stdout_reader),
@@ -509,7 +550,8 @@ fn spawn_process(
         stdin_writer: Mutex::new(stdin_writer),
         output_error,
         started_at,
-        options,
+        timeout,
+        termination_grace,
         monitor: Mutex::new(()),
         terminal: Mutex::new(None),
     }))
@@ -517,7 +559,17 @@ fn spawn_process(
 
 #[cfg(unix)]
 fn terminate_child(child: &mut Child) -> std::io::Result<()> {
-    let result = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    signal_process_group(child, libc::SIGTERM)
+}
+
+#[cfg(unix)]
+fn kill_child(child: &mut Child) -> std::io::Result<()> {
+    signal_process_group(child, libc::SIGKILL)
+}
+
+#[cfg(unix)]
+fn signal_process_group(child: &Child, signal: libc::c_int) -> std::io::Result<()> {
+    let result = unsafe { libc::kill(-(child.id() as libc::pid_t), signal) };
     if result == 0 {
         Ok(())
     } else {
@@ -533,6 +585,35 @@ fn terminate_child(child: &mut Child) -> std::io::Result<()> {
 #[cfg(windows)]
 fn terminate_child(child: &mut Child) -> std::io::Result<()> {
     child.kill()
+}
+
+#[cfg(windows)]
+fn kill_child(child: &mut Child) -> std::io::Result<()> {
+    child.kill()
+}
+
+#[cfg(unix)]
+fn kill_descendants_after_exit(child: &Child) -> std::io::Result<()> {
+    signal_process_group(child, libc::SIGKILL)
+}
+
+#[cfg(windows)]
+fn kill_descendants_after_exit(_child: &Child) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn kill_remaining_process_group(process: &ProcessEntry) -> std::io::Result<()> {
+    let child = process
+        .child
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    signal_process_group(&child, libc::SIGKILL)
+}
+
+#[cfg(windows)]
+fn kill_remaining_process_group(_process: &ProcessEntry) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn try_status(process: &ProcessEntry) -> std::result::Result<Option<ExitStatus>, String> {
@@ -554,14 +635,18 @@ fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, Stri
             .try_wait()
             .map_err(|error| format!("failed to monitor process: {error}"))?
         {
+            kill_descendants_after_exit(&child)
+                .map_err(|error| format!("failed to clean up process descendants: {error}"))?;
             return Ok(status);
         }
         terminate_child(&mut child)
             .map_err(|error| format!("failed to terminate process: {error}"))?;
     }
-    let deadline = Instant::now() + process.options.termination_grace;
+    let deadline = Instant::now() + process.termination_grace;
     loop {
         if let Some(status) = try_status(process)? {
+            kill_remaining_process_group(process)
+                .map_err(|error| format!("failed to clean up process descendants: {error}"))?;
             return Ok(status);
         }
         if Instant::now() >= deadline {
@@ -569,9 +654,7 @@ fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, Stri
                 .child
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            child
-                .kill()
-                .map_err(|error| format!("failed to kill process: {error}"))?;
+            kill_child(&mut child).map_err(|error| format!("failed to kill process: {error}"))?;
             return child
                 .wait()
                 .map_err(|error| format!("failed to reap process: {error}"));
@@ -580,10 +663,7 @@ fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, Stri
     }
 }
 
-fn join_reader(
-    reader: Option<OutputReader>,
-    stream: &str,
-) -> std::result::Result<Vec<u8>, String> {
+fn join_reader(reader: Option<OutputReader>, stream: &str) -> std::result::Result<Vec<u8>, String> {
     match reader {
         Some(reader) => reader
             .join()
@@ -667,6 +747,60 @@ fn finalize_process(
     ))
 }
 
+fn monitor_process_uncached(
+    process: &ProcessEntry,
+    block: bool,
+) -> std::result::Result<Option<ProcessSummary>, String> {
+    let mut timed_out = false;
+    let mut cancelled = false;
+    let status = loop {
+        let output_error = process
+            .output_error
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(error) = output_error {
+            return match stop_and_reap(process) {
+                Ok(status) => {
+                    let _ = finalize_process(process, status, false);
+                    Err(error)
+                }
+                Err(cleanup_error) => Err(format!("{error}; cleanup failed: {cleanup_error}")),
+            };
+        }
+        if crate::stdlib::concurrent::is_current_task_cancelled() {
+            cancelled = true;
+            break stop_and_reap(process)?;
+        }
+        if process
+            .timeout
+            .is_some_and(|timeout| process.started_at.elapsed() >= timeout)
+        {
+            timed_out = true;
+            break stop_and_reap(process)?;
+        }
+        if let Some(status) = try_status(process)? {
+            kill_remaining_process_group(process)
+                .map_err(|error| format!("failed to clean up process descendants: {error}"))?;
+            break status;
+        }
+        if !block {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    let finalized = finalize_process(process, status, timed_out);
+    if cancelled {
+        match finalized {
+            Ok(_) => Err("process cancelled".to_string()),
+            Err(error) => Err(format!("process cancelled; cleanup failed: {error}")),
+        }
+    } else {
+        finalized.map(Some)
+    }
+}
+
 fn monitor_process(
     process: &ProcessEntry,
     block: bool,
@@ -684,65 +818,32 @@ fn monitor_process(
         return result.map(Some);
     }
 
-    let mut timed_out = false;
-    let mut cancelled = false;
-    let status = loop {
-        let output_error = {
-            process
-                .output_error
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone()
-        };
-        if let Some(error) = output_error {
-            let result = match stop_and_reap(process) {
-                Ok(status) => {
-                    let _ = finalize_process(process, status, false);
-                    Err(error)
-                }
-                Err(cleanup_error) => Err(format!("{error}; cleanup failed: {cleanup_error}")),
-            };
+    match monitor_process_uncached(process, block) {
+        Ok(None) => Ok(None),
+        Ok(Some(summary)) => {
             *process
                 .terminal
                 .lock()
-                .unwrap_or_else(|error| error.into_inner()) = Some(result.clone());
-            return result.map(Some);
+                .unwrap_or_else(|error| error.into_inner()) = Some(Ok(summary.clone()));
+            Ok(Some(summary))
         }
-        if crate::stdlib::concurrent::is_current_task_cancelled() {
-            cancelled = true;
-            break stop_and_reap(process)?;
+        Err(error) => {
+            *process
+                .terminal
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(Err(error.clone()));
+            Err(error)
         }
-        if process
-            .options
-            .timeout
-            .is_some_and(|timeout| process.started_at.elapsed() >= timeout)
-        {
-            timed_out = true;
-            break stop_and_reap(process)?;
-        }
-        if let Some(status) = try_status(process)? {
-            break status;
-        }
-        if !block {
-            return Ok(None);
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    };
+    }
+}
 
-    let finalized = finalize_process(process, status, timed_out);
-    let result = if cancelled {
-        match finalized {
-            Ok(_) => Err("process cancelled".to_string()),
-            Err(error) => Err(format!("process cancelled; cleanup failed: {error}")),
+fn supervise_process(process: Arc<ProcessEntry>) {
+    std::thread::spawn(move || loop {
+        match monitor_process(&process, false) {
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Ok(Some(_)) | Err(_) => return,
         }
-    } else {
-        finalized
-    };
-    *process
-        .terminal
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = Some(result.clone());
-    result.map(Some)
+    });
 }
 
 fn run_from_args(args: &[Value]) -> Result<Value> {
@@ -758,7 +859,13 @@ fn run_from_args(args: &[Value]) -> Result<Value> {
         Ok(process) => process,
         Err(error) => return Ok(Value::err(Value::String(error))),
     };
-    match monitor_process(&process, true) {
+    let process_id = match register_process(&process) {
+        Ok(process_id) => process_id,
+        Err(error) => return Ok(Value::err(Value::String(error))),
+    };
+    let result = monitor_process(&process, true);
+    RUNTIME.remove(process_id);
+    match result {
         Ok(Some(result)) => Ok(Value::ok(result.into_value())),
         Ok(None) => unreachable!("blocking process monitor returned pending"),
         Err(error) => Ok(Value::err(Value::String(error))),
@@ -769,17 +876,25 @@ impl ProcessRuntime {
     fn new() -> Self {
         Self {
             next_id: AtomicU64::new(1),
+            shutting_down: AtomicBool::new(false),
             entries: Mutex::new(HashMap::new()),
         }
     }
 
-    fn insert(&self, process: Arc<ProcessEntry>) -> u64 {
+    fn insert(&self, process: Arc<ProcessEntry>) -> std::result::Result<u64, String> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err("process runtime is shutting down".to_string());
+        }
         let id = self.next_id.fetch_add(1, Ordering::AcqRel);
-        self.entries
+        let mut entries = self
+            .entries
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(id, process);
-        id
+            .unwrap_or_else(|error| error.into_inner());
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err("process runtime is shutting down".to_string());
+        }
+        entries.insert(id, process);
+        Ok(id)
     }
 
     fn get(&self, id: u64) -> Option<Arc<ProcessEntry>> {
@@ -790,7 +905,15 @@ impl ProcessRuntime {
             .cloned()
     }
 
+    fn remove(&self, id: u64) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&id);
+    }
+
     pub fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
         let processes = self
             .entries
             .lock()
@@ -825,6 +948,22 @@ impl ProcessRuntime {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
+        #[cfg(test)]
+        self.shutting_down.store(false, Ordering::Release);
+    }
+}
+
+fn register_process(process: &Arc<ProcessEntry>) -> std::result::Result<u64, String> {
+    match RUNTIME.insert(Arc::clone(process)) {
+        Ok(process_id) => Ok(process_id),
+        Err(error) => {
+            let cleanup = stop_and_reap(process)
+                .and_then(|status| finalize_process(process, status, false).map(|_| ()));
+            match cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(format!("{error}; cleanup failed: {cleanup_error}")),
+            }
+        }
     }
 }
 
@@ -858,7 +997,12 @@ fn start_from_args(args: &[Value]) -> Result<Value> {
         Ok(process) => process,
         Err(error) => return Ok(Value::err(Value::String(error))),
     };
-    Ok(Value::ok(Value::ProcessHandle(RUNTIME.insert(process))))
+    let id = match register_process(&process) {
+        Ok(process_id) => process_id,
+        Err(error) => return Ok(Value::err(Value::String(error))),
+    };
+    supervise_process(process);
+    Ok(Value::ok(Value::ProcessHandle(id)))
 }
 
 fn wait_from_args(args: &[Value]) -> Result<Value> {
@@ -906,7 +1050,7 @@ fn signal_from_args(args: &[Value], force: bool) -> Result<Value> {
         Ok(Some(_)) => Ok(Value::ok(Value::Bool(false))),
         Ok(None) => {
             let result = if force {
-                child.kill()
+                kill_child(&mut child)
             } else {
                 terminate_child(&mut child)
             };
@@ -942,6 +1086,12 @@ pub fn init() -> HashMap<String, Value> {
     //
     // The operating-system process API receives every argument literally; no shell is
     // invoked. Execution requires NTNT_PROCESS_ENABLE=1 and respects NTNT_PROCESS_ALLOW.
+    // Options: cwd (String), env (Map<String, String | Secret>), clear_env (Bool),
+    // stdin/stdout/stderr mode maps, timeout_ms, termination_grace_ms, and
+    // max_output_bytes. stdin modes are null, inherit, file, string, and bytes;
+    // stdout/stderr modes are capture, inherit, null, and file. File modes require path,
+    // output files optionally accept append, and string/bytes input requires data.
+    // run() has no default timeout; set timeout_ms whenever execution must be time-bounded.
     // @param program Executable path or name resolved through PATH
     // @param args Literal arguments passed directly to the executable
     // @param options Optional cwd, env, stdio, timeout, grace, and output-limit settings
@@ -950,6 +1100,7 @@ pub fn init() -> HashMap<String, Value> {
     // @tags #process #system
     // @example run("/usr/bin/ffmpeg", ["-version"]) => Ok({...}) ~ "Run without a shell"
     // @error RuntimeError ~ "process execution is disabled" fix: "Set NTNT_PROCESS_ENABLE=1 for a trusted application"
+    // @error RuntimeError ~ "Windows batch scripts are not direct executables" fix: "Invoke an explicitly allowlisted cmd.exe only when shell authority is intentional"
     module.insert(
         "run".to_string(),
         Value::NativeFunction {
@@ -965,12 +1116,17 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/process
     // @signature start(program: String, args: Array<String>, options?: Map) -> Result<Process, String>
     // Start a supervised native process and return an opaque handle.
+    // The runtime monitors exit, timeout, and captured-output limits without caller polling.
+    // On Unix, the child leads a process group so timeout and shutdown also terminate
+    // descendants. start() accepts the same options as run(), but stdout/stderr default to
+    // inherit instead of capture.
     // @param program Executable path or name resolved through PATH
     // @param args Literal arguments passed directly to the executable
     // @param options Optional cwd, env, stdio, timeout, grace, and output-limit settings
     // @returns Ok(Process) or an execution/capability error
     // @example start("mlx_audio.server", []) => Ok(Process(1)) ~ "Start a supervised service"
     // @gotcha start defaults stdout and stderr to inherit; select capture only when output is bounded and will be collected
+    // @see_also run, wait, try_wait, terminate, kill
     // @since v0.5.3
     // @tags #process #system
     module.insert(
@@ -1075,6 +1231,7 @@ mod tests {
     use std::sync::{LazyLock, Mutex};
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    static RUNTIME_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn current_test_command(fixture: &str, trailing: &[&str]) -> (String, Vec<Value>) {
         let executable = std::env::current_exe().unwrap();
@@ -1155,6 +1312,7 @@ mod tests {
 
     #[test]
     fn run_passes_metacharacters_as_literal_arguments() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
         let (program, args) = current_test_command(
             "fixture_print_args",
             &["hello; echo injected", "$(touch nope)", "$HOME"],
@@ -1178,6 +1336,7 @@ mod tests {
 
     #[test]
     fn run_returns_nonzero_exit_as_ok_result() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
         let (program, args) = current_test_command("fixture_nonzero", &[]);
         let result = with_process_capability(&program, || {
             run_from_args(&run_args(program.clone(), args)).expect("run result")
@@ -1195,6 +1354,7 @@ mod tests {
 
     #[test]
     fn run_honors_timeout_and_reaps_child() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
         let (program, args) = current_test_command("fixture_sleep", &[]);
         let options = HashMap::from([
             ("timeout_ms".to_string(), Value::Int(20)),
@@ -1217,6 +1377,7 @@ mod tests {
 
     #[test]
     fn run_stops_child_when_captured_output_exceeds_limit() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
         let (program, args) = current_test_command("fixture_large_output", &[]);
         let options = HashMap::from([
             ("max_output_bytes".to_string(), Value::Int(64)),
@@ -1228,18 +1389,21 @@ mod tests {
         });
         let (variant, error) = result_variant(result);
         assert_eq!(variant, "Err");
-        assert!(error
-            .to_string()
-            .contains("stdout exceeded max_output_bytes limit of 64"));
+        let error = error.to_string();
+        assert!(
+            error.contains("exceeded max_output_bytes limit of 64"),
+            "unexpected process error: {error}"
+        );
     }
 
     #[test]
     fn run_applies_cwd_environment_and_string_stdin() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
         let (program, args) = current_test_command("fixture_context", &[]);
         let directory =
             std::env::temp_dir().join(format!("ntnt-process-context-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        let expected_cwd = std::fs::canonicalize(&directory).unwrap();
+        std::fs::write(directory.join("cwd-marker"), b"expected directory").unwrap();
         let options = HashMap::from([
             (
                 "cwd".to_string(),
@@ -1275,10 +1439,19 @@ mod tests {
         };
         assert!(stdout.contains("env=violet"), "stdout={stdout}");
         assert!(stdout.contains("stdin=read this"), "stdout={stdout}");
-        assert!(
-            stdout.contains(&format!("cwd={}", expected_cwd.display())),
-            "stdout={stdout}"
-        );
+        assert!(stdout.contains("cwd_marker=true"), "stdout={stdout}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_batch_scripts_are_rejected_as_implicit_shells() {
+        let error = validate_windows_program(Path::new("tool.cmd"))
+            .expect_err("cmd files must require an explicit shell");
+        assert!(error.contains("not direct executables"));
+        let error = validate_windows_program(Path::new("tool.BAT"))
+            .expect_err("bat files must require an explicit shell");
+        assert!(error.contains("not direct executables"));
+        assert!(validate_windows_program(Path::new("tool.exe")).is_ok());
     }
 
     #[test]
@@ -1342,6 +1515,7 @@ mod tests {
 
     #[test]
     fn lifecycle_start_try_wait_and_cached_wait() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
         let (program, handle) = start_supervised_fixture("fixture_sleep_short");
         assert!(matches!(handle, Value::ProcessHandle(_)));
         let first = with_process_capability(&program, || {
@@ -1384,6 +1558,7 @@ mod tests {
 
     #[test]
     fn lifecycle_terminate_and_kill_active_processes() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
         let (program, terminate_handle) = start_supervised_fixture("fixture_sleep");
         let terminated = with_process_capability(&program, || {
             terminate_from_args(std::slice::from_ref(&terminate_handle)).unwrap()
@@ -1413,6 +1588,7 @@ mod tests {
 
     #[test]
     fn lifecycle_runtime_shutdown_reaps_children() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
         let (program, handle) = start_supervised_fixture("fixture_sleep");
         RUNTIME.shutdown();
         let waited = with_process_capability(&program, || {
@@ -1425,6 +1601,7 @@ mod tests {
 
     #[test]
     fn lifecycle_terminate_remains_responsive_while_waiting() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
         let (_, handle) = start_supervised_fixture("fixture_sleep");
         let Value::ProcessHandle(id) = handle else {
             panic!("expected process handle");
@@ -1440,6 +1617,151 @@ mod tests {
         );
         let waited = waiter.join().unwrap().expect("wait result");
         assert!(waited.is_some());
+    }
+
+    #[test]
+    fn lifecycle_timeout_is_enforced_without_polling() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let (program, args) = current_test_command("fixture_sleep", &[]);
+        let options = HashMap::from([
+            ("timeout_ms".to_string(), Value::Int(20)),
+            ("termination_grace_ms".to_string(), Value::Int(20)),
+        ]);
+        let value = with_process_capability(&program, || {
+            start_from_args(&run_args_with_options(program.clone(), args, options))
+                .expect("start result")
+        });
+        let (variant, handle) = result_variant(value);
+        assert_eq!(variant, "Ok");
+        let Value::ProcessHandle(id) = handle else {
+            panic!("expected process handle");
+        };
+
+        std::thread::sleep(Duration::from_millis(150));
+
+        let process = RUNTIME.get(id).expect("registered process");
+        let terminal = process.terminal.lock().unwrap().clone();
+        assert!(
+            terminal.is_some(),
+            "timeout must be enforced without wait/try_wait"
+        );
+        let summary = terminal.unwrap().expect("timeout result");
+        assert!(summary.timed_out);
+        RUNTIME.shutdown();
+    }
+
+    #[test]
+    fn lifecycle_output_limit_is_enforced_without_polling() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let (program, args) = current_test_command("fixture_large_output", &[]);
+        let options = HashMap::from([
+            (
+                "stdout".to_string(),
+                Value::Map(HashMap::from([(
+                    "mode".to_string(),
+                    Value::String("capture".to_string()),
+                )])),
+            ),
+            ("max_output_bytes".to_string(), Value::Int(64)),
+            ("termination_grace_ms".to_string(), Value::Int(20)),
+        ]);
+        let value = with_process_capability(&program, || {
+            start_from_args(&run_args_with_options(program.clone(), args, options))
+                .expect("start result")
+        });
+        let (variant, handle) = result_variant(value);
+        assert_eq!(variant, "Ok");
+        let Value::ProcessHandle(id) = handle else {
+            panic!("expected process handle");
+        };
+
+        std::thread::sleep(Duration::from_millis(150));
+
+        let process = RUNTIME.get(id).expect("registered process");
+        let terminal = process.terminal.lock().unwrap().clone();
+        assert!(
+            terminal.is_some(),
+            "output limits must be enforced without polling"
+        );
+        let result = terminal.unwrap();
+        match result {
+            Err(error) => assert!(error.contains("stdout exceeded max_output_bytes")),
+            Ok(_) => panic!("output overflow must fail"),
+        }
+        RUNTIME.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_timeout_terminates_descendants_that_inherit_capture_pipes() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let (program, args) = current_test_command("fixture_spawn_descendant", &[]);
+        let options = HashMap::from([
+            ("timeout_ms".to_string(), Value::Int(20)),
+            ("termination_grace_ms".to_string(), Value::Int(20)),
+        ]);
+        let started = Instant::now();
+        let result = with_process_capability(&program, || {
+            run_from_args(&run_args_with_options(program.clone(), args, options))
+                .expect("run result")
+        });
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "descendant-held pipes must not defeat the timeout"
+        );
+        let (variant, value) = result_variant(result);
+        assert_eq!(variant, "Ok");
+        let Value::Map(result) = value else {
+            panic!("expected process result map");
+        };
+        assert!(matches!(result.get("timed_out"), Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn runtime_shutdown_interrupts_blocking_run_processes() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let runner = std::thread::spawn(|| {
+            let (program, args) = current_test_command("fixture_sleep", &[]);
+            let options = HashMap::from([
+                ("timeout_ms".to_string(), Value::Int(5_000)),
+                ("termination_grace_ms".to_string(), Value::Int(20)),
+            ]);
+            let result = with_process_capability(&program, || {
+                run_from_args(&run_args_with_options(program.clone(), args, options))
+                    .expect("run result")
+            });
+            let (variant, value) = result_variant(result);
+            assert_eq!(variant, "Ok");
+            let Value::Map(result) = value else {
+                panic!("expected process result map");
+            };
+            matches!(result.get("success"), Some(Value::Bool(false)))
+        });
+
+        let registration_deadline = Instant::now() + Duration::from_secs(2);
+        while RUNTIME
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+            && Instant::now() < registration_deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !RUNTIME
+                .entries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "blocking run() processes must be registered for runtime shutdown"
+        );
+
+        let started = Instant::now();
+        RUNTIME.shutdown();
+        assert!(runner.join().expect("run thread"));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
@@ -1476,12 +1798,25 @@ mod tests {
         std::thread::sleep(Duration::from_secs(10));
     }
 
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn fixture_spawn_descendant() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 2"])
+            .spawn()
+            .expect("spawn descendant fixture");
+        std::thread::sleep(Duration::from_secs(10));
+        let _ = child.wait();
+    }
+
     #[test]
     #[ignore]
     fn fixture_context() {
         let mut stdin = String::new();
         std::io::stdin().read_to_string(&mut stdin).unwrap();
         println!("cwd={}", std::env::current_dir().unwrap().display());
+        println!("cwd_marker={}", Path::new("cwd-marker").is_file());
         println!(
             "env={}",
             std::env::var("NTNT_PROCESS_FIXTURE").unwrap_or_default()
