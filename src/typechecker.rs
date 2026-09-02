@@ -4711,6 +4711,18 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     value_type: Box::new(Type::Any),
                 }
             ], Type::Any, required(2));
+            sig!("start", [
+                "program" => Type::String,
+                "args" => Type::Array(Box::new(Type::String)),
+                "options" => Type::Map {
+                    key_type: Box::new(Type::String),
+                    value_type: Box::new(Type::Any),
+                }
+            ], Type::Any, required(2));
+            sig!("wait", ["process" => Type::Any], Type::Any);
+            sig!("try_wait", ["process" => Type::Any], Type::Any);
+            sig!("terminate", ["process" => Type::Any], Type::Any);
+            sig!("kill", ["process" => Type::Any], Type::Any);
         }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));

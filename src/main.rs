@@ -1315,6 +1315,7 @@ fn run_file_with_workers(
     // Shutdown concurrency runtime unconditionally — cancel all tasks and schedules
     // even on eval error, so schedules/tasks don't outlive the program (rule 28)
     ntnt::stdlib::concurrent::RUNTIME.shutdown();
+    ntnt::stdlib::process::RUNTIME.shutdown();
 
     result?;
 
@@ -1419,6 +1420,7 @@ fn run_worker_command(
         // Block until Ctrl-C, then shut down all workers
         let _ = rx.recv();
         ntnt::stdlib::concurrent::RUNTIME.shutdown();
+        ntnt::stdlib::process::RUNTIME.shutdown();
         return Ok(());
     }
 
@@ -1429,6 +1431,7 @@ fn run_worker_command(
     };
     func(&[ntnt::interpreter::Value::Map(opts)])?;
     ntnt::stdlib::concurrent::RUNTIME.shutdown();
+    ntnt::stdlib::process::RUNTIME.shutdown();
     Ok(())
 }
 
@@ -2616,6 +2619,7 @@ fn test_http_server(
 
     // Shutdown concurrency runtime to prevent leaked tasks/schedules
     ntnt::stdlib::concurrent::RUNTIME.shutdown();
+    ntnt::stdlib::process::RUNTIME.shutdown();
 
     // Wait for request thread to finish
     request_handle.join().ok();

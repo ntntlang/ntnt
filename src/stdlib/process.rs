@@ -7,7 +7,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -59,17 +60,69 @@ impl ProcessOptions {
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         }
     }
+
+    fn start_defaults() -> Self {
+        Self {
+            stdout: OutputMode::Inherit,
+            stderr: OutputMode::Inherit,
+            ..Self::run_defaults()
+        }
+    }
 }
 
-struct SpawnedProcess {
-    child: Child,
-    stdout_reader: Option<JoinHandle<std::result::Result<Vec<u8>, String>>>,
-    stderr_reader: Option<JoinHandle<std::result::Result<Vec<u8>, String>>>,
-    stdin_writer: Option<JoinHandle<std::result::Result<(), String>>>,
+struct ProcessEntry {
+    child: Mutex<Child>,
+    stdout_reader: Mutex<Option<JoinHandle<std::result::Result<Vec<u8>, String>>>>,
+    stderr_reader: Mutex<Option<JoinHandle<std::result::Result<Vec<u8>, String>>>>,
+    stdin_writer: Mutex<Option<JoinHandle<std::result::Result<(), String>>>>,
     output_error: Arc<Mutex<Option<String>>>,
     started_at: Instant,
     options: ProcessOptions,
+    monitor: Mutex<()>,
+    terminal: Mutex<Option<std::result::Result<ProcessSummary, String>>>,
 }
+
+#[derive(Clone)]
+struct ProcessSummary {
+    success: bool,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+    duration_ms: i64,
+}
+
+impl ProcessSummary {
+    fn into_value(self) -> Value {
+        Value::Map(HashMap::from([
+            ("success".to_string(), Value::Bool(self.success)),
+            (
+                "exit_code".to_string(),
+                self.exit_code
+                    .map(|code| Value::some(Value::Int(code as i64)))
+                    .unwrap_or_else(Value::none),
+            ),
+            (
+                "signal".to_string(),
+                self.signal
+                    .map(|signal| Value::some(Value::Int(signal as i64)))
+                    .unwrap_or_else(Value::none),
+            ),
+            ("stdout".to_string(), Value::String(self.stdout)),
+            ("stderr".to_string(), Value::String(self.stderr)),
+            ("timed_out".to_string(), Value::Bool(self.timed_out)),
+            ("duration_ms".to_string(), Value::Int(self.duration_ms)),
+        ]))
+    }
+}
+
+pub struct ProcessRuntime {
+    next_id: AtomicU64,
+    entries: Mutex<HashMap<u64, Arc<ProcessEntry>>>,
+}
+
+pub static RUNTIME: LazyLock<ProcessRuntime> = LazyLock::new(ProcessRuntime::new);
 
 fn type_error(message: impl Into<String>) -> IntentError {
     IntentError::type_error(message.into())
@@ -187,8 +240,7 @@ fn parse_output(value: Option<&Value>, default: OutputMode, stream: &str) -> Res
     }
 }
 
-fn parse_options(value: Option<&Value>) -> Result<ProcessOptions> {
-    let mut parsed = ProcessOptions::run_defaults();
+fn parse_options(value: Option<&Value>, mut parsed: ProcessOptions) -> Result<ProcessOptions> {
     let Some(value) = value else {
         return Ok(parsed);
     };
@@ -214,9 +266,12 @@ fn parse_options(value: Option<&Value>) -> Result<ProcessOptions> {
 
     parsed.cwd = option_string(options, "cwd")?.map(PathBuf::from);
     parsed.clear_env = option_bool(options, "clear_env", false)?;
-    parsed.stdin = parse_stdin(options.get("stdin"))?;
-    parsed.stdout = parse_output(options.get("stdout"), OutputMode::Capture, "stdout")?;
-    parsed.stderr = parse_output(options.get("stderr"), OutputMode::Capture, "stderr")?;
+    parsed.stdin = match options.get("stdin") {
+        Some(value) => parse_stdin(Some(value))?,
+        None => parsed.stdin,
+    };
+    parsed.stdout = parse_output(options.get("stdout"), parsed.stdout, "stdout")?;
+    parsed.stderr = parse_output(options.get("stderr"), parsed.stderr, "stderr")?;
     parsed.timeout =
         option_nonnegative_u64(options, "timeout_ms", None)?.map(Duration::from_millis);
     parsed.termination_grace = Duration::from_millis(
@@ -257,7 +312,10 @@ fn parse_options(value: Option<&Value>) -> Result<ProcessOptions> {
     Ok(parsed)
 }
 
-fn parse_command(args: &[Value]) -> Result<(String, Vec<String>, ProcessOptions)> {
+fn parse_command(
+    args: &[Value],
+    defaults: ProcessOptions,
+) -> Result<(String, Vec<String>, ProcessOptions)> {
     let Value::String(program) = &args[0] else {
         return Err(type_error("process program must be a String"));
     };
@@ -274,7 +332,11 @@ fn parse_command(args: &[Value]) -> Result<(String, Vec<String>, ProcessOptions)
             ))),
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok((program.clone(), arguments, parse_options(args.get(2))?))
+    Ok((
+        program.clone(),
+        arguments,
+        parse_options(args.get(2), defaults)?,
+    ))
 }
 
 fn resolve_program(program: &str) -> std::result::Result<PathBuf, String> {
@@ -379,7 +441,7 @@ fn spawn_process(
     executable: &Path,
     arguments: &[String],
     options: ProcessOptions,
-) -> std::result::Result<SpawnedProcess, String> {
+) -> std::result::Result<Arc<ProcessEntry>, String> {
     let mut command = Command::new(executable);
     command.args(arguments);
     if let Some(cwd) = &options.cwd {
@@ -438,15 +500,17 @@ fn spawn_process(
         }
         _ => None,
     };
-    Ok(SpawnedProcess {
-        child,
-        stdout_reader,
-        stderr_reader,
-        stdin_writer,
+    Ok(Arc::new(ProcessEntry {
+        child: Mutex::new(child),
+        stdout_reader: Mutex::new(stdout_reader),
+        stderr_reader: Mutex::new(stderr_reader),
+        stdin_writer: Mutex::new(stdin_writer),
         output_error,
         started_at,
         options,
-    })
+        monitor: Mutex::new(()),
+        terminal: Mutex::new(None),
+    }))
 }
 
 #[cfg(unix)]
@@ -469,25 +533,44 @@ fn terminate_child(child: &mut Child) -> std::io::Result<()> {
     child.kill()
 }
 
-fn stop_and_reap(process: &mut SpawnedProcess) -> std::result::Result<ExitStatus, String> {
-    terminate_child(&mut process.child)
-        .map_err(|error| format!("failed to terminate process: {error}"))?;
-    let deadline = Instant::now() + process.options.termination_grace;
-    loop {
-        if let Some(status) = process
+fn try_status(process: &ProcessEntry) -> std::result::Result<Option<ExitStatus>, String> {
+    process
+        .child
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .try_wait()
+        .map_err(|error| format!("failed to monitor process: {error}"))
+}
+
+fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, String> {
+    {
+        let mut child = process
             .child
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(status) = child
             .try_wait()
             .map_err(|error| format!("failed to monitor process: {error}"))?
         {
             return Ok(status);
         }
+        terminate_child(&mut child)
+            .map_err(|error| format!("failed to terminate process: {error}"))?;
+    }
+    let deadline = Instant::now() + process.options.termination_grace;
+    loop {
+        if let Some(status) = try_status(process)? {
+            return Ok(status);
+        }
         if Instant::now() >= deadline {
-            process
+            let mut child = process
                 .child
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            child
                 .kill()
                 .map_err(|error| format!("failed to kill process: {error}"))?;
-            return process
-                .child
+            return child
                 .wait()
                 .map_err(|error| format!("failed to reap process: {error}"));
         }
@@ -507,20 +590,16 @@ fn join_reader(
     }
 }
 
-fn exit_signal(status: &ExitStatus) -> Value {
+fn exit_signal(status: &ExitStatus) -> Option<i32> {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        status
-            .signal()
-            .map(|signal| Value::Int(signal as i64))
-            .map(Value::some)
-            .unwrap_or_else(Value::none)
+        status.signal()
     }
     #[cfg(not(unix))]
     {
         let _ = status;
-        Value::none()
+        None
     }
 }
 
@@ -530,35 +609,79 @@ fn result_map(
     stderr: Vec<u8>,
     timed_out: bool,
     duration: Duration,
-) -> Value {
-    let exit_code = status
-        .code()
-        .map(|code| Value::some(Value::Int(code as i64)))
-        .unwrap_or_else(Value::none);
-    Value::Map(HashMap::from([
-        (
-            "success".to_string(),
-            Value::Bool(status.success() && !timed_out),
-        ),
-        ("exit_code".to_string(), exit_code),
-        ("signal".to_string(), exit_signal(&status)),
-        (
-            "stdout".to_string(),
-            Value::String(String::from_utf8_lossy(&stdout).into_owned()),
-        ),
-        (
-            "stderr".to_string(),
-            Value::String(String::from_utf8_lossy(&stderr).into_owned()),
-        ),
-        ("timed_out".to_string(), Value::Bool(timed_out)),
-        (
-            "duration_ms".to_string(),
-            Value::Int(duration.as_millis().min(i64::MAX as u128) as i64),
-        ),
-    ]))
+) -> ProcessSummary {
+    ProcessSummary {
+        success: status.success() && !timed_out,
+        exit_code: status.code(),
+        signal: exit_signal(&status),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        timed_out,
+        duration_ms: duration.as_millis().min(i64::MAX as u128) as i64,
+    }
 }
 
-fn wait_for_run(mut process: SpawnedProcess) -> std::result::Result<Value, String> {
+fn finalize_process(
+    process: &ProcessEntry,
+    status: ExitStatus,
+    timed_out: bool,
+) -> std::result::Result<ProcessSummary, String> {
+    let stdin_result = process
+        .stdin_writer
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+        .map(|writer| {
+            writer
+                .join()
+                .map_err(|_| "process stdin writer panicked".to_string())?
+        })
+        .unwrap_or(Ok(()));
+    let stdout_result = join_reader(
+        process
+            .stdout_reader
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take(),
+        "stdout",
+    );
+    let stderr_result = join_reader(
+        process
+            .stderr_reader
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take(),
+        "stderr",
+    );
+    stdin_result?;
+    let stdout = stdout_result?;
+    let stderr = stderr_result?;
+    Ok(result_map(
+        status,
+        stdout,
+        stderr,
+        timed_out,
+        process.started_at.elapsed(),
+    ))
+}
+
+fn monitor_process(
+    process: &ProcessEntry,
+    block: bool,
+) -> std::result::Result<Option<ProcessSummary>, String> {
+    let _monitor = process
+        .monitor
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(result) = process
+        .terminal
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+    {
+        return result.map(Some);
+    }
+
     let mut timed_out = false;
     let mut cancelled = false;
     let status = loop {
@@ -570,12 +693,22 @@ fn wait_for_run(mut process: SpawnedProcess) -> std::result::Result<Value, Strin
                 .clone()
         };
         if let Some(error) = output_error {
-            let _ = stop_and_reap(&mut process);
-            return Err(error);
+            let result = match stop_and_reap(process) {
+                Ok(status) => {
+                    let _ = finalize_process(process, status, false);
+                    Err(error)
+                }
+                Err(cleanup_error) => Err(format!("{error}; cleanup failed: {cleanup_error}")),
+            };
+            *process
+                .terminal
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(result.clone());
+            return result.map(Some);
         }
         if crate::stdlib::concurrent::is_current_task_cancelled() {
             cancelled = true;
-            break stop_and_reap(&mut process)?;
+            break stop_and_reap(process)?;
         }
         if process
             .options
@@ -583,39 +716,35 @@ fn wait_for_run(mut process: SpawnedProcess) -> std::result::Result<Value, Strin
             .is_some_and(|timeout| process.started_at.elapsed() >= timeout)
         {
             timed_out = true;
-            break stop_and_reap(&mut process)?;
+            break stop_and_reap(process)?;
         }
-        if let Some(status) = process
-            .child
-            .try_wait()
-            .map_err(|error| format!("failed to monitor process: {error}"))?
-        {
+        if let Some(status) = try_status(process)? {
             break status;
+        }
+        if !block {
+            return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(25));
     };
 
-    if let Some(writer) = process.stdin_writer {
-        writer
-            .join()
-            .map_err(|_| "process stdin writer panicked".to_string())??;
-    }
-    let stdout = join_reader(process.stdout_reader, "stdout")?;
-    let stderr = join_reader(process.stderr_reader, "stderr")?;
-    if cancelled {
-        return Err("process cancelled".to_string());
-    }
-    Ok(result_map(
-        status,
-        stdout,
-        stderr,
-        timed_out,
-        process.started_at.elapsed(),
-    ))
+    let finalized = finalize_process(process, status, timed_out);
+    let result = if cancelled {
+        match finalized {
+            Ok(_) => Err("process cancelled".to_string()),
+            Err(error) => Err(format!("process cancelled; cleanup failed: {error}")),
+        }
+    } else {
+        finalized
+    };
+    *process
+        .terminal
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(result.clone());
+    result.map(Some)
 }
 
 fn run_from_args(args: &[Value]) -> Result<Value> {
-    let (program, arguments, options) = parse_command(args)?;
+    let (program, arguments, options) = parse_command(args, ProcessOptions::run_defaults())?;
     if crate::stdlib::concurrent::is_current_task_cancelled() {
         return Ok(Value::err(Value::String("process cancelled".to_string())));
     }
@@ -627,10 +756,178 @@ fn run_from_args(args: &[Value]) -> Result<Value> {
         Ok(process) => process,
         Err(error) => return Ok(Value::err(Value::String(error))),
     };
-    match wait_for_run(process) {
-        Ok(result) => Ok(Value::ok(result)),
+    match monitor_process(&process, true) {
+        Ok(Some(result)) => Ok(Value::ok(result.into_value())),
+        Ok(None) => unreachable!("blocking process monitor returned pending"),
         Err(error) => Ok(Value::err(Value::String(error))),
     }
+}
+
+impl ProcessRuntime {
+    fn new() -> Self {
+        Self {
+            next_id: AtomicU64::new(1),
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn insert(&self, process: Arc<ProcessEntry>) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::AcqRel);
+        self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id, process);
+        id
+    }
+
+    fn get(&self, id: u64) -> Option<Arc<ProcessEntry>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&id)
+            .cloned()
+    }
+
+    pub fn shutdown(&self) {
+        let processes = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for process in processes {
+            let already_terminal = process
+                .terminal
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some();
+            if already_terminal {
+                continue;
+            }
+            let status = stop_and_reap(&process);
+            let _monitor = process
+                .monitor
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut terminal = process
+                .terminal
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if terminal.is_none() {
+                *terminal =
+                    Some(status.and_then(|status| finalize_process(&process, status, false)));
+            }
+        }
+        self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+}
+
+fn process_handle(value: &Value) -> Result<u64> {
+    match value {
+        Value::ProcessHandle(id) => Ok(*id),
+        other => Err(type_error(format!(
+            "expected Process handle, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn registered_process(value: &Value) -> Result<std::result::Result<Arc<ProcessEntry>, String>> {
+    let id = process_handle(value)?;
+    Ok(RUNTIME
+        .get(id)
+        .ok_or_else(|| format!("unknown process handle: {id}")))
+}
+
+fn start_from_args(args: &[Value]) -> Result<Value> {
+    let (program, arguments, options) = parse_command(args, ProcessOptions::start_defaults())?;
+    if crate::stdlib::concurrent::is_current_task_cancelled() {
+        return Ok(Value::err(Value::String("process cancelled".to_string())));
+    }
+    let executable = match authorize_program(&program) {
+        Ok(executable) => executable,
+        Err(error) => return Ok(Value::err(Value::String(error))),
+    };
+    let process = match spawn_process(&executable, &arguments, options) {
+        Ok(process) => process,
+        Err(error) => return Ok(Value::err(Value::String(error))),
+    };
+    Ok(Value::ok(Value::ProcessHandle(RUNTIME.insert(process))))
+}
+
+fn wait_from_args(args: &[Value]) -> Result<Value> {
+    let process = match registered_process(&args[0])? {
+        Ok(process) => process,
+        Err(error) => return Ok(Value::err(Value::String(error))),
+    };
+    match monitor_process(&process, true) {
+        Ok(Some(result)) => Ok(Value::ok(result.into_value())),
+        Ok(None) => unreachable!("blocking process monitor returned pending"),
+        Err(error) => Ok(Value::err(Value::String(error))),
+    }
+}
+
+fn try_wait_from_args(args: &[Value]) -> Result<Value> {
+    let process = match registered_process(&args[0])? {
+        Ok(process) => process,
+        Err(error) => return Ok(Value::err(Value::String(error))),
+    };
+    match monitor_process(&process, false) {
+        Ok(Some(result)) => Ok(Value::ok(Value::some(result.into_value()))),
+        Ok(None) => Ok(Value::ok(Value::none())),
+        Err(error) => Ok(Value::err(Value::String(error))),
+    }
+}
+
+fn signal_from_args(args: &[Value], force: bool) -> Result<Value> {
+    let process = match registered_process(&args[0])? {
+        Ok(process) => process,
+        Err(error) => return Ok(Value::err(Value::String(error))),
+    };
+    if process
+        .terminal
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_some()
+    {
+        return Ok(Value::ok(Value::Bool(false)));
+    }
+    let mut child = process
+        .child
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    match child.try_wait() {
+        Ok(Some(_)) => Ok(Value::ok(Value::Bool(false))),
+        Ok(None) => {
+            let result = if force {
+                child.kill()
+            } else {
+                terminate_child(&mut child)
+            };
+            match result {
+                Ok(()) => Ok(Value::ok(Value::Bool(true))),
+                Err(error) => Ok(Value::err(Value::String(format!(
+                    "failed to {} process: {error}",
+                    if force { "kill" } else { "terminate" }
+                )))),
+            }
+        }
+        Err(error) => Ok(Value::err(Value::String(format!(
+            "failed to monitor process: {error}"
+        )))),
+    }
+}
+
+fn terminate_from_args(args: &[Value]) -> Result<Value> {
+    signal_from_args(args, false)
+}
+
+fn kill_from_args(args: &[Value]) -> Result<Value> {
+    signal_from_args(args, true)
 }
 
 pub fn init() -> HashMap<String, Value> {
@@ -659,6 +956,103 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 3,
             requires: None,
             func: run_from_args,
+        },
+    );
+
+    // @ntnt start
+    // @module std/process
+    // @signature start(program: String, args: Array<String>, options?: Map) -> Result<Process, String>
+    // Start a supervised native process and return an opaque handle.
+    // @param program Executable path or name resolved through PATH
+    // @param args Literal arguments passed directly to the executable
+    // @param options Optional cwd, env, stdio, timeout, grace, and output-limit settings
+    // @returns Ok(Process) or an execution/capability error
+    // @since v0.5.3
+    // @tags #process #system
+    module.insert(
+        "start".to_string(),
+        Value::NativeFunction {
+            name: "start".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: start_from_args,
+        },
+    );
+
+    // @ntnt wait
+    // @module std/process
+    // @signature wait(process: Process) -> Result<Map, String>
+    // Wait for a supervised process and return its cached final result.
+    // @param process Opaque handle returned by start
+    // @returns Ok with the final process result or Err for an invalid handle
+    // @since v0.5.3
+    // @tags #process #system
+    module.insert(
+        "wait".to_string(),
+        Value::NativeFunction {
+            name: "wait".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: wait_from_args,
+        },
+    );
+
+    // @ntnt try_wait
+    // @module std/process
+    // @signature try_wait(process: Process) -> Result<Option<Map>, String>
+    // Inspect a supervised process without blocking.
+    // @param process Opaque handle returned by start
+    // @returns Ok(None) while running or Ok(Some(result)) after exit
+    // @since v0.5.3
+    // @tags #process #system
+    module.insert(
+        "try_wait".to_string(),
+        Value::NativeFunction {
+            name: "try_wait".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: try_wait_from_args,
+        },
+    );
+
+    // @ntnt terminate
+    // @module std/process
+    // @signature terminate(process: Process) -> Result<Bool, String>
+    // Request graceful termination of a supervised process.
+    // @param process Opaque handle returned by start
+    // @returns Ok(true) when requested or Ok(false) when already exited
+    // @since v0.5.3
+    // @tags #process #system
+    module.insert(
+        "terminate".to_string(),
+        Value::NativeFunction {
+            name: "terminate".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: terminate_from_args,
+        },
+    );
+
+    // @ntnt kill
+    // @module std/process
+    // @signature kill(process: Process) -> Result<Bool, String>
+    // Force termination of a supervised process.
+    // @param process Opaque handle returned by start
+    // @returns Ok(true) when requested or Ok(false) when already exited
+    // @since v0.5.3
+    // @tags #process #system
+    module.insert(
+        "kill".to_string(),
+        Value::NativeFunction {
+            name: "kill".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: kill_from_args,
         },
     );
 
@@ -903,6 +1297,142 @@ mod tests {
         assert!(error.to_string().contains("is not allowed"));
     }
 
+    fn supervised_args(program: String, args: Vec<Value>) -> Vec<Value> {
+        run_args_with_options(
+            program,
+            args,
+            HashMap::from([
+                (
+                    "stdout".to_string(),
+                    Value::Map(HashMap::from([(
+                        "mode".to_string(),
+                        Value::String("capture".to_string()),
+                    )])),
+                ),
+                (
+                    "stderr".to_string(),
+                    Value::Map(HashMap::from([(
+                        "mode".to_string(),
+                        Value::String("capture".to_string()),
+                    )])),
+                ),
+                ("termination_grace_ms".to_string(), Value::Int(20)),
+            ]),
+        )
+    }
+
+    fn start_supervised_fixture(fixture: &str) -> (String, Value) {
+        let (program, args) = current_test_command(fixture, &[]);
+        let value = with_process_capability(&program, || {
+            start_from_args(&supervised_args(program.clone(), args)).expect("start result")
+        });
+        let (variant, handle) = result_variant(value);
+        assert_eq!(variant, "Ok");
+        (program, handle)
+    }
+
+    #[test]
+    fn lifecycle_start_try_wait_and_cached_wait() {
+        let (program, handle) = start_supervised_fixture("fixture_sleep_short");
+        assert!(matches!(handle, Value::ProcessHandle(_)));
+        let first = with_process_capability(&program, || {
+            try_wait_from_args(std::slice::from_ref(&handle)).expect("try_wait result")
+        });
+        let (variant, pending) = result_variant(first);
+        assert_eq!(variant, "Ok");
+        assert!(matches!(pending, Value::EnumValue { variant, .. } if variant == "None"));
+
+        let final_value = with_process_capability(&program, || {
+            wait_from_args(std::slice::from_ref(&handle)).expect("wait result")
+        });
+        let repeated = with_process_capability(&program, || {
+            wait_from_args(std::slice::from_ref(&handle)).expect("cached wait result")
+        });
+        let (variant, value) = result_variant(final_value);
+        assert_eq!(variant, "Ok");
+        let Value::Map(result) = value else {
+            panic!("expected process result map");
+        };
+        let (repeated_variant, repeated_value) = result_variant(repeated);
+        assert_eq!(repeated_variant, "Ok");
+        let Value::Map(repeated_result) = repeated_value else {
+            panic!("expected cached process result map");
+        };
+        assert_eq!(
+            result.get("exit_code").unwrap().to_string(),
+            repeated_result.get("exit_code").unwrap().to_string()
+        );
+        assert_eq!(
+            result.get("stdout").unwrap().to_string(),
+            repeated_result.get("stdout").unwrap().to_string()
+        );
+        assert_eq!(
+            result.get("duration_ms").unwrap().to_string(),
+            repeated_result.get("duration_ms").unwrap().to_string()
+        );
+        assert!(matches!(result.get("success"), Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn lifecycle_terminate_and_kill_active_processes() {
+        let (program, terminate_handle) = start_supervised_fixture("fixture_sleep");
+        let terminated = with_process_capability(&program, || {
+            terminate_from_args(std::slice::from_ref(&terminate_handle)).unwrap()
+        });
+        let (variant, value) = result_variant(terminated);
+        assert_eq!(variant, "Ok");
+        assert!(matches!(value, Value::Bool(true)));
+        with_process_capability(&program, || {
+            wait_from_args(std::slice::from_ref(&terminate_handle)).unwrap()
+        });
+        let terminated_again = with_process_capability(&program, || {
+            terminate_from_args(std::slice::from_ref(&terminate_handle)).unwrap()
+        });
+        assert!(
+            matches!(result_variant(terminated_again), (variant, Value::Bool(false)) if variant == "Ok")
+        );
+
+        let (_, kill_handle) = start_supervised_fixture("fixture_sleep");
+        let killed = with_process_capability(&program, || {
+            kill_from_args(std::slice::from_ref(&kill_handle)).unwrap()
+        });
+        assert!(matches!(result_variant(killed), (variant, Value::Bool(true)) if variant == "Ok"));
+        with_process_capability(&program, || {
+            wait_from_args(std::slice::from_ref(&kill_handle)).unwrap()
+        });
+    }
+
+    #[test]
+    fn lifecycle_runtime_shutdown_reaps_children() {
+        let (program, handle) = start_supervised_fixture("fixture_sleep");
+        RUNTIME.shutdown();
+        let waited = with_process_capability(&program, || {
+            wait_from_args(std::slice::from_ref(&handle)).unwrap()
+        });
+        let (variant, error) = result_variant(waited);
+        assert_eq!(variant, "Err");
+        assert!(error.to_string().contains("unknown process handle"));
+    }
+
+    #[test]
+    fn lifecycle_terminate_remains_responsive_while_waiting() {
+        let (_, handle) = start_supervised_fixture("fixture_sleep");
+        let Value::ProcessHandle(id) = handle else {
+            panic!("expected process handle");
+        };
+        let process = RUNTIME.get(id).unwrap();
+        let waiter = std::thread::spawn(move || monitor_process(&process, true));
+        std::thread::sleep(Duration::from_millis(30));
+        let started = Instant::now();
+        let terminated = terminate_from_args(&[Value::ProcessHandle(id)]).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(
+            matches!(result_variant(terminated), (variant, Value::Bool(true)) if variant == "Ok")
+        );
+        let waited = waiter.join().unwrap().expect("wait result");
+        assert!(waited.is_some());
+    }
+
     #[test]
     #[ignore]
     fn fixture_print_args() {
@@ -922,6 +1452,12 @@ mod tests {
     #[ignore]
     fn fixture_sleep() {
         std::thread::sleep(Duration::from_secs(10));
+    }
+
+    #[test]
+    #[ignore]
+    fn fixture_sleep_short() {
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     #[test]
