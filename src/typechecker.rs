@@ -4702,6 +4702,16 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 }))
             );
         }
+        "std/process" => {
+            sig!("run", [
+                "program" => Type::String,
+                "args" => Type::Array(Box::new(Type::String)),
+                "options" => Type::Map {
+                    key_type: Box::new(Type::String),
+                    value_type: Box::new(Type::Any),
+                }
+            ], Type::Any, required(2));
+        }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));
             sig!("parse_csv", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));

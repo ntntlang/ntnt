@@ -126,6 +126,9 @@ pub enum Value {
     /// Task handle (from spawn/after)
     TaskHandle(u64),
 
+    /// Opaque supervised native process handle.
+    ProcessHandle(u64),
+
     /// Channel sender handle — the sending end returned by channel().
     /// Holds an opaque Arc<dyn Any + Send + Sync> (actually Arc<crossbeam::Sender<T>>)
     /// so that when all TxChannelHandle clones drop, the sender drops and the receiver
@@ -238,6 +241,7 @@ impl Value {
             Value::Function { .. } => "Function",
             Value::NativeFunction { .. } => "NativeFunction",
             Value::TaskHandle(_) => "Task",
+            Value::ProcessHandle(_) => "Process",
             Value::TxChannelHandle(_, _) => "TxChannel",
             Value::RxChannelHandle(_) => "RxChannel",
             Value::ScheduleHandle(_) => "Schedule",
@@ -348,6 +352,7 @@ impl fmt::Display for Value {
             Value::Function { name, .. } => write!(f, "<fn {}>", name),
             Value::NativeFunction { name, .. } => write!(f, "<native fn {}>", name),
             Value::TaskHandle(id) => write!(f, "Task({})", id),
+            Value::ProcessHandle(id) => write!(f, "Process({})", id),
             Value::TxChannelHandle(id, _) => write!(f, "TxChannel({})", id),
             Value::RxChannelHandle(id) => write!(f, "RxChannel({})", id),
             Value::ScheduleHandle(id) => write!(f, "Schedule({})", id),
@@ -11059,6 +11064,7 @@ impl Interpreter {
             }
             // Handle equality: same variant + same id
             (Value::TaskHandle(a), Value::TaskHandle(b)) => a == b,
+            (Value::ProcessHandle(a), Value::ProcessHandle(b)) => a == b,
             (Value::TxChannelHandle(a, _), Value::TxChannelHandle(b, _)) => a == b,
             (Value::RxChannelHandle(a), Value::RxChannelHandle(b)) => a == b,
             (Value::ScheduleHandle(a), Value::ScheduleHandle(b)) => a == b,
@@ -11080,6 +11086,7 @@ impl Interpreter {
             let lhs_is_handle = matches!(
                 &lhs,
                 Value::TaskHandle(_)
+                    | Value::ProcessHandle(_)
                     | Value::TxChannelHandle(_, _)
                     | Value::RxChannelHandle(_)
                     | Value::ScheduleHandle(_)
@@ -11087,6 +11094,7 @@ impl Interpreter {
             let rhs_is_handle = matches!(
                 &rhs,
                 Value::TaskHandle(_)
+                    | Value::ProcessHandle(_)
                     | Value::TxChannelHandle(_, _)
                     | Value::RxChannelHandle(_)
                     | Value::ScheduleHandle(_)
@@ -17525,5 +17533,18 @@ page
         assert!(err
             .to_string()
             .contains("config[\"protected_paths\"] must be String or [String]"));
+    }
+
+    #[test]
+    fn process_handles_are_opaque_values_equal_only_by_id() {
+        let first = Value::ProcessHandle(41);
+        let same = Value::ProcessHandle(41);
+        let different = Value::ProcessHandle(42);
+
+        assert_eq!(first.type_name(), "Process");
+        assert_eq!(first.to_string(), "Process(41)");
+        assert!(Interpreter::values_equal(&first, &same));
+        assert!(!Interpreter::values_equal(&first, &different));
+        assert!(!Interpreter::values_equal(&first, &Value::TaskHandle(41)));
     }
 }
