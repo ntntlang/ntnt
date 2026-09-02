@@ -101,6 +101,9 @@ hickory-resolver = "0.24.4"
 socket2 = "0.6"
 zeroize = { version = "1.8.2", features = ["serde"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [build-dependencies]
 # Doc comment scanner (build.rs extracts /// @ntnt blocks)
 serde = { version = "1.0", features = ["derive"] }

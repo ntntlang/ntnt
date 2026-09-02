@@ -831,6 +831,83 @@ print(blocks[1]["text"])
     assert_eq!(lines, ["heading", "# Chaptér", "0", "10", "Mara paused."]);
 }
 
+#[test]
+fn test_http_download_accepts_request_map_and_streams_binary_response() {
+    let expected = vec![b'R', b'I', b'F', b'F', 0, 255, 128, b'W', b'A', b'V', b'E'];
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind binary download fixture");
+    let port = listener.local_addr().unwrap().port();
+    let response_bytes = expected.clone();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept binary download");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).expect("read download request");
+            request.extend_from_slice(&buffer[..read]);
+            let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        assert!(request.starts_with("POST /speech HTTP/1.1"));
+        assert!(request.ends_with("{\"text\":\"Mara paused.\"}"));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response_bytes.len()
+        )
+        .unwrap();
+        stream.write_all(&response_bytes).unwrap();
+    });
+
+    let directory = std::env::temp_dir().join(format!(
+        "ntnt-language-download-{}-{}",
+        std::process::id(),
+        TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let destination = directory.join("take.wav");
+    let code = format!(
+        r#"
+import {{ download }} from "std/http"
+let result = download(map {{
+    "url": "http://127.0.0.1:{port}/speech",
+    "method": "POST",
+    "json": map {{ "text": "Mara paused." }}
+}}, "{}", map {{ "create_parent": true }})
+match result {{
+    Ok(info) => {{
+        print(info["status"])
+        print(info["bytes_written"])
+    }},
+    Err(error) => print("error:" + error)
+}}
+"#,
+        destination.to_string_lossy()
+    );
+
+    let (stdout, stderr, exit_code) = run_ntnt_code(&code);
+    server.join().expect("binary download fixture");
+    assert_eq!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), ["200", "11"]);
+    assert_eq!(fs::read(&destination).unwrap(), expected);
+    fs::remove_dir_all(directory).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn test_unix_socket_secret_provider_end_to_end() {

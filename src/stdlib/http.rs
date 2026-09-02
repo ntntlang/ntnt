@@ -29,10 +29,10 @@ use crate::stdlib::json::intent_value_to_json_expose;
 use base64::Engine;
 use reqwest::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Write;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -753,23 +753,22 @@ fn format_ssrf_error(reason: &str, direct_loopback_http: bool) -> String {
     }
 }
 
-/// Full HTTP request with all options
-fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
-    let app_env = std::env::var("APP_ENV").ok();
-    http_fetch_with_app_env(opts, app_env.as_deref())
+struct PreparedHttpRequest {
+    url: String,
+    request: reqwest::blocking::RequestBuilder,
 }
 
-pub(crate) fn http_fetch_with_app_env(
+fn prepare_http_request(
     opts: &HashMap<String, Value>,
     app_env: Option<&str>,
-) -> Result<Value> {
-    // Cancellation yield point (rule 19): check before making the network request
+    cookie_store: bool,
+) -> Result<std::result::Result<PreparedHttpRequest, String>> {
     if crate::stdlib::concurrent::is_current_task_cancelled() {
         return Err(IntentError::runtime_error("Task cancelled".to_string()));
     }
 
     let url = match opts.get("url") {
-        Some(Value::String(u)) => u.clone(),
+        Some(Value::String(url)) => url.clone(),
         _ => {
             return Err(IntentError::type_error(
                 "fetch() requires 'url' option".to_string(),
@@ -795,13 +794,8 @@ pub(crate) fn http_fetch_with_app_env(
 
     let contains_secret = opts.values().any(Value::contains_secret);
     let direct_loopback_http = validate_secret_transport(&url, contains_secret, app_env)?;
-
-    // SSRF protection: validate URL before making request
     if let Err(reason) = validate_url_for_ssrf(&url) {
-        return Ok(Value::err(Value::String(format_ssrf_error(
-            &reason,
-            direct_loopback_http,
-        ))));
+        return Ok(Err(format_ssrf_error(&reason, direct_loopback_http)));
     }
 
     let method = match opts.get("method") {
@@ -814,11 +808,7 @@ pub(crate) fn http_fetch_with_app_env(
             )))
         }
     };
-
-    // Redirects are always returned to the caller so every destination can be
-    // validated explicitly before credentials or a 307/308 body can be forwarded.
-    let client = build_http_client(true, direct_loopback_http, &url)?;
-
+    let client = build_http_client(cookie_store, direct_loopback_http, &url)?;
     let mut request = match method.as_str() {
         "GET" => client.get(&url),
         "POST" => client.post(&url),
@@ -828,13 +818,11 @@ pub(crate) fn http_fetch_with_app_env(
         "HEAD" => client.head(&url),
         _ => {
             return Err(IntentError::runtime_error(format!(
-                "Unsupported HTTP method: {}",
-                method
+                "Unsupported HTTP method: {method}"
             )))
         }
     };
 
-    // Add headers. Secrets are approved only as values, never names.
     if let Some(Value::Map(headers)) = opts.get("headers") {
         for (key, value) in headers {
             request = request.header(key.as_str(), secret_or_string(value, "header value")?);
@@ -846,17 +834,16 @@ pub(crate) fn http_fetch_with_app_env(
         )));
     }
 
-    // Add cookies
     if let Some(Value::Map(cookies)) = opts.get("cookies") {
-        let cookie_str: Result<Vec<String>> = cookies
+        let cookie_values: Result<Vec<String>> = cookies
             .iter()
             .map(|(key, value)| {
                 secret_or_string(value, "cookie value").map(|value| format!("{key}={value}"))
             })
             .collect();
-        let cookie_str = cookie_str?;
-        if !cookie_str.is_empty() {
-            request = request.header(COOKIE, cookie_str.join("; "));
+        let cookie_values = cookie_values?;
+        if !cookie_values.is_empty() {
+            request = request.header(COOKIE, cookie_values.join("; "));
         }
     } else if let Some(other) = opts.get("cookies") {
         return Err(IntentError::type_error(format!(
@@ -865,7 +852,6 @@ pub(crate) fn http_fetch_with_app_env(
         )));
     }
 
-    // Add basic auth
     if let Some(Value::Map(auth)) = opts.get("auth") {
         let username = match auth.get("user") {
             Some(value) => secret_or_string(value, "basic-auth user")?,
@@ -876,8 +862,8 @@ pub(crate) fn http_fetch_with_app_env(
             None => "",
         };
         if !username.is_empty() {
-            let credentials = format!("{username}:{password}");
-            let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+            let encoded = base64::engine::general_purpose::STANDARD
+                .encode(format!("{username}:{password}").as_bytes());
             request = request.header(AUTHORIZATION, format!("Basic {encoded}"));
         }
     } else if let Some(other) = opts.get("auth") {
@@ -887,20 +873,15 @@ pub(crate) fn http_fetch_with_app_env(
         )));
     }
 
-    // Add raw body
     if let Some(body) = opts.get("body") {
         request = request.body(secret_or_string(body, "body")?.to_string());
     }
-
-    // Add JSON body
     if let Some(data) = opts.get("json") {
         let json_body = intent_value_to_json_expose(data)?;
         request = request
             .header("Content-Type", "application/json")
             .body(json_body.to_string());
     }
-
-    // Add form data
     if let Some(Value::Map(form_data)) = opts.get("form") {
         let form: Result<Vec<(String, String)>> = form_data
             .iter()
@@ -914,7 +895,6 @@ pub(crate) fn http_fetch_with_app_env(
         )));
     }
 
-    // Add timeout
     match opts.get("timeout") {
         Some(Value::Int(timeout)) if *timeout >= 0 => {
             request = request.timeout(Duration::from_secs(*timeout as u64));
@@ -932,6 +912,26 @@ pub(crate) fn http_fetch_with_app_env(
         }
         None => {}
     }
+
+    Ok(Ok(PreparedHttpRequest { url, request }))
+}
+
+/// Full HTTP request with all options
+fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
+    let app_env = std::env::var("APP_ENV").ok();
+    http_fetch_with_app_env(opts, app_env.as_deref())
+}
+
+pub(crate) fn http_fetch_with_app_env(
+    opts: &HashMap<String, Value>,
+    app_env: Option<&str>,
+) -> Result<Value> {
+    let prepared = match prepare_http_request(opts, app_env, true)? {
+        Ok(prepared) => prepared,
+        Err(error) => return Ok(Value::err(Value::String(error))),
+    };
+    let url = prepared.url;
+    let request = prepared.request;
 
     // Execute request
     match request.send() {
@@ -978,79 +978,272 @@ pub(crate) fn http_fetch_with_app_env(
     }
 }
 
-/// Download a file from URL
-fn http_download(url: &str, file_path: &str) -> Result<Value> {
-    // Cancellation yield point: check before making the network request
-    if crate::stdlib::concurrent::is_current_task_cancelled() {
-        return Err(IntentError::runtime_error("Task cancelled".to_string()));
+#[derive(Clone, Copy)]
+struct DownloadOptions {
+    overwrite: bool,
+    create_parent: bool,
+}
+
+fn download_temp_path(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let directory = parent.unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| IntentError::type_error("download() path must name a file".to_string()))?;
+    Ok(directory.join(format!(
+        ".{file_name}.ntnt-download-{}",
+        uuid::Uuid::new_v4()
+    )))
+}
+
+fn response_headers_value(headers: &reqwest::header::HeaderMap) -> Value {
+    Value::Map(
+        headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.to_string(), Value::String(value.to_string())))
+            })
+            .collect(),
+    )
+}
+
+fn promote_download(
+    temporary_path: &Path,
+    destination: &Path,
+    overwrite: bool,
+) -> std::io::Result<()> {
+    if !overwrite {
+        std::fs::hard_link(temporary_path, destination)?;
+        return std::fs::remove_file(temporary_path);
     }
 
-    // SSRF protection: validate URL before making request
-    if let Err(reason) = validate_url_for_ssrf(url) {
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(temporary_path, destination)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let source = temporary_path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let destination = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn http_download(
+    request_options: &HashMap<String, Value>,
+    file_path: &str,
+    file_options: DownloadOptions,
+) -> Result<Value> {
+    let path = Path::new(file_path);
+    if path.exists() && !file_options.overwrite {
         return Ok(Value::err(Value::String(format!(
-            "SSRF protection: {}",
-            reason
+            "download() destination already exists: {file_path}"
         ))));
     }
 
-    let path = Path::new(file_path);
-
-    // Create parent directories if they don't exist
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                IntentError::runtime_error(format!("Failed to create directory: {}", e))
+            if !file_options.create_parent {
+                return Ok(Value::err(Value::String(format!(
+                    "download() parent directory does not exist: {}",
+                    parent.display()
+                ))));
+            }
+            std::fs::create_dir_all(parent).map_err(|error| {
+                IntentError::runtime_error(format!("Failed to create directory: {error}"))
             })?;
         }
     }
 
-    let client = build_http_client(false, false, url)?;
-    match client.get(url).send() {
-        Ok(response) => {
-            let status = response.status().as_u16();
-            if (200..300).contains(&status) {
-                match response.bytes() {
-                    Ok(bytes) => match File::create(path) {
-                        Ok(mut file) => match file.write_all(&bytes) {
-                            Ok(_) => {
-                                let mut result_map = HashMap::new();
-                                result_map.insert("status".to_string(), Value::Int(status as i64));
-                                result_map.insert(
-                                    "path".to_string(),
-                                    Value::String(file_path.to_string()),
-                                );
-                                result_map
-                                    .insert("size".to_string(), Value::Int(bytes.len() as i64));
-
-                                Ok(Value::ok(Value::Map(result_map)))
-                            }
-                            Err(e) => Ok(Value::err(Value::String(format!(
-                                "Failed to write file: {}",
-                                e
-                            )))),
-                        },
-                        Err(e) => Ok(Value::err(Value::String(format!(
-                            "Failed to create file: {}",
-                            e
-                        )))),
-                    },
-                    Err(e) => Ok(Value::err(Value::String(format!(
-                        "Failed to read response: {}",
-                        e
-                    )))),
-                }
-            } else {
-                Ok(Value::err(Value::String(format!(
-                    "HTTP error: status {}",
-                    status
-                ))))
-            }
+    let app_env = std::env::var("APP_ENV").ok();
+    let prepared = match prepare_http_request(request_options, app_env.as_deref(), false)? {
+        Ok(prepared) => prepared,
+        Err(error) => return Ok(Value::err(Value::String(error))),
+    };
+    let mut response = match prepared.request.send() {
+        Ok(response) => response,
+        Err(error) => {
+            return Ok(Value::err(Value::String(format!(
+                "HTTP request failed: {error}"
+            ))))
         }
-        Err(e) => Ok(Value::err(Value::String(format!(
-            "HTTP request failed: {}",
-            e
-        )))),
+    };
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    if !(200..300).contains(&status) {
+        let mut diagnostic = Vec::new();
+        let _ = response.take(8192).read_to_end(&mut diagnostic);
+        let diagnostic = String::from_utf8_lossy(&diagnostic);
+        let suffix = if diagnostic.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {}", diagnostic.trim())
+        };
+        return Ok(Value::err(Value::String(format!(
+            "HTTP error: status {status}{suffix}"
+        ))));
     }
+
+    let temporary_path = download_temp_path(path)?;
+    let mut temporary = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return Ok(Value::err(Value::String(format!(
+                "Failed to create temporary download: {error}"
+            ))))
+        }
+    };
+
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut bytes_written = 0_i64;
+    loop {
+        if crate::stdlib::concurrent::is_current_task_cancelled() {
+            drop(temporary);
+            let _ = std::fs::remove_file(&temporary_path);
+            return Err(IntentError::runtime_error("download cancelled".to_string()));
+        }
+        let read = match response.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) => {
+                drop(temporary);
+                let _ = std::fs::remove_file(&temporary_path);
+                return Ok(Value::err(Value::String(format!(
+                    "Failed to read response: {error}"
+                ))));
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        if let Err(error) = temporary.write_all(&buffer[..read]) {
+            drop(temporary);
+            let _ = std::fs::remove_file(&temporary_path);
+            return Ok(Value::err(Value::String(format!(
+                "Failed to write file: {error}"
+            ))));
+        }
+        bytes_written += read as i64;
+    }
+
+    if let Err(error) = temporary.flush().and_then(|_| temporary.sync_all()) {
+        drop(temporary);
+        let _ = std::fs::remove_file(&temporary_path);
+        return Ok(Value::err(Value::String(format!(
+            "Failed to flush file: {error}"
+        ))));
+    }
+    drop(temporary);
+
+    if let Err(error) = promote_download(&temporary_path, path, file_options.overwrite) {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Ok(Value::err(Value::String(format!(
+            "Failed to promote download: {error}"
+        ))));
+    }
+
+    Ok(Value::ok(Value::Map(HashMap::from([
+        ("status".to_string(), Value::Int(status as i64)),
+        ("path".to_string(), Value::String(file_path.to_string())),
+        ("size".to_string(), Value::Int(bytes_written)),
+        ("bytes_written".to_string(), Value::Int(bytes_written)),
+        ("headers".to_string(), response_headers_value(&headers)),
+    ]))))
+}
+
+fn download_file_options(
+    value: Option<&Value>,
+    defaults: DownloadOptions,
+) -> Result<DownloadOptions> {
+    let Some(value) = value else {
+        return Ok(defaults);
+    };
+    let Value::Map(options) = value else {
+        return Err(IntentError::type_error(
+            "download() file options must be a Map".to_string(),
+        ));
+    };
+    let boolean = |name: &str, fallback: bool| match options.get(name) {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(other) => Err(IntentError::type_error(format!(
+            "download() {name} must be a Bool, got {}",
+            other.type_name()
+        ))),
+        None => Ok(fallback),
+    };
+    Ok(DownloadOptions {
+        overwrite: boolean("overwrite", defaults.overwrite)?,
+        create_parent: boolean("create_parent", defaults.create_parent)?,
+    })
+}
+
+fn download_from_args(args: &[Value]) -> Result<Value> {
+    let Value::String(file_path) = &args[1] else {
+        return Err(IntentError::type_error(
+            "download() file path must be a String".to_string(),
+        ));
+    };
+    let (request_options, defaults) = match &args[0] {
+        Value::String(url) => (
+            HashMap::from([("url".to_string(), Value::String(url.clone()))]),
+            DownloadOptions {
+                overwrite: true,
+                create_parent: true,
+            },
+        ),
+        Value::Map(options) => (
+            options.clone(),
+            DownloadOptions {
+                overwrite: false,
+                create_parent: false,
+            },
+        ),
+        other => {
+            return Err(IntentError::type_error(format!(
+                "download() requires a URL String or request Map, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let file_options = download_file_options(args.get(2), defaults)?;
+    http_download(&request_options, file_path, file_options)
 }
 
 /// Initialize the std/http module
@@ -1140,21 +1333,23 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt download
     // @module std/http
-    // @signature download(url: String, file_path: String) -> Result<Map, String>
-    // Download a file from a URL and save it to disk.
+    // @signature download(url_or_options: String | Map, file_path: String, file_options?: Map) -> Result<Map, String>
+    // Stream an HTTP response to a file and promote it atomically.
     //
-    // Fetches the resource at the given URL and writes the response bytes to
-    // the specified file path. Parent directories are created automatically
-    // if they do not exist. Redirects are not followed; a 3xx response returns an error
-    // without creating the destination file. Returns a map with status, path, and size on success.
-    // @param url The URL of the file to download
+    // A String performs the legacy GET behavior, including parent creation and overwrite.
+    // A request Map accepts the same request fields and safety rules as fetch(). Its safe
+    // file defaults reject overwrite and missing parents. file_options can set overwrite
+    // and create_parent. Failed requests leave an existing destination unchanged.
+    // @param url_or_options A URL String for GET or a fetch-compatible request Map
     // @param file_path The local file path to save the downloaded content
-    // @returns Result<Map{status: Int, path: String, size: Int}, String> on success; Err with message on failure
+    // @param file_options Optional Map with overwrite and create_parent Bool fields
+    // @returns Result<Map{status: Int, path: String, size: Int, bytes_written: Int, headers: Map}, String>
     // @see_also fetch
     // @since v0.1.0
     // @tags #network
-    // @example download("https://example.com/file.zip", "./file.zip") => Ok({status: 200, path: "./file.zip", size: 1024}) ~ "Download a file"
-    // @error TypeError ~ "download() requires URL string and file path string" fix: "Pass two String arguments: URL and file path"
+    // @example download("https://example.com/file.zip", "./file.zip") => Ok({status: 200, path: "./file.zip", size: 1024, bytes_written: 1024}) ~ "Legacy GET download"
+    // @example download(map { "url": "https://example.com/audio", "method": "POST", "json": map { "text": "Hello" } }, "./take.wav", map { "create_parent": true }) => Ok({status: 200, path: "./take.wav", ...}) ~ "Binary POST download"
+    // @error TypeError ~ "download() requires a URL String or request Map" fix: "Pass a URL String or fetch-compatible request Map"
     // @error RuntimeError ~ "Failed to create directory: ..." fix: "Ensure the parent directory path is valid and writable"
     // @error RuntimeError ~ "Failed to create file: ..." fix: "Ensure the file path is valid and writable"
     // @error RuntimeError ~ "HTTP error: status ..." fix: "Check the URL and server availability"
@@ -1163,14 +1358,9 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "download".to_string(),
             arity: 2,
-            max_arity: 2,
+            max_arity: 3,
             requires: None,
-            func: |args| match (&args[0], &args[1]) {
-                (Value::String(url), Value::String(file_path)) => http_download(url, file_path),
-                _ => Err(IntentError::type_error(
-                    "download() requires URL string and file path string".to_string(),
-                )),
-            },
+            func: download_from_args,
         },
     );
 
@@ -1378,6 +1568,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    static DOWNLOAD_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
     fn response_status(value: Value) -> i64 {
         let Value::EnumValue {
             enum_name,
@@ -1396,6 +1588,139 @@ mod tests {
             panic!("fetch response omitted integer status");
         };
         *status
+    }
+
+    fn result_map(value: Value) -> HashMap<String, Value> {
+        let Value::EnumValue {
+            enum_name,
+            variant,
+            mut values,
+        } = value
+        else {
+            panic!("operation returned a non-Result value");
+        };
+        assert_eq!(enum_name, "Result");
+        assert_eq!(variant, "Ok");
+        let Value::Map(map) = values.remove(0) else {
+            panic!("operation returned a non-map value");
+        };
+        map
+    }
+
+    fn result_error(value: Value) -> String {
+        let Value::EnumValue {
+            enum_name,
+            variant,
+            mut values,
+        } = value
+        else {
+            panic!("operation returned a non-Result value");
+        };
+        assert_eq!(enum_name, "Result");
+        assert_eq!(variant, "Err");
+        let Value::String(error) = values.remove(0) else {
+            panic!("operation returned a non-string error");
+        };
+        error
+    }
+
+    fn download_directory(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ntnt-{name}-{}-{}",
+            std::process::id(),
+            DOWNLOAD_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn assert_no_download_temporary_file(directory: &Path) {
+        let entries = std::fs::read_dir(directory)
+            .expect("read download directory")
+            .map(|entry| entry.expect("read directory entry").file_name())
+            .collect::<Vec<_>>();
+        assert!(
+            entries
+                .iter()
+                .all(|name| !name.to_string_lossy().contains(".ntnt-download-")),
+            "download left a temporary file behind: {entries:?}"
+        );
+    }
+
+    fn raw_response_fixture(response: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind response fixture");
+        let url = format!("http://{}/audio", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept response request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set response request timeout");
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).expect("read response request");
+            stream.write_all(&response).expect("write raw response");
+        });
+        (url, server)
+    }
+
+    fn binary_post_fixture(
+        expected_body: &'static str,
+        bytes: Vec<u8>,
+    ) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind binary fixture");
+        let url = format!("http://{}/speech", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept binary request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set binary request timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).expect("read binary request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + length {
+                    break;
+                }
+            }
+
+            let request_text = String::from_utf8_lossy(&request).to_string();
+            assert!(request_text.starts_with("POST /speech HTTP/1.1"));
+            assert!(request_text
+                .to_ascii_lowercase()
+                .contains("x-studio: sound-stage"));
+            assert!(request_text.ends_with(expected_body));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            )
+            .expect("write binary headers");
+            let split = bytes.len() / 2;
+            stream
+                .write_all(&bytes[..split])
+                .expect("write first binary chunk");
+            stream.flush().expect("flush first binary chunk");
+            thread::sleep(Duration::from_millis(10));
+            stream
+                .write_all(&bytes[split..])
+                .expect("write second binary chunk");
+            request_text
+        });
+        (url, server)
     }
 
     struct RedirectFixture {
@@ -1651,8 +1976,15 @@ mod tests {
                 std::process::id()
             ));
             let _ = std::fs::remove_file(&path);
-            let result = http_download(&fixture.url, path.to_str().expect("UTF-8 temp path"))
-                .expect("download should return a Result value");
+            let result = http_download(
+                &HashMap::from([("url".to_string(), Value::String(fixture.url.clone()))]),
+                path.to_str().expect("UTF-8 temp path"),
+                DownloadOptions {
+                    overwrite: true,
+                    create_parent: true,
+                },
+            )
+            .expect("download should return a Result value");
 
             assert!(
                 matches!(result, Value::EnumValue { ref variant, .. } if variant == "Err"),
@@ -1664,6 +1996,226 @@ mod tests {
             );
             assert_eq!(fixture.finish(), 0, "must not follow {status} redirect");
         }
+    }
+
+    #[test]
+    fn download_posts_request_options_and_streams_binary_bytes() {
+        let expected = vec![b'R', b'I', b'F', b'F', 0, 255, 128, b'W', b'A', b'V', b'E'];
+        let expected_body = "{\"cfg_scale\":4,\"input\":\"Hello\"}";
+        let (url, server) = binary_post_fixture(expected_body, expected.clone());
+        let directory = std::env::temp_dir().join(format!(
+            "ntnt-binary-download-{}-{}",
+            std::process::id(),
+            DOWNLOAD_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let destination = directory.join("take.wav");
+        let request = HashMap::from([
+            ("url".to_string(), Value::String(url)),
+            ("method".to_string(), Value::String("POST".to_string())),
+            (
+                "headers".to_string(),
+                Value::Map(HashMap::from([(
+                    "x-studio".to_string(),
+                    Value::String("sound-stage".to_string()),
+                )])),
+            ),
+            (
+                "json".to_string(),
+                Value::Map(HashMap::from([
+                    ("input".to_string(), Value::String("Hello".to_string())),
+                    ("cfg_scale".to_string(), Value::Int(4)),
+                ])),
+            ),
+        ]);
+
+        let result = http_download(
+            &request,
+            destination.to_str().expect("UTF-8 destination"),
+            DownloadOptions {
+                overwrite: false,
+                create_parent: true,
+            },
+        )
+        .expect("download result");
+
+        server.join().expect("binary fixture");
+        assert_eq!(std::fs::read(&destination).unwrap(), expected);
+        let result = result_map(result);
+        assert!(matches!(result.get("status"), Some(Value::Int(200))));
+        assert!(matches!(result.get("size"), Some(Value::Int(11))));
+        assert!(matches!(result.get("bytes_written"), Some(Value::Int(11))));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn download_non_success_preserves_destination_and_removes_temporary_file() {
+        let response = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 12\r\nConnection: close\r\n\r\ntry tomorrow".to_vec();
+        let (url, server) = raw_response_fixture(response);
+        let directory = download_directory("failed-download");
+        let destination = directory.join("take.wav");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&destination, b"approved take").unwrap();
+
+        let result = http_download(
+            &HashMap::from([("url".to_string(), Value::String(url))]),
+            destination.to_str().unwrap(),
+            DownloadOptions {
+                overwrite: true,
+                create_parent: false,
+            },
+        )
+        .expect("download result");
+
+        server.join().unwrap();
+        assert!(result_error(result).contains("status 503: try tomorrow"));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"approved take");
+        assert_no_download_temporary_file(&directory);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn download_truncated_body_preserves_destination_and_removes_temporary_file() {
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial".to_vec();
+        let (url, server) = raw_response_fixture(response);
+        let directory = download_directory("truncated-download");
+        let destination = directory.join("take.wav");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&destination, b"approved take").unwrap();
+
+        let result = http_download(
+            &HashMap::from([("url".to_string(), Value::String(url))]),
+            destination.to_str().unwrap(),
+            DownloadOptions {
+                overwrite: true,
+                create_parent: false,
+            },
+        )
+        .expect("download result");
+
+        server.join().unwrap();
+        assert!(result_error(result).contains("Failed to read response"));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"approved take");
+        assert_no_download_temporary_file(&directory);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn download_cancellation_preserves_destination_and_removes_temporary_file() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind cancellation fixture");
+        let url = format!("http://{}/audio", listener.local_addr().unwrap());
+        let (chunk_sent, chunk_received) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept cancellation request");
+            let mut request = [0_u8; 1024];
+            let _ = stream
+                .read(&mut request)
+                .expect("read cancellation request");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                1024 * 1024
+            )
+            .unwrap();
+            stream.write_all(&vec![1_u8; 64 * 1024]).unwrap();
+            stream.flush().unwrap();
+            chunk_sent.send(()).unwrap();
+            thread::sleep(Duration::from_millis(30));
+            let _ = stream.write_all(&vec![2_u8; 64 * 1024]);
+        });
+
+        let directory = download_directory("cancelled-download");
+        let destination = directory.join("take.wav");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&destination, b"approved take").unwrap();
+        let token = Arc::new(crate::stdlib::concurrent::CancelToken::new());
+        crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|current| {
+            *current.borrow_mut() = Some(Arc::clone(&token));
+        });
+        let canceller = thread::spawn(move || {
+            chunk_received.recv().unwrap();
+            token.cancel();
+        });
+
+        let result = http_download(
+            &HashMap::from([("url".to_string(), Value::String(url))]),
+            destination.to_str().unwrap(),
+            DownloadOptions {
+                overwrite: true,
+                create_parent: false,
+            },
+        );
+        crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|current| {
+            *current.borrow_mut() = None;
+        });
+
+        canceller.join().unwrap();
+        server.join().unwrap();
+        assert!(result
+            .expect_err("cancelled download must return a runtime error")
+            .to_string()
+            .contains("download cancelled"));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"approved take");
+        assert_no_download_temporary_file(&directory);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn request_map_download_defaults_reject_overwrite_and_missing_parent() {
+        let request = Value::Map(HashMap::from([(
+            "url".to_string(),
+            Value::String("http://127.0.0.1:1/audio".to_string()),
+        )]));
+        let directory = download_directory("safe-download-defaults");
+        let destination = directory.join("take.wav");
+
+        let missing_parent = download_from_args(&[
+            request.clone(),
+            Value::String(destination.to_string_lossy().into_owned()),
+        ])
+        .expect("download result");
+        assert!(result_error(missing_parent).contains("parent directory does not exist"));
+
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&destination, b"approved take").unwrap();
+        let existing = download_from_args(&[
+            request,
+            Value::String(destination.to_string_lossy().into_owned()),
+        ])
+        .expect("download result");
+        assert!(result_error(existing).contains("destination already exists"));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"approved take");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_download_creates_parent_and_overwrites_destination() {
+        let expected = b"new take".to_vec();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            expected.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(expected.clone())
+        .collect();
+        let (url, server) = raw_response_fixture(response);
+        let directory = download_directory("legacy-download");
+        let destination = directory.join("nested/take.wav");
+
+        let result = download_from_args(&[
+            Value::String(url),
+            Value::String(destination.to_string_lossy().into_owned()),
+        ])
+        .expect("download result");
+
+        server.join().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), expected);
+        assert!(matches!(
+            result_map(result).get("bytes_written"),
+            Some(Value::Int(8))
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
