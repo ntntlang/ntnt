@@ -4,7 +4,8 @@
 //! `wait()`, `try_wait()`, `terminate()`, and `kill()`. Both launch executables
 //! directly, require `NTNT_PROCESS_ENABLE`, and honor an optional exact-path
 //! `NTNT_PROCESS_ALLOW` allowlist. All active commands are registered for runtime
-//! shutdown, and started processes are monitored autonomously.
+//! shutdown, started processes are monitored autonomously, and capture-thread
+//! draining is bounded after the direct child exits.
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
@@ -24,6 +25,7 @@ type OutputReader = JoinHandle<OutputReadResult>;
 
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_TERMINATION_GRACE_MS: u64 = 5_000;
+const IO_THREAD_DRAIN_GRACE_MS: u64 = 500;
 
 enum StdinMode {
     Null,
@@ -665,11 +667,27 @@ fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, Stri
 
 fn join_reader(reader: Option<OutputReader>, stream: &str) -> std::result::Result<Vec<u8>, String> {
     match reader {
-        Some(reader) => reader
-            .join()
-            .map_err(|_| format!("process {stream} reader panicked"))?,
+        Some(reader) => {
+            wait_for_io_thread(&reader, stream)?;
+            reader
+                .join()
+                .map_err(|_| format!("process {stream} reader panicked"))?
+        }
         None => Ok(Vec::new()),
     }
+}
+
+fn wait_for_io_thread<T>(thread: &JoinHandle<T>, stream: &str) -> std::result::Result<(), String> {
+    let deadline = Instant::now() + Duration::from_millis(IO_THREAD_DRAIN_GRACE_MS);
+    while !thread.is_finished() {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "process {stream} remained open after the child exited"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
 }
 
 fn exit_signal(status: &ExitStatus) -> Option<i32> {
@@ -714,6 +732,7 @@ fn finalize_process(
         .unwrap_or_else(|error| error.into_inner())
         .take()
         .map(|writer| {
+            wait_for_io_thread(&writer, "stdin")?;
             writer
                 .join()
                 .map_err(|_| "process stdin writer panicked".to_string())?
@@ -1718,6 +1737,83 @@ mod tests {
         assert!(matches!(result.get("timed_out"), Some(Value::Bool(true))));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn detached_descendant_cannot_block_autonomous_finalization() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let marker =
+            std::env::temp_dir().join(format!("ntnt-process-detached-{}", std::process::id()));
+        std::fs::remove_file(&marker).ok();
+        let marker_text = marker.to_string_lossy().into_owned();
+        let (program, args) =
+            current_test_command("fixture_spawn_detached_descendant", &[&marker_text]);
+        let options = HashMap::from([
+            (
+                "stdout".to_string(),
+                Value::Map(HashMap::from([(
+                    "mode".to_string(),
+                    Value::String("capture".to_string()),
+                )])),
+            ),
+            (
+                "stderr".to_string(),
+                Value::Map(HashMap::from([(
+                    "mode".to_string(),
+                    Value::String("capture".to_string()),
+                )])),
+            ),
+        ]);
+
+        let started = with_process_capability(&program, || {
+            start_from_args(&run_args_with_options(program.clone(), args, options))
+                .expect("start result")
+        });
+        let (variant, handle) = result_variant(started);
+        assert_eq!(variant, "Ok");
+        let Value::ProcessHandle(id) = handle else {
+            panic!("expected process handle");
+        };
+        let process = RUNTIME.get(id).expect("registered process");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let terminal = loop {
+            if let Some(terminal) = process
+                .terminal
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+            {
+                break Some(terminal);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+
+        let detached_pid: libc::pid_t = std::fs::read_to_string(&marker)
+            .expect("detached fixture wrote pid")
+            .parse()
+            .expect("valid detached fixture pid");
+        unsafe {
+            libc::kill(-detached_pid, libc::SIGKILL);
+        }
+        std::fs::remove_file(marker).ok();
+
+        let wait_started = Instant::now();
+        let waited = wait_from_args(&[Value::ProcessHandle(id)]).expect("wait result");
+        let wait_elapsed = wait_started.elapsed();
+        RUNTIME.shutdown();
+
+        let terminal = terminal.expect("autonomous finalization must be bounded");
+        let error = match terminal {
+            Err(error) => error,
+            Ok(_) => panic!("detached captured pipe must fail clearly"),
+        };
+        assert!(error.contains("remained open after the child exited"));
+        assert!(wait_elapsed < Duration::from_secs(1));
+        assert_eq!(result_variant(waited).0, "Err");
+    }
+
     #[test]
     fn runtime_shutdown_interrupts_blocking_run_processes() {
         let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
@@ -1808,6 +1904,56 @@ mod tests {
             .expect("spawn descendant fixture");
         std::thread::sleep(Duration::from_secs(10));
         let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn fixture_spawn_detached_descendant() {
+        use std::os::unix::process::CommandExt;
+
+        let marker = std::env::args()
+            .skip_while(|argument| argument != "--")
+            .nth(1)
+            .expect("pid marker argument");
+        let executable = std::env::current_exe().unwrap();
+        let mut command = std::process::Command::new(executable);
+        command.args([
+            "--exact",
+            "stdlib::process::tests::fixture_write_pid_and_sleep",
+            "--ignored",
+            "--nocapture",
+            "--",
+            &marker,
+        ]);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let _detached = command.spawn().expect("spawn detached descendant fixture");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !Path::new(&marker).is_file() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            Path::new(&marker).is_file(),
+            "detached fixture did not start"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn fixture_write_pid_and_sleep() {
+        let marker = std::env::args()
+            .skip_while(|argument| argument != "--")
+            .nth(1)
+            .expect("pid marker argument");
+        std::fs::write(marker, std::process::id().to_string()).unwrap();
+        std::thread::sleep(Duration::from_secs(10));
     }
 
     #[test]
