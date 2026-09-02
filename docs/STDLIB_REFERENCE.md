@@ -9069,6 +9069,7 @@ import { to_html, to_html_safe, parse_blocks } from "std/markdown"
 | Function | Description |
 |----------|-------------|
 | [`parse_blocks`](#parseblocks) | Parse Markdown into ordered, non-overlapping top-level blocks. |
+| [`replace_source_range`](#replacesourcerange) | Replace an inclusive-start, exclusive-end UTF-8 byte range in Markdown source. This pairs with parse_blocks() offsets while preserving every byte outside the range. |
 | [`to_html`](#tohtml) | Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags pass through as-is. Use to_html_safe() if the input is untrusted. |
 | [`to_html_safe`](#tohtmlsafe) | Convert a Markdown string to HTML with embedded HTML tags stripped. Use this when rendering user-supplied or untrusted Markdown content. |
 
@@ -9099,6 +9100,39 @@ parse_blocks("# Hello\n\nWorld")  // => [{kind: "heading", start: 0, end: 7, sou
 - **TypeError**: parse_blocks() requires a String argument — *Fix: Pass Markdown source as a String*
 
 **See also:** `to_html`, `to_html_safe`
+
+*Since v0.5.3*
+
+---
+
+#### `replace_source_range`
+
+```ntnt
+replace_source_range(markdown: String, start: Int, end: Int, replacement: String) -> String
+```
+
+Replace an inclusive-start, exclusive-end UTF-8 byte range in Markdown source. This pairs with parse_blocks() offsets while preserving every byte outside the range.
+
+**Parameters:**
+
+- `markdown` — Original Markdown source.
+- `start` — Inclusive UTF-8 byte offset.
+- `end` — Exclusive UTF-8 byte offset.
+- `replacement` — Replacement source text.
+
+**Returns:** Markdown with exactly the requested source range replaced.
+
+**Examples:**
+
+```ntnt
+replace_source_range("# Chaptér\n\nOld", 12, 15, "New")  // => "# Chaptér\n\nNew"  // Splice a parsed source range
+```
+
+**Errors:**
+
+- **RuntimeError**: Invalid Markdown source range — *Fix: Use UTF-8 byte offsets returned by parse_blocks()*
+
+**See also:** `parse_blocks`
 
 *Since v0.5.3*
 

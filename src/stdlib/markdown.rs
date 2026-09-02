@@ -113,7 +113,75 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt replace_source_range
+    // @module std/markdown
+    // @signature replace_source_range(markdown: String, start: Int, end: Int, replacement: String) -> String
+    // Replace an inclusive-start, exclusive-end UTF-8 byte range in Markdown source.
+    // This pairs with parse_blocks() offsets while preserving every byte outside the range.
+    // @param markdown Original Markdown source.
+    // @param start Inclusive UTF-8 byte offset.
+    // @param end Exclusive UTF-8 byte offset.
+    // @param replacement Replacement source text.
+    // @returns Markdown with exactly the requested source range replaced.
+    // @see_also parse_blocks
+    // @since v0.5.3
+    // @tags #text #markdown
+    // @example replace_source_range("# Chaptér\n\nOld", 12, 15, "New") => "# Chaptér\n\nNew" ~ "Splice a parsed source range"
+    // @error RuntimeError ~ "Invalid Markdown source range" fix: "Use UTF-8 byte offsets returned by parse_blocks()"
+    module.insert(
+        "replace_source_range".to_string(),
+        Value::NativeFunction {
+            name: "replace_source_range".to_string(),
+            arity: 4,
+            max_arity: 4,
+            requires: None,
+            func: |args| match (&args[0], &args[1], &args[2], &args[3]) {
+                (
+                    Value::String(markdown),
+                    Value::Int(start),
+                    Value::Int(end),
+                    Value::String(replacement),
+                ) => {
+                    let start = usize::try_from(*start).map_err(|_| {
+                        IntentError::runtime_error("Invalid Markdown source range".to_string())
+                    })?;
+                    let end = usize::try_from(*end).map_err(|_| {
+                        IntentError::runtime_error("Invalid Markdown source range".to_string())
+                    })?;
+                    replace_markdown_source_range(markdown, start, end, replacement)
+                        .map(Value::String)
+                }
+                _ => Err(IntentError::type_error(
+                    "replace_source_range() requires string, int, int, string".to_string(),
+                )),
+            },
+        },
+    );
+
     module
+}
+
+fn replace_markdown_source_range(
+    markdown: &str,
+    start: usize,
+    end: usize,
+    replacement: &str,
+) -> std::result::Result<String, IntentError> {
+    if start > end
+        || end > markdown.len()
+        || !markdown.is_char_boundary(start)
+        || !markdown.is_char_boundary(end)
+    {
+        return Err(IntentError::runtime_error(
+            "Invalid Markdown source range".to_string(),
+        ));
+    }
+
+    let mut edited = String::with_capacity(markdown.len() - (end - start) + replacement.len());
+    edited.push_str(&markdown[..start]);
+    edited.push_str(replacement);
+    edited.push_str(&markdown[end..]);
+    Ok(edited)
 }
 
 /// Convert markdown to HTML
@@ -466,6 +534,18 @@ mod tests {
         assert_eq!(blocks[1].source, "Mara *paused*.");
         assert_eq!(blocks[1].text, "Mara paused.");
         assert!(blocks[0].end < blocks[1].start);
+    }
+
+    #[test]
+    fn replace_source_range_uses_utf8_byte_offsets() {
+        let input = "# Chaptér\n\nMara *paused*.\n";
+        let blocks = parse_markdown_blocks(input);
+        let edited =
+            replace_markdown_source_range(input, blocks[1].start, blocks[1].end, "Mara listened.")
+                .unwrap();
+
+        assert_eq!(edited, "# Chaptér\n\nMara listened.\n");
+        assert!(replace_markdown_source_range(input, 0, 8, "bad").is_err());
     }
 
     #[test]

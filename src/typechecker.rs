@@ -4701,6 +4701,12 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     value_type: Box::new(Type::Any),
                 }))
             );
+            sig!("replace_source_range", [
+                "markdown" => Type::String,
+                "start" => Type::Int,
+                "end" => Type::Int,
+                "replacement" => Type::String
+            ], Type::String);
         }
         "std/process" => {
             sig!("run", [
