@@ -27,6 +27,7 @@
 - [std/netmon](#stdnetmon)
 - [std/path](#stdpath)
 - [std/postgres](#stdpostgres)
+- [std/process](#stdprocess)
 - [std/secrets](#stdsecrets)
 - [std/sqlite](#stdsqlite)
 - [std/string](#stdstring)
@@ -6551,7 +6552,7 @@ import { fetch, download, Cache } from "std/http"
 | [`cache_clear`](#cacheclear) | Remove all cached responses from a cache. |
 | [`cache_delete`](#cachedelete) | Remove a cached response for a specific URL. |
 | [`cache_fetch`](#cachefetch) | Fetch a URL using a cache, returning a cached response if available. |
-| [`download`](#download) | Download a file from a URL and save it to disk. |
+| [`download`](#download) | Stream an HTTP response to a file and promote it atomically. |
 | [`fetch`](#fetch) | Make an HTTP request to a URL. |
 
 #### `Cache`
@@ -6693,29 +6694,31 @@ cache_fetch(my_cache, "https://api.example.com/data")  // => Ok({status: 200, ..
 #### `download`
 
 ```ntnt
-download(url: String, file_path: String) -> Result<Map, String>
+download(url_or_options: String | Map, file_path: String, file_options?: Map) -> Result<Map, String>
 ```
 
-Download a file from a URL and save it to disk.
+Stream an HTTP response to a file and promote it atomically.
 
-Fetches the resource at the given URL and writes the response bytes to the specified file path. Parent directories are created automatically if they do not exist. Redirects are not followed; a 3xx response returns an error without creating the destination file. Returns a map with status, path, and size on success.
+A String performs the legacy GET behavior, including parent creation and overwrite. A request Map accepts the same request fields and safety rules as fetch(). Its safe file defaults reject overwrite and missing parents. file_options can set overwrite and create_parent. Failed requests leave an existing destination unchanged.
 
 **Parameters:**
 
-- `url` — The URL of the file to download
+- `url_or_options` — A URL String for GET or a fetch-compatible request Map
 - `file_path` — The local file path to save the downloaded content
+- `file_options` — Optional Map with overwrite and create_parent Bool fields
 
-**Returns:** Result<Map{status: Int, path: String, size: Int}, String> on success; Err with message on failure
+**Returns:** Result<Map{status: Int, path: String, size: Int, bytes_written: Int, headers: Map}, String>
 
 **Examples:**
 
 ```ntnt
-download("https://example.com/file.zip", "./file.zip")  // => Ok({status: 200, path: "./file.zip", size: 1024})  // Download a file
+download("https://example.com/file.zip", "./file.zip")  // => Ok({status: 200, path: "./file.zip", size: 1024, bytes_written: 1024})  // Legacy GET download
+download(map { "url": "https://example.com/audio", "method": "POST", "json": map { "text": "Hello" } }, "./take.wav", map { "create_parent": true })  // => Ok({status: 200, path: "./take.wav", ...})  // Binary POST download
 ```
 
 **Errors:**
 
-- **TypeError**: download() requires URL string and file path string — *Fix: Pass two String arguments: URL and file path*
+- **TypeError**: download() requires a URL String or request Map — *Fix: Pass a URL String or fetch-compatible request Map*
 - **RuntimeError**: Failed to create directory: ... — *Fix: Ensure the parent directory path is valid and writable*
 - **RuntimeError**: Failed to create file: ... — *Fix: Ensure the file path is valid and writable*
 - **RuntimeError**: HTTP error: status ... — *Fix: Check the URL and server availability*
@@ -9058,15 +9061,48 @@ set_log_level("error")  // Only show errors
 ## std/markdown
 
 ```ntnt
-import { to_html, to_html_safe } from "std/markdown"
+import { to_html, to_html_safe, parse_blocks } from "std/markdown"
 ```
 
 ### Functions
 
 | Function | Description |
 |----------|-------------|
+| [`parse_blocks`](#parseblocks) | Parse Markdown into ordered, non-overlapping top-level blocks. |
 | [`to_html`](#tohtml) | Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags pass through as-is. Use to_html_safe() if the input is untrusted. |
 | [`to_html_safe`](#tohtmlsafe) | Convert a Markdown string to HTML with embedded HTML tags stripped. Use this when rendering user-supplied or untrusted Markdown content. |
+
+#### `parse_blocks`
+
+```ntnt
+parse_blocks(markdown: String) -> Array<Map>
+```
+
+Parse Markdown into ordered, non-overlapping top-level blocks.
+
+Each block contains kind, inclusive start and exclusive end UTF-8 byte offsets, the exact source slice, plain text, and block-specific metadata. Bytes between blocks remain only in the original input so callers can replace one range without rewriting unrelated whitespace or formatting.
+
+**Parameters:**
+
+- `markdown` — Markdown source to parse.
+
+**Returns:** Ordered maps with kind, start, end, source, text, and meta fields.
+
+**Examples:**
+
+```ntnt
+parse_blocks("# Hello\n\nWorld")  // => [{kind: "heading", start: 0, end: 7, source: "# Hello", text: "Hello", meta: {level: 1}}, ...]  // Retain source ranges
+```
+
+**Errors:**
+
+- **TypeError**: parse_blocks() requires a String argument — *Fix: Pass Markdown source as a String*
+
+**See also:** `to_html`, `to_html_safe`
+
+*Since v0.5.3*
+
+---
 
 #### `to_html`
 
@@ -10972,6 +11008,185 @@ rollback(db)  // => true  // Roll back an active transaction
 **See also:** `begin`, `commit`
 
 *Since v0.2.0*
+
+---
+
+## std/process
+
+```ntnt
+import { run, start, wait } from "std/process"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`kill`](#kill) | Force termination of a supervised process. |
+| [`run`](#run) | Run a native program directly and wait for its bounded result. |
+| [`start`](#start) | Start a supervised native process and return an opaque handle. |
+| [`terminate`](#terminate) | Request graceful termination of a supervised process. |
+| [`try_wait`](#trywait) | Inspect a supervised process without blocking. |
+| [`wait`](#wait) | Wait for a supervised process and return its cached final result. |
+
+#### `kill`
+
+```ntnt
+kill(process: Process) -> Result<Bool, String>
+```
+
+Force termination of a supervised process.
+
+**Parameters:**
+
+- `process` — Opaque handle returned by start
+
+**Returns:** Ok(true) when requested or Ok(false) when already exited
+
+**Examples:**
+
+```ntnt
+kill(process)  // => Ok(true)  // Force child termination
+```
+
+*Since v0.5.3*
+
+---
+
+#### `run`
+
+```ntnt
+run(program: String, args: Array<String>, options?: Map) -> Result<Map, String>
+```
+
+Run a native program directly and wait for its bounded result.
+
+The operating-system process API receives every argument literally; no shell is invoked. Execution requires NTNT_PROCESS_ENABLE=1 and respects NTNT_PROCESS_ALLOW.
+
+**Parameters:**
+
+- `program` — Executable path or name resolved through PATH
+- `args` — Literal arguments passed directly to the executable
+- `options` — Optional cwd, env, stdio, timeout, grace, and output-limit settings
+
+**Returns:** Ok with exit, output, timeout, and duration fields; Err for capability or monitoring failures
+
+**Examples:**
+
+```ntnt
+run("/usr/bin/ffmpeg", ["-version"])  // => Ok({...})  // Run without a shell
+```
+
+**Errors:**
+
+- **RuntimeError**: process execution is disabled — *Fix: Set NTNT_PROCESS_ENABLE=1 for a trusted application*
+
+*Since v0.5.3*
+
+---
+
+#### `start`
+
+```ntnt
+start(program: String, args: Array<String>, options?: Map) -> Result<Process, String>
+```
+
+Start a supervised native process and return an opaque handle.
+
+**Parameters:**
+
+- `program` — Executable path or name resolved through PATH
+- `args` — Literal arguments passed directly to the executable
+- `options` — Optional cwd, env, stdio, timeout, grace, and output-limit settings
+
+**Returns:** Ok(Process) or an execution/capability error
+
+**Examples:**
+
+```ntnt
+start("mlx_audio.server", [])  // => Ok(Process(1))  // Start a supervised service
+```
+
+**Gotchas:**
+
+- start defaults stdout and stderr to inherit; select capture only when output is bounded and will be collected
+
+*Since v0.5.3*
+
+---
+
+#### `terminate`
+
+```ntnt
+terminate(process: Process) -> Result<Bool, String>
+```
+
+Request graceful termination of a supervised process.
+
+**Parameters:**
+
+- `process` — Opaque handle returned by start
+
+**Returns:** Ok(true) when requested or Ok(false) when already exited
+
+**Examples:**
+
+```ntnt
+terminate(process)  // => Ok(true)  // Request graceful termination
+```
+
+**Gotchas:**
+
+- Unix sends SIGTERM; Windows uses the supported child termination operation
+
+*Since v0.5.3*
+
+---
+
+#### `try_wait`
+
+```ntnt
+try_wait(process: Process) -> Result<Option<Map>, String>
+```
+
+Inspect a supervised process without blocking.
+
+**Parameters:**
+
+- `process` — Opaque handle returned by start
+
+**Returns:** Ok(None) while running or Ok(Some(result)) after exit
+
+**Examples:**
+
+```ntnt
+try_wait(process)  // => Ok(None)  // Poll without blocking
+```
+
+*Since v0.5.3*
+
+---
+
+#### `wait`
+
+```ntnt
+wait(process: Process) -> Result<Map, String>
+```
+
+Wait for a supervised process and return its cached final result.
+
+**Parameters:**
+
+- `process` — Opaque handle returned by start
+
+**Returns:** Ok with the final process result or Err for an invalid handle
+
+**Examples:**
+
+```ntnt
+wait(process)  // => Ok({success: true, exit_code: Some(0), ...})  // Wait and cache the final result
+```
+
+*Since v0.5.3*
 
 ---
 

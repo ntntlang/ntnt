@@ -13,6 +13,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, IntentError>;
+type OutputReadResult = std::result::Result<Vec<u8>, String>;
+type OutputReader = JoinHandle<OutputReadResult>;
 
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_TERMINATION_GRACE_MS: u64 = 5_000;
@@ -72,8 +74,8 @@ impl ProcessOptions {
 
 struct ProcessEntry {
     child: Mutex<Child>,
-    stdout_reader: Mutex<Option<JoinHandle<std::result::Result<Vec<u8>, String>>>>,
-    stderr_reader: Mutex<Option<JoinHandle<std::result::Result<Vec<u8>, String>>>>,
+    stdout_reader: Mutex<Option<OutputReader>>,
+    stderr_reader: Mutex<Option<OutputReader>>,
     stdin_writer: Mutex<Option<JoinHandle<std::result::Result<(), String>>>>,
     output_error: Arc<Mutex<Option<String>>>,
     started_at: Instant,
@@ -413,7 +415,7 @@ fn spawn_reader<R: Read + Send + 'static>(
     stream: &'static str,
     max_bytes: usize,
     output_error: Arc<Mutex<Option<String>>>,
-) -> JoinHandle<std::result::Result<Vec<u8>, String>> {
+) -> OutputReader {
     std::thread::spawn(move || {
         let mut output = Vec::new();
         let mut buffer = [0_u8; 16 * 1024];
@@ -579,7 +581,7 @@ fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, Stri
 }
 
 fn join_reader(
-    reader: Option<JoinHandle<std::result::Result<Vec<u8>, String>>>,
+    reader: Option<OutputReader>,
     stream: &str,
 ) -> std::result::Result<Vec<u8>, String> {
     match reader {
@@ -967,6 +969,8 @@ pub fn init() -> HashMap<String, Value> {
     // @param args Literal arguments passed directly to the executable
     // @param options Optional cwd, env, stdio, timeout, grace, and output-limit settings
     // @returns Ok(Process) or an execution/capability error
+    // @example start("mlx_audio.server", []) => Ok(Process(1)) ~ "Start a supervised service"
+    // @gotcha start defaults stdout and stderr to inherit; select capture only when output is bounded and will be collected
     // @since v0.5.3
     // @tags #process #system
     module.insert(
@@ -986,6 +990,7 @@ pub fn init() -> HashMap<String, Value> {
     // Wait for a supervised process and return its cached final result.
     // @param process Opaque handle returned by start
     // @returns Ok with the final process result or Err for an invalid handle
+    // @example wait(process) => Ok({success: true, exit_code: Some(0), ...}) ~ "Wait and cache the final result"
     // @since v0.5.3
     // @tags #process #system
     module.insert(
@@ -1005,6 +1010,7 @@ pub fn init() -> HashMap<String, Value> {
     // Inspect a supervised process without blocking.
     // @param process Opaque handle returned by start
     // @returns Ok(None) while running or Ok(Some(result)) after exit
+    // @example try_wait(process) => Ok(None) ~ "Poll without blocking"
     // @since v0.5.3
     // @tags #process #system
     module.insert(
@@ -1024,6 +1030,8 @@ pub fn init() -> HashMap<String, Value> {
     // Request graceful termination of a supervised process.
     // @param process Opaque handle returned by start
     // @returns Ok(true) when requested or Ok(false) when already exited
+    // @example terminate(process) => Ok(true) ~ "Request graceful termination"
+    // @gotcha Unix sends SIGTERM; Windows uses the supported child termination operation
     // @since v0.5.3
     // @tags #process #system
     module.insert(
@@ -1043,6 +1051,7 @@ pub fn init() -> HashMap<String, Value> {
     // Force termination of a supervised process.
     // @param process Opaque handle returned by start
     // @returns Ok(true) when requested or Ok(false) when already exited
+    // @example kill(process) => Ok(true) ~ "Force child termination"
     // @since v0.5.3
     // @tags #process #system
     module.insert(

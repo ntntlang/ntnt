@@ -3753,3 +3753,69 @@ for name in users { print("#{name}: #{users[name]}") }         // keys
 for entry in entries(users) { print("#{entry[\"key\"]}") }    // key-value
 for age in values(users) { print(age) }                      // values only
 ```
+
+## Source-Mapped Markdown
+
+Use `parse_blocks` when an editor must preserve the manuscript exactly while changing one semantic block. Ranges are UTF-8 byte offsets, not character indexes. Keep the original string and replace only `source[start..end]`; bytes between blocks, including blank lines, remain untouched.
+
+```ntnt
+import { parse_blocks } from "std/markdown"
+
+let manuscript = "# Chaptér\n\nMara *paused*."
+let blocks = parse_blocks(manuscript)
+print(blocks[1]["source"])
+print(blocks[1]["text"])
+```
+
+## Streaming HTTP Downloads
+
+`download` accepts the same request map as `fetch` and writes response bytes to a sibling temporary file before atomic promotion. Request-map downloads do not overwrite or create parents unless explicitly enabled.
+
+```ntnt
+import { download } from "std/http"
+
+let result = download(map {
+    "url": "http://127.0.0.1:8000/v1/audio/speech",
+    "method": "POST",
+    "headers": map { "content-type": "application/json" },
+    "body": "{\"text\":\"Mara paused.\"}",
+    "timeout": 600
+}, "./takes/segment-001.wav", map {
+    "overwrite": true,
+    "create_parent": true
+})
+```
+
+Failed statuses, cancellation, truncated responses, and write errors preserve an existing destination. The legacy two-string form retains its original overwrite and parent-creation behavior.
+
+## Native Processes
+
+`std/process` invokes an executable directly with a structured argument array. It never interprets shell syntax. Process execution requires `NTNT_PROCESS_ENABLE=1`; when `NTNT_PROCESS_ALLOW` is set, every executable must match one of its canonical paths. The allowlist uses the platform path delimiter (`:` on Unix and `;` on Windows).
+
+```ntnt
+import { run, start, try_wait, wait, terminate, kill } from "std/process"
+
+match run("/usr/bin/ffmpeg", ["-version"]) {
+    Ok(result) => print(result["stdout"]),
+    Err(error) => print(error)
+}
+
+match start("mlx_audio.server", [], map {
+    "termination_grace_ms": 5000
+}) {
+    Ok(process_handle) => {
+        match try_wait(process_handle) {
+            Ok(None) => print("running"),
+            Ok(Some(result)) => print(result["exit_code"]),
+            Err(error) => print(error)
+        }
+        terminate(process_handle)
+        wait(process_handle)
+    },
+    Err(error) => print(error)
+}
+```
+
+`run` defaults to captured stdout/stderr and enforces an 8 MiB limit per stream. `start` defaults to inherited output to avoid unbounded service logs. Timeouts request graceful termination, wait for `termination_grace_ms`, force-kill survivors, and reap the child. On Unix graceful termination sends `SIGTERM`; Windows uses the closest supported child termination operation.
+
+Invoking a shell explicitly, such as `run("/bin/sh", ["-c", command])`, grants access to everything that shell can execute under the NTNT process account. Only allowlist a shell when that authority is intentional.
