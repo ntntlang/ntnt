@@ -813,6 +813,24 @@ print(token)
     assert!(!stderr.contains("template-secret-canary"));
 }
 
+#[test]
+fn test_markdown_parse_blocks_exposes_exact_source_map() {
+    let code = r##"
+import { parse_blocks } from "std/markdown"
+let blocks = parse_blocks("# Chaptér\n\nMara *paused*.")
+print(blocks[0]["kind"])
+print(blocks[0]["source"])
+print(blocks[0]["start"])
+print(blocks[0]["end"])
+print(blocks[1]["text"])
+"##;
+
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "stdout={stdout}\nstderr={stderr}");
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines, ["heading", "# Chaptér", "0", "10", "Mara paused."]);
+}
+
 #[cfg(unix)]
 #[test]
 fn test_unix_socket_secret_provider_end_to_end() {
