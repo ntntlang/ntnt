@@ -30,6 +30,9 @@ fn capture_http_request(listener: TcpListener) -> std::thread::JoinHandle<Option
                 Ok((mut stream, _)) => {
                     let mut request = Vec::new();
                     stream
+                        .set_nonblocking(false)
+                        .expect("set HTTP capture blocking");
+                    stream
                         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                         .expect("request read timeout");
                     let mut chunk = [0_u8; 1024];
