@@ -179,6 +179,81 @@ configure_queue(map {{ "store": {store} }})
     assert!(!survived, "child {pid} survived CLI exit");
 }
 
+#[cfg(unix)]
+#[test]
+fn sigint_shutdowns_started_processes() {
+    let fixture = std::env::current_exe().unwrap();
+    let fixture_text = fixture.to_string_lossy();
+    let program = program_literal(&fixture_text);
+    let directory = std::env::temp_dir().join(format!(
+        "ntnt-process-sigint-{}-{}",
+        std::process::id(),
+        TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("server.tnt");
+    let marker = directory.join("child.pid");
+    let code = format!(
+        r#"
+import {{ start, wait }} from "std/process"
+
+match start({program}, ["--exact", "process_fixture_write_pid_and_sleep", "--ignored", "--nocapture", "--", {marker}], map {{
+    "stdout": map {{ "mode": "null" }},
+    "stderr": map {{ "mode": "null" }}
+}}) {{
+    Ok(child) => wait(child),
+    Err(error) => print(error)
+}}
+"#,
+        marker = program_literal(&marker.to_string_lossy()),
+    );
+    fs::write(&source, code).unwrap();
+
+    let mut ntnt = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .arg("run")
+        .arg(&source)
+        .env("NTNT_PROCESS_ENABLE", "1")
+        .env("NTNT_PROCESS_ALLOW", &*fixture_text)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("run NTNT SIGINT fixture");
+
+    for _ in 0..100 {
+        if marker.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let pid: u32 = fs::read_to_string(&marker)
+        .expect("started fixture wrote pid")
+        .parse()
+        .expect("valid fixture pid");
+    unsafe {
+        libc::kill(ntnt.id() as libc::pid_t, libc::SIGINT);
+    }
+    for _ in 0..100 {
+        if ntnt.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if ntnt.try_wait().unwrap().is_none() {
+        ntnt.kill().ok();
+        ntnt.wait().ok();
+        panic!("NTNT did not exit after SIGINT");
+    }
+
+    let survived = process_exists(pid);
+    if survived {
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+    fs::remove_dir_all(directory).unwrap();
+    assert!(!survived, "child {pid} survived NTNT SIGINT");
+}
+
 #[test]
 #[ignore]
 fn process_fixture_print_args() {

@@ -876,6 +876,11 @@ fn exit_with_runtime_cleanup(code: i32) -> ! {
     std::process::exit(code)
 }
 
+fn install_run_shutdown_handler() -> anyhow::Result<()> {
+    ctrlc::set_handler(|| exit_with_runtime_cleanup(130))
+        .map_err(|error| anyhow::anyhow!("Failed to set Ctrl-C handler: {}", error))
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -895,7 +900,10 @@ fn main() {
             file,
             timeout,
             workers,
-        }) => run_file_with_workers(&file, timeout, workers),
+        }) => match install_run_shutdown_handler() {
+            Ok(()) => run_file_with_workers(&file, timeout, workers),
+            Err(error) => Err(error),
+        },
         Some(Commands::Test {
             file,
             get_requests,
@@ -959,7 +967,10 @@ fn main() {
         Some(Commands::Workers(workers_cmd)) => run_workers_command(workers_cmd),
         None => {
             if let Some(file) = cli.file {
-                run_file(&file, 30)
+                match install_run_shutdown_handler() {
+                    Ok(()) => run_file(&file, 30),
+                    Err(error) => Err(error),
+                }
             } else {
                 run_repl()
             }
