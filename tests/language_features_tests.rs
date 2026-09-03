@@ -888,7 +888,7 @@ let result = download(map {{
     "url": "http://127.0.0.1:{port}/speech",
     "method": "POST",
     "json": map {{ "text": "Mara paused." }}
-}}, "{}", map {{ "create_parent": true }})
+}}, {}, map {{ "create_parent": true }})
 match result {{
     Ok(info) => {{
         print(info["status"])
@@ -897,7 +897,7 @@ match result {{
     Err(error) => print("error:" + error)
 }}
 "#,
-        destination.to_string_lossy()
+        serde_json::to_string(destination.to_string_lossy().as_ref()).unwrap()
     );
 
     let (stdout, stderr, exit_code) = run_ntnt_code(&code);

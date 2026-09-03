@@ -4,16 +4,16 @@
 //! `wait()`, `try_wait()`, `terminate()`, and `kill()`. Both launch executables
 //! directly, require `NTNT_PROCESS_ENABLE`, and honor an optional exact-path
 //! `NTNT_PROCESS_ALLOW` allowlist. All active commands are registered for runtime
-//! shutdown, started processes are monitored autonomously, and capture-thread
-//! draining is bounded after the direct child exits.
+//! shutdown, started processes are monitored autonomously, and captured pipes use
+//! cancellable workers that are joined after a bounded drain.
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::JoinHandle;
@@ -26,6 +26,115 @@ type OutputReader = JoinHandle<OutputReadResult>;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_TERMINATION_GRACE_MS: u64 = 5_000;
 const IO_THREAD_DRAIN_GRACE_MS: u64 = 500;
+
+#[cfg(test)]
+static ACTIVE_OUTPUT_READERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+struct ActiveOutputReader;
+
+#[cfg(test)]
+impl Drop for ActiveOutputReader {
+    fn drop(&mut self) {
+        ACTIVE_OUTPUT_READERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+trait ProcessPipe: Read + Send + 'static {
+    fn prepare(&self) -> std::io::Result<()>;
+    fn read_available(&mut self, buffer: &mut [u8]) -> std::io::Result<Option<usize>>;
+}
+
+#[cfg(unix)]
+fn set_pipe_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> std::io::Result<()> {
+    let descriptor = pipe.as_raw_fd();
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+macro_rules! impl_process_pipe {
+    ($pipe:ty) => {
+        impl ProcessPipe for $pipe {
+            fn prepare(&self) -> std::io::Result<()> {
+                set_pipe_nonblocking(self)
+            }
+
+            fn read_available(&mut self, buffer: &mut [u8]) -> std::io::Result<Option<usize>> {
+                match self.read(buffer) {
+                    Ok(read) => Ok(Some(read)),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(None),
+                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(Some(0)),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    };
+}
+
+#[cfg(windows)]
+fn pipe_bytes_available(
+    pipe: &impl std::os::windows::io::AsRawHandle,
+) -> std::io::Result<Option<usize>> {
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+    let mut available = 0_u32;
+    let result = unsafe {
+        PeekNamedPipe(
+            pipe.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut available,
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(109) {
+            return Ok(Some(0));
+        }
+        return Err(error);
+    }
+    if available == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(available as usize))
+    }
+}
+
+#[cfg(windows)]
+macro_rules! impl_process_pipe {
+    ($pipe:ty) => {
+        impl ProcessPipe for $pipe {
+            fn prepare(&self) -> std::io::Result<()> {
+                Ok(())
+            }
+
+            fn read_available(&mut self, buffer: &mut [u8]) -> std::io::Result<Option<usize>> {
+                let Some(available) = pipe_bytes_available(self)? else {
+                    return Ok(None);
+                };
+                if available == 0 {
+                    return Ok(Some(0));
+                }
+                let to_read = available.min(buffer.len());
+                self.read(&mut buffer[..to_read]).map(Some)
+            }
+        }
+    };
+}
+
+impl_process_pipe!(ChildStdout);
+impl_process_pipe!(ChildStderr);
 
 enum StdinMode {
     Null,
@@ -81,7 +190,7 @@ struct ProcessEntry {
     child: Mutex<Child>,
     stdout_reader: Mutex<Option<OutputReader>>,
     stderr_reader: Mutex<Option<OutputReader>>,
-    stdin_writer: Mutex<Option<JoinHandle<std::result::Result<(), String>>>>,
+    io_cancel: Arc<AtomicBool>,
     output_error: Arc<Mutex<Option<String>>>,
     started_at: Instant,
     timeout: Option<Duration>,
@@ -446,19 +555,55 @@ fn output_stdio(mode: &OutputMode) -> std::result::Result<Stdio, String> {
     }
 }
 
-fn spawn_reader<R: Read + Send + 'static>(
+fn input_stdio(mode: &StdinMode) -> std::result::Result<Stdio, String> {
+    match mode {
+        StdinMode::Null => Ok(Stdio::null()),
+        StdinMode::Inherit => Ok(Stdio::inherit()),
+        StdinMode::File(path) => File::open(path)
+            .map(Stdio::from)
+            .map_err(|error| format!("cannot open process input '{}': {error}", path.display())),
+        StdinMode::Data(data) => {
+            let mut file = tempfile::tempfile()
+                .map_err(|error| format!("cannot create process stdin buffer: {error}"))?;
+            file.write_all(data)
+                .map_err(|error| format!("cannot write process stdin buffer: {error}"))?;
+            file.seek(SeekFrom::Start(0))
+                .map_err(|error| format!("cannot rewind process stdin buffer: {error}"))?;
+            Ok(Stdio::from(file))
+        }
+    }
+}
+
+fn spawn_reader<R: ProcessPipe>(
     mut reader: R,
     stream: &'static str,
     max_bytes: usize,
+    io_cancel: Arc<AtomicBool>,
     output_error: Arc<Mutex<Option<String>>>,
 ) -> OutputReader {
     std::thread::spawn(move || {
+        #[cfg(test)]
+        let _active_reader = {
+            ACTIVE_OUTPUT_READERS.fetch_add(1, Ordering::AcqRel);
+            ActiveOutputReader
+        };
         let mut output = Vec::new();
         let mut buffer = [0_u8; 16 * 1024];
         loop {
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|error| format!("failed reading process {stream}: {error}"))?;
+            if io_cancel.load(Ordering::Acquire) {
+                return Ok(output);
+            }
+            let read = match reader.read_available(&mut buffer) {
+                Ok(Some(read)) => read,
+                Ok(None) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(format!("failed reading process {stream}: {error}"));
+                }
+            };
             if read == 0 {
                 return Ok(output);
             }
@@ -496,17 +641,7 @@ fn spawn_process(
     }
     command.stdout(output_stdio(&options.stdout)?);
     command.stderr(output_stdio(&options.stderr)?);
-    match &options.stdin {
-        StdinMode::Null => command.stdin(Stdio::null()),
-        StdinMode::Inherit => command.stdin(Stdio::inherit()),
-        StdinMode::File(path) => {
-            let file = File::open(path).map_err(|error| {
-                format!("cannot open process input '{}': {error}", path.display())
-            })?;
-            command.stdin(Stdio::from(file))
-        }
-        StdinMode::Data(_) => command.stdin(Stdio::piped()),
-    };
+    command.stdin(input_stdio(&options.stdin)?);
 
     let started_at = Instant::now();
     let mut child = command.spawn().map_err(|error| {
@@ -515,41 +650,46 @@ fn spawn_process(
             executable.display()
         )
     })?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let capture_setup = stdout
+        .as_ref()
+        .map(ProcessPipe::prepare)
+        .transpose()
+        .and_then(|_| stderr.as_ref().map(ProcessPipe::prepare).transpose());
+    if let Err(error) = capture_setup {
+        let _ = kill_child(&mut child);
+        let _ = child.wait();
+        return Err(format!("failed to configure process capture: {error}"));
+    }
+
+    let io_cancel = Arc::new(AtomicBool::new(false));
     let output_error = Arc::new(Mutex::new(None));
-    let stdout_reader = child.stdout.take().map(|stdout| {
+    let stdout_reader = stdout.map(|stdout| {
         spawn_reader(
             stdout,
             "stdout",
             options.max_output_bytes,
+            Arc::clone(&io_cancel),
             Arc::clone(&output_error),
         )
     });
-    let stderr_reader = child.stderr.take().map(|stderr| {
+    let stderr_reader = stderr.map(|stderr| {
         spawn_reader(
             stderr,
             "stderr",
             options.max_output_bytes,
+            Arc::clone(&io_cancel),
             Arc::clone(&output_error),
         )
     });
-    let stdin_writer = match (&options.stdin, child.stdin.take()) {
-        (StdinMode::Data(data), Some(mut stdin)) => {
-            let data = data.clone();
-            Some(std::thread::spawn(move || {
-                stdin
-                    .write_all(&data)
-                    .map_err(|error| format!("failed writing process stdin: {error}"))
-            }))
-        }
-        _ => None,
-    };
     let timeout = options.timeout;
     let termination_grace = options.termination_grace;
     Ok(Arc::new(ProcessEntry {
         child: Mutex::new(child),
         stdout_reader: Mutex::new(stdout_reader),
         stderr_reader: Mutex::new(stderr_reader),
-        stdin_writer: Mutex::new(stdin_writer),
+        io_cancel,
         output_error,
         started_at,
         timeout,
@@ -667,27 +807,11 @@ fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, Stri
 
 fn join_reader(reader: Option<OutputReader>, stream: &str) -> std::result::Result<Vec<u8>, String> {
     match reader {
-        Some(reader) => {
-            wait_for_io_thread(&reader, stream)?;
-            reader
-                .join()
-                .map_err(|_| format!("process {stream} reader panicked"))?
-        }
+        Some(reader) => reader
+            .join()
+            .map_err(|_| format!("process {stream} reader panicked"))?,
         None => Ok(Vec::new()),
     }
-}
-
-fn wait_for_io_thread<T>(thread: &JoinHandle<T>, stream: &str) -> std::result::Result<(), String> {
-    let deadline = Instant::now() + Duration::from_millis(IO_THREAD_DRAIN_GRACE_MS);
-    while !thread.is_finished() {
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "process {stream} remained open after the child exited"
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    Ok(())
 }
 
 fn exit_signal(status: &ExitStatus) -> Option<i32> {
@@ -726,37 +850,48 @@ fn finalize_process(
     status: ExitStatus,
     timed_out: bool,
 ) -> std::result::Result<ProcessSummary, String> {
-    let stdin_result = process
-        .stdin_writer
+    let stdout_reader = process
+        .stdout_reader
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .take()
-        .map(|writer| {
-            wait_for_io_thread(&writer, "stdin")?;
-            writer
-                .join()
-                .map_err(|_| "process stdin writer panicked".to_string())?
-        })
-        .unwrap_or(Ok(()));
-    let stdout_result = join_reader(
-        process
-            .stdout_reader
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take(),
-        "stdout",
-    );
-    let stderr_result = join_reader(
-        process
-            .stderr_reader
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take(),
-        "stderr",
-    );
-    stdin_result?;
-    let stdout = stdout_result?;
-    let stderr = stderr_result?;
+        .take();
+    let stderr_reader = process
+        .stderr_reader
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+
+    let deadline = Instant::now() + Duration::from_millis(IO_THREAD_DRAIN_GRACE_MS);
+    while stdout_reader
+        .as_ref()
+        .is_some_and(|reader| !reader.is_finished())
+        || stderr_reader
+            .as_ref()
+            .is_some_and(|reader| !reader.is_finished())
+    {
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let stdout_lingering = stdout_reader
+        .as_ref()
+        .is_some_and(|reader| !reader.is_finished());
+    let stderr_lingering = stderr_reader
+        .as_ref()
+        .is_some_and(|reader| !reader.is_finished());
+    if stdout_lingering || stderr_lingering {
+        process.io_cancel.store(true, Ordering::Release);
+    }
+
+    let stdout = join_reader(stdout_reader, "stdout")?;
+    let stderr = join_reader(stderr_reader, "stderr")?;
+    if stdout_lingering {
+        return Err("process stdout remained open after the child exited".to_string());
+    }
+    if stderr_lingering {
+        return Err("process stderr remained open after the child exited".to_string());
+    }
     Ok(result_map(
         status,
         stdout,
@@ -1812,11 +1947,13 @@ mod tests {
         assert!(error.contains("remained open after the child exited"));
         assert!(wait_elapsed < Duration::from_secs(1));
         assert_eq!(result_variant(waited).0, "Err");
+        assert_eq!(ACTIVE_OUTPUT_READERS.load(Ordering::Acquire), 0);
     }
 
     #[test]
     fn runtime_shutdown_interrupts_blocking_run_processes() {
         let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        RUNTIME.shutdown();
         let runner = std::thread::spawn(|| {
             let (program, args) = current_test_command("fixture_sleep", &[]);
             let options = HashMap::from([

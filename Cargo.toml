@@ -100,9 +100,10 @@ pulldown-cmark = "0.13.0"
 hickory-resolver = "0.24.4"
 socket2 = "0.6"
 zeroize = { version = "1.8.2", features = ["serde"] }
+tempfile = "3.24"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_Pipes"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
