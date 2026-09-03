@@ -264,22 +264,33 @@ impl MacExitObserver {
             data: 0,
             udata: std::ptr::null_mut(),
         };
+        let mut initial_event: libc::kevent = unsafe { std::mem::zeroed() };
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let result = unsafe {
             libc::kevent(
                 queue.as_raw_fd(),
                 &change,
                 1,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
+                &mut initial_event,
+                1,
+                &timeout,
             )
         };
         if result == -1 {
             return Err(std::io::Error::last_os_error());
         }
+        if result == 1 && initial_event.flags & libc::EV_ERROR != 0 {
+            return Err(std::io::Error::from_raw_os_error(initial_event.data as i32));
+        }
+        let exited = result == 1
+            && initial_event.ident == child.id() as libc::uintptr_t
+            && initial_event.fflags & libc::NOTE_EXIT != 0;
         Ok(Self {
             queue,
-            exited: AtomicBool::new(false),
+            exited: AtomicBool::new(exited),
         })
     }
 
@@ -2181,7 +2192,8 @@ mod tests {
             let waited = with_process_capability(&program, || {
                 wait_from_args(std::slice::from_ref(&handle)).expect("wait result")
             });
-            assert_eq!(result_variant(waited).0, "Ok");
+            let (variant, value) = result_variant(waited);
+            assert_eq!(variant, "Ok", "unexpected process result: {value}");
             handles.push(handle);
         }
 
@@ -2457,7 +2469,10 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("detached captured pipe must fail clearly"),
         };
-        assert!(error.contains("remained open after the child exited"));
+        assert!(
+            error.contains("remained open after the child exited"),
+            "unexpected process error: {error}"
+        );
         assert!(wait_elapsed < Duration::from_secs(1));
         assert_eq!(result_variant(waited).0, "Err");
         assert_eq!(ACTIVE_OUTPUT_READERS.load(Ordering::Acquire), 0);
