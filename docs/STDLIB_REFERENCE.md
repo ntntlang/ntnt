@@ -11060,7 +11060,7 @@ import { run, start, wait } from "std/process"
 | [`start`](#start) | Start a supervised native process and return an opaque handle. The runtime monitors exit, timeout, and captured-output limits without caller polling. On Unix, the child leads a process group so timeout and shutdown also terminate descendants. start() accepts the same options as run(), but stdout/stderr default to inherit instead of capture. |
 | [`terminate`](#terminate) | Request graceful termination of a supervised process. |
 | [`try_wait`](#trywait) | Inspect a supervised process without blocking. |
-| [`wait`](#wait) | Wait for a supervised process and return its cached final result. |
+| [`wait`](#wait) | Wait for a supervised process and return its cached final result. The runtime retains at most 64 terminal handles and 64 MiB of terminal output; older handles return an invalid-handle error after eviction. |
 
 #### `kill`
 
@@ -11144,6 +11144,7 @@ start("mlx_audio.server", [])  // => Ok(Process(1))  // Start a supervised servi
 **Gotchas:**
 
 - start defaults stdout and stderr to inherit; select capture only when output is bounded and will be collected
+- Completed handles share a 64-entry, 64-MiB terminal-result cache; persist needed results instead of retaining handles indefinitely
 
 **See also:** `run`, `wait`, `try_wait`, `terminate`, `kill`
 
@@ -11191,7 +11192,7 @@ Inspect a supervised process without blocking.
 
 - `process` — Opaque handle returned by start
 
-**Returns:** Ok(None) while running or Ok(Some(result)) after exit
+**Returns:** Ok(None) while running, Ok(Some(result)) after exit, or Err for an invalid or evicted handle
 
 **Examples:**
 
@@ -11209,7 +11210,7 @@ try_wait(process)  // => Ok(None)  // Poll without blocking
 wait(process: Process) -> Result<Map, String>
 ```
 
-Wait for a supervised process and return its cached final result.
+Wait for a supervised process and return its cached final result. The runtime retains at most 64 terminal handles and 64 MiB of terminal output; older handles return an invalid-handle error after eviction.
 
 **Parameters:**
 

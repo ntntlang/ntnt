@@ -4,8 +4,9 @@
 //! `wait()`, `try_wait()`, `terminate()`, and `kill()`. Both launch executables
 //! directly, require `NTNT_PROCESS_ENABLE`, and honor an optional exact-path
 //! `NTNT_PROCESS_ALLOW` allowlist. All active commands are registered for runtime
-//! shutdown, started processes are monitored autonomously, and captured pipes use
-//! cancellable workers that are joined after a bounded drain.
+//! shutdown, started processes are monitored autonomously, captured pipes use
+//! cancellable workers that are joined after a bounded drain, and completed results
+//! remain in a bounded cache for repeated handle operations.
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
@@ -26,6 +27,8 @@ type OutputReader = JoinHandle<OutputReadResult>;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_TERMINATION_GRACE_MS: u64 = 5_000;
 const IO_THREAD_DRAIN_GRACE_MS: u64 = 500;
+const MAX_RETAINED_TERMINAL_PROCESSES: usize = 64;
+const MAX_RETAINED_TERMINAL_BYTES: usize = 64 * 1024 * 1024;
 
 #[cfg(test)]
 static ACTIVE_OUTPUT_READERS: std::sync::atomic::AtomicUsize =
@@ -196,6 +199,7 @@ struct ProcessEntry {
     timeout: Option<Duration>,
     termination_grace: Duration,
     monitor: Mutex<()>,
+    terminal_at: Mutex<Option<Instant>>,
     terminal: Mutex<Option<std::result::Result<ProcessSummary, String>>>,
 }
 
@@ -695,6 +699,7 @@ fn spawn_process(
         timeout,
         termination_grace,
         monitor: Mutex::new(()),
+        terminal_at: Mutex::new(None),
         terminal: Mutex::new(None),
     }))
 }
@@ -972,9 +977,13 @@ fn monitor_process(
         return result.map(Some);
     }
 
-    match monitor_process_uncached(process, block) {
-        Ok(None) => Ok(None),
+    let result = match monitor_process_uncached(process, block) {
+        Ok(None) => return Ok(None),
         Ok(Some(summary)) => {
+            *process
+                .terminal_at
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(Instant::now());
             *process
                 .terminal
                 .lock()
@@ -983,12 +992,18 @@ fn monitor_process(
         }
         Err(error) => {
             *process
+                .terminal_at
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(Instant::now());
+            *process
                 .terminal
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()) = Some(Err(error.clone()));
             Err(error)
         }
-    }
+    };
+    RUNTIME.prune_terminal_entries();
+    result
 }
 
 fn supervise_process(process: Arc<ProcessEntry>) {
@@ -1066,6 +1081,55 @@ impl ProcessRuntime {
             .remove(&id);
     }
 
+    fn prune_terminal_entries(&self) {
+        self.prune_terminal_entries_to(
+            MAX_RETAINED_TERMINAL_PROCESSES,
+            MAX_RETAINED_TERMINAL_BYTES,
+        );
+    }
+
+    fn prune_terminal_entries_to(&self, max_count: usize, max_bytes: usize) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut terminal = entries
+            .iter()
+            .filter_map(|(id, process)| {
+                let retained_bytes = process
+                    .terminal
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_ref()
+                    .map(|result| {
+                        result.as_ref().map_or(0, |summary| {
+                            summary.stdout.len().saturating_add(summary.stderr.len())
+                        })
+                    })?;
+                let terminal_at = process
+                    .terminal_at
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .unwrap_or(process.started_at);
+                Some((*id, terminal_at, retained_bytes))
+            })
+            .collect::<Vec<_>>();
+        terminal.sort_unstable_by_key(|(_, completed_at, _)| *completed_at);
+
+        let mut retained_count = terminal.len();
+        let mut retained_bytes = terminal
+            .iter()
+            .fold(0_usize, |total, (_, _, bytes)| total.saturating_add(*bytes));
+        for (id, _, bytes) in terminal {
+            if retained_count <= max_count && retained_bytes <= max_bytes {
+                break;
+            }
+            entries.remove(&id);
+            retained_count -= 1;
+            retained_bytes = retained_bytes.saturating_sub(bytes);
+        }
+    }
+
     pub fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
         let processes = self
@@ -1094,6 +1158,10 @@ impl ProcessRuntime {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             if terminal.is_none() {
+                *process
+                    .terminal_at
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(Instant::now());
                 *terminal =
                     Some(status.and_then(|status| finalize_process(&process, status, false)));
             }
@@ -1280,6 +1348,7 @@ pub fn init() -> HashMap<String, Value> {
     // @returns Ok(Process) or an execution/capability error
     // @example start("mlx_audio.server", []) => Ok(Process(1)) ~ "Start a supervised service"
     // @gotcha start defaults stdout and stderr to inherit; select capture only when output is bounded and will be collected
+    // @gotcha Completed handles share a 64-entry, 64-MiB terminal-result cache; persist needed results instead of retaining handles indefinitely
     // @see_also run, wait, try_wait, terminate, kill
     // @since v0.5.3
     // @tags #process #system
@@ -1297,7 +1366,9 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt wait
     // @module std/process
     // @signature wait(process: Process) -> Result<Map, String>
-    // Wait for a supervised process and return its cached final result.
+    // Wait for a supervised process and return its cached final result. The runtime
+    // retains at most 64 terminal handles and 64 MiB of terminal output; older
+    // handles return an invalid-handle error after eviction.
     // @param process Opaque handle returned by start
     // @returns Ok with the final process result or Err for an invalid handle
     // @example wait(process) => Ok({success: true, exit_code: Some(0), ...}) ~ "Wait and cache the final result"
@@ -1319,7 +1390,7 @@ pub fn init() -> HashMap<String, Value> {
     // @signature try_wait(process: Process) -> Result<Option<Map>, String>
     // Inspect a supervised process without blocking.
     // @param process Opaque handle returned by start
-    // @returns Ok(None) while running or Ok(Some(result)) after exit
+    // @returns Ok(None) while running, Ok(Some(result)) after exit, or Err for an invalid or evicted handle
     // @example try_wait(process) => Ok(None) ~ "Poll without blocking"
     // @since v0.5.3
     // @tags #process #system
@@ -1708,6 +1779,53 @@ mod tests {
             repeated_result.get("duration_ms").unwrap().to_string()
         );
         assert!(matches!(result.get("success"), Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn completed_process_registry_is_bounded() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        RUNTIME.shutdown();
+        let mut handles = Vec::new();
+        for _ in 0..(MAX_RETAINED_TERMINAL_PROCESSES + 4) {
+            let (program, handle) = start_supervised_fixture("fixture_nonzero");
+            let waited = with_process_capability(&program, || {
+                wait_from_args(std::slice::from_ref(&handle)).expect("wait result")
+            });
+            assert_eq!(result_variant(waited).0, "Ok");
+            handles.push(handle);
+        }
+
+        let (terminal_count, retained_bytes) = {
+            let entries = RUNTIME.entries.lock().unwrap();
+            let terminal_count = entries
+                .values()
+                .filter(|process| process.terminal.lock().unwrap().is_some())
+                .count();
+            let retained_bytes = entries.values().fold(0_usize, |total, process| {
+                let bytes = process
+                    .terminal
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map_or(0, |summary| summary.stdout.len() + summary.stderr.len());
+                total.saturating_add(bytes)
+            });
+            (terminal_count, retained_bytes)
+        };
+        assert!(terminal_count <= MAX_RETAINED_TERMINAL_PROCESSES);
+        assert!(retained_bytes <= MAX_RETAINED_TERMINAL_BYTES);
+        assert!(retained_bytes > 0);
+
+        let expired = wait_from_args(std::slice::from_ref(&handles[0])).unwrap();
+        let retained = wait_from_args(std::slice::from_ref(handles.last().unwrap())).unwrap();
+        assert_eq!(result_variant(expired).0, "Err");
+        assert_eq!(result_variant(retained).0, "Ok");
+
+        RUNTIME.prune_terminal_entries_to(MAX_RETAINED_TERMINAL_PROCESSES, 0);
+        let output_evicted = wait_from_args(std::slice::from_ref(handles.last().unwrap())).unwrap();
+        assert_eq!(result_variant(output_evicted).0, "Err");
+        RUNTIME.shutdown();
     }
 
     #[test]
