@@ -139,14 +139,17 @@ fn read_pipe_cancellable(
             Some(ERROR_OPERATION_ABORTED) if io_cancel.load(Ordering::Acquire) => return Ok(None),
             Some(WAIT_TIMEOUT) => {
                 let cancelled = unsafe { CancelIoEx(handle, &overlapped) };
-                if cancelled == 0 {
-                    let cancel_error = std::io::Error::last_os_error();
-                    if cancel_error.raw_os_error().map(|code| code as u32) != Some(ERROR_NOT_FOUND)
-                    {
-                        return Err(cancel_error);
-                    }
-                }
+                let cancel_error = if cancelled == 0 {
+                    let error = std::io::Error::last_os_error();
+                    (error.raw_os_error().map(|code| code as u32) != Some(ERROR_NOT_FOUND))
+                        .then_some(error)
+                } else {
+                    None
+                };
 
+                // CancelIoEx only requests cancellation. Even when it fails, the read may
+                // still be pending, so always observe terminal completion before returning;
+                // the OVERLAPPED and caller buffer must remain alive until then.
                 let mut final_read = 0_u32;
                 let final_result = unsafe {
                     GetOverlappedResultEx(handle, &overlapped, &mut final_read, u32::MAX, 0)
@@ -158,7 +161,7 @@ fn read_pipe_cancellable(
                 return match final_error.raw_os_error().map(|code| code as u32) {
                     Some(ERROR_OPERATION_ABORTED) => Ok(None),
                     Some(ERROR_BROKEN_PIPE) => Ok(Some(0)),
-                    _ => Err(final_error),
+                    _ => Err(cancel_error.unwrap_or(final_error)),
                 };
             }
             _ => return Err(error),
@@ -1912,6 +1915,63 @@ mod tests {
         assert!(result.success);
         assert!(result.stdout.is_empty());
         assert!(result.stderr.is_empty());
+        assert_eq!(ACTIVE_OUTPUT_READERS.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_capture_cancellation_completes_pending_read() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let program = std::env::var_os("COMSPEC").expect("Windows command interpreter path");
+        let arguments = ["/D", "/Q", "/C", "ping -n 6 127.0.0.1 >nul"].map(str::to_string);
+        let mut options = ProcessOptions::run_defaults();
+        options.stderr = OutputMode::Null;
+        let process = spawn_process(Path::new(&program), &arguments, options)
+            .expect("spawn pending-read cancellation fixture");
+        let reader_start_deadline = Instant::now() + Duration::from_secs(1);
+        while ACTIVE_OUTPUT_READERS.load(Ordering::Acquire) == 0
+            && Instant::now() < reader_start_deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(ACTIVE_OUTPUT_READERS.load(Ordering::Acquire), 1);
+        std::thread::sleep(Duration::from_millis(25));
+
+        let reader = process
+            .stdout_reader
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .expect("stdout capture reader");
+        process.io_cancel.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !reader.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let completed_before_child_exit = reader.is_finished();
+
+        if !completed_before_child_exit {
+            let mut child = process
+                .child
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let _ = kill_child(&mut child);
+        }
+        let result = reader.join().expect("capture reader must not panic");
+        assert!(
+            completed_before_child_exit,
+            "cancellation must complete the pending read before its buffer is released"
+        );
+        assert!(result.is_ok(), "capture cancellation must be graceful");
+
+        let mut child = process
+            .child
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if completed_before_child_exit {
+            let _ = kill_child(&mut child);
+        }
+        let _ = child.wait();
         assert_eq!(ACTIVE_OUTPUT_READERS.load(Ordering::Acquire), 0);
     }
 
