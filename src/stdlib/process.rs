@@ -103,6 +103,8 @@ fn read_pipe_cancellable(
     use windows_sys::Win32::Storage::FileSystem::ReadFile;
     use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResultEx, OVERLAPPED};
 
+    // Rust's std::process creates the parent ChildStdout/ChildStderr ends as
+    // overlapped handles (std/sys/process/windows/child_pipe.rs::anon_pipe).
     let handle = pipe.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
     let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
     let started = unsafe {
@@ -236,8 +238,94 @@ impl ProcessOptions {
     }
 }
 
+#[cfg(target_os = "macos")]
+struct MacExitObserver {
+    queue: std::os::fd::OwnedFd,
+    exited: AtomicBool,
+}
+
+#[cfg(target_os = "macos")]
+impl MacExitObserver {
+    fn new(child: &Child) -> std::io::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let raw_queue = unsafe { libc::kqueue() };
+        if raw_queue == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let queue = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_queue) };
+        // EVFILT_PROC reports an already-pending NOTE_EXIT without reaping the child,
+        // so registration remains safe even when a short-lived child exited first.
+        let change = libc::kevent {
+            ident: child.id() as libc::uintptr_t,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD | libc::EV_ENABLE,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        let result = unsafe {
+            libc::kevent(
+                queue.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if result == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            queue,
+            exited: AtomicBool::new(false),
+        })
+    }
+
+    fn is_exited(&self, child: &Child) -> std::io::Result<bool> {
+        use std::os::fd::AsRawFd;
+
+        if self.exited.load(Ordering::Acquire) {
+            return Ok(true);
+        }
+        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let result = unsafe {
+            libc::kevent(
+                self.queue.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                &mut event,
+                1,
+                &timeout,
+            )
+        };
+        if result == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if result == 0 {
+            return Ok(false);
+        }
+        if event.flags & libc::EV_ERROR != 0 {
+            return Err(std::io::Error::from_raw_os_error(event.data as i32));
+        }
+        let exited =
+            event.ident == child.id() as libc::uintptr_t && event.fflags & libc::NOTE_EXIT != 0;
+        if exited {
+            self.exited.store(true, Ordering::Release);
+        }
+        Ok(exited)
+    }
+}
+
 struct ProcessEntry {
     child: Mutex<Child>,
+    #[cfg(target_os = "macos")]
+    exit_observer: MacExitObserver,
     stdout_reader: Mutex<Option<OutputReader>>,
     stderr_reader: Mutex<Option<OutputReader>>,
     io_cancel: Arc<AtomicBool>,
@@ -702,6 +790,15 @@ fn spawn_process(
             executable.display()
         )
     })?;
+    #[cfg(target_os = "macos")]
+    let exit_observer = match MacExitObserver::new(&child) {
+        Ok(observer) => observer,
+        Err(error) => {
+            let _ = kill_child(&mut child);
+            let _ = child.wait();
+            return Err(format!("failed to configure process monitoring: {error}"));
+        }
+    };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let capture_setup = stdout
@@ -739,6 +836,8 @@ fn spawn_process(
     let termination_grace = options.termination_grace;
     Ok(Arc::new(ProcessEntry {
         child: Mutex::new(child),
+        #[cfg(target_os = "macos")]
+        exit_observer,
         stdout_reader: Mutex::new(stdout_reader),
         stderr_reader: Mutex::new(stderr_reader),
         io_cancel,
@@ -788,8 +887,8 @@ fn kill_child(child: &mut Child) -> std::io::Result<()> {
     child.kill()
 }
 
-#[cfg(unix)]
-fn child_exit_is_pending(child: &Child) -> std::io::Result<bool> {
+#[cfg(all(unix, not(target_os = "macos")))]
+fn child_exit_is_pending(_process: &ProcessEntry, child: &Child) -> std::io::Result<bool> {
     loop {
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let result = unsafe {
@@ -810,9 +909,17 @@ fn child_exit_is_pending(child: &Child) -> std::io::Result<bool> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn child_exit_is_pending(process: &ProcessEntry, child: &Child) -> std::io::Result<bool> {
+    process.exit_observer.is_exited(child)
+}
+
 #[cfg(unix)]
-fn reap_if_exited(child: &mut Child) -> std::result::Result<Option<ExitStatus>, String> {
-    if !child_exit_is_pending(child)
+fn reap_if_exited(
+    process: &ProcessEntry,
+    child: &mut Child,
+) -> std::result::Result<Option<ExitStatus>, String> {
+    if !child_exit_is_pending(process, child)
         .map_err(|error| format!("failed to monitor process: {error}"))?
     {
         return Ok(None);
@@ -829,19 +936,29 @@ fn reap_if_exited(child: &mut Child) -> std::result::Result<Option<ExitStatus>, 
 }
 
 #[cfg(windows)]
-fn reap_if_exited(child: &mut Child) -> std::result::Result<Option<ExitStatus>, String> {
+fn reap_if_exited(
+    _process: &ProcessEntry,
+    child: &mut Child,
+) -> std::result::Result<Option<ExitStatus>, String> {
     child
         .try_wait()
         .map_err(|error| format!("failed to monitor process: {error}"))
 }
 
 #[cfg(unix)]
-fn child_has_exited(child: &mut Child) -> std::result::Result<bool, String> {
-    child_exit_is_pending(child).map_err(|error| format!("failed to monitor process: {error}"))
+fn child_has_exited(
+    process: &ProcessEntry,
+    child: &mut Child,
+) -> std::result::Result<bool, String> {
+    child_exit_is_pending(process, child)
+        .map_err(|error| format!("failed to monitor process: {error}"))
 }
 
 #[cfg(windows)]
-fn child_has_exited(child: &mut Child) -> std::result::Result<bool, String> {
+fn child_has_exited(
+    _process: &ProcessEntry,
+    child: &mut Child,
+) -> std::result::Result<bool, String> {
     child
         .try_wait()
         .map(|status| status.is_some())
@@ -869,7 +986,7 @@ fn try_status(process: &ProcessEntry) -> std::result::Result<Option<ExitStatus>,
     if let Some(status) = cached_reaped_status(process, &mut child)? {
         return Ok(Some(status));
     }
-    let status = reap_if_exited(&mut child)?;
+    let status = reap_if_exited(process, &mut child)?;
     if status.is_some() {
         process.reaped.store(true, Ordering::Release);
     }
@@ -885,7 +1002,7 @@ fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, Stri
         if let Some(status) = cached_reaped_status(process, &mut child)? {
             return Ok(status);
         }
-        if let Some(status) = reap_if_exited(&mut child)? {
+        if let Some(status) = reap_if_exited(process, &mut child)? {
             process.reaped.store(true, Ordering::Release);
             return Ok(status);
         }
@@ -1377,7 +1494,7 @@ fn signal_from_args(args: &[Value], force: bool) -> Result<Value> {
     if process.reaped.load(Ordering::Acquire) {
         return Ok(Value::ok(Value::Bool(false)));
     }
-    match child_has_exited(&mut child) {
+    match child_has_exited(&process, &mut child) {
         Ok(true) => {
             #[cfg(windows)]
             process.reaped.store(true, Ordering::Release);
@@ -1714,33 +1831,42 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn observing_exit_preserves_pid_until_group_cleanup() {
-        use std::os::unix::process::CommandExt;
-
         let program = std::env::current_exe().expect("current test executable");
         let arguments = [
             "--exact",
             "stdlib::process::tests::fixture_nonzero",
             "--ignored",
             "--nocapture",
-        ];
-        let mut command = Command::new(program);
-        command
-            .args(arguments)
-            .process_group(0)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = command.spawn().expect("spawn exit-observation fixture");
+        ]
+        .map(str::to_string);
+        let mut options = ProcessOptions::run_defaults();
+        options.stdout = OutputMode::Null;
+        options.stderr = OutputMode::Null;
+        let process =
+            spawn_process(&program, &arguments, options).expect("spawn exit-observation fixture");
         let deadline = Instant::now() + Duration::from_secs(2);
-        while !child_exit_is_pending(&child).expect("observe child exit") {
+        loop {
+            let child = process
+                .child
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if child_exit_is_pending(&process, &child).expect("observe child exit") {
+                break;
+            }
+            drop(child);
             assert!(Instant::now() < deadline, "child did not exit in time");
             std::thread::sleep(Duration::from_millis(5));
         }
 
+        let mut child = process
+            .child
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         assert!(
-            child_exit_is_pending(&child).expect("observe the same unreaped child again"),
-            "WNOWAIT observation must preserve the PID through group cleanup"
+            child_exit_is_pending(&process, &child).expect("observe the same unreaped child again"),
+            "exit observation must preserve the PID through group cleanup"
         );
-        let status = reap_if_exited(&mut child)
+        let status = reap_if_exited(&process, &mut child)
             .expect("clean up exited process group")
             .expect("child remains available to reap");
         assert!(!status.success());
@@ -1930,6 +2056,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let exited = child_has_exited(
+                &process,
                 &mut process
                     .child
                     .lock()
