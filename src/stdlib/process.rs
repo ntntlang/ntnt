@@ -889,23 +889,60 @@ fn signal_process_group(child: &Child, signal: libc::c_int) -> std::io::Result<(
 }
 
 #[cfg(target_os = "macos")]
-fn exited_group_has_descendants(child: &Child) -> std::io::Result<bool> {
+fn macos_process_is_live(pid: libc::pid_t) -> std::io::Result<bool> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let bytes = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
+        )
+    };
+    if bytes as usize == std::mem::size_of::<libc::proc_bsdinfo>() {
+        return Ok(info.pbi_status != libc::SZOMB);
+    }
+    if unsafe { libc::kill(pid, 0) } == -1
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    {
+        return Ok(false);
+    }
+    Err(std::io::Error::other(format!(
+        "failed to inspect macOS process {pid}"
+    )))
+}
+
+#[cfg(target_os = "macos")]
+fn exited_group_has_live_descendants(child: &Child) -> std::io::Result<bool> {
+    const MAX_INSPECTED_GROUP_PROCESSES: usize = 65_536;
+
     let leader = child.id() as libc::pid_t;
-    let mut pids = [0 as libc::pid_t; 2];
+    let capacity = unsafe { libc::proc_listpgrppids(leader, std::ptr::null_mut(), 0) };
+    if capacity <= 0 || capacity as usize > MAX_INSPECTED_GROUP_PROCESSES {
+        return Err(std::io::Error::other(
+            "failed to size exited macOS process group",
+        ));
+    }
+    let mut pids = vec![0 as libc::pid_t; capacity as usize];
     let listed = unsafe {
         libc::proc_listpgrppids(
             leader,
             pids.as_mut_ptr().cast(),
-            std::mem::size_of_val(&pids) as libc::c_int,
+            std::mem::size_of_val(pids.as_slice()) as libc::c_int,
         )
     };
-    if listed <= 0 {
+    if listed <= 0 || listed as usize > pids.len() {
         return Err(std::io::Error::other(
             "failed to inspect exited macOS process group",
         ));
     }
-    let count = (listed as usize).min(pids.len());
-    Ok(pids[..count].iter().any(|pid| *pid != 0 && *pid != leader))
+    for pid in pids.into_iter().take(listed as usize) {
+        if pid != 0 && pid != leader && macos_process_is_live(pid)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -913,9 +950,9 @@ fn clean_up_exited_process_group(child: &Child) -> std::io::Result<()> {
     match signal_process_group(child, libc::SIGKILL) {
         Err(error)
             if error.raw_os_error() == Some(libc::EPERM)
-                && !exited_group_has_descendants(child)? =>
+                && !exited_group_has_live_descendants(child)? =>
         {
-            // Darwin reports EPERM when the exited leader is the group's only member.
+            // Darwin reports EPERM when an exited group contains no live members.
             Ok(())
         }
         result => result,
