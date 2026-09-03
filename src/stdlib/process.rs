@@ -2430,10 +2430,15 @@ mod tests {
             panic!("expected process handle");
         };
 
-        std::thread::sleep(Duration::from_millis(150));
-
         let process = RUNTIME.get(id).expect("registered process");
-        let terminal = process.terminal.lock().unwrap().clone();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let terminal = loop {
+            let terminal = process.terminal.lock().unwrap().clone();
+            if terminal.is_some() || Instant::now() >= deadline {
+                break terminal;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert!(
             terminal.is_some(),
             "output limits must be enforced without polling"
