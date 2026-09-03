@@ -888,6 +888,45 @@ fn signal_process_group(child: &Child, signal: libc::c_int) -> std::io::Result<(
     }
 }
 
+#[cfg(target_os = "macos")]
+fn exited_group_has_descendants(child: &Child) -> std::io::Result<bool> {
+    let leader = child.id() as libc::pid_t;
+    let mut pids = [0 as libc::pid_t; 2];
+    let listed = unsafe {
+        libc::proc_listpgrppids(
+            leader,
+            pids.as_mut_ptr().cast(),
+            std::mem::size_of_val(&pids) as libc::c_int,
+        )
+    };
+    if listed <= 0 {
+        return Err(std::io::Error::other(
+            "failed to inspect exited macOS process group",
+        ));
+    }
+    let count = (listed as usize).min(pids.len());
+    Ok(pids[..count].iter().any(|pid| *pid != 0 && *pid != leader))
+}
+
+#[cfg(target_os = "macos")]
+fn clean_up_exited_process_group(child: &Child) -> std::io::Result<()> {
+    match signal_process_group(child, libc::SIGKILL) {
+        Err(error)
+            if error.raw_os_error() == Some(libc::EPERM)
+                && !exited_group_has_descendants(child)? =>
+        {
+            // Darwin reports EPERM when the exited leader is the group's only member.
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn clean_up_exited_process_group(child: &Child) -> std::io::Result<()> {
+    signal_process_group(child, libc::SIGKILL)
+}
+
 #[cfg(windows)]
 fn terminate_child(child: &mut Child) -> std::io::Result<()> {
     child.kill()
@@ -938,7 +977,7 @@ fn reap_if_exited(
 
     // Keep the exited leader unreaped until its process group is signalled. A zombie
     // still owns its PID, so the negative ID cannot be redirected to a reused PID.
-    signal_process_group(child, libc::SIGKILL)
+    clean_up_exited_process_group(child)
         .map_err(|error| format!("failed to clean up process descendants: {error}"))?;
     child
         .wait()
