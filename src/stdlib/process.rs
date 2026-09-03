@@ -46,7 +46,11 @@ impl Drop for ActiveOutputReader {
 
 trait ProcessPipe: Read + Send + 'static {
     fn prepare(&self) -> std::io::Result<()>;
-    fn read_available(&mut self, buffer: &mut [u8]) -> std::io::Result<Option<usize>>;
+    fn read_available(
+        &mut self,
+        buffer: &mut [u8],
+        io_cancel: &AtomicBool,
+    ) -> std::io::Result<Option<usize>>;
 }
 
 #[cfg(unix)]
@@ -70,7 +74,11 @@ macro_rules! impl_process_pipe {
                 set_pipe_nonblocking(self)
             }
 
-            fn read_available(&mut self, buffer: &mut [u8]) -> std::io::Result<Option<usize>> {
+            fn read_available(
+                &mut self,
+                buffer: &mut [u8],
+                _io_cancel: &AtomicBool,
+            ) -> std::io::Result<Option<usize>> {
                 match self.read(buffer) {
                     Ok(read) => Ok(Some(read)),
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
@@ -84,33 +92,75 @@ macro_rules! impl_process_pipe {
 }
 
 #[cfg(windows)]
-fn pipe_bytes_available(
+fn read_pipe_cancellable(
     pipe: &impl std::os::windows::io::AsRawHandle,
+    buffer: &mut [u8],
+    io_cancel: &AtomicBool,
 ) -> std::io::Result<Option<usize>> {
-    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+    use windows_sys::Win32::Foundation::{
+        ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::ReadFile;
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResultEx, OVERLAPPED};
 
-    let mut available = 0_u32;
-    let result = unsafe {
-        PeekNamedPipe(
-            pipe.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+    let handle = pipe.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    let started = unsafe {
+        ReadFile(
+            handle,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
             std::ptr::null_mut(),
-            0,
-            std::ptr::null_mut(),
-            &mut available,
-            std::ptr::null_mut(),
+            &mut overlapped,
         )
     };
-    if result == 0 {
+    if started == 0 {
         let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(109) {
-            return Ok(Some(0));
+        match error.raw_os_error().map(|code| code as u32) {
+            Some(ERROR_BROKEN_PIPE) => return Ok(Some(0)),
+            Some(ERROR_IO_PENDING) => {}
+            _ => return Err(error),
         }
-        return Err(error);
     }
-    if available == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(available as usize))
+
+    loop {
+        let mut read = 0_u32;
+        let completed = unsafe { GetOverlappedResultEx(handle, &overlapped, &mut read, 5, 0) };
+        if completed != 0 {
+            return Ok(Some(read as usize));
+        }
+
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error().map(|code| code as u32) {
+            Some(ERROR_BROKEN_PIPE) => return Ok(Some(0)),
+            Some(WAIT_TIMEOUT) if !io_cancel.load(Ordering::Acquire) => continue,
+            Some(ERROR_OPERATION_ABORTED) if io_cancel.load(Ordering::Acquire) => return Ok(None),
+            Some(WAIT_TIMEOUT) => {
+                let cancelled = unsafe { CancelIoEx(handle, &overlapped) };
+                if cancelled == 0 {
+                    let cancel_error = std::io::Error::last_os_error();
+                    if cancel_error.raw_os_error().map(|code| code as u32) != Some(ERROR_NOT_FOUND)
+                    {
+                        return Err(cancel_error);
+                    }
+                }
+
+                let mut final_read = 0_u32;
+                let final_result = unsafe {
+                    GetOverlappedResultEx(handle, &overlapped, &mut final_read, u32::MAX, 0)
+                };
+                if final_result != 0 {
+                    return Ok(Some(final_read as usize));
+                }
+                let final_error = std::io::Error::last_os_error();
+                return match final_error.raw_os_error().map(|code| code as u32) {
+                    Some(ERROR_OPERATION_ABORTED) => Ok(None),
+                    Some(ERROR_BROKEN_PIPE) => Ok(Some(0)),
+                    _ => Err(final_error),
+                };
+            }
+            _ => return Err(error),
+        }
     }
 }
 
@@ -122,15 +172,12 @@ macro_rules! impl_process_pipe {
                 Ok(())
             }
 
-            fn read_available(&mut self, buffer: &mut [u8]) -> std::io::Result<Option<usize>> {
-                let Some(available) = pipe_bytes_available(self)? else {
-                    return Ok(None);
-                };
-                if available == 0 {
-                    return Ok(Some(0));
-                }
-                let to_read = available.min(buffer.len());
-                self.read(&mut buffer[..to_read]).map(Some)
+            fn read_available(
+                &mut self,
+                buffer: &mut [u8],
+                io_cancel: &AtomicBool,
+            ) -> std::io::Result<Option<usize>> {
+                read_pipe_cancellable(self, buffer, io_cancel)
             }
         }
     };
@@ -198,6 +245,7 @@ struct ProcessEntry {
     started_at: Instant,
     timeout: Option<Duration>,
     termination_grace: Duration,
+    reaped: AtomicBool,
     monitor: Mutex<()>,
     terminal_at: Mutex<Option<Instant>>,
     terminal: Mutex<Option<std::result::Result<ProcessSummary, String>>>,
@@ -597,7 +645,7 @@ fn spawn_reader<R: ProcessPipe>(
             if io_cancel.load(Ordering::Acquire) {
                 return Ok(output);
             }
-            let read = match reader.read_available(&mut buffer) {
+            let read = match reader.read_available(&mut buffer, &io_cancel) {
                 Ok(Some(read)) => read,
                 Ok(None) => {
                     std::thread::sleep(Duration::from_millis(5));
@@ -698,6 +746,7 @@ fn spawn_process(
         started_at,
         timeout,
         termination_grace,
+        reaped: AtomicBool::new(false),
         monitor: Mutex::new(()),
         terminal_at: Mutex::new(None),
         terminal: Mutex::new(None),
@@ -740,36 +789,91 @@ fn kill_child(child: &mut Child) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn kill_descendants_after_exit(child: &Child) -> std::io::Result<()> {
-    signal_process_group(child, libc::SIGKILL)
-}
-
-#[cfg(windows)]
-fn kill_descendants_after_exit(_child: &Child) -> std::io::Result<()> {
-    Ok(())
+fn child_exit_is_pending(child: &Child) -> std::io::Result<bool> {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(info.si_signo != 0);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 #[cfg(unix)]
-fn kill_remaining_process_group(process: &ProcessEntry) -> std::io::Result<()> {
-    let child = process
-        .child
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    signal_process_group(&child, libc::SIGKILL)
+fn reap_if_exited(child: &mut Child) -> std::result::Result<Option<ExitStatus>, String> {
+    if !child_exit_is_pending(child)
+        .map_err(|error| format!("failed to monitor process: {error}"))?
+    {
+        return Ok(None);
+    }
+
+    // Keep the exited leader unreaped until its process group is signalled. A zombie
+    // still owns its PID, so the negative ID cannot be redirected to a reused PID.
+    signal_process_group(child, libc::SIGKILL)
+        .map_err(|error| format!("failed to clean up process descendants: {error}"))?;
+    child
+        .wait()
+        .map(Some)
+        .map_err(|error| format!("failed to reap process: {error}"))
 }
 
 #[cfg(windows)]
-fn kill_remaining_process_group(_process: &ProcessEntry) -> std::io::Result<()> {
-    Ok(())
+fn reap_if_exited(child: &mut Child) -> std::result::Result<Option<ExitStatus>, String> {
+    child
+        .try_wait()
+        .map_err(|error| format!("failed to monitor process: {error}"))
+}
+
+#[cfg(unix)]
+fn child_has_exited(child: &mut Child) -> std::result::Result<bool, String> {
+    child_exit_is_pending(child).map_err(|error| format!("failed to monitor process: {error}"))
+}
+
+#[cfg(windows)]
+fn child_has_exited(child: &mut Child) -> std::result::Result<bool, String> {
+    child
+        .try_wait()
+        .map(|status| status.is_some())
+        .map_err(|error| format!("failed to monitor process: {error}"))
+}
+
+fn cached_reaped_status(
+    process: &ProcessEntry,
+    child: &mut Child,
+) -> std::result::Result<Option<ExitStatus>, String> {
+    if !process.reaped.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+    child
+        .wait()
+        .map(Some)
+        .map_err(|error| format!("failed to read reaped process status: {error}"))
 }
 
 fn try_status(process: &ProcessEntry) -> std::result::Result<Option<ExitStatus>, String> {
-    process
+    let mut child = process
         .child
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .try_wait()
-        .map_err(|error| format!("failed to monitor process: {error}"))
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(status) = cached_reaped_status(process, &mut child)? {
+        return Ok(Some(status));
+    }
+    let status = reap_if_exited(&mut child)?;
+    if status.is_some() {
+        process.reaped.store(true, Ordering::Release);
+    }
+    Ok(status)
 }
 
 fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, String> {
@@ -778,12 +882,11 @@ fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, Stri
             .child
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("failed to monitor process: {error}"))?
-        {
-            kill_descendants_after_exit(&child)
-                .map_err(|error| format!("failed to clean up process descendants: {error}"))?;
+        if let Some(status) = cached_reaped_status(process, &mut child)? {
+            return Ok(status);
+        }
+        if let Some(status) = reap_if_exited(&mut child)? {
+            process.reaped.store(true, Ordering::Release);
             return Ok(status);
         }
         terminate_child(&mut child)
@@ -792,8 +895,6 @@ fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, Stri
     let deadline = Instant::now() + process.termination_grace;
     loop {
         if let Some(status) = try_status(process)? {
-            kill_remaining_process_group(process)
-                .map_err(|error| format!("failed to clean up process descendants: {error}"))?;
             return Ok(status);
         }
         if Instant::now() >= deadline {
@@ -801,10 +902,17 @@ fn stop_and_reap(process: &ProcessEntry) -> std::result::Result<ExitStatus, Stri
                 .child
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            // Another monitor can reap between the preceding status probe and this lock.
+            // Reuse its cached status before signalling any numeric process-group ID.
+            if let Some(status) = cached_reaped_status(process, &mut child)? {
+                return Ok(status);
+            }
             kill_child(&mut child).map_err(|error| format!("failed to kill process: {error}"))?;
-            return child
+            let status = child
                 .wait()
-                .map_err(|error| format!("failed to reap process: {error}"));
+                .map_err(|error| format!("failed to reap process: {error}"))?;
+            process.reaped.store(true, Ordering::Release);
+            return Ok(status);
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -939,8 +1047,6 @@ fn monitor_process_uncached(
             break stop_and_reap(process)?;
         }
         if let Some(status) = try_status(process)? {
-            kill_remaining_process_group(process)
-                .map_err(|error| format!("failed to clean up process descendants: {error}"))?;
             break status;
         }
         if !block {
@@ -1268,9 +1374,16 @@ fn signal_from_args(args: &[Value], force: bool) -> Result<Value> {
         .child
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    match child.try_wait() {
-        Ok(Some(_)) => Ok(Value::ok(Value::Bool(false))),
-        Ok(None) => {
+    if process.reaped.load(Ordering::Acquire) {
+        return Ok(Value::ok(Value::Bool(false)));
+    }
+    match child_has_exited(&mut child) {
+        Ok(true) => {
+            #[cfg(windows)]
+            process.reaped.store(true, Ordering::Release);
+            Ok(Value::ok(Value::Bool(false)))
+        }
+        Ok(false) => {
             let result = if force {
                 kill_child(&mut child)
             } else {
@@ -1284,9 +1397,7 @@ fn signal_from_args(args: &[Value], force: bool) -> Result<Value> {
                 )))),
             }
         }
-        Err(error) => Ok(Value::err(Value::String(format!(
-            "failed to monitor process: {error}"
-        )))),
+        Err(error) => Ok(Value::err(Value::String(error))),
     }
 }
 
@@ -1577,6 +1688,64 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_capture_observes_eof_for_quiet_child() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let command = std::env::var_os("COMSPEC").expect("Windows command interpreter path");
+        let arguments = ["/D", "/C", "exit", "0"].map(str::to_string);
+        let process = spawn_process(
+            Path::new(&command),
+            &arguments,
+            ProcessOptions::run_defaults(),
+        )
+        .expect("spawn quiet child");
+
+        let result = monitor_process_uncached(&process, true)
+            .expect("quiet capture must observe EOF")
+            .expect("blocking monitor returns a result");
+
+        assert!(result.success);
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.is_empty());
+        assert_eq!(ACTIVE_OUTPUT_READERS.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observing_exit_preserves_pid_until_group_cleanup() {
+        use std::os::unix::process::CommandExt;
+
+        let program = std::env::current_exe().expect("current test executable");
+        let arguments = [
+            "--exact",
+            "stdlib::process::tests::fixture_nonzero",
+            "--ignored",
+            "--nocapture",
+        ];
+        let mut command = Command::new(program);
+        command
+            .args(arguments)
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().expect("spawn exit-observation fixture");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !child_exit_is_pending(&child).expect("observe child exit") {
+            assert!(Instant::now() < deadline, "child did not exit in time");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            child_exit_is_pending(&child).expect("observe the same unreaped child again"),
+            "WNOWAIT observation must preserve the PID through group cleanup"
+        );
+        let status = reap_if_exited(&mut child)
+            .expect("clean up exited process group")
+            .expect("child remains available to reap");
+        assert!(!status.success());
+    }
+
     #[test]
     fn run_honors_timeout_and_reaps_child() {
         let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
@@ -1736,6 +1905,100 @@ mod tests {
         let (variant, handle) = result_variant(value);
         assert_eq!(variant, "Ok");
         (program, handle)
+    }
+
+    #[test]
+    fn lifecycle_signal_after_exit_preserves_result_for_wait() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        RUNTIME.shutdown();
+        let (program, argument_values) = current_test_command("fixture_nonzero", &[]);
+        let arguments = argument_values
+            .into_iter()
+            .map(|argument| match argument {
+                Value::String(argument) => argument,
+                _ => unreachable!("test arguments are strings"),
+            })
+            .collect::<Vec<_>>();
+        let mut options = ProcessOptions::start_defaults();
+        options.stdout = OutputMode::Null;
+        options.stderr = OutputMode::Null;
+        let process = spawn_process(Path::new(&program), &arguments, options)
+            .expect("spawn completed-process signal fixture");
+        let id = RUNTIME
+            .insert(Arc::clone(&process))
+            .expect("register process");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let exited = child_has_exited(
+                &mut process
+                    .child
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+            )
+            .expect("observe child exit");
+            if exited {
+                break;
+            }
+            assert!(Instant::now() < deadline, "child did not exit in time");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let signalled = terminate_from_args(&[Value::ProcessHandle(id)]).expect("signal result");
+        let (variant, value) = result_variant(signalled);
+        assert_eq!(variant, "Ok");
+        assert!(matches!(value, Value::Bool(false)));
+
+        let waited = wait_from_args(&[Value::ProcessHandle(id)]).expect("wait result");
+        let (variant, value) = result_variant(waited);
+        assert_eq!(variant, "Ok");
+        let Value::Map(result) = value else {
+            panic!("expected process result map");
+        };
+        assert!(matches!(result.get("success"), Some(Value::Bool(false))));
+        RUNTIME.shutdown();
+    }
+
+    #[test]
+    fn lifecycle_signal_during_finalization_is_a_noop() {
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        RUNTIME.shutdown();
+        let (program, argument_values) = current_test_command("fixture_nonzero", &[]);
+        let arguments = argument_values
+            .into_iter()
+            .map(|argument| match argument {
+                Value::String(argument) => argument,
+                _ => unreachable!("test arguments are strings"),
+            })
+            .collect::<Vec<_>>();
+        let mut options = ProcessOptions::start_defaults();
+        options.stdout = OutputMode::Null;
+        options.stderr = OutputMode::Null;
+        let process = spawn_process(Path::new(&program), &arguments, options)
+            .expect("spawn finalization-gap fixture");
+        let id = RUNTIME
+            .insert(Arc::clone(&process))
+            .expect("register process");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = try_status(&process).expect("observe and reap child") {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "child did not exit in time");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(process.terminal.lock().unwrap().is_none());
+
+        let signalled = terminate_from_args(&[Value::ProcessHandle(id)]).expect("signal result");
+        let (variant, value) = result_variant(signalled);
+        assert_eq!(variant, "Ok");
+        assert!(matches!(value, Value::Bool(false)));
+
+        let repeated_status = stop_and_reap(&process).expect("reuse cached reaped status");
+        assert_eq!(status.code(), repeated_status.code());
+        let result = finalize_process(&process, status, false).expect("finalize process");
+        assert!(!result.success);
+        RUNTIME.remove(id);
+        RUNTIME.shutdown();
     }
 
     #[test]
