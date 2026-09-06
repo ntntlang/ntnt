@@ -1,6 +1,17 @@
 # DD-078: Intent Verification Runtime and Pure-NTNT Project Testing
 
-**Status:** Draft / architecture decision
+**Status:** Broad roadmap retained; active implementation is the [Intent-led native milestone](dd-078-native-milestone.md).
+
+## Active testing direction and ownership
+
+The first useful milestone is `.intent` selecting ordinary `.tnt` functions through one small native runner. Simple IAL/glossary/HTTP scenarios remain first-class; complex executable setup and assertions belong in `.tnt`. Unit, integration and behavioral testing will compose from `.intent`, without hidden order-dependence between cases.
+
+The linked milestone checklist is authoritative for current implementation scope. The broader verification/governance design below is retained for later discussion, not a prerequisite chain: verification-only `std/test`, mandatory opaque grants, exhaustive source/asset/migration inventories, protected CI and signed evidence are deferred. Suite composition belongs at the Intent front door; optional future resource configuration may use `ntnt.toml`. No full-suite, provider, governance or private-consumer migration claim is made by the native milestone.
+
+- [x] First useful native function/assertion runtime (see linked checklist and validation record; full-suite composition is not shipped).
+- [ ] Explicit root `.intent` suite composition with mixed native/HTTP cases.
+- [ ] Bounded optional integration resources and later browser/external-DB adapters.
+- [ ] Separately reviewed operational governance, only when independently needed.
 **Authors:** Larri + Josh
 **Created:** 2026-07-28
 **Origin:** General-purpose application-verification architecture, pressure-tested by the Larrimon audit
