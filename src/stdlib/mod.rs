@@ -28,6 +28,7 @@ pub mod net;
 pub mod netmon;
 pub mod path;
 pub mod postgres;
+pub mod process;
 pub mod secrets;
 pub mod sqlite;
 pub mod string;
@@ -41,6 +42,12 @@ use std::collections::HashMap;
 
 /// Type alias for stdlib module initialization functions
 pub type StdlibModule = HashMap<String, Value>;
+
+/// Stop process-local runtimes before the host exits.
+pub fn shutdown_runtimes() {
+    concurrent::RUNTIME.shutdown();
+    process::RUNTIME.shutdown();
+}
 
 /// Initialize all standard library modules
 pub fn init_all_modules() -> HashMap<String, StdlibModule> {
@@ -68,6 +75,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/template".to_string(), template::init());
     modules.insert("std/log".to_string(), log::init());
     modules.insert("std/markdown".to_string(), markdown::init());
+    modules.insert("std/process".to_string(), process::init());
     modules.insert("std/kv".to_string(), kv::create_kv_module());
     modules.insert("std/jobs".to_string(), jobs::init());
     modules.insert("std/auth".to_string(), auth::init());

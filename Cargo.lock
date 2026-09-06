@@ -1937,6 +1937,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "socket2 0.6.1",
+ "tempfile",
  "thiserror 1.0.69",
  "tiny_http",
  "tokio",
@@ -1949,6 +1950,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webpki-root-certs",
+ "windows-sys 0.61.2",
  "x509-parser",
  "zeroize",
 ]

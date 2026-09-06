@@ -1110,6 +1110,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         }
         // Handle equality: same variant + same id
         (Value::TaskHandle(a), Value::TaskHandle(b)) => a == b,
+        (Value::ProcessHandle(a), Value::ProcessHandle(b)) => a == b,
         (Value::TxChannelHandle(a, _), Value::TxChannelHandle(b, _)) => a == b,
         (Value::RxChannelHandle(a), Value::RxChannelHandle(b)) => a == b,
         (Value::ScheduleHandle(a), Value::ScheduleHandle(b)) => a == b,

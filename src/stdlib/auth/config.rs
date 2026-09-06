@@ -94,6 +94,7 @@ pub fn init_auth(config: AuthConfig) {
         eprintln!("│                                                                 │");
         eprintln!("│ Generate a secret: openssl rand -base64 32                      │");
         eprintln!("└─────────────────────────────────────────────────────────────────┘");
+        crate::stdlib::shutdown_runtimes();
         std::process::exit(1);
     }
 

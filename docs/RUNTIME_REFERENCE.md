@@ -30,6 +30,8 @@ Environment variables that control NTNT runtime behavior
 | `NTNT_MAX_RECURSION` | integer | 256 | Maximum recursion depth for function calls. Prevents stack overflow from runaway recursion. |
 | `NTNT_NETMON_ENABLE` | `1`, `true`, `yes`, `on` | unset (disabled — std/netmon protocol calls rejected) | Explicitly enables std/netmon protocol calls for the process. This gate is required for public and private targets. Private/internal targets additionally require NTNT_NET_ALLOW_PRIVATE=1 and per-call allow_private: true. |
 | `NTNT_NET_ALLOW_PRIVATE` | `1`, `true`, `yes` | unset (disabled — private targets blocked) | Process-level opt-in for `std/net` probes (`ping`, `tcp_connect`, `reachable`, `port_scan`, `tls_info`, `traceroute`) and `std/netmon` protocol calls against private/internal targets. Each call must also pass `allow_private: true`; std/netmon independently requires `NTNT_NETMON_ENABLE=1`. Special-purpose targets such as cloud metadata, multicast, broadcast, unspecified, and documentation ranges remain blocked. This is separate from `NTNT_ALLOW_PRIVATE_IPS`, which only applies to `fetch()`. |
+| `NTNT_PROCESS_ALLOW` | platform-path-delimited executable paths | unset (all executables allowed after NTNT_PROCESS_ENABLE opt-in) | Optional exact allowlist for `std/process`, separated with the platform path delimiter (`:` on Unix and `;` on Windows). Both configured entries and requested executables are canonicalized before comparison. On Windows, `.bat` and `.cmd` files are rejected because the OS invokes `cmd.exe` implicitly; explicitly allowlist and invoke `cmd.exe` only when shell authority is intentional. |
+| `NTNT_PROCESS_ENABLE` | `1`, `true`, `yes`, `on` | unset (disabled — std/process calls rejected) | Explicitly enables native process execution through `std/process`. Arguments are passed directly to approved executables without an implicit shell. |
 | `NTNT_SECRETS_AUTHORIZATION_SCOPE` | opaque ASCII deployment identifier | unset (required for unix-socket) | Trusted non-credential deployment scope expected in every secrets-agent response. It detects endpoint miswiring but is not authentication and is never rendered in diagnostics. Leading or trailing whitespace is rejected. |
 | `NTNT_SECRETS_PROVIDER` | `env`, `unix-socket` | env | Selects the provider behind the opt-in `std/secrets` API. This setting does not affect `std/env`, `get_env`, `load_env`, or existing `.env` workflows. Provider configuration is evaluated only when an application calls `get_secret` or `require_secret`. The exact-name environment provider is development-only and is rejected when `NTNT_ENV` is `production` or `prod`; that restriction applies only to `std/secrets`. `unix-socket` is Unix-only and talks to any local secrets agent implementing the documented protocol, without depending directly on a secrets backend. |
 | `NTNT_SECRETS_SOCKET_ENDPOINTS` | comma-separated absolute Unix socket paths | unset (required for unix-socket) | Ordered local secrets-agent endpoints for secret lookup. One through eight unique paths are allowed. Each endpoint is tried twice, and failover occurs only for bounded unavailable results. Production paths must be beneath the host-controlled `/run/ntnt-secrets` root; raw paths are never included in runtime diagnostics. |
@@ -61,6 +63,12 @@ NTNT_NETMON_ENABLE=1 NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
 
 # Process-level opt-in for `std/net` probes (`ping`, `tcp_connect`, `reachable`, `port_scan`, `tls_info`, `traceroute`) and `std/netmon` protocol calls against private/internal targets
 NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
+
+# Optional exact allowlist for `std/process`, separated with the platform path delimiter (`:` on Unix and `;` on Windows)
+NTNT_PROCESS_ENABLE=1 NTNT_PROCESS_ALLOW=/usr/bin/ffmpeg:/usr/bin/sox ntnt run audio.tnt
+
+# Explicitly enables native process execution through `std/process`
+NTNT_PROCESS_ENABLE=1 NTNT_PROCESS_ALLOW=/usr/bin/ffmpeg ntnt run audio.tnt
 
 # Trusted non-credential deployment scope expected in every secrets-agent response
 NTNT_SECRETS_AUTHORIZATION_SCOPE=deployment-a

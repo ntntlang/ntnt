@@ -937,6 +937,8 @@ server 8080 {
 | `NTNT_ALLOW_PRIVATE_IPS` | `true` | Allows `fetch()` to connect to private/internal IPs (see below) |
 | `NTNT_NETMON_ENABLE` | `1`, `true`, `yes`, `on` | Explicitly enables `std/netmon` protocol calls for the process |
 | `NTNT_NET_ALLOW_PRIVATE` | `1`, `true`, `yes` | Process-level opt-in for `std/net` and `std/netmon` calls to private/internal targets; calls still need `allow_private: true` |
+| `NTNT_PROCESS_ENABLE` | `1`, `true`, `yes`, `on` | Explicitly enables native `std/process` execution |
+| `NTNT_PROCESS_ALLOW` | platform-delimited paths | Optionally restricts `std/process` to exact canonical executable paths |
 | `NTNT_WORKERS` | `1` (dev) / CPU cores (prod) | Number of interpreter worker threads. Auto-scales in production. |
 
 ```bash
@@ -3753,3 +3755,78 @@ for name in users { print("#{name}: #{users[name]}") }         // keys
 for entry in entries(users) { print("#{entry[\"key\"]}") }    // key-value
 for age in values(users) { print(age) }                      // values only
 ```
+
+## Source-Mapped Markdown
+
+Use `parse_blocks` when an editor must preserve the manuscript exactly while changing one semantic block. Ranges are UTF-8 byte offsets, not character indexes. Keep the original string and replace only `source[start..end]`; bytes between blocks, including blank lines, remain untouched.
+
+```ntnt
+import { parse_blocks } from "std/markdown"
+
+let manuscript = "# Chaptér\n\nMara *paused*."
+let blocks = parse_blocks(manuscript)
+print(blocks[1]["source"])
+print(blocks[1]["text"])
+```
+
+## Streaming HTTP Downloads
+
+`download` accepts the same request map as `fetch` and writes response bytes to a sibling temporary file before atomic promotion. Request-map downloads do not overwrite or create parents unless explicitly enabled.
+
+```ntnt
+import { download } from "std/http"
+
+let result = download(map {
+    "url": "http://127.0.0.1:8000/v1/audio/speech",
+    "method": "POST",
+    "headers": map { "content-type": "application/json" },
+    "body": "{\"text\":\"Mara paused.\"}",
+    "timeout": 600
+}, "./takes/segment-001.wav", map {
+    "overwrite": true,
+    "create_parent": true
+})
+```
+
+Failed statuses, cancellation, truncated responses, and write errors preserve an existing destination. The legacy two-string form retains its original overwrite and parent-creation behavior and preserves Unix regular-file permissions when replacing a destination.
+
+## Native Processes
+
+`std/process` invokes an executable directly with a structured argument array. It never interprets shell syntax. Process execution requires `NTNT_PROCESS_ENABLE=1`; when `NTNT_PROCESS_ALLOW` is set, every executable must match one of its canonical paths. The allowlist uses the platform path delimiter (`:` on Unix and `;` on Windows).
+
+```ntnt
+import { run, start, try_wait, wait, terminate, kill } from "std/process"
+
+match run("/usr/bin/ffmpeg", ["-version"]) {
+    Ok(result) => print(result["stdout"]),
+    Err(error) => print(error)
+}
+
+match start("mlx_audio.server", [], map {
+    "termination_grace_ms": 5000
+}) {
+    Ok(process_handle) => {
+        match try_wait(process_handle) {
+            Ok(None) => print("running"),
+            Ok(Some(result)) => print(result["exit_code"]),
+            Err(error) => print(error)
+        }
+        terminate(process_handle)
+        wait(process_handle)
+    },
+    Err(error) => print(error)
+}
+```
+
+`run` defaults to captured stdout/stderr and enforces an 8 MiB limit per stream. `start` defaults to inherited output to avoid unbounded service logs. A supervisor monitors every started process even when application code never calls `wait` or `try_wait`; deadlines and output limits are therefore enforced autonomously and final results remain available through the handle. The runtime bounds that terminal cache to the newest 64 handles and 64 MiB of captured output; once evicted, an older handle returns the normal invalid-handle error. All active `run` and `start` commands are registered with the process runtime so runtime shutdown and direct CLI exit paths cannot leave an untracked child behind. Captured-stream finalization is bounded: a detached descendant that retains an inherited pipe produces an `Err` instead of blocking handle operations or shutdown indefinitely. Timeouts request graceful termination, wait for `termination_grace_ms`, force-kill survivors, and reap the child. On Unix each launch gets a process group so termination also closes descendants that could otherwise keep captured pipes open. Windows uses the closest supported child termination operation and rejects `.bat`/`.cmd` targets because the OS would invoke `cmd.exe` implicitly.
+
+Process options are a closed top-level map:
+
+- `cwd: String`, `env: Map<String, String | Secret>`, and `clear_env: Bool`
+- `stdin: map { "mode": "null" | "inherit" | "file" | "string" | "bytes", ... }`
+- `stdout` / `stderr: map { "mode": "capture" | "inherit" | "null" | "file", ... }`
+- `timeout_ms: Int`, `termination_grace_ms: Int`, and `max_output_bytes: Int`
+
+File stdio maps use `path`; output files also accept `append`. String/byte input maps use `data`. `run` has no default deadline, so set `timeout_ms` whenever execution must be time-bounded.
+
+Invoking a shell explicitly, such as `run("/bin/sh", ["-c", command])`, grants access to everything that shell can execute under the NTNT process account. Only allowlist a shell when that authority is intentional.

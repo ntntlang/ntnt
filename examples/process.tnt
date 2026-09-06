@@ -1,0 +1,28 @@
+import { run, start, try_wait, terminate } from "std/process"
+
+// Arguments are passed directly. NTNT does not invoke a shell.
+match run("/usr/bin/ffmpeg", ["-version"], map {
+    "timeout_ms": 10000,
+    "max_output_bytes": 1048576
+}) {
+    Ok(result) => print(result["stdout"]),
+    Err(error) => print("ffmpeg failed: " + error)
+}
+
+// Long-running services default to inherited output and null input.
+match start("mlx_audio.server", [], map {
+    "cwd": ".",
+    "termination_grace_ms": 5000
+}) {
+    Ok(process_handle) => {
+        match try_wait(process_handle) {
+            Ok(None) => print("MLX server is running"),
+            Ok(Some(result)) => print("MLX server exited: " + str(result["exit_code"])),
+            Err(error) => print("MLX status failed: " + error)
+        }
+
+        // A real application keeps the handle and terminates it during shutdown.
+        terminate(process_handle)
+    },
+    Err(error) => print("MLX server failed to start: " + error)
+}

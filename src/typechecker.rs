@@ -78,6 +78,8 @@ struct FileExports {
     struct_type_params: HashMap<String, Vec<String>>,
 }
 
+const PROCESS_HANDLE_TYPE_NAME: &str = "std/process::Process";
+
 /// Type checking context with scoped variable bindings
 pub struct TypeContext {
     /// Stack of variable scopes (innermost last)
@@ -1027,6 +1029,15 @@ impl TypeContext {
                 "Float" => Type::Float,
                 "String" => Type::String,
                 "Secret" => Type::Secret,
+                "Process" => {
+                    if let Some(resolved) = self.type_aliases.get(name) {
+                        resolved.clone()
+                    } else if self.structs.contains_key(name) || self.enums.contains_key(name) {
+                        Type::Named(name.clone())
+                    } else {
+                        Type::Named(PROCESS_HANDLE_TYPE_NAME.to_string())
+                    }
+                }
                 "Bool" => Type::Bool,
                 "Unit" | "()" => Type::Unit,
                 "Any" => Type::Any,
@@ -4362,11 +4373,25 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("require_secret", ["name" => Type::String], secret);
         }
         "std/http" => {
+            let string_map = Type::Map {
+                key_type: Box::new(Type::String),
+                value_type: Box::new(Type::Any),
+            };
             sig!("fetch", ["url_or_options" => Type::Union(vec![Type::String, Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }])], Type::Generic {
                 name: "Result".to_string(),
                 args: vec![Type::Named("Response".to_string()), Type::String],
             }, variadic);
-            sig!("download", ["url" => Type::String, "path" => Type::String], Type::Any);
+            sig!("download", [
+                "url_or_options" => Type::Union(vec![Type::String, Type::Map {
+                    key_type: Box::new(Type::String),
+                    value_type: Box::new(Type::Any),
+                }]),
+                "path" => Type::String,
+                "file_options" => string_map.clone()
+            ], Type::Generic {
+                name: "Result".to_string(),
+                args: vec![string_map, Type::String],
+            }, required(2));
             sig!("Cache", ["ttl" => Type::Int], Type::Any);
             sig!("cache_fetch", [
                 "cache" => Type::Any,
@@ -4679,6 +4704,53 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("batch_status", ["batch_id_or_handle" => Type::Any], Type::Generic { name: "Result".to_string(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
             sig!("batch_id", [], Type::Optional(Box::new(Type::String)));
             sig!("enqueue_into", ["batch_id_or_handle" => Type::Any, "job_type" => Type::String, "args" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::String, Type::String] });
+        }
+        "std/markdown" => {
+            sig!("to_html", ["markdown" => Type::String], Type::String);
+            sig!("to_html_safe", ["markdown" => Type::String], Type::String);
+            sig!(
+                "parse_blocks",
+                ["markdown" => Type::String],
+                Type::Array(Box::new(Type::Map {
+                    key_type: Box::new(Type::String),
+                    value_type: Box::new(Type::Any),
+                }))
+            );
+            sig!("replace_source_range", [
+                "markdown" => Type::String,
+                "start" => Type::Int,
+                "end" => Type::Int,
+                "replacement" => Type::String
+            ], Type::String);
+        }
+        "std/process" => {
+            let string_map = Type::Map {
+                key_type: Box::new(Type::String),
+                value_type: Box::new(Type::Any),
+            };
+            let process = Type::Named(PROCESS_HANDLE_TYPE_NAME.to_string());
+            let result = |ok| Type::Generic {
+                name: "Result".to_string(),
+                args: vec![ok, Type::String],
+            };
+            sig!("run", [
+                "program" => Type::String,
+                "args" => Type::Array(Box::new(Type::String)),
+                "options" => string_map.clone()
+            ], result(string_map.clone()), required(2));
+            sig!("start", [
+                "program" => Type::String,
+                "args" => Type::Array(Box::new(Type::String)),
+                "options" => string_map.clone()
+            ], result(process.clone()), required(2));
+            sig!("wait", ["process" => process.clone()], result(string_map.clone()));
+            sig!(
+                "try_wait",
+                ["process" => process.clone()],
+                result(Type::Optional(Box::new(string_map)))
+            );
+            sig!("terminate", ["process" => process.clone()], result(Type::Bool));
+            sig!("kill", ["process" => process], result(Type::Bool));
         }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));
@@ -5486,6 +5558,62 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("expected String"));
         assert!(errs[0].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_std_process_rejects_non_process_handles() {
+        let errs = check_errors(
+            r#"
+            import { wait } from "std/process"
+            wait("not a process")
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("expected std/process::Process"));
+        assert!(errs[0].message.contains("got String"));
+    }
+
+    #[test]
+    fn test_process_handle_type_cannot_be_forged_by_a_user_enum() {
+        let errs = check_errors(
+            r#"
+            import { wait } from "std/process"
+            enum Process { Fake }
+            wait(Process::Fake)
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs.iter().any(|error| {
+            error.message.contains("expected std/process::Process")
+                && error.message.contains("got Process")
+        }));
+    }
+
+    #[test]
+    fn test_process_handle_type_annotation_resolves_to_opaque_type() {
+        let errs = check_errors(
+            r#"
+            import { wait } from "std/process"
+            fn await_process(process: Process) {
+                wait(process)
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
+    }
+
+    #[test]
+    fn test_std_http_download_preserves_its_result_type() {
+        let errs = check_errors(
+            r#"
+            import { download } from "std/http"
+            let result: String = download("https://example.com/file", "./file")
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("Type mismatch"));
+        assert!(errs[0].message.contains("String"));
+        assert!(errs[0].message.contains("Result"));
     }
 
     #[test]

@@ -226,6 +226,9 @@ impl SerializedValue {
                 })
             }
             Value::TaskHandle(id) => Ok(SerializedValue::TaskHandle(*id)),
+            Value::ProcessHandle(_) => Err(IntentError::type_error(
+                "Process handles cannot cross task or channel boundaries".to_string(),
+            )),
             Value::TxChannelHandle(id, cs) => {
                 // Downcast the opaque Arc<dyn Any> back to Arc<Sender<SerializedValue>>.
                 // This clone keeps the sender alive in the spawned task.
@@ -1909,16 +1912,17 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
             )))
         }
     };
-    // Handles cannot be sent through channels (they're process-local references)
+    // Process handles are runtime-local references and cannot cross channel boundaries.
     if matches!(
         value,
         Value::TaskHandle(_)
+            | Value::ProcessHandle(_)
             | Value::TxChannelHandle(_, _)
             | Value::RxChannelHandle(_)
             | Value::ScheduleHandle(_)
     ) {
         return Err(IntentError::type_error(
-            "Handles (Task, TxChannel, RxChannel, Schedule) cannot be sent through channels"
+            "Handles (Task, Process, TxChannel, RxChannel, Schedule) cannot be sent through channels"
                 .to_string(),
         ));
     }
@@ -3027,6 +3031,15 @@ mod tests {
         let error = SerializedValue::from_value(&value)
             .expect_err("task and channel serialization must reject secrets");
         assert!(!error.to_string().contains(canary));
+    }
+
+    #[test]
+    fn serialized_values_reject_process_handles() {
+        let error = SerializedValue::from_value(&Value::ProcessHandle(7))
+            .expect_err("process handles must stay in their supervising runtime");
+        assert!(error
+            .to_string()
+            .contains("Process handles cannot cross task or channel boundaries"));
     }
 
     #[test]
