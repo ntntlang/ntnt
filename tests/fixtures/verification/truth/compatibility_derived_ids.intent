@@ -1,0 +1,5 @@
+Feature: Legacy behavior
+
+  Scenario: Legacy scenario
+    When something happens
+    → a legacy result is observed

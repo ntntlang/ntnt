@@ -1,0 +1,5 @@
+Feature: First feature
+  id: feature.duplicate
+
+Feature: Second feature
+  id: feature.duplicate

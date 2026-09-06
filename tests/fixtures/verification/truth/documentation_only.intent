@@ -1,0 +1,5 @@
+Feature: Domain terminology
+  id: feature.domain-terminology
+  verification: documentation-only
+  rationale: "Defines shared vocabulary and makes no behavioral claim"
+  description: "Terms used by the behavioral specifications"

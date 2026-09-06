@@ -34,6 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -45,6 +46,7 @@ use crate::ial::{self, standard_vocabulary, Context as IalContext, Term, Vocabul
 use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
 use crate::parser::Parser as IntentParser;
+use crate::verification::ids::{IdKind, IdMode, IdOrigin, IdWarning, SourceSpan, StableId};
 
 // ============================================================================
 // GLOSSARY SYSTEM (IAL Core)
@@ -2187,6 +2189,32 @@ pub struct Invariant {
 // SCENARIO SYSTEM (Natural Language Tests)
 // ============================================================================
 
+/// Feature-level verification declaration. Documentation-only is deliberately
+/// unavailable on scenarios and outcomes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeatureVerification {
+    Behavioral,
+    DocumentationOnly { rationale: String },
+}
+
+/// Stable identity and location paired with an existing outcome string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutcomeMetadata {
+    pub(crate) id: StableId,
+    pub(crate) source: SourceSpan,
+}
+
+/// The declaration that owns a parsed scenario.
+///
+/// Constraint scenarios remain in the legacy feature/component collections for
+/// compatibility, but are not behavioral feature obligations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScenarioOrigin {
+    Feature,
+    Component,
+    Constraint,
+}
+
 /// A natural language scenario that can be executed as a test
 #[derive(Debug, Clone, Serialize)]
 pub struct Scenario {
@@ -2685,6 +2713,267 @@ pub struct IntentFile {
     pub test_data: Vec<TestDataSection>,
 }
 
+/// An intent AST paired with stable verification identity owned by the parser.
+///
+/// The wrapped [`IntentFile`] retains its pre-verification public shape. The
+/// sidecar is immutable after parsing so edits to public truth-model fields
+/// cannot redefine canonical declaration ownership.
+#[derive(Debug)]
+pub struct IdentifiedIntent {
+    intent: IntentFile,
+    metadata: IntentMetadata,
+}
+
+#[derive(Debug)]
+pub(crate) struct IntentMetadata {
+    pub(crate) features: Vec<FeatureMetadata>,
+    pub(crate) components: Vec<ComponentMetadata>,
+    warnings: Vec<IdWarning>,
+}
+
+#[derive(Debug)]
+pub(crate) struct FeatureMetadata {
+    pub(crate) id: StableId,
+    pub(crate) id_source: SourceSpan,
+    pub(crate) source: SourceSpan,
+    pub(crate) verification: FeatureVerification,
+    pub(crate) scenarios: Vec<ScenarioMetadata>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ComponentMetadata {
+    pub(crate) scenarios: Vec<ScenarioMetadata>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ScenarioMetadata {
+    pub(crate) id: StableId,
+    pub(crate) id_source: SourceSpan,
+    pub(crate) source: SourceSpan,
+    pub(crate) origin: ScenarioOrigin,
+    pub(crate) outcomes: Vec<OutcomeMetadata>,
+}
+
+#[derive(Debug)]
+struct ParsedScenario {
+    ast: Scenario,
+    id: Option<String>,
+    verification_id: StableId,
+    verification_id_source: SourceSpan,
+    source: SourceSpan,
+    origin: ScenarioOrigin,
+    outcome_metadata: Vec<OutcomeMetadata>,
+}
+
+impl Deref for ParsedScenario {
+    type Target = Scenario;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ast
+    }
+}
+
+impl DerefMut for ParsedScenario {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ast
+    }
+}
+
+#[derive(Debug)]
+struct ParsedFeature {
+    ast: Feature,
+    verification_id: StableId,
+    verification_id_source: SourceSpan,
+    source: SourceSpan,
+    verification: FeatureVerification,
+    scenarios: Vec<ParsedScenario>,
+}
+
+impl Deref for ParsedFeature {
+    type Target = Feature;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ast
+    }
+}
+
+impl DerefMut for ParsedFeature {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ast
+    }
+}
+
+impl ParsedFeature {
+    fn into_parts(mut self) -> (Feature, FeatureMetadata) {
+        let (scenarios, scenario_metadata): (Vec<_>, Vec<_>) = self
+            .scenarios
+            .into_iter()
+            .map(ParsedScenario::into_parts)
+            .unzip();
+        self.ast.scenarios = scenarios;
+        (
+            self.ast,
+            FeatureMetadata {
+                id: self.verification_id,
+                id_source: self.verification_id_source,
+                source: self.source,
+                verification: self.verification,
+                scenarios: scenario_metadata,
+            },
+        )
+    }
+}
+
+#[derive(Debug)]
+struct ParsedComponent {
+    ast: Component,
+    scenarios: Vec<ParsedScenario>,
+}
+
+impl Deref for ParsedComponent {
+    type Target = Component;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ast
+    }
+}
+
+impl DerefMut for ParsedComponent {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ast
+    }
+}
+
+impl ParsedComponent {
+    fn into_parts(mut self) -> (Component, ComponentMetadata) {
+        let (scenarios, scenario_metadata): (Vec<_>, Vec<_>) = self
+            .scenarios
+            .into_iter()
+            .map(ParsedScenario::into_parts)
+            .unzip();
+        self.ast.scenarios = scenarios;
+        (
+            self.ast,
+            ComponentMetadata {
+                scenarios: scenario_metadata,
+            },
+        )
+    }
+}
+
+impl ParsedScenario {
+    fn into_parts(self) -> (Scenario, ScenarioMetadata) {
+        (
+            self.ast,
+            ScenarioMetadata {
+                id: self.verification_id,
+                id_source: self.verification_id_source,
+                source: self.source,
+                origin: self.origin,
+                outcomes: self.outcome_metadata,
+            },
+        )
+    }
+}
+
+impl IdentifiedIntent {
+    pub fn as_intent(&self) -> &IntentFile {
+        &self.intent
+    }
+
+    pub fn into_intent(self) -> IntentFile {
+        self.intent
+    }
+
+    pub fn verification_warnings(&self) -> &[IdWarning] {
+        &self.metadata.warnings
+    }
+
+    pub fn feature_stable_id(&self, feature_index: usize) -> Option<&StableId> {
+        self.metadata
+            .features
+            .get(feature_index)
+            .map(|feature| &feature.id)
+    }
+
+    pub fn feature_verification(&self, feature_index: usize) -> Option<&FeatureVerification> {
+        self.metadata
+            .features
+            .get(feature_index)
+            .map(|feature| &feature.verification)
+    }
+
+    pub fn scenario_stable_id(
+        &self,
+        feature_index: usize,
+        scenario_index: usize,
+    ) -> Option<&StableId> {
+        self.metadata
+            .features
+            .get(feature_index)?
+            .scenarios
+            .get(scenario_index)
+            .map(|scenario| &scenario.id)
+    }
+
+    pub fn component_scenario_stable_id(
+        &self,
+        component_index: usize,
+        scenario_index: usize,
+    ) -> Option<&StableId> {
+        self.metadata
+            .components
+            .get(component_index)?
+            .scenarios
+            .get(scenario_index)
+            .map(|scenario| &scenario.id)
+    }
+
+    pub fn outcome_stable_id(
+        &self,
+        feature_index: usize,
+        scenario_index: usize,
+        outcome_index: usize,
+    ) -> Option<&StableId> {
+        self.metadata
+            .features
+            .get(feature_index)?
+            .scenarios
+            .get(scenario_index)?
+            .outcomes
+            .get(outcome_index)
+            .map(|outcome| &outcome.id)
+    }
+
+    pub fn component_outcome_stable_id(
+        &self,
+        component_index: usize,
+        scenario_index: usize,
+        outcome_index: usize,
+    ) -> Option<&StableId> {
+        self.metadata
+            .components
+            .get(component_index)?
+            .scenarios
+            .get(scenario_index)?
+            .outcomes
+            .get(outcome_index)
+            .map(|outcome| &outcome.id)
+    }
+
+    pub(crate) fn metadata(&self) -> &IntentMetadata {
+        &self.metadata
+    }
+}
+
+impl Deref for IdentifiedIntent {
+    type Target = IntentFile;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_intent()
+    }
+}
+
 /// A section of test data linked to a feature/scenario
 #[derive(Debug, Clone, Serialize)]
 pub struct TestDataSection {
@@ -2788,13 +3077,25 @@ pub struct FeatureCoverage {
 }
 
 impl IntentFile {
-    /// Parse an intent file from a path
+    /// Parse an intent file from a path while preserving legacy behavior.
     pub fn parse(path: &Path) -> Result<Self, IntentError> {
         let content = fs::read_to_string(path).map_err(|e| {
             IntentError::runtime_error(format!("Failed to read intent file: {}", e))
         })?;
 
         Self::parse_content(&content, path.to_string_lossy().to_string())
+    }
+
+    /// Parse an intent file with explicit stable-ID policy.
+    pub fn parse_with_id_mode(
+        path: &Path,
+        id_mode: IdMode,
+    ) -> Result<IdentifiedIntent, IntentError> {
+        let content = fs::read_to_string(path).map_err(|e| {
+            IntentError::runtime_error(format!("Failed to read intent file: {}", e))
+        })?;
+
+        Self::parse_content_with_id_mode(&content, path.to_string_lossy().to_string(), id_mode)
     }
 
     /// Look up test data by ID.
@@ -2847,34 +3148,50 @@ impl IntentFile {
             .collect()
     }
 
-    /// Parse intent file content
+    /// Parse intent file content while preserving legacy behavior.
     pub fn parse_content(content: &str, source_path: String) -> Result<Self, IntentError> {
-        let mut features = Vec::new();
-        let mut components = Vec::new();
+        Self::parse_content_with_id_mode(content, source_path, IdMode::Compatibility)
+            .map(IdentifiedIntent::into_intent)
+    }
+
+    /// Parse intent file content with explicit stable-ID policy.
+    pub fn parse_content_with_id_mode(
+        content: &str,
+        source_path: String,
+        id_mode: IdMode,
+    ) -> Result<IdentifiedIntent, IntentError> {
+        let mut features: Vec<ParsedFeature> = Vec::new();
+        let mut components: Vec<ParsedComponent> = Vec::new();
         let mut invariants: Vec<Invariant> = Vec::new();
         let mut test_data_sections: Vec<TestDataSection> = Vec::new();
         let mut glossary = Glossary::new();
         let mut has_glossary = false;
         let mut title: Option<String> = None;
         let mut expecting_title = false;
-        let mut current_feature: Option<Feature> = None;
-        let mut current_component: Option<Component> = None;
+        let mut current_feature: Option<ParsedFeature> = None;
+        let mut current_component: Option<ParsedComponent> = None;
         let mut current_invariant: Option<Invariant> = None;
         let mut current_test_data: Option<TestDataSection> = None;
         let mut current_test: Option<TestCase> = None;
-        let mut current_scenario: Option<Scenario> = None;
+        let mut current_scenario: Option<ParsedScenario> = None;
         let mut in_assertions = false;
         let mut in_glossary = false;
         let mut in_component_inherent = false;
         let mut in_invariant_assertions = false;
         let mut in_test_data_table = false;
+        // Constraints are a legacy Intent declaration parsed only indirectly by
+        // this module. Track their context so their `id:` and `rationale:`
+        // fields are not reinterpreted as verification metadata for the
+        // preceding feature.
+        let mut in_constraint = false;
         let mut test_data_columns: Vec<String> = Vec::new();
         let mut _in_glossary_bindings = false;
         // Technical bindings parsing state
         let mut current_binding_term: Option<(String, TechnicalBinding)> = None;
         let mut in_binding_assert_list = false;
 
-        for line in content.lines() {
+        for (line_index, line) in content.lines().enumerate() {
+            let line_number = line_index + 1;
             let trimmed = line.trim();
 
             // Skip empty lines
@@ -2885,6 +3202,42 @@ impl IntentFile {
             // Skip pure comments (but not markdown headers)
             if trimmed.starts_with('#') && !trimmed.starts_with("##") {
                 continue;
+            }
+
+            // Markdown headings are parser-section boundaries. Finish the previous
+            // section before the named heading below enables its own state.
+            if trimmed.starts_with("##") {
+                Self::finish_current_scenario(
+                    &mut current_scenario,
+                    &mut current_feature,
+                    &mut current_component,
+                );
+                if let Some(test) = current_test.take() {
+                    if let Some(feature) = current_feature.as_mut() {
+                        feature.tests.push(test);
+                    }
+                }
+                if let Some((term, binding)) = current_binding_term.take() {
+                    glossary.set_binding(&term, binding);
+                }
+                if let Some(test_data) = current_test_data.take() {
+                    test_data_sections.push(test_data);
+                }
+                if let Some(invariant) = current_invariant.take() {
+                    invariants.push(invariant);
+                }
+                in_constraint = false;
+                in_glossary = false;
+                _in_glossary_bindings = false;
+                in_binding_assert_list = false;
+                in_test_data_table = false;
+                test_data_columns.clear();
+                in_invariant_assertions = false;
+                in_component_inherent = false;
+                in_assertions = false;
+                if !trimmed.starts_with("## Title") {
+                    expecting_title = false;
+                }
             }
 
             // Section separator (---)
@@ -2907,25 +3260,41 @@ impl IntentFile {
                     }
                     components.push(comp);
                 }
-                // Save any pending binding term
+                // Save any pending binding term or parser-owned section.
                 if let Some((term, binding)) = current_binding_term.take() {
                     glossary.set_binding(&term, binding);
                 }
-                // Reset scenario state since we just saved it
+                if let Some(test_data) = current_test_data.take() {
+                    test_data_sections.push(test_data);
+                }
+                if let Some(invariant) = current_invariant.take() {
+                    invariants.push(invariant);
+                }
+                // Reset section state since the separator closed it.
                 current_scenario = None;
                 current_test = None;
                 in_glossary = false;
                 in_component_inherent = false;
                 _in_glossary_bindings = false;
                 in_binding_assert_list = false;
+                in_test_data_table = false;
+                test_data_columns.clear();
+                in_invariant_assertions = false;
+                in_assertions = false;
+                in_constraint = false;
+                expecting_title = false;
                 continue;
             }
 
-            // Capture title from next line after ## Title header
+            // Capture title from next non-declaration line after ## Title.
             if expecting_title && title.is_none() {
-                title = Some(trimmed.to_string());
-                expecting_title = false;
-                continue;
+                if Self::is_named_declaration(trimmed) {
+                    expecting_title = false;
+                } else {
+                    title = Some(trimmed.to_string());
+                    expecting_title = false;
+                    continue;
+                }
             }
 
             // Title section header: ## Title
@@ -2955,6 +3324,64 @@ impl IntentFile {
                     _in_glossary_bindings = false;
                 }
                 continue;
+            }
+
+            // Named declarations also end any surrounding Markdown parser section.
+            // Their declaration-specific handling below owns the semantic transition.
+            let is_legacy_test_declaration = trimmed == "test:";
+            let is_test_data_declaration =
+                trimmed.starts_with("Test Cases:") || trimmed.starts_with("Test Data:");
+            let is_named_declaration = Self::is_named_declaration(trimmed);
+            if is_named_declaration {
+                if let Some((term, binding)) = current_binding_term.take() {
+                    glossary.set_binding(&term, binding);
+                }
+                if let Some(test_data) = current_test_data.take() {
+                    test_data_sections.push(test_data);
+                }
+                if let Some(invariant) = current_invariant.take() {
+                    invariants.push(invariant);
+                }
+                in_glossary = false;
+                _in_glossary_bindings = false;
+                in_binding_assert_list = false;
+                in_test_data_table = false;
+                test_data_columns.clear();
+                in_invariant_assertions = false;
+                expecting_title = false;
+            }
+            if is_test_data_declaration || is_legacy_test_declaration {
+                Self::finish_current_scenario(
+                    &mut current_scenario,
+                    &mut current_feature,
+                    &mut current_component,
+                );
+                in_constraint = false;
+            }
+            if id_mode == IdMode::Strict && is_legacy_test_declaration && current_feature.is_none()
+            {
+                return Err(Self::verification_error(
+                    &Self::line_span(&source_path, line_number, line, "test:"),
+                    "test requires an active Feature owner",
+                ));
+            }
+
+            if id_mode == IdMode::Strict
+                && (trimmed.starts_with('→') || trimmed.starts_with("->"))
+                && current_scenario.is_none()
+                && current_invariant.is_none()
+                && !_in_glossary_bindings
+                && !in_component_inherent
+            {
+                let marker = if trimmed.starts_with('→') {
+                    "→"
+                } else {
+                    "->"
+                };
+                return Err(Self::verification_error(
+                    &Self::line_span(&source_path, line_number, line, marker),
+                    "outcome requires an active Scenario or Invariant owner",
+                ));
             }
 
             // Parse glossary table rows: | term | meaning | or | term | type | meaning |
@@ -3095,8 +3522,32 @@ impl IntentFile {
                 continue;
             }
 
+            // Legacy constraint declaration. Preserve the existing behavior
+            // where constraint scenarios remain visible to the preceding
+            // feature, but do not treat constraint metadata as feature
+            // verification metadata.
+            if trimmed.starts_with("Constraint:") {
+                if let Some(scenario) = current_scenario.take() {
+                    if let Some(feature) = current_feature.as_mut() {
+                        feature.scenarios.push(scenario);
+                    } else if let Some(component) = current_component.as_mut() {
+                        component.scenarios.push(scenario);
+                    }
+                }
+                if let Some(test) = current_test.take() {
+                    if let Some(feature) = current_feature.as_mut() {
+                        feature.tests.push(test);
+                    }
+                }
+                in_assertions = false;
+                in_component_inherent = false;
+                in_constraint = true;
+                continue;
+            }
+
             // Feature declaration
             if trimmed.starts_with("Feature:") {
+                in_constraint = false;
                 // Save previous component
                 if let Some(mut comp) = current_component.take() {
                     if let Some(scenario) = current_scenario.take() {
@@ -3122,11 +3573,21 @@ impl IntentFile {
                 }
 
                 let name = trimmed.trim_start_matches("Feature:").trim().to_string();
-                current_feature = Some(Feature {
-                    id: None,
-                    name,
-                    description: None,
-                    tests: Vec::new(),
+                let source = Self::line_span(&source_path, line_number, line, "Feature:");
+                let verification_id =
+                    StableId::compatibility_derived(IdKind::Feature, &[&name], features.len());
+                current_feature = Some(ParsedFeature {
+                    ast: Feature {
+                        id: None,
+                        name,
+                        description: None,
+                        tests: Vec::new(),
+                        scenarios: Vec::new(),
+                    },
+                    verification_id,
+                    verification_id_source: source.clone(),
+                    source,
+                    verification: FeatureVerification::Behavioral,
                     scenarios: Vec::new(),
                 });
                 current_test = None;
@@ -3142,6 +3603,7 @@ impl IntentFile {
 
             // Component declaration
             if trimmed.starts_with("Component:") {
+                in_constraint = false;
                 // Save previous component
                 if let Some(mut comp) = current_component.take() {
                     if let Some(scenario) = current_scenario.take() {
@@ -3166,12 +3628,15 @@ impl IntentFile {
                 }
 
                 let name = trimmed.trim_start_matches("Component:").trim().to_string();
-                current_component = Some(Component {
-                    id: String::new(),
-                    name,
-                    description: None,
-                    parameters: Vec::new(),
-                    inherent_behavior: Vec::new(),
+                current_component = Some(ParsedComponent {
+                    ast: Component {
+                        id: String::new(),
+                        name,
+                        description: None,
+                        parameters: Vec::new(),
+                        inherent_behavior: Vec::new(),
+                        scenarios: Vec::new(),
+                    },
                     scenarios: Vec::new(),
                 });
                 current_test = None;
@@ -3187,8 +3652,20 @@ impl IntentFile {
                 continue;
             }
 
+            if id_mode == IdMode::Strict
+                && trimmed.starts_with("Scenario:")
+                && current_feature.is_none()
+                && current_component.is_none()
+            {
+                return Err(Self::verification_error(
+                    &Self::line_span(&source_path, line_number, line, "Scenario:"),
+                    "scenario requires an active Feature or Component owner",
+                ));
+            }
+
             // Invariant declaration
             if trimmed.starts_with("Invariant:") {
+                in_constraint = false;
                 // Save previous feature
                 if let Some(mut feat) = current_feature.take() {
                     if let Some(test) = current_test.take() {
@@ -3371,22 +3848,25 @@ impl IntentFile {
             // Inside a component
             if let Some(ref mut component) = current_component {
                 // Component ID
-                if trimmed.starts_with("id:") {
+                if trimmed.starts_with("id:") && current_scenario.is_none() && !in_constraint {
                     let id = trimmed.trim_start_matches("id:").trim();
                     component.id = id.to_string();
                     continue;
                 }
 
-                // Description - only for component if not inside a scenario
-                if trimmed.starts_with("description:") && current_scenario.is_none() {
+                // Description - only for component if not inside a scenario or Constraint
+                if trimmed.starts_with("description:")
+                    && current_scenario.is_none()
+                    && !in_constraint
+                {
                     let desc = trimmed.trim_start_matches("description:").trim();
                     let desc = desc.trim_matches('"').to_string();
                     component.description = Some(desc);
                     continue;
                 }
 
-                // Parameters
-                if trimmed.starts_with("parameters:") {
+                // Parameters belong to the component, never a following Constraint.
+                if trimmed.starts_with("parameters:") && !in_constraint {
                     let params_str = trimmed.trim_start_matches("parameters:").trim();
                     // Parse [param1, param2] or [param1] format
                     let params_str = params_str.trim_matches(|c| c == '[' || c == ']');
@@ -3398,9 +3878,10 @@ impl IntentFile {
                     continue;
                 }
 
-                // Inherent Behavior section
-                if trimmed.starts_with("Inherent Behavior:")
-                    || trimmed.starts_with("inherent_behavior:")
+                // Inherent Behavior section belongs to the component, not a Constraint.
+                if !in_constraint
+                    && (trimmed.starts_with("Inherent Behavior:")
+                        || trimmed.starts_with("inherent_behavior:"))
                 {
                     in_component_inherent = true;
                     continue;
@@ -3415,20 +3896,72 @@ impl IntentFile {
                     }
 
                     let name = trimmed.trim_start_matches("Scenario:").trim().to_string();
-                    current_scenario = Some(Scenario {
-                        name,
-                        description: None,
-                        given_clause: None,
-                        when_clause: String::new(),
-                        outcomes: Vec::new(),
-                        resolved_test: None,
-                        component_refs: Vec::new(),
+                    let source = Self::line_span(&source_path, line_number, line, "Scenario:");
+                    let component_ordinal = (components.len() + 1).to_string();
+                    current_scenario = Some(ParsedScenario {
+                        ast: Scenario {
+                            name: name.clone(),
+                            description: None,
+                            given_clause: None,
+                            when_clause: String::new(),
+                            outcomes: Vec::new(),
+                            resolved_test: None,
+                            component_refs: Vec::new(),
+                        },
+                        id: None,
+                        verification_id: StableId::compatibility_derived(
+                            IdKind::Scenario,
+                            &[
+                                "component",
+                                &component_ordinal,
+                                &component.id,
+                                &component.name,
+                                &name,
+                            ],
+                            component.scenarios.len(),
+                        ),
+                        verification_id_source: source.clone(),
+                        source,
+                        origin: if in_constraint {
+                            ScenarioOrigin::Constraint
+                        } else {
+                            ScenarioOrigin::Component
+                        },
+                        outcome_metadata: Vec::new(),
                     });
                     continue;
                 }
 
                 // Inside component scenario
                 if let Some(ref mut scenario) = current_scenario {
+                    if trimmed.starts_with("id:") {
+                        if in_constraint {
+                            continue;
+                        }
+                        let id = trimmed.trim_start_matches("id:").trim();
+                        let id_source = Self::line_span(&source_path, line_number, line, "id:");
+                        if scenario.id.is_some() {
+                            return Err(Self::verification_error(
+                                &id_source,
+                                format!(
+                                    "repeated scenario ID; first declared at {}",
+                                    scenario.verification_id_source.location()
+                                ),
+                            ));
+                        }
+                        if !scenario.outcomes.is_empty() {
+                            return Err(Self::verification_error(
+                                &id_source,
+                                "scenario ID must appear before outcomes",
+                            ));
+                        }
+                        scenario.id = Some(id.to_string());
+                        scenario.verification_id =
+                            Self::explicit_id(id, IdKind::Scenario, &id_source)?;
+                        scenario.verification_id_source = id_source;
+                        continue;
+                    }
+
                     // Description
                     if trimmed.starts_with("description:") {
                         let desc = trimmed.trim_start_matches("description:").trim();
@@ -3451,18 +3984,27 @@ impl IntentFile {
 
                     // Outcome clause
                     if trimmed.starts_with("→") || trimmed.starts_with("->") {
-                        let outcome = trimmed
+                        let raw_outcome = trimmed
                             .trim_start_matches("→")
                             .trim_start_matches("->")
-                            .trim()
-                            .to_string();
+                            .trim();
+                        let (outcome, metadata) = Self::parse_outcome(
+                            &source_path,
+                            line_number,
+                            line,
+                            raw_outcome,
+                            &scenario.verification_id,
+                            scenario.outcomes.len(),
+                            scenario.origin != ScenarioOrigin::Constraint,
+                        )?;
                         scenario.outcomes.push(outcome);
+                        scenario.outcome_metadata.push(metadata);
                         continue;
                     }
                 }
 
-                // Inherent behavior outcomes
-                if in_component_inherent {
+                // Inherent behavior outcomes never consume Constraint lines.
+                if in_component_inherent && !in_constraint {
                     if trimmed.starts_with("→") || trimmed.starts_with("->") {
                         let outcome = trimmed
                             .trim_start_matches("→")
@@ -3479,15 +4021,97 @@ impl IntentFile {
 
             // Inside a feature
             if let Some(ref mut feature) = current_feature {
-                // Feature ID
+                // Scenario ID must be handled before the enclosing feature ID.
                 if trimmed.starts_with("id:") {
+                    if in_constraint {
+                        continue;
+                    }
                     let id = trimmed.trim_start_matches("id:").trim();
-                    feature.id = Some(id.to_string());
+                    let id_source = Self::line_span(&source_path, line_number, line, "id:");
+                    if let Some(scenario) = current_scenario.as_mut() {
+                        if scenario.id.is_some() {
+                            return Err(Self::verification_error(
+                                &id_source,
+                                format!(
+                                    "repeated scenario ID; first declared at {}",
+                                    scenario.verification_id_source.location()
+                                ),
+                            ));
+                        }
+                        if !scenario.outcomes.is_empty() {
+                            return Err(Self::verification_error(
+                                &id_source,
+                                "scenario ID must appear before outcomes",
+                            ));
+                        }
+                        scenario.id = Some(id.to_string());
+                        scenario.verification_id =
+                            Self::explicit_id(id, IdKind::Scenario, &id_source)?;
+                        scenario.verification_id_source = id_source;
+                    } else {
+                        if feature.id.is_some() {
+                            return Err(Self::verification_error(
+                                &id_source,
+                                format!(
+                                    "repeated feature ID; first declared at {}",
+                                    feature.verification_id_source.location()
+                                ),
+                            ));
+                        }
+                        feature.verification_id =
+                            Self::explicit_id(id, IdKind::Feature, &id_source)?;
+                        feature.verification_id_source = id_source;
+                        feature.id = Some(id.to_string());
+                    }
                     continue;
                 }
 
-                // Description - only for feature if not inside a scenario
-                if trimmed.starts_with("description:") && current_scenario.is_none() {
+                if trimmed.starts_with("verification:") && !in_constraint {
+                    if current_scenario.is_some() {
+                        return Err(Self::verification_error(
+                            &Self::line_span(&source_path, line_number, line, "verification:"),
+                            "documentation-only is valid only on a feature",
+                        ));
+                    }
+                    let value = trimmed.trim_start_matches("verification:").trim();
+                    if value != "documentation-only" {
+                        return Err(Self::verification_error(
+                            &Self::line_span(&source_path, line_number, line, "verification:"),
+                            format!("unknown feature verification declaration '{value}'"),
+                        ));
+                    }
+                    feature.verification = FeatureVerification::DocumentationOnly {
+                        rationale: String::new(),
+                    };
+                    continue;
+                }
+
+                if trimmed.starts_with("rationale:") && current_scenario.is_none() && !in_constraint
+                {
+                    let rationale = trimmed
+                        .trim_start_matches("rationale:")
+                        .trim()
+                        .trim_matches('"')
+                        .to_string();
+                    match &mut feature.verification {
+                        FeatureVerification::DocumentationOnly {
+                            rationale: feature_rationale,
+                        } => *feature_rationale = rationale,
+                        FeatureVerification::Behavioral => {
+                            return Err(Self::verification_error(
+                                &Self::line_span(&source_path, line_number, line, "rationale:"),
+                                "rationale requires 'verification: documentation-only'",
+                            ));
+                        }
+                    }
+                    continue;
+                }
+
+                // Description - only for feature if not inside a scenario or Constraint
+                if trimmed.starts_with("description:")
+                    && current_scenario.is_none()
+                    && !in_constraint
+                {
                     let desc = trimmed.trim_start_matches("description:").trim();
                     // Remove surrounding quotes if present
                     let desc = desc.trim_matches('"').to_string();
@@ -3507,14 +4131,32 @@ impl IntentFile {
                     }
 
                     let name = trimmed.trim_start_matches("Scenario:").trim().to_string();
-                    current_scenario = Some(Scenario {
-                        name,
-                        description: None,
-                        given_clause: None,
-                        when_clause: String::new(),
-                        outcomes: Vec::new(),
-                        resolved_test: None,
-                        component_refs: Vec::new(),
+                    let source = Self::line_span(&source_path, line_number, line, "Scenario:");
+                    current_scenario = Some(ParsedScenario {
+                        ast: Scenario {
+                            name: name.clone(),
+                            description: None,
+                            given_clause: None,
+                            when_clause: String::new(),
+                            outcomes: Vec::new(),
+                            resolved_test: None,
+                            component_refs: Vec::new(),
+                        },
+                        id: None,
+                        verification_id: StableId::compatibility_child(
+                            IdKind::Scenario,
+                            &feature.verification_id,
+                            &[&name],
+                            feature.scenarios.len(),
+                        ),
+                        verification_id_source: source.clone(),
+                        source,
+                        origin: if in_constraint {
+                            ScenarioOrigin::Constraint
+                        } else {
+                            ScenarioOrigin::Feature
+                        },
+                        outcome_metadata: Vec::new(),
                     });
                     in_assertions = false;
                     continue;
@@ -3544,18 +4186,27 @@ impl IntentFile {
 
                     // Outcome clause (→ or ->)
                     if trimmed.starts_with("→") || trimmed.starts_with("->") {
-                        let outcome = trimmed
+                        let raw_outcome = trimmed
                             .trim_start_matches("→")
                             .trim_start_matches("->")
-                            .trim()
-                            .to_string();
+                            .trim();
+                        let (outcome, metadata) = Self::parse_outcome(
+                            &source_path,
+                            line_number,
+                            line,
+                            raw_outcome,
+                            &scenario.verification_id,
+                            scenario.outcomes.len(),
+                            scenario.origin != ScenarioOrigin::Constraint,
+                        )?;
                         scenario.outcomes.push(outcome);
+                        scenario.outcome_metadata.push(metadata);
                         continue;
                     }
                 }
 
                 // Test section start
-                if trimmed == "test:" {
+                if trimmed == "test:" && !in_constraint {
                     // Save any current scenario first
                     if let Some(scenario) = current_scenario.take() {
                         feature.scenarios.push(scenario);
@@ -3565,7 +4216,9 @@ impl IntentFile {
                 }
 
                 // Request line (starts a new test case)
-                if trimmed.starts_with("- request:") || trimmed.starts_with("request:") {
+                if !in_constraint
+                    && (trimmed.starts_with("- request:") || trimmed.starts_with("request:"))
+                {
                     // Save previous test
                     if let Some(test) = current_test.take() {
                         feature.tests.push(test);
@@ -3595,13 +4248,13 @@ impl IntentFile {
                 }
 
                 // Assert section
-                if trimmed == "assert:" {
+                if trimmed == "assert:" && !in_constraint {
                     in_assertions = true;
                     continue;
                 }
 
                 // Assertion lines
-                if in_assertions {
+                if in_assertions && !in_constraint {
                     if let Some(ref mut test) = current_test {
                         if let Some(assertion) = Self::parse_assertion(trimmed) {
                             test.assertions.push(assertion);
@@ -3611,7 +4264,7 @@ impl IntentFile {
                 }
 
                 // Body for POST requests
-                if trimmed.starts_with("body:") {
+                if trimmed.starts_with("body:") && !in_constraint {
                     if let Some(ref mut test) = current_test {
                         let body = trimmed.trim_start_matches("body:").trim();
                         let body = body.trim_matches('"').to_string();
@@ -3653,15 +4306,297 @@ impl IntentFile {
             test_data_sections.push(td);
         }
 
-        Ok(IntentFile {
-            features,
-            source_path,
-            title,
-            glossary: if has_glossary { Some(glossary) } else { None },
-            components,
-            invariants,
-            test_data: test_data_sections,
+        let mut verification_warnings = Vec::new();
+        Self::finalize_verification_ids(
+            &features,
+            &components,
+            id_mode,
+            &mut verification_warnings,
+        )?;
+
+        let (features, feature_metadata): (Vec<_>, Vec<_>) =
+            features.into_iter().map(ParsedFeature::into_parts).unzip();
+        let (components, component_metadata): (Vec<_>, Vec<_>) = components
+            .into_iter()
+            .map(ParsedComponent::into_parts)
+            .unzip();
+
+        Ok(IdentifiedIntent {
+            intent: IntentFile {
+                features,
+                source_path,
+                title,
+                glossary: if has_glossary { Some(glossary) } else { None },
+                components,
+                invariants,
+                test_data: test_data_sections,
+            },
+            metadata: IntentMetadata {
+                features: feature_metadata,
+                components: component_metadata,
+                warnings: verification_warnings,
+            },
         })
+    }
+
+    fn is_named_declaration(trimmed: &str) -> bool {
+        trimmed.starts_with("Scenario:")
+            || trimmed == "test:"
+            || trimmed.starts_with("Test Cases:")
+            || trimmed.starts_with("Test Data:")
+            || trimmed.starts_with("Feature:")
+            || trimmed.starts_with("Component:")
+            || trimmed.starts_with("Constraint:")
+            || trimmed.starts_with("Invariant:")
+    }
+
+    fn finish_current_scenario(
+        current_scenario: &mut Option<ParsedScenario>,
+        current_feature: &mut Option<ParsedFeature>,
+        current_component: &mut Option<ParsedComponent>,
+    ) {
+        let Some(scenario) = current_scenario.take() else {
+            return;
+        };
+        if let Some(feature) = current_feature.as_mut() {
+            feature.scenarios.push(scenario);
+        } else if let Some(component) = current_component.as_mut() {
+            component.scenarios.push(scenario);
+        } else {
+            *current_scenario = Some(scenario);
+        }
+    }
+
+    fn line_span(source_path: &str, line_number: usize, line: &str, marker: &str) -> SourceSpan {
+        let start_column = line
+            .find(marker)
+            .map_or(1, |byte_index| line[..byte_index].chars().count() + 1);
+        SourceSpan::single_line(
+            source_path,
+            line_number,
+            start_column,
+            line.chars().count() + 1,
+        )
+    }
+
+    fn verification_error(span: &SourceSpan, message: impl AsRef<str>) -> IntentError {
+        IntentError::runtime_error(format!("{}: {}", span.location(), message.as_ref()))
+    }
+
+    fn explicit_id(
+        value: &str,
+        kind: IdKind,
+        source: &SourceSpan,
+    ) -> Result<StableId, IntentError> {
+        StableId::explicit(value, kind).map_err(|reason| {
+            Self::verification_error(source, format!("malformed {kind} ID '{value}': {reason}"))
+        })
+    }
+
+    fn parse_outcome(
+        source_path: &str,
+        line_number: usize,
+        line: &str,
+        raw_outcome: &str,
+        scenario_id: &StableId,
+        ordinal: usize,
+        allow_verification_metadata: bool,
+    ) -> Result<(String, OutcomeMetadata), IntentError> {
+        let explicit_id = allow_verification_metadata
+            .then_some(raw_outcome)
+            .and_then(|outcome| outcome.strip_prefix("id:"))
+            .and_then(|declaration| declaration.split_once(';'))
+            .filter(|(id, _)| id.trim().starts_with("outcome."));
+        let source_marker = if explicit_id.is_some() {
+            "id:"
+        } else if line.contains('→') {
+            "→"
+        } else {
+            "->"
+        };
+        let source = Self::line_span(source_path, line_number, line, source_marker);
+
+        let (statement, id) = if let Some((id, statement)) = explicit_id {
+            let id = id.trim();
+            let statement = statement.trim();
+            if statement.is_empty() {
+                return Err(Self::verification_error(
+                    &source,
+                    "outcome statement must not be empty",
+                ));
+            }
+            (
+                statement.to_string(),
+                Self::explicit_id(id, IdKind::Outcome, &source)?,
+            )
+        } else {
+            (
+                raw_outcome.to_string(),
+                StableId::compatibility_child(
+                    IdKind::Outcome,
+                    scenario_id,
+                    &[raw_outcome],
+                    ordinal,
+                ),
+            )
+        };
+
+        if allow_verification_metadata && statement == "verification: documentation-only" {
+            return Err(Self::verification_error(
+                &source,
+                "documentation-only is valid only on a feature",
+            ));
+        }
+
+        Ok((
+            statement,
+            OutcomeMetadata {
+                id,
+                source: source.clone(),
+            },
+        ))
+    }
+
+    fn finalize_verification_ids(
+        features: &[ParsedFeature],
+        components: &[ParsedComponent],
+        id_mode: IdMode,
+        warnings: &mut Vec<IdWarning>,
+    ) -> Result<(), IntentError> {
+        let mut feature_ids = HashMap::<String, SourceSpan>::new();
+        let mut scenario_ids = HashMap::<String, SourceSpan>::new();
+        let mut outcome_ids = HashMap::<String, SourceSpan>::new();
+
+        for feature in features {
+            Self::check_id_policy(&feature.verification_id, &feature.source, id_mode, warnings)?;
+            Self::register_unique_id(
+                &mut feature_ids,
+                &feature.verification_id,
+                &feature.verification_id_source,
+            )?;
+
+            if let FeatureVerification::DocumentationOnly { rationale } = &feature.verification {
+                if rationale.trim().is_empty() {
+                    return Err(Self::verification_error(
+                        &feature.source,
+                        "verification: documentation-only requires a non-empty rationale",
+                    ));
+                }
+                if feature
+                    .scenarios
+                    .iter()
+                    .any(|scenario| scenario.origin == ScenarioOrigin::Feature)
+                    || !feature.tests.is_empty()
+                {
+                    let span = feature
+                        .scenarios
+                        .iter()
+                        .find(|scenario| scenario.origin == ScenarioOrigin::Feature)
+                        .map(|scenario| &scenario.source)
+                        .unwrap_or(&feature.source);
+                    return Err(Self::verification_error(
+                        span,
+                        "documentation-only is valid only for a feature with no behavioral outcomes or tests",
+                    ));
+                }
+            }
+
+            for scenario in &feature.scenarios {
+                if scenario.origin != ScenarioOrigin::Feature {
+                    continue;
+                }
+                Self::check_id_policy(
+                    &scenario.verification_id,
+                    &scenario.source,
+                    id_mode,
+                    warnings,
+                )?;
+                Self::register_unique_id(
+                    &mut scenario_ids,
+                    &scenario.verification_id,
+                    &scenario.verification_id_source,
+                )?;
+
+                for outcome in &scenario.outcome_metadata {
+                    Self::check_id_policy(&outcome.id, &outcome.source, id_mode, warnings)?;
+                    Self::register_unique_id(&mut outcome_ids, &outcome.id, &outcome.source)?;
+                }
+            }
+        }
+
+        for component in components {
+            for scenario in &component.scenarios {
+                if scenario.origin != ScenarioOrigin::Component {
+                    continue;
+                }
+                Self::check_id_policy(
+                    &scenario.verification_id,
+                    &scenario.source,
+                    id_mode,
+                    warnings,
+                )?;
+                Self::register_unique_id(
+                    &mut scenario_ids,
+                    &scenario.verification_id,
+                    &scenario.verification_id_source,
+                )?;
+                for outcome in &scenario.outcome_metadata {
+                    Self::check_id_policy(&outcome.id, &outcome.source, id_mode, warnings)?;
+                    Self::register_unique_id(&mut outcome_ids, &outcome.id, &outcome.source)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_id_policy(
+        id: &StableId,
+        source: &SourceSpan,
+        id_mode: IdMode,
+        warnings: &mut Vec<IdWarning>,
+    ) -> Result<(), IntentError> {
+        if id.origin() == IdOrigin::Explicit {
+            return Ok(());
+        }
+        if id_mode == IdMode::Strict {
+            return Err(Self::verification_error(
+                source,
+                format!(
+                    "missing {} ID; strict mode requires a stable explicit ID",
+                    id.kind()
+                ),
+            ));
+        }
+        warnings.push(IdWarning {
+            message: format!(
+                "derived {} ID '{}' for compatibility; renaming or reordering changes identity",
+                id.kind(),
+                id
+            ),
+            id: id.clone(),
+            span: source.clone(),
+        });
+        Ok(())
+    }
+
+    fn register_unique_id(
+        seen: &mut HashMap<String, SourceSpan>,
+        id: &StableId,
+        source: &SourceSpan,
+    ) -> Result<(), IntentError> {
+        if let Some(first) = seen.get(id.as_str()) {
+            return Err(Self::verification_error(
+                source,
+                format!(
+                    "duplicate {} ID '{}'; first declared at {}",
+                    id.kind(),
+                    id,
+                    first.location()
+                ),
+            ));
+        }
+        seen.insert(id.to_string(), source.clone());
+        Ok(())
     }
 
     /// Parse a single assertion line
