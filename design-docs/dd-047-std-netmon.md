@@ -988,6 +988,19 @@ Retention, rollups, dashboards, and notification delivery should live in the ref
 - alert-state helpers
 - storage-friendly metric/check shapes
 
+### Follow-on protocols: DD requirements only
+
+DD-047 does not design or implement gNMI, NETCONF, YANG, Syslog, or a generic streaming runtime. They differ materially from SNMP polling and must not enter `std/netmon` as convenience additions. This document tracks only the requirement to create focused follow-on DDs:
+
+- [ ] **Create a bounded-stream runtime DD** — specify an opaque stream/subscription handle, bounded item/byte buffers, backpressure and overflow policy, cancellation, deterministic close, batching, drain behavior, and supervised long-lived source lifecycle. Keep it generic enough for gNMI, NETCONF notifications, Syslog, WebSockets, database notifications, and future message sources without becoming a workflow DSL.
+- [ ] **Create a gNMI DD** — specify Capabilities/Get/Subscribe, gRPC and TLS/mTLS, path/subscription modes, update normalization, reconnect/resubscribe, duplicate/gap semantics, and its dependency on the bounded-stream contract. Decide private `netops/gnmi` packaging versus a future `std/gnmi` promotion; do not add the API to DD-047.
+- [ ] **Create a NETCONF DD** — specify SSH/TLS sessions, RPC and notification subscriptions, framing, capability negotiation, datastore/lock semantics, and separate read-only versus configuration-write authority. Decide private `netops/netconf` packaging versus future promotion; do not let monitoring authority imply device-configuration authority.
+- [ ] **Create a YANG DD** — specify model loading, module/import resolution, revisions, identities, path/type validation, generated versus dynamic bindings, and how gNMI/NETCONF consume model metadata. YANG is a schema/model system, not a transport, and remains outside `std/netmon`.
+- [ ] **Create a Syslog DD** — specify RFC 3164/5424 parsing, UDP/TCP/TLS listeners, framing, sender admission, message/connection/rate bounds, spoofing and loss semantics, batching, backpressure, and supervised collector lifecycle. Decide private `netops/syslog` packaging versus a generic future `std/syslog` module.
+- [ ] **Create an optional `ntnt-netops` packaging DD or packaging section in the first protocol DD** — decide whether the private modules ship together while preserving separate import namespaces and independent promotion paths.
+
+Each follow-on DD must apply the primitive/stdlib-worthiness test from [DD-077](dd-077-correctness-primitives-roadmap.md), state its runtime/stdlib/application boundary, and define crash, reconnect, loss, duplication, ordering, backpressure, secret, and network-authority semantics before implementation begins. Completing these checklist items means creating and registering the DDs; it does not expand DD-047's implementation scope.
+
 ### Reference app, not library
 
 - UI/dashboard
@@ -1017,6 +1030,7 @@ Some of these may become useful later, but they carry OS permissions, abuse risk
 
 ### Status Dashboard
 
+- [ ] **Planning prerequisite — create and register the bounded-stream, gNMI, NETCONF, YANG, Syslog, and optional `ntnt-netops` packaging DDs listed above.** Their implementation is not part of DD-047.
 - [x] **Slice 0 — standard-library packaging and security contract**
 - [x] **Slice 1A — bounded SNMPv2c GET**
 - [x] **Slice 1B — bounded numeric SNMP WALK**
