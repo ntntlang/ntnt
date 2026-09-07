@@ -561,7 +561,7 @@ ntnt jobs clear server.tnt --status=dead --older-than=7d --yes
 ntnt intent check <FILE>
 ```
 
-Run intent tests against implementation
+Run Intent-selected native functions or HTTP tests. Native-only files need no paired server. Native cases run serially in clean, disposable child processes; this is local code execution, not a security sandbox. Failed, unresolved, skipped or empty runs exit nonzero in both human and JSON modes.
 
 **Options:**
 
@@ -569,6 +569,7 @@ Run intent tests against implementation
 |--------|------|---------|-------------|
 | `--intent`, `-i` | PATH | - | Path to intent file (default: <name>.intent) |
 | `--port` | number | 18081 | Port to run the test server on |
+| `--case` | string | - | Select one exact, unique scenario name before deciding whether HTTP is needed; no match is non-green |
 | `--verbose`, `-v` | flag | - | Show scenario pass/fail status |
 | `-vv` | flag | - | Show all assertions and term resolution |
 | `--json` | flag | - | Output results as JSON |
@@ -578,6 +579,8 @@ Run intent tests against implementation
 ntnt intent check server.tnt
 ntnt intent check server.tnt -v
 ntnt intent check server.tnt -vv
+ntnt intent check examples/native_testing/library.intent
+ntnt intent check examples/native_testing/library.intent --case 'Complete one task in memory' --json
 ```
 
 ### Intent Coverage

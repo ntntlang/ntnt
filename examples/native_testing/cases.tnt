@@ -1,0 +1,26 @@
+import { normalize_title, add_task, finish_task } from "./domain.tnt"
+import { connect, execute, query, close } from "std/db/sqlite"
+
+fn pure_checks() {
+    assert(normalize_title("  SHIP  ") == "ship")
+    let value = Ok(map { "items": [1, true, "three"], "optional": Some(false) })
+    assert(is_ok(value))
+    assert(unwrap(value)["optional"] == Some(false))
+}
+
+fn task_lifecycle() {
+    // The selected case owns this disposable database, never an ambient URL.
+    // Explicit close on success; the case process releases it on any failure.
+    let db = unwrap(connect(":memory:"))
+    unwrap(execute(db, "CREATE TABLE tasks (title TEXT UNIQUE NOT NULL, done INTEGER NOT NULL)", []))
+    assert(unwrap(add_task(db, "ship")) == 1)
+    assert(is_err(add_task(db, "ship")))
+    assert(unwrap(finish_task(db, "ship")) == 1)
+    let rows = unwrap(query(db, "SELECT title, done FROM tasks", []))
+    assert(len(rows) == 1)
+    assert(rows[0]["title"] == "ship")
+    assert(rows[0]["done"] == 1)
+    close(db)
+}
+
+// No autorun footer: Intent selects and invokes exactly one named function.

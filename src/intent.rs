@@ -172,35 +172,35 @@ impl KeywordSyntax {
     /// "call: func(a, b), source: file" -> ["call: func(a, b)", "source: file"]
     fn split_respecting_parens(s: &str) -> Vec<String> {
         let mut parts = Vec::new();
-        let mut current = String::new();
-        let mut paren_depth: i32 = 0;
-
-        for ch in s.chars() {
+        let mut start = 0;
+        let mut depth = 0usize;
+        let mut quote = None;
+        let mut escaped = false;
+        for (index, ch) in s.char_indices() {
+            if let Some(delimiter) = quote {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == delimiter {
+                    quote = None;
+                }
+                continue;
+            }
             match ch {
-                '(' => {
-                    paren_depth += 1;
-                    current.push(ch);
+                '"' | '\'' => quote = Some(ch),
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    parts.push(s[start..index].trim().to_string());
+                    start = index + 1;
                 }
-                ')' => {
-                    paren_depth = paren_depth.saturating_sub(1);
-                    current.push(ch);
-                }
-                ',' if paren_depth == 0 => {
-                    if !current.trim().is_empty() {
-                        parts.push(current.trim().to_string());
-                    }
-                    current = String::new();
-                }
-                _ => {
-                    current.push(ch);
-                }
+                _ => {}
             }
         }
-
-        if !current.trim().is_empty() {
-            parts.push(current.trim().to_string());
+        if !s.trim().is_empty() {
+            parts.push(s[start..].trim().to_string());
         }
-
         parts
     }
 
@@ -210,18 +210,17 @@ impl KeywordSyntax {
         let paren_start = call_str.find('(')?;
         let paren_end = call_str.rfind(')')?;
 
-        if paren_end <= paren_start {
+        if paren_end <= paren_start || !call_str[paren_end + 1..].trim().is_empty() {
             return None;
         }
 
         let function_name = call_str[..paren_start].trim().to_string();
         let args_str = &call_str[paren_start + 1..paren_end];
 
-        let args: Vec<String> = args_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let args = Self::split_respecting_parens(args_str);
+        if args.iter().any(String::is_empty) {
+            return None;
+        }
 
         Some(FunctionCallSpec {
             function_name,
@@ -965,6 +964,9 @@ impl Glossary {
         invariants: &[Invariant],
     ) -> Vec<Assertion> {
         // Build IAL vocabulary from glossary, components, and invariants
+        if let Some(predicate) = self.native_predicate(outcome) {
+            return vec![predicate];
+        }
         let vocab = self.to_ial_vocabulary_full(components, invariants);
 
         // Convert outcome to IAL format ($param -> {param}) for lookup
@@ -1036,6 +1038,9 @@ impl Glossary {
         depth: usize,
     ) -> Vec<Assertion> {
         // Safety: max depth check
+        if let Some(predicate) = self.native_predicate(outcome) {
+            return vec![predicate];
+        }
         if depth > Self::MAX_GLOSSARY_DEPTH {
             // Graceful degradation: return empty rather than crash
             return vec![];
@@ -1056,7 +1061,12 @@ impl Glossary {
         let mut assertions = Vec::new();
 
         // Look up in vocabulary - this handles parameterized terms
-        if let Some((params, definition)) = vocab.lookup(outcome) {
+        let project_definition = self.project_term(outcome).and_then(|(pattern, params)| {
+            vocab
+                .lookup_exact(&pattern)
+                .map(|definition| (params, definition))
+        });
+        if let Some((params, definition)) = project_definition.or_else(|| vocab.lookup(outcome)) {
             match definition {
                 ial::Definition::Terms(sub_terms) => {
                     // Expand ALL sub-terms and collect ALL assertions
@@ -1207,9 +1217,57 @@ impl Glossary {
         None
     }
 
+    fn project_term(&self, text: &str) -> Option<(String, HashMap<String, ial::Value>)> {
+        if let Some(term) = self.get(text.trim()) {
+            return Some((Self::convert_params_to_ial(&term.term), HashMap::new()));
+        }
+        self.terms
+            .values()
+            .filter_map(|term| {
+                let pattern = Self::convert_params_to_ial(&term.term);
+                if !pattern.contains('{') {
+                    return None;
+                }
+                let params = ial::Pattern::new(pattern.clone()).match_text(text)?;
+                Some((pattern, params))
+            })
+            .max_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+    }
+
+    /// Keep native literals intact before IAL compatibility parsing loses types.
+    fn native_predicate(&self, text: &str) -> Option<Assertion> {
+        // Explicit project vocabulary retains priority over primitive spelling.
+        if self.project_term(text).is_some() {
+            return None;
+        }
+        let text = text.trim();
+        let lower = text.to_ascii_lowercase();
+        if lower == "native assertions pass" {
+            return Some(Assertion::NativeAssertions);
+        }
+        for prefix in ["result is ", "result equals "] {
+            if lower.starts_with(prefix) {
+                let value = text[prefix.len()..].trim();
+                if !matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "lowercase" | "non-empty" | "non empty" | "deterministic" | "idempotent"
+                ) {
+                    return Some(Assertion::ResultEquals(value.to_string()));
+                }
+            }
+        }
+        None
+    }
+
     /// Convert a term text string to an assertion (for resolved IAL terms)
     fn term_text_to_assertion(&self, text: &str) -> Option<Assertion> {
+        if self.project_term(text).is_some() {
+            return None;
+        }
         let text_lower = text.to_lowercase();
+        if let Some(predicate) = self.native_predicate(text) {
+            return Some(predicate);
+        }
 
         // Status assertions
         if text_lower.starts_with("status") {
@@ -1555,21 +1613,29 @@ impl Glossary {
     ) -> Option<(TestCase, Vec<String>, Vec<String>)> {
         // Resolve preconditions from Given clause if present
         let mut preconditions = Vec::new();
+        let mut unresolved = Vec::new();
         if let Some(given) = &scenario.given_clause {
             // Try to resolve Given clause as an outcome (e.g., "no tasks exist")
             // This becomes precondition assertions to verify before the test
             // Use resolve_outcomes_with_context for full invariant resolution
             let resolved = self.resolve_outcomes_with_context(given, components, invariants);
+            if resolved.is_empty() {
+                unresolved.push(format!("Unresolved Given: {given}"));
+            }
             preconditions.extend(resolved);
-            // Note: If Given doesn't resolve, we just skip it (it's descriptive only)
         }
 
         // Resolve the when clause to get the action
         let when_action = self.resolve_when_clause(&scenario.when_clause)?;
+        if matches!(when_action, WhenAction::FunctionCall { .. }) {
+            if let Some(given) = &scenario.given_clause {
+                unresolved = vec![format!("Native Given setup is not supported; put setup inside the named .tnt function: {given}")];
+                preconditions.clear();
+            }
+        }
 
         // Resolve each outcome to an assertion
         let mut assertions = Vec::new();
-        let mut unresolved = Vec::new();
         let mut component_refs = Vec::new();
 
         // Determine method/path/body based on action type
@@ -1693,7 +1759,13 @@ impl Glossary {
                 test_data
                     .iter()
                     .find(|td| &td.id == input_id)
-                    .map(|td| td.rows.clone())
+                    .map(|td| {
+                        if base_test.method == "FUNCTION_CALL" && !td.literal_rows.is_empty() {
+                            td.literal_rows.clone()
+                        } else {
+                            td.rows.clone()
+                        }
+                    })
                     .unwrap_or_default()
             } else {
                 vec![]
@@ -1744,6 +1816,13 @@ impl Glossary {
             return Some((test_cases, unresolved, component_refs, input_ref));
         }
 
+        if let Some(ref input) = input_ref {
+            let mut unresolved = unresolved;
+            unresolved.push(format!(
+                "Input data {input:?} is missing, empty or unsupported"
+            ));
+            return Some((vec![], unresolved, component_refs, input_ref));
+        }
         // No test data expansion - return single test case
         Some((vec![base_test], unresolved, component_refs, input_ref))
     }
@@ -1765,10 +1844,7 @@ impl Glossary {
                 if KeywordSyntax::is_keyword_syntax(&term.meaning) {
                     if let Some(syntax) = KeywordSyntax::parse(&term.meaning) {
                         if let Some(ref input) = syntax.input {
-                            // Check if it references test_data or corpus
-                            if input.starts_with("test_data.") || input.starts_with("corpus.") {
-                                return Some(input.clone());
-                            }
+                            return Some(input.clone());
                         }
                     }
                 }
@@ -2259,6 +2335,8 @@ pub enum Assertion {
     // === Unit Test Assertions ===
     /// Check result equals expected value: `result is "expected"`
     ResultEquals(String),
+    /// The selected function is an assertion-bearing native test entry.
+    NativeAssertions,
     /// Check result is lowercase: `is lowercase`
     IsLowercase,
     /// Check result is non-empty: `is non-empty`
@@ -2356,7 +2434,8 @@ impl Assertion {
             Assertion::CodeQualityNoWarnings => "no lint warnings".to_string(),
             Assertion::CodeQualityErrorCount(count) => format!("error count is {}", count),
             // Unit test assertions
-            Assertion::ResultEquals(value) => format!("result equals \"{}\"", value),
+            Assertion::ResultEquals(value) => format!("result equals {}", value),
+            Assertion::NativeAssertions => "native assertions pass".to_string(),
             Assertion::IsLowercase => "is lowercase".to_string(),
             Assertion::IsNonEmpty => "is non-empty".to_string(),
             Assertion::UsesOnlyChars(chars) => format!("uses only [{}]", chars),
@@ -2595,7 +2674,8 @@ fn run_assertion_legacy(
             return None;
         }
         // Unit test assertions are handled in run_function_call_test
-        Assertion::ResultEquals(_)
+        Assertion::NativeAssertions
+        | Assertion::ResultEquals(_)
         | Assertion::IsLowercase
         | Assertion::IsNonEmpty
         | Assertion::UsesOnlyChars(_)
@@ -2700,6 +2780,9 @@ pub struct TestDataSection {
     pub for_scenario: Option<String>,
     /// Test cases as rows (each row is a map of column -> value)
     pub rows: Vec<HashMap<String, String>>,
+    /// Exact cell spelling for native arguments; legacy HTTP rows remain text.
+    #[serde(skip)]
+    pub literal_rows: Vec<HashMap<String, String>>,
 }
 
 /// Result of running a single assertion
@@ -3305,6 +3388,7 @@ impl IntentFile {
                     for_feature: None,
                     for_scenario: None,
                     rows: Vec::new(),
+                    literal_rows: Vec::new(),
                 });
                 current_invariant = None;
                 in_invariant_assertions = false;
@@ -3352,9 +3436,11 @@ impl IntentFile {
                     } else if in_test_data_table && !cells.is_empty() {
                         // This is a data row
                         let mut row: HashMap<String, String> = HashMap::new();
+                        let mut literal_row = HashMap::new();
                         for (i, cell) in cells.iter().enumerate() {
                             if i < test_data_columns.len() {
                                 let col = &test_data_columns[i];
+                                literal_row.insert(col.clone(), cell.clone());
                                 // Remove surrounding quotes from cell value
                                 let value = cell.trim_matches('"').to_string();
                                 row.insert(col.clone(), value);
@@ -3362,6 +3448,7 @@ impl IntentFile {
                         }
                         if !row.is_empty() {
                             test_data.rows.push(row);
+                            test_data.literal_rows.push(literal_row);
                         }
                     }
                     continue;
@@ -4223,9 +4310,12 @@ fn expand_char_ranges(pattern: &str) -> String {
 /// Run a function call test (unit test)
 /// path format: "source_file::function_name"
 /// body format: JSON array of arguments
-fn run_function_call_test(test: &TestCase, base_dir: Option<&Path>) -> TestResult {
-    use crate::lexer::Lexer;
-    use crate::parser::Parser as IntentParser;
+fn run_function_call_test(
+    test: &TestCase,
+    base_dir: Option<&Path>,
+    native_exe: Option<&Path>,
+) -> TestResult {
+    use crate::native_test::{self, NativeRequest, NativeValue};
 
     let mut assertion_results = Vec::new();
 
@@ -4253,12 +4343,10 @@ fn run_function_call_test(test: &TestCase, base_dir: Option<&Path>) -> TestResul
     let source_file = parts[0];
     let function_name = parts[1];
 
-    // Parse arguments from body
-    let args: Vec<String> = test
-        .body
-        .as_ref()
-        .and_then(|b| serde_json::from_str(b).ok())
-        .unwrap_or_default();
+    let args: Vec<String> = match serde_json::from_str(test.body.as_deref().unwrap_or("[]")) {
+        Ok(args) => args,
+        Err(error) => return make_error(format!("Invalid native argument binding: {error}")),
+    };
 
     // Resolve source file path
     let source_path = if let Some(base) = base_dir {
@@ -4267,80 +4355,86 @@ fn run_function_call_test(test: &TestCase, base_dir: Option<&Path>) -> TestResul
         std::path::PathBuf::from(source_file)
     };
 
-    // Read and parse the source file
-    let source_code = match std::fs::read_to_string(&source_path) {
-        Ok(code) => code,
-        Err(e) => {
-            return make_error(format!(
-                "Failed to read source file {}: {}",
-                source_path.display(),
-                e
-            ));
-        }
-    };
-
-    // Parse the source code
-    let lexer = Lexer::new(&source_code);
-    let tokens: Vec<_> = lexer.collect();
-
-    let mut parser = IntentParser::new(tokens);
-    let ast = match parser.parse() {
-        Ok(a) => a,
-        Err(e) => {
-            return make_error(format!("Failed to parse source: {}", e));
-        }
-    };
-
-    // Create interpreter and eval the AST
-    // Use unit test mode to skip server-related calls (listen, get, post, etc.)
-    let mut interpreter = Interpreter::new();
-    interpreter.set_execution_mode(crate::interpreter::ExecutionMode::UnitTest);
-    if let Err(e) = interpreter.eval(&ast) {
-        return make_error(format!("Failed to load source: {}", e));
-    }
-
-    // Convert string args to interpreter values
-    let interpreter_args: Vec<crate::interpreter::Value> = args
+    let interpreter_args = match args
         .iter()
-        .map(|arg| {
-            // Try to parse as integer first, then float
-            if let Ok(n) = arg.parse::<i64>() {
-                crate::interpreter::Value::Int(n)
-            } else if let Ok(n) = arg.parse::<f64>() {
-                crate::interpreter::Value::Float(n)
-            } else {
-                crate::interpreter::Value::String(arg.clone())
-            }
-        })
-        .collect();
-
-    // Call the function
-    let result = match interpreter.call_function_by_name(function_name, interpreter_args) {
-        Ok(v) => v,
-        Err(e) => {
-            return make_error(format!("Function call failed: {}", e));
-        }
+        .map(|arg| native_test::parse_literal(arg))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(args) => args,
+        Err(error) => return make_error(error),
     };
-
-    // Convert result to string for assertion checking
+    let request = NativeRequest {
+        source: source_path,
+        function: function_name.to_string(),
+        args: interpreter_args,
+    };
+    let call = |request: &NativeRequest| match native_exe {
+        Some(exe) => native_test::execute_isolated(exe, request),
+        None => Ok(native_test::execute(request)),
+    };
+    let response = match call(&request) {
+        Ok(response) => response,
+        Err(error) => return make_error(error),
+    };
+    if let Some(error) = response.error {
+        return make_error(error);
+    }
+    let Some(result) = response.value else {
+        return make_error("Native call produced no result".to_string());
+    };
+    // Formatting is diagnostic only; predicates below compare native values.
     let result_str = match &result {
-        crate::interpreter::Value::String(s) => s.clone(),
-        crate::interpreter::Value::Int(n) => format!("{}", n),
-        crate::interpreter::Value::Float(n) => {
-            if n.fract() == 0.0 {
-                format!("{}", *n as i64)
-            } else {
-                format!("{}", n)
-            }
-        }
-        crate::interpreter::Value::Bool(b) => b.to_string(),
-        crate::interpreter::Value::Unit => "()".to_string(),
+        NativeValue::String(value) => value.clone(),
         _ => format!("{:?}", result),
     };
+    if test.assertions.is_empty() {
+        return make_error("Native value calls require an explicit result predicate; use native assertions pass for test entries".to_string());
+    }
+    if response.assertions.iter().any(|a| !a.passed) {
+        let errors = response
+            .assertions
+            .iter()
+            .filter(|a| !a.passed)
+            .map(|a| format!("{}:{}: {}", a.source, a.line, a.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return make_error(errors);
+    }
 
     // Check assertions against the result
     let mut all_passed = true;
     for assertion in &test.assertions {
+        if matches!(assertion, Assertion::NativeAssertions) {
+            if response.assertions.is_empty() {
+                return make_error("Native test entry executed zero assertions".to_string());
+            }
+            if matches!(&result, NativeValue::Enum { enum_name, variant, .. } if enum_name == "Result" && variant == "Err")
+            {
+                return make_error(format!("Native test entry returned Err: {result:?}"));
+            }
+            for evidence in &response.assertions {
+                assertion_results.push(AssertionResult {
+                    assertion: Assertion::NativeAssertions,
+                    passed: evidence.passed,
+                    actual: None,
+                    message: Some(format!(
+                        "{}:{}: {}",
+                        evidence.source, evidence.line, evidence.message
+                    )),
+                });
+            }
+            continue;
+        }
+        if !matches!(
+            assertion,
+            Assertion::NativeAssertions
+                | Assertion::ResultEquals(_)
+                | Assertion::PropertyDeterministic
+                | Assertion::PropertyIdempotent
+        ) && !matches!(result, NativeValue::String(_))
+        {
+            return make_error("This native predicate requires a String result".to_string());
+        }
         let (passed, actual, message) = match assertion {
             Assertion::BodyContains(expected) => {
                 let passed = result_str.contains(expected);
@@ -4369,15 +4463,14 @@ fn run_function_call_test(test: &TestCase, base_dir: Option<&Path>) -> TestResul
                     },
                 )
             }
-            // Handle Status assertion as "result type" check
-            Assertion::Status(expected) => {
-                // Use status as a simple result check - if function returned, it's a success (200)
-                let passed = *expected == 200;
-                (passed, Some("200".to_string()), None)
-            }
+
             // === Unit Test Assertions ===
             Assertion::ResultEquals(expected) => {
-                let passed = result_str == *expected;
+                let expected_value = match native_test::parse_literal(expected) {
+                    Ok(value) => value,
+                    Err(error) => return make_error(error),
+                };
+                let passed = result == expected_value;
                 (
                     passed,
                     Some(result_str.clone()),
@@ -4497,121 +4590,43 @@ fn run_function_call_test(test: &TestCase, base_dir: Option<&Path>) -> TestResul
                     }
                 }
             }
-            Assertion::EndsWithEllipsisOrOriginal => {
-                // For truncation tests - result should either end with "..." or be unchanged
-                // In unit test context, we check if it ends with "..." OR is reasonably short
-                let passed = result_str.ends_with("...") || result_str.len() <= 50;
-                (
-                    passed,
-                    Some(result_str.clone()),
-                    if passed {
-                        None
-                    } else {
-                        Some("Result should end with '...' or be short enough to not require truncation".to_string())
-                    },
-                )
-            }
-            // === Property-Based Assertions ===
-            Assertion::PropertyDeterministic => {
-                // Call the function again with the same args and verify same output
-                let interpreter_args2: Vec<crate::interpreter::Value> = args
-                    .iter()
-                    .map(|arg| {
-                        if let Ok(n) = arg.parse::<i64>() {
-                            crate::interpreter::Value::Int(n)
-                        } else if let Ok(n) = arg.parse::<f64>() {
-                            crate::interpreter::Value::Float(n)
-                        } else {
-                            crate::interpreter::Value::String(arg.clone())
-                        }
-                    })
-                    .collect();
 
-                let result2 = interpreter.call_function_by_name(function_name, interpreter_args2);
-                match result2 {
-                    Ok(v2) => {
-                        let result_str2 = match &v2 {
-                            crate::interpreter::Value::String(s) => s.clone(),
-                            crate::interpreter::Value::Int(n) => format!("{}", n),
-                            crate::interpreter::Value::Float(n) => {
-                                if n.fract() == 0.0 {
-                                    format!("{}", *n as i64)
-                                } else {
-                                    format!("{}", n)
-                                }
-                            }
-                            crate::interpreter::Value::Bool(b) => b.to_string(),
-                            crate::interpreter::Value::Unit => "()".to_string(),
-                            _ => format!("{:?}", v2),
-                        };
-                        let passed = result_str == result_str2;
+            // === Property-Based Assertions ===
+            Assertion::PropertyDeterministic | Assertion::PropertyIdempotent => {
+                let mut repeat = request.clone();
+                if matches!(assertion, Assertion::PropertyIdempotent) {
+                    repeat.args = vec![result.clone()];
+                }
+                match call(&repeat) {
+                    Ok(next)
+                        if next.error.is_none() && next.assertions.iter().all(|a| a.passed) =>
+                    {
+                        let passed = next.value.as_ref() == Some(&result);
                         (
                             passed,
-                            Some(format!("run1='{}', run2='{}'", result_str, result_str2)),
+                            Some(result_str.clone()),
                             if passed {
                                 None
                             } else {
-                                Some(format!(
-                                    "Function is not deterministic: '{}' != '{}'",
-                                    result_str, result_str2
-                                ))
+                                Some("Native property comparison failed".to_string())
                             },
                         )
                     }
-                    Err(e) => (
+                    Ok(next) => (
                         false,
-                        Some(result_str.clone()),
-                        Some(format!("Second function call failed: {}", e)),
+                        None,
+                        Some(next.error.unwrap_or_else(|| {
+                            "Native assertion failed during property check".to_string()
+                        })),
                     ),
+                    Err(error) => (false, None, Some(error)),
                 }
             }
-            Assertion::PropertyIdempotent => {
-                // Call f(f(x)) and verify it equals f(x)
-                // First, use the result as input to call the function again
-                let result_as_arg = vec![crate::interpreter::Value::String(result_str.clone())];
-                let result2 = interpreter.call_function_by_name(function_name, result_as_arg);
-                match result2 {
-                    Ok(v2) => {
-                        let result_str2 = match &v2 {
-                            crate::interpreter::Value::String(s) => s.clone(),
-                            crate::interpreter::Value::Int(n) => format!("{}", n),
-                            crate::interpreter::Value::Float(n) => {
-                                if n.fract() == 0.0 {
-                                    format!("{}", *n as i64)
-                                } else {
-                                    format!("{}", n)
-                                }
-                            }
-                            crate::interpreter::Value::Bool(b) => b.to_string(),
-                            crate::interpreter::Value::Unit => "()".to_string(),
-                            _ => format!("{:?}", v2),
-                        };
-                        let passed = result_str == result_str2;
-                        (
-                            passed,
-                            Some(format!("f(x)='{}', f(f(x))='{}'", result_str, result_str2)),
-                            if passed {
-                                None
-                            } else {
-                                Some(format!(
-                                    "Function is not idempotent: f(x)='{}' != f(f(x))='{}'",
-                                    result_str, result_str2
-                                ))
-                            },
-                        )
-                    }
-                    Err(e) => (
-                        false,
-                        Some(result_str.clone()),
-                        Some(format!("Idempotent check failed: {}", e)),
-                    ),
-                }
-            }
-            // Other assertions are passed through with best-effort handling
+            // Unsupported work is never successful evidence.
             _ => (
-                true,
+                false,
                 Some(result_str.clone()),
-                Some("Assertion type not fully supported for unit tests".to_string()),
+                Some("Assertion type not supported for native function tests".to_string()),
             ),
         };
 
@@ -4639,7 +4654,7 @@ fn run_function_call_test(test: &TestCase, base_dir: Option<&Path>) -> TestResul
 
 /// Run a single test case against the server
 fn run_single_test(test: &TestCase, port: u16) -> TestResult {
-    run_single_test_with_base_dir(test, port, None)
+    run_single_test_with_base_dir(test, port, None, None)
 }
 
 /// Run a single test case with optional base directory for unit tests
@@ -4647,6 +4662,7 @@ fn run_single_test_with_base_dir(
     test: &TestCase,
     port: u16,
     base_dir: Option<&Path>,
+    native_exe: Option<&Path>,
 ) -> TestResult {
     // Handle CODE_QUALITY tests separately (no HTTP needed)
     if test.method == "CODE_QUALITY" {
@@ -4655,7 +4671,7 @@ fn run_single_test_with_base_dir(
 
     // Handle FUNCTION_CALL tests (unit tests)
     if test.method == "FUNCTION_CALL" {
-        return run_function_call_test(test, base_dir);
+        return run_function_call_test(test, base_dir, native_exe);
     }
 
     let path = if test.path.starts_with('/') {
@@ -4915,7 +4931,8 @@ fn run_assertions(
                 message: Some("Code quality assertion not applicable in HTTP test".to_string()),
             },
             // Unit test assertions are handled in run_function_call_test
-            Assertion::ResultEquals(_)
+            Assertion::NativeAssertions
+            | Assertion::ResultEquals(_)
             | Assertion::IsLowercase
             | Assertion::IsNonEmpty
             | Assertion::UsesOnlyChars(_)
@@ -4994,6 +5011,8 @@ fn navigate_json_path<'a>(
 /// Results from running tests against a live server (for Intent Studio)
 #[derive(Debug, Clone, Serialize)]
 pub struct LiveTestResults {
+    /// Overall execution success; unresolved/skipped/empty work is not success.
+    pub passed: bool,
     pub features: Vec<LiveFeatureResult>,
     pub components: Vec<LiveComponentResult>,
     pub total_assertions: usize,
@@ -5010,6 +5029,33 @@ pub struct LiveTestResults {
     /// Summary statistics for quick overview
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<LiveTestSummary>,
+}
+
+impl LiveTestResults {
+    /// One success decision for human output, JSON consumers and CLI exit.
+    pub fn passed(&self) -> bool {
+        self.total_assertions > 0
+            && self.failed_assertions == 0
+            && self.features.iter().all(|feature| {
+                feature.passed
+                    && (!feature.tests.is_empty() || !feature.scenarios.is_empty())
+                    && feature
+                        .tests
+                        .iter()
+                        .all(|test| test.passed && !test.assertions.is_empty())
+                    && feature
+                        .scenarios
+                        .iter()
+                        .all(|scenario| scenario.status == "pass")
+            })
+            && self.components.iter().all(|component| {
+                component.passed
+                    && component
+                        .scenarios
+                        .iter()
+                        .all(|scenario| scenario.status == "pass")
+            })
+    }
 }
 
 /// Summary statistics for test results
@@ -5163,13 +5209,65 @@ pub struct LiveCheckResult {
     pub actual: Option<String>,
 }
 
-/// Run tests against an already-running server (no interpreter needed)
-/// Returns results in a format suitable for JSON serialization and UI display
-/// If source_files is provided, will check for @implements annotations across all files
+/// Whether the selected declarations need the existing HTTP application runner.
+/// Unresolved actions are reported by execution, not guessed to be HTTP.
+pub fn requires_http(intent: &IntentFile) -> bool {
+    let http_test =
+        |test: &TestCase| !matches!(test.method.as_str(), "FUNCTION_CALL" | "CODE_QUALITY");
+    intent
+        .features
+        .iter()
+        .any(|feature| feature.tests.iter().any(http_test))
+        || intent.glossary.as_ref().is_some_and(|glossary| {
+            intent
+                .features
+                .iter()
+                .flat_map(|f| &f.scenarios)
+                .chain(intent.components.iter().flat_map(|c| &c.scenarios))
+                .any(|scenario| {
+                    matches!(
+                        glossary.resolve_when_clause(&scenario.when_clause),
+                        Some(WhenAction::Http { .. })
+                    )
+                })
+        })
+}
+
+fn unresolved_scenario(
+    scenario: &Scenario,
+    unresolved: Vec<String>,
+    components: Vec<String>,
+) -> LiveScenarioResult {
+    LiveScenarioResult {
+        name: scenario.name.clone(),
+        description: scenario.description.clone(),
+        given_clause: scenario.given_clause.clone(),
+        when_clause: scenario.when_clause.clone(),
+        outcomes: scenario.outcomes.clone(),
+        status: "warning".to_string(),
+        test_result: None,
+        unresolved_outcomes: unresolved,
+        component_refs: components,
+    }
+}
+
+/// Run against an already-running HTTP server with in-process native functions.
+/// Source annotations are display-only traceability, never execution evidence.
 pub fn run_tests_against_server(
     intent: &IntentFile,
     port: u16,
     source_files: &[(String, String)], // (path, content) pairs
+) -> LiveTestResults {
+    run_tests_with_native_runner(intent, port, source_files, None)
+}
+
+/// CLI uses process-isolated native cases; embedded callers can use the same
+/// loader in process, without claiming process/global/resource isolation.
+pub fn run_tests_with_native_runner(
+    intent: &IntentFile,
+    port: u16,
+    source_files: &[(String, String)],
+    native_exe: Option<&Path>,
 ) -> LiveTestResults {
     let mut feature_results = Vec::new();
     let mut total_assertions = 0;
@@ -5218,6 +5316,15 @@ pub fn run_tests_against_server(
                         intent_base_dir,
                     )
                 {
+                    if !unresolved_outcomes.is_empty() {
+                        feature_passed = false;
+                        scenario_results.push(unresolved_scenario(
+                            scenario,
+                            unresolved_outcomes,
+                            component_refs,
+                        ));
+                        continue;
+                    }
                     // For test data scenarios, we may have multiple test cases
                     // Process each one
                     for resolved_test in resolved_tests {
@@ -5237,8 +5344,12 @@ pub fn run_tests_against_server(
                                 scenario_name: None,
                             };
 
-                            let precond_result =
-                                run_single_test_with_base_dir(&precondition_test, port, base_path);
+                            let precond_result = run_single_test_with_base_dir(
+                                &precondition_test,
+                                port,
+                                base_path,
+                                native_exe,
+                            );
 
                             for ar in &precond_result.assertion_results {
                                 let assertion_text = format_assertion(&ar.assertion);
@@ -5283,7 +5394,12 @@ pub fn run_tests_against_server(
                         }
 
                         // Execute the resolved test
-                        let result = run_single_test_with_base_dir(&resolved_test, port, base_path);
+                        let result = run_single_test_with_base_dir(
+                            &resolved_test,
+                            port,
+                            base_path,
+                            native_exe,
+                        );
                         let mut assertion_results = Vec::new();
                         let mut test_passed = result.passed && preconditions_passed;
 
@@ -5320,11 +5436,8 @@ pub fn run_tests_against_server(
                         // Note: Scenarios are tracked in scenario_results, not test_results
                         // test_results is for legacy test: blocks only
 
-                        // Determine status: warning if there are unresolved outcomes
-                        let status = if !unresolved_outcomes.is_empty() {
-                            feature_passed = false; // Unresolved outcomes = incomplete test
-                            "warning".to_string()
-                        } else if test_passed {
+                        // Unresolved work has already returned without execution.
+                        let status = if test_passed {
                             "pass".to_string()
                         } else {
                             "fail".to_string()
@@ -5382,7 +5495,7 @@ pub fn run_tests_against_server(
 
         // Process test: blocks (run in addition to scenario tests)
         for test in &feature.tests {
-            let result = run_single_test_with_base_dir(test, port, base_path);
+            let result = run_single_test_with_base_dir(test, port, base_path, native_exe);
             let mut assertion_results = Vec::new();
             let mut test_passed = result.passed;
 
@@ -5417,6 +5530,13 @@ pub fn run_tests_against_server(
             });
         }
 
+        feature_passed &= (!test_results.is_empty() || !scenario_results.is_empty())
+            && test_results
+                .iter()
+                .all(|test: &LiveTestResult| test.passed && !test.assertions.is_empty())
+            && scenario_results
+                .iter()
+                .all(|scenario: &LiveScenarioResult| scenario.status == "pass");
         feature_results.push(LiveFeatureResult {
             feature_id,
             feature_name: feature.name.clone(),
@@ -5453,6 +5573,11 @@ pub fn run_tests_against_server(
 
     if let Some(ref glossary_obj) = intent.glossary {
         for component in &intent.components {
+            // Definitions remain available to resolve selected outcomes, but an
+            // unselected/documentation-only component is not passing execution.
+            if component.scenarios.is_empty() {
+                continue;
+            }
             let mut component_scenarios = Vec::new();
             let mut component_passed = true;
 
@@ -5467,6 +5592,15 @@ pub fn run_tests_against_server(
                         intent_base_dir,
                     )
                 {
+                    if !unresolved_outcomes.is_empty() {
+                        component_passed = false;
+                        component_scenarios.push(unresolved_scenario(
+                            scenario,
+                            unresolved_outcomes,
+                            component_refs,
+                        ));
+                        continue;
+                    }
                     // For test data scenarios, process each test case
                     for resolved_test in resolved_tests {
                         // Check preconditions
@@ -5483,8 +5617,12 @@ pub fn run_tests_against_server(
                                 scenario_name: None,
                             };
 
-                            let precond_result =
-                                run_single_test_with_base_dir(&precondition_test, port, base_path);
+                            let precond_result = run_single_test_with_base_dir(
+                                &precondition_test,
+                                port,
+                                base_path,
+                                native_exe,
+                            );
                             for ar in &precond_result.assertion_results {
                                 let assertion_text = format_assertion(&ar.assertion);
                                 precondition_results.push(LiveAssertionResult {
@@ -5501,7 +5639,12 @@ pub fn run_tests_against_server(
                         }
 
                         // Execute component scenario test
-                        let result = run_single_test_with_base_dir(&resolved_test, port, base_path);
+                        let result = run_single_test_with_base_dir(
+                            &resolved_test,
+                            port,
+                            base_path,
+                            native_exe,
+                        );
                         let mut assertion_results = Vec::new();
                         let mut test_passed = result.passed && preconditions_passed;
 
@@ -5564,6 +5707,9 @@ pub fn run_tests_against_server(
                 }
             }
 
+            component_passed &= component_scenarios
+                .iter()
+                .all(|scenario: &LiveScenarioResult| scenario.status == "pass");
             component_results.push(LiveComponentResult {
                 component_id: component.id.clone(),
                 component_name: component.name.clone(),
@@ -5627,7 +5773,7 @@ pub fn run_tests_against_server(
     let pass_percentage = if total_assertions > 0 {
         (passed_assertions as f32 / total_assertions as f32) * 100.0
     } else {
-        100.0
+        0.0
     };
 
     let summary = LiveTestSummary {
@@ -5642,7 +5788,8 @@ pub fn run_tests_against_server(
         pass_percentage,
     };
 
-    LiveTestResults {
+    let mut results = LiveTestResults {
+        passed: false,
         features: feature_results,
         components: component_results,
         total_assertions,
@@ -5653,7 +5800,9 @@ pub fn run_tests_against_server(
         title: intent.title.clone(),
         glossary,
         summary: Some(summary),
-    }
+    };
+    results.passed = results.passed();
+    results
 }
 
 /// Print intent check results
@@ -5786,7 +5935,8 @@ fn format_assertion(assertion: &Assertion) -> String {
         Assertion::CodeQualityNoWarnings => "no lint warnings".to_string(),
         Assertion::CodeQualityErrorCount(count) => format!("error count is {}", count),
         // Unit test assertions
-        Assertion::ResultEquals(value) => format!("result equals \"{}\"", value),
+        Assertion::ResultEquals(value) => format!("result equals {}", value),
+        Assertion::NativeAssertions => "native assertions pass".to_string(),
         Assertion::IsLowercase => "is lowercase".to_string(),
         Assertion::IsNonEmpty => "is non-empty".to_string(),
         Assertion::UsesOnlyChars(chars) => format!("uses only [{}]", chars),
@@ -6523,7 +6673,8 @@ pub fn generate_scaffolding(intent: &IntentFile) -> String {
                         // Skip code quality assertions in HTTP handler generation
                     }
                     // Unit test assertions are not applicable for HTTP handlers
-                    Assertion::ResultEquals(_)
+                    Assertion::NativeAssertions
+                    | Assertion::ResultEquals(_)
                     | Assertion::IsLowercase
                     | Assertion::IsNonEmpty
                     | Assertion::UsesOnlyChars(_)
@@ -7077,6 +7228,7 @@ Feature: API
             for_feature: Some("feature.text_utilities".to_string()),
             for_scenario: None,
             rows: vec![row1, row2],
+            literal_rows: Vec::new(),
         }];
 
         let scenario = Scenario {
