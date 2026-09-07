@@ -562,7 +562,10 @@ mod tests {
             args: vec![],
         });
         assert_eq!(response.assertions.len(), 1, "{response:?}");
-        assert_eq!(response.assertions[0].source, helper.to_string_lossy());
+        assert_eq!(
+            response.assertions[0].source,
+            helper.canonicalize().unwrap().to_string_lossy()
+        );
         assert_eq!(response.assertions[0].line, 2);
         assert!(response.error.unwrap().contains("helper.tnt"));
     }

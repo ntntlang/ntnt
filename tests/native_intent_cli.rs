@@ -45,6 +45,63 @@ fn native_async_callbacks_fail_closed_even_when_caught_or_aliased() {
 }
 
 #[test]
+fn native_result_glossary_definitions_keep_priority() {
+    for (term, meaning, value, expected) in [
+        ("result is valid", "is non-empty", "\"hello\"", true),
+        ("result is valid", "is non-empty", "\"\"", false),
+        ("result equals valid", "result is 99", "\"valid\"", false),
+        ("result is valid", "result equals accepted", "99", true),
+        ("result is {label}", "is non-empty", "\"hello\"", true),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("helpers.tnt"),
+            format!("fn sample() {{ return {value} }}"),
+        )
+        .unwrap();
+        let outcome = if term.starts_with("result equals") {
+            "result equals valid"
+        } else {
+            "result is valid"
+        };
+        let suite = write_suite(root.path(), outcome);
+        let spec = std::fs::read_to_string(&suite).unwrap().replace(
+            "\n\nFeature:",
+            &format!(
+                "\n| {term} | {meaning} |\n| result equals accepted | result is 99 |\n\nFeature:"
+            ),
+        );
+        std::fs::write(&suite, spec).unwrap();
+        for args in [vec!["-v"], vec!["--json"]] {
+            let output = run_suite(&suite, &args);
+            assert_eq!(
+                output.status.success(),
+                expected,
+                "{term}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+}
+
+#[test]
+fn native_selection_does_not_report_unselected_components_passing() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("helpers.tnt"), "fn sample() { return 42 }").unwrap();
+    let suite = write_suite(root.path(), "result is 42");
+    let mut spec = std::fs::read_to_string(&suite).unwrap();
+    spec.push_str("\nComponent: Unselected\n  id: component.unselected\n  Scenario: Other case\n    When exercising the helper\n    → result is 0\n");
+    std::fs::write(&suite, spec).unwrap();
+    let output = run_suite(&suite, &["--case", "Selected helper", "--json"]);
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["components"].as_array().unwrap().is_empty(),
+        "unexecuted components reported: {report}"
+    );
+}
+
+#[test]
 fn native_assertion_entries_report_actual_work() {
     for (source, success) in [
         ("fn sample() { assert(true) }", true),

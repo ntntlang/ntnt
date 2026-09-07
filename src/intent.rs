@@ -964,7 +964,7 @@ impl Glossary {
         invariants: &[Invariant],
     ) -> Vec<Assertion> {
         // Build IAL vocabulary from glossary, components, and invariants
-        if let Some(predicate) = Self::native_predicate(outcome) {
+        if let Some(predicate) = self.native_predicate(outcome) {
             return vec![predicate];
         }
         let vocab = self.to_ial_vocabulary_full(components, invariants);
@@ -1038,7 +1038,7 @@ impl Glossary {
         depth: usize,
     ) -> Vec<Assertion> {
         // Safety: max depth check
-        if let Some(predicate) = Self::native_predicate(outcome) {
+        if let Some(predicate) = self.native_predicate(outcome) {
             return vec![predicate];
         }
         if depth > Self::MAX_GLOSSARY_DEPTH {
@@ -1061,7 +1061,12 @@ impl Glossary {
         let mut assertions = Vec::new();
 
         // Look up in vocabulary - this handles parameterized terms
-        if let Some((params, definition)) = vocab.lookup(outcome) {
+        let project_definition = self.project_term(outcome).and_then(|(pattern, params)| {
+            vocab
+                .lookup_exact(&pattern)
+                .map(|definition| (params, definition))
+        });
+        if let Some((params, definition)) = project_definition.or_else(|| vocab.lookup(outcome)) {
             match definition {
                 ial::Definition::Terms(sub_terms) => {
                     // Expand ALL sub-terms and collect ALL assertions
@@ -1212,9 +1217,29 @@ impl Glossary {
         None
     }
 
-    /// Keep native literals intact before the JSON-like IAL compatibility parser
-    /// can discard quotes or reduce structured values to display strings.
-    fn native_predicate(text: &str) -> Option<Assertion> {
+    fn project_term(&self, text: &str) -> Option<(String, HashMap<String, ial::Value>)> {
+        if let Some(term) = self.get(text.trim()) {
+            return Some((Self::convert_params_to_ial(&term.term), HashMap::new()));
+        }
+        self.terms
+            .values()
+            .filter_map(|term| {
+                let pattern = Self::convert_params_to_ial(&term.term);
+                if !pattern.contains('{') {
+                    return None;
+                }
+                let params = ial::Pattern::new(pattern.clone()).match_text(text)?;
+                Some((pattern, params))
+            })
+            .max_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+    }
+
+    /// Keep native literals intact before IAL compatibility parsing loses types.
+    fn native_predicate(&self, text: &str) -> Option<Assertion> {
+        // Explicit project vocabulary retains priority over primitive spelling.
+        if self.project_term(text).is_some() {
+            return None;
+        }
         let text = text.trim();
         let lower = text.to_ascii_lowercase();
         if lower == "native assertions pass" {
@@ -1236,8 +1261,11 @@ impl Glossary {
 
     /// Convert a term text string to an assertion (for resolved IAL terms)
     fn term_text_to_assertion(&self, text: &str) -> Option<Assertion> {
+        if self.project_term(text).is_some() {
+            return None;
+        }
         let text_lower = text.to_lowercase();
-        if let Some(predicate) = Self::native_predicate(text) {
+        if let Some(predicate) = self.native_predicate(text) {
             return Some(predicate);
         }
 
@@ -5545,6 +5573,11 @@ pub fn run_tests_with_native_runner(
 
     if let Some(ref glossary_obj) = intent.glossary {
         for component in &intent.components {
+            // Definitions remain available to resolve selected outcomes, but an
+            // unselected/documentation-only component is not passing execution.
+            if component.scenarios.is_empty() {
+                continue;
+            }
             let mut component_scenarios = Vec::new();
             let mut component_passed = true;
 
