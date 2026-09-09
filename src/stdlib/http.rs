@@ -1151,7 +1151,9 @@ fn send_http_request(
             Ok(response) => response,
             Err(error) => return Ok(Err(format!("HTTP request failed: {error}"))),
         };
-        if policy.expired()? {
+        // The legacy consumer owns cancellation after receiving its response
+        // (notably download's established "download cancelled" diagnostic).
+        if policy.enabled && policy.expired()? {
             return Ok(Err("HTTP chain timeout".into()));
         }
         if !policy.enabled || !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
@@ -3239,6 +3241,44 @@ mod tests {
 
         server.join().unwrap();
         assert!(result_error(result).contains("Failed to read response"));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"approved take");
+        assert_no_download_temporary_file(&directory);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_download_cancelled_before_response_headers_keeps_diagnostic() {
+        let directory = download_directory("cancel-before-headers");
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("take.wav");
+        std::fs::write(&destination, b"approved take").unwrap();
+        let token = Arc::new(crate::stdlib::concurrent::CancelToken::new());
+        let server_token = Arc::clone(&token);
+        let fixture = ChainFixture::new(move |_, _| {
+            // Request preparation/send has completed, but response processing
+            // has not. This deterministically exercises the hosted-CI race.
+            server_token.cancel();
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+        });
+        crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|current| {
+            *current.borrow_mut() = Some(token);
+        });
+        let result = http_download(
+            &HashMap::from([("url".into(), Value::String(fixture.url.clone()))]),
+            destination.to_str().unwrap(),
+            DownloadOptions {
+                overwrite: true,
+                create_parent: false,
+            },
+        );
+        crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|current| {
+            *current.borrow_mut() = None;
+        });
+        assert_eq!(fixture.finish().len(), 1);
+        assert!(result
+            .expect_err("cancelled download must fail")
+            .to_string()
+            .contains("download cancelled"));
         assert_eq!(std::fs::read(&destination).unwrap(), b"approved take");
         assert_no_download_temporary_file(&directory);
         std::fs::remove_dir_all(directory).unwrap();
