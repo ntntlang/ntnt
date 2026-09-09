@@ -688,6 +688,13 @@ fn build_http_client_for_target(
     })
 }
 
+fn check_http_cancellation() -> Result<()> {
+    if crate::stdlib::concurrent::is_current_task_cancelled() {
+        return Err(IntentError::runtime_error("Task cancelled".to_string()));
+    }
+    Ok(())
+}
+
 /// Simple HTTP GET request
 fn http_get(url: &str) -> Result<Value> {
     // Cancellation yield point (rule 19): check before making the network request
@@ -705,13 +712,18 @@ fn http_get(url: &str) -> Result<Value> {
 
     let client = build_http_client(false, false, url)?;
     match client.get(url).send() {
-        Ok(response) => match read_response_body_limited(response) {
-            Ok((body, status, headers, final_url)) => {
-                let resp_value = response_to_value(status, &headers, body, &final_url, url);
-                Ok(Value::ok(resp_value))
+        Ok(response) => {
+            check_http_cancellation()?;
+            let body = read_response_body_limited(response);
+            check_http_cancellation()?;
+            match body {
+                Ok((body, status, headers, final_url)) => {
+                    let resp_value = response_to_value(status, &headers, body, &final_url, url);
+                    Ok(Value::ok(resp_value))
+                }
+                Err(e) => Ok(Value::err(Value::String(e))),
             }
-            Err(e) => Ok(Value::err(Value::String(e))),
-        },
+        }
         Err(e) => Ok(Value::err(Value::String(format!(
             "HTTP request failed: {}",
             e
@@ -1272,6 +1284,7 @@ pub(crate) fn http_fetch_with_app_env(
     let response = send_http_request(opts, app_env, true)?;
     match response {
         Ok(chain) => {
+            check_http_cancellation()?;
             let response = chain.response;
             let status = response.status().as_u16();
             let headers = response.headers().clone();
@@ -1295,6 +1308,7 @@ pub(crate) fn http_fetch_with_app_env(
             } else {
                 response.text().map_err(|e| e.to_string())
             };
+            check_http_cancellation()?;
             match body {
                 Ok(body) => {
                     let mut resp_value =
@@ -2080,7 +2094,7 @@ mod tests {
             panic!("fetch returned a non-Result value");
         };
         assert_eq!(enum_name, "Result");
-        assert_eq!(variant, "Ok");
+        assert_eq!(variant, "Ok", "HTTP result: {values:?}");
         let Value::Map(response) = &values[0] else {
             panic!("fetch returned a non-map response");
         };
@@ -2405,6 +2419,58 @@ mod tests {
         }
     }
 
+    fn read_chain_request(stream: &mut std::net::TcpStream) -> String {
+        // Accepted sockets can inherit the listener's nonblocking mode.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let Ok(n) = stream.read(&mut buffer) else {
+                break;
+            };
+            if n == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..n]);
+            if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..end]);
+                let len = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (k, v) = line.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if bytes.len() >= end + 4 + len {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    #[test]
+    fn chain_fixture_reads_delayed_request_on_nonblocking_accepted_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            let _ = client.write_all(b"GET /delayed HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        });
+        let request = read_chain_request(&mut server);
+        writer.join().unwrap();
+        assert_eq!(request, "GET /delayed HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    }
+
     struct ChainFixture {
         url: String,
         requests: Arc<Mutex<Vec<String>>>,
@@ -2424,38 +2490,7 @@ mod tests {
                 while done.try_recv().is_err() {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            stream
-                                .set_read_timeout(Some(Duration::from_secs(2)))
-                                .unwrap();
-                            stream
-                                .set_write_timeout(Some(Duration::from_secs(2)))
-                                .unwrap();
-                            let mut bytes = Vec::new();
-                            let mut buffer = [0; 4096];
-                            loop {
-                                let Ok(n) = stream.read(&mut buffer) else {
-                                    break;
-                                };
-                                if n == 0 {
-                                    break;
-                                }
-                                bytes.extend_from_slice(&buffer[..n]);
-                                if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
-                                    let headers = String::from_utf8_lossy(&bytes[..end]);
-                                    let len = headers
-                                        .lines()
-                                        .find_map(|line| {
-                                            let (k, v) = line.split_once(':')?;
-                                            k.eq_ignore_ascii_case("content-length")
-                                                .then(|| v.trim().parse::<usize>().unwrap())
-                                        })
-                                        .unwrap_or(0);
-                                    if bytes.len() >= end + 4 + len {
-                                        break;
-                                    }
-                                }
-                            }
-                            let request = String::from_utf8_lossy(&bytes).to_string();
+                            let request = read_chain_request(&mut stream);
                             let mut requests = captured.lock().unwrap();
                             let n = requests.len();
                             requests.push(request.clone());
@@ -2538,14 +2573,26 @@ mod tests {
             opts.insert("max_redirects".into(), value);
             assert!(http_fetch(&opts).is_err());
         }
-        for value in [
-            Value::Int(-1),
-            Value::String("1".into()),
-            Value::Int(i64::MAX),
-        ] {
+        for value in [Value::Int(-1), Value::String("1".into())] {
             let mut opts = fixture.options();
             opts.insert("timeout".into(), value);
             assert!(http_fetch(&opts).is_err());
+        }
+        // Instant's representable range differs across platforms. Windows can
+        // represent this duration; Linux cannot. Test the checked-add contract,
+        // not a platform-specific assumption, without sending a huge-timeout request.
+        let mut huge_timeout = fixture.options();
+        huge_timeout.insert("timeout".into(), Value::Int(i64::MAX));
+        if Instant::now()
+            .checked_add(Duration::from_secs(i64::MAX as u64))
+            .is_none()
+        {
+            assert!(http_fetch(&huge_timeout).is_err());
+        } else {
+            assert!(RedirectPolicy::parse(&huge_timeout)
+                .unwrap()
+                .deadline
+                .is_some());
         }
         let mut opts = fixture.options();
         opts.insert("timeout".into(), Value::Int(0));
@@ -2902,6 +2949,46 @@ mod tests {
         let contacts = destination.finish();
         assert!(result_error(result.unwrap()).contains("userinfo"));
         assert!(contacts.is_empty());
+    }
+
+    #[test]
+    fn public_fetch_forms_reject_cancellation_before_response_headers() {
+        let module = init();
+        let Value::NativeFunction { func, .. } = &module["fetch"] else {
+            panic!("native fetch");
+        };
+        for form in 0..3 {
+            let token = Arc::new(crate::stdlib::concurrent::CancelToken::new());
+            let server_token = Arc::clone(&token);
+            let fixture = ChainFixture::new(move |_, _| {
+                server_token.cancel();
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone".into()
+            });
+            let opts = Value::Map(HashMap::from([(
+                "url".into(),
+                Value::String(fixture.url.clone()),
+            )]));
+            let args = match form {
+                0 => vec![opts],
+                1 => vec![Value::String(fixture.url.clone()), opts],
+                _ => vec![Value::String(fixture.url.clone())],
+            };
+            crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|current| {
+                *current.borrow_mut() = Some(token);
+            });
+            let result = func(&args);
+            crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|current| {
+                *current.borrow_mut() = None;
+            });
+            assert_eq!(fixture.finish().len(), 1);
+            assert!(
+                result
+                    .expect_err("cancelled fetch must not succeed")
+                    .to_string()
+                    .contains("Task cancelled"),
+                "form {form}"
+            );
+        }
     }
 
     #[test]
