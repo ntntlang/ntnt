@@ -3769,6 +3769,35 @@ print(blocks[1]["source"])
 print(blocks[1]["text"])
 ```
 
+## Explicit HTTP Redirects
+
+Redirects are disabled by default. Enable them per request when the caller permits following:
+
+```ntnt
+import { fetch } from "std/http"
+
+fn fetch_following(url) {
+    match fetch(url, map {
+        "follow_redirects": true,
+        "max_redirects": 5,
+        "timeout": 30
+    }) {
+        Ok(response) => print(response["body"]),
+        Err(error) => print(error)
+    }
+}
+
+fetch_following("https://example.com")
+```
+
+The same options work in a one-map `fetch`, `cache_fetch` request map, and request-map `download`. `max_redirects` must be an integer from 1 through 10 (default 5); setting it alone does not enable redirects. The limit counts followed edges. Cache entries are separated by redirect policy and hop limit; deleting a URL invalidates all its variants. This does not change the cache's existing method/header/auth identity limitations.
+
+Every protected hop is validated and connected to its exact approved DNS addresses without an implicit proxy. Opt-in rejects opaque Secret values before contact, URL userinfo, explicit Host headers, HTTPS downgrades, cycles, and invalid, multiple, or oversized Location values. Only 301/302/303/307/308 are followed; a missing Location is terminal. URL-only cycle detection conservatively rejects POST→303→GET at the same normalized URL.
+
+Same-origin ordinary credentials remain available. Crossing an origin (scheme, normalized hostname, effective port) permanently removes auth, cookies, and caller headers except Accept, Accept-Language, and User-Agent. POST on 301/302 and non-HEAD on 303 become GET with all body sources and entity headers removed. A redirect that would replay a body across origins fails before contacting that destination. Response cookies are not forwarded; redirect-cookie sessions and Secret-bearing traffic require explicit independently authorized requests.
+
+Opt-in uses one timeout budget, defaulting to 30 seconds; zero expires before contact or a cache return. Synchronous system DNS and filesystem operations cannot be interrupted, so this is not a hard wall-clock return guarantee. Final fetch bodies decode as UTF-8 with replacement, ignoring the response charset; both received bytes and decoded UTF-8 bytes are bounded by `NTNT_MAX_RESPONSE_SIZE` (50 MiB by default). Opt-in downloads bound streamed bytes by the same limit. Successful file promotion is the commit point. If a no-overwrite download commits but cannot unlink its temporary file, it returns `Ok` with `cleanup_warning` and `temporary_path` rather than claiming the destination was preserved.
+
 ## Streaming HTTP Downloads
 
 `download` accepts the same request map as `fetch` and writes response bytes to a sibling temporary file before atomic promotion. Request-map downloads do not overwrite or create parents unless explicitly enabled.

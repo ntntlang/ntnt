@@ -21,7 +21,8 @@
 //! - `auth`: Map with `user` and `pass` for Basic auth
 //! - `cookies`: Map of cookies to send
 //! - `timeout`: Timeout in seconds (default: 30)
-//! - `follow_redirects`: Must be false; automatic redirect following is disabled
+//! - `follow_redirects`: Explicit safe manual following (default: false)
+//! - `max_redirects`: Maximum followed edges (default: 5, allowed: 1..10)
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
@@ -207,6 +208,14 @@ fn validated_http_target(url: &str) -> std::result::Result<Option<ValidatedHttpT
         Ok(iter) => iter.collect(),
         Err(_) => return Err(format!("Could not resolve hostname: {}", host)),
     };
+    validate_resolved_addresses(config, host, addrs).map(Some)
+}
+
+fn validate_resolved_addresses(
+    config: &SsrfConfig,
+    host: String,
+    addrs: Vec<SocketAddr>,
+) -> std::result::Result<ValidatedHttpTarget, String> {
     if addrs.is_empty() {
         return Err(format!("Could not resolve hostname: {}", host));
     }
@@ -234,10 +243,10 @@ fn validated_http_target(url: &str) -> std::result::Result<Option<ValidatedHttpT
         }
     }
 
-    Ok(Some(ValidatedHttpTarget {
+    Ok(ValidatedHttpTarget {
         host,
         addresses: addrs,
-    }))
+    })
 }
 
 /// Validate a URL for SSRF protection without retaining its resolved target.
@@ -263,9 +272,15 @@ struct CacheEntry {
     expires_at: Instant,
 }
 
+#[derive(Clone, Hash, PartialEq, Eq)]
+enum CacheKey {
+    Url(String),
+    Follow { url: String, limit: usize },
+}
+
 /// Response cache with TTL
 struct ResponseCache {
-    entries: HashMap<String, CacheEntry>,
+    entries: HashMap<CacheKey, CacheEntry>,
     default_ttl: Duration,
 }
 
@@ -277,7 +292,7 @@ impl ResponseCache {
         }
     }
 
-    fn get(&mut self, key: &str) -> Option<CachedResponse> {
+    fn get(&mut self, key: &CacheKey) -> Option<CachedResponse> {
         if let Some(entry) = self.entries.get(key) {
             if Instant::now() < entry.expires_at {
                 return Some(entry.response.clone());
@@ -288,7 +303,7 @@ impl ResponseCache {
         None
     }
 
-    fn set(&mut self, key: String, response: CachedResponse, ttl: Option<Duration>) {
+    fn set(&mut self, key: CacheKey, response: CachedResponse, ttl: Option<Duration>) {
         let ttl = ttl.unwrap_or(self.default_ttl);
         self.entries.insert(
             key,
@@ -300,7 +315,9 @@ impl ResponseCache {
     }
 
     fn delete(&mut self, key: &str) {
-        self.entries.remove(key);
+        self.entries.retain(|identity, _| match identity {
+            CacheKey::Url(url) | CacheKey::Follow { url, .. } => url != key,
+        });
     }
 
     fn clear(&mut self) {
@@ -363,11 +380,29 @@ fn cache_fetch(cache_id: u64, url: &str, opts: Option<&HashMap<String, Value>>) 
         ));
     }
 
+    let policy = opts.map(RedirectPolicy::parse).transpose()?;
+    if let Some(policy) = policy {
+        if policy.expired()? {
+            return Ok(Value::err(Value::String("HTTP chain timeout".into())));
+        }
+        if policy.enabled {
+            if let Err(error) = redirect_url(url) {
+                return Ok(Value::err(Value::String(error)));
+            }
+        }
+    }
+    let key = match policy {
+        Some(policy) if policy.enabled => CacheKey::Follow {
+            url: url.to_string(),
+            limit: policy.limit,
+        },
+        _ => CacheKey::Url(url.to_string()),
+    };
     // Check cache first
     {
         let mut registry = CACHE_REGISTRY.lock().unwrap();
         if let Some(cache) = registry.get_mut(&cache_id) {
-            if let Some(cached) = cache.get(url) {
+            if let Some(cached) = cache.get(&key) {
                 let resp_value = cached_response_to_value(&cached);
                 return Ok(Value::ok(resp_value));
             }
@@ -483,7 +518,7 @@ fn cache_fetch(cache_id: u64, url: &str, opts: Option<&HashMap<String, Value>>) 
 
                 let mut registry = CACHE_REGISTRY.lock().unwrap();
                 if let Some(cache) = registry.get_mut(&cache_id) {
-                    cache.set(url.to_string(), cached, None);
+                    cache.set(key, cached, None);
                 }
             }
         }
@@ -622,11 +657,20 @@ fn build_http_client(
     direct_loopback_http: bool,
     url: &str,
 ) -> Result<reqwest::blocking::Client> {
+    let target = validated_http_target(url).map_err(IntentError::runtime_error)?;
+    build_http_client_for_target(cookie_store, direct_loopback_http, target)
+}
+
+fn build_http_client_for_target(
+    cookie_store: bool,
+    direct_loopback_http: bool,
+    target: Option<ValidatedHttpTarget>,
+) -> Result<reqwest::blocking::Client> {
     let mut builder = reqwest::blocking::Client::builder()
         .cookie_store(cookie_store)
         .redirect(reqwest::redirect::Policy::none());
 
-    if let Some(target) = validated_http_target(url).map_err(IntentError::runtime_error)? {
+    if let Some(target) = target {
         // A configured proxy would resolve the hostname independently and reopen the
         // validation-to-connection gap, so protected requests always connect directly.
         builder = builder
@@ -642,6 +686,13 @@ fn build_http_client(
     builder.build().map_err(|error| {
         IntentError::runtime_error(format!("Failed to create HTTP client: {error}"))
     })
+}
+
+fn check_http_cancellation() -> Result<()> {
+    if crate::stdlib::concurrent::is_current_task_cancelled() {
+        return Err(IntentError::runtime_error("Task cancelled".to_string()));
+    }
+    Ok(())
 }
 
 /// Simple HTTP GET request
@@ -661,13 +712,18 @@ fn http_get(url: &str) -> Result<Value> {
 
     let client = build_http_client(false, false, url)?;
     match client.get(url).send() {
-        Ok(response) => match read_response_body_limited(response) {
-            Ok((body, status, headers, final_url)) => {
-                let resp_value = response_to_value(status, &headers, body, &final_url, url);
-                Ok(Value::ok(resp_value))
+        Ok(response) => {
+            check_http_cancellation()?;
+            let body = read_response_body_limited(response);
+            check_http_cancellation()?;
+            match body {
+                Ok((body, status, headers, final_url)) => {
+                    let resp_value = response_to_value(status, &headers, body, &final_url, url);
+                    Ok(Value::ok(resp_value))
+                }
+                Err(e) => Ok(Value::err(Value::String(e))),
             }
-            Err(e) => Ok(Value::err(Value::String(e))),
-        },
+        }
         Err(e) => Ok(Value::err(Value::String(format!(
             "HTTP request failed: {}",
             e
@@ -754,7 +810,6 @@ fn format_ssrf_error(reason: &str, direct_loopback_http: bool) -> String {
 }
 
 struct PreparedHttpRequest {
-    url: String,
     request: reqwest::blocking::RequestBuilder,
 }
 
@@ -776,27 +831,12 @@ fn prepare_http_request(
         }
     };
 
-    match opts.get("follow_redirects") {
-        Some(Value::Bool(false)) | None => {}
-        Some(Value::Bool(true)) => {
-            return Err(IntentError::type_error(
-                "fetch() automatic redirect following is disabled; inspect each 3xx response and validate the next URL explicitly"
-                    .to_string(),
-            ))
-        }
-        Some(other) => {
-            return Err(IntentError::type_error(format!(
-                "fetch() follow_redirects must be a Bool, got {}",
-                other.type_name()
-            )))
-        }
-    }
-
     let contains_secret = opts.values().any(Value::contains_secret);
     let direct_loopback_http = validate_secret_transport(&url, contains_secret, app_env)?;
-    if let Err(reason) = validate_url_for_ssrf(&url) {
-        return Ok(Err(format_ssrf_error(&reason, direct_loopback_http)));
-    }
+    let target = match validated_http_target(&url) {
+        Ok(target) => target,
+        Err(reason) => return Ok(Err(format_ssrf_error(&reason, direct_loopback_http))),
+    };
 
     let method = match opts.get("method") {
         Some(Value::String(method)) => method.to_uppercase(),
@@ -808,7 +848,10 @@ fn prepare_http_request(
             )))
         }
     };
-    let client = build_http_client(cookie_store, direct_loopback_http, &url)?;
+    let client = match build_http_client_for_target(cookie_store, direct_loopback_http, target) {
+        Ok(client) => client,
+        Err(error) => return Ok(Err(error.to_string())),
+    };
     let mut request = match method.as_str() {
         "GET" => client.get(&url),
         "POST" => client.post(&url),
@@ -913,7 +956,311 @@ fn prepare_http_request(
         None => {}
     }
 
-    Ok(Ok(PreparedHttpRequest { url, request }))
+    Ok(Ok(PreparedHttpRequest { request }))
+}
+
+#[derive(Clone, Copy)]
+struct RedirectPolicy {
+    enabled: bool,
+    limit: usize,
+    deadline: Option<Instant>,
+}
+
+impl RedirectPolicy {
+    fn parse(opts: &HashMap<String, Value>) -> Result<Self> {
+        let enabled = match opts.get("follow_redirects") {
+            None | Some(Value::Bool(false)) => false,
+            Some(Value::Bool(true)) => true,
+            _ => {
+                return Err(IntentError::type_error(
+                    "fetch() follow_redirects must be a Bool".to_string(),
+                ))
+            }
+        };
+        let limit = match opts.get("max_redirects") {
+            None => 5,
+            Some(Value::Int(n)) if (1..=10).contains(n) => *n as usize,
+            _ => {
+                return Err(IntentError::type_error(
+                    "fetch() max_redirects must be an Int in 1..10".to_string(),
+                ))
+            }
+        };
+        let deadline = if enabled {
+            if opts.values().any(Value::contains_secret) {
+                return Err(IntentError::type_error(
+                    "Secret-bearing requests cannot follow redirects".to_string(),
+                ));
+            }
+            if let Some(Value::Map(headers)) = opts.get("headers") {
+                if headers.keys().any(|key| key.eq_ignore_ascii_case("host")) {
+                    return Err(IntentError::type_error(
+                        "Explicit Host is forbidden with follow_redirects".to_string(),
+                    ));
+                }
+            }
+            let seconds = match opts.get("timeout") {
+                None => 30,
+                Some(Value::Int(n)) if *n >= 0 => *n as u64,
+                _ => {
+                    return Err(IntentError::type_error(
+                        "fetch() timeout must be a non-negative Int".to_string(),
+                    ))
+                }
+            };
+            Some(
+                Instant::now()
+                    .checked_add(Duration::from_secs(seconds))
+                    .ok_or_else(|| {
+                        IntentError::type_error("fetch() timeout is too large".to_string())
+                    })?,
+            )
+        } else {
+            None
+        };
+        Ok(Self {
+            enabled,
+            limit,
+            deadline,
+        })
+    }
+
+    fn expired(self) -> Result<bool> {
+        if crate::stdlib::concurrent::is_current_task_cancelled() {
+            return Err(IntentError::runtime_error("Task cancelled".to_string()));
+        }
+        Ok(self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline))
+    }
+}
+
+fn url_has_userinfo(url: &str) -> bool {
+    url.strip_prefix("//")
+        .or_else(|| url.split_once("://").map(|(_, authority)| authority))
+        .is_some_and(|authority| {
+            authority
+                .split(['/', '?', '#'])
+                .next()
+                .is_some_and(|authority| authority.contains('@'))
+        })
+}
+
+fn redirect_url(url: &str) -> std::result::Result<reqwest::Url, String> {
+    if url_has_userinfo(url) {
+        return Err("Redirect URL userinfo is forbidden".into());
+    }
+    let mut url = reqwest::Url::parse(url).map_err(|_| "Invalid redirect URL".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("Redirect URL requires HTTP or HTTPS".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Redirect URL userinfo is forbidden".into());
+    }
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn redirect_options(
+    opts: &mut HashMap<String, Value>,
+    status: u16,
+    origin_changed: bool,
+) -> std::result::Result<(), String> {
+    let method = match opts.get("method") {
+        Some(Value::String(method)) => method.to_uppercase(),
+        _ => "GET".to_string(),
+    };
+    let to_get =
+        (status == 303 && method != "HEAD") || (matches!(status, 301 | 302) && method == "POST");
+    if to_get {
+        opts.insert("method".into(), Value::String("GET".into()));
+        for key in ["body", "json", "form"] {
+            opts.remove(key);
+        }
+        if let Some(Value::Map(headers)) = opts.get_mut("headers") {
+            headers.retain(|key, _| {
+                let key = key.to_ascii_lowercase();
+                !key.starts_with("content-")
+                    && !matches!(
+                        key.as_str(),
+                        "transfer-encoding" | "trailer" | "expect" | "digest"
+                    )
+            });
+        }
+    }
+    if origin_changed {
+        if ["body", "json", "form"]
+            .iter()
+            .any(|key| opts.contains_key(*key))
+        {
+            return Err("Cross-origin redirect would replay a request body".into());
+        }
+        opts.remove("auth");
+        opts.remove("cookies");
+        if let Some(Value::Map(headers)) = opts.get_mut("headers") {
+            headers.retain(|key, _| {
+                matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "accept" | "accept-language" | "user-agent"
+                )
+            });
+        }
+    }
+    Ok(())
+}
+
+struct HttpResponse {
+    response: reqwest::blocking::Response,
+    policy: RedirectPolicy,
+    hops: usize,
+}
+
+/// Manual redirect transport shared by request-map consumers. Automatic following
+/// remains disabled; each preparation resolves, validates and pins its own target.
+fn send_http_request(
+    opts: &HashMap<String, Value>,
+    app_env: Option<&str>,
+    cookie_store: bool,
+) -> Result<std::result::Result<HttpResponse, String>> {
+    let policy = RedirectPolicy::parse(opts)?;
+    let mut effective = opts.clone();
+    let mut visited = std::collections::HashSet::new();
+    for hops in 0..=policy.limit {
+        if policy.expired()? {
+            return Ok(Err("HTTP chain timeout".into()));
+        }
+        if policy.enabled {
+            let Some(Value::String(url)) = effective.get("url") else {
+                return Err(IntentError::type_error(
+                    "fetch() requires 'url' option".to_string(),
+                ));
+            };
+            let url = match redirect_url(url) {
+                Ok(url) => url,
+                Err(e) => return Ok(Err(e)),
+            };
+            if !visited.insert(url.to_string()) {
+                return Ok(Err("Redirect cycle detected".into()));
+            }
+            effective.insert("url".into(), Value::String(url.to_string()));
+        }
+        let prepared =
+            match prepare_http_request(&effective, app_env, cookie_store && !policy.enabled)? {
+                Ok(prepared) => prepared,
+                Err(error) => return Ok(Err(error)),
+            };
+        if policy.expired()? {
+            return Ok(Err("HTTP chain timeout".into()));
+        }
+        let request = if let Some(deadline) = policy.deadline {
+            prepared
+                .request
+                .timeout(deadline.saturating_duration_since(Instant::now()))
+        } else {
+            prepared.request
+        };
+        let response = match request.send() {
+            Ok(response) => response,
+            Err(error) => return Ok(Err(format!("HTTP request failed: {error}"))),
+        };
+        // The legacy consumer owns cancellation after receiving its response
+        // (notably download's established "download cancelled" diagnostic).
+        if policy.enabled && policy.expired()? {
+            return Ok(Err("HTTP chain timeout".into()));
+        }
+        if !policy.enabled || !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(Ok(HttpResponse {
+                response,
+                policy,
+                hops,
+            }));
+        }
+        let mut locations = response.headers().get_all(reqwest::header::LOCATION).iter();
+        let Some(location) = locations.next() else {
+            return Ok(Ok(HttpResponse {
+                response,
+                policy,
+                hops,
+            }));
+        };
+        if locations.next().is_some() || location.as_bytes().len() > 8192 {
+            return Ok(Err("Invalid redirect Location count or size".into()));
+        }
+        let location = match location.to_str() {
+            Ok(location)
+                if !location.trim().is_empty() && !location.chars().any(char::is_control) =>
+            {
+                location
+            }
+            _ => return Ok(Err("Invalid redirect Location".into())),
+        };
+        if url_has_userinfo(location) {
+            return Ok(Err("Redirect URL userinfo is forbidden".into()));
+        }
+        let next = response.url().join(location).ok();
+        let Some(next) = next else {
+            return Ok(Err("Invalid redirect Location".into()));
+        };
+        let next = match redirect_url(next.as_str()) {
+            Ok(next) => next,
+            Err(e) => return Ok(Err(e)),
+        };
+        if response.url().scheme() == "https" && next.scheme() == "http" {
+            return Ok(Err("HTTPS redirect downgrade forbidden".into()));
+        }
+        if hops == policy.limit {
+            return Ok(Err("Redirect limit exceeded".into()));
+        }
+        if let Err(error) = redirect_options(
+            &mut effective,
+            response.status().as_u16(),
+            response.url().origin() != next.origin(),
+        ) {
+            return Ok(Err(error));
+        }
+        effective.insert("url".to_string(), Value::String(next.to_string()));
+        // Drop the intermediate body without consuming it.
+    }
+    unreachable!()
+}
+
+/// Opted-in text is UTF-8 with replacement, independent of Content-Type charset.
+/// Validate decoded expansion before allocating the returned String.
+fn read_redirect_body(
+    mut response: reqwest::blocking::Response,
+    policy: RedirectPolicy,
+) -> Result<std::result::Result<String, String>> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        if policy.expired()? {
+            return Ok(Err("HTTP chain timeout".into()));
+        }
+        let read = match response.read(&mut buffer) {
+            Ok(n) => n,
+            Err(e) => return Ok(Err(format!("Failed to read response body: {e}"))),
+        };
+        if read == 0 {
+            break;
+        }
+        if read > max_response_size().saturating_sub(bytes.len()) {
+            return Ok(Err("Response body too large".into()));
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    let mut decoded_len = 0usize;
+    for chunk in bytes.utf8_chunks() {
+        let len = chunk.valid().len() + if chunk.invalid().is_empty() { 0 } else { 3 };
+        if len > max_response_size().saturating_sub(decoded_len) {
+            return Ok(Err("Decoded response body too large".into()));
+        }
+        decoded_len += len;
+    }
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    if policy.expired()? {
+        return Ok(Err("HTTP chain timeout".into()));
+    }
+    Ok(Ok(body))
 }
 
 /// Full HTTP request with all options
@@ -926,16 +1273,19 @@ pub(crate) fn http_fetch_with_app_env(
     opts: &HashMap<String, Value>,
     app_env: Option<&str>,
 ) -> Result<Value> {
-    let prepared = match prepare_http_request(opts, app_env, true)? {
-        Ok(prepared) => prepared,
-        Err(error) => return Ok(Value::err(Value::String(error))),
+    let url = match opts.get("url") {
+        Some(Value::String(url)) => url.clone(),
+        _ => {
+            return Err(IntentError::type_error(
+                "fetch() requires 'url' option".to_string(),
+            ))
+        }
     };
-    let url = prepared.url;
-    let request = prepared.request;
-
-    // Execute request
-    match request.send() {
-        Ok(response) => {
+    let response = send_http_request(opts, app_env, true)?;
+    match response {
+        Ok(chain) => {
+            check_http_cancellation()?;
+            let response = chain.response;
             let status = response.status().as_u16();
             let headers = response.headers().clone();
             let final_url = response.url().to_string();
@@ -953,10 +1303,19 @@ pub(crate) fn http_fetch_with_app_env(
                 }
             }
 
-            match response.text() {
+            let body = if chain.policy.enabled {
+                read_redirect_body(response, chain.policy)?
+            } else {
+                response.text().map_err(|e| e.to_string())
+            };
+            check_http_cancellation()?;
+            match body {
                 Ok(body) => {
                     let mut resp_value =
                         response_to_value(status, &headers, body, &final_url, &url);
+                    if let Value::Map(ref mut map) = resp_value {
+                        map.insert("redirected".into(), Value::Bool(chain.hops > 0));
+                    }
                     // Add cookies to response
                     if let Value::Map(ref mut map) = resp_value {
                         if !response_cookies.is_empty() {
@@ -1023,6 +1382,11 @@ fn promote_download(
         return std::fs::remove_file(temporary_path);
     }
 
+    prepare_overwrite_permissions(temporary_path, destination)?;
+    replace_download(temporary_path, destination)
+}
+
+fn prepare_overwrite_permissions(temporary_path: &Path, destination: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     match std::fs::symlink_metadata(destination) {
         Ok(metadata) if metadata.file_type().is_file() => {
@@ -1033,6 +1397,12 @@ fn promote_download(
         Err(error) => return Err(error),
     }
 
+    #[cfg(not(unix))]
+    let _ = (temporary_path, destination);
+    Ok(())
+}
+
+fn replace_download(temporary_path: &Path, destination: &Path) -> std::io::Result<()> {
     #[cfg(not(windows))]
     {
         std::fs::rename(temporary_path, destination)
@@ -1070,6 +1440,40 @@ fn promote_download(
     }
 }
 
+fn commit_redirect_download(
+    policy: RedirectPolicy,
+    temporary_path: &Path,
+    destination: &Path,
+    overwrite: bool,
+    cleanup: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<std::result::Result<Option<String>, String>> {
+    if policy.expired()? {
+        return Ok(Err("HTTP chain timeout".into()));
+    }
+    if overwrite {
+        if let Err(error) = prepare_overwrite_permissions(temporary_path, destination) {
+            return Ok(Err(format!(
+                "Failed to prepare download permissions: {error}"
+            )));
+        }
+        // Permission preparation can block too. Recheck immediately before the
+        // replacing filesystem operation, not merely before its preparation.
+        if policy.expired()? {
+            return Ok(Err("HTTP chain timeout".into()));
+        }
+        return Ok(replace_download(temporary_path, destination)
+            .map(|_| None)
+            .map_err(|e| format!("Failed to promote download: {e}")));
+    }
+    if let Err(error) = std::fs::hard_link(temporary_path, destination) {
+        return Ok(Err(format!("Failed to promote download: {error}")));
+    }
+    // A successful link is the commit point. Cleanup cannot undo success.
+    Ok(Ok(cleanup(temporary_path).err().map(|error| {
+        format!("Download committed; temporary cleanup failed: {error}")
+    })))
+}
+
 fn http_download(
     request_options: &HashMap<String, Value>,
     file_path: &str,
@@ -1100,18 +1504,12 @@ fn http_download(
     }
 
     let app_env = std::env::var("APP_ENV").ok();
-    let prepared = match prepare_http_request(request_options, app_env.as_deref(), false)? {
-        Ok(prepared) => prepared,
+    let chain = match send_http_request(request_options, app_env.as_deref(), false)? {
+        Ok(chain) => chain,
         Err(error) => return Ok(Value::err(Value::String(error))),
     };
-    let mut response = match prepared.request.send() {
-        Ok(response) => response,
-        Err(error) => {
-            return Ok(Value::err(Value::String(format!(
-                "HTTP request failed: {error}"
-            ))))
-        }
-    };
+    let policy = chain.policy;
+    let mut response = chain.response;
     let status = response.status().as_u16();
     let headers = response.headers().clone();
     if !(200..300).contains(&status) {
@@ -1142,60 +1540,96 @@ fn http_download(
         }
     };
 
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut bytes_written = 0_i64;
-    loop {
-        if crate::stdlib::concurrent::is_current_task_cancelled() {
-            drop(temporary);
-            let _ = std::fs::remove_file(&temporary_path);
-            return Err(IntentError::runtime_error("download cancelled".to_string()));
-        }
-        let read = match response.read(&mut buffer) {
-            Ok(read) => read,
-            Err(error) => {
-                drop(temporary);
-                let _ = std::fs::remove_file(&temporary_path);
-                return Ok(Value::err(Value::String(format!(
-                    "Failed to read response: {error}"
-                ))));
+    let transfer = (|| -> Result<std::result::Result<i64, String>> {
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut bytes_written = 0_i64;
+        loop {
+            if crate::stdlib::concurrent::is_current_task_cancelled() {
+                return Err(IntentError::runtime_error("download cancelled".to_string()));
             }
-        };
-        if read == 0 {
-            break;
+            if policy.expired()? {
+                return Ok(Err("HTTP chain timeout".into()));
+            }
+            let read = match response.read(&mut buffer) {
+                Ok(read) => read,
+                Err(error) => return Ok(Err(format!("Failed to read response: {error}"))),
+            };
+            if read == 0 {
+                break;
+            }
+            if policy.enabled && read > max_response_size().saturating_sub(bytes_written as usize) {
+                return Ok(Err("Response body too large".into()));
+            }
+            if let Err(error) = temporary.write_all(&buffer[..read]) {
+                return Ok(Err(format!("Failed to write file: {error}")));
+            }
+            bytes_written += read as i64;
         }
-        if let Err(error) = temporary.write_all(&buffer[..read]) {
-            drop(temporary);
-            let _ = std::fs::remove_file(&temporary_path);
-            return Ok(Value::err(Value::String(format!(
-                "Failed to write file: {error}"
-            ))));
+        if policy.enabled && policy.expired()? {
+            return Ok(Err("HTTP chain timeout".into()));
         }
-        bytes_written += read as i64;
-    }
-
-    if let Err(error) = temporary.flush().and_then(|_| temporary.sync_all()) {
-        drop(temporary);
-        let _ = std::fs::remove_file(&temporary_path);
-        return Ok(Value::err(Value::String(format!(
-            "Failed to flush file: {error}"
-        ))));
-    }
+        if let Err(error) = temporary.flush().and_then(|_| temporary.sync_all()) {
+            return Ok(Err(format!("Failed to flush file: {error}")));
+        }
+        if policy.enabled && policy.expired()? {
+            return Ok(Err("HTTP chain timeout".into()));
+        }
+        Ok(Ok(bytes_written))
+    })();
     drop(temporary);
+    let bytes_written = match transfer {
+        Ok(Ok(bytes)) => bytes,
+        other => {
+            let _ = std::fs::remove_file(&temporary_path);
+            return match other {
+                Err(error) => Err(error),
+                Ok(Err(error)) => Ok(Value::err(Value::String(error))),
+                _ => unreachable!(),
+            };
+        }
+    };
+    let promotion = if policy.enabled {
+        commit_redirect_download(
+            policy,
+            &temporary_path,
+            path,
+            file_options.overwrite,
+            |path| std::fs::remove_file(path),
+        )
+    } else {
+        Ok(
+            promote_download(&temporary_path, path, file_options.overwrite)
+                .map(|_| None)
+                .map_err(|e| format!("Failed to promote download: {e}")),
+        )
+    };
+    let cleanup_warning = match promotion {
+        Ok(Ok(warning)) => warning,
+        other => {
+            let _ = std::fs::remove_file(&temporary_path);
+            return match other {
+                Err(error) => Err(error),
+                Ok(Err(error)) => Ok(Value::err(Value::String(error))),
+                _ => unreachable!(),
+            };
+        }
+    };
 
-    if let Err(error) = promote_download(&temporary_path, path, file_options.overwrite) {
-        let _ = std::fs::remove_file(&temporary_path);
-        return Ok(Value::err(Value::String(format!(
-            "Failed to promote download: {error}"
-        ))));
-    }
-
-    Ok(Value::ok(Value::Map(HashMap::from([
+    let mut info = HashMap::from([
         ("status".to_string(), Value::Int(status as i64)),
         ("path".to_string(), Value::String(file_path.to_string())),
         ("size".to_string(), Value::Int(bytes_written)),
         ("bytes_written".to_string(), Value::Int(bytes_written)),
         ("headers".to_string(), response_headers_value(&headers)),
-    ]))))
+    ]);
+    if let Some(warning) = cleanup_warning {
+        info.insert("cleanup_warning".into(), Value::String(warning));
+        info.insert(
+            "temporary_path".into(),
+            Value::String(temporary_path.display().to_string()),
+        );
+    }
+    Ok(Value::ok(Value::Map(info)))
 }
 
 fn download_file_options(
@@ -1271,10 +1705,21 @@ pub fn init() -> HashMap<String, Value> {
     //   with full control over method, headers, body, authentication, cookies, and timeout.
     // - Two arguments: a URL string and an options map. The URL is merged into
     //   the options map automatically.
-    // Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout, follow_redirects.
-    // Redirects are returned as 3xx responses so callers can validate each hop.
-    // follow_redirects may be omitted or false; true is rejected because reqwest cannot
-    // apply NTNT's SSRF policy to every redirect destination before connecting.
+    // Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout, follow_redirects, max_redirects.
+    // Redirects default to terminal 3xx responses. follow_redirects:true manually follows
+    // 301/302/303/307/308, validating and pinning each protected hop without proxies.
+    // max_redirects defaults to 5 (allowed 1..10); it never enables following by itself.
+    // Opt-in rejects Secret values, URL userinfo, explicit Host, HTTPS downgrades,
+    // cycles, and malformed/multiple/oversized Location values. Missing Location is terminal.
+    // Origins compare scheme, normalized hostname and effective port. Origin changes
+    // permanently strip auth/cookies and caller headers except Accept, Accept-Language,
+    // User-Agent; response cookies are never forwarded. Body replay across origins fails.
+    // POST 301/302 and non-HEAD 303 become GET, clearing bodies and entity headers.
+    // Opt-in uses one timeout budget (default 30 seconds); zero expires before contact.
+    // Blocking system DNS and filesystem operations cannot be interrupted by this budget.
+    // Final opt-in bodies use bounded UTF-8 decoding with replacement (charset ignored),
+    // limited by NTNT_MAX_RESPONSE_SIZE in both received bytes and decoded UTF-8 bytes.
+    // URL-only cycle detection also rejects POST->303->GET at the same normalized URL.
     // Opaque Secret values are accepted only in header values, cookie values, basic-auth
     // fields, raw bodies, JSON leaves, and form values. Secret-bearing requests require
     // HTTPS; APP_ENV=development permits direct HTTP only for localhost and loopback IPs,
@@ -1303,7 +1748,7 @@ pub fn init() -> HashMap<String, Value> {
     // @error TypeError ~ "fetch() requires a URL string or options map" fix: "Pass a String URL or a Map with request options"
     // @error TypeError ~ "fetch() requires 'url' option" fix: "Include 'url' key in the options map"
     // @error TypeError ~ "fetch() follow_redirects must be a Bool" fix: "Pass true or false for follow_redirects"
-    // @error TypeError ~ "automatic redirect following is disabled" fix: "Inspect the 3xx response, validate Location, and issue the next request explicitly"
+    // @error TypeError ~ "Secret-bearing requests cannot follow redirects" fix: "Use explicit independently authorized requests for Secret-bearing traffic"
     // @error TypeError ~ "Secret-bearing HTTP requests require HTTPS" fix: "Use HTTPS, or set APP_ENV=development for localhost/loopback HTTP"
     // @error RuntimeError ~ "Unsupported HTTP method: ..." fix: "Use GET, POST, PUT, DELETE, PATCH, or HEAD"
     module.insert(
@@ -1351,6 +1796,10 @@ pub fn init() -> HashMap<String, Value> {
     // A request Map accepts the same request fields and safety rules as fetch(). Its safe
     // file defaults reject overwrite and missing parents. file_options can set overwrite
     // and create_parent. Failed requests leave an existing destination unchanged.
+    // Request maps support the same explicit redirect policy as fetch(). Opt-in streamed
+    // bytes are bounded by NTNT_MAX_RESPONSE_SIZE. Failures before promotion preserve
+    // the destination and remove the temporary file. Promotion is the commit point;
+    // committed no-overwrite cleanup failure returns Ok with cleanup_warning and temporary_path.
     // @param url_or_options A URL String for GET or a fetch-compatible request Map
     // @param file_path The local file path to save the downloaded content
     // @param file_options Optional Map with overwrite and create_parent Bool fields
@@ -1425,7 +1874,8 @@ pub fn init() -> HashMap<String, Value> {
     // @signature cache_fetch(cache_obj: Map, url_or_options: String | Map) -> Result<Response, String>
     // Fetch a URL using a cache, returning a cached response if available.
     //
-    // Checks the cache for a previously stored response matching the URL.
+    // Checks the cache for a response matching the URL and redirect policy/hop limit.
+    // Redirect policy and opt-in timeout are validated even on a cache hit.
     // Secret-bearing request options are rejected because cache keys do not include credentials.
     // On a cache miss, performs the HTTP request via fetch(), stores the
     // successful response in the cache, and returns it. This is the internal
@@ -1485,7 +1935,7 @@ pub fn init() -> HashMap<String, Value> {
     // @signature cache_delete(cache_obj: Map, url: String) -> Unit
     // Remove a cached response for a specific URL.
     //
-    // Evicts the cached entry for the given URL from the cache, if present.
+    // Evicts all redirect-policy variants for the given URL, if present.
     // This is the internal function backing cache.delete() method calls.
     // @param cache_obj A cache object created by Cache()
     // @param url The URL whose cached response should be removed
@@ -1581,6 +2031,59 @@ mod tests {
 
     static DOWNLOAD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+    // Production configuration is process-global and cached in OnceLocks. Keep
+    // environment-dependent cases isolated under both nextest and plain libtest.
+    fn run_http_environment_case(name: &str) -> bool {
+        let test = format!("stdlib::http::tests::{name}");
+        const GUARD: &str = "NTNT_HTTP_ISOLATED_TEST";
+        if std::env::var(GUARD).ok().as_deref() == Some(test.as_str()) {
+            return false;
+        }
+        let mut output = tempfile::tempfile().expect("create isolated test log");
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"));
+        command.args(["--exact", &test, "--nocapture", "--test-threads=1"]);
+        for (key, _) in std::env::vars_os() {
+            let text = key.to_string_lossy();
+            if text.starts_with("NTNT_")
+                || text == "APP_ENV"
+                || text.to_ascii_lowercase().ends_with("_proxy")
+            {
+                command.env_remove(key);
+            }
+        }
+        command
+            .env(GUARD, &test)
+            .env("NTNT_ENV", "development")
+            .env("NTNT_SSRF_PROTECTION", "true")
+            .env("NTNT_ALLOW_LOCALHOST", "true")
+            .env("NTNT_ALLOW_PRIVATE_IPS", "false")
+            .stdout(output.try_clone().expect("clone test stdout"))
+            .stderr(output.try_clone().expect("clone test stderr"));
+        let mut child = command.spawn().expect("spawn isolated HTTP test");
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll isolated HTTP test") {
+                break status;
+            }
+            if started.elapsed() >= Duration::from_secs(30) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("isolated HTTP test exceeded 30 seconds: {test}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        std::io::Seek::rewind(&mut output).expect("rewind test log");
+        let mut log = String::new();
+        output.read_to_string(&mut log).expect("read test log");
+        assert!(status.success(), "isolated HTTP test failed: {test}\n{log}");
+        assert!(
+            log.contains(&test) && log.contains("test result: ok. 1 passed;"),
+            "isolated HTTP test did not execute exactly one passing case: {test}\n{log}"
+        );
+        true
+    }
+
     fn response_status(value: Value) -> i64 {
         let Value::EnumValue {
             enum_name,
@@ -1591,7 +2094,7 @@ mod tests {
             panic!("fetch returned a non-Result value");
         };
         assert_eq!(enum_name, "Result");
-        assert_eq!(variant, "Ok");
+        assert_eq!(variant, "Ok", "HTTP result: {values:?}");
         let Value::Map(response) = &values[0] else {
             panic!("fetch returned a non-map response");
         };
@@ -1916,20 +2419,739 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fetch_rejects_automatic_redirect_following() {
-        let error = http_fetch(&HashMap::from([
-            (
-                "url".to_string(),
-                Value::String("http://127.0.0.1:1/not-requested".to_string()),
-            ),
-            ("follow_redirects".to_string(), Value::Bool(true)),
-        ]))
-        .expect_err("automatic redirect following must stay disabled");
+    fn read_chain_request(stream: &mut std::net::TcpStream) -> String {
+        // Accepted sockets can inherit the listener's nonblocking mode.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let Ok(n) = stream.read(&mut buffer) else {
+                break;
+            };
+            if n == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..n]);
+            if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..end]);
+                let len = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (k, v) = line.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if bytes.len() >= end + 4 + len {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&bytes).to_string()
+    }
 
-        assert!(error
-            .to_string()
-            .contains("automatic redirect following is disabled"));
+    #[test]
+    fn chain_fixture_reads_delayed_request_on_nonblocking_accepted_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            let _ = client.write_all(b"GET /delayed HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        });
+        let request = read_chain_request(&mut server);
+        writer.join().unwrap();
+        assert_eq!(request, "GET /delayed HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    }
+
+    struct ChainFixture {
+        url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        stop: mpsc::Sender<()>,
+        server: thread::JoinHandle<()>,
+    }
+
+    impl ChainFixture {
+        fn new(respond: impl Fn(usize, &str) -> String + Send + 'static) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}/start", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let captured = requests.clone();
+            let (stop, done) = mpsc::channel();
+            let server = thread::spawn(move || {
+                while done.try_recv().is_err() {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let request = read_chain_request(&mut stream);
+                            let mut requests = captured.lock().unwrap();
+                            let n = requests.len();
+                            requests.push(request.clone());
+                            drop(requests);
+                            let _ = stream.write_all(respond(n, &request).as_bytes());
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2))
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                }
+            });
+            Self {
+                url,
+                requests,
+                stop,
+                server,
+            }
+        }
+        fn finish(self) -> Vec<String> {
+            self.stop.send(()).unwrap();
+            self.server.join().unwrap();
+            Arc::try_unwrap(self.requests)
+                .unwrap()
+                .into_inner()
+                .unwrap()
+        }
+        fn options(&self) -> HashMap<String, Value> {
+            HashMap::from([
+                ("url".into(), Value::String(self.url.clone())),
+                ("follow_redirects".into(), Value::Bool(true)),
+            ])
+        }
+    }
+
+    fn redirect_response(status: u16, location: &str) -> String {
+        format!("HTTP/1.1 {status} Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    }
+
+    #[test]
+    fn safe_redirect_limits_and_cycles() {
+        let fixture = ChainFixture::new(|n, _| redirect_response(302, &format!("/hop{n}")));
+        let mut opts = fixture.options();
+        opts.insert("max_redirects".into(), Value::Int(1));
+        let result = http_fetch(&opts);
+        let requests = fixture.finish();
+        assert!(result_error(result.unwrap()).contains("limit"));
+        assert_eq!(requests.len(), 2);
+        let fixture = ChainFixture::new(|_, _| redirect_response(303, "/start#fragment"));
+        let result = http_fetch(&fixture.options());
+        let requests = fixture.finish();
+        assert!(result_error(result.unwrap()).contains("cycle"));
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[test]
+    fn safe_redirect_rejects_invalid_locations_before_destination() {
+        for location in [
+            "".to_string(),
+            "x".repeat(8193),
+            "/final\r\nLocation: /other".into(),
+            "file:///tmp/blocked".into(),
+            "http://user:pass@127.0.0.1:1/".into(),
+        ] {
+            let fixture = ChainFixture::new(move |_, _| redirect_response(302, &location));
+            let result = http_fetch(&fixture.options());
+            let requests = fixture.finish();
+            assert!(!result_error(result.unwrap()).is_empty());
+            assert_eq!(requests.len(), 1);
+        }
+    }
+
+    #[test]
+    fn safe_redirect_option_validation_before_contact() {
+        let fixture =
+            ChainFixture::new(|_, _| "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".into());
+        for value in [Value::Int(0), Value::Int(11), Value::String("5".into())] {
+            let mut opts = fixture.options();
+            opts.insert("max_redirects".into(), value);
+            assert!(http_fetch(&opts).is_err());
+        }
+        for value in [Value::Int(-1), Value::String("1".into())] {
+            let mut opts = fixture.options();
+            opts.insert("timeout".into(), value);
+            assert!(http_fetch(&opts).is_err());
+        }
+        // Instant's representable range differs across platforms. Windows can
+        // represent this duration; Linux cannot. Test the checked-add contract,
+        // not a platform-specific assumption, without sending a huge-timeout request.
+        let mut huge_timeout = fixture.options();
+        huge_timeout.insert("timeout".into(), Value::Int(i64::MAX));
+        if Instant::now()
+            .checked_add(Duration::from_secs(i64::MAX as u64))
+            .is_none()
+        {
+            assert!(http_fetch(&huge_timeout).is_err());
+        } else {
+            assert!(RedirectPolicy::parse(&huge_timeout)
+                .unwrap()
+                .deadline
+                .is_some());
+        }
+        let mut opts = fixture.options();
+        opts.insert("timeout".into(), Value::Int(0));
+        assert!(result_error(http_fetch(&opts).unwrap()).contains("timeout"));
+        opts.remove("timeout");
+        opts.insert(
+            "headers".into(),
+            Value::Map(HashMap::from([(
+                "hOsT".into(),
+                Value::String("other".into()),
+            )])),
+        );
+        assert!(http_fetch(&opts).is_err());
+        opts.remove("headers");
+        opts.insert(
+            "ignored".into(),
+            Value::Array(vec![Value::Secret(
+                crate::interpreter::SecretValue::new("TEST", "canary").unwrap(),
+            )]),
+        );
+        assert!(http_fetch(&opts).is_err());
+        assert_eq!(fixture.finish().len(), 0);
+    }
+
+    #[test]
+    fn safe_redirect_method_body_matrix() {
+        for status in [301, 302, 303, 307, 308] {
+            for method in ["POST", "PUT", "HEAD"] {
+                let fixture = ChainFixture::new(move |n, _| {
+                    if n == 0 {
+                        redirect_response(status, "/final")
+                    } else {
+                        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+                    }
+                });
+                let mut opts = fixture.options();
+                opts.insert("method".into(), Value::String(method.into()));
+                if method != "HEAD" {
+                    opts.insert("body".into(), Value::String("payload".into()));
+                    // All body sources coexist; GET conversion must remove even
+                    // the sources shadowed by the final form serialization.
+                    opts.insert(
+                        "json".into(),
+                        Value::Map(HashMap::from([(
+                            "json".into(),
+                            Value::String("payload".into()),
+                        )])),
+                    );
+                    opts.insert(
+                        "form".into(),
+                        Value::Map(HashMap::from([(
+                            "form".into(),
+                            Value::String("payload".into()),
+                        )])),
+                    );
+                    opts.insert(
+                        "headers".into(),
+                        Value::Map(HashMap::from([
+                            ("Content-Type".into(), Value::String("text/plain".into())),
+                            ("Content-Encoding".into(), Value::String("identity".into())),
+                        ])),
+                    );
+                }
+                let result = http_fetch(&opts);
+                let requests = fixture.finish();
+                assert_eq!(response_status(result.unwrap()), 200);
+                let converts = method != "HEAD"
+                    && (status == 303 || (method == "POST" && matches!(status, 301 | 302)));
+                assert!(
+                    requests[1].starts_with(&format!(
+                        "{} /final ",
+                        if converts { "GET" } else { method }
+                    )),
+                    "status={status} method={method}: {}",
+                    requests[1]
+                );
+                if converts {
+                    assert!(!requests[1].contains("payload"));
+                    assert!(!requests[1].to_lowercase().contains("content-"));
+                } else if method != "HEAD" {
+                    assert!(requests[1].ends_with("payload"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn safe_redirect_cross_origin_strips_permanently() {
+        let return_url = Arc::new(Mutex::new(String::new()));
+        let back = return_url.clone();
+        let destination =
+            ChainFixture::new(move |_, _| redirect_response(302, &back.lock().unwrap()));
+        let target = destination.url.clone();
+        let source = ChainFixture::new(move |n, _| {
+            if n < 2 {
+                redirect_response(302, if n == 0 { "/same" } else { &target })
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+            }
+        });
+        *return_url.lock().unwrap() = source.url.replace("/start", "/returned");
+        let mut opts = source.options();
+        opts.insert(
+            "auth".into(),
+            Value::Map(HashMap::from([
+                ("user".into(), Value::String("alice".into())),
+                ("pass".into(), Value::String("password".into())),
+            ])),
+        );
+        opts.insert(
+            "cookies".into(),
+            Value::Map(HashMap::from([(
+                "session".into(),
+                Value::String("cookie-canary".into()),
+            )])),
+        );
+        opts.insert(
+            "headers".into(),
+            Value::Map(HashMap::from([
+                ("X-Custom".into(), Value::String("custom-canary".into())),
+                ("aCcEpT".into(), Value::String("text/plain".into())),
+            ])),
+        );
+        let result = http_fetch(&opts);
+        let source_requests = source.finish();
+        let target_requests = destination.finish();
+        assert_eq!(response_status(result.unwrap()), 200);
+        assert_eq!(source_requests.len(), 3);
+        assert_eq!(target_requests.len(), 1);
+        assert!(source_requests[1].to_lowercase().contains("authorization:"));
+        assert!(source_requests[1].contains("cookie-canary"));
+        for request in [&source_requests[2], &target_requests[0]] {
+            assert!(!request.to_lowercase().contains("authorization:"));
+            assert!(!request.contains("cookie-canary"));
+            assert!(!request.contains("custom-canary"));
+            assert!(request.to_lowercase().contains("accept: text/plain"));
+        }
+    }
+
+    #[test]
+    fn safe_redirect_cross_origin_body_denied_without_contact() {
+        for status in [301, 302, 303, 307, 308] {
+            let destination =
+                ChainFixture::new(|_, _| "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".into());
+            let target = destination.url.clone();
+            let source = ChainFixture::new(move |_, _| redirect_response(status, &target));
+            let mut opts = source.options();
+            opts.insert("method".into(), Value::String("PUT".into()));
+            opts.insert("body".into(), Value::String("private-body".into()));
+            let result = http_fetch(&opts);
+            assert_eq!(source.finish().len(), 1);
+            let requests = destination.finish();
+            if status == 303 {
+                assert_eq!(response_status(result.unwrap()), 200);
+                assert_eq!(requests.len(), 1);
+                assert!(!requests[0].contains("private-body"));
+            } else {
+                assert!(result_error(result.unwrap()).contains("body"));
+                assert_eq!(requests.len(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn safe_redirect_fetch_bounds_received_and_decoded_body() {
+        if run_http_environment_case("safe_redirect_fetch_bounds_received_and_decoded_body") {
+            return;
+        }
+        std::env::set_var("NTNT_MAX_RESPONSE_SIZE", "8");
+        for body in ["123456789", "ééééé"] {
+            let fixture = ChainFixture::new(move |_, _| {
+                format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n", body.len())
+            });
+            let result = http_fetch(&fixture.options());
+            assert_eq!(fixture.finish().len(), 1);
+            assert!(result_error(result.unwrap()).contains("large"));
+        }
+        // Three invalid bytes expand to nine UTF-8 replacement bytes: received
+        // bytes fit, but the decoded result must be rejected before allocation.
+        let mut response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n".to_vec();
+        response.extend_from_slice(&[0xff, 0xff, 0xff]);
+        let (url, server) = raw_response_fixture(response);
+        let result = http_fetch(&HashMap::from([
+            ("url".into(), Value::String(url)),
+            ("follow_redirects".into(), Value::Bool(true)),
+        ]));
+        server.join().unwrap();
+        assert!(result_error(result.unwrap()).contains("Decoded response body too large"));
+        std::env::remove_var("NTNT_MAX_RESPONSE_SIZE");
+    }
+
+    #[test]
+    fn safe_redirect_download_follows_and_bounds_bytes() {
+        if run_http_environment_case("safe_redirect_download_follows_and_bounds_bytes") {
+            return;
+        }
+        std::env::set_var("NTNT_MAX_RESPONSE_SIZE", "8");
+        let directory = download_directory("safe-download");
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("file");
+        for body in ["done", "123456789"] {
+            std::fs::write(&destination, b"old").unwrap();
+            let fixture = ChainFixture::new(move |n, _| {
+                if n == 0 {
+                    redirect_response(302, "/file")
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                }
+            });
+            let result = http_download(
+                &fixture.options(),
+                destination.to_str().unwrap(),
+                DownloadOptions {
+                    overwrite: true,
+                    create_parent: false,
+                },
+            );
+            assert_eq!(fixture.finish().len(), 2);
+            if body == "done" {
+                assert_eq!(response_status(result.unwrap()), 200);
+                assert_eq!(std::fs::read(&destination).unwrap(), b"done");
+            } else {
+                assert!(result_error(result.unwrap()).contains("large"));
+                assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+            }
+            assert_no_download_temporary_file(&directory);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+        std::env::remove_var("NTNT_MAX_RESPONSE_SIZE");
+    }
+
+    #[test]
+    fn safe_redirect_cache_policy_and_hit_validation() {
+        let fixture = ChainFixture::new(|_, request| {
+            if request.starts_with("GET /start ") {
+                redirect_response(302, "/final")
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone".into()
+            }
+        });
+        let id = get_next_cache_id();
+        CACHE_REGISTRY
+            .lock()
+            .unwrap()
+            .insert(id, ResponseCache::new(60));
+        let mut opts = fixture.options();
+        assert_eq!(
+            response_status(cache_fetch(id, &fixture.url, None).unwrap()),
+            302
+        );
+        assert_eq!(
+            response_status(cache_fetch(id, &fixture.url, Some(&opts)).unwrap()),
+            200
+        );
+        assert_eq!(
+            response_status(cache_fetch(id, &fixture.url, None).unwrap()),
+            302
+        );
+        assert_eq!(
+            response_status(cache_fetch(id, &fixture.url, Some(&opts)).unwrap()),
+            200
+        );
+        opts.insert("timeout".into(), Value::Int(0));
+        assert!(
+            result_error(cache_fetch(id, &fixture.url, Some(&opts)).unwrap()).contains("timeout")
+        );
+        opts.insert("timeout".into(), Value::Int(-1));
+        assert!(cache_fetch(id, &fixture.url, Some(&opts)).is_err());
+        opts.remove("timeout");
+        opts.insert("max_redirects".into(), Value::Int(0));
+        assert!(cache_fetch(id, &fixture.url, Some(&opts)).is_err());
+        cache_delete(id, &fixture.url);
+        assert!(CACHE_REGISTRY
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .entries
+            .is_empty());
+        CACHE_REGISTRY.lock().unwrap().remove(&id);
+        assert_eq!(fixture.finish().len(), 3);
+    }
+
+    #[test]
+    fn safe_redirect_download_commit_cleanup_failure_is_success() {
+        let directory = download_directory("commit-warning");
+        std::fs::create_dir_all(&directory).unwrap();
+        let temp = directory.join("temporary");
+        let dest = directory.join("destination");
+        std::fs::write(&temp, b"committed").unwrap();
+        let policy = RedirectPolicy::parse(&HashMap::from([(
+            "follow_redirects".into(),
+            Value::Bool(true),
+        )]))
+        .unwrap();
+        let result = commit_redirect_download(policy, &temp, &dest, false, |_| {
+            Err(std::io::Error::other("injected cleanup failure"))
+        });
+        assert_eq!(std::fs::read(&dest).unwrap(), b"committed");
+        assert!(result
+            .unwrap()
+            .expect("successful link is committed")
+            .unwrap()
+            .contains("cleanup"));
+        assert!(temp.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn safe_redirect_download_precommit_expiry_and_cancellation() {
+        let directory = download_directory("precommit");
+        std::fs::create_dir_all(&directory).unwrap();
+        let temp = directory.join("temporary");
+        let dest = directory.join("destination");
+        std::fs::write(&temp, b"new").unwrap();
+        std::fs::write(&dest, b"old").unwrap();
+        let policy = RedirectPolicy {
+            enabled: true,
+            limit: 5,
+            deadline: Some(Instant::now()),
+        };
+        assert!(
+            commit_redirect_download(policy, &temp, &dest, true, |_| panic!("not committed"))
+                .unwrap()
+                .unwrap_err()
+                .contains("timeout")
+        );
+        let token = Arc::new(crate::stdlib::concurrent::CancelToken::new());
+        token.cancel();
+        crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN
+            .with(|current| *current.borrow_mut() = Some(token));
+        let result =
+            commit_redirect_download(policy, &temp, &dest, true, |_| panic!("not committed"));
+        crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN
+            .with(|current| *current.borrow_mut() = None);
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old");
+        assert_eq!(std::fs::read(&temp).unwrap(), b"new");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn safe_redirect_empty_userinfo_denied() {
+        let destination =
+            ChainFixture::new(|_, _| "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".into());
+        let target = destination.url.replace("http://", "http://@");
+        let source = ChainFixture::new(move |_, _| redirect_response(302, &target));
+        let result = http_fetch(&source.options());
+        assert_eq!(source.finish().len(), 1);
+        let contacts = destination.finish();
+        assert!(result_error(result.unwrap()).contains("userinfo"));
+        assert!(contacts.is_empty());
+    }
+
+    #[test]
+    fn public_fetch_forms_reject_cancellation_before_response_headers() {
+        let module = init();
+        let Value::NativeFunction { func, .. } = &module["fetch"] else {
+            panic!("native fetch");
+        };
+        for form in 0..3 {
+            let token = Arc::new(crate::stdlib::concurrent::CancelToken::new());
+            let server_token = Arc::clone(&token);
+            let fixture = ChainFixture::new(move |_, _| {
+                server_token.cancel();
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone".into()
+            });
+            let opts = Value::Map(HashMap::from([(
+                "url".into(),
+                Value::String(fixture.url.clone()),
+            )]));
+            let args = match form {
+                0 => vec![opts],
+                1 => vec![Value::String(fixture.url.clone()), opts],
+                _ => vec![Value::String(fixture.url.clone())],
+            };
+            crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|current| {
+                *current.borrow_mut() = Some(token);
+            });
+            let result = func(&args);
+            crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|current| {
+                *current.borrow_mut() = None;
+            });
+            assert_eq!(fixture.finish().len(), 1);
+            assert!(
+                result
+                    .expect_err("cancelled fetch must not succeed")
+                    .to_string()
+                    .contains("Task cancelled"),
+                "form {form}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_redirect_public_dispatch_variants() {
+        let fixture = ChainFixture::new(|_, request| {
+            if request.starts_with("GET /start ") {
+                redirect_response(302, "/final")
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone".into()
+            }
+        });
+        let module = init();
+        let call = |name: &str, args: &[Value]| {
+            let Value::NativeFunction { func, .. } = &module[name] else {
+                panic!("native function");
+            };
+            func(args).unwrap()
+        };
+        assert_eq!(
+            response_status(call("fetch", &[Value::Map(fixture.options())])),
+            200
+        );
+        assert_eq!(
+            response_status(call(
+                "fetch",
+                &[
+                    Value::String(fixture.url.clone()),
+                    Value::Map(fixture.options())
+                ]
+            )),
+            200
+        );
+        let cache = call("Cache", &[Value::Int(60)]);
+        assert_eq!(
+            response_status(call("cache_fetch", &[cache, Value::Map(fixture.options())])),
+            200
+        );
+        let directory = download_directory("public-dispatch");
+        let path = directory.join("file");
+        let options = Value::Map(HashMap::from([("create_parent".into(), Value::Bool(true))]));
+        assert_eq!(
+            response_status(call(
+                "download",
+                &[
+                    Value::Map(fixture.options()),
+                    Value::String(path.display().to_string()),
+                    options
+                ]
+            )),
+            200
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"done");
+        std::fs::remove_dir_all(directory).unwrap();
+        let mut opts = fixture.options();
+        opts.insert("follow_redirects".into(), Value::Bool(false));
+        assert_eq!(response_status(call("fetch", &[Value::Map(opts)])), 302);
+        assert_eq!(fixture.finish().len(), 9);
+    }
+
+    #[test]
+    fn safe_redirect_protected_proxy_bypass_and_blocked_hop() {
+        if run_http_environment_case("safe_redirect_protected_proxy_bypass_and_blocked_hop") {
+            return;
+        }
+        std::env::set_var("NTNT_BLOCKED_HOSTS", "localhost");
+        let proxy = ChainFixture::new(|_, _| panic!("protected request reached proxy"));
+        std::env::set_var("HTTP_PROXY", &proxy.url);
+        std::env::set_var("http_proxy", &proxy.url);
+        std::env::set_var("ALL_PROXY", &proxy.url);
+        std::env::set_var("NO_PROXY", "");
+        std::env::set_var("no_proxy", "");
+        let destination =
+            ChainFixture::new(|_, _| "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".into());
+        let target = destination.url.replace("127.0.0.1", "localhost");
+        let source = ChainFixture::new(move |_, _| redirect_response(302, &target));
+        let result = http_fetch(&source.options());
+        assert_eq!(source.finish().len(), 1);
+        assert!(destination.finish().is_empty());
+        assert!(proxy.finish().is_empty());
+        assert!(result_error(result.unwrap()).contains("blocked"));
+    }
+
+    #[test]
+    fn safe_redirect_resolution_set_is_all_validated() {
+        let config = SsrfConfig {
+            enabled: true,
+            allow_localhost: false,
+            allow_private: false,
+            blocked_hosts: Vec::new(),
+        };
+        let public = "8.8.8.8:443".parse().unwrap();
+        let blocked = "127.0.0.1:443".parse().unwrap();
+        assert!(
+            validate_resolved_addresses(&config, "example.test".into(), vec![public, blocked])
+                .is_err()
+        );
+        assert!(validate_resolved_addresses(&config, "example.test".into(), vec![]).is_err());
+        let approved = vec![public, "1.1.1.1:443".parse().unwrap()];
+        let target =
+            validate_resolved_addresses(&config, "example.test".into(), approved.clone()).unwrap();
+        assert_eq!(target.addresses, approved);
+        assert_eq!(target.host, "example.test");
+    }
+
+    #[test]
+    fn safe_redirect_whole_chain_timeout() {
+        let source = ChainFixture::new(|n, _| {
+            thread::sleep(Duration::from_millis(650));
+            if n == 0 {
+                redirect_response(302, "/final")
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".into()
+            }
+        });
+        let mut opts = source.options();
+        opts.insert("timeout".into(), Value::Int(1));
+        let result = http_fetch(&opts);
+        assert!(!result_error(result.unwrap()).is_empty());
+        assert_eq!(source.finish().len(), 2);
+    }
+
+    #[test]
+    fn safe_redirect_relative_success() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/start", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let count = hits.clone();
+        let (stop, done) = mpsc::channel();
+        let server = thread::spawn(move || {
+            while done.try_recv().is_err() {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        drain_http_request(&mut stream);
+                        let n = count.fetch_add(1, Ordering::SeqCst);
+                        let response = if n == 0 {
+                            "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        } else {
+                            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone"
+                        };
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2))
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+        });
+        let result = http_fetch(&HashMap::from([
+            ("url".to_string(), Value::String(url.clone())),
+            ("follow_redirects".to_string(), Value::Bool(true)),
+        ]));
+        stop.send(()).unwrap();
+        server.join().unwrap();
+        let map = result_map(result.expect("safe opt-in should be accepted"));
+        assert!(matches!(map.get("status"), Some(Value::Int(200))));
+        assert!(matches!(map.get("redirected"), Some(Value::Bool(true))));
+        assert!(matches!(map.get("body"), Some(Value::String(s)) if s == "done"));
+        assert!(
+            matches!(map.get("url"), Some(Value::String(s)) if s == &url.replace("/start", "/final"))
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -2106,6 +3328,44 @@ mod tests {
 
         server.join().unwrap();
         assert!(result_error(result).contains("Failed to read response"));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"approved take");
+        assert_no_download_temporary_file(&directory);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_download_cancelled_before_response_headers_keeps_diagnostic() {
+        let directory = download_directory("cancel-before-headers");
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("take.wav");
+        std::fs::write(&destination, b"approved take").unwrap();
+        let token = Arc::new(crate::stdlib::concurrent::CancelToken::new());
+        let server_token = Arc::clone(&token);
+        let fixture = ChainFixture::new(move |_, _| {
+            // Request preparation/send has completed, but response processing
+            // has not. This deterministically exercises the hosted-CI race.
+            server_token.cancel();
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+        });
+        crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|current| {
+            *current.borrow_mut() = Some(token);
+        });
+        let result = http_download(
+            &HashMap::from([("url".into(), Value::String(fixture.url.clone()))]),
+            destination.to_str().unwrap(),
+            DownloadOptions {
+                overwrite: true,
+                create_parent: false,
+            },
+        );
+        crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|current| {
+            *current.borrow_mut() = None;
+        });
+        assert_eq!(fixture.finish().len(), 1);
+        assert!(result
+            .expect_err("cancelled download must fail")
+            .to_string()
+            .contains("download cancelled"));
         assert_eq!(std::fs::read(&destination).unwrap(), b"approved take");
         assert_no_download_temporary_file(&directory);
         std::fs::remove_dir_all(directory).unwrap();

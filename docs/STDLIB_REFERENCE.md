@@ -6628,7 +6628,7 @@ cache_delete(cache_obj: Map, url: String) -> Unit
 
 Remove a cached response for a specific URL.
 
-Evicts the cached entry for the given URL from the cache, if present. This is the internal function backing cache.delete() method calls.
+Evicts all redirect-policy variants for the given URL, if present. This is the internal function backing cache.delete() method calls.
 
 **Parameters:**
 
@@ -6663,7 +6663,7 @@ cache_fetch(cache_obj: Map, url_or_options: String | Map) -> Result<Response, St
 
 Fetch a URL using a cache, returning a cached response if available.
 
-Checks the cache for a previously stored response matching the URL. Secret-bearing request options are rejected because cache keys do not include credentials. On a cache miss, performs the HTTP request via fetch(), stores the successful response in the cache, and returns it. This is the internal function backing cache.fetch() method calls.
+Checks the cache for a response matching the URL and redirect policy/hop limit. Redirect policy and opt-in timeout are validated even on a cache hit. Secret-bearing request options are rejected because cache keys do not include credentials. On a cache miss, performs the HTTP request via fetch(), stores the successful response in the cache, and returns it. This is the internal function backing cache.fetch() method calls.
 
 **Parameters:**
 
@@ -6699,7 +6699,7 @@ download(url_or_options: String | Map, file_path: String, file_options?: Map) ->
 
 Stream an HTTP response to a file and promote it atomically.
 
-A String performs the legacy GET behavior, including parent creation, overwrite, and preservation of Unix regular-file permissions when replacing a destination. A request Map accepts the same request fields and safety rules as fetch(). Its safe file defaults reject overwrite and missing parents. file_options can set overwrite and create_parent. Failed requests leave an existing destination unchanged.
+A String performs the legacy GET behavior, including parent creation, overwrite, and preservation of Unix regular-file permissions when replacing a destination. A request Map accepts the same request fields and safety rules as fetch(). Its safe file defaults reject overwrite and missing parents. file_options can set overwrite and create_parent. Failed requests leave an existing destination unchanged. Request maps support the same explicit redirect policy as fetch(). Opt-in streamed bytes are bounded by NTNT_MAX_RESPONSE_SIZE. Failures before promotion preserve the destination and remove the temporary file. Promotion is the commit point; committed no-overwrite cleanup failure returns Ok with cleanup_warning and temporary_path.
 
 **Parameters:**
 
@@ -6737,7 +6737,7 @@ fetch(url_or_options: String | Map, options?: Map) -> Result<Response, String>
 
 Make an HTTP request to a URL.
 
-Accepts one or two arguments: - One argument: a URL string for a simple GET request, or an options map   with full control over method, headers, body, authentication, cookies, and timeout. - Two arguments: a URL string and an options map. The URL is merged into   the options map automatically. Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout, follow_redirects. Redirects are returned as 3xx responses so callers can validate each hop. follow_redirects may be omitted or false; true is rejected because reqwest cannot apply NTNT's SSRF policy to every redirect destination before connecting. Opaque Secret values are accepted only in header values, cookie values, basic-auth fields, raw bodies, JSON leaves, and form values. Secret-bearing requests require HTTPS; APP_ENV=development permits direct HTTP only for localhost and loopback IPs, bypassing system proxies.
+Accepts one or two arguments: - One argument: a URL string for a simple GET request, or an options map   with full control over method, headers, body, authentication, cookies, and timeout. - Two arguments: a URL string and an options map. The URL is merged into   the options map automatically. Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout, follow_redirects, max_redirects. Redirects default to terminal 3xx responses. follow_redirects:true manually follows 301/302/303/307/308, validating and pinning each protected hop without proxies. max_redirects defaults to 5 (allowed 1..10); it never enables following by itself. Opt-in rejects Secret values, URL userinfo, explicit Host, HTTPS downgrades, cycles, and malformed/multiple/oversized Location values. Missing Location is terminal. Origins compare scheme, normalized hostname and effective port. Origin changes permanently strip auth/cookies and caller headers except Accept, Accept-Language, User-Agent; response cookies are never forwarded. Body replay across origins fails. POST 301/302 and non-HEAD 303 become GET, clearing bodies and entity headers. Opt-in uses one timeout budget (default 30 seconds); zero expires before contact. Blocking system DNS and filesystem operations cannot be interrupted by this budget. Final opt-in bodies use bounded UTF-8 decoding with replacement (charset ignored), limited by NTNT_MAX_RESPONSE_SIZE in both received bytes and decoded UTF-8 bytes. URL-only cycle detection also rejects POST->303->GET at the same normalized URL. Opaque Secret values are accepted only in header values, cookie values, basic-auth fields, raw bodies, JSON leaves, and form values. Secret-bearing requests require HTTPS; APP_ENV=development permits direct HTTP only for localhost and loopback IPs, bypassing system proxies.
 
 **Parameters:**
 
@@ -6771,7 +6771,7 @@ fetch("https://api.example.com", map {
 - **TypeError**: fetch() requires a URL string or options map — *Fix: Pass a String URL or a Map with request options*
 - **TypeError**: fetch() requires 'url' option — *Fix: Include 'url' key in the options map*
 - **TypeError**: fetch() follow_redirects must be a Bool — *Fix: Pass true or false for follow_redirects*
-- **TypeError**: automatic redirect following is disabled — *Fix: Inspect the 3xx response, validate Location, and issue the next request explicitly*
+- **TypeError**: Secret-bearing requests cannot follow redirects — *Fix: Use explicit independently authorized requests for Secret-bearing traffic*
 - **TypeError**: Secret-bearing HTTP requests require HTTPS — *Fix: Use HTTPS, or set APP_ENV=development for localhost/loopback HTTP*
 - **RuntimeError**: Unsupported HTTP method: ... — *Fix: Use GET, POST, PUT, DELETE, PATCH, or HEAD*
 
