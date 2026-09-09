@@ -1,0 +1,27 @@
+# Native library tests
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| normalizing a title | call: normalize_title("  SHIP  "), source: domain.tnt |
+| exercising pure helpers | call: pure_checks(), source: cases.tnt |
+| completing a disposable task | call: task_lifecycle(), source: cases.tnt |
+
+Feature: Pure helpers
+  id: feature.native_helpers
+
+  Scenario: Normalize a title directly
+    When normalizing a title
+    → result is "ship"
+
+  Scenario: Native structured assertions
+    When exercising pure helpers
+    → native assertions pass
+
+Feature: Disposable task store
+  id: feature.native_store
+
+  Scenario: Complete one task in memory
+    When completing a disposable task
+    → native assertions pass

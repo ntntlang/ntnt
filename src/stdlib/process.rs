@@ -1328,6 +1328,79 @@ fn supervise_process(process: Arc<ProcessEntry>) {
     });
 }
 
+/// Launch only the native test child protocol using the existing supervisor.
+/// This Rust-only entry does not authorize any std/process operation in .tnt.
+pub(crate) fn run_native_test_child(
+    executable: &Path,
+    cwd: &Path,
+    request_path: &Path,
+    response_path: &Path,
+) -> std::result::Result<(), String> {
+    let options = ProcessOptions {
+        cwd: Some(cwd.to_path_buf()),
+        clear_env: true,
+        env: native_test_launch_env(),
+        timeout: Some(Duration::from_secs(30)),
+        max_output_bytes: 512 * 1024, // one MiB total across the two captured streams
+        ..ProcessOptions::run_defaults()
+    };
+    let arguments = vec![
+        "__native-test".to_string(),
+        request_path
+            .to_str()
+            .ok_or("Native request path is not UTF-8")?
+            .to_string(),
+        response_path
+            .to_str()
+            .ok_or("Native response path is not UTF-8")?
+            .to_string(),
+    ];
+    let process = spawn_process(executable, &arguments, options)?;
+    let id = register_process(&process)?;
+    let result = monitor_process(&process, true);
+    // The normal monitor already kills/reaps on timeout and output failure.
+    // If OS observation itself failed, make a final cleanup attempt before
+    // releasing the fixture owner; retain every failure as non-green.
+    let result = match result {
+        Err(error) => match stop_and_reap(&process)
+            .and_then(|status| finalize_process(&process, status, false).map(|_| ()))
+        {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(format!("{error}; cleanup failed: {cleanup}")),
+        },
+        Ok(Some(summary)) if summary.timed_out => {
+            Err("Native test child timed out after 30 seconds".into())
+        }
+        Ok(Some(summary)) if !summary.success => Err(format!(
+            "Native test child failed (exit {:?}, signal {:?}): {}",
+            summary.exit_code, summary.signal, summary.stderr
+        )),
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err("Native child monitor unexpectedly returned pending".into()),
+    };
+    RUNTIME.remove(id);
+    result
+}
+
+fn native_test_launch_env() -> HashMap<String, String> {
+    #[cfg(windows)]
+    {
+        // No HOME, PATH, application credentials, dotenv or capability flags.
+        ["SystemRoot", "WINDIR"]
+            .into_iter()
+            .filter_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|value| (name.to_string(), value))
+            })
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        HashMap::new()
+    }
+}
+
 fn run_from_args(args: &[Value]) -> Result<Value> {
     let (program, arguments, options) = parse_command(args, ProcessOptions::run_defaults())?;
     if crate::stdlib::concurrent::is_current_task_cancelled() {

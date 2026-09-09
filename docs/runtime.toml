@@ -388,10 +388,11 @@ example = "ntnt completions zsh >> ~/.zshrc"
 # --- Intent Check ---
 [cli.intent_check]
 command = "ntnt intent check <FILE>"
-description = "Run intent tests against implementation"
+description = "Run Intent-selected native functions or HTTP tests. Native-only files need no paired server. Native cases run serially in clean, disposable child processes; this is local code execution, not a security sandbox. Failed, unresolved, skipped or empty runs exit nonzero in both human and JSON modes."
 options = [
     { name = "--intent", short = "-i", type = "PATH", description = "Path to intent file (default: <name>.intent)" },
     { name = "--port", short = "", type = "number", default = "18081", description = "Port to run the test server on" },
+    { name = "--case", short = "", type = "string", description = "Select one exact, unique scenario name before deciding whether HTTP is needed; no match is non-green" },
     { name = "--verbose", short = "-v", type = "flag", description = "Show scenario pass/fail status" },
     { name = "-vv", short = "", type = "flag", description = "Show all assertions and term resolution" },
     { name = "--json", short = "", type = "flag", description = "Output results as JSON" }
@@ -399,7 +400,9 @@ options = [
 examples = [
     "ntnt intent check server.tnt",
     "ntnt intent check server.tnt -v",
-    "ntnt intent check server.tnt -vv"
+    "ntnt intent check server.tnt -vv",
+    "ntnt intent check examples/native_testing/library.intent",
+    "ntnt intent check examples/native_testing/library.intent --case 'Complete one task in memory' --json"
 ]
 
 # --- Intent Coverage ---

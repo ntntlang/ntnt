@@ -712,6 +712,14 @@ struct CachedExternalTemplate {
 
 /// The Intent interpreter
 pub struct Interpreter {
+    /// Actual builtin calls, enabled only for the selected native test invocation.
+    native_assertions: Option<Vec<crate::native_test::NativeAssertion>>,
+    native_test_entry: Option<String>,
+    native_test_scope: Option<Rc<RefCell<Environment>>>,
+    native_load_calls: HashMap<usize, Rc<RefCell<Environment>>>,
+    native_test_loading: bool,
+    native_test_error: Option<String>,
+    native_function_sources: HashMap<(usize, String), String>,
     environment: Rc<RefCell<Environment>>,
     contracts: ContractChecker,
     /// Struct type definitions
@@ -940,9 +948,84 @@ fn auto_unwrap_field(inner_val: Value, field: &str) -> Result<Value> {
 }
 
 impl Interpreter {
+    pub(crate) fn configure_native_test(&mut self, entry: &str) {
+        self.execution_mode = ExecutionMode::UnitTest;
+        self.native_test_entry = Some(entry.to_string());
+        self.native_test_scope = Some(Rc::clone(&self.environment));
+        self.native_test_loading = true;
+    }
+
+    pub(crate) fn native_test_error(&self) -> Option<String> {
+        if self.native_test_loading {
+            if let (Some(entry), Some(scope)) = (&self.native_test_entry, &self.native_test_scope) {
+                if let Some(Value::Function { name, closure, .. }) = scope.borrow().get(entry) {
+                    let id = Rc::as_ptr(&closure) as usize;
+                    if self.native_load_calls.contains_key(&id) {
+                        let source = self.native_function_sources.get(&(id, name));
+                        return Some(format!("{}: Selected native function '{entry}' was called during module loading; remove its autorun call", source.map(String::as_str).unwrap_or("<native>")));
+                    }
+                }
+            }
+        }
+        self.native_test_error.clone()
+    }
+
+    // A native-only lexical proxy gives each function a stable identity without
+    // changing Value::Function or the ordinary interpreter's closure semantics.
+    fn native_function_closure(&mut self, name: &str) -> Rc<RefCell<Environment>> {
+        if self.native_test_entry.is_none() {
+            return Rc::clone(&self.environment);
+        }
+        let closure = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(
+            &self.environment,
+        ))));
+        if let Some(source) = &self.current_file {
+            self.native_function_sources.insert(
+                (Rc::as_ptr(&closure) as usize, name.to_string()),
+                source.clone(),
+            );
+        }
+        closure
+    }
+
+    fn native_entry_matches(&self, name: &str, closure: &Rc<RefCell<Environment>>) -> bool {
+        let (Some(entry), Some(scope)) = (&self.native_test_entry, &self.native_test_scope) else {
+            return false;
+        };
+        matches!(scope.borrow().get(entry), Some(Value::Function { name: selected_name, closure: selected_closure, .. }) if selected_name == name && Rc::ptr_eq(&selected_closure, closure))
+    }
+
+    fn reject_native_action(&mut self, message: String) -> IntentError {
+        let message = format!(
+            "{}:{}: {message}",
+            self.current_file.as_deref().unwrap_or("<native>"),
+            self.current_line
+        );
+        self.native_test_error
+            .get_or_insert_with(|| message.clone());
+        IntentError::runtime_error(message)
+    }
+
+    pub(crate) fn begin_native_assertions(&mut self) {
+        self.native_test_loading = false;
+        self.native_load_calls.clear();
+        self.native_assertions = Some(Vec::new());
+    }
+
+    pub(crate) fn finish_native_assertions(&mut self) -> Vec<crate::native_test::NativeAssertion> {
+        self.native_assertions.take().unwrap_or_default()
+    }
+
     pub fn new() -> Self {
         let env = Rc::new(RefCell::new(Environment::new()));
         let mut interpreter = Interpreter {
+            native_assertions: None,
+            native_test_entry: None,
+            native_test_scope: None,
+            native_load_calls: HashMap::new(),
+            native_test_loading: false,
+            native_test_error: None,
+            native_function_sources: HashMap::new(),
             environment: env,
             contracts: ContractChecker::new(),
             structs: HashMap::new(),
@@ -1044,9 +1127,22 @@ impl Interpreter {
         if args.len() < arity_min || args.len() > arity_max {
             return None;
         }
+        // Lifecycle actions handle their own mode gate in ordinary execution.
+        if self.native_test_entry.is_some()
+            && matches!(name, "listen" | "new_server" | "on_shutdown" | "on_error")
+        {
+            return Some(Err(self.reject_native_action(format!(
+                "Unsupported native test capability: {name} requires HttpServer"
+            ))));
+        }
         // Capability gate
         if let Some(cap) = requires {
             if !self.execution_mode.has(cap) {
+                if self.native_test_entry.is_some() {
+                    return Some(Err(self.reject_native_action(format!(
+                        "Unsupported native test capability: {name} requires {cap:?}"
+                    ))));
+                }
                 return Some(Ok(Value::Unit));
             }
         }
@@ -5180,7 +5276,7 @@ impl Interpreter {
                     name: name.clone(),
                     params: params.clone(),
                     body: body.clone(),
-                    closure: Rc::clone(&self.environment),
+                    closure: self.native_function_closure(name),
                     contract: func_contract,
                     type_params: type_params.clone(),
                 };
@@ -6915,6 +7011,9 @@ impl Interpreter {
                             if pattern_str.starts_with('/') {
                                 // Route registration requires HttpServer capability
                                 if !self.execution_mode.has(RuntimeCapability::HttpServer) {
+                                    if self.native_test_entry.is_some() {
+                                        return Err(self.reject_native_action(format!("Unsupported native test capability: {name} requires HttpServer")));
+                                    }
                                     return Ok(Value::Unit);
                                 }
                                 let handler = self.eval_expression(&arguments[1])?;
@@ -7543,7 +7642,7 @@ impl Interpreter {
                 name: "<lambda>".to_string(),
                 params: params.clone(),
                 body: body.clone(),
-                closure: Rc::clone(&self.environment),
+                closure: self.native_function_closure("<lambda>"),
                 contract: None,
                 type_params: vec![],
             }),
@@ -9327,6 +9426,13 @@ impl Interpreter {
                 type_params: _, // Generic type params - for future type checking
             } => {
                 // Check recursion depth limit
+                if self.native_test_loading {
+                    self.native_load_calls
+                        .insert(Rc::as_ptr(&closure) as usize, Rc::clone(&closure));
+                }
+                if self.native_test_loading && self.native_entry_matches(&name, &closure) {
+                    return Err(self.reject_native_action(format!("Selected native function '{name}' was called during module loading; remove its autorun call")));
+                }
                 if self.call_depth >= self.max_recursion_depth {
                     return Err(IntentError::runtime_error(format!(
                         "Maximum recursion depth ({}) exceeded. Use NTNT_MAX_RECURSION env var to increase.",
@@ -9334,7 +9440,33 @@ impl Interpreter {
                     )));
                 }
                 self.call_depth += 1;
-                let result = self.call_user_function(name, params, body, closure, contract, args);
+                let result = if self.native_test_entry.is_some() {
+                    let previous_file = self.current_file.clone();
+                    let previous_line = self.current_line;
+                    let previous_environment = Rc::clone(&self.environment);
+                    if let Some(source) = self
+                        .native_function_sources
+                        .get(&(Rc::as_ptr(&closure) as usize, name.clone()))
+                    {
+                        self.current_file = Some(source.clone());
+                    }
+                    let result = self
+                        .call_user_function(name, params, body, closure, contract, args)
+                        .map_err(|e| {
+                            let line = e.line().unwrap_or(self.current_line);
+                            IntentError::runtime_error(format!(
+                                "{}:{line}: {e}",
+                                self.current_file.as_deref().unwrap_or("<native>")
+                            ))
+                            .at_line(line)
+                        });
+                    self.environment = previous_environment;
+                    self.current_file = previous_file;
+                    self.current_line = previous_line;
+                    result
+                } else {
+                    self.call_user_function(name, params, body, closure, contract, args)
+                };
                 self.call_depth -= 1;
                 result
             }
@@ -9349,7 +9481,25 @@ impl Interpreter {
                 // Capability gate: if the function declares a required capability,
                 // silently skip it (return Unit) when the active mode lacks that capability.
                 if let Some(cap) = requires {
+                    // Task interpreters do not yet carry the native assertion observer.
+                    // Reject at the capability boundary so aliases/caught errors cannot
+                    // silently turn unsupported asynchronous work into passing evidence.
+                    if self.native_test_entry.is_some()
+                        && matches!(
+                            cap,
+                            RuntimeCapability::TaskSpawning | RuntimeCapability::Scheduling
+                        )
+                    {
+                        return Err(self.reject_native_action(format!(
+                            "Unsupported native test capability: {fn_name} requires {cap:?}"
+                        )));
+                    }
                     if !self.execution_mode.has(cap) {
+                        if self.native_test_entry.is_some() {
+                            return Err(self.reject_native_action(format!(
+                                "Unsupported native test capability: {fn_name} requires {cap:?}"
+                            )));
+                        }
                         return Ok(Value::Unit);
                     }
                 }
@@ -9379,7 +9529,22 @@ impl Interpreter {
                         });
                     }
                 }
-                func(&args)
+                let result = func(&args);
+                if fn_name == "assert" {
+                    if let Some(assertions) = &mut self.native_assertions {
+                        assertions.push(crate::native_test::NativeAssertion {
+                            source: self.current_file.clone().unwrap_or_default(),
+                            line: self.current_line,
+                            passed: result.is_ok(),
+                            message: result
+                                .as_ref()
+                                .err()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| "Assertion passed".into()),
+                        });
+                    }
+                }
+                result
             }
 
             Value::EnumConstructor {

@@ -124,6 +124,8 @@ pub enum PropertyType {
 /// Values in the system - what primitives operate on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
+    /// Native values whose type cannot be represented by IAL's JSON-like values.
+    Native(crate::native_test::NativeValue),
     /// String value
     String(String),
     /// Numeric value (integers and floats unified)
@@ -171,11 +173,44 @@ impl Value {
         }
     }
 
-    /// Try to get as number
+    /// Numeric projection for legacy callers; equality retains native identity.
     pub fn as_number(&self) -> Option<f64> {
         match self {
             Value::Number(n) => Some(*n),
+            Value::Native(crate::native_test::NativeValue::Int(n)) => Some(*n as f64),
+            Value::Native(crate::native_test::NativeValue::Float(n)) => Some(*n),
             _ => None,
+        }
+    }
+
+    /// Compare numeric values without rounding an Int to f64 first.
+    pub(crate) fn numeric_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        use crate::native_test::NativeValue;
+        use std::cmp::Ordering;
+        fn int_float(a: i64, b: f64) -> Option<Ordering> {
+            if b.is_nan() {
+                return None;
+            }
+            if b < i64::MIN as f64 {
+                return Some(Ordering::Greater);
+            }
+            if b >= -(i64::MIN as f64) {
+                return Some(Ordering::Less);
+            }
+            match a.cmp(&(b as i64)) {
+                Ordering::Equal => 0.0f64.partial_cmp(&b.fract()),
+                order => Some(order),
+            }
+        }
+        match (self, other) {
+            (Value::Native(NativeValue::Int(a)), Value::Native(NativeValue::Int(b))) => {
+                Some(a.cmp(b))
+            }
+            (Value::Native(NativeValue::Int(a)), b) => int_float(*a, b.as_number()?),
+            (a, Value::Native(NativeValue::Int(b))) => {
+                int_float(*b, a.as_number()?).map(Ordering::reverse)
+            }
+            (a, b) => a.as_number()?.partial_cmp(&b.as_number()?),
         }
     }
 
@@ -227,6 +262,7 @@ impl From<bool> for Value {
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Value::Native(value) => write!(f, "{:?}", value),
             Value::String(s) => write!(f, "{}", s),
             Value::Number(n) => {
                 // Display integers without decimal point

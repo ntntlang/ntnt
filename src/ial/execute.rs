@@ -521,7 +521,7 @@ fn do_execute_check(op: &CheckOp, path: &str, expected: &Value, ctx: &Context) -
 
     match op {
         CheckOp::Equals => {
-            let passed = actual == Some(expected);
+            let passed = actual.is_some_and(|actual| native_equal(actual, expected));
             ExecuteResult::check_result(
                 passed,
                 &description,
@@ -531,7 +531,7 @@ fn do_execute_check(op: &CheckOp, path: &str, expected: &Value, ctx: &Context) -
         }
 
         CheckOp::NotEquals => {
-            let passed = actual != Some(expected);
+            let passed = actual.is_some_and(|actual| !native_equal(actual, expected));
             ExecuteResult::check_result(
                 passed,
                 &description,
@@ -603,10 +603,8 @@ fn do_execute_check(op: &CheckOp, path: &str, expected: &Value, ctx: &Context) -
         }
 
         CheckOp::LessThan => {
-            let passed = match (actual, expected) {
-                (Some(Value::Number(a)), Value::Number(e)) => a < e,
-                _ => false,
-            };
+            let passed =
+                actual.and_then(|a| a.numeric_cmp(expected)) == Some(std::cmp::Ordering::Less);
             ExecuteResult::check_result(
                 passed,
                 &description,
@@ -616,10 +614,8 @@ fn do_execute_check(op: &CheckOp, path: &str, expected: &Value, ctx: &Context) -
         }
 
         CheckOp::GreaterThan => {
-            let passed = match (actual, expected) {
-                (Some(Value::Number(a)), Value::Number(e)) => a > e,
-                _ => false,
-            };
+            let passed =
+                actual.and_then(|a| a.numeric_cmp(expected)) == Some(std::cmp::Ordering::Greater);
             ExecuteResult::check_result(
                 passed,
                 &description,
@@ -630,7 +626,12 @@ fn do_execute_check(op: &CheckOp, path: &str, expected: &Value, ctx: &Context) -
 
         CheckOp::InRange => {
             let passed = match (actual, expected) {
-                (Some(Value::Number(a)), Value::Range(min, max)) => a >= min && a <= max,
+                (Some(a), Value::Range(min, max)) => {
+                    a.numeric_cmp(&Value::Number(*min))
+                        .is_some_and(|order| order.is_ge())
+                        && a.numeric_cmp(&Value::Number(*max))
+                            .is_some_and(|order| order.is_le())
+                }
                 _ => false,
             };
             ExecuteResult::check_result(
@@ -675,6 +676,14 @@ fn do_execute_check(op: &CheckOp, path: &str, expected: &Value, ctx: &Context) -
             let passed = match (actual, expected) {
                 (Some(value), Value::String(type_name)) => {
                     let actual_type = match value {
+                        Value::Native(crate::native_test::NativeValue::Enum {
+                            enum_name, ..
+                        }) => enum_name.as_str(),
+                        Value::Native(
+                            crate::native_test::NativeValue::Int(_)
+                            | crate::native_test::NativeValue::Float(_),
+                        ) => "number",
+                        Value::Native(_) => "native",
                         Value::String(_) => "string",
                         Value::Number(_) => "number",
                         Value::Bool(_) => "bool",
@@ -736,6 +745,7 @@ fn format_check_description(op: &CheckOp, path: &str, expected: &Value) -> Strin
 /// Format a value for display
 fn format_value(value: Option<&Value>) -> String {
     match value {
+        Some(Value::Native(value)) => format!("{value:?}"),
         None => "null".to_string(),
         Some(Value::String(s)) => {
             if s.len() > 100 {
@@ -770,78 +780,42 @@ fn execute_function_call(
     args: &[Value],
     ctx: &mut Context,
 ) -> ExecuteResult {
-    use crate::interpreter::Interpreter;
-    use crate::lexer::Lexer;
-    use crate::parser::Parser;
-
-    // Read the source file
-    let source = match std::fs::read_to_string(source_file) {
-        Ok(s) => s,
-        Err(e) => {
-            return ExecuteResult::fail(
-                format!("Call {}()", function_name),
-                format!("Could not read source file '{}': {}", source_file, e),
-            );
-        }
+    use crate::native_test::{self, NativeRequest, NativeValue};
+    let interpreter_args: Vec<_> = args.iter().map(ial_value_to_interpreter_value).collect();
+    let native_args = match interpreter_args
+        .iter()
+        .map(NativeValue::from_runtime)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(args) => args,
+        Err(error) => return ExecuteResult::fail(format!("Call {function_name}()"), error),
     };
-
-    // Parse the source
-    let lexer = Lexer::new(&source);
-    let tokens: Vec<_> = lexer.collect();
-    let mut parser = Parser::new(tokens);
-
-    let ast = match parser.parse() {
-        Ok(ast) => ast,
-        Err(e) => {
-            return ExecuteResult::fail(
-                format!("Call {}()", function_name),
-                format!("Parse error in '{}': {}", source_file, e),
-            );
-        }
-    };
-
-    // Create an interpreter and run the module to define functions
-    let mut interpreter = Interpreter::new();
-
-    // Set current file for relative imports
-    interpreter.set_current_file(source_file);
-
-    // Execute the program to define all functions
-    if let Err(e) = interpreter.eval(&ast) {
+    let response = native_test::execute(&NativeRequest {
+        source: source_file.into(),
+        function: function_name.into(),
+        args: native_args,
+    });
+    if let Some(error) = response.error {
+        return ExecuteResult::fail(format!("Call {function_name}()"), error);
+    }
+    if let Some(failed) = response
+        .assertions
+        .iter()
+        .find(|assertion| !assertion.passed)
+    {
         return ExecuteResult::fail(
-            format!("Call {}()", function_name),
-            format!("Runtime error loading '{}': {}", source_file, e),
+            format!("Call {function_name}()"),
+            format!("{}:{}: {}", failed.source, failed.line, failed.message),
         );
     }
-
-    // Convert IAL Values to interpreter Values
-    let interpreter_args: Vec<crate::interpreter::Value> = args
-        .iter()
-        .map(|v| ial_value_to_interpreter_value(v))
-        .collect();
-
-    // Call the function
-    match interpreter.call_function_by_name(function_name, interpreter_args) {
-        Ok(result) => {
-            // Convert interpreter Value back to IAL Value
-            let ial_result = interpreter_value_to_ial_value(&result);
-
-            // Store in context
-            ctx.set("result", ial_result.clone());
-
-            ExecuteResult::pass(format!(
-                "{}({}) → {}",
-                function_name,
-                args.iter()
-                    .map(|a| a.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                ial_result
-            ))
+    match response.value {
+        Some(value) => {
+            ctx.set("result", native_value_to_ial_value(&value));
+            ExecuteResult::pass(format!("Call {function_name}()"))
         }
-        Err(e) => ExecuteResult::fail(
-            format!("Call {}()", function_name),
-            format!("Function call failed: {}", e),
+        None => ExecuteResult::fail(
+            format!("Call {function_name}()"),
+            "Native function returned no value",
         ),
     }
 }
@@ -849,9 +823,10 @@ fn execute_function_call(
 /// Convert IAL Value to interpreter Value
 fn ial_value_to_interpreter_value(value: &Value) -> crate::interpreter::Value {
     match value {
+        Value::Native(value) => value.to_runtime(),
         Value::String(s) => crate::interpreter::Value::String(s.clone()),
         Value::Number(n) => {
-            if n.fract() == 0.0 {
+            if n.fract() == 0.0 && *n >= i64::MIN as f64 && *n < -(i64::MIN as f64) {
                 crate::interpreter::Value::Int(*n as i64)
             } else {
                 crate::interpreter::Value::Float(*n)
@@ -884,27 +859,44 @@ fn ial_value_to_interpreter_value(value: &Value) -> crate::interpreter::Value {
     }
 }
 
-/// Convert interpreter Value to IAL Value
-fn interpreter_value_to_ial_value(value: &crate::interpreter::Value) -> Value {
+/// Preserve native enum and integer identity rather than using display strings.
+fn native_value_to_ial_value(value: &crate::native_test::NativeValue) -> Value {
+    use crate::native_test::NativeValue as N;
     match value {
-        crate::interpreter::Value::String(s) => Value::String(s.clone()),
-        crate::interpreter::Value::Int(n) => Value::Number(*n as f64),
-        crate::interpreter::Value::Float(n) => Value::Number(*n),
-        crate::interpreter::Value::Bool(b) => Value::Bool(*b),
-        crate::interpreter::Value::Unit => Value::Null,
-        crate::interpreter::Value::Array(arr) => {
-            let items: Vec<_> = arr.iter().map(interpreter_value_to_ial_value).collect();
-            Value::Array(items)
+        N::String(s) => Value::String(s.clone()),
+
+        N::Bool(b) => Value::Bool(*b),
+        N::Unit => Value::Null,
+        N::Array(items) => Value::Array(items.iter().map(native_value_to_ial_value).collect()),
+        N::Map(items) => Value::Map(
+            items
+                .iter()
+                .map(|(k, v)| (k.clone(), native_value_to_ial_value(v)))
+                .collect(),
+        ),
+        N::Int(_) | N::Float(_) | N::Enum { .. } => Value::Native(value.clone()),
+    }
+}
+
+fn native_equal(actual: &Value, expected: &Value) -> bool {
+    fn contains_native(value: &Value) -> bool {
+        match value {
+            Value::Native(_) => true,
+            Value::Array(items) => items.iter().any(contains_native),
+            Value::Map(items) => items.values().any(contains_native),
+            _ => false,
         }
-        crate::interpreter::Value::Map(map) => {
-            let mut hm = std::collections::HashMap::new();
-            for (k, v) in map {
-                hm.insert(k.clone(), interpreter_value_to_ial_value(v));
-            }
-            Value::Map(hm)
-        }
-        // Handle other interpreter value types as needed
-        _ => Value::String(format!("{:?}", value)),
+    }
+    if !contains_native(actual) && !contains_native(expected) {
+        return actual == expected;
+    }
+    use crate::native_test::NativeValue;
+    match (
+        NativeValue::from_runtime(&ial_value_to_interpreter_value(actual)),
+        NativeValue::from_runtime(&ial_value_to_interpreter_value(expected)),
+    ) {
+        (Ok(actual), Ok(expected)) => actual == expected,
+        _ => false,
     }
 }
 
@@ -916,175 +908,45 @@ fn execute_property_check(
     input: &Value,
     ctx: &mut Context,
 ) -> ExecuteResult {
-    use crate::interpreter::Interpreter;
-    use crate::lexer::Lexer;
-    use crate::parser::Parser;
-
-    // Read and parse the source file
-    let source = match std::fs::read_to_string(source_file) {
-        Ok(s) => s,
-        Err(e) => {
-            return ExecuteResult::fail(
-                format!("Property check {}()", function_name),
-                format!("Could not read source file '{}': {}", source_file, e),
-            );
-        }
-    };
-
-    let lexer = Lexer::new(&source);
-    let tokens: Vec<_> = lexer.collect();
-    let mut parser = Parser::new(tokens);
-
-    let ast = match parser.parse() {
-        Ok(ast) => ast,
-        Err(e) => {
-            return ExecuteResult::fail(
-                format!("Property check {}()", function_name),
-                format!("Parse error in '{}': {}", source_file, e),
-            );
-        }
-    };
-
-    // Create interpreter and load the module
-    let mut interpreter = Interpreter::new();
-    interpreter.set_current_file(source_file);
-    if let Err(e) = interpreter.eval(&ast) {
-        return ExecuteResult::fail(
-            format!("Property check {}()", function_name),
-            format!("Runtime error loading '{}': {}", source_file, e),
-        );
+    let mut first = Context::new();
+    let initial = execute_function_call(
+        source_file,
+        function_name,
+        std::slice::from_ref(input),
+        &mut first,
+    );
+    if !initial.passed {
+        return initial;
     }
-
-    let interpreter_input = ial_value_to_interpreter_value(input);
-
-    match property {
-        PropertyType::Deterministic => {
-            // Call function twice with same input, results should be equal
-            let result1 =
-                interpreter.call_function_by_name(function_name, vec![interpreter_input.clone()]);
-            let result2 = interpreter.call_function_by_name(function_name, vec![interpreter_input]);
-
-            match (result1, result2) {
-                (Ok(r1), Ok(r2)) => {
-                    let v1 = interpreter_value_to_ial_value(&r1);
-                    let v2 = interpreter_value_to_ial_value(&r2);
-
-                    if v1 == v2 {
-                        ctx.set("result", v1.clone());
-                        ExecuteResult::pass(format!(
-                            "{}() is deterministic: {} == {}",
-                            function_name, v1, v2
-                        ))
-                    } else {
-                        ExecuteResult::fail(
-                            format!("{}() is deterministic", function_name),
-                            format!("Different results: {} vs {}", v1, v2),
-                        )
-                    }
-                }
-                (Err(e), _) | (_, Err(e)) => ExecuteResult::fail(
-                    format!("{}() is deterministic", function_name),
-                    format!("Function call failed: {}", e),
-                ),
-            }
-        }
-
-        PropertyType::Idempotent => {
-            // Call f(x), then call f(f(x)), results should be equal
-            let result1 =
-                match interpreter.call_function_by_name(function_name, vec![interpreter_input]) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return ExecuteResult::fail(
-                            format!("{}() is idempotent", function_name),
-                            format!("First call failed: {}", e),
-                        );
-                    }
-                };
-
-            let result2 =
-                match interpreter.call_function_by_name(function_name, vec![result1.clone()]) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return ExecuteResult::fail(
-                            format!("{}() is idempotent", function_name),
-                            format!("Second call failed: {}", e),
-                        );
-                    }
-                };
-
-            let v1 = interpreter_value_to_ial_value(&result1);
-            let v2 = interpreter_value_to_ial_value(&result2);
-
-            if v1 == v2 {
-                ctx.set("result", v1);
-                ExecuteResult::pass(format!(
-                    "{}() is idempotent: f(f(x)) == f(x) ({})",
-                    function_name, v2
-                ))
-            } else {
-                ExecuteResult::fail(
-                    format!("{}() is idempotent", function_name),
-                    format!("f(x) = {} but f(f(x)) = {}", v1, v2),
-                )
-            }
-        }
-
-        PropertyType::RoundTrips { inverse_function } => {
-            // Call f(x), then call g(f(x)), result should equal x
-            let forward_result = match interpreter
-                .call_function_by_name(function_name, vec![interpreter_input.clone()])
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    return ExecuteResult::fail(
-                        format!(
-                            "{}() round-trips with {}()",
-                            function_name, inverse_function
-                        ),
-                        format!("Forward call failed: {}", e),
-                    );
-                }
-            };
-
-            let round_trip_result =
-                match interpreter.call_function_by_name(inverse_function, vec![forward_result]) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return ExecuteResult::fail(
-                            format!(
-                                "{}() round-trips with {}()",
-                                function_name, inverse_function
-                            ),
-                            format!("Inverse call failed: {}", e),
-                        );
-                    }
-                };
-
-            let original = ial_value_to_interpreter_value(input);
-            let round_tripped = round_trip_result;
-
-            // Compare original to round-tripped
-            let orig_ial = interpreter_value_to_ial_value(&original);
-            let rt_ial = interpreter_value_to_ial_value(&round_tripped);
-
-            if orig_ial == rt_ial {
-                ctx.set("result", rt_ial);
-                ExecuteResult::pass(format!(
-                    "{}() round-trips with {}(): {} → ... → {}",
-                    function_name, inverse_function, input, orig_ial
-                ))
-            } else {
-                ExecuteResult::fail(
-                    format!(
-                        "{}() round-trips with {}()",
-                        function_name, inverse_function
-                    ),
-                    format!("Original: {}, Round-tripped: {}", orig_ial, rt_ial),
-                )
-            }
-        }
+    let Some(value) = first.get("result").cloned() else {
+        return ExecuteResult::fail("Native property", "First call produced no value");
+    };
+    let (next_function, next_input, expected) = match property {
+        PropertyType::Deterministic => (function_name, input, &value),
+        PropertyType::Idempotent => (function_name, &value, &value),
+        PropertyType::RoundTrips { inverse_function } => (inverse_function.as_str(), &value, input),
+    };
+    let mut second = Context::new();
+    let repeated = execute_function_call(
+        source_file,
+        next_function,
+        std::slice::from_ref(next_input),
+        &mut second,
+    );
+    if !repeated.passed {
+        return repeated;
     }
+    let actual = second.get("result");
+    let passed = actual.is_some_and(|actual| native_equal(actual, expected));
+    if let Some(value) = actual {
+        ctx.set("result", value.clone());
+    }
+    ExecuteResult::check_result(
+        passed,
+        format!("Native property {property:?}"),
+        format_value(actual),
+        format_value(Some(expected)),
+    )
 }
 
 /// Execute multiple primitives and collect results
@@ -1094,6 +956,85 @@ pub fn execute_all(primitives: &[Primitive], ctx: &mut Context, port: u16) -> Ve
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_ial_results_keep_int_and_float_distinct() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("values.tnt");
+        std::fs::write(
+            &source,
+            "fn integer() { return 42 }\nfn floating() { return 42.0 }",
+        )
+        .unwrap();
+        let mut integer = Context::new();
+        let mut floating = Context::new();
+        assert!(
+            execute_function_call(source.to_str().unwrap(), "integer", &[], &mut integer).passed
+        );
+        assert!(
+            execute_function_call(source.to_str().unwrap(), "floating", &[], &mut floating).passed
+        );
+        assert_ne!(integer.get("result"), floating.get("result"));
+        for ctx in [&integer, &floating] {
+            assert_eq!(ctx.get_number("result"), Some(42.0));
+            for (op, expected) in [
+                (CheckOp::LessThan, Value::Number(100.0)),
+                (CheckOp::GreaterThan, Value::Number(0.0)),
+                (CheckOp::InRange, Value::Range(40.0, 50.0)),
+                (CheckOp::IsType, Value::String("number".into())),
+            ] {
+                let result = execute_check(
+                    &Primitive::Check {
+                        op,
+                        path: "result".into(),
+                        expected,
+                    },
+                    ctx,
+                );
+                assert!(result.passed, "{result:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_ial_numeric_ordering_keeps_large_integers_exact() {
+        use crate::native_test::NativeValue;
+        use std::cmp::Ordering;
+        for (integer, float, expected) in [
+            (
+                9_007_199_254_740_993,
+                9_007_199_254_740_992.0,
+                Ordering::Greater,
+            ),
+            (i64::MAX, 9_223_372_036_854_775_808.0, Ordering::Less),
+            (i64::MIN, -9_223_372_036_854_775_808.0, Ordering::Equal),
+            (0, -0.5, Ordering::Greater),
+            (0, 0.5, Ordering::Less),
+        ] {
+            let a = Value::Native(NativeValue::Int(integer));
+            let b = Value::Number(float);
+            assert_eq!(a.numeric_cmp(&b), Some(expected));
+            assert_eq!(b.numeric_cmp(&a), Some(expected.reverse()));
+        }
+        let number = Value::Native(NativeValue::Int(42));
+        assert_eq!(number.numeric_cmp(&Value::String("42".into())), None);
+        assert_eq!(number.numeric_cmp(&Value::Number(f64::NAN)), None);
+    }
+
+    #[test]
+    fn native_result_identity_is_not_debug_text() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("domain.tnt");
+        std::fs::write(&source, "fn sample() { return Err(\"expected\") }").unwrap();
+        let mut ctx = super::Context::new();
+        let result =
+            super::execute_function_call(source.to_str().unwrap(), "sample", &[], &mut ctx);
+        assert!(result.passed);
+        assert!(
+            !matches!(ctx.get("result"), Some(super::Value::String(_))),
+            "Result identity was stringified"
+        );
+    }
+
     use super::*;
 
     #[test]

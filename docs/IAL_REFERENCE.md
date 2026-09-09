@@ -281,7 +281,7 @@ Example: `| they see {text} | body contains {text} |`
 
 ### Keyword Syntax for Unit Tests
 
-Glossary terms can use special keywords to invoke function calls for unit testing
+Glossary call:/source: bindings select ordinary .tnt functions. A native-only .intent file needs no paired server. Direct calls use explicit result predicates; native assertions pass designates an assertion-bearing test entry.
 
 ```intent
 ## Glossary
@@ -316,7 +316,16 @@ Feature: Email Validation
     → result is false
 ```
 
-The `source:` keyword is **required** - it tells IAL which .tnt file contains the function to call.
+Write `source:` relative to the .intent file. Modules execute normally once, including top-level statements; author import-safe modules with no autorun footer or ambient resource initialization. Use `./` or `../` imports relative to their source file. Bare import paths retain the language's cwd-relative meaning; native CLI cwd is a fresh disposable fixture directory, not your app directory.
+
+`result is ...` and call arguments preserve native literal types: quoted strings, signed integers, finite floats, booleans, arrays, `map { ... }` with string keys, None, Some(...), Ok(...) and Err(...). Nesting is bounded at 32 and literal text at 64 KiB. Equality is structural/type-sensitive, not display-string equality (42, 42.0 and "42" differ). Bare legacy prose words are Strings; quote strings explicitly. Executable expressions, malformed literals, unbound placeholders and unsupported result types fail. Complex data construction belongs inside .tnt helpers.
+
+`native assertions pass` requires at least one actual builtin assert during the selected invocation, no failed assertion (even if caught), no runtime error and no returned Result::Err. In contrast, a production function's Err is ordinary expected data: `result is Err("not found")`. Existing string predicates and deterministic/idempotent checks remain available; HTTP predicates on native results and the old approximate ellipsis/original heuristic are unsupported, not successful. Native Given setup is not implemented: put setup/actions/assertions in the named function. Unresolved Given/outcomes never count as executed.
+
+Native CLI cases get separate clean processes, owned temporary working directories, a 30-second execution deadline and bounded capture/report size. No app environment, HOME, dotenv loading or std/process permission is inherited. Explicit absolute file/network access remains possible: this is trusted local testing, not a sandbox. The parent removes the fixture directory after success/failure/timeout; cleanup failures fail the case. In-process Rust/IAL callers use the same loader but do not receive process-global/resource isolation. Task-spawning and scheduling capabilities are rejected with a sticky failure, including aliases and caught errors: this milestone's test entries must remain synchronous. Utilities such as sleep_ms remain available.
+
+See examples/native_testing/library.intent and its import-safe domain/case modules for pure and disposable in-memory SQLite cases. Use `--case` to run one scenario independently. Root-suite composition across .intent files, managed services and browser adapters are later milestones, not shipped prerequisites. The JSON report is intentionally small/unversioned; its overall passed field agrees with CLI exit, and annotation coverage is not execution evidence.
+
 
 ### Resolution Order
 

@@ -1,0 +1,15 @@
+// Import-safe application functions: importing defines behavior, not resources.
+import { execute } from "std/db/sqlite"
+import { trim, to_lower } from "std/string"
+
+fn normalize_title(title: String) -> String {
+    return to_lower(trim(title))
+}
+
+fn add_task(db, title: String) {
+    return execute(db, "INSERT INTO tasks (title, done) VALUES (?, 0)", [title])
+}
+
+fn finish_task(db, title: String) {
+    return execute(db, "UPDATE tasks SET done = 1 WHERE title = ?", [title])
+}

@@ -408,6 +408,10 @@ enum IntentCommands {
         #[arg(long = "port", default_value = "18081")]
         port: u16,
 
+        /// Run one exact scenario name (must be unique within this Intent file)
+        #[arg(long = "case")]
+        case: Option<String>,
+
         /// Increase output verbosity (-v for scenarios, -vv for assertions)
         #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
         verbose: u8,
@@ -882,6 +886,28 @@ fn install_run_shutdown_handler() -> anyhow::Result<()> {
 }
 
 fn main() {
+    // Internal native-case transport. It is not an authority or sandbox boundary:
+    // callers already have permission to execute local NTNT code.
+    let internal_args: Vec<_> = std::env::args_os().collect();
+    if internal_args
+        .get(1)
+        .is_some_and(|arg| arg == "__native-test")
+    {
+        let result = if internal_args.len() == 4 {
+            ntnt::native_test::run_child(
+                std::path::Path::new(&internal_args[2]),
+                std::path::Path::new(&internal_args[3]),
+            )
+        } else {
+            Err("Invalid internal native test invocation".to_string())
+        };
+        ntnt::stdlib::shutdown_runtimes();
+        if let Err(error) = result {
+            eprintln!("{error}");
+            exit_with_runtime_cleanup(1);
+        }
+        return;
+    }
     let cli = Cli::parse();
 
     // Extract the file path for error context (used in format_error for source snippets)
@@ -4098,9 +4124,17 @@ fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
             file,
             intent_file,
             port,
+            case,
             verbose,
             json,
-        } => run_intent_check_command(&file, intent_file.as_ref(), port, verbose as usize, json),
+        } => run_intent_check_command(
+            &file,
+            intent_file.as_ref(),
+            port,
+            verbose as usize,
+            json,
+            case.as_deref(),
+        ),
         IntentCommands::Coverage { file, intent_file } => {
             run_intent_coverage_command(&file, intent_file.as_ref())
         }
@@ -4218,6 +4252,7 @@ fn run_intent_check_command(
     port: u16,
     verbosity: usize,
     json_output: bool,
+    case: Option<&str>,
 ) -> anyhow::Result<()> {
     // Verification runs strict by default (DD-063 Rec 7): warn mode's
     // tolerated degradations (OOB→None, implicit conversions) should fail
@@ -4258,36 +4293,50 @@ fn run_intent_check_command(
         }
     };
 
-    let ntnt_path = match tnt_path_opt {
-        Some(p) => p,
-        None => {
-            let stem = input_path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            anyhow::bail!(
-                "No .tnt file found. Create {}.tnt to run tests against",
-                stem
-            );
-        }
-    };
-
     if !json_output {
-        println!("Source: {}", ntnt_path.display().to_string().green());
+        if let Some(ref source) = tnt_path_opt {
+            println!("Source: {}", source.display().to_string().green());
+        }
         println!("Intent: {}", intent_file_path.display().to_string().green());
         println!();
     }
 
     // Parse intent file (new IAL format)
-    let intent_file = match intent::IntentFile::parse(&intent_file_path) {
+    let mut intent_file = match intent::IntentFile::parse(&intent_file_path) {
         Ok(intent) => intent,
         Err(e) => {
             anyhow::bail!("Failed to parse intent file: {}", e);
         }
     };
 
-    // Collect all source files for annotation checking
-    let project_dir = ntnt_path.parent().unwrap_or(std::path::Path::new("."));
+    if let Some(name) = case {
+        let matches = intent_file
+            .features
+            .iter()
+            .flat_map(|f| &f.scenarios)
+            .chain(intent_file.components.iter().flat_map(|c| &c.scenarios))
+            .filter(|scenario| scenario.name == name)
+            .count();
+        if matches > 1 {
+            anyhow::bail!("Ambiguous case name {name:?}: {matches} scenarios match");
+        }
+        for feature in &mut intent_file.features {
+            feature.tests.clear();
+            feature.scenarios.retain(|scenario| scenario.name == name);
+        }
+        intent_file
+            .features
+            .retain(|feature| !feature.scenarios.is_empty());
+        // Keep component definitions available for outcome resolution.
+        for component in &mut intent_file.components {
+            component.scenarios.retain(|scenario| scenario.name == name);
+        }
+    }
+
+    // Collect source annotations for display, not as execution evidence.
+    let project_dir = intent_file_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
     let source_files: Vec<(String, String)> = collect_tnt_files(&project_dir.to_path_buf())
         .unwrap_or_default()
         .into_iter()
@@ -4297,67 +4346,81 @@ fn run_intent_check_command(
         })
         .collect();
 
-    // Run tests against the app server (same as Intent Studio)
-    if !json_output {
-        println!("Starting server on port {}...", port);
-    }
+    // Native-only selections never start an application or bind a listener.
+    let mut app_process = if intent::requires_http(&intent_file) {
+        let ntnt_path = tnt_path_opt.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Selected HTTP cases require a paired .tnt application")
+        })?;
+        if !json_output {
+            println!("Starting server on port {}...", port);
+        }
 
-    // Get the current executable path to run ntnt
-    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ntnt"));
+        // Get the current executable path to run ntnt
+        let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ntnt"));
 
-    // Start the NTNT app server as a subprocess
-    use std::process::Command;
-    let mut app_process = Command::new(&current_exe)
-        .arg("run")
-        .arg(&ntnt_path)
-        .env("NTNT_LISTEN_PORT", port.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to start app server: {}", e))?;
+        // Start the NTNT app server as a subprocess
+        use std::process::Command;
+        let mut app_process = Command::new(&current_exe)
+            .arg("run")
+            .arg(&ntnt_path)
+            .env("NTNT_LISTEN_PORT", port.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Failed to start app server: {}", e))?;
 
-    // Wait for the server to be ready (TCP connect poll, up to 30 seconds)
-    let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(30);
-    let mut server_ready = false;
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    while start.elapsed() < timeout {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        // Check if subprocess died
-        if let Some(status) = app_process.try_wait().ok().flatten() {
+        // Wait for the server to be ready (TCP connect poll, up to 30 seconds)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
+        let mut server_ready = false;
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        while start.elapsed() < timeout {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            // Check if subprocess died
+            if let Some(status) = app_process.try_wait().ok().flatten() {
+                let _ = app_process.kill();
+                anyhow::bail!(
+                    "Server process exited with status {} before becoming ready",
+                    status
+                );
+            }
+            // Try TCP connect with a short timeout
+            if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
+                .is_ok()
+            {
+                server_ready = true;
+                break;
+            }
+        }
+        if !server_ready {
             let _ = app_process.kill();
-            anyhow::bail!(
-                "Server process exited with status {} before becoming ready",
-                status
-            );
+            anyhow::bail!("Server failed to start within 30 seconds on port {}", port);
         }
-        // Try TCP connect with a short timeout
-        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
-            .is_ok()
-        {
-            server_ready = true;
-            break;
-        }
-    }
-    if !server_ready {
-        let _ = app_process.kill();
-        anyhow::bail!("Server failed to start within 30 seconds on port {}", port);
-    }
 
-    // Run tests using the new IAL engine
-    let results = intent::run_tests_against_server(&intent_file, port, &source_files);
+        Some(app_process)
+    } else {
+        None
+    };
+
+    // Run tests using the shared Intent execution path.
+    let native_exe = std::env::current_exe()?;
+    let results =
+        intent::run_tests_with_native_runner(&intent_file, port, &source_files, Some(&native_exe));
+
+    // Reap the owned HTTP child before rendering or selecting an exit code.
+    if let Some(ref mut child) = app_process {
+        child.kill()?;
+        child.wait()?;
+    }
 
     // JSON output mode: print JSON and exit
     if json_output {
-        // Kill app server before output
-        let _ = app_process.kill();
-
         let json = serde_json::to_string_pretty(&results)
             .map_err(|e| anyhow::anyhow!("Failed to serialize results: {}", e))?;
         println!("{}", json);
 
         // Exit with appropriate code
-        if results.failed_assertions > 0 {
+        if !results.passed() {
             exit_with_runtime_cleanup(1);
         }
         return Ok(());
@@ -4592,11 +4655,8 @@ fn run_intent_check_command(
     );
     println!();
 
-    // Cleanup: kill the app server
-    let _ = app_process.kill();
-
-    if scenarios_failed > 0 || features_failed > 0 {
-        anyhow::bail!("Some tests failed");
+    if !results.passed() {
+        anyhow::bail!("Intent check failed: failed, unresolved, skipped or empty work");
     }
 
     Ok(())
