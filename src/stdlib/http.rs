@@ -2573,14 +2573,26 @@ mod tests {
             opts.insert("max_redirects".into(), value);
             assert!(http_fetch(&opts).is_err());
         }
-        for value in [
-            Value::Int(-1),
-            Value::String("1".into()),
-            Value::Int(i64::MAX),
-        ] {
+        for value in [Value::Int(-1), Value::String("1".into())] {
             let mut opts = fixture.options();
             opts.insert("timeout".into(), value);
             assert!(http_fetch(&opts).is_err());
+        }
+        // Instant's representable range differs across platforms. Windows can
+        // represent this duration; Linux cannot. Test the checked-add contract,
+        // not a platform-specific assumption, without sending a huge-timeout request.
+        let mut huge_timeout = fixture.options();
+        huge_timeout.insert("timeout".into(), Value::Int(i64::MAX));
+        if Instant::now()
+            .checked_add(Duration::from_secs(i64::MAX as u64))
+            .is_none()
+        {
+            assert!(http_fetch(&huge_timeout).is_err());
+        } else {
+            assert!(RedirectPolicy::parse(&huge_timeout)
+                .unwrap()
+                .deadline
+                .is_some());
         }
         let mut opts = fixture.options();
         opts.insert("timeout".into(), Value::Int(0));
