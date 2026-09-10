@@ -3865,7 +3865,24 @@ Invoking a shell explicitly, such as `run("/bin/sh", ["-c", command])`, grants a
 For SRI over raw assets, import `sha384_bytes` and `base64_encode_bytes` from
 `std/crypto`: `"sha384-" + base64_encode_bytes(sha384_bytes(raw_bytes))`.
 `sha384` returns lowercase hex. Strings use exact UTF-8; new byte APIs reject
-non-integers and values outside 0..255. Legacy SHA256/base64 behavior is unchanged.
+non-integers and values outside 0..255. Valid SHA256 text/byte and legacy string
+Base64 results are preserved; SHA256 now rejects out-of-range integers instead of
+truncating them. `sha256_bytes`, `sha512`, `sha512_bytes`, `hmac_sha256` and
+`hmac_sha256_bytes` accept text or checked bytes. `hmac_sha256_verify(key, data, tag)`
+returns `Result<Bool, String>`: exactly 32 raw bytes or 64 hex digits are required;
+malformed tags return Err and valid mismatches return Ok(false), using RustCrypto
+MAC verification. `base64_decode_bytes`, `base64url_encode_bytes`,
+`base64url_decode_bytes`, `utf8_encode` and `utf8_decode` complete binary/text
+conversion. Standard Base64 uses padding; URL-safe Base64 omits it. New Base64
+decoders cap decoded payload at 16 MiB before allocation; materialized Value arrays
+use substantially more heap. UTF-8 decoding rejects invalid sequences without loss.
+
+`std/time.monotonic_now()` returns nondecreasing process-local milliseconds, not
+Unix time. `monotonic_elapsed(start)`, `monotonic_deadline(timeout_ms)` and
+`monotonic_remaining(deadline)` return `Result<Int, String>`. Negative/malformed
+inputs, future starts and overflowing deadlines return Err. Zero timeout is
+immediate, remaining time saturates at zero. Do not persist or exchange these
+values between processes; wall-clock `now` and `elapsed` are unchanged.
 
 `std/fs.write_file_exclusive(path, content, options?)` accepts UTF-8 or bytes and
 only `mode` (0..511, default 384/0600) and `sync` (Bool, default true). It never
@@ -3873,7 +3890,37 @@ replaces an existing entry, including a dangling terminal symlink. The initial m
 is restricted by inherited umask and ACL rules; the runtime never changes umask.
 `mkdir_private(path, mode?)` creates one directory (default 448/0700), requires an
 existing parent and fails on an existing entry. Both are Unix-only and fail before
-mutation on unsupported platforms. New writes cap at 16 MiB and validate first.
+mutation on unsupported platforms. `write_bytes` and `write_file_exclusive` cap
+content at 16 MiB and validate first.
+
+`write_file_atomic(path, content, options?)` validates text/checked bytes and options
+before mutation, stages in the same parent, and uses atomic rename/replace. Unix
+mode defaults to 0600 under umask; an explicit broader mode also relaxes staging
+confidentiality. Default sync:true syncs both file and parent. Non-Unix supports
+atomic visibility with explicit sync:false and no requested POSIX mode, and rejects
+unsupported options before mutation. Filesystems must honor the underlying rename
+contract. This publishes a new inode, replaces terminal symlinks, and does not
+preserve owner/ACL metadata. Errors distinguish unpublished failure (with any
+owned-temp cleanup failure) from published-but-durability-uncertain failure; a
+published destination is never deleted by error cleanup.
+
+`temp_file(options?)` / `temp_dir(options?)` create opaque `TempFile` / `TempDir`
+resources, with optional trusted `parent` and separator/NUL-free `prefix`.
+`temp_path(resource)` returns the open UTF-8 path; `temp_close(resource)` invalidates
+all aliases. Successful cleanup is idempotent; a failed consuming close preserves
+its terminal error and does not promise automatic retry. The live resource limit
+is 128, reserved before creation. Unix modes are 0600/0700 at creation under umask;
+non-Unix confidentiality follows OS ACL rules. Last-owner Drop is best-effort;
+closure cycles require explicit close or runtime shutdown (a weak registry releases
+retained resources), and crashes can leave paths behind. Callers must not replace
+owned paths or ancestors; TempDir cleanup does not follow interior symlinks. Handles
+cannot cross JSON, cache serialization, task snapshots or channels.
+
+`lstat(path)` reports size, is_file, is_dir, is_symlink and modified/created timestamps
+without following the terminal link; unavailable times use 0 as in `file_stat`.
+`read_link(path)` returns the exact UTF-8 target, without canonicalization.
+`symlink(target, path, kind?)` never replaces an entry; kind is file (default) or dir,
+with Windows privilege failures returned honestly. Trusted ancestors remain required.
 
 For trusted-parent publication: exclusive unique temporary file with sync enabled,
 then same-filesystem `rename`, then `sync_dir(parent)` (both parents if moving).
@@ -3915,10 +3962,26 @@ Shutdown accepts read/write/both and retains the descriptor; close releases it a
 is idempotent. Copies share socket identity; closing a listener leaves accepted
 streams independent. Per-owner concurrent operations return `busy:`.
 
-The process caps live/reserved sockets at 128 and transient TCP buffers (including
-Value-array conversion storage) at 16 MiB. Caller-owned arrays are not covered by
-that runtime-buffer ceiling. No internal read-ahead, payload history or per-socket
-IO threads exist. A bounded native event loop can poll several clients so an idle
+`tcp_reader(stream, options?)` attaches a `TcpReader` to the actual shared socket;
+`max_buffer_bytes` is 1..65536 (default 65536). One reader owns reading: raw
+`tcp_read` and second attachments fail. Reader aliases share identity; last-reader
+Drop closes the socket even if stream aliases remain. `tcp_read_exact(reader, count,
+timeout_ms?)` and `tcp_read_until(reader, delimiter, max_bytes, timeout_ms?)` preserve
+read-ahead bytes for the next call. Exact count is positive; delimiters are nonempty
+UTF-8/checked bytes and included in output; delimiter length <= max_bytes <= cap.
+Matching is linear and never accepts a delimiter beyond the current max_bytes.
+Timeout (default 5000, range 1..60000 ms) covers the entire synchronous call, even
+with continuous progress. Timeout, EOF, oversize and I/O errors preserve bytes and
+report buffered_bytes; a smaller exact read can drain them. Invalid arguments never
+consume bytes. Local read/both shutdown preserves buffered frames and marks local
+EOF; explicit close, fatal write failure and global shutdown dispose framing state.
+Already-complete buffered frames can succeed after peer EOF, but explicit close fails.
+There is no detach or cancellation API, and same-owner calls may return busy.
+
+The process caps live/reserved sockets at 128 and runtime-owned reserved TCP buffers
+plus active matcher/output construction at 16 MiB. Caller-retained arrays are not
+covered by that ceiling. No per-socket I/O threads exist. Explicit close is recommended
+for sockets/readers in closure cycles; global shutdown uses the shared weak registry. A bounded native event loop can poll several clients so an idle
 one cannot monopolize the fixture. Sockets cannot cross spawn/parallel/channels or
 public JSON, and require Normal execution mode; denied modes and native Intent
 observers raise capability errors. Use ordinary strict run children for server tests.

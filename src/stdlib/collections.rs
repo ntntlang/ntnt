@@ -1118,6 +1118,10 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::ProcessHandle(a), Value::ProcessHandle(b)) => a == b,
         (Value::TcpListener(a), Value::TcpListener(b))
         | (Value::TcpStream(a), Value::TcpStream(b)) => std::sync::Arc::ptr_eq(a, b),
+        (Value::TcpReader(a), Value::TcpReader(b)) => std::sync::Arc::ptr_eq(a, b),
+        (Value::TempFile(a), Value::TempFile(b)) | (Value::TempDir(a), Value::TempDir(b)) => {
+            std::sync::Arc::ptr_eq(a, b)
+        }
         (Value::TxChannelHandle(a, _), Value::TxChannelHandle(b, _)) => a == b,
         (Value::RxChannelHandle(a), Value::RxChannelHandle(b)) => a == b,
         (Value::ScheduleHandle(a), Value::ScheduleHandle(b)) => a == b,

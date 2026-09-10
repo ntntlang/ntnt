@@ -1056,6 +1056,24 @@ impl TypeContext {
                         Type::Named("std/net::TcpStream".to_string())
                     }
                 }
+                "TcpReader" => {
+                    if let Some(resolved) = self.type_aliases.get(name) {
+                        resolved.clone()
+                    } else if self.structs.contains_key(name) || self.enums.contains_key(name) {
+                        Type::Named(name.clone())
+                    } else {
+                        Type::Named("std/net::TcpReader".to_string())
+                    }
+                }
+                "TempFile" | "TempDir" => {
+                    if let Some(resolved) = self.type_aliases.get(name) {
+                        resolved.clone()
+                    } else if self.structs.contains_key(name) || self.enums.contains_key(name) {
+                        Type::Named(name.clone())
+                    } else {
+                        Type::Named(format!("std/fs::{name}"))
+                    }
+                }
                 "Bool" => Type::Bool,
                 "Unit" | "()" => Type::Unit,
                 "Any" => Type::Any,
@@ -4354,6 +4372,17 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("decr_by", ["kv" => Type::Any, "key" => Type::String, "amount" => Type::Int], kv_int_result);
         }
         "std/fs" => {
+            sig!("lstat", ["path" => Type::String], Type::Generic { name: "Result".into(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
+            sig!("read_link", ["path" => Type::String], Type::Generic { name: "Result".into(), args: vec![Type::String, Type::String] });
+            sig!("symlink", ["target" => Type::String, "path" => Type::String, "kind" => Type::String], Type::Generic { name: "Result".into(), args: vec![Type::Unit, Type::String] }, required(2));
+
+            sig!("temp_file", ["options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".into(), args: vec![Type::Named("std/fs::TempFile".into()), Type::String] }, required(0));
+            sig!("temp_dir", ["options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".into(), args: vec![Type::Named("std/fs::TempDir".into()), Type::String] }, required(0));
+            sig!("temp_path", ["resource" => Type::Union(vec![Type::Named("std/fs::TempFile".into()), Type::Named("std/fs::TempDir".into())])], Type::Generic { name: "Result".into(), args: vec![Type::String, Type::String] });
+            sig!("temp_close", ["resource" => Type::Union(vec![Type::Named("std/fs::TempFile".into()), Type::Named("std/fs::TempDir".into())])], Type::Generic { name: "Result".into(), args: vec![Type::Unit, Type::String] });
+
+            sig!("write_file_atomic", ["path" => Type::String, "content" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))]), "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".into(), args: vec![Type::Unit, Type::String] }, required(2));
+
             sig!("write_bytes", ["path" => Type::String, "content" => Type::Array(Box::new(Type::Int))], Type::Generic { name: "Result".into(), args: vec![Type::Unit, Type::String] });
             sig!("write_file_exclusive", ["path" => Type::String, "content" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))]), "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".into(), args: vec![Type::Unit, Type::String] }, required(2));
             sig!("mkdir_private", ["path" => Type::String, "mode" => Type::Int], Type::Generic { name: "Result".into(), args: vec![Type::Unit, Type::String] }, required(1));
@@ -4539,12 +4568,15 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
         "std/net" => {
             sig!("tcp_listen", ["port" => Type::Int, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".into(), args: vec![Type::Named("std/net::TcpListener".into()), Type::String] }, required(1));
             sig!("tcp_accept", ["listener" => Type::Named("std/net::TcpListener".into()), "timeout_ms" => Type::Int], Type::Generic { name: "Result".into(), args: vec![Type::Named("std/net::TcpStream".into()), Type::String] }, required(1));
+            sig!("tcp_reader", ["stream" => Type::Named("std/net::TcpStream".into()), "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".into(), args: vec![Type::Named("std/net::TcpReader".into()), Type::String] }, required(1));
+            sig!("tcp_read_exact", ["reader" => Type::Named("std/net::TcpReader".into()), "count" => Type::Int, "timeout_ms" => Type::Int], Type::Generic { name: "Result".into(), args: vec![Type::Array(Box::new(Type::Int)), Type::String] }, required(2));
+            sig!("tcp_read_until", ["reader" => Type::Named("std/net::TcpReader".into()), "delimiter" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))]), "max_bytes" => Type::Int, "timeout_ms" => Type::Int], Type::Generic { name: "Result".into(), args: vec![Type::Array(Box::new(Type::Int)), Type::String] }, required(3));
             sig!("tcp_read", ["stream" => Type::Named("std/net::TcpStream".into()), "max_bytes" => Type::Int, "timeout_ms" => Type::Int], Type::Generic { name: "Result".into(), args: vec![Type::Optional(Box::new(Type::Array(Box::new(Type::Int)))), Type::String] }, required(2));
             sig!("tcp_write", ["stream" => Type::Named("std/net::TcpStream".into()), "data" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))]), "timeout_ms" => Type::Int], Type::Generic { name: "Result".into(), args: vec![Type::Int, Type::String] }, required(2));
-            sig!("tcp_local_addr", ["socket" => Type::Union(vec![Type::Named("std/net::TcpListener".into()), Type::Named("std/net::TcpStream".into())])], Type::Generic { name: "Result".into(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
+            sig!("tcp_local_addr", ["socket" => Type::Union(vec![Type::Named("std/net::TcpListener".into()), Type::Named("std/net::TcpStream".into()), Type::Named("std/net::TcpReader".into())])], Type::Generic { name: "Result".into(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
             sig!("tcp_peer_addr", ["stream" => Type::Named("std/net::TcpStream".into())], Type::Generic { name: "Result".into(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
             sig!("tcp_shutdown", ["stream" => Type::Named("std/net::TcpStream".into()), "how" => Type::String], Type::Generic { name: "Result".into(), args: vec![Type::Unit, Type::String] });
-            sig!("tcp_close", ["socket" => Type::Union(vec![Type::Named("std/net::TcpListener".into()), Type::Named("std/net::TcpStream".into())])], Type::Generic { name: "Result".into(), args: vec![Type::Unit, Type::String] });
+            sig!("tcp_close", ["socket" => Type::Union(vec![Type::Named("std/net::TcpListener".into()), Type::Named("std/net::TcpStream".into()), Type::Named("std/net::TcpReader".into())])], Type::Generic { name: "Result".into(), args: vec![Type::Unit, Type::String] });
 
             let result_map = Type::Generic {
                 name: "Result".to_string(),
@@ -4649,6 +4681,11 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("is_absolute", ["path" => Type::String], Type::Bool);
         }
         "std/time" => {
+            sig!("monotonic_now", [], Type::Int);
+            sig!("monotonic_elapsed", ["start" => Type::Int], Type::Generic { name: "Result".into(), args: vec![Type::Int, Type::String] });
+            sig!("monotonic_deadline", ["timeout_ms" => Type::Int], Type::Generic { name: "Result".into(), args: vec![Type::Int, Type::String] });
+            sig!("monotonic_remaining", ["deadline" => Type::Int], Type::Generic { name: "Result".into(), args: vec![Type::Int, Type::String] });
+
             sig!("from_now", ["timestamp" => Type::Union(vec![Type::Int, Type::Float])], Type::String);
             sig!("time_ago", ["timestamp" => Type::Union(vec![Type::Int, Type::Float])], Type::String);
             sig!("now", [], Type::Any);
@@ -5162,10 +5199,20 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
         }
         "std/crypto" => {
             sig!("sha256", ["data" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))])], Type::String);
+            sig!("sha512", ["data" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))])], Type::String);
+            sig!("sha512_bytes", ["data" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))])], Type::Array(Box::new(Type::Int)));
+            sig!("hmac_sha256", ["key" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))]), "data" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))])], Type::String);
+            sig!("hmac_sha256_bytes", ["key" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))]), "data" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))])], Type::Array(Box::new(Type::Int)));
+            sig!("hmac_sha256_verify", ["key" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))]), "data" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))]), "expected" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))])], Type::Generic { name: "Result".into(), args: vec![Type::Bool, Type::String] });
             sig!("sha384", ["data" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))])], Type::String);
             sig!("sha384_bytes", ["data" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))])], Type::Array(Box::new(Type::Int)));
+            sig!("base64_decode_bytes", ["encoded" => Type::String], Type::Generic { name: "Result".into(), args: vec![Type::Array(Box::new(Type::Int)), Type::String] });
+            sig!("base64url_encode_bytes", ["data" => Type::Array(Box::new(Type::Int))], Type::String);
+            sig!("base64url_decode_bytes", ["encoded" => Type::String], Type::Generic { name: "Result".into(), args: vec![Type::Array(Box::new(Type::Int)), Type::String] });
+            sig!("utf8_encode", ["text" => Type::String], Type::Array(Box::new(Type::Int)));
+            sig!("utf8_decode", ["data" => Type::Array(Box::new(Type::Int))], Type::Generic { name: "Result".into(), args: vec![Type::String, Type::String] });
             sig!("base64_encode_bytes", ["data" => Type::Array(Box::new(Type::Int))], Type::String);
-            sig!("sha256_bytes", ["data" => Type::String], Type::Array(Box::new(Type::Int)));
+            sig!("sha256_bytes", ["data" => Type::Union(vec![Type::String, Type::Array(Box::new(Type::Int))])], Type::Array(Box::new(Type::Int)));
             sig!("hmac", ["key" => Type::String, "data" => Type::String], Type::String, variadic);
             sig!("random_bytes", ["n" => Type::Int], Type::Array(Box::new(Type::Int)));
             sig!("random_hex", ["n" => Type::Int], Type::String);

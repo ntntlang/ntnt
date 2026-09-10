@@ -48,6 +48,77 @@ fn parse_timezone(tz: &str) -> Result<Tz, IntentError> {
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
+    // @ntnt monotonic_now
+    // @module std/time
+    // @signature monotonic_now() -> Int
+    // Nondecreasing process-local milliseconds from one Instant origin; not Unix time or cross-process persistent.
+    // @since v0.5.4
+    // @example monotonic_now() ~ "Read nondecreasing process-local milliseconds"
+    module.insert(
+        "monotonic_now".into(),
+        Value::NativeFunction {
+            name: "monotonic_now".into(),
+            arity: 0,
+            max_arity: 0,
+            requires: None,
+            func: |_args| Ok(Value::Int(monotonic_millis())),
+        },
+    );
+
+    // @ntnt monotonic_elapsed
+    // @module std/time
+    // @signature monotonic_elapsed(start: Int) -> Result<Int, String>
+    // Elapsed monotonic milliseconds. Negative or future starts return Err.
+    // @since v0.5.4
+    // @param start A previous monotonic_now result from this process.
+    // @example monotonic_elapsed(0) ~ "Measure milliseconds since the process-local origin"
+    module.insert(
+        "monotonic_elapsed".into(),
+        Value::NativeFunction {
+            name: "monotonic_elapsed".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| monotonic_value(&args[0], |n, now| now.checked_sub(n).filter(|v| *v >= 0)),
+        },
+    );
+
+    // @ntnt monotonic_deadline
+    // @module std/time
+    // @signature monotonic_deadline(timeout_ms: Int) -> Result<Int, String>
+    // Checked process-local deadline. Zero is immediate; negative or overflowing timeouts return Err.
+    // @since v0.5.4
+    // @param timeout_ms Nonnegative timeout in milliseconds; zero is immediate.
+    // @example monotonic_deadline(1000) ~ "Create a deadline one second from now"
+    module.insert(
+        "monotonic_deadline".into(),
+        Value::NativeFunction {
+            name: "monotonic_deadline".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| monotonic_value(&args[0], |n, now| now.checked_add(n)),
+        },
+    );
+
+    // @ntnt monotonic_remaining
+    // @module std/time
+    // @signature monotonic_remaining(deadline: Int) -> Result<Int, String>
+    // Remaining monotonic milliseconds, saturating at zero. Negative deadlines return Err.
+    // @since v0.5.4
+    // @param deadline A nonnegative deadline from this process.
+    // @example monotonic_remaining(0) => Ok(0) ~ "Past deadline has no time remaining"
+    module.insert(
+        "monotonic_remaining".into(),
+        Value::NativeFunction {
+            name: "monotonic_remaining".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| monotonic_value(&args[0], |n, now| Some(n.saturating_sub(now).max(0))),
+        },
+    );
+
     // ========== Current Time ==========
 
     // @ntnt now
@@ -1707,4 +1778,30 @@ fn relative_time(value: &Value, fn_name: &str) -> Result<Value, IntentError> {
         format!("in {} {}{}", count, unit, plural)
     };
     Ok(Value::String(rendered))
+}
+
+fn monotonic_millis() -> i64 {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    i64::try_from(
+        ORIGIN
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX)
+}
+fn monotonic_value(
+    value: &Value,
+    operation: impl FnOnce(i64, i64) -> Option<i64>,
+) -> Result<Value, IntentError> {
+    let result = match value {
+        Value::Int(n) if *n >= 0 => operation(*n, monotonic_millis()),
+        _ => None,
+    };
+    Ok(match result {
+        Some(n) => Value::ok(Value::Int(n)),
+        None => Value::err(Value::String(
+            "invalid_argument: negative, future, malformed or overflowing monotonic time".into(),
+        )),
+    })
 }

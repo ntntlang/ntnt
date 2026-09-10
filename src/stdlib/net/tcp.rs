@@ -39,6 +39,7 @@ enum Socket {
 struct Open {
     socket: Socket,
     write_shutdown: bool,
+    framing: Option<Framing>,
     _permit: Permit,
 }
 pub struct Owner {
@@ -61,6 +62,7 @@ impl Owner {
             state: Mutex::new(Some(Open {
                 socket,
                 write_shutdown: false,
+                framing: None,
                 _permit: permit,
             })),
         });
@@ -143,6 +145,7 @@ fn io_error(e: io::Error) -> String {
 fn owner(value: &Value) -> R<&Arc<Owner>> {
     match value {
         Value::TcpListener(o) | Value::TcpStream(o) => Ok(o),
+        Value::TcpReader(r) => Ok(&r.owner),
         _ => Err("invalid_argument: expected native TCP socket".into()),
     }
 }
@@ -225,6 +228,9 @@ pub fn read(args: &[Value]) -> R<Value> {
     let end = deadline(args.get(2))?;
     let owner = stream_owner(&args[0])?;
     let mut state = owner.lock()?;
+    if state.as_ref().is_some_and(|open| open.framing.is_some()) {
+        return Err("read_owned: stream has an attached TcpReader".into());
+    }
     let Some(Open {
         socket: Socket::Stream(stream),
         ..
@@ -386,6 +392,11 @@ pub fn shutdown_stream(args: &[Value]) -> R<Value> {
         return Err("closed: stream".into());
     };
     s.shutdown(how).map_err(io_error)?;
+    if matches!(how, Shutdown::Read | Shutdown::Both) {
+        if let Some(frame) = state.as_mut().and_then(|open| open.framing.as_mut()) {
+            frame.eof = true;
+        }
+    }
     if matches!(how, Shutdown::Write | Shutdown::Both) {
         if let Some(open) = state.as_mut() {
             open.write_shutdown = true;
@@ -402,10 +413,350 @@ pub fn close(args: &[Value]) -> R<Value> {
     Ok(Value::Unit)
 }
 
+struct Framing {
+    // Fixed initialized storage avoids Vec growth and a separate read scratch allocation.
+    bytes: Box<[u8]>,
+    len: usize,
+    eof: bool,
+    _permit: Permit,
+}
+/// Reader aliases share this lease; its last Drop closes the actual shared socket.
+/// Owner has no back-reference to the lease, so it cannot form an Arc cycle.
+pub struct ReaderLease {
+    owner: Arc<Owner>,
+}
+impl std::fmt::Debug for ReaderLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<opaque TCP reader>")
+    }
+}
+impl Drop for ReaderLease {
+    fn drop(&mut self) {
+        match self.owner.state.lock() {
+            Ok(mut state) => {
+                let open = state.take();
+                drop(state);
+                drop(open);
+            }
+            Err(e) => {
+                // Poison must not retain socket/buffer authority after the last reader disappears.
+                let open = e.into_inner().take();
+                drop(open);
+                let _ = writeln!(io::stderr(), "TCP reader cleanup: poisoned socket owner");
+            }
+        }
+        if let Err(e) = unregister(&self.owner) {
+            let _ = writeln!(io::stderr(), "TCP reader cleanup: {e}");
+        }
+    }
+}
+pub fn reader(args: &[Value]) -> R<Value> {
+    let mut cap = 65536;
+    if let Some(options) = args.get(1) {
+        let Value::Map(options) = options else {
+            return Err("invalid_argument: reader options must be Map".into());
+        };
+        for (key, value) in options {
+            if key != "max_buffer_bytes" {
+                return Err("invalid_argument: unknown reader option".into());
+            }
+            cap = integer(Some(value), 65536, 1, 65536)? as usize;
+        }
+    }
+    let owner = stream_owner(&args[0])?;
+    let mut state = owner.lock()?;
+    let open = state.as_mut().ok_or("closed: stream")?;
+    if open.framing.is_some() {
+        return Err("read_owned: stream already has a TcpReader".into());
+    }
+    let permit = Permit::reserve(&BUFFERS, cap, BUFFER_LIMIT)?;
+    let bytes = vec![0; cap].into_boxed_slice();
+    open.framing = Some(Framing {
+        bytes,
+        len: 0,
+        eof: false,
+        _permit: permit,
+    });
+    Ok(Value::TcpReader(Arc::new(ReaderLease {
+        owner: owner.clone(),
+    })))
+}
+fn reader_owner(value: &Value) -> R<&Arc<Owner>> {
+    match value {
+        Value::TcpReader(r) => Ok(&r.owner),
+        _ => Err("invalid_argument: expected native TcpReader".into()),
+    }
+}
+fn frame_output(frame: &mut Framing, count: usize) -> R<Value> {
+    let amount = count
+        .checked_mul(std::mem::size_of::<Value>())
+        .ok_or("capacity: output overflow")?;
+    let _output = Permit::reserve(&BUFFERS, amount, BUFFER_LIMIT)?;
+    // Reserve before allocation and consumption: a capacity error never loses a frame.
+    let result = Value::Array(
+        frame.bytes[..count]
+            .iter()
+            .map(|b| Value::Int(i64::from(*b)))
+            .collect(),
+    );
+    frame.bytes.copy_within(count..frame.len, 0);
+    frame.len -= count;
+    Ok(result)
+}
+pub fn read_exact(args: &[Value]) -> R<Value> {
+    let count = integer(args.get(1), 0, 1, 65536)? as usize;
+    let end = deadline(args.get(2))?;
+    read_frame(&args[0], count, None, end)
+}
+pub fn read_until(args: &[Value]) -> R<Value> {
+    let max = integer(args.get(2), 0, 1, 65536)? as usize;
+    let end = deadline(args.get(3))?;
+    let length = match &args[1] {
+        Value::String(s) => s.len(),
+        Value::Array(a) => a.len(),
+        _ => return Err("invalid_argument: delimiter must be String or Array<Int>".into()),
+    };
+    if length == 0 || length > max {
+        return Err("invalid_argument: delimiter length must be in 1..max_bytes".into());
+    }
+    if let Value::Array(a) = &args[1] {
+        if a.iter()
+            .any(|v| !matches!(v, Value::Int(n) if (0..=255).contains(n)))
+        {
+            return Err("invalid_argument: delimiter requires integer bytes in 0..255".into());
+        }
+    }
+    let amount = length
+        .checked_mul(1 + std::mem::size_of::<usize>())
+        .ok_or("capacity: matcher overflow")?;
+    let _matcher = Permit::reserve(&BUFFERS, amount, BUFFER_LIMIT)?;
+    let delimiter: Vec<u8> = match &args[1] {
+        Value::String(s) => s.as_bytes().to_vec(),
+        Value::Array(a) => a
+            .iter()
+            .map(|v| {
+                if let Value::Int(n) = v {
+                    *n as u8
+                } else {
+                    unreachable!()
+                }
+            })
+            .collect(),
+        _ => unreachable!(),
+    };
+    let mut prefix = vec![0; length];
+    let mut matched = 0;
+    for i in 1..length {
+        while matched > 0 && delimiter[i] != delimiter[matched] {
+            matched = prefix[matched - 1];
+        }
+        if delimiter[i] == delimiter[matched] {
+            matched += 1;
+        }
+        prefix[i] = matched;
+    }
+    read_frame(&args[0], max, Some((&delimiter, &prefix)), end)
+}
+fn read_frame(
+    value: &Value,
+    max: usize,
+    delimiter: Option<(&[u8], &[usize])>,
+    end: Instant,
+) -> R<Value> {
+    let mut state = reader_owner(value)?.lock()?;
+    let open = state.as_mut().ok_or("closed: stream")?;
+    let Socket::Stream(stream) = &mut open.socket else {
+        return Err("invalid_argument: expected stream".into());
+    };
+    let frame = open.framing.as_mut().ok_or("closed: reader")?;
+    if max > frame.bytes.len() {
+        return Err("invalid_argument: requested frame exceeds reader buffer cap".into());
+    }
+    let mut scanned = 0;
+    let mut matched = 0;
+    let mut did_io = false;
+    loop {
+        let error = |message: &str, len: usize| format!("{message}; buffered_bytes={len}");
+        if did_io && Instant::now() >= end {
+            return Err(error("timeout: frame deadline", frame.len));
+        }
+        let complete = if let Some((delimiter, prefix)) = delimiter {
+            let mut complete = None;
+            while scanned < frame.len.min(max) {
+                if did_io && scanned % 1024 == 0 && Instant::now() >= end {
+                    return Err(error("timeout: frame deadline", frame.len));
+                }
+                let byte = frame.bytes[scanned];
+                while matched > 0 && byte != delimiter[matched] {
+                    matched = prefix[matched - 1];
+                }
+                if byte == delimiter[matched] {
+                    matched += 1;
+                }
+                scanned += 1;
+                if matched == delimiter.len() {
+                    complete = Some(scanned);
+                    break;
+                }
+            }
+            complete
+        } else {
+            (frame.len >= max).then_some(max)
+        };
+        if let Some(count) = complete {
+            return frame_output(frame, count).map_err(|e| error(&e, frame.len));
+        }
+        if frame.len >= max {
+            return Err(error(
+                "oversize: delimiter not found within max_bytes",
+                frame.len,
+            ));
+        }
+        if frame.eof {
+            return Err(error("eof: incomplete frame", frame.len));
+        }
+        if Instant::now() >= end {
+            return Err(error("timeout: frame deadline", frame.len));
+        }
+        did_io = true;
+        match stream.read(&mut frame.bytes[frame.len..]) {
+            Ok(0) => frame.eof = true,
+            Ok(n) => frame.len += n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                retry(end).map_err(|e| error(&e, frame.len))?;
+            }
+            Err(e) => return Err(error(&io_error(e), frame.len)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn pair() -> (Value, TcpStream) {
+        let listener = listen(&[Value::Int(0)]).unwrap();
+        let Value::Map(addr) = local_addr(&[listener.clone()]).unwrap() else {
+            panic!()
+        };
+        let Value::Int(port) = addr["port"] else {
+            panic!()
+        };
+        let client = TcpStream::connect(("127.0.0.1", port as u16)).unwrap();
+        let stream = accept(&[listener.clone()]).unwrap();
+        close(&[listener]).unwrap();
+        (stream, client)
+    }
+    #[test]
+    fn reader_capacity_failure_preserves_attachment_and_completed_frame() {
+        let _serial = TEST_LOCK.lock().unwrap();
+        let (stream, mut client) = pair();
+        let all = Permit::reserve(&BUFFERS, BUFFER_LIMIT, BUFFER_LIMIT).unwrap();
+        assert!(reader(&[stream.clone()])
+            .unwrap_err()
+            .starts_with("capacity:"));
+        drop(all);
+        client.write_all(b"ab!").unwrap();
+        // A failed constructor leaves raw read authority intact.
+        assert!(
+            matches!(read(&[stream.clone(), Value::Int(1)]).unwrap(), Value::EnumValue { variant, .. } if variant == "Some")
+        );
+        let reader = reader(&[
+            stream.clone(),
+            Value::Map(HashMap::from([("max_buffer_bytes".into(), Value::Int(32))])),
+        ])
+        .unwrap();
+        let all = Permit::reserve(&BUFFERS, BUFFER_LIMIT - 32, BUFFER_LIMIT).unwrap();
+        let e = read_exact(&[reader.clone(), Value::Int(2)]).unwrap_err();
+        assert!(
+            e.starts_with("capacity:") && e.contains("buffered_bytes=2"),
+            "{e}"
+        );
+        drop(all);
+        assert_eq!(
+            read_exact(&[reader.clone(), Value::Int(2)])
+                .unwrap()
+                .to_string(),
+            "[98, 33]"
+        );
+        assert_eq!(BUFFERS.load(Ordering::Acquire), 32);
+        close(&[stream]).unwrap();
+        assert_eq!(BUFFERS.load(Ordering::Acquire), 0);
+        assert!(read_exact(&[reader, Value::Int(1)])
+            .unwrap_err()
+            .starts_with("closed:"));
+        assert_eq!(LIVE.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn reader_global_shutdown_and_write_failure_dispose_framing() {
+        let _serial = TEST_LOCK.lock().unwrap();
+        let (stream, client) = pair();
+        let reader = reader(&[stream.clone()]).unwrap();
+        // Force the OS write side closed without the public preflight flag, reproducing fatal write cleanup.
+        let state = stream_owner(&stream).unwrap().lock().unwrap();
+        let Socket::Stream(s) = &state.as_ref().unwrap().socket else {
+            panic!()
+        };
+        s.shutdown(Shutdown::Write).unwrap();
+        drop(state);
+        assert!(write(&[stream.clone(), Value::String("x".into())])
+            .unwrap_err()
+            .starts_with("write_failed:"));
+        assert_eq!(BUFFERS.load(Ordering::Acquire), 0);
+        assert!(read_exact(&[reader, Value::Int(1)])
+            .unwrap_err()
+            .starts_with("closed:"));
+        drop(client);
+        let (stream, _client) = pair();
+        let reader = super::reader(&[stream.clone()]).unwrap();
+        shutdown().unwrap();
+        assert_eq!(BUFFERS.load(Ordering::Acquire), 0);
+        assert!(read_exact(&[reader, Value::Int(1)])
+            .unwrap_err()
+            .starts_with("closed:"));
+        close(&[stream]).unwrap();
+    }
+    #[test]
+    fn native_observer_denies_reader_callbacks_without_consuming_socket_bytes() {
+        let _serial = TEST_LOCK.lock().unwrap();
+        let (stream, mut client) = pair();
+        let reader = reader(&[stream.clone()]).unwrap();
+        client.write_all(b"x").unwrap();
+        for name in ["tcp_reader", "tcp_read_exact", "tcp_read_until"] {
+            for expression in [
+                "alias(reader, 1)",
+                "sort_by([reader, 1], alias)",
+                "reduce([alias], [reader, 1], sort_by)",
+            ] {
+                let mut interp = crate::interpreter::Interpreter::new();
+                interp.configure_native_test("entry");
+                interp.set_execution_mode(crate::interpreter::ExecutionMode::Normal);
+                interp.define_global("reader".into(), reader.clone());
+                let source = format!("import {{ {name} }} from \"std/net\"\nimport {{ sort_by }} from \"std/collections\"\nlet alias = {name}\n{expression}");
+                let program =
+                    crate::parser::Parser::new(crate::lexer::Lexer::new(&source).collect())
+                        .parse()
+                        .unwrap();
+                assert!(interp
+                    .eval(&program)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Unsupported native test capability"));
+            }
+        }
+        assert_eq!(
+            read_exact(&[reader.clone(), Value::Int(1)])
+                .unwrap()
+                .to_string(),
+            "[120]"
+        );
+        close(&[reader]).unwrap();
+    }
     #[test]
     fn poisoned_registry_returns_system_error_without_panicking_on_cleanup() {
         let _serial = TEST_LOCK.lock().unwrap();
