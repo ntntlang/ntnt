@@ -517,4 +517,55 @@ mod tests {
             .to_string()
             .contains("Unsupported native test capability"));
     }
+    #[test]
+    fn nested_comparator_preserves_capability_and_observer_denial() {
+        let _serial = TEST_LOCK.lock().unwrap();
+        use crate::interpreter::{ExecutionMode, Interpreter};
+        for observer in [false, true] {
+            for mode in [
+                ExecutionMode::Normal,
+                ExecutionMode::Worker,
+                ExecutionMode::HotReload,
+                ExecutionMode::Job,
+                ExecutionMode::UnitTest,
+            ] {
+                if !observer && mode == ExecutionMode::Normal {
+                    continue;
+                }
+                for expression in [
+                    "tcp_listen(0)",
+                    "alias(0)",
+                    "sort_by([map { \"host\": \"127.0.0.1\" }, 0], alias)",
+                    "reduce([alias], [map { \"host\": \"127.0.0.1\" }, 0], sort_by)",
+                ] {
+                    let mut interpreter = Interpreter::new();
+                    if observer {
+                        interpreter.configure_native_test("test_entry");
+                    }
+                    interpreter.set_execution_mode(mode);
+                    let source = format!("import {{ tcp_listen }} from \"std/net\"\nimport {{ sort_by }} from \"std/collections\"\nlet alias = tcp_listen\n{expression}");
+                    let program =
+                        crate::parser::Parser::new(crate::lexer::Lexer::new(&source).collect())
+                            .parse()
+                            .unwrap();
+                    let error = interpreter.eval(&program).unwrap_err().to_string();
+                    assert!(
+                        error.contains(if observer {
+                            "Unsupported native test capability"
+                        } else {
+                            "requires TcpServer"
+                        }),
+                        "{mode:?}: {error}"
+                    );
+                    if observer {
+                        assert!(interpreter
+                            .native_test_error()
+                            .unwrap()
+                            .contains("Unsupported native test capability"));
+                    }
+                    assert_eq!(LIVE.load(Ordering::Acquire), 0);
+                }
+            }
+        }
+    }
 }

@@ -1006,6 +1006,9 @@ fn system_sync(args: &[Value], directory: bool) -> SystemResult {
     }
     let mut options = fs::OpenOptions::new();
     options.read(true);
+    // Windows FlushFileBuffers requires GENERIC_WRITE on an existing handle.
+    #[cfg(windows)]
+    options.write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;

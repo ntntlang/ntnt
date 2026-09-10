@@ -396,6 +396,39 @@ pub fn init() -> HashMap<String, Value> {
     module
 }
 
+// Shared by the original path and absolute symlink targets. A Windows UNC
+// prefix has an implicit RootDir even when no separator follows the share.
+// Count bytes from the original spelling, never from the reconstructed root.
+fn split_absolute_root(input: &str) -> Result<(PathBuf, &str), String> {
+    use std::path::Component;
+    let mut root = PathBuf::new();
+    let mut consumed = 0;
+    for component in Path::new(input).components() {
+        match component {
+            Component::Prefix(prefix) => {
+                root.push(prefix.as_os_str());
+                consumed = prefix.as_os_str().len();
+            }
+            Component::RootDir => {
+                root.push(component.as_os_str());
+                while input
+                    .as_bytes()
+                    .get(consumed)
+                    .is_some_and(|b| *b == b'/' || (cfg!(windows) && *b == b'\\'))
+                {
+                    consumed += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    if !root.is_absolute() {
+        return Err("invalid_argument: ambiguous path prefix".into());
+    }
+    // Path::strip_prefix would normalize file/. and lose non-directory errors.
+    Ok((root, &input[consumed..]))
+}
+
 fn resolve_missing_path(input: &str) -> Result<String, String> {
     use std::collections::VecDeque;
     use std::path::Component;
@@ -404,20 +437,6 @@ fn resolve_missing_path(input: &str) -> Result<String, String> {
         path.split(|c| c == '/' || (cfg!(windows) && c == '\\'))
             .map(str::to_owned)
             .collect()
-    }
-    fn rooted(path: &Path) -> Result<PathBuf, String> {
-        let mut root = PathBuf::new();
-        for c in path.components() {
-            match c {
-                Component::Prefix(p) => root.push(p.as_os_str()),
-                Component::RootDir => root.push(c.as_os_str()),
-                _ => break,
-            }
-        }
-        if !root.is_absolute() {
-            return Err("invalid_argument: ambiguous path prefix".into());
-        }
-        Ok(root)
     }
     if input.contains('\0') || input.len() > LIMIT || input.is_empty() {
         return Err("invalid_argument: empty, NUL or oversized path".into());
@@ -430,17 +449,13 @@ fn resolve_missing_path(input: &str) -> Result<String, String> {
     {
         return Err("invalid_argument: ambiguous Windows prefix".into());
     }
-    let mut resolved = if path.is_absolute() {
-        rooted(path)?
+    let (mut resolved, relative) = if path.is_absolute() {
+        split_absolute_root(input)?
     } else {
-        std::env::current_dir().map_err(|e| format!("io: {e}"))?
-    };
-    // Strip only the root bytes: Path::strip_prefix normalizes trailing dot
-    // components, which would incorrectly accept regular-file/. and file/.
-    let relative = if path.is_absolute() {
-        &input[resolved.as_os_str().len()..]
-    } else {
-        input
+        (
+            std::env::current_dir().map_err(|e| format!("io: {e}"))?,
+            input,
+        )
     };
     let mut pending = tokens(relative);
     let mut expansions = 0;
@@ -465,8 +480,9 @@ fn resolve_missing_path(input: &str) -> Result<String, String> {
                     .to_str()
                     .ok_or("invalid_argument: non-UTF-8 symlink")?;
                 let text = if target.is_absolute() {
-                    resolved = rooted(&target)?;
-                    &text[resolved.as_os_str().len()..]
+                    let (root, suffix) = split_absolute_root(text)?;
+                    resolved = root;
+                    suffix
                 } else {
                     if target.has_root()
                         || matches!(target.components().next(), Some(Component::Prefix(_)))
@@ -502,4 +518,32 @@ fn resolve_missing_path(input: &str) -> Result<String, String> {
         .into_os_string()
         .into_string()
         .map_err(|_| "invalid_argument: non-UTF-8 result".into())
+}
+
+#[cfg(all(test, windows))]
+mod windows_root_tests {
+    use super::*;
+
+    #[test]
+    fn unc_root_and_absolute_link_target_share_raw_suffix_handling() {
+        for spelling in [
+            r"\\server\share",
+            r"\\server\share\",
+            r"\\?\UNC\server\share",
+        ] {
+            let (root, suffix) = split_absolute_root(spelling).unwrap();
+            assert!(root.is_absolute());
+            assert_eq!(suffix, "");
+            // No filesystem access or network share is needed for a root alone.
+            assert_eq!(PathBuf::from(resolve_missing_path(spelling).unwrap()), root);
+            // read_link supplies a PathBuf; exercise that exact conversion too.
+            let target = PathBuf::from(spelling);
+            let (link_root, link_suffix) = split_absolute_root(target.to_str().unwrap()).unwrap();
+            assert_eq!(link_root, root);
+            assert_eq!(link_suffix, "");
+        }
+        for spelling in [r"\\server\share\file\.", r"C:\file\."] {
+            assert_eq!(split_absolute_root(spelling).unwrap().1, r"file\.");
+        }
+    }
 }

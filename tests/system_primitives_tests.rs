@@ -429,3 +429,81 @@ fn missing_suffix_dangling_links_and_expansion_limit() {
     err(call(&m, "resolve_missing", vec![text("x".repeat(65537))]));
     err(call(&m, "resolve_missing", vec![text("nul\0")]));
 }
+
+// Runs on Windows CI as well as Unix: FlushFileBuffers needs write access.
+#[test]
+fn sync_written_file_preserves_bytes_and_missing_stays_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sync-bytes");
+    let m = ntnt::stdlib::fs::init();
+    let p = text(path.to_str().unwrap());
+    ok(call(
+        &m,
+        "write_bytes",
+        vec![
+            p.clone(),
+            Value::Array(vec![Value::Int(0), Value::Int(255)]),
+        ],
+    ));
+    ok(call(&m, "sync_file", vec![p]));
+    assert_eq!(std::fs::read(path).unwrap(), [0, 255]);
+    let missing = dir.path().join("missing");
+    err(call(&m, "sync_file", vec![text(missing.to_str().unwrap())]));
+    assert!(!missing.exists());
+}
+
+#[test]
+fn native_sync_and_nested_sort_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("native-sync");
+    let missing = dir.path().join("missing");
+    let source = format!(
+        r#"
+import {{ write_bytes, sync_file, read_bytes, exists }} from "std/fs"
+import {{ sort_by }} from "std/collections"
+import {{ stringify }} from "std/json"
+let path = {}
+unwrap(write_bytes(path, [0, 255]))
+unwrap(sync_file(path))
+assert(stringify(unwrap(read_bytes(path))) == "[0,255]")
+assert(is_err(sync_file({})))
+assert(!exists({}))
+fn compare(a: Int, b: Int) -> Int {{ a - b }}
+assert(stringify(reduce([compare], [3, 1, 2], sort_by)) == "[1,2,3]")
+print("SYNC_SORT_OK")
+"#,
+        serde_json::to_string(path.to_str().unwrap()).unwrap(),
+        serde_json::to_string(missing.to_str().unwrap()).unwrap(),
+        serde_json::to_string(missing.to_str().unwrap()).unwrap()
+    );
+    assert!(fixture::strict_run(&source).contains("SYNC_SORT_OK"));
+}
+
+#[cfg(windows)]
+#[test]
+fn native_windows_unc_root_returns_ok_without_share_access() {
+    let source = r#"
+import { resolve_missing } from "std/path"
+assert(is_ok(resolve_missing("\\\\server\\share")))
+print("UNC_OK")
+"#;
+    assert!(fixture::strict_run(source).contains("UNC_OK"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_absolute_unc_symlink_target_resolves_without_share_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("unc-link");
+    let target = r"\\server\share";
+    std::os::windows::fs::symlink_dir(target, &link).unwrap();
+    let module = ntnt::stdlib::path::init();
+    let resolved = ok(call(
+        &module,
+        "resolve_missing",
+        vec![text(link.to_str().unwrap())],
+    ));
+    let mut expected = std::path::PathBuf::from(target);
+    expected.push(r"\");
+    assert_eq!(std::path::PathBuf::from(resolved.to_string()), expected);
+}

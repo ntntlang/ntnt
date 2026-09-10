@@ -1,8 +1,7 @@
 # NTNT v0.5.4 — proposed, unreleased
 
-This candidate adds four native system primitive groups. Local implementation and
-verification do not constitute release approval; independent review and the hosted
-Linux/macOS/Windows matrix remain parent-owned.
+This release adds native primitives for raw cryptography, filesystem operations,
+TCP listeners, and HTTP listener options.
 
 - `std/crypto`: `sha384`, `sha384_bytes` accept exact UTF-8 or checked integer bytes;
   `base64_encode_bytes` produces standard padded base64. Existing SHA256 and string

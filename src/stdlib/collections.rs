@@ -402,6 +402,11 @@ pub fn init() -> HashMap<String, Value> {
                 };
 
                 let comparator = match &args[1] {
+                    Value::NativeFunction { requires: Some(cap), .. } => {
+                        return Err(IntentError::runtime_error(format!(
+                            "capability: sort_by comparator requires {cap:?}; interpreter context required"
+                        )));
+                    }
                     Value::NativeFunction { func, .. } => *func,
                     _ => {
                         return Err(IntentError::type_error(

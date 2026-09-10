@@ -9554,6 +9554,11 @@ impl Interpreter {
                         });
                     }
                 }
+                // Higher-order calls must keep comparator execution inside the
+                // interpreter, including capability gates and native observers.
+                if fn_name == "sort_by" && args.len() == 2 {
+                    return self.sort_by_hof(args[0].clone(), args[1].clone());
+                }
                 let result = func(&args);
                 if fn_name == "assert" {
                     if let Some(assertions) = &mut self.native_assertions {
