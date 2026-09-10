@@ -31,7 +31,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Shared-owner buffered TCP exact/delimiter reads with bounded memory and whole-call deadlines.
 - [x] Native system I/O examples, strict typed imports and Normal-mode loopback framing fixture.
 - Deferred: outbound TCP/UDP/TLS/Unix sockets, general file streams/incremental hashing, HTTP lifecycle.
-- [ ] Independent final review and hosted platform matrix (parent-owned; no publication from this worktree).
+- Release gates: independent exact-snapshot review and hosted platform CI; current evidence is recorded on the corresponding implementation PRs.
 
 ## Current Status
 

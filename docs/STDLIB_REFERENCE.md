@@ -6283,12 +6283,12 @@ import { write_file_atomic, temp_file, temp_dir } from "std/fs"
 | [`sync_dir`](#syncdir) | Unix directory descriptor sync. OS/filesystem durability semantics apply; no physical-media guarantee. |
 | [`sync_file`](#syncfile) | Sync an existing regular file descriptor. Unix rejects terminal symlinks and special files; non-Unix terminal links follow OS open semantics. |
 | [`temp_close`](#tempclose) | Close all aliases and remove the owned path. Success is idempotent; cleanup failure remains a terminal Err on repeated close, with no automatic retry. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
-| [`temp_dir`](#tempdir) | Create an owned directory. Options: trusted parent and separator/NUL-free prefix. Unix mode 0700 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
-| [`temp_file`](#tempfile) | Create an owned private file. Options: trusted parent and separator/NUL-free prefix. Unix mode 0600 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
+| [`temp_dir`](#tempdir) | Create an owned directory. Options: trusted parent and separator/colon/NUL-free prefix. Unix mode 0700 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
+| [`temp_file`](#tempfile) | Create an owned private file. Options: trusted parent and separator/colon/NUL-free prefix. Unix mode 0600 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
 | [`temp_path`](#temppath) | Expose the open owned path for filesystem APIs. Closed and non-UTF8 paths return Err. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
 | [`write_bytes`](#writebytes) | Write up to 16 MiB of validated bytes, creating or truncating with ordinary symlink semantics. |
 | [`write_file`](#writefile) | Write a string to a file, creating or overwriting it. |
-| [`write_file_atomic`](#writefileatomic) | Atomically replace a file using an owned same-parent temporary inode and rename. Default sync:true syncs file and parent on Unix. Non-Unix requires sync:false and no mode. Unix mode defaults to 0600, restricted by umask at creation; explicit broader mode also exposes staging. Replaces terminal symlinks, uses a new inode, and does not preserve ownership or ACLs. Trusted ancestors and filesystem rename guarantees are required; this is not race-free path authorization. Err distinguishes unpublished failure (including cleanup failure) from published durability_uncertain. |
+| [`write_file_atomic`](#writefileatomic) | Atomically replace a file using an owned same-parent temporary inode and rename. Default sync:true syncs file and parent on Unix. Non-Unix requires sync:false and no mode. Unix mode defaults to 0600, restricted by umask at creation; explicit broader mode also exposes staging. Replaces terminal symlinks, uses a new inode, and does not preserve ownership or ACLs. Destination NUL is rejected before staging, including before Windows FFI publication. Trusted ancestors and filesystem rename guarantees are required; this is not race-free path authorization. Err distinguishes unpublished failure (including cleanup failure) from published durability_uncertain. |
 | [`write_file_exclusive`](#writefileexclusive) | Unix exclusive creation with initial mode (default 384, restricted by umask) and sync (default true). Options are mode and sync only. Trusted ancestors required. Never removes a partially written file. |
 
 #### `access`
@@ -7075,11 +7075,11 @@ temp_close(resource)  // Invalidate aliases and clean up the owned path
 temp_dir(options?: Map<String, Any>) -> Result<TempDir, String>
 ```
 
-Create an owned directory. Options: trusted parent and separator/NUL-free prefix. Unix mode 0700 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
+Create an owned directory. Options: trusted parent and separator/colon/NUL-free prefix. Unix mode 0700 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
 
 **Parameters:**
 
-- `options` — Optional trusted parent String and separator/NUL-free prefix String.
+- `options` — Optional trusted parent String and separator/colon/NUL-free prefix String.
 
 **Examples:**
 
@@ -7097,11 +7097,11 @@ temp_dir()  // Create an owned directory; explicitly temp_close after use
 temp_file(options?: Map<String, Any>) -> Result<TempFile, String>
 ```
 
-Create an owned private file. Options: trusted parent and separator/NUL-free prefix. Unix mode 0600 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
+Create an owned private file. Options: trusted parent and separator/colon/NUL-free prefix. Unix mode 0600 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
 
 **Parameters:**
 
-- `options` — Optional trusted parent String and separator/NUL-free prefix String.
+- `options` — Optional trusted parent String and separator/colon/NUL-free prefix String.
 
 **Examples:**
 
@@ -7199,7 +7199,7 @@ write_file("out.txt", "hello")  // => Ok(())  // Write string to file
 write_file_atomic(path: String, content: String | Array<Int>, options?: Map<String, Any>) -> Result<Unit, String>
 ```
 
-Atomically replace a file using an owned same-parent temporary inode and rename. Default sync:true syncs file and parent on Unix. Non-Unix requires sync:false and no mode. Unix mode defaults to 0600, restricted by umask at creation; explicit broader mode also exposes staging. Replaces terminal symlinks, uses a new inode, and does not preserve ownership or ACLs. Trusted ancestors and filesystem rename guarantees are required; this is not race-free path authorization. Err distinguishes unpublished failure (including cleanup failure) from published durability_uncertain.
+Atomically replace a file using an owned same-parent temporary inode and rename. Default sync:true syncs file and parent on Unix. Non-Unix requires sync:false and no mode. Unix mode defaults to 0600, restricted by umask at creation; explicit broader mode also exposes staging. Replaces terminal symlinks, uses a new inode, and does not preserve ownership or ACLs. Destination NUL is rejected before staging, including before Windows FFI publication. Trusted ancestors and filesystem rename guarantees are required; this is not race-free path authorization. Err distinguishes unpublished failure (including cleanup failure) from published durability_uncertain.
 
 **Parameters:**
 

@@ -1,6 +1,83 @@
 use ntnt::interpreter::Value;
 
 #[test]
+fn temporary_prefix_cannot_select_a_drive_or_stream() {
+    let root = tempfile::tempdir().unwrap();
+    for function in ["temp_file", "temp_dir"] {
+        for prefix in ["C:", "z:relative", "name:stream"] {
+            let result = call(
+                "fs",
+                function,
+                &[map(&[
+                    ("parent", path(root.path())),
+                    ("prefix", string(prefix)),
+                ])],
+            )
+            .unwrap();
+            assert!(
+                is_err(result.clone()),
+                "{function} accepted structural prefix {prefix:?}: {result:?}"
+            );
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        }
+        for prefix in ["", "ordinary-"] {
+            let resource = ok(call(
+                "fs",
+                function,
+                &[map(&[
+                    ("parent", path(root.path())),
+                    ("prefix", string(prefix)),
+                ])],
+            )
+            .unwrap());
+            let Value::String(name) = ok(call("fs", "temp_path", &[resource.clone()]).unwrap())
+            else {
+                panic!("path")
+            };
+            assert_eq!(std::path::Path::new(&name).parent(), Some(root.path()));
+            ok(call("fs", "temp_close", &[resource]).unwrap());
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        }
+    }
+}
+
+#[test]
+fn atomic_destination_nul_is_rejected_before_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let victim = root.path().join("victim");
+    std::fs::write(&victim, b"original canary").unwrap();
+    let malformed = format!("{}\0ignored", victim.to_str().unwrap());
+    let result = call(
+        "fs",
+        "write_file_atomic",
+        &[
+            string(&malformed),
+            string("replacement"),
+            map(&[("sync", Value::Bool(false))]),
+        ],
+    )
+    .unwrap();
+    assert!(is_err(result.clone()), "{result:?}");
+    assert!(
+        format!("{result:?}").contains("invalid_argument:"),
+        "must reject before staging, not fail during persist: {result:?}"
+    );
+    assert_eq!(std::fs::read(&victim).unwrap(), b"original canary");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    ok(call(
+        "fs",
+        "write_file_atomic",
+        &[
+            path(&victim),
+            bytes(&[0, 255]),
+            map(&[("sync", Value::Bool(false))]),
+        ],
+    )
+    .unwrap());
+    assert_eq!(std::fs::read(&victim).unwrap(), [0, 255]);
+}
+
+#[test]
 fn binary_base64_decode_round_trips_non_utf8() {
     let module = ntnt::stdlib::crypto::init();
     let function = module

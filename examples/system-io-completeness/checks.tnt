@@ -49,13 +49,14 @@ fn clock_checks() -> Unit {
 // @implements: feature.system_io_files
 fn file_checks() -> Unit {
     let file = unwrap(owned_file())
-    let path = unwrap(owned_path(file))
-    assert(exists(path))
+    let file_path = unwrap(owned_path(file))
+    assert(exists(file_path))
+    let dir = unwrap(owned_dir())
+    let path = "#{unwrap(owned_path(dir))}/example.bin"
     unwrap(atomic(path, [0, 255]))
     assert(stringify(unwrap(read_bytes(path))) == "[0,255]")
     assert(unwrap(inspect(path))["is_file"])
     assert(is_err(link_target(path)))
-    let dir = unwrap(owned_dir())
     assert(exists(unwrap(owned_path(dir))))
     unwrap(cleanup(dir))
     unwrap(cleanup(file))

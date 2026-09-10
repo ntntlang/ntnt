@@ -25,6 +25,8 @@ TCP listeners, and HTTP listener options.
   default private Unix creation honors umask. Explicit broader modes apply to staging
   too. Non-Unix supports sync:false without mode; other options fail before mutation.
   New-inode replacement does not preserve owner/ACL metadata and replaces terminal links.
+  Atomic-write and temporary-resource path strings reject NUL before mutation; name prefixes reject
+  separators, colon and NUL on every platform to prevent drive/stream reinterpretation.
 - Opaque `temp_file`/`temp_dir`, `temp_path` and idempotent `temp_close`: 128 live resources,
   Unix 0600/0700 at creation, OS ACL rules elsewhere, terminal cleanup errors retained.
   Trusted paths are required; Drop/shutdown are best-effort, with no crash guarantee.

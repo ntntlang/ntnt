@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 type R<T> = Result<T, String>;
 fn text(value: &Value) -> R<&str> {
     match value {
+        Value::String(s) if s.contains('\0') => {
+            Err("invalid_argument: filesystem path or prefix cannot contain NUL".into())
+        }
         Value::String(s) => Ok(s),
         _ => Err("invalid_argument: expected String".into()),
     }
@@ -221,9 +224,10 @@ pub(super) fn create_temp(args: &[Value], directory: bool) -> R<Value> {
                 "parent" => parent = Some(Path::new(text(value)?)),
                 "prefix" => {
                     prefix = text(value)?;
-                    if prefix.contains(['/', '\\', '\0']) {
+                    if prefix.contains(['/', '\\', ':', '\0']) {
                         return Err(
-                            "invalid_argument: prefix cannot contain separators or NUL".into()
+                            "invalid_argument: prefix cannot contain separators, colon or NUL"
+                                .into(),
                         );
                     }
                 }
