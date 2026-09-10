@@ -1,8 +1,8 @@
 # System I/O completion
 
 Run `ntnt run examples/system-io-completeness/run.tnt` for binary crypto,
-monotonic deadlines and an owned temporary file that is atomically replaced,
-read and explicitly cleaned up. It uses `sync:false` for portable atomic visibility;
+monotonic deadlines and atomic publication of a child file inside an owned temporary
+directory, alongside explicit temporary-file cleanup. It uses `sync:false` for portable atomic visibility;
 Unix callers can request file/parent durability by omitting that option.
 
 Native checks:
