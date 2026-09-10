@@ -169,6 +169,27 @@ fn native_http_json_cas_and_no_send_email_capture() {
         s.take(65536).read_to_end(&mut response).unwrap();
         response
     }
+    for body in [
+        "[]",
+        "null",
+        "true",
+        "1",
+        "\"not an object\"",
+        "{}",
+        r#"{"cas":"0","data":{}}"#,
+        r#"{"cas":0}"#,
+        r#"{"cas":0,"data":[]}"#,
+        r#"{"cas":0,"data":null}"#,
+    ] {
+        let invalid = post(addr, "/state", body);
+        assert!(
+            headers(&invalid).contains("400"),
+            "invalid body {body}: {}",
+            String::from_utf8_lossy(&invalid)
+        );
+    }
+    let untouched = request(addr, "/state", "GET");
+    assert!(String::from_utf8_lossy(&untouched).contains("\"version\":0"));
     let good = post(addr, "/state", r#"{"cas":0,"data":{"value":"local"}}"#);
     assert!(
         headers(&good).contains("200 ok"),

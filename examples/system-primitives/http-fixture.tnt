@@ -9,6 +9,12 @@ get("/redirect", fn(req: Map<String, Any>) { redirect("/state") })
 get("/state", fn(req: Map<String, Any>) { json(map { "version": version, "data": value }) })
 post("/state", fn(req: Map<String, Any>) {
     let update = parse_json(req) otherwise { return json(map { "error": err }, 400) }
+    if typeof(update) != "Map" {
+        return json(map { "error": "expected an object with integer cas and object data" }, 400)
+    }
+    if typeof(update["cas"]) != "Int" || typeof(update["data"]) != "Map" {
+        return json(map { "error": "expected an object with integer cas and object data" }, 400)
+    }
     if update["cas"] != version { return json(map { "error": "version conflict" }, 409) }
     value = update["data"]
     version = version + 1

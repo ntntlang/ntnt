@@ -85,7 +85,7 @@ pub fn init() -> HashMap<String, Value> {
     // RFC4648 standard padded base64 of checked raw bytes.
     //
     // Rejects non-integers and bytes outside 0..255 with a type error.
-    // @param data Exact input bytes; strings use UTF-8.
+    // @param data Array of integer bytes in 0..255; strings are not accepted.
     // @since v0.5.4
     // @example base64_encode_bytes([97, 98, 99]) ~ "Encode exact bytes"
     module.insert(

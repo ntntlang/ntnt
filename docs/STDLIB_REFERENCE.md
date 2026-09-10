@@ -5202,7 +5202,7 @@ Rejects non-integers and bytes outside 0..255 with a type error.
 
 **Parameters:**
 
-- `data` — Exact input bytes; strings use UTF-8.
+- `data` — Array of integer bytes in 0..255; strings are not accepted.
 
 **Examples:**
 
