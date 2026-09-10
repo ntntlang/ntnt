@@ -179,6 +179,37 @@ fn stringify_and_server_json_reject_secret_values() {
     assert!(!response_err.to_string().contains(SECRET_CANARY));
 }
 
+fn configure_capture_stream(stream: &std::net::TcpStream) {
+    // Windows may inherit the listener's nonblocking mode on accepted sockets.
+    stream
+        .set_nonblocking(false)
+        .expect("blocking capture stream");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set timeout");
+}
+
+#[test]
+fn secret_capture_accepts_delayed_bytes_on_nonblocking_stream() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind capture listener");
+    let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap())
+        .expect("connect capture client");
+    let (mut server, _) = listener.accept().expect("accept capture client");
+    server.set_nonblocking(true).expect("force inherited mode");
+    configure_capture_stream(&server);
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(50));
+        client
+            .write_all(SECRET_CANARY.as_bytes())
+            .expect("send delayed bytes");
+    });
+    let mut bytes = vec![0; SECRET_CANARY.len()];
+    let result = server.read_exact(&mut bytes);
+    writer.join().expect("delayed writer");
+    assert!(result.is_ok(), "delayed capture read failed: {result:?}");
+    assert_eq!(bytes, SECRET_CANARY.as_bytes());
+}
+
 fn fetch_and_capture(mut options: HashMap<String, Value>) -> (Value, String) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
     let address = listener.local_addr().expect("listener address");
@@ -204,9 +235,7 @@ fn fetch_and_capture(mut options: HashMap<String, Value>) -> (Value, String) {
                 Err(error) => panic!("accept request: {error}"),
             }
         };
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("set timeout");
+        configure_capture_stream(&stream);
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 4096];
         let mut expected_len = None;
