@@ -413,7 +413,16 @@ mod tests {
         {
             use std::os::unix::ffi::OsStringExt;
             let parent = root.path().join(std::ffi::OsString::from_vec(vec![255]));
-            fs::create_dir(&parent).unwrap();
+            if let Err(error) = fs::create_dir(&parent) {
+                // APFS may reject non-UTF8 filenames at creation; do not mistake
+                // that filesystem limitation for a failure of temp_path validation.
+                assert!(
+                    cfg!(target_os = "macos") && error.raw_os_error() == Some(libc::EILSEQ),
+                    "unexpected non-UTF8 fixture creation error: {error}"
+                );
+                assert!(!parent.exists());
+                return;
+            }
             let permit = TempPermit::reserve().unwrap();
             let owner = Arc::new(TempOwner {
                 state: Mutex::new(TempState::Open(

@@ -850,6 +850,33 @@ fn eval(
     interpreter.eval(&program)
 }
 #[test]
+fn process_handle_captures_fail_before_spawn_even_when_nested() {
+    // No OS process is started: rejection depends on the runtime-local value kind,
+    // not on a registry lookup or a live process identifier.
+    for resource in [
+        Value::ProcessHandle(0),
+        Value::Array(vec![Value::ProcessHandle(0)]),
+        map(&[("process", Value::ProcessHandle(0))]),
+        Value::ok(Value::Array(vec![Value::ProcessHandle(0)])),
+    ] {
+        let mut interpreter = ntnt::interpreter::Interpreter::new();
+        interpreter.define_global("resource".into(), resource);
+        let result = eval(
+            &mut interpreter,
+            "import { spawn } from \"std/concurrent\"\nspawn(fn() { resource })",
+        );
+        assert!(
+            result.is_err(),
+            "must reject before returning a task handle: {result:?}"
+        );
+    }
+    let mut interpreter = ntnt::interpreter::Interpreter::new();
+    interpreter.define_global("resource".into(), map(&[("ordinary", Value::Int(42))]));
+    let result = eval(&mut interpreter, "import { spawn, await_task } from \"std/concurrent\"\nlet task = spawn(fn() { resource })\nunwrap(await_task(task))").unwrap();
+    equal(result, map(&[("ordinary", Value::Int(42))]));
+}
+
+#[test]
 fn task_capture_rejects_nested_owned_authority_before_spawn() {
     let resource = ok(call("fs", "temp_file", &[]).unwrap());
     let mut interpreter = ntnt::interpreter::Interpreter::new();

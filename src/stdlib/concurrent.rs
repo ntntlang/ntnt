@@ -1216,18 +1216,10 @@ fn capture_bindings(
                     values.insert(key.clone(), serialized);
                 }
                 Err(_) => {
-                    // Reject closures and nested runtime-local authority before any task starts.
-                    if matches!(value, Value::Function { .. })
-                        || crate::stdlib::json::reject_runtime_authority(value).is_err()
-                    {
-                        non_serializable_captures.push(key.clone());
-                    } else {
-                        eprintln!(
-                            "[WARN] Cannot capture '{}' for concurrent task: value type '{}' is not serializable",
-                            key,
-                            value.type_name()
-                        );
-                    }
+                    // Never start a task with a selected binding silently omitted.
+                    // Native functions are handled above; all other values must
+                    // satisfy the same recursive task-serialization contract.
+                    non_serializable_captures.push(key.clone());
                 }
             },
         }
