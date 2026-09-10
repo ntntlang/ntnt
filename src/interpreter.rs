@@ -10811,6 +10811,10 @@ impl Interpreter {
             return WorkerExit::StartupFailed;
         }
 
+        // Worker mode suppresses once-only side effects during initialization.
+        // Requests need the same capabilities as those served by the primary.
+        interpreter.set_execution_mode(ExecutionMode::Normal);
+
         // Worker request loop — no hot-reload, just process requests
         loop {
             match rx.recv() {
@@ -15986,6 +15990,100 @@ c")
     fn test_worker_mode_skips_listen() {
         let result = eval_in_mode("listen(9999)", ExecutionMode::Worker).unwrap();
         assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_http_worker_request_tasks_preserve_bootstrap_suppression() {
+        use crate::stdlib::http_bridge::{BridgeRequest, HandlerRequest};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source_file = dir.path().join("worker.tnt");
+        let marker = dir.path().join("bootstrap-task-ran");
+        let marker_literal = serde_json::to_string(&marker.to_string_lossy()).unwrap();
+        std::fs::write(
+            &source_file,
+            format!(
+                r#"
+import {{ spawn, await_task, parallel, schedule, after }} from "std/concurrent"
+import {{ json }} from "std/http/server"
+import {{ write_file }} from "std/fs"
+let marker = {marker_literal}
+let boot_spawn = spawn(fn() {{ write_file(marker, "spawn") }})
+let boot_parallel = parallel([fn() {{ write_file(marker, "parallel") }}])
+let boot_schedule = schedule(60000, fn() {{ write_file(marker, "schedule") }})
+let boot_after = after(60000, fn() {{ write_file(marker, "after") }})
+get("/bootstrap", fn(req) {{
+    json([boot_spawn, boot_parallel, boot_schedule, boot_after])
+}})
+get("/spawn", fn(req) {{
+    let task = spawn(fn() {{ 42 }})
+    json(unwrap(await_task(task)))
+}})
+get("/parallel", fn(req) {{
+    let results = parallel([fn() {{ 21 }}, fn() {{ 42 }}])
+    json([unwrap(results[0]), unwrap(results[1])])
+}})
+listen(0)
+"#
+            ),
+        )
+        .unwrap();
+
+        // Use the actual secondary worker's bootstrap and shared-channel request
+        // loop, not an interpreter whose mode the test sets itself. Repeated
+        // requests also verify that serving one request does not consume the fix.
+        let (tx, rx) = flume::unbounded();
+        let mut replies = Vec::new();
+        for path in ["/bootstrap", "/spawn", "/parallel", "/spawn", "/bootstrap"] {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            tx.send(HandlerRequest {
+                request: BridgeRequest {
+                    method: "GET".into(),
+                    path: path.into(),
+                    url: format!("http://localhost{path}"),
+                    query: String::new(),
+                    query_params: HashMap::new(),
+                    params: HashMap::new(),
+                    headers: HashMap::new(),
+                    body: String::new(),
+                    body_bytes: Vec::new(),
+                    id: path.into(),
+                    ip: "127.0.0.1".into(),
+                    peer_ip: "127.0.0.1".into(),
+                    protocol: "http".into(),
+                },
+                reply_tx,
+            })
+            .unwrap();
+            replies.push((path, reply_rx));
+        }
+        drop(tx);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let exit = Interpreter::run_worker(1, rx, source_file.to_str().unwrap());
+            done_tx.send(exit).unwrap();
+        });
+        let exit = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("HTTP worker must finish after the request channel closes");
+        worker.join().unwrap();
+        assert_eq!(exit, WorkerExit::Shutdown);
+        assert!(!marker.exists(), "bootstrap tasks must not execute");
+        for (path, reply_rx) in replies {
+            let response = reply_rx.blocking_recv().expect("worker must reply");
+            assert_eq!(response.status, 200, "{path}: {}", response.body);
+            let expected = match path {
+                "/bootstrap" => serde_json::json!([null, null, null, null]),
+                "/spawn" => serde_json::json!(42),
+                "/parallel" => serde_json::json!([21, 42]),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&response.body).unwrap(),
+                expected,
+                "{path}"
+            );
+        }
     }
 
     #[test]
