@@ -3859,3 +3859,78 @@ Process options are a closed top-level map:
 File stdio maps use `path`; output files also accept `append`. String/byte input maps use `data`. `run` has no default deadline, so set `timeout_ms` whenever execution must be time-bounded.
 
 Invoking a shell explicitly, such as `run("/bin/sh", ["-c", command])`, grants access to everything that shell can execute under the NTNT process account. Only allowlist a shell when that authority is intentional.
+
+## Native system primitives (v0.5.4)
+
+For SRI over raw assets, import `sha384_bytes` and `base64_encode_bytes` from
+`std/crypto`: `"sha384-" + base64_encode_bytes(sha384_bytes(raw_bytes))`.
+`sha384` returns lowercase hex. Strings use exact UTF-8; new byte APIs reject
+non-integers and values outside 0..255. Legacy SHA256/base64 behavior is unchanged.
+
+`std/fs.write_file_exclusive(path, content, options?)` accepts UTF-8 or bytes and
+only `mode` (0..511, default 384/0600) and `sync` (Bool, default true). It never
+replaces an existing entry, including a dangling terminal symlink. The initial mode
+is restricted by inherited umask and ACL rules; the runtime never changes umask.
+`mkdir_private(path, mode?)` creates one directory (default 448/0700), requires an
+existing parent and fails on an existing entry. Both are Unix-only and fail before
+mutation on unsupported platforms. New writes cap at 16 MiB and validate first.
+
+For trusted-parent publication: exclusive unique temporary file with sync enabled,
+then same-filesystem `rename`, then `sync_dir(parent)` (both parents if moving).
+After a rename succeeds, a directory-sync failure means publication occurred but
+its durability is uncertain. Exclusive write errors report `write_failed:
+file_created=true; content_may_be_partial=true` or `durability_uncertain:
+file_created=true; write_completed=true`; no pathname cleanup risks deleting a
+replacement. `sync_file` opens an existing regular file and syncs that descriptor;
+Unix rejects terminal links and special files without blocking on FIFOs. Non-Unix
+file sync follows ordinary OS terminal-link semantics. Directory sync is Unix-only.
+
+`file_permissions` uses Unix lstat and reports mode (07777 mask), uid/gid and kind
+flags. `chmod` and `chown` follow terminal links; IDs must fit OS types and exclude
+the all-ones sentinel. `access(path, "rwx")` uses real UID/GID and supplementary
+credentials, accepts nonrepeating r/w/x subsets or empty for existence, and returns
+false for missing/denied/read-only paths. It is advisory and TOCTOU-prone, never
+safe-open authorization. These POSIX operations are explicitly unsupported elsewhere.
+New errors begin `invalid_argument:`, `already_exists:`, `unsupported:` or `io:`.
+
+`std/path.resolve_missing` resolves existing components and symlinks before `..`,
+then allows truly missing suffixes. It resumes inspection after missing/.., rejects
+loops/non-directory/permission errors and non-UTF-8 output, and caps symlink expansion
+at 40 and path data at 64 KiB. `resolve` and `normalize` retain their distinct old
+contracts. No path helper defends against hostile concurrent ancestor replacement.
+
+`std/net.tcp_listen(port, options?)` defaults to literal 127.0.0.1, accepts only a
+literal `host` option and reports the actual port through `tcp_local_addr`. Port 0
+selects a free port; bind/close is an availability check, not a future reservation.
+Explicit non-loopback hosts expose a server. No raw outgoing connect is provided;
+`tcp_connect` remains the old policy-checked diagnostic.
+
+Use `tcp_accept`, `tcp_read`, `tcp_write`, `tcp_peer_addr`, `tcp_shutdown` and
+`tcp_close` with genuine opaque handles. Timeouts default to 5000 ms (1..60000).
+Read size is 1..65536; writes cap at 65536, accept text or checked bytes, and empty
+writes return 0. Reads return `Ok(Some(bytes))`, `Ok(None)` on EOF, or `Err` with a
+`timeout:` prefix. Writes complete or invalidate the stream with `write_failed:
+stream_closed=true; bytes_written=N`; never blindly replay an uncertain prefix.
+Shutdown accepts read/write/both and retains the descriptor; close releases it and
+is idempotent. Copies share socket identity; closing a listener leaves accepted
+streams independent. Per-owner concurrent operations return `busy:`.
+
+The process caps live/reserved sockets at 128 and transient TCP buffers (including
+Value-array conversion storage) at 16 MiB. Caller-owned arrays are not covered by
+that runtime-buffer ceiling. No internal read-ahead, payload history or per-socket
+IO threads exist. A bounded native event loop can poll several clients so an idle
+one cannot monopolize the fixture. Sockets cannot cross spawn/parallel/channels or
+public JSON, and require Normal execution mode; denied modes and native Intent
+observers raise capability errors. Use ordinary strict run children for server tests.
+
+Global `listen(port, options?)` accepts `host` (literal IP), `readiness` (none/json),
+`fixture` (Bool), `suppress_server_header` and `suppress_cache_control` (Bool).
+Suppression requires fixture=true, which defaults to loopback and rejects exposed
+hosts. Ordinary omitted host remains 0.0.0.0. `NTNT_LISTEN_PORT` overrides the port;
+HTTP test mode retains test-port precedence and forced IPv4 loopback. JSON readiness
+is exactly one flushed `NTNT_READY {"host":"127.0.0.1","port":12345}` line after bind
+and router initialization, including actual ephemeral port 0 selection. Scan for the
+prefix; unrelated app logs may precede it. Bind/init failures cannot announce ready.
+Fixture suppression applies to helper/dependency headers on both engines and never
+disables auth, CSRF, CSP, CORS, other security headers, or request limits. Valid 204
+responses have no body; incidental Date/reason/framing differences remain.

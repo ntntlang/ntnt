@@ -39,6 +39,7 @@ Source files:
 | Document | Description |
 |----------|-------------|
 | [Roadmap](../ROADMAP.md) | Implementation phases and progress |
+| [v0.5.4 Proposed Release Notes](release-notes-v0.5.4.md) | Native byte crypto, secure filesystem primitives, bounded TCP listeners, HTTP fixture options (unreleased) |
 | [v0.5.3 Release Notes](release-notes/v0.5.3.md) | Native Intent tests, HTTP security, SNMP GET/WALK, supervised processes, source-mapped Markdown, and binary downloads |
 | [v0.5.2 Development Notes (Unpublished)](release-notes/v0.5.2.md) | Historical SNMP GET slice notes; changes included in v0.5.3 |
 | [v0.5.1 Release Notes](release-notes/v0.5.1.md) | Passwordless magic-link flow, opaque provider-neutral secrets, compatibility guarantees, and auth hardening |

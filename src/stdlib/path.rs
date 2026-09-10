@@ -362,5 +362,144 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt resolve_missing
+    // @module std/path
+    // @signature resolve_missing(path: String) -> Result<String, String>
+    // Resolve existing symlinks in order, allowing genuinely missing suffixes.
+    //
+    // Processes dotdot after symlinks; caps expansions at 40 and path data at 64 KiB.
+    // Errors on loops, non-directories, invalid prefixes, NUL and non-UTF-8 paths.
+    // Best-effort identity only; concurrent ancestor replacement is not prevented.
+    // @param path Relative or absolute filesystem path.
+    // @since v0.5.4
+    // @example resolve_missing("new/output.bin") ~ "Resolve an unpublished destination"
+    module.insert(
+        "resolve_missing".into(),
+        Value::NativeFunction {
+            name: "resolve_missing".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match &args[0] {
+                    Value::String(path) => match resolve_missing_path(path) {
+                        Ok(path) => Value::ok(Value::String(path)),
+                        Err(e) => Value::err(Value::String(e)),
+                    },
+                    _ => Value::err(Value::String(
+                        "invalid_argument: path must be String".into(),
+                    )),
+                })
+            },
+        },
+    );
     module
+}
+
+fn resolve_missing_path(input: &str) -> Result<String, String> {
+    use std::collections::VecDeque;
+    use std::path::Component;
+    const LIMIT: usize = 65536;
+    fn tokens(path: &str) -> VecDeque<String> {
+        path.split(|c| c == '/' || (cfg!(windows) && c == '\\'))
+            .map(str::to_owned)
+            .collect()
+    }
+    fn rooted(path: &Path) -> Result<PathBuf, String> {
+        let mut root = PathBuf::new();
+        for c in path.components() {
+            match c {
+                Component::Prefix(p) => root.push(p.as_os_str()),
+                Component::RootDir => root.push(c.as_os_str()),
+                _ => break,
+            }
+        }
+        if !root.is_absolute() {
+            return Err("invalid_argument: ambiguous path prefix".into());
+        }
+        Ok(root)
+    }
+    if input.contains('\0') || input.len() > LIMIT || input.is_empty() {
+        return Err("invalid_argument: empty, NUL or oversized path".into());
+    }
+    let path = Path::new(input);
+    if cfg!(windows)
+        && (path.has_root() != path.is_absolute()
+            || matches!(path.components().next(), Some(Component::Prefix(_)))
+                && !path.is_absolute())
+    {
+        return Err("invalid_argument: ambiguous Windows prefix".into());
+    }
+    let mut resolved = if path.is_absolute() {
+        rooted(path)?
+    } else {
+        std::env::current_dir().map_err(|e| format!("io: {e}"))?
+    };
+    // Strip only the root bytes: Path::strip_prefix normalizes trailing dot
+    // components, which would incorrectly accept regular-file/. and file/.
+    let relative = if path.is_absolute() {
+        &input[resolved.as_os_str().len()..]
+    } else {
+        input
+    };
+    let mut pending = tokens(relative);
+    let mut expansions = 0;
+    while let Some(part) = pending.pop_front() {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            resolved.pop();
+            continue;
+        }
+        resolved.push(&part);
+        match std::fs::symlink_metadata(&resolved) {
+            Ok(meta) if meta.is_symlink() => {
+                expansions += 1;
+                if expansions > 40 {
+                    return Err("io: symlink expansion limit (40)".into());
+                }
+                let target = std::fs::read_link(&resolved).map_err(|e| format!("io: {e}"))?;
+                resolved.pop();
+                let text = target
+                    .to_str()
+                    .ok_or("invalid_argument: non-UTF-8 symlink")?;
+                let text = if target.is_absolute() {
+                    resolved = rooted(&target)?;
+                    &text[resolved.as_os_str().len()..]
+                } else {
+                    if target.has_root()
+                        || matches!(target.components().next(), Some(Component::Prefix(_)))
+                    {
+                        return Err("invalid_argument: ambiguous symlink prefix".into());
+                    }
+                    text
+                };
+                let size = pending
+                    .iter()
+                    .try_fold(text.len(), |n, p| n.checked_add(p.len() + 1))
+                    .ok_or("invalid_argument: expanded path overflow")?;
+                if size > LIMIT {
+                    return Err("invalid_argument: expanded path exceeds 64 KiB".into());
+                }
+                let mut expanded = tokens(text);
+                expanded.append(&mut pending);
+                pending = expanded;
+            }
+            Ok(meta) => {
+                if !meta.is_dir() && !pending.is_empty() {
+                    return Err("io: path component is not a directory".into());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("io: {e}")),
+        }
+        if resolved.as_os_str().len() > LIMIT {
+            return Err("invalid_argument: resolved path exceeds 64 KiB".into());
+        }
+    }
+    resolved
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "invalid_argument: non-UTF-8 result".into())
 }

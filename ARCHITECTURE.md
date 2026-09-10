@@ -6,6 +6,27 @@ NTNT is an agent-native programming language designed for AI-driven web developm
 
 This document describes the current implementation architecture as of v0.4.7.
 
+## Native system primitives (v0.5.4, unreleased)
+
+`std/net/tcp.rs` owns server-side socket descriptors through shared opaque owners.
+Each open descriptor carries one of 128 RAII capacity permits; weak tracking exists
+only for shutdown. Registry locks never enclose socket IO or owner-lock acquisition.
+Nonblocking deadline loops use per-owner try-locks and a 16 MiB transient buffer
+budget. Closed aliases remain closed; JSON, native-value serialization and task/channel
+transfer cannot reconstruct or transport socket authority. `TcpServer` capability is
+Normal-only and denied calls throw rather than returning fake handles.
+
+Filesystem helpers validate before mutation, create exclusively with Unix initial
+permissions, and sync the descriptor they opened. Missing-path resolution expands
+symlinks before processing dotdot. These operations require trusted ancestors and
+are not a filesystem sandbox or a multi-operation authorization transaction.
+
+HTTP retains the existing Axum/interpreter bridge and tiny_http engines. Immutable
+listener options resolve one effective bind address. A startup handshake propagates
+async startup failure before workers begin; readiness uses the actual post-bind
+address. An outer Axum response filter and a bounded tiny_http serialization writer
+remove selected fixture headers without replacing HTTP parsing or framing.
+
 ## Source Structure
 
 ```

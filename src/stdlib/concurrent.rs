@@ -226,6 +226,7 @@ impl SerializedValue {
                 })
             }
             Value::TaskHandle(id) => Ok(SerializedValue::TaskHandle(*id)),
+            Value::TcpListener(_) | Value::TcpStream(_) => Err(IntentError::type_error("TCP handles cannot transfer between tasks or channels")),
             Value::ProcessHandle(_) => Err(IntentError::type_error(
                 "Process handles cannot cross task or channel boundaries".to_string(),
             )),
@@ -1917,12 +1918,14 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
         value,
         Value::TaskHandle(_)
             | Value::ProcessHandle(_)
+            | Value::TcpListener(_)
+            | Value::TcpStream(_)
             | Value::TxChannelHandle(_, _)
             | Value::RxChannelHandle(_)
             | Value::ScheduleHandle(_)
     ) {
         return Err(IntentError::type_error(
-            "Handles (Task, Process, TxChannel, RxChannel, Schedule) cannot be sent through channels"
+            "Handles (Task, Process, TCP, TxChannel, RxChannel, Schedule) cannot be sent through channels"
                 .to_string(),
         ));
     }

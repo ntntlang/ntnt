@@ -114,7 +114,8 @@ pub enum Value {
     /// Capability gating:
     /// - `requires == None`: always runs regardless of execution mode
     /// - `requires == Some(cap)`: silently returns `Unit` when the active mode
-    ///   does not grant `cap` (checked in `call_function`)
+    ///   does not grant `cap` (checked in `call_function`), except TcpServer
+    ///   denial raises a capability error to preserve honest Result contracts.
     NativeFunction {
         name: String,
         arity: usize,
@@ -128,6 +129,10 @@ pub enum Value {
 
     /// Opaque supervised native process handle.
     ProcessHandle(u64),
+    /// Shared native listener authority; aliases observe close, never exposes an FD.
+    TcpListener(std::sync::Arc<crate::stdlib::net::tcp::Owner>),
+    /// Shared native accepted-stream authority; not transferable between tasks.
+    TcpStream(std::sync::Arc<crate::stdlib::net::tcp::Owner>),
 
     /// Channel sender handle — the sending end returned by channel().
     /// Holds an opaque Arc<dyn Any + Send + Sync> (actually Arc<crossbeam::Sender<T>>)
@@ -242,6 +247,8 @@ impl Value {
             Value::NativeFunction { .. } => "NativeFunction",
             Value::TaskHandle(_) => "Task",
             Value::ProcessHandle(_) => "Process",
+            Value::TcpListener(_) => "TcpListener",
+            Value::TcpStream(_) => "TcpStream",
             Value::TxChannelHandle(_, _) => "TxChannel",
             Value::RxChannelHandle(_) => "RxChannel",
             Value::ScheduleHandle(_) => "Schedule",
@@ -353,6 +360,8 @@ impl fmt::Display for Value {
             Value::NativeFunction { name, .. } => write!(f, "<native fn {}>", name),
             Value::TaskHandle(id) => write!(f, "Task({})", id),
             Value::ProcessHandle(id) => write!(f, "Process({})", id),
+            Value::TcpListener(_) => f.write_str("<TcpListener>"),
+            Value::TcpStream(_) => f.write_str("<TcpStream>"),
             Value::TxChannelHandle(id, _) => write!(f, "TxChannel({})", id),
             Value::RxChannelHandle(id) => write!(f, "RxChannel({})", id),
             Value::ScheduleHandle(id) => write!(f, "Schedule({})", id),
@@ -580,9 +589,12 @@ impl Default for Environment {
 ///
 /// Each mode (Normal, Worker, Job, HotReload, UnitTest) exposes a subset of these
 /// capabilities. Built-in functions that carry a `requires` field will silently
-/// return `Unit` when the active mode lacks the required capability.
+/// return `Unit` when the active mode lacks the required capability, except
+/// `TcpServer`, whose denied calls raise a capability error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeCapability {
+    /// Native TCP lifecycle; Normal only, denied calls throw instead of returning Unit.
+    TcpServer,
     /// HTTP server lifecycle: listen, serve_static, routes, use_middleware,
     /// on_shutdown, on_error, get/post/put/patch/delete route registration
     HttpServer,
@@ -636,6 +648,7 @@ impl ExecutionMode {
     pub fn capabilities(self) -> &'static [RuntimeCapability] {
         match self {
             ExecutionMode::Normal => &[
+                RuntimeCapability::TcpServer,
                 RuntimeCapability::HttpServer,
                 RuntimeCapability::HttpConfig,
                 RuntimeCapability::TaskSpawning,
@@ -1163,7 +1176,12 @@ impl Interpreter {
                 );
             };
         }
-        register!("listen", None, AritySpec::exact(1), Interpreter::sa_listen);
+        register!(
+            "listen",
+            None,
+            AritySpec::between(1, 2),
+            Interpreter::sa_listen
+        );
         register!(
             "new_server",
             None,
@@ -1240,23 +1258,17 @@ impl Interpreter {
             return Ok(Value::Unit);
         }
         let port = interp.eval_expression(&args[0])?;
-        if let Value::Int(port_num) = port {
-            // Allow NTNT_LISTEN_PORT env var to override the port
-            // (used by `ntnt intent check` to run on a test port)
-            let effective_port = std::env::var("NTNT_LISTEN_PORT")
-                .ok()
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(port_num as u16);
-            // Use sync server for test mode (intent check), async for production
-            if interp.test_mode.is_some() {
-                interp.run_http_server(effective_port)
-            } else {
-                interp.run_async_http_server(effective_port)
-            }
+        let Value::Int(port) = port else {
+            return Err(IntentError::type_error("listen requires an integer port"));
+        };
+        let port = u16::try_from(port)
+            .map_err(|_| IntentError::type_error("listen port must be in 0..65535"))?;
+        let value = args.get(1).map(|v| interp.eval_expression(v)).transpose()?;
+        let options = crate::stdlib::http_server::ListenOptions::parse(value.as_ref())?;
+        if interp.test_mode.is_some() {
+            interp.run_http_server(port, options)
         } else {
-            Err(IntentError::type_error(
-                "listen() requires an integer port".to_string(),
-            ))
+            interp.run_async_http_server(port, options)
         }
     }
 
@@ -3649,7 +3661,13 @@ impl Interpreter {
         );
 
         // @ntnt listen
-        // @signature listen(port: Int) -> Unit
+        // @signature listen(port: Int, options?: Map<String, Any>) -> Unit
+        // Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool),
+        // suppress_server_header and suppress_cache_control (Bool, require fixture=true).
+        // Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged.
+        // JSON readiness is one flushed NTNT_READY line after bind with actual host/port.
+        // Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness.
+        // @param options Optional immutable listener and fixture response policy.
         // Starts an HTTP server on the given port.
         //
         // This must be called after registering route handlers with
@@ -3665,7 +3683,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "listen".to_string(),
                 arity: 1,
-                max_arity: 1,
+                max_arity: 2,
                 requires: None,
                 func: |_args| {
                     // This is a placeholder - actual implementation is in eval_call
@@ -9487,7 +9505,9 @@ impl Interpreter {
                     if self.native_test_entry.is_some()
                         && matches!(
                             cap,
-                            RuntimeCapability::TaskSpawning | RuntimeCapability::Scheduling
+                            RuntimeCapability::TaskSpawning
+                                | RuntimeCapability::Scheduling
+                                | RuntimeCapability::TcpServer
                         )
                     {
                         return Err(self.reject_native_action(format!(
@@ -9498,6 +9518,11 @@ impl Interpreter {
                         if self.native_test_entry.is_some() {
                             return Err(self.reject_native_action(format!(
                                 "Unsupported native test capability: {fn_name} requires {cap:?}"
+                            )));
+                        }
+                        if cap == RuntimeCapability::TcpServer {
+                            return Err(IntentError::runtime_error(format!(
+                                "capability: {fn_name} requires TcpServer in Normal mode"
                             )));
                         }
                         return Ok(Value::Unit);
@@ -9728,21 +9753,18 @@ impl Interpreter {
     }
 
     /// Run the HTTP server on the specified port
-    fn run_http_server(&mut self, port: u16) -> Result<Value> {
+    fn run_http_server(
+        &mut self,
+        port: u16,
+        options: crate::stdlib::http_server::ListenOptions,
+    ) -> Result<Value> {
         use crate::stdlib::http_server;
         use std::sync::atomic::Ordering;
         use std::time::Duration;
 
-        // Check for NTNT_LISTEN_PORT env var override (used by Intent Studio)
-        let env_port = std::env::var("NTNT_LISTEN_PORT")
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok());
-
-        // Check if we're in test mode
-        let (actual_port, is_test_mode, shutdown_flag) = match &self.test_mode {
-            Some((test_port, _max_req, flag)) => (*test_port, true, Some(flag.clone())),
-            None => (env_port.unwrap_or(port), false, None),
-        };
+        let addr = options.address(port, self.test_mode.as_ref().map(|m| m.0))?;
+        let is_test_mode = self.test_mode.is_some();
+        let shutdown_flag = self.test_mode.as_ref().map(|m| m.2.clone());
 
         if let Some(auth_config) = crate::stdlib::auth::get_auth_config() {
             self.setup_auth_routes(&auth_config)?;
@@ -9758,11 +9780,20 @@ impl Interpreter {
             ));
         }
 
+        let server = tiny_http::Server::http(addr)
+            .map_err(|e| IntentError::runtime_error(format!("Failed to bind: {e}")))?;
+        let bound = server
+            .server_addr()
+            .to_ip()
+            .ok_or_else(|| IntentError::runtime_error("expected TCP HTTP listener"))?;
+        if options.readiness {
+            http_server::emit_readiness(bound)?;
+        }
         // Print startup message
         if is_test_mode {
-            println!("Starting test server on http://127.0.0.1:{}", actual_port);
+            println!("Starting test server on http://{}", bound);
         } else {
-            println!("Starting server on http://0.0.0.0:{}", actual_port);
+            println!("Starting server on http://{}", bound);
         }
 
         if has_routes {
@@ -9795,13 +9826,6 @@ impl Interpreter {
             println!("Press Ctrl+C to stop");
         }
         println!();
-
-        // Start the server
-        let server = if is_test_mode {
-            http_server::start_server_with_timeout(actual_port, Duration::from_secs(60))?
-        } else {
-            http_server::start_server(actual_port)?
-        };
 
         // Handle requests in a loop
         // In test mode, use recv_timeout and check shutdown flag
@@ -9863,7 +9887,11 @@ impl Interpreter {
                     if let Ok((_, http_request)) =
                         http_server::process_request(request, HashMap::new())
                     {
-                        let _ = http_server::send_response(http_request, &preflight_response);
+                        let _ = http_server::send_response_with_options(
+                            http_request,
+                            &preflight_response,
+                            options.headers,
+                        );
                     }
                     continue;
                 }
@@ -9902,7 +9930,11 @@ impl Interpreter {
                         } else {
                             bad_request
                         };
-                        let _ = http_server::send_response(http_request, &bad_request);
+                        let _ = http_server::send_response_with_options(
+                            http_request,
+                            &bad_request,
+                            options.headers,
+                        );
                     }
                     Err(_) => {}
                 }
@@ -10091,7 +10123,11 @@ impl Interpreter {
                         };
 
                         // Send the response (only once)
-                        if let Err(e) = http_server::send_response(http_request, &final_response) {
+                        if let Err(e) = http_server::send_response_with_options(
+                            http_request,
+                            &final_response,
+                            options.headers,
+                        ) {
                             eprintln!("Error sending response: {}", e);
                         }
                     }
@@ -10106,7 +10142,11 @@ impl Interpreter {
             if method == "GET" {
                 if let Some((file_path, _relative)) = self.server_state.find_static_file(&path) {
                     // Serve static file
-                    if let Err(e) = http_server::send_static_response(request, &file_path) {
+                    if let Err(e) = http_server::send_static_response_with_options(
+                        request,
+                        &file_path,
+                        options.headers,
+                    ) {
                         eprintln!("Error serving static file: {}", e);
                     }
                     continue;
@@ -10144,7 +10184,11 @@ impl Interpreter {
                     } else {
                         not_found
                     };
-                    let _ = http_server::send_response(http_request, &not_found);
+                    let _ = http_server::send_response_with_options(
+                        http_request,
+                        &not_found,
+                        options.headers,
+                    );
                 }
                 Err(_) => {}
             }
@@ -10166,7 +10210,11 @@ impl Interpreter {
 
     /// Run the HTTP server using Axum + Tokio
     /// This provides high-concurrency handling for production workloads
-    fn run_async_http_server(&mut self, port: u16) -> Result<Value> {
+    fn run_async_http_server(
+        &mut self,
+        port: u16,
+        options: crate::stdlib::http_server::ListenOptions,
+    ) -> Result<Value> {
         use crate::stdlib::http_bridge::{
             create_channel, BridgeConfig, HandlerRequest, InterpreterHandle,
         };
@@ -10187,12 +10235,7 @@ impl Interpreter {
             ));
         }
 
-        // Check for NTNT_LISTEN_PORT env var override (used by Intent Studio and intent check)
-        let actual_port = std::env::var("NTNT_LISTEN_PORT")
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(port);
-
+        let addr = options.address(port, None)?;
         // Enable hot-reload unless in production mode
         let is_production = is_production_mode();
         self.server_state.hot_reload = !is_production;
@@ -10257,9 +10300,13 @@ impl Interpreter {
         });
 
         // Create server config
+        let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
         let server_config = AsyncServerConfig {
-            port: actual_port,
-            host: "0.0.0.0".to_string(),
+            port: addr.port(),
+            host: addr.ip().to_string(),
+            readiness: options.readiness,
+            fixture_headers: options.headers,
+            startup: Some(startup_tx),
             enable_compression: true,
             request_timeout_secs: self.request_timeout_secs,
             max_connections: 10_000,
@@ -10272,20 +10319,29 @@ impl Interpreter {
         // Note: We move interpreter_handle into the thread (not clone) so it's dropped
         // when the server shuts down, which closes the channel and signals the main loop to exit
         let routes_clone = async_routes.clone();
-        let server_handle = thread::spawn(move || {
+        let server_handle = thread::spawn(move || -> std::result::Result<(), String> {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
-                .expect("Failed to create tokio runtime");
-
-            rt.block_on(async {
-                if let Err(e) =
-                    start_server_with_bridge(server_config, interpreter_handle, routes_clone).await
-                {
-                    eprintln!("Server error: {}", e);
-                }
-            });
+                .map_err(|e| format!("Failed to create runtime: {e}"))?;
+            rt.block_on(start_server_with_bridge(
+                server_config,
+                interpreter_handle,
+                routes_clone,
+            ))
+            .map_err(|e| e.to_string())
         });
+        if let Err(error) = startup_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            drop(startup_rx);
+            let result = server_handle
+                .join()
+                .map_err(|_| IntentError::runtime_error("HTTP server thread panicked"))?;
+            return Err(IntentError::runtime_error(
+                result
+                    .err()
+                    .unwrap_or_else(|| format!("HTTP startup handshake: {error}")),
+            ));
+        }
 
         // Spawn additional worker threads (workers 2..N). Each is wrapped in
         // a supervisor loop so a crashed worker (panic) or a failed startup
@@ -10326,6 +10382,9 @@ impl Interpreter {
                                     worker_id, backoff
                                 );
                             }
+                        }
+                        if worker_rx.is_disconnected() {
+                            break;
                         }
                         // A run that survived past the backoff window was
                         // healthy — reset; otherwise keep doubling
@@ -10387,7 +10446,9 @@ impl Interpreter {
         }
 
         // Wait for server thread to finish
-        let _ = server_handle.join();
+        let server_result = server_handle
+            .join()
+            .map_err(|_| IntentError::runtime_error("HTTP server thread panicked"))?;
 
         // Run shutdown handlers (mirrors sync server path)
         let shutdown_handlers: Vec<Value> = self.server_state.get_shutdown_handlers().to_vec();
@@ -10400,6 +10461,7 @@ impl Interpreter {
             }
         }
 
+        server_result.map_err(IntentError::runtime_error)?;
         Ok(Value::Unit)
     }
 
@@ -11230,6 +11292,8 @@ impl Interpreter {
             // Handle equality: same variant + same id
             (Value::TaskHandle(a), Value::TaskHandle(b)) => a == b,
             (Value::ProcessHandle(a), Value::ProcessHandle(b)) => a == b,
+            (Value::TcpListener(a), Value::TcpListener(b))
+            | (Value::TcpStream(a), Value::TcpStream(b)) => std::sync::Arc::ptr_eq(a, b),
             (Value::TxChannelHandle(a, _), Value::TxChannelHandle(b, _)) => a == b,
             (Value::RxChannelHandle(a), Value::RxChannelHandle(b)) => a == b,
             (Value::ScheduleHandle(a), Value::ScheduleHandle(b)) => a == b,
@@ -11252,6 +11316,8 @@ impl Interpreter {
                 &lhs,
                 Value::TaskHandle(_)
                     | Value::ProcessHandle(_)
+                    | Value::TcpListener(_)
+                    | Value::TcpStream(_)
                     | Value::TxChannelHandle(_, _)
                     | Value::RxChannelHandle(_)
                     | Value::ScheduleHandle(_)
@@ -11260,6 +11326,8 @@ impl Interpreter {
                 &rhs,
                 Value::TaskHandle(_)
                     | Value::ProcessHandle(_)
+                    | Value::TcpListener(_)
+                    | Value::TcpStream(_)
                     | Value::TxChannelHandle(_, _)
                     | Value::RxChannelHandle(_)
                     | Value::ScheduleHandle(_)
@@ -11725,9 +11793,9 @@ impl Interpreter {
 
         // Use sync server for test mode (intent check), async for production
         if self.test_mode.is_some() {
-            self.run_http_server(port)
+            self.run_http_server(port, crate::stdlib::http_server::ListenOptions::default())
         } else {
-            self.run_async_http_server(port)
+            self.run_async_http_server(port, crate::stdlib::http_server::ListenOptions::default())
         }
     }
 }
@@ -15649,8 +15717,8 @@ c")
 
     #[test]
     fn test_capabilities_returns_correct_slice_lengths() {
-        // Normal has all 8 capabilities
-        assert_eq!(ExecutionMode::Normal.capabilities().len(), 8);
+        // Normal has all 9 capabilities, including native TCP servers.
+        assert_eq!(ExecutionMode::Normal.capabilities().len(), 9);
         // HotReload and Worker have 4 each
         assert_eq!(ExecutionMode::HotReload.capabilities().len(), 4);
         assert_eq!(ExecutionMode::Worker.capabilities().len(), 4);

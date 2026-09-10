@@ -18,6 +18,15 @@ This document outlines the implementation plan for NTNT, a programming language 
 
 ---
 
+## Native system primitives — v0.5.4 (unreleased)
+
+- [x] SHA384 text/raw-byte hashing and standard base64 byte encoding.
+- [x] Exclusive initial-mode files, private directories, byte writes, POSIX metadata/access and descriptor sync.
+- [x] Missing-suffix resolution with ordered symlink expansion.
+- [x] Bounded opaque server-side TCP handles and multi-client native fixture.
+- [x] Existing HTTP engines: literal host, post-bind readiness and opt-in fixture header suppression.
+- [ ] Independent final review and hosted platform matrix (parent-owned; no publication from this worktree).
+
 ## Current Status
 
 ### Completed ✅

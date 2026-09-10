@@ -2,7 +2,7 @@
 
 > **Auto-generated from [runtime.toml](runtime.toml)** - Do not edit directly.
 >
-> Last updated: v0.5.3
+> Last updated: v0.5.4
 
 Runtime configuration, environment variables, and CLI commands for NTNT
 
@@ -196,7 +196,7 @@ Automatic code reloading during development
 
 ## HTTP Server
 
-Built-in HTTP server runtime behavior
+Built-in HTTP server runtime behavior. Global listen(port, options?) supports literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool). Suppression requires fixture=true and loopback. NTNT_READY JSON is flushed once after bind/router initialization with actual host and ephemeral port. Startup errors propagate. Ordinary host defaults to 0.0.0.0; fixture defaults to 127.0.0.1. NTNT_LISTEN_PORT overrides the port; test mode retains test-port precedence and forced loopback. Both existing engines preserve auth/CSRF/CSP/CORS and request limits.
 
 ### Request Object Properties
 
@@ -364,7 +364,7 @@ ntnt inspect server.tnt --pretty
 ntnt test <FILE>
 ```
 
-Run HTTP tests against a server file
+Run HTTP tests against a server file. listen(port, options?) retains test-port precedence and forced loopback; explicitly exposed hosts are rejected. Optional readiness=json emits one flushed NTNT_READY JSON line after actual bind. Fixture options require loopback and may suppress Server/Cache-Control without changing security headers.
 
 **Options:**
 
