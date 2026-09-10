@@ -280,6 +280,104 @@ pub fn init() -> HashMap<String, Value> {
             },
         },
     );
+    // @ntnt tcp_reader
+    // @module std/net
+    // @signature tcp_reader(stream: TcpStream, options?: Map<String, Any>) -> Result<TcpReader, String>
+    // Attach exclusive read ownership to the existing socket. max_buffer_bytes: 1..65536 (default65536). Raw reads and second readers then fail. Last reader alias Drop closes the shared socket; there is no detach operation.
+    // Synchronous TcpServer capability; same-owner concurrent operations return busy.
+    // Available only in Normal mode; native Intent observers are denied before side effects.
+    // Invalid options or capacity failure leave the stream unattached.
+    // @see_also tcp_read_exact, tcp_read_until, tcp_close
+    // Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays.
+    // Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state.
+    // JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles.
+    // @since v0.5.4
+    // @param stream An open native TcpStream without an attached reader.
+    // @param options Optional max_buffer_bytes integer in 1..65536, default 65536.
+    // @example tcp_reader(stream, map { "max_buffer_bytes": 4096 }) ~ "Attach exclusive buffered read ownership"
+    module.insert(
+        "tcp_reader".into(),
+        Value::NativeFunction {
+            name: "tcp_reader".into(),
+            arity: 1,
+            max_arity: 2,
+            requires: Some(crate::interpreter::RuntimeCapability::TcpServer),
+            func: |args| {
+                Ok(match tcp::reader(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+
+    // @ntnt tcp_read_exact
+    // @module std/net
+    // @signature tcp_read_exact(reader: TcpReader, count: Int, timeout_ms?: Int) -> Result<Array<Int>, String>
+    // Read exactly count positive bytes within the reader cap, preserving overread for later calls.
+    // Synchronous TcpServer capability; same-owner concurrent operations return busy.
+    // Available only in Normal mode; native Intent observers are denied before side effects.
+    // Timeout defaults to 5000ms, range 1..60000, covering the whole call even with continuous progress.
+    // Timeout, EOF, oversize and I/O errors preserve buffered bytes and report buffered_bytes; retry a smaller exact read to drain.
+    // Invalid arguments never consume bytes. Already-complete buffered frames may succeed after peer EOF.
+    // Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays.
+    // Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state.
+    // JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles.
+    // @since v0.5.4
+    // @param reader An open native TcpReader.
+    // @param count Positive byte count within the reader buffer cap.
+    // @param timeout_ms Optional whole-call timeout in 1..60000 milliseconds, default 5000.
+    // @example tcp_read_exact(reader, 4, 1000) ~ "Read exactly four bytes without losing overread"
+    module.insert(
+        "tcp_read_exact".into(),
+        Value::NativeFunction {
+            name: "tcp_read_exact".into(),
+            arity: 2,
+            max_arity: 3,
+            requires: Some(crate::interpreter::RuntimeCapability::TcpServer),
+            func: |args| {
+                Ok(match tcp::read_exact(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+
+    // @ntnt tcp_read_until
+    // @module std/net
+    // @signature tcp_read_until(reader: TcpReader, delimiter: String | Array<Int>, max_bytes: Int, timeout_ms?: Int) -> Result<Array<Int>, String>
+    // Read through and include a nonempty UTF-8 or checked binary delimiter, using linear matching only within max_bytes. Delimiter length <= max_bytes <= reader cap.
+    // Synchronous TcpServer capability; same-owner concurrent operations return busy.
+    // Available only in Normal mode; native Intent observers are denied before side effects.
+    // Timeout defaults to 5000ms, range 1..60000, covering the whole call even with continuous progress.
+    // Timeout, EOF, oversize and I/O errors preserve buffered bytes and report buffered_bytes; retry a smaller exact read to drain.
+    // Invalid arguments never consume bytes. Already-complete buffered frames may succeed after peer EOF.
+    // Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays.
+    // Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state.
+    // JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles.
+    // @since v0.5.4
+    // @param reader An open native TcpReader.
+    // @param delimiter Nonempty UTF-8 text or checked raw bytes, at most max_bytes long.
+    // @param max_bytes Positive frame limit within the reader buffer cap.
+    // @param timeout_ms Optional whole-call timeout in 1..60000 milliseconds, default 5000.
+    // @example tcp_read_until(reader, [13, 10], 4096, 1000) ~ "Read a binary CRLF-terminated frame including CRLF"
+    module.insert(
+        "tcp_read_until".into(),
+        Value::NativeFunction {
+            name: "tcp_read_until".into(),
+            arity: 3,
+            max_arity: 4,
+            requires: Some(crate::interpreter::RuntimeCapability::TcpServer),
+            func: |args| {
+                Ok(match tcp::read_until(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+
     // @ntnt tcp_read
     // @module std/net
     // @signature tcp_read(stream: TcpStream, max_bytes: Int, timeout_ms?: Int) -> Result<Array<Int>?, String>
@@ -340,13 +438,13 @@ pub fn init() -> HashMap<String, Value> {
     );
     // @ntnt tcp_local_addr
     // @module std/net
-    // @signature tcp_local_addr(socket: TcpListener | TcpStream) -> Result<Map<String, Any>, String>
+    // @signature tcp_local_addr(socket: TcpListener | TcpStream | TcpReader) -> Result<Map<String, Any>, String>
     // Inspect the actual local bound address as {host, port}; Normal mode only.
     //
     // Port 0 reports the OS-assigned port. Closing after a bind checks availability, not future reservation.
     // Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err.
     // Concurrent operations on one owner return busy: rather than blocking on its lock.
-    // @param socket Genuine open TcpListener or TcpStream.
+    // @param socket Genuine open TcpListener, TcpStream or TcpReader.
     // @since v0.5.4
     // @example tcp_local_addr(socket) ~ "Check Result and close owned sockets"
     module.insert(
@@ -398,6 +496,7 @@ pub fn init() -> HashMap<String, Value> {
     // Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err.
     // Concurrent operations on one owner return busy: rather than blocking on its lock.
     // @param stream Genuine open TcpStream.
+    // An attached reader preserves buffered bytes on read/both shutdown and marks local EOF.
     // @param how Exactly read, write or both.
     // @since v0.5.4
     // @example tcp_shutdown(stream, "write") ~ "Check Result and close owned sockets"
@@ -418,13 +517,13 @@ pub fn init() -> HashMap<String, Value> {
     );
     // @ntnt tcp_close
     // @module std/net
-    // @signature tcp_close(socket: TcpListener | TcpStream) -> Result<Unit, String>
+    // @signature tcp_close(socket: TcpListener | TcpStream | TcpReader) -> Result<Unit, String>
     // Close a native socket and release capacity; Normal mode only.
     //
     // Aliases observe closed state; listener close leaves accepted streams independent.
     // Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err.
     // Concurrent operations on one owner return busy: rather than blocking on its lock.
-    // @param socket Genuine TcpListener or TcpStream; close is idempotent for closed aliases.
+    // @param socket Genuine TcpListener, TcpStream or TcpReader; close is idempotent for closed aliases.
     // @since v0.5.4
     // @example tcp_close(socket) ~ "Check Result and close owned sockets"
     module.insert(

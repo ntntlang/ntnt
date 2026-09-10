@@ -133,6 +133,9 @@ pub enum Value {
     TcpListener(std::sync::Arc<crate::stdlib::net::tcp::Owner>),
     /// Shared native accepted-stream authority; not transferable between tasks.
     TcpStream(std::sync::Arc<crate::stdlib::net::tcp::Owner>),
+    TcpReader(std::sync::Arc<crate::stdlib::net::tcp::ReaderLease>),
+    TempFile(std::sync::Arc<crate::stdlib::fs::owned::TempOwner>),
+    TempDir(std::sync::Arc<crate::stdlib::fs::owned::TempOwner>),
 
     /// Channel sender handle — the sending end returned by channel().
     /// Holds an opaque Arc<dyn Any + Send + Sync> (actually Arc<crossbeam::Sender<T>>)
@@ -249,6 +252,9 @@ impl Value {
             Value::ProcessHandle(_) => "Process",
             Value::TcpListener(_) => "TcpListener",
             Value::TcpStream(_) => "TcpStream",
+            Value::TcpReader(_) => "TcpReader",
+            Value::TempFile(_) => "TempFile",
+            Value::TempDir(_) => "TempDir",
             Value::TxChannelHandle(_, _) => "TxChannel",
             Value::RxChannelHandle(_) => "RxChannel",
             Value::ScheduleHandle(_) => "Schedule",
@@ -362,6 +368,9 @@ impl fmt::Display for Value {
             Value::ProcessHandle(id) => write!(f, "Process({})", id),
             Value::TcpListener(_) => f.write_str("<TcpListener>"),
             Value::TcpStream(_) => f.write_str("<TcpStream>"),
+            Value::TcpReader(_) => f.write_str("<TcpReader>"),
+            Value::TempFile(_) => f.write_str("<TempFile>"),
+            Value::TempDir(_) => f.write_str("<TempDir>"),
             Value::TxChannelHandle(id, _) => write!(f, "TxChannel({})", id),
             Value::RxChannelHandle(id) => write!(f, "RxChannel({})", id),
             Value::ScheduleHandle(id) => write!(f, "Schedule({})", id),
@@ -11299,6 +11308,10 @@ impl Interpreter {
             (Value::ProcessHandle(a), Value::ProcessHandle(b)) => a == b,
             (Value::TcpListener(a), Value::TcpListener(b))
             | (Value::TcpStream(a), Value::TcpStream(b)) => std::sync::Arc::ptr_eq(a, b),
+            (Value::TcpReader(a), Value::TcpReader(b)) => std::sync::Arc::ptr_eq(a, b),
+            (Value::TempFile(a), Value::TempFile(b)) | (Value::TempDir(a), Value::TempDir(b)) => {
+                std::sync::Arc::ptr_eq(a, b)
+            }
             (Value::TxChannelHandle(a, _), Value::TxChannelHandle(b, _)) => a == b,
             (Value::RxChannelHandle(a), Value::RxChannelHandle(b)) => a == b,
             (Value::ScheduleHandle(a), Value::ScheduleHandle(b)) => a == b,
@@ -11323,6 +11336,9 @@ impl Interpreter {
                     | Value::ProcessHandle(_)
                     | Value::TcpListener(_)
                     | Value::TcpStream(_)
+                    | Value::TcpReader(_)
+                    | Value::TempFile(_)
+                    | Value::TempDir(_)
                     | Value::TxChannelHandle(_, _)
                     | Value::RxChannelHandle(_)
                     | Value::ScheduleHandle(_)
@@ -11333,6 +11349,9 @@ impl Interpreter {
                     | Value::ProcessHandle(_)
                     | Value::TcpListener(_)
                     | Value::TcpStream(_)
+                    | Value::TcpReader(_)
+                    | Value::TempFile(_)
+                    | Value::TempDir(_)
                     | Value::TxChannelHandle(_, _)
                     | Value::RxChannelHandle(_)
                     | Value::ScheduleHandle(_)

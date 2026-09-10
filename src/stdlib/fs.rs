@@ -4,10 +4,217 @@ use crate::error::IntentError;
 use crate::interpreter::Value;
 use std::collections::HashMap;
 use std::fs;
+#[path = "fs_owned.rs"]
+pub mod owned;
 
 /// Initialize the std/fs module
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
+
+    // @ntnt write_file_atomic
+    // @module std/fs
+    // @signature write_file_atomic(path: String, content: String | Array<Int>, options?: Map<String, Any>) -> Result<Unit, String>
+    // Atomically replace a file using an owned same-parent temporary inode and rename.
+    // Default sync:true syncs file and parent on Unix. Non-Unix requires sync:false and no mode.
+    // Unix mode defaults to 0600, restricted by umask at creation; explicit broader mode also exposes staging.
+    // Replaces terminal symlinks, uses a new inode, and does not preserve ownership or ACLs.
+    // Trusted ancestors and filesystem rename guarantees are required; this is not race-free path authorization.
+    // Err distinguishes unpublished failure (including cleanup failure) from published durability_uncertain.
+    // @since v0.5.4
+    // @param path Destination in a trusted existing parent directory.
+    // @param content UTF-8 text or checked integer bytes in 0..255.
+    // @param options Optional mode 0..511 and sync Bool (default true); non-Unix requires sync:false without mode.
+    // @example write_file_atomic("example.bin", [0, 255], map { "sync": false }) ~ "Publish bytes with portable atomic visibility"
+    module.insert(
+        "write_file_atomic".into(),
+        Value::NativeFunction {
+            name: "write_file_atomic".into(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                Ok(match owned::write_atomic(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+
+    // @ntnt temp_file
+    // @module std/fs
+    // @signature temp_file(options?: Map<String, Any>) -> Result<TempFile, String>
+    // Create an owned private file. Options: trusted parent and separator/NUL-free prefix. Unix mode 0600 under umask; other platforms use OS ACL rules.
+    // At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected.
+    // Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees.
+    // Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
+    // @since v0.5.4
+    // @param options Optional trusted parent String and separator/NUL-free prefix String.
+    // @example temp_file() ~ "Create an owned file; use temp_path and explicitly temp_close"
+    module.insert(
+        "temp_file".into(),
+        Value::NativeFunction {
+            name: "temp_file".into(),
+            arity: 0,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match owned::create_temp(args, false) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+
+    // @ntnt temp_dir
+    // @module std/fs
+    // @signature temp_dir(options?: Map<String, Any>) -> Result<TempDir, String>
+    // Create an owned directory. Options: trusted parent and separator/NUL-free prefix. Unix mode 0700 under umask; other platforms use OS ACL rules.
+    // At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected.
+    // Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees.
+    // Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
+    // @since v0.5.4
+    // @param options Optional trusted parent String and separator/NUL-free prefix String.
+    // @example temp_dir() ~ "Create an owned directory; explicitly temp_close after use"
+    module.insert(
+        "temp_dir".into(),
+        Value::NativeFunction {
+            name: "temp_dir".into(),
+            arity: 0,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match owned::create_temp(args, true) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+
+    // @ntnt temp_path
+    // @module std/fs
+    // @signature temp_path(resource: TempFile | TempDir) -> Result<String, String>
+    // Expose the open owned path for filesystem APIs. Closed and non-UTF8 paths return Err.
+    // At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected.
+    // Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees.
+    // Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
+    // @since v0.5.4
+    // @param resource An open native TempFile or TempDir.
+    // @example temp_path(resource) ~ "Get the owned UTF-8 path"
+    module.insert(
+        "temp_path".into(),
+        Value::NativeFunction {
+            name: "temp_path".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match owned::temp_path(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+
+    // @ntnt temp_close
+    // @module std/fs
+    // @signature temp_close(resource: TempFile | TempDir) -> Result<Unit, String>
+    // Close all aliases and remove the owned path. Success is idempotent; cleanup failure remains a terminal Err on repeated close, with no automatic retry.
+    // At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected.
+    // Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees.
+    // Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
+    // @since v0.5.4
+    // @param resource A native TempFile or TempDir, including a closed alias.
+    // @example temp_close(resource) ~ "Invalidate aliases and clean up the owned path"
+    module.insert(
+        "temp_close".into(),
+        Value::NativeFunction {
+            name: "temp_close".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match owned::temp_close(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+
+    // @ntnt lstat
+    // @module std/fs
+    // @signature lstat(path: String) -> Result<Map<String, Any>, String>
+    // Inspect without following the terminal symlink: size, is_file, is_dir, is_symlink, modified and created (Unix seconds, 0 if unavailable, matching file_stat).
+    // @since v0.5.4
+    // @param path Path whose terminal entry is inspected without following it.
+    // @example lstat("example.bin") ~ "Inspect file or symlink metadata"
+    module.insert(
+        "lstat".into(),
+        Value::NativeFunction {
+            name: "lstat".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match owned::lstat(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+
+    // @ntnt read_link
+    // @module std/fs
+    // @signature read_link(path: String) -> Result<String, String>
+    // Return the exact symlink target without canonicalization. Non-UTF8 targets and non-symlinks return Err.
+    // @since v0.5.4
+    // @param path Symlink whose exact target should be read.
+    // @example read_link("example-link") ~ "Read the target without canonicalizing it"
+    module.insert(
+        "read_link".into(),
+        Value::NativeFunction {
+            name: "read_link".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match owned::read_link(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+
+    // @ntnt symlink
+    // @module std/fs
+    // @signature symlink(target: String, path: String, kind?: String) -> Result<Unit, String>
+    // Create a symlink without replacement. Kind defaults to file; file or dir is required on Windows. Permission or Windows privilege denial returns Err.
+    // @since v0.5.4
+    // @param target Target string stored by the symlink.
+    // @param path New link path in a trusted parent; existing entries are never replaced.
+    // @param kind Optional file (default) or dir, used for Windows symlink creation.
+    // @example symlink("example.bin", "example-link", "file") ~ "Create a file symlink; handle OS privilege errors"
+    module.insert(
+        "symlink".into(),
+        Value::NativeFunction {
+            name: "symlink".into(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                Ok(match owned::symlink(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
 
     // @ntnt read_file
     // @module std/fs

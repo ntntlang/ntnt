@@ -1,0 +1,29 @@
+import { tcp_listen, tcp_accept, tcp_local_addr, tcp_reader, tcp_read_exact, tcp_read_until, tcp_write, tcp_close } from "std/net"
+import { get_env } from "std/env"
+import { stringify } from "std/json"
+
+fn attach(stream: TcpStream) -> Result<TcpReader, String> {
+    tcp_reader(stream, map { "max_buffer_bytes": 64 })
+}
+fn exact(reader: TcpReader, count: Int) -> Result<Array<Int>, String> { tcp_read_exact(reader, count, 1000) }
+fn frame(reader: TcpReader) -> Result<Array<Int>, String> { tcp_read_until(reader, [13, 10], 32, 1000) }
+fn close_reader(reader: TcpReader) -> Result<Unit, String> { tcp_close(reader) }
+
+// An integration test supplies the loopback peer in Normal execution mode.
+// Opt-in keeps ordinary example execution offline and nonblocking.
+if (get_env("NTNT_SYSTEM_IO_TCP") ?? "") == "1" {
+    let listener = unwrap(tcp_listen(0))
+    print("NTNT_READY " + stringify(unwrap(tcp_local_addr(listener))))
+    let stream = unwrap(tcp_accept(listener, 5000))
+    let reader = unwrap(attach(stream))
+    assert(stringify(unwrap(frame(reader))) == "[0,255,13,10]")
+    assert(stringify(unwrap(frame(reader))) == "[254,0,13,10]")
+    assert(stringify(unwrap(exact(reader, 2))) == "[7,8]")
+    unwrap(tcp_write(stream, "OK"))
+    unwrap(close_reader(reader))
+    assert(is_err(tcp_write(stream, "closed")))
+    unwrap(tcp_close(listener))
+    print("SYSTEM_IO_TCP_OK")
+} else {
+    print("Set NTNT_SYSTEM_IO_TCP=1 and provide a loopback test peer to exercise framing.")
+}

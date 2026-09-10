@@ -61,18 +61,21 @@ pub(crate) fn intent_value_to_json_expose(
     intent_value_to_json_with_policy(value, SecretSerialization::Expose)
 }
 
-fn reject_tcp_authority(value: &Value) -> crate::error::Result<()> {
+pub(crate) fn reject_runtime_authority(value: &Value) -> crate::error::Result<()> {
     match value {
-        Value::TcpListener(_) | Value::TcpStream(_) => Err(IntentError::type_error(
-            "TCP handles cannot be serialized to JSON",
+        Value::TcpListener(_) | Value::TcpStream(_) | Value::TcpReader(_) => Err(
+            IntentError::type_error("TCP handles cannot be serialized to JSON"),
+        ),
+        Value::TempFile(_) | Value::TempDir(_) => Err(IntentError::type_error(
+            "Temporary handles cannot be serialized to JSON",
         )),
         Value::Array(values) | Value::EnumValue { values, .. } => {
-            values.iter().try_for_each(reject_tcp_authority)
+            values.iter().try_for_each(reject_runtime_authority)
         }
         Value::Map(values) | Value::Struct { fields: values, .. } => {
-            values.values().try_for_each(reject_tcp_authority)
+            values.values().try_for_each(reject_runtime_authority)
         }
-        Value::Return(value) => reject_tcp_authority(value),
+        Value::Return(value) => reject_runtime_authority(value),
         _ => Ok(()),
     }
 }
@@ -81,7 +84,7 @@ fn intent_value_to_json_with_policy(
     value: &Value,
     policy: SecretSerialization,
 ) -> crate::error::Result<serde_json::Value> {
-    reject_tcp_authority(value)?;
+    reject_runtime_authority(value)?;
     convert_json(value, policy)
 }
 
@@ -96,7 +99,8 @@ fn convert_json(
     }
 
     Ok(match value {
-        Value::TcpListener(_) | Value::TcpStream(_) => return Err(IntentError::type_error("TCP handles cannot be serialized to JSON")),
+        Value::TcpListener(_) | Value::TcpStream(_) | Value::TcpReader(_) => return Err(IntentError::type_error("TCP handles cannot be serialized to JSON")),
+        Value::TempFile(_) | Value::TempDir(_) => return Err(IntentError::type_error("Temporary handles cannot be serialized to JSON")),
         Value::Unit => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),

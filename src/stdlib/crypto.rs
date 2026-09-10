@@ -12,7 +12,7 @@ use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use regex::Regex;
-use sha2::{Digest, Sha256, Sha384};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use uuid::Uuid;
@@ -27,6 +27,200 @@ fn get_csrf_secret() -> &'static str {
 /// Initialize the std/crypto module
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
+
+    // @ntnt base64_decode_bytes
+    // @module std/crypto
+    // @signature base64_decode_bytes(encoded: String) -> Result<Array<Int>, String>
+    // Decode standard padded Base64 without interpreting UTF-8.
+    // Decoded payload is limited to 16 MiB; Value arrays use more heap memory.
+    // @param encoded Standard Base64 text.
+    // @since v0.5.4
+    // @example base64_decode_bytes("AP8=") => Ok([0, 255]) ~ "Decode binary bytes"
+    module.insert(
+        "base64_decode_bytes".into(),
+        Value::NativeFunction {
+            name: "base64_decode_bytes".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| decode_bytes(&args[0], &STANDARD),
+        },
+    );
+
+    // @ntnt base64url_encode_bytes
+    // @module std/crypto
+    // @signature base64url_encode_bytes(data: Array<Int>) -> String
+    // Encode checked raw bytes as URL-safe Base64 without padding.
+    // @since v0.5.4
+    // @example base64url_encode_bytes([255]) ~ "Convert exact bytes"
+    // @param data Checked integer bytes in 0..255.
+    module.insert(
+        "base64url_encode_bytes".into(),
+        Value::NativeFunction {
+            name: "base64url_encode_bytes".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(Value::String(
+                    URL_SAFE_NO_PAD.encode(checked_crypto_bytes(&args[0], false)?),
+                ))
+            },
+        },
+    );
+
+    // @ntnt base64url_decode_bytes
+    // @module std/crypto
+    // @signature base64url_decode_bytes(encoded: String) -> Result<Array<Int>, String>
+    // Decode unpadded URL-safe Base64; decoded payload cap 16 MiB (Value arrays use more heap).
+    // @since v0.5.4
+    // @example base64url_decode_bytes("_w") ~ "Convert exact bytes"
+    // @param encoded URL-safe unpadded Base64 text.
+    module.insert(
+        "base64url_decode_bytes".into(),
+        Value::NativeFunction {
+            name: "base64url_decode_bytes".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| decode_bytes(&args[0], &URL_SAFE_NO_PAD),
+        },
+    );
+
+    // @ntnt utf8_encode
+    // @module std/crypto
+    // @signature utf8_encode(text: String) -> Array<Int>
+    // Encode text as exact UTF-8 bytes.
+    // @since v0.5.4
+    // @example utf8_encode("hello") ~ "Convert exact bytes"
+    // @param text Text to encode without normalization.
+    module.insert(
+        "utf8_encode".into(),
+        Value::NativeFunction {
+            name: "utf8_encode".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| match &args[0] {
+                Value::String(s) => Ok(byte_values(s.as_bytes())),
+                _ => Err(IntentError::type_error("utf8_encode expects String")),
+            },
+        },
+    );
+
+    // @ntnt utf8_decode
+    // @module std/crypto
+    // @signature utf8_decode(data: Array<Int>) -> Result<String, String>
+    // Decode checked bytes as UTF-8; invalid UTF-8 returns Err without lossy replacement.
+    // @since v0.5.4
+    // @example utf8_decode([104, 105]) ~ "Convert exact bytes"
+    // @param data Checked integer bytes in 0..255; invalid UTF-8 returns Err.
+    module.insert(
+        "utf8_decode".into(),
+        Value::NativeFunction {
+            name: "utf8_decode".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match checked_crypto_bytes(&args[0], false) {
+                    Ok(b) => match String::from_utf8(b) {
+                        Ok(s) => Value::ok(Value::String(s)),
+                        Err(e) => Value::err(Value::String(e.to_string())),
+                    },
+                    Err(e) => Value::err(Value::String(e.to_string())),
+                })
+            },
+        },
+    );
+
+    // @ntnt sha512
+    // @module std/crypto
+    // @signature sha512(data: String | Array<Int>) -> String
+    // SHA-512 lowercase hex of UTF-8 text or checked integer bytes in 0..255.
+    // @since v0.5.4
+    // @param data UTF-8 text or checked integer bytes in 0..255.
+    // @example sha512("abc") ~ "Compute a 128-character lowercase digest"
+    module.insert(
+        "sha512".into(),
+        Value::NativeFunction {
+            name: "sha512".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(Value::String(hex::encode(Sha512::digest(
+                    checked_crypto_bytes(&args[0], true)?,
+                ))))
+            },
+        },
+    );
+
+    // @ntnt sha512_bytes
+    // @module std/crypto
+    // @signature sha512_bytes(data: String | Array<Int>) -> Array<Int>
+    // SHA-512 as 64 raw digest bytes; input bytes must be integers in 0..255.
+    // @since v0.5.4
+    // @param data UTF-8 text or checked integer bytes in 0..255.
+    // @example sha512_bytes([0, 255]) ~ "Compute 64 raw digest bytes"
+    module.insert(
+        "sha512_bytes".into(),
+        Value::NativeFunction {
+            name: "sha512_bytes".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(byte_values(&Sha512::digest(checked_crypto_bytes(
+                    &args[0], true,
+                )?)))
+            },
+        },
+    );
+
+    // @ntnt hmac_sha256_bytes
+    // @module std/crypto
+    // @signature hmac_sha256_bytes(key: String | Array<Int>, data: String | Array<Int>) -> Array<Int>
+    // HMAC-SHA256 as 32 raw bytes. Text uses UTF-8; arrays require integers in 0..255.
+    // @since v0.5.4
+    // @param key UTF-8 text or checked raw key bytes.
+    // @param data UTF-8 text or checked raw message bytes.
+    // @example hmac_sha256_bytes([1, 2], [0, 255]) ~ "Authenticate binary data"
+    module.insert(
+        "hmac_sha256_bytes".into(),
+        Value::NativeFunction {
+            name: "hmac_sha256_bytes".into(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: |args| Ok(byte_values(&checked_hmac(args)?.finalize().into_bytes())),
+        },
+    );
+
+    // @ntnt hmac_sha256_verify
+    // @module std/crypto
+    // @signature hmac_sha256_verify(key: String | Array<Int>, data: String | Array<Int>, expected: String | Array<Int>) -> Result<Bool, String>
+    // Verify with RustCrypto MAC verification. Malformed hex or non-32-byte tags return Err; a valid mismatch returns Ok(false).
+    // @since v0.5.4
+    // @param key UTF-8 text or checked raw key bytes.
+    // @param data UTF-8 text or checked raw message bytes.
+    // @param expected Exactly 32 checked bytes or 64 hexadecimal digits.
+    // @example hmac_sha256_verify("key", "message", hmac_sha256("key", "message")) => Ok(true) ~ "Verify an authentic tag"
+    module.insert(
+        "hmac_sha256_verify".into(),
+        Value::NativeFunction {
+            name: "hmac_sha256_verify".into(),
+            arity: 3,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                Ok(match verify_hmac(args) {
+                    Ok(v) => Value::ok(Value::Bool(v)),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
 
     // @ntnt sha384
     // @module std/crypto
@@ -106,86 +300,54 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/crypto
     // @module_description Cryptographic hashing and random value generation
     // @signature sha256(data: String | Array<Int>) -> String
-    // SHA-256 hash as hex string. Accepts string or byte array.
+    // SHA-256 hash as hex string. Accepts text or checked integer bytes in 0..255.
     // @param data The input data to hash (string or byte array)
     // @since v0.2.0
     // @tags #pure, #deterministic
     // @example sha256("hello") => "2cf24dba..." ~ "Hash a string"
     module.insert(
-        "sha256".to_string(),
+        "sha256".into(),
         Value::NativeFunction {
-            name: "sha256".to_string(),
+            name: "sha256".into(),
             arity: 1,
             max_arity: 1,
             requires: None,
             func: |args| {
-                match &args[0] {
-                    Value::String(data) => {
-                        let mut hasher = Sha256::new();
-                        hasher.update(data.as_bytes());
-                        let result = hasher.finalize();
-                        Ok(Value::String(hex::encode(result)))
-                    }
-                    Value::Array(bytes) => {
-                        // Handle array of bytes
-                        let byte_vec: std::result::Result<Vec<u8>, _> = bytes
-                            .iter()
-                            .map(|v| match v {
-                                Value::Int(i) => Ok(*i as u8),
-                                _ => Err(IntentError::type_error(
-                                    "sha256() array must contain integers".to_string(),
-                                )),
-                            })
-                            .collect();
-                        let byte_vec = byte_vec?;
-                        let mut hasher = Sha256::new();
-                        hasher.update(&byte_vec);
-                        let result = hasher.finalize();
-                        Ok(Value::String(hex::encode(result)))
-                    }
-                    _ => Err(IntentError::type_error(
-                        "sha256() requires a string or byte array".to_string(),
-                    )),
-                }
+                Ok(Value::String(hex::encode(Sha256::digest(
+                    checked_crypto_bytes(&args[0], true)?,
+                ))))
             },
         },
     );
 
     // @ntnt sha256_bytes
     // @module std/crypto
-    // @signature sha256_bytes(data: String) -> Array<Int>
+    // @signature sha256_bytes(data: String | Array<Int>) -> Array<Int>
     // SHA-256 hash as byte array. Returns array of 32 integers (0-255).
-    // @param data The input string to hash
+    // @param data UTF-8 text or checked integer bytes in 0..255.
     // @see_also sha256
     // @since v0.2.0
     // @tags #pure, #deterministic
     // @example sha256_bytes("hello")[0] => 44 ~ "First byte of SHA-256 hash of 'hello'"
     module.insert(
-        "sha256_bytes".to_string(),
+        "sha256_bytes".into(),
         Value::NativeFunction {
-            name: "sha256_bytes".to_string(),
+            name: "sha256_bytes".into(),
             arity: 1,
             max_arity: 1,
             requires: None,
-            func: |args| match &args[0] {
-                Value::String(data) => {
-                    let mut hasher = Sha256::new();
-                    hasher.update(data.as_bytes());
-                    let result = hasher.finalize();
-                    let bytes: Vec<Value> = result.iter().map(|b| Value::Int(*b as i64)).collect();
-                    Ok(Value::Array(bytes))
-                }
-                _ => Err(IntentError::type_error(
-                    "sha256_bytes() requires a string".to_string(),
-                )),
+            func: |args| {
+                Ok(byte_values(&Sha256::digest(checked_crypto_bytes(
+                    &args[0], true,
+                )?)))
             },
         },
     );
 
     // @ntnt hmac_sha256
     // @module std/crypto
-    // @signature hmac_sha256(key: String, data: String) -> String
-    // HMAC-SHA256 message authentication code as hex string.
+    // @signature hmac_sha256(key: String | Array<Int>, data: String | Array<Int>) -> String
+    // HMAC-SHA256 lowercase hex over UTF-8 text or checked integer bytes in 0..255.
     // @param key The secret key for HMAC
     // @param data The data to authenticate
     // @see_also sha256
@@ -193,24 +355,16 @@ pub fn init() -> HashMap<String, Value> {
     // @tags #pure, #deterministic
     // @example hmac_sha256("secret", "message") ~ "Returns HMAC-SHA256 as 64-char hex string"
     module.insert(
-        "hmac_sha256".to_string(),
+        "hmac_sha256".into(),
         Value::NativeFunction {
-            name: "hmac_sha256".to_string(),
+            name: "hmac_sha256".into(),
             arity: 2,
             max_arity: 2,
             requires: None,
-            func: |args| match (&args[0], &args[1]) {
-                (Value::String(key), Value::String(data)) => {
-                    type HmacSha256 = Hmac<Sha256>;
-                    let mut mac = <HmacSha256 as Mac>::new_from_slice(key.as_bytes())
-                        .map_err(|e| IntentError::runtime_error(format!("HMAC error: {}", e)))?;
-                    mac.update(data.as_bytes());
-                    let result = mac.finalize();
-                    Ok(Value::String(hex::encode(result.into_bytes())))
-                }
-                _ => Err(IntentError::type_error(
-                    "hmac_sha256() requires two strings (key, data)".to_string(),
-                )),
+            func: |args| {
+                Ok(Value::String(hex::encode(
+                    checked_hmac(args)?.finalize().into_bytes(),
+                )))
             },
         },
     );
@@ -1022,6 +1176,71 @@ pub fn init() -> HashMap<String, Value> {
     module
 }
 
+fn checked_crypto_bytes(value: &Value, allow_text: bool) -> Result<Vec<u8>, IntentError> {
+    match value {
+        Value::String(s) if allow_text => Ok(s.as_bytes().to_vec()),
+        Value::Array(values) => values
+            .iter()
+            .map(|v| match v {
+                Value::Int(n) if (0..=255).contains(n) => Ok(*n as u8),
+                _ => Err(IntentError::type_error(
+                    "expected integer bytes in 0..255".to_string(),
+                )),
+            })
+            .collect(),
+        _ => Err(IntentError::type_error(
+            "expected raw byte array or permitted UTF-8 string".to_string(),
+        )),
+    }
+}
+
+fn decode_bytes(
+    value: &Value,
+    engine: &base64::engine::GeneralPurpose,
+) -> Result<Value, IntentError> {
+    let Value::String(encoded) = value else {
+        return Err(IntentError::type_error("expected Base64 String"));
+    };
+    let unpadded = encoded.trim_end_matches('=');
+    let estimated = unpadded.len().checked_mul(3).map(|n| n / 4);
+    if encoded.len() > (16 * 1024 * 1024_usize).div_ceil(3) * 4
+        || estimated.is_none_or(|n| n > 16 * 1024 * 1024)
+    {
+        return Ok(Value::err(Value::String(
+            "capacity: decoded payload exceeds 16 MiB".into(),
+        )));
+    }
+    Ok(match engine.decode(encoded) {
+        Ok(bytes) => Value::ok(byte_values(&bytes)),
+        Err(e) => Value::err(Value::String(format!("Base64 decode error: {e}"))),
+    })
+}
+
+fn byte_values(bytes: &[u8]) -> Value {
+    Value::Array(bytes.iter().map(|b| Value::Int(i64::from(*b))).collect())
+}
+
+fn checked_hmac(args: &[Value]) -> Result<Hmac<Sha256>, IntentError> {
+    let key = checked_crypto_bytes(&args[0], true)?;
+    let data = checked_crypto_bytes(&args[1], true)?;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key)
+        .map_err(|_| IntentError::type_error("invalid HMAC key"))?;
+    mac.update(&data);
+    Ok(mac)
+}
+fn verify_hmac(args: &[Value]) -> Result<bool, String> {
+    let expected = match &args[2] {
+        Value::String(s) if s.len() == 64 => hex::decode(s)
+            .map_err(|_| "invalid_argument: expected 64 hexadecimal digits".to_string())?,
+        Value::Array(a) if a.len() == 32 => {
+            checked_crypto_bytes(&args[2], false).map_err(|e| e.to_string())?
+        }
+        _ => return Err("invalid_argument: expected exactly 32 tag bytes or 64 hex digits".into()),
+    };
+    let mac = checked_hmac(args).map_err(|e| e.to_string())?;
+    Ok(mac.verify_slice(&expected).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1194,23 +1413,5 @@ mod tests {
             "argon2_verify",
             vec![Value::String("password".into()), bcrypt_hash],
         )));
-    }
-}
-
-fn checked_crypto_bytes(value: &Value, allow_text: bool) -> Result<Vec<u8>, IntentError> {
-    match value {
-        Value::String(s) if allow_text => Ok(s.as_bytes().to_vec()),
-        Value::Array(values) => values
-            .iter()
-            .map(|v| match v {
-                Value::Int(n) if (0..=255).contains(n) => Ok(*n as u8),
-                _ => Err(IntentError::type_error(
-                    "expected integer bytes in 0..255".to_string(),
-                )),
-            })
-            .collect(),
-        _ => Err(IntentError::type_error(
-            "expected raw byte array or permitted UTF-8 string".to_string(),
-        )),
     }
 }

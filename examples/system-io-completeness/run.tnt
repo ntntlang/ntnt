@@ -1,0 +1,5 @@
+import { crypto_checks, clock_checks, file_checks } from "./checks.tnt"
+crypto_checks()
+clock_checks()
+file_checks()
+print("SYSTEM_IO_CHECKS_OK")

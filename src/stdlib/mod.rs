@@ -47,6 +47,9 @@ pub type StdlibModule = HashMap<String, Value>;
 pub fn shutdown_runtimes() {
     concurrent::RUNTIME.shutdown();
     process::RUNTIME.shutdown();
+    if let Err(e) = fs::owned::shutdown() {
+        eprintln!("temporary resource shutdown failed: {e}");
+    }
     if let Err(e) = net::tcp::shutdown() {
         eprintln!("TCP shutdown failed: {e}");
     }

@@ -4974,7 +4974,7 @@ try_recv(rx)
 Cryptographic hashing and random value generation
 
 ```ntnt
-import { sha384, sha384_bytes, base64_encode_bytes } from "std/crypto"
+import { base64_decode_bytes, base64url_encode_bytes, base64url_decode_bytes } from "std/crypto"
 ```
 
 ### Functions
@@ -4987,23 +4987,32 @@ import { sha384, sha384_bytes, base64_encode_bytes } from "std/crypto"
 | [`argon2_hash`](#argon2hash) | Hashes a password using Argon2id, the recommended password hashing algorithm. Returns a PHC-format string that includes the salt and parameters. Uses OWASP-recommended defaults: m=19456 KiB, t=2 iterations, p=1 parallelism. |
 | [`argon2_verify`](#argon2verify) | Verifies a password against an Argon2 hash in PHC format. Returns true if the password matches, false otherwise (including for invalid hashes). |
 | [`base64_decode`](#base64decode) | Decodes a standard Base64-encoded string back to plaintext. Returns Err if the input is not valid Base64 or not valid UTF-8. |
+| [`base64_decode_bytes`](#base64decodebytes) | Decode standard padded Base64 without interpreting UTF-8. Decoded payload is limited to 16 MiB; Value arrays use more heap memory. |
 | [`base64_encode`](#base64encode) | Encodes a string using standard Base64 encoding (RFC 4648). |
 | [`base64_encode_bytes`](#base64encodebytes) | RFC4648 standard padded base64 of checked raw bytes. |
 | [`base64url_decode`](#base64urldecode) | Decodes a URL-safe Base64-encoded string (no padding) back to plaintext. Returns Err if the input is not valid URL-safe Base64 or not valid UTF-8. |
+| [`base64url_decode_bytes`](#base64urldecodebytes) | Decode unpadded URL-safe Base64; decoded payload cap 16 MiB (Value arrays use more heap). |
 | [`base64url_encode`](#base64urlencode) | Encodes a string using URL-safe Base64 encoding (no padding). Uses the URL_SAFE_NO_PAD alphabet, suitable for URLs and filenames. |
+| [`base64url_encode_bytes`](#base64urlencodebytes) | Encode checked raw bytes as URL-safe Base64 without padding. |
 | [`csrf_generate`](#csrfgenerate) | Generate a CSRF token and its HMAC signature for stateless CSRF protection. |
 | [`csrf_validate`](#csrfvalidate) | Validate a CSRF token against its HMAC hash. |
 | [`hash_password`](#hashpassword) | Hash a password using bcrypt with configurable cost factor. |
 | [`hex_decode`](#hexdecode) | Decodes hex string to byte array. Returns Err for invalid hex. |
 | [`hex_encode`](#hexencode) | Encodes bytes or string as hex. |
-| [`hmac_sha256`](#hmacsha256) | HMAC-SHA256 message authentication code as hex string. |
+| [`hmac_sha256`](#hmacsha256) | HMAC-SHA256 lowercase hex over UTF-8 text or checked integer bytes in 0..255. |
+| [`hmac_sha256_bytes`](#hmacsha256bytes) | HMAC-SHA256 as 32 raw bytes. Text uses UTF-8; arrays require integers in 0..255. |
+| [`hmac_sha256_verify`](#hmacsha256verify) | Verify with RustCrypto MAC verification. Malformed hex or non-32-byte tags return Err; a valid mismatch returns Ok(false). |
 | [`is_valid_hash`](#isvalidhash) | Check if a string is a valid bcrypt hash format. |
 | [`random_bytes`](#randombytes) | Generates n cryptographically secure random bytes. Size limit 0-1048576. |
 | [`random_hex`](#randomhex) | Generates n random bytes as hex string (2n chars). |
-| [`sha256`](#sha256) | SHA-256 hash as hex string. Accepts string or byte array. |
+| [`sha256`](#sha256) | SHA-256 hash as hex string. Accepts text or checked integer bytes in 0..255. |
 | [`sha256_bytes`](#sha256bytes) | SHA-256 hash as byte array. Returns array of 32 integers (0-255). |
 | [`sha384`](#sha384) | SHA-384 lowercase hex of exact UTF-8 or checked raw bytes. |
 | [`sha384_bytes`](#sha384bytes) | SHA-384 as 48 raw digest bytes for SRI. |
+| [`sha512`](#sha512) | SHA-512 lowercase hex of UTF-8 text or checked integer bytes in 0..255. |
+| [`sha512_bytes`](#sha512bytes) | SHA-512 as 64 raw digest bytes; input bytes must be integers in 0..255. |
+| [`utf8_decode`](#utf8decode) | Decode checked bytes as UTF-8; invalid UTF-8 returns Err without lossy replacement. |
+| [`utf8_encode`](#utf8encode) | Encode text as exact UTF-8 bytes. |
 | [`uuid`](#uuid) | Generates a random UUID v4 string. |
 | [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
 
@@ -5164,6 +5173,28 @@ base64_decode("!!!invalid!!!")  // => Err("...")  // Invalid base64 returns Err
 
 ---
 
+#### `base64_decode_bytes`
+
+```ntnt
+base64_decode_bytes(encoded: String) -> Result<Array<Int>, String>
+```
+
+Decode standard padded Base64 without interpreting UTF-8. Decoded payload is limited to 16 MiB; Value arrays use more heap memory.
+
+**Parameters:**
+
+- `encoded` — Standard Base64 text.
+
+**Examples:**
+
+```ntnt
+base64_decode_bytes("AP8=")  // => Ok([0, 255])  // Decode binary bytes
+```
+
+*Since v0.5.4*
+
+---
+
 #### `base64_encode`
 
 ```ntnt
@@ -5241,6 +5272,28 @@ base64url_decode("!!!")  // => Err("...")  // Invalid input returns Err
 
 ---
 
+#### `base64url_decode_bytes`
+
+```ntnt
+base64url_decode_bytes(encoded: String) -> Result<Array<Int>, String>
+```
+
+Decode unpadded URL-safe Base64; decoded payload cap 16 MiB (Value arrays use more heap).
+
+**Parameters:**
+
+- `encoded` — URL-safe unpadded Base64 text.
+
+**Examples:**
+
+```ntnt
+base64url_decode_bytes("_w")  // Convert exact bytes
+```
+
+*Since v0.5.4*
+
+---
+
 #### `base64url_encode`
 
 ```ntnt
@@ -5264,6 +5317,28 @@ base64url_encode("Hello, World!")  // => "SGVsbG8sIFdvcmxkIQ"  // URL-safe base6
 **See also:** `base64url_decode`, `base64_encode`
 
 *Since v0.3.13*
+
+---
+
+#### `base64url_encode_bytes`
+
+```ntnt
+base64url_encode_bytes(data: Array<Int>) -> String
+```
+
+Encode checked raw bytes as URL-safe Base64 without padding.
+
+**Parameters:**
+
+- `data` — Checked integer bytes in 0..255.
+
+**Examples:**
+
+```ntnt
+base64url_encode_bytes([255])  // Convert exact bytes
+```
+
+*Since v0.5.4*
 
 ---
 
@@ -5407,10 +5482,10 @@ hex_encode("hi")  // => "6869"
 #### `hmac_sha256`
 
 ```ntnt
-hmac_sha256(key: String, data: String) -> String
+hmac_sha256(key: String | Array<Int>, data: String | Array<Int>) -> String
 ```
 
-HMAC-SHA256 message authentication code as hex string.
+HMAC-SHA256 lowercase hex over UTF-8 text or checked integer bytes in 0..255.
 
 **Parameters:**
 
@@ -5426,6 +5501,53 @@ hmac_sha256("secret", "message")  // Returns HMAC-SHA256 as 64-char hex string
 **See also:** `sha256`
 
 *Since v0.2.0*
+
+---
+
+#### `hmac_sha256_bytes`
+
+```ntnt
+hmac_sha256_bytes(key: String | Array<Int>, data: String | Array<Int>) -> Array<Int>
+```
+
+HMAC-SHA256 as 32 raw bytes. Text uses UTF-8; arrays require integers in 0..255.
+
+**Parameters:**
+
+- `key` — UTF-8 text or checked raw key bytes.
+- `data` — UTF-8 text or checked raw message bytes.
+
+**Examples:**
+
+```ntnt
+hmac_sha256_bytes([1, 2], [0, 255])  // Authenticate binary data
+```
+
+*Since v0.5.4*
+
+---
+
+#### `hmac_sha256_verify`
+
+```ntnt
+hmac_sha256_verify(key: String | Array<Int>, data: String | Array<Int>, expected: String | Array<Int>) -> Result<Bool, String>
+```
+
+Verify with RustCrypto MAC verification. Malformed hex or non-32-byte tags return Err; a valid mismatch returns Ok(false).
+
+**Parameters:**
+
+- `key` — UTF-8 text or checked raw key bytes.
+- `data` — UTF-8 text or checked raw message bytes.
+- `expected` — Exactly 32 checked bytes or 64 hexadecimal digits.
+
+**Examples:**
+
+```ntnt
+hmac_sha256_verify("key", "message", hmac_sha256("key", "message"))  // => Ok(true)  // Verify an authentic tag
+```
+
+*Since v0.5.4*
 
 ---
 
@@ -5516,7 +5638,7 @@ random_hex(8)  // Returns 16-char hex string from 8 random bytes
 sha256(data: String | Array<Int>) -> String
 ```
 
-SHA-256 hash as hex string. Accepts string or byte array.
+SHA-256 hash as hex string. Accepts text or checked integer bytes in 0..255.
 
 **Parameters:**
 
@@ -5535,14 +5657,14 @@ sha256("hello")  // => "2cf24dba..."  // Hash a string
 #### `sha256_bytes`
 
 ```ntnt
-sha256_bytes(data: String) -> Array<Int>
+sha256_bytes(data: String | Array<Int>) -> Array<Int>
 ```
 
 SHA-256 hash as byte array. Returns array of 32 integers (0-255).
 
 **Parameters:**
 
-- `data` — The input string to hash
+- `data` — UTF-8 text or checked integer bytes in 0..255.
 
 **Examples:**
 
@@ -5598,6 +5720,94 @@ Rejects non-integers and bytes outside 0..255 with a type error.
 
 ```ntnt
 sha384_bytes([97, 98, 99])  // Encode exact bytes
+```
+
+*Since v0.5.4*
+
+---
+
+#### `sha512`
+
+```ntnt
+sha512(data: String | Array<Int>) -> String
+```
+
+SHA-512 lowercase hex of UTF-8 text or checked integer bytes in 0..255.
+
+**Parameters:**
+
+- `data` — UTF-8 text or checked integer bytes in 0..255.
+
+**Examples:**
+
+```ntnt
+sha512("abc")  // Compute a 128-character lowercase digest
+```
+
+*Since v0.5.4*
+
+---
+
+#### `sha512_bytes`
+
+```ntnt
+sha512_bytes(data: String | Array<Int>) -> Array<Int>
+```
+
+SHA-512 as 64 raw digest bytes; input bytes must be integers in 0..255.
+
+**Parameters:**
+
+- `data` — UTF-8 text or checked integer bytes in 0..255.
+
+**Examples:**
+
+```ntnt
+sha512_bytes([0, 255])  // Compute 64 raw digest bytes
+```
+
+*Since v0.5.4*
+
+---
+
+#### `utf8_decode`
+
+```ntnt
+utf8_decode(data: Array<Int>) -> Result<String, String>
+```
+
+Decode checked bytes as UTF-8; invalid UTF-8 returns Err without lossy replacement.
+
+**Parameters:**
+
+- `data` — Checked integer bytes in 0..255; invalid UTF-8 returns Err.
+
+**Examples:**
+
+```ntnt
+utf8_decode([104, 105])  // Convert exact bytes
+```
+
+*Since v0.5.4*
+
+---
+
+#### `utf8_encode`
+
+```ntnt
+utf8_encode(text: String) -> Array<Int>
+```
+
+Encode text as exact UTF-8 bytes.
+
+**Parameters:**
+
+- `text` — Text to encode without normalization.
+
+**Examples:**
+
+```ntnt
+utf8_encode("hello")  // Convert exact bytes
 ```
 
 *Since v0.5.4*
@@ -6039,7 +6249,7 @@ load_env(".env.local")  // Load environment-specific file
 File system operations: reading, writing, and directory management
 
 ```ntnt
-import { read_file, read_bytes, write_file } from "std/fs"
+import { write_file_atomic, temp_file, temp_dir } from "std/fs"
 ```
 
 ### Functions
@@ -6057,20 +6267,28 @@ import { read_file, read_bytes, write_file } from "std/fs"
 | [`file_stat`](#filestat) | Get filesystem metadata for a file or directory. |
 | [`is_dir`](#isdir) | Check whether the path points to a directory. |
 | [`is_file`](#isfile) | Check whether the path points to a regular file. |
+| [`lstat`](#lstat) | Inspect without following the terminal symlink: size, is_file, is_dir, is_symlink, modified and created (Unix seconds, 0 if unavailable, matching file_stat). |
 | [`mkdir`](#mkdir) | Create a single directory. |
 | [`mkdir_all`](#mkdirall) | Create a directory and all missing parent directories. |
 | [`mkdir_private`](#mkdirprivate) | Unix single directory creation, default mode 448 restricted by umask; existing entries fail. |
 | [`read_bytes`](#readbytes) | Read the entire contents of a file as raw bytes. |
 | [`read_file`](#readfile) | Read the entire contents of a file as a UTF-8 string. |
+| [`read_link`](#readlink) | Return the exact symlink target without canonicalization. Non-UTF8 targets and non-symlinks return Err. |
 | [`readdir`](#readdir) | List the entries of a directory. |
 | [`remove`](#remove) | Remove a file from the filesystem. |
 | [`remove_dir`](#removedir) | Remove an empty directory. |
 | [`remove_dir_all`](#removedirall) | Recursively remove a directory and all of its contents. |
 | [`rename`](#rename) | Rename or move a file or directory. |
+| [`symlink`](#symlink) | Create a symlink without replacement. Kind defaults to file; file or dir is required on Windows. Permission or Windows privilege denial returns Err. |
 | [`sync_dir`](#syncdir) | Unix directory descriptor sync. OS/filesystem durability semantics apply; no physical-media guarantee. |
 | [`sync_file`](#syncfile) | Sync an existing regular file descriptor. Unix rejects terminal symlinks and special files; non-Unix terminal links follow OS open semantics. |
+| [`temp_close`](#tempclose) | Close all aliases and remove the owned path. Success is idempotent; cleanup failure remains a terminal Err on repeated close, with no automatic retry. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
+| [`temp_dir`](#tempdir) | Create an owned directory. Options: trusted parent and separator/NUL-free prefix. Unix mode 0700 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
+| [`temp_file`](#tempfile) | Create an owned private file. Options: trusted parent and separator/NUL-free prefix. Unix mode 0600 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
+| [`temp_path`](#temppath) | Expose the open owned path for filesystem APIs. Closed and non-UTF8 paths return Err. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
 | [`write_bytes`](#writebytes) | Write up to 16 MiB of validated bytes, creating or truncating with ordinary symlink semantics. |
 | [`write_file`](#writefile) | Write a string to a file, creating or overwriting it. |
+| [`write_file_atomic`](#writefileatomic) | Atomically replace a file using an owned same-parent temporary inode and rename. Default sync:true syncs file and parent on Unix. Non-Unix requires sync:false and no mode. Unix mode defaults to 0600, restricted by umask at creation; explicit broader mode also exposes staging. Replaces terminal symlinks, uses a new inode, and does not preserve ownership or ACLs. Trusted ancestors and filesystem rename guarantees are required; this is not race-free path authorization. Err distinguishes unpublished failure (including cleanup failure) from published durability_uncertain. |
 | [`write_file_exclusive`](#writefileexclusive) | Unix exclusive creation with initial mode (default 384, restricted by umask) and sync (default true). Options are mode and sync only. Trusted ancestors required. Never removes a partially written file. |
 
 #### `access`
@@ -6399,6 +6617,28 @@ is_file("config.tnt")  // => true  // Check if path is a file
 
 ---
 
+#### `lstat`
+
+```ntnt
+lstat(path: String) -> Result<Map<String, Any>, String>
+```
+
+Inspect without following the terminal symlink: size, is_file, is_dir, is_symlink, modified and created (Unix seconds, 0 if unavailable, matching file_stat).
+
+**Parameters:**
+
+- `path` — Path whose terminal entry is inspected without following it.
+
+**Examples:**
+
+```ntnt
+lstat("example.bin")  // Inspect file or symlink metadata
+```
+
+*Since v0.5.4*
+
+---
+
 #### `mkdir`
 
 ```ntnt
@@ -6549,6 +6789,28 @@ read_file("hello.txt")  // => Ok("Hello, world!")  // Read file contents
 **See also:** `read_bytes`, `write_file`, `exists`
 
 *Since v0.1.0*
+
+---
+
+#### `read_link`
+
+```ntnt
+read_link(path: String) -> Result<String, String>
+```
+
+Return the exact symlink target without canonicalization. Non-UTF8 targets and non-symlinks return Err.
+
+**Parameters:**
+
+- `path` — Symlink whose exact target should be read.
+
+**Examples:**
+
+```ntnt
+read_link("example-link")  // Read the target without canonicalizing it
+```
+
+*Since v0.5.4*
 
 ---
 
@@ -6713,6 +6975,30 @@ rename("old.txt", "new.txt")  // => Ok(())  // Rename a file
 
 ---
 
+#### `symlink`
+
+```ntnt
+symlink(target: String, path: String, kind?: String) -> Result<Unit, String>
+```
+
+Create a symlink without replacement. Kind defaults to file; file or dir is required on Windows. Permission or Windows privilege denial returns Err.
+
+**Parameters:**
+
+- `target` — Target string stored by the symlink.
+- `path` — New link path in a trusted parent; existing entries are never replaced.
+- `kind` — Optional file (default) or dir, used for Windows symlink creation.
+
+**Examples:**
+
+```ntnt
+symlink("example.bin", "example-link", "file")  // Create a file symlink; handle OS privilege errors
+```
+
+*Since v0.5.4*
+
+---
+
 #### `sync_dir`
 
 ```ntnt
@@ -6755,6 +7041,94 @@ Errors use invalid_argument:, already_exists:, unsupported: or io: classes. Unix
 
 ```ntnt
 sync_file("local-data")  // Inspect Result before continuing
+```
+
+*Since v0.5.4*
+
+---
+
+#### `temp_close`
+
+```ntnt
+temp_close(resource: TempFile | TempDir) -> Result<Unit, String>
+```
+
+Close all aliases and remove the owned path. Success is idempotent; cleanup failure remains a terminal Err on repeated close, with no automatic retry. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
+
+**Parameters:**
+
+- `resource` — A native TempFile or TempDir, including a closed alias.
+
+**Examples:**
+
+```ntnt
+temp_close(resource)  // Invalidate aliases and clean up the owned path
+```
+
+*Since v0.5.4*
+
+---
+
+#### `temp_dir`
+
+```ntnt
+temp_dir(options?: Map<String, Any>) -> Result<TempDir, String>
+```
+
+Create an owned directory. Options: trusted parent and separator/NUL-free prefix. Unix mode 0700 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
+
+**Parameters:**
+
+- `options` — Optional trusted parent String and separator/NUL-free prefix String.
+
+**Examples:**
+
+```ntnt
+temp_dir()  // Create an owned directory; explicitly temp_close after use
+```
+
+*Since v0.5.4*
+
+---
+
+#### `temp_file`
+
+```ntnt
+temp_file(options?: Map<String, Any>) -> Result<TempFile, String>
+```
+
+Create an owned private file. Options: trusted parent and separator/NUL-free prefix. Unix mode 0600 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
+
+**Parameters:**
+
+- `options` — Optional trusted parent String and separator/NUL-free prefix String.
+
+**Examples:**
+
+```ntnt
+temp_file()  // Create an owned file; use temp_path and explicitly temp_close
+```
+
+*Since v0.5.4*
+
+---
+
+#### `temp_path`
+
+```ntnt
+temp_path(resource: TempFile | TempDir) -> Result<String, String>
+```
+
+Expose the open owned path for filesystem APIs. Closed and non-UTF8 paths return Err. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks.
+
+**Parameters:**
+
+- `resource` — An open native TempFile or TempDir.
+
+**Examples:**
+
+```ntnt
+temp_path(resource)  // Get the owned UTF-8 path
 ```
 
 *Since v0.5.4*
@@ -6816,6 +7190,30 @@ write_file("out.txt", "hello")  // => Ok(())  // Write string to file
 **See also:** `read_file`, `append_file`, `copy`
 
 *Since v0.1.0*
+
+---
+
+#### `write_file_atomic`
+
+```ntnt
+write_file_atomic(path: String, content: String | Array<Int>, options?: Map<String, Any>) -> Result<Unit, String>
+```
+
+Atomically replace a file using an owned same-parent temporary inode and rename. Default sync:true syncs file and parent on Unix. Non-Unix requires sync:false and no mode. Unix mode defaults to 0600, restricted by umask at creation; explicit broader mode also exposes staging. Replaces terminal symlinks, uses a new inode, and does not preserve ownership or ACLs. Trusted ancestors and filesystem rename guarantees are required; this is not race-free path authorization. Err distinguishes unpublished failure (including cleanup failure) from published durability_uncertain.
+
+**Parameters:**
+
+- `path` — Destination in a trusted existing parent directory.
+- `content` — UTF-8 text or checked integer bytes in 0..255.
+- `options` — Optional mode 0..511 and sync Bool (default true); non-Unix requires sync:false without mode.
+
+**Examples:**
+
+```ntnt
+write_file_atomic("example.bin", [0, 255], map { "sync": false })  // Publish bytes with portable atomic visibility
+```
+
+*Since v0.5.4*
 
 ---
 
@@ -10334,7 +10732,7 @@ tanh(1)  // => 0.7615941559557649  // Hyperbolic tangent of one
 Safe network primitives: IPAM-grade CIDR math and reachability probes
 
 ```ntnt
-import { tcp_listen, tcp_accept, tcp_read } from "std/net"
+import { tcp_listen, tcp_accept, tcp_reader } from "std/net"
 ```
 
 ### Functions
@@ -10361,6 +10759,9 @@ import { tcp_listen, tcp_accept, tcp_read } from "std/net"
 | [`tcp_local_addr`](#tcplocaladdr) | Inspect the actual local bound address as {host, port}; Normal mode only. |
 | [`tcp_peer_addr`](#tcppeeraddr) | Inspect accepted peer address as {host, port}; Normal mode only. |
 | [`tcp_read`](#tcpread) | Read one bounded raw-byte chunk, with EOF distinct from timeout; Normal mode only. |
+| [`tcp_read_exact`](#tcpreadexact) | Read exactly count positive bytes within the reader cap, preserving overread for later calls. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Timeout defaults to 5000ms, range 1..60000, covering the whole call even with continuous progress. Timeout, EOF, oversize and I/O errors preserve buffered bytes and report buffered_bytes; retry a smaller exact read to drain. Invalid arguments never consume bytes. Already-complete buffered frames may succeed after peer EOF. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles. |
+| [`tcp_read_until`](#tcpreaduntil) | Read through and include a nonempty UTF-8 or checked binary delimiter, using linear matching only within max_bytes. Delimiter length <= max_bytes <= reader cap. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Timeout defaults to 5000ms, range 1..60000, covering the whole call even with continuous progress. Timeout, EOF, oversize and I/O errors preserve buffered bytes and report buffered_bytes; retry a smaller exact read to drain. Invalid arguments never consume bytes. Already-complete buffered frames may succeed after peer EOF. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles. |
+| [`tcp_reader`](#tcpreader) | Attach exclusive read ownership to the existing socket. max_buffer_bytes: 1..65536 (default65536). Raw reads and second readers then fail. Last reader alias Drop closes the shared socket; there is no detach operation. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Invalid options or capacity failure leave the stream unattached. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles. |
 | [`tcp_shutdown`](#tcpshutdown) | Shut down a stream direction without releasing its descriptor; Normal mode only. |
 | [`tcp_write`](#tcpwrite) | Write all input bytes or invalidate the stream; Normal mode only. |
 | [`tls_info`](#tlsinfo) | Opens a bounded TLS connection and returns certificate metadata. Validation failures still return Ok(map { "valid": false, ... }) when a certificate is available. |
@@ -10637,7 +11038,7 @@ tcp_accept(listener, 10)  // Check Result and close owned sockets
 #### `tcp_close`
 
 ```ntnt
-tcp_close(socket: TcpListener | TcpStream) -> Result<Unit, String>
+tcp_close(socket: TcpListener | TcpStream | TcpReader) -> Result<Unit, String>
 ```
 
 Close a native socket and release capacity; Normal mode only.
@@ -10646,7 +11047,7 @@ Aliases observe closed state; listener close leaves accepted streams independent
 
 **Parameters:**
 
-- `socket` — Genuine TcpListener or TcpStream; close is idempotent for closed aliases.
+- `socket` — Genuine TcpListener, TcpStream or TcpReader; close is idempotent for closed aliases.
 
 **Examples:**
 
@@ -10712,7 +11113,7 @@ tcp_listen(0)  // Check Result and close owned sockets
 #### `tcp_local_addr`
 
 ```ntnt
-tcp_local_addr(socket: TcpListener | TcpStream) -> Result<Map<String, Any>, String>
+tcp_local_addr(socket: TcpListener | TcpStream | TcpReader) -> Result<Map<String, Any>, String>
 ```
 
 Inspect the actual local bound address as {host, port}; Normal mode only.
@@ -10721,7 +11122,7 @@ Port 0 reports the OS-assigned port. Closing after a bind checks availability, n
 
 **Parameters:**
 
-- `socket` — Genuine open TcpListener or TcpStream.
+- `socket` — Genuine open TcpListener, TcpStream or TcpReader.
 
 **Examples:**
 
@@ -10783,6 +11184,80 @@ tcp_read(stream, 1024, 10)  // Check Result and close owned sockets
 
 ---
 
+#### `tcp_read_exact`
+
+```ntnt
+tcp_read_exact(reader: TcpReader, count: Int, timeout_ms?: Int) -> Result<Array<Int>, String>
+```
+
+Read exactly count positive bytes within the reader cap, preserving overread for later calls. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Timeout defaults to 5000ms, range 1..60000, covering the whole call even with continuous progress. Timeout, EOF, oversize and I/O errors preserve buffered bytes and report buffered_bytes; retry a smaller exact read to drain. Invalid arguments never consume bytes. Already-complete buffered frames may succeed after peer EOF. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles.
+
+**Parameters:**
+
+- `reader` — An open native TcpReader.
+- `count` — Positive byte count within the reader buffer cap.
+- `timeout_ms` — Optional whole-call timeout in 1..60000 milliseconds, default 5000.
+
+**Examples:**
+
+```ntnt
+tcp_read_exact(reader, 4, 1000)  // Read exactly four bytes without losing overread
+```
+
+*Since v0.5.4*
+
+---
+
+#### `tcp_read_until`
+
+```ntnt
+tcp_read_until(reader: TcpReader, delimiter: String | Array<Int>, max_bytes: Int, timeout_ms?: Int) -> Result<Array<Int>, String>
+```
+
+Read through and include a nonempty UTF-8 or checked binary delimiter, using linear matching only within max_bytes. Delimiter length <= max_bytes <= reader cap. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Timeout defaults to 5000ms, range 1..60000, covering the whole call even with continuous progress. Timeout, EOF, oversize and I/O errors preserve buffered bytes and report buffered_bytes; retry a smaller exact read to drain. Invalid arguments never consume bytes. Already-complete buffered frames may succeed after peer EOF. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles.
+
+**Parameters:**
+
+- `reader` — An open native TcpReader.
+- `delimiter` — Nonempty UTF-8 text or checked raw bytes, at most max_bytes long.
+- `max_bytes` — Positive frame limit within the reader buffer cap.
+- `timeout_ms` — Optional whole-call timeout in 1..60000 milliseconds, default 5000.
+
+**Examples:**
+
+```ntnt
+tcp_read_until(reader, [13, 10], 4096, 1000)  // Read a binary CRLF-terminated frame including CRLF
+```
+
+*Since v0.5.4*
+
+---
+
+#### `tcp_reader`
+
+```ntnt
+tcp_reader(stream: TcpStream, options?: Map<String, Any>) -> Result<TcpReader, String>
+```
+
+Attach exclusive read ownership to the existing socket. max_buffer_bytes: 1..65536 (default65536). Raw reads and second readers then fail. Last reader alias Drop closes the shared socket; there is no detach operation. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Invalid options or capacity failure leave the stream unattached. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles.
+
+**Parameters:**
+
+- `stream` — An open native TcpStream without an attached reader.
+- `options` — Optional max_buffer_bytes integer in 1..65536, default 65536.
+
+**Examples:**
+
+```ntnt
+tcp_reader(stream, map { "max_buffer_bytes": 4096 })  // Attach exclusive buffered read ownership
+```
+
+**See also:** `tcp_read_exact`, `tcp_read_until`, `tcp_close`
+
+*Since v0.5.4*
+
+---
+
 #### `tcp_shutdown`
 
 ```ntnt
@@ -10791,7 +11266,7 @@ tcp_shutdown(stream: TcpStream, how: String) -> Result<Unit, String>
 
 Shut down a stream direction without releasing its descriptor; Normal mode only.
 
-Subsequent writes after write shutdown return Err; close releases capacity. Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err. Concurrent operations on one owner return busy: rather than blocking on its lock.
+Subsequent writes after write shutdown return Err; close releases capacity. Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err. Concurrent operations on one owner return busy: rather than blocking on its lock. An attached reader preserves buffered bytes on read/both shutdown and marks local EOF.
 
 **Parameters:**
 
@@ -13818,7 +14293,7 @@ words("hello world")  // => ["hello", "world"]  // Split by whitespace
 Date, time, and duration operations
 
 ```ntnt
-import { now, now_millis, now_nanos } from "std/time"
+import { monotonic_now, monotonic_elapsed, monotonic_deadline } from "std/time"
 ```
 
 ### Functions
@@ -13851,6 +14326,10 @@ import { now, now_millis, now_nanos } from "std/time"
 | [`make_date`](#makedate) | Creates a Unix timestamp for midnight UTC from date components. |
 | [`make_time`](#maketime) | Creates a Unix timestamp from individual date and time components (UTC). |
 | [`minute`](#minute) | Extracts the minute from a Unix timestamp (UTC). |
+| [`monotonic_deadline`](#monotonicdeadline) | Checked process-local deadline. Zero is immediate; negative or overflowing timeouts return Err. |
+| [`monotonic_elapsed`](#monotonicelapsed) | Elapsed monotonic milliseconds. Negative or future starts return Err. |
+| [`monotonic_now`](#monotonicnow) | Nondecreasing process-local milliseconds from one Instant origin; not Unix time or cross-process persistent. |
+| [`monotonic_remaining`](#monotonicremaining) | Remaining monotonic milliseconds, saturating at zero. Negative deadlines return Err. |
 | [`month`](#month) | Extracts the month from a Unix timestamp (UTC). |
 | [`month_name`](#monthname) | Returns the full English name of the month for a timestamp (UTC). |
 | [`now`](#now) | Returns the current Unix timestamp in seconds (UTC). |
@@ -14722,6 +15201,90 @@ minute(0)  // => 0  // Epoch minute is 0
 **See also:** `hour`, `second`, `to_utc`
 
 *Since v0.1.0*
+
+---
+
+#### `monotonic_deadline`
+
+```ntnt
+monotonic_deadline(timeout_ms: Int) -> Result<Int, String>
+```
+
+Checked process-local deadline. Zero is immediate; negative or overflowing timeouts return Err.
+
+**Parameters:**
+
+- `timeout_ms` — Nonnegative timeout in milliseconds; zero is immediate.
+
+**Examples:**
+
+```ntnt
+monotonic_deadline(1000)  // Create a deadline one second from now
+```
+
+*Since v0.5.4*
+
+---
+
+#### `monotonic_elapsed`
+
+```ntnt
+monotonic_elapsed(start: Int) -> Result<Int, String>
+```
+
+Elapsed monotonic milliseconds. Negative or future starts return Err.
+
+**Parameters:**
+
+- `start` — A previous monotonic_now result from this process.
+
+**Examples:**
+
+```ntnt
+monotonic_elapsed(0)  // Measure milliseconds since the process-local origin
+```
+
+*Since v0.5.4*
+
+---
+
+#### `monotonic_now`
+
+```ntnt
+monotonic_now() -> Int
+```
+
+Nondecreasing process-local milliseconds from one Instant origin; not Unix time or cross-process persistent.
+
+**Examples:**
+
+```ntnt
+monotonic_now()  // Read nondecreasing process-local milliseconds
+```
+
+*Since v0.5.4*
+
+---
+
+#### `monotonic_remaining`
+
+```ntnt
+monotonic_remaining(deadline: Int) -> Result<Int, String>
+```
+
+Remaining monotonic milliseconds, saturating at zero. Negative deadlines return Err.
+
+**Parameters:**
+
+- `deadline` — A nonnegative deadline from this process.
+
+**Examples:**
+
+```ntnt
+monotonic_remaining(0)  // => Ok(0)  // Past deadline has no time remaining
+```
+
+*Since v0.5.4*
 
 ---
 

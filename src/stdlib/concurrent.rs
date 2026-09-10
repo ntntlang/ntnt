@@ -226,7 +226,8 @@ impl SerializedValue {
                 })
             }
             Value::TaskHandle(id) => Ok(SerializedValue::TaskHandle(*id)),
-            Value::TcpListener(_) | Value::TcpStream(_) => Err(IntentError::type_error("TCP handles cannot transfer between tasks or channels")),
+            Value::TcpListener(_) | Value::TcpStream(_) | Value::TcpReader(_) => Err(IntentError::type_error("TCP handles cannot transfer between tasks or channels")),
+            Value::TempFile(_) | Value::TempDir(_) => Err(IntentError::type_error("Temporary handles cannot transfer between tasks or channels")),
             Value::ProcessHandle(_) => Err(IntentError::type_error(
                 "Process handles cannot cross task or channel boundaries".to_string(),
             )),
@@ -1184,13 +1185,13 @@ struct CapturedNativeFn {
 }
 
 /// Capture all bindings from an environment for cross-thread use.
-/// Returns Err with a list of non-serializable closure names if any are found.
+/// Returns Err for captured closures or nested runtime-local resource authority.
 fn capture_bindings(
     bindings: &HashMap<String, Value>,
 ) -> std::result::Result<CapturedBindings, Vec<String>> {
     let mut values = HashMap::new();
     let mut native_fns = Vec::new();
-    let mut non_serializable_closures = Vec::new();
+    let mut non_serializable_captures = Vec::new();
 
     for (key, value) in bindings {
         match value {
@@ -1215,10 +1216,11 @@ fn capture_bindings(
                     values.insert(key.clone(), serialized);
                 }
                 Err(_) => {
-                    // User-defined closures (Value::Function) cannot cross task boundaries.
-                    // Track them so we can fail with a clear error listing all problematic captures.
-                    if matches!(value, Value::Function { .. }) {
-                        non_serializable_closures.push(key.clone());
+                    // Reject closures and nested runtime-local authority before any task starts.
+                    if matches!(value, Value::Function { .. })
+                        || crate::stdlib::json::reject_runtime_authority(value).is_err()
+                    {
+                        non_serializable_captures.push(key.clone());
                     } else {
                         eprintln!(
                             "[WARN] Cannot capture '{}' for concurrent task: value type '{}' is not serializable",
@@ -1231,8 +1233,8 @@ fn capture_bindings(
         }
     }
 
-    if !non_serializable_closures.is_empty() {
-        return Err(non_serializable_closures);
+    if !non_serializable_captures.is_empty() {
+        return Err(non_serializable_captures);
     }
 
     Ok(CapturedBindings { values, native_fns })
@@ -1784,8 +1786,8 @@ fn validate_and_capture(
                 .collect();
             let captured = capture_bindings(&needed).map_err(|names| {
                 IntentError::runtime_error(format!(
-                    "Cannot capture user-defined function(s) across task boundaries: {}. \
-                     These functions use Rc<RefCell> which cannot be sent between threads. \
+                    "Cannot capture user-defined functions or runtime-local resources across task boundaries: {}. \
+                     Captured values must support task serialization. \
                      Inline the function body into the closure, or call a native function instead.",
                     names.join(", ")
                 ))
@@ -1920,6 +1922,9 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
             | Value::ProcessHandle(_)
             | Value::TcpListener(_)
             | Value::TcpStream(_)
+            | Value::TcpReader(_)
+            | Value::TempFile(_)
+            | Value::TempDir(_)
             | Value::TxChannelHandle(_, _)
             | Value::RxChannelHandle(_)
             | Value::ScheduleHandle(_)

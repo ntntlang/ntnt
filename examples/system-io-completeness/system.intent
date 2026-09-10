@@ -1,0 +1,30 @@
+# System I/O native checks
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| checking binary crypto | call: crypto_checks(), source: checks.tnt |
+| checking monotonic time | call: clock_checks(), source: checks.tnt |
+| checking owned files | call: file_checks(), source: checks.tnt |
+
+Feature: Binary cryptography
+  id: feature.system_io_crypto
+
+  Scenario: Exact bytes and authenticated tags
+    When checking binary crypto
+    → native assertions pass
+
+Feature: Process-local monotonic time
+  id: feature.system_io_clock
+
+  Scenario: Checked deadlines and elapsed time
+    When checking monotonic time
+    → native assertions pass
+
+Feature: Owned filesystem resources
+  id: feature.system_io_files
+
+  Scenario: Atomic binary writes and explicit cleanup
+    When checking owned files
+    → native assertions pass

@@ -25,6 +25,12 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Missing-suffix resolution with ordered symlink expansion.
 - [x] Bounded opaque server-side TCP handles and multi-client native fixture.
 - [x] Existing HTTP engines: literal host, post-bind readiness and opt-in fixture header suppression.
+- [x] Binary Base64/UTF-8 completion, checked SHA256/SHA512 and HMAC verification.
+- [x] Process-local monotonic elapsed/deadline/remaining helpers.
+- [x] Same-parent atomic writes, owned temporary resources and portable symlink inspection.
+- [x] Shared-owner buffered TCP exact/delimiter reads with bounded memory and whole-call deadlines.
+- [x] Native system I/O examples, strict typed imports and Normal-mode loopback framing fixture.
+- Deferred: outbound TCP/UDP/TLS/Unix sockets, general file streams/incremental hashing, HTTP lifecycle.
 - [ ] Independent final review and hosted platform matrix (parent-owned; no publication from this worktree).
 
 ## Current Status

@@ -1,0 +1,65 @@
+import { base64_decode_bytes, base64url_encode_bytes, base64url_decode_bytes, utf8_encode, utf8_decode, sha256, sha256_bytes, sha512, sha512_bytes, hmac_sha256, hmac_sha256_bytes, hmac_sha256_verify } from "std/crypto"
+import { monotonic_now, monotonic_elapsed, monotonic_deadline, monotonic_remaining } from "std/time"
+import { temp_file, temp_dir, temp_path, temp_close, write_file_atomic, read_bytes, exists, lstat, read_link, symlink } from "std/fs"
+import { stringify } from "std/json"
+
+fn decode(text: String) -> Result<Array<Int>, String> { base64_decode_bytes(text) }
+fn decode_url(text: String) -> Result<Array<Int>, String> { base64url_decode_bytes(text) }
+fn decode_utf8(data: Array<Int>) -> Result<String, String> { utf8_decode(data) }
+fn verify(key: Array<Int>, data: Array<Int>, tag: Array<Int>) -> Result<Bool, String> { hmac_sha256_verify(key, data, tag) }
+fn elapsed(start: Int) -> Result<Int, String> { monotonic_elapsed(start) }
+fn deadline(timeout: Int) -> Result<Int, String> { monotonic_deadline(timeout) }
+fn remaining(due: Int) -> Result<Int, String> { monotonic_remaining(due) }
+fn owned_file() -> Result<TempFile, String> { temp_file() }
+fn owned_dir() -> Result<TempDir, String> { temp_dir() }
+fn owned_path(resource: TempFile | TempDir) -> Result<String, String> { temp_path(resource) }
+fn cleanup(resource: TempFile | TempDir) -> Result<Unit, String> { temp_close(resource) }
+fn atomic(path: String, data: Array<Int>) -> Result<Unit, String> { write_file_atomic(path, data, map { "sync": false }) }
+fn inspect(path: String) -> Result<Map<String, Any>, String> { lstat(path) }
+fn link_target(path: String) -> Result<String, String> { read_link(path) }
+fn make_link(target: String, path: String) -> Result<Unit, String> { symlink(target, path, "file") }
+
+// @implements: feature.system_io_crypto
+fn crypto_checks() -> Unit {
+    let raw = [0, 255]
+    assert(stringify(unwrap(decode("AP8="))) == "[0,255]")
+    assert(base64url_encode_bytes(raw) == "AP8")
+    assert(stringify(unwrap(decode_url("AP8"))) == "[0,255]")
+    assert(unwrap(decode_utf8(utf8_encode("hello"))) == "hello")
+    assert(is_err(decode_utf8([255])))
+    assert(sha256([97, 98, 99]) == sha256("abc"))
+    assert(len(sha256_bytes(raw)) == 32)
+    assert(len(sha512(raw)) == 128)
+    assert(len(sha512_bytes(raw)) == 64)
+    let tag = hmac_sha256_bytes([1, 2], raw)
+    assert(unwrap(verify([1, 2], raw, tag)))
+    assert(!unwrap(verify([1, 2], [0], tag)))
+    assert(len(hmac_sha256([1, 2], raw)) == 64)
+}
+
+// @implements: feature.system_io_clock
+fn clock_checks() -> Unit {
+    let start = monotonic_now()
+    assert(unwrap(elapsed(start)) >= 0)
+    assert(unwrap(remaining(unwrap(deadline(0)))) == 0)
+    assert(is_err(elapsed(-1)))
+    assert(is_err(deadline(-1)))
+}
+
+// @implements: feature.system_io_files
+fn file_checks() -> Unit {
+    let file = unwrap(owned_file())
+    let path = unwrap(owned_path(file))
+    assert(exists(path))
+    unwrap(atomic(path, [0, 255]))
+    assert(stringify(unwrap(read_bytes(path))) == "[0,255]")
+    assert(unwrap(inspect(path))["is_file"])
+    assert(is_err(link_target(path)))
+    let dir = unwrap(owned_dir())
+    assert(exists(unwrap(owned_path(dir))))
+    unwrap(cleanup(dir))
+    unwrap(cleanup(file))
+    unwrap(cleanup(file))
+    assert(!exists(path))
+    assert(is_err(owned_path(file)))
+}
