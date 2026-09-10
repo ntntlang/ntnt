@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.5.3
+> Last updated: v0.5.4
 
 ## Table of Contents
 
@@ -72,7 +72,7 @@ These functions are available everywhere without importing.
 | [`jobs(directory: String)`](#jobs) | Auto-discover and register job definitions from .tnt files in a directory. |
 | [`len(x: String \| Array \| Map)`](#len) | Returns the length of a string, array, or map. |
 | [`libs(directory: String)`](#libs) | Auto-import all .tnt files from a directory. |
-| [`listen(port: Int)`](#listen) | Starts an HTTP server on the given port. |
+| [`listen(port: Int, options?: Map<String, Any>)`](#listen) | Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool, require fixture=true). Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged. JSON readiness is one flushed NTNT_READY line after bind with actual host/port. Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness. Starts an HTTP server on the given port. |
 | [`max(a: Int \| Float, b: Int \| Float)`](#max) | Returns the larger of two numbers. |
 | [`min(a: Int \| Float, b: Int \| Float)`](#min) | Returns the smaller of two numbers. |
 | [`new_server()`](#newserver) | Resets the server, clearing all registered routes. |
@@ -981,15 +981,16 @@ libs("lib/")  // Auto-load all lib files into the current scope
 #### `listen`
 
 ```ntnt
-listen(port: Int) -> Unit
+listen(port: Int, options?: Map<String, Any>) -> Unit
 ```
 
-Starts an HTTP server on the given port.
+Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool, require fixture=true). Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged. JSON readiness is one flushed NTNT_READY line after bind with actual host/port. Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness. Starts an HTTP server on the given port.
 
 This must be called after registering route handlers with get(), post(), put(), delete(), or patch(). The server blocks and serves requests until the process is terminated.
 
 **Parameters:**
 
+- `options` — Optional immutable listener and fixture response policy.
 - `port` — The port number to listen on (e.g. 8080)
 
 **Examples:**
@@ -4973,7 +4974,7 @@ try_recv(rx)
 Cryptographic hashing and random value generation
 
 ```ntnt
-import { sha256, sha256_bytes, hmac_sha256 } from "std/crypto"
+import { sha384, sha384_bytes, base64_encode_bytes } from "std/crypto"
 ```
 
 ### Functions
@@ -4987,6 +4988,7 @@ import { sha256, sha256_bytes, hmac_sha256 } from "std/crypto"
 | [`argon2_verify`](#argon2verify) | Verifies a password against an Argon2 hash in PHC format. Returns true if the password matches, false otherwise (including for invalid hashes). |
 | [`base64_decode`](#base64decode) | Decodes a standard Base64-encoded string back to plaintext. Returns Err if the input is not valid Base64 or not valid UTF-8. |
 | [`base64_encode`](#base64encode) | Encodes a string using standard Base64 encoding (RFC 4648). |
+| [`base64_encode_bytes`](#base64encodebytes) | RFC4648 standard padded base64 of checked raw bytes. |
 | [`base64url_decode`](#base64urldecode) | Decodes a URL-safe Base64-encoded string (no padding) back to plaintext. Returns Err if the input is not valid URL-safe Base64 or not valid UTF-8. |
 | [`base64url_encode`](#base64urlencode) | Encodes a string using URL-safe Base64 encoding (no padding). Uses the URL_SAFE_NO_PAD alphabet, suitable for URLs and filenames. |
 | [`csrf_generate`](#csrfgenerate) | Generate a CSRF token and its HMAC signature for stateless CSRF protection. |
@@ -5000,6 +5002,8 @@ import { sha256, sha256_bytes, hmac_sha256 } from "std/crypto"
 | [`random_hex`](#randomhex) | Generates n random bytes as hex string (2n chars). |
 | [`sha256`](#sha256) | SHA-256 hash as hex string. Accepts string or byte array. |
 | [`sha256_bytes`](#sha256bytes) | SHA-256 hash as byte array. Returns array of 32 integers (0-255). |
+| [`sha384`](#sha384) | SHA-384 lowercase hex of exact UTF-8 or checked raw bytes. |
+| [`sha384_bytes`](#sha384bytes) | SHA-384 as 48 raw digest bytes for SRI. |
 | [`uuid`](#uuid) | Generates a random UUID v4 string. |
 | [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
 
@@ -5183,6 +5187,30 @@ base64_encode("Hello, World!")  // => "SGVsbG8sIFdvcmxkIQ=="  // Standard base64
 **See also:** `base64_decode`, `base64url_encode`
 
 *Since v0.3.13*
+
+---
+
+#### `base64_encode_bytes`
+
+```ntnt
+base64_encode_bytes(data: Array<Int>) -> String
+```
+
+RFC4648 standard padded base64 of checked raw bytes.
+
+Rejects non-integers and bytes outside 0..255 with a type error.
+
+**Parameters:**
+
+- `data` — Array of integer bytes in 0..255; strings are not accepted.
+
+**Examples:**
+
+```ntnt
+base64_encode_bytes([97, 98, 99])  // Encode exact bytes
+```
+
+*Since v0.5.4*
 
 ---
 
@@ -5525,6 +5553,54 @@ sha256_bytes("hello")[0]  // => 44  // First byte of SHA-256 hash of 'hello'
 **See also:** `sha256`
 
 *Since v0.2.0*
+
+---
+
+#### `sha384`
+
+```ntnt
+sha384(data: String | Array<Int>) -> String
+```
+
+SHA-384 lowercase hex of exact UTF-8 or checked raw bytes.
+
+Rejects non-integers and bytes outside 0..255 with a type error.
+
+**Parameters:**
+
+- `data` — Exact input bytes; strings use UTF-8.
+
+**Examples:**
+
+```ntnt
+sha384([97, 98, 99])  // Encode exact bytes
+```
+
+*Since v0.5.4*
+
+---
+
+#### `sha384_bytes`
+
+```ntnt
+sha384_bytes(data: String | Array<Int>) -> Array<Int>
+```
+
+SHA-384 as 48 raw digest bytes for SRI.
+
+Rejects non-integers and bytes outside 0..255 with a type error.
+
+**Parameters:**
+
+- `data` — Exact input bytes; strings use UTF-8.
+
+**Examples:**
+
+```ntnt
+sha384_bytes([97, 98, 99])  // Encode exact bytes
+```
+
+*Since v0.5.4*
 
 ---
 
@@ -5970,15 +6046,20 @@ import { read_file, read_bytes, write_file } from "std/fs"
 
 | Function | Description |
 |----------|-------------|
+| [`access`](#access) | Unix real-ID access check: empty mode checks existence; nonrepeating r/w/x combinations check access. Advisory and TOCTOU-prone, not permission to open. |
 | [`append_file`](#appendfile) | Append a string to the end of a file, creating it if it does not exist. |
+| [`chmod`](#chmod) | Unix chmod follows terminal symlinks, accepts 0..511. Not a race-free authorization operation. |
+| [`chown`](#chown) | Unix chown follows terminal symlinks. IDs exclude negative values and all-ones sentinel. OS may clear set-ID bits. |
 | [`copy`](#copy) | Copy a file to a new location, returning the number of bytes copied. |
 | [`exists`](#exists) | Check whether a file or directory exists at the given path. |
+| [`file_permissions`](#filepermissions) | Unix lstat returns mode (including special bits), uid, gid, is_symlink, is_file and is_dir. |
 | [`file_size`](#filesize) | Get the size of a file in bytes. |
 | [`file_stat`](#filestat) | Get filesystem metadata for a file or directory. |
 | [`is_dir`](#isdir) | Check whether the path points to a directory. |
 | [`is_file`](#isfile) | Check whether the path points to a regular file. |
 | [`mkdir`](#mkdir) | Create a single directory. |
 | [`mkdir_all`](#mkdirall) | Create a directory and all missing parent directories. |
+| [`mkdir_private`](#mkdirprivate) | Unix single directory creation, default mode 448 restricted by umask; existing entries fail. |
 | [`read_bytes`](#readbytes) | Read the entire contents of a file as raw bytes. |
 | [`read_file`](#readfile) | Read the entire contents of a file as a UTF-8 string. |
 | [`readdir`](#readdir) | List the entries of a directory. |
@@ -5986,7 +6067,36 @@ import { read_file, read_bytes, write_file } from "std/fs"
 | [`remove_dir`](#removedir) | Remove an empty directory. |
 | [`remove_dir_all`](#removedirall) | Recursively remove a directory and all of its contents. |
 | [`rename`](#rename) | Rename or move a file or directory. |
+| [`sync_dir`](#syncdir) | Unix directory descriptor sync. OS/filesystem durability semantics apply; no physical-media guarantee. |
+| [`sync_file`](#syncfile) | Sync an existing regular file descriptor. Unix rejects terminal symlinks and special files; non-Unix terminal links follow OS open semantics. |
+| [`write_bytes`](#writebytes) | Write up to 16 MiB of validated bytes, creating or truncating with ordinary symlink semantics. |
 | [`write_file`](#writefile) | Write a string to a file, creating or overwriting it. |
+| [`write_file_exclusive`](#writefileexclusive) | Unix exclusive creation with initial mode (default 384, restricted by umask) and sync (default true). Options are mode and sync only. Trusted ancestors required. Never removes a partially written file. |
+
+#### `access`
+
+```ntnt
+access(path: String, mode: String) -> Result<Bool, String>
+```
+
+Unix real-ID access check: empty mode checks existence; nonrepeating r/w/x combinations check access. Advisory and TOCTOU-prone, not permission to open.
+
+Errors use invalid_argument:, already_exists:, unsupported: or io: classes. Unix-only operations return unsupported before mutation on other platforms.
+
+**Parameters:**
+
+- `path` — Filesystem path with trusted ancestors; NUL is rejected.
+- `mode` — Empty for existence or a nonrepeating r/w/x combination; real-ID semantics.
+
+**Examples:**
+
+```ntnt
+access("local-data", "r")  // Inspect Result before continuing
+```
+
+*Since v0.5.4*
+
+---
 
 #### `append_file`
 
@@ -6018,6 +6128,57 @@ append_file("log.txt", "new line\n")  // => Ok(())  // Append to file
 **See also:** `write_file`, `read_file`
 
 *Since v0.1.0*
+
+---
+
+#### `chmod`
+
+```ntnt
+chmod(path: String, mode: Int) -> Result<Unit, String>
+```
+
+Unix chmod follows terminal symlinks, accepts 0..511. Not a race-free authorization operation.
+
+Errors use invalid_argument:, already_exists:, unsupported: or io: classes. Unix-only operations return unsupported before mutation on other platforms.
+
+**Parameters:**
+
+- `path` — Filesystem path with trusted ancestors; NUL is rejected.
+- `mode` — Integer 0..511; special bits rejected.
+
+**Examples:**
+
+```ntnt
+chmod("local-data", 384)  // Inspect Result before continuing
+```
+
+*Since v0.5.4*
+
+---
+
+#### `chown`
+
+```ntnt
+chown(path: String, uid: Int, gid: Int) -> Result<Unit, String>
+```
+
+Unix chown follows terminal symlinks. IDs exclude negative values and all-ones sentinel. OS may clear set-ID bits.
+
+Errors use invalid_argument:, already_exists:, unsupported: or io: classes. Unix-only operations return unsupported before mutation on other platforms.
+
+**Parameters:**
+
+- `path` — Filesystem path with trusted ancestors; NUL is rejected.
+- `uid` — Nonnegative OS user ID excluding the all-ones sentinel.
+- `gid` — Nonnegative OS group ID excluding the all-ones sentinel.
+
+**Examples:**
+
+```ntnt
+chown("local-data", 1000, 1000)  // Inspect Result before continuing
+```
+
+*Since v0.5.4*
 
 ---
 
@@ -6083,6 +6244,30 @@ exists("/tmp")  // => true  // Check path existence
 **See also:** `is_file`, `is_dir`
 
 *Since v0.1.0*
+
+---
+
+#### `file_permissions`
+
+```ntnt
+file_permissions(path: String) -> Result<Map<String, Any>, String>
+```
+
+Unix lstat returns mode (including special bits), uid, gid, is_symlink, is_file and is_dir.
+
+Errors use invalid_argument:, already_exists:, unsupported: or io: classes. Unix-only operations return unsupported before mutation on other platforms.
+
+**Parameters:**
+
+- `path` — Filesystem path with trusted ancestors; NUL is rejected.
+
+**Examples:**
+
+```ntnt
+file_permissions("local-data")  // Inspect Result before continuing
+```
+
+*Since v0.5.4*
 
 ---
 
@@ -6275,6 +6460,31 @@ mkdir_all("a/b/c")  // => Ok(())  // Create nested directories
 **See also:** `mkdir`, `remove_dir_all`, `readdir`
 
 *Since v0.1.0*
+
+---
+
+#### `mkdir_private`
+
+```ntnt
+mkdir_private(path: String, mode?: Int) -> Result<Unit, String>
+```
+
+Unix single directory creation, default mode 448 restricted by umask; existing entries fail.
+
+Errors use invalid_argument:, already_exists:, unsupported: or io: classes. Unix-only operations return unsupported before mutation on other platforms.
+
+**Parameters:**
+
+- `path` — Filesystem path with trusted ancestors; NUL is rejected.
+- `mode` — Optional integer 0..511, default 448; restricted by inherited umask.
+
+**Examples:**
+
+```ntnt
+mkdir_private("local-data")  // Inspect Result before continuing
+```
+
+*Since v0.5.4*
 
 ---
 
@@ -6503,6 +6713,79 @@ rename("old.txt", "new.txt")  // => Ok(())  // Rename a file
 
 ---
 
+#### `sync_dir`
+
+```ntnt
+sync_dir(path: String) -> Result<Unit, String>
+```
+
+Unix directory descriptor sync. OS/filesystem durability semantics apply; no physical-media guarantee.
+
+Errors use invalid_argument:, already_exists:, unsupported: or io: classes. Unix-only operations return unsupported before mutation on other platforms.
+
+**Parameters:**
+
+- `path` — Filesystem path with trusted ancestors; NUL is rejected.
+
+**Examples:**
+
+```ntnt
+sync_dir("local-data")  // Inspect Result before continuing
+```
+
+*Since v0.5.4*
+
+---
+
+#### `sync_file`
+
+```ntnt
+sync_file(path: String) -> Result<Unit, String>
+```
+
+Sync an existing regular file descriptor. Unix rejects terminal symlinks and special files; non-Unix terminal links follow OS open semantics.
+
+Errors use invalid_argument:, already_exists:, unsupported: or io: classes. Unix-only operations return unsupported before mutation on other platforms.
+
+**Parameters:**
+
+- `path` — Filesystem path with trusted ancestors; NUL is rejected.
+
+**Examples:**
+
+```ntnt
+sync_file("local-data")  // Inspect Result before continuing
+```
+
+*Since v0.5.4*
+
+---
+
+#### `write_bytes`
+
+```ntnt
+write_bytes(path: String, content: Array<Int>) -> Result<Unit, String>
+```
+
+Write up to 16 MiB of validated bytes, creating or truncating with ordinary symlink semantics.
+
+Errors use invalid_argument:, already_exists:, unsupported: or io: classes. Unix-only operations return unsupported before mutation on other platforms.
+
+**Parameters:**
+
+- `path` — Filesystem path with trusted ancestors; NUL is rejected.
+- `content` — Integer bytes 0..255, maximum 16 MiB; validated before opening.
+
+**Examples:**
+
+```ntnt
+write_bytes("local-data", [0, 255])  // Inspect Result before continuing
+```
+
+*Since v0.5.4*
+
+---
+
 #### `write_file`
 
 ```ntnt
@@ -6533,6 +6816,32 @@ write_file("out.txt", "hello")  // => Ok(())  // Write string to file
 **See also:** `read_file`, `append_file`, `copy`
 
 *Since v0.1.0*
+
+---
+
+#### `write_file_exclusive`
+
+```ntnt
+write_file_exclusive(path: String, content: String | Array<Int>, options?: Map<String, Any>) -> Result<Unit, String>
+```
+
+Unix exclusive creation with initial mode (default 384, restricted by umask) and sync (default true). Options are mode and sync only. Trusted ancestors required. Never removes a partially written file.
+
+Errors use invalid_argument:, already_exists:, unsupported: or io: classes. Unix-only operations return unsupported before mutation on other platforms.
+
+**Parameters:**
+
+- `path` — Filesystem path with trusted ancestors; NUL is rejected.
+- `content` — Exact UTF-8 String or checked integer bytes; maximum 16 MiB.
+- `options` — Optional mode (0..511, default 384) and sync (Bool, default true).
+
+**Examples:**
+
+```ntnt
+write_file_exclusive("local-data", [0, 255])  // Inspect Result before continuing
+```
+
+*Since v0.5.4*
 
 ---
 
@@ -10025,7 +10334,7 @@ tanh(1)  // => 0.7615941559557649  // Hyperbolic tangent of one
 Safe network primitives: IPAM-grade CIDR math and reachability probes
 
 ```ntnt
-import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
+import { tcp_listen, tcp_accept, tcp_read } from "std/net"
 ```
 
 ### Functions
@@ -10045,7 +10354,15 @@ import { ip_parse, subnet_contains, subnet_overlaps } from "std/net"
 | [`subnet_split`](#subnetsplit) | Splits a CIDR into child subnets with a longer prefix, enforcing result caps. |
 | [`subnet_summarize`](#subnetsummarize) | Summarizes adjacent or overlapping CIDRs into the shortest equivalent route list. |
 | [`subnet_supernet`](#subnetsupernet) | Returns the parent/supernet of a CIDR. Defaults to one bit shorter. |
+| [`tcp_accept`](#tcpaccept) | Accept one independent native stream or return timeout; Normal mode only. |
+| [`tcp_close`](#tcpclose) | Close a native socket and release capacity; Normal mode only. |
 | [`tcp_connect`](#tcpconnect) | Performs a bounded TCP connect probe to one explicit port. Closed, refused, or timed-out ports return Ok(map { "connected": false, ... }); invalid input, policy denial, and resolver/system failures return Err(String). |
+| [`tcp_listen`](#tcplisten) | Bind a native TCP listener; Normal mode only. Default literal host is 127.0.0.1. |
+| [`tcp_local_addr`](#tcplocaladdr) | Inspect the actual local bound address as {host, port}; Normal mode only. |
+| [`tcp_peer_addr`](#tcppeeraddr) | Inspect accepted peer address as {host, port}; Normal mode only. |
+| [`tcp_read`](#tcpread) | Read one bounded raw-byte chunk, with EOF distinct from timeout; Normal mode only. |
+| [`tcp_shutdown`](#tcpshutdown) | Shut down a stream direction without releasing its descriptor; Normal mode only. |
+| [`tcp_write`](#tcpwrite) | Write all input bytes or invalidate the stream; Normal mode only. |
 | [`tls_info`](#tlsinfo) | Opens a bounded TLS connection and returns certificate metadata. Validation failures still return Ok(map { "valid": false, ... }) when a certificate is available. |
 | [`traceroute`](#traceroute) | Traces the network path to a host using TTL-stepped native probes. The method option selects the probe protocol: "icmp" (default) sends echo requests, "udp" sends datagrams to an unused port (destination reached on ICMP Port Unreachable), and "tcp" sends SYNs to a real port (reached on SYN-ACK/RST — the variant most likely to traverse firewalls). All methods need a raw ICMP socket for intermediate hops (usually CAP_NET_RAW; Docker: cap_add: [NET_RAW]). "icmp" is cross-platform; "udp" and "tcp" are Linux-only ("tcp" additionally needs a raw TCP socket). When the required capability is missing it returns Err(String) rather than degrading — check net_capabilities() (traceroute / traceroute_udp / traceroute_tcp) before probing. Each hop reports the responding router, latency, or a timeout; the trace stops at the destination, on a terminal ICMP error, or at max_hops. |
 
@@ -10292,6 +10609,55 @@ Returns the parent/supernet of a CIDR. Defaults to one bit shorter.
 
 ---
 
+#### `tcp_accept`
+
+```ntnt
+tcp_accept(listener: TcpListener, timeout_ms?: Int) -> Result<TcpStream, String>
+```
+
+Accept one independent native stream or return timeout; Normal mode only.
+
+Nonblocking deadline loop; accepted sockets explicitly use nonblocking mode. Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err. Concurrent operations on one owner return busy: rather than blocking on its lock.
+
+**Parameters:**
+
+- `listener` — Open native TcpListener.
+- `timeout_ms` — Deadline in 1..60000 ms; default 5000.
+
+**Examples:**
+
+```ntnt
+tcp_accept(listener, 10)  // Check Result and close owned sockets
+```
+
+*Since v0.5.4*
+
+---
+
+#### `tcp_close`
+
+```ntnt
+tcp_close(socket: TcpListener | TcpStream) -> Result<Unit, String>
+```
+
+Close a native socket and release capacity; Normal mode only.
+
+Aliases observe closed state; listener close leaves accepted streams independent. Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err. Concurrent operations on one owner return busy: rather than blocking on its lock.
+
+**Parameters:**
+
+- `socket` — Genuine TcpListener or TcpStream; close is idempotent for closed aliases.
+
+**Examples:**
+
+```ntnt
+tcp_close(socket)  // Check Result and close owned sockets
+```
+
+*Since v0.5.4*
+
+---
+
 #### `tcp_connect`
 
 ```ntnt
@@ -10315,6 +10681,156 @@ tcp_connect("example.com", 443)  // Check whether TCP 443 accepts connections
 ```
 
 *Since v0.4.10*
+
+---
+
+#### `tcp_listen`
+
+```ntnt
+tcp_listen(port: Int, options?: Map<String, Any>) -> Result<TcpListener, String>
+```
+
+Bind a native TCP listener; Normal mode only. Default literal host is 127.0.0.1.
+
+At most 128 live/reserved sockets and 16 MiB transient IO buffers per process. No outgoing-connect authority. Handles alias identity and cannot transfer through tasks/channels or JSON. Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err. Concurrent operations on one owner return busy: rather than blocking on its lock.
+
+**Parameters:**
+
+- `port` — Integer 0..65535; 0 selects an ephemeral port.
+- `options` — Optional map containing only host (literal IPv4/IPv6); explicit exposed hosts deliberately widen access.
+
+**Examples:**
+
+```ntnt
+tcp_listen(0)  // Check Result and close owned sockets
+```
+
+*Since v0.5.4*
+
+---
+
+#### `tcp_local_addr`
+
+```ntnt
+tcp_local_addr(socket: TcpListener | TcpStream) -> Result<Map<String, Any>, String>
+```
+
+Inspect the actual local bound address as {host, port}; Normal mode only.
+
+Port 0 reports the OS-assigned port. Closing after a bind checks availability, not future reservation. Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err. Concurrent operations on one owner return busy: rather than blocking on its lock.
+
+**Parameters:**
+
+- `socket` — Genuine open TcpListener or TcpStream.
+
+**Examples:**
+
+```ntnt
+tcp_local_addr(socket)  // Check Result and close owned sockets
+```
+
+*Since v0.5.4*
+
+---
+
+#### `tcp_peer_addr`
+
+```ntnt
+tcp_peer_addr(stream: TcpStream) -> Result<Map<String, Any>, String>
+```
+
+Inspect accepted peer address as {host, port}; Normal mode only.
+
+Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err. Concurrent operations on one owner return busy: rather than blocking on its lock.
+
+**Parameters:**
+
+- `stream` — Genuine open TcpStream.
+
+**Examples:**
+
+```ntnt
+tcp_peer_addr(socket)  // Check Result and close owned sockets
+```
+
+*Since v0.5.4*
+
+---
+
+#### `tcp_read`
+
+```ntnt
+tcp_read(stream: TcpStream, max_bytes: Int, timeout_ms?: Int) -> Result<Array<Int>?, String>
+```
+
+Read one bounded raw-byte chunk, with EOF distinct from timeout; Normal mode only.
+
+Returns Ok(Some(nonempty bytes)), Ok(None) at EOF, or Err(timeout: ...). Transient budget includes byte buffer and Value-array storage, not caller-retained arrays. Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err. Concurrent operations on one owner return busy: rather than blocking on its lock.
+
+**Parameters:**
+
+- `stream` — Open native TcpStream.
+- `max_bytes` — Integer 1..65536; no retained read-ahead.
+- `timeout_ms` — Deadline in 1..60000 ms; default 5000.
+
+**Examples:**
+
+```ntnt
+tcp_read(stream, 1024, 10)  // Check Result and close owned sockets
+```
+
+*Since v0.5.4*
+
+---
+
+#### `tcp_shutdown`
+
+```ntnt
+tcp_shutdown(stream: TcpStream, how: String) -> Result<Unit, String>
+```
+
+Shut down a stream direction without releasing its descriptor; Normal mode only.
+
+Subsequent writes after write shutdown return Err; close releases capacity. Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err. Concurrent operations on one owner return busy: rather than blocking on its lock.
+
+**Parameters:**
+
+- `stream` — Genuine open TcpStream.
+- `how` — Exactly read, write or both.
+
+**Examples:**
+
+```ntnt
+tcp_shutdown(stream, "write")  // Check Result and close owned sockets
+```
+
+*Since v0.5.4*
+
+---
+
+#### `tcp_write`
+
+```ntnt
+tcp_write(stream: TcpStream, data: String | Array<Int>, timeout_ms?: Int) -> Result<Int, String>
+```
+
+Write all input bytes or invalidate the stream; Normal mode only.
+
+Empty input returns 0. Failed attempted nonempty writes close the stream and report write_failed: stream_closed=true; bytes_written=N; never blindly replay an uncertain prefix. Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err. Concurrent operations on one owner return busy: rather than blocking on its lock.
+
+**Parameters:**
+
+- `stream` — Open native TcpStream whose write side is not shut down.
+- `data` — Exact UTF-8 String or integer bytes 0..255, at most 65536 bytes.
+- `timeout_ms` — Deadline in 1..60000 ms; default 5000.
+
+**Examples:**
+
+```ntnt
+tcp_write(stream, [0, 255], 10)  // Check Result and close owned sockets
+```
+
+*Since v0.5.4*
 
 ---
 
@@ -10479,6 +10995,7 @@ import { join_path, join, dirname } from "std/path"
 | [`join_path`](#joinpath) | Joins path segments into a single path string. |
 | [`normalize`](#normalize) | Cleans up `..` and `.` path components without touching the filesystem. |
 | [`resolve`](#resolve) | Resolves a path to an absolute path using filesystem canonicalize. |
+| [`resolve_missing`](#resolvemissing) | Resolve existing symlinks in order, allowing genuinely missing suffixes. |
 | [`stem`](#stem) | Returns the filename without its extension. |
 | [`with_extension`](#withextension) | Returns the path with its extension changed to the given extension. |
 
@@ -10700,6 +11217,30 @@ resolve("nonexistent")  // => Err("No such file or directory")  // Returns Err f
 **See also:** `is_absolute`, `normalize`
 
 *Since v0.2.0*
+
+---
+
+#### `resolve_missing`
+
+```ntnt
+resolve_missing(path: String) -> Result<String, String>
+```
+
+Resolve existing symlinks in order, allowing genuinely missing suffixes.
+
+Processes dotdot after symlinks; caps expansions at 40 and path data at 64 KiB. Errors on loops, non-directories, invalid prefixes, NUL and non-UTF-8 paths. Best-effort identity only; concurrent ancestor replacement is not prevented.
+
+**Parameters:**
+
+- `path` — Relative or absolute filesystem path.
+
+**Examples:**
+
+```ntnt
+resolve_missing("new/output.bin")  // Resolve an unpublished destination
+```
+
+*Since v0.5.4*
 
 ---
 

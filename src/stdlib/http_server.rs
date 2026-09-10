@@ -3147,6 +3147,13 @@ pub fn process_request(
 /// Send a response back to the client
 /// Automatically adds security headers (configurable via NTNT_SECURITY_HEADERS=false)
 pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()> {
+    send_response_with_options(request, response, FixtureHeaders::default())
+}
+pub fn send_response_with_options(
+    request: tiny_http::Request,
+    response: &Value,
+    policy: FixtureHeaders,
+) -> Result<()> {
     let config = get_security_config();
 
     let (status, mut headers, body) = match response {
@@ -3242,9 +3249,7 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
         }
     }
 
-    request
-        .respond(response_builder)
-        .map_err(|e| IntentError::runtime_error(format!("Failed to send response: {}", e)))
+    emit_response(request, response_builder, policy)
 }
 
 /// Create an error response
@@ -3515,6 +3520,13 @@ pub fn serve_static_file(file_path: &str) -> Result<Value> {
 
 /// Send a binary response (for static files) with ETag/conditional request support
 pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Result<()> {
+    send_static_response_with_options(request, file_path, FixtureHeaders::default())
+}
+pub fn send_static_response_with_options(
+    request: tiny_http::Request,
+    file_path: &str,
+    policy: FixtureHeaders,
+) -> Result<()> {
     use std::fs::{self, File};
     use std::io::Read;
 
@@ -3523,7 +3535,7 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
     // Check if file exists and is a file
     if !path.exists() || !path.is_file() {
         let not_found = create_error_response(404, "File not found");
-        return send_response(request, &not_found);
+        return send_response_with_options(request, &not_found, policy);
     }
 
     // Generate ETag from file metadata (size + mtime)
@@ -3563,9 +3575,7 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
                 .with_status_code(304)
                 .with_header(etag_header)
                 .with_header(cache_header);
-            return request.respond(response).map_err(|e| {
-                IntentError::runtime_error(format!("Failed to send response: {}", e))
-            });
+            return emit_response(request, response, policy);
         }
     }
 
@@ -3602,9 +3612,7 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
         .with_header(connection_close)
         .with_header(server_header);
 
-    request
-        .respond(response)
-        .map_err(|e| IntentError::runtime_error(format!("Failed to send response: {}", e)))
+    emit_response(request, response, policy)
 }
 
 /// Returns appropriate Cache-Control value based on file type (sync server).
@@ -4961,5 +4969,234 @@ mod tests {
             headers.get("content-security-policy").unwrap(),
             "default-src 'none'",
         );
+    }
+}
+
+/// Immutable options for one HTTP listener; fixture mode never changes security policy.
+#[derive(Debug, Clone, Default)]
+pub struct ListenOptions {
+    pub host: Option<std::net::IpAddr>,
+    pub readiness: bool,
+    pub fixture: bool,
+    pub headers: FixtureHeaders,
+}
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FixtureHeaders {
+    pub suppress_server: bool,
+    pub suppress_cache_control: bool,
+}
+impl ListenOptions {
+    pub fn parse(value: Option<&Value>) -> Result<Self> {
+        let mut options = Self::default();
+        if let Some(value) = value {
+            let Value::Map(map) = value else {
+                return Err(IntentError::type_error("listen options must be Map"));
+            };
+            for (key, value) in map {
+                match (key.as_str(), value) {
+                    ("host", Value::String(s)) => {
+                        options.host = Some(s.parse().map_err(|_| {
+                            IntentError::type_error("listen host must be literal IP")
+                        })?)
+                    }
+                    ("readiness", Value::String(s)) if s == "none" || s == "json" => {
+                        options.readiness = s == "json"
+                    }
+                    ("fixture", Value::Bool(b)) => options.fixture = *b,
+                    ("suppress_server_header", Value::Bool(b)) => {
+                        options.headers.suppress_server = *b
+                    }
+                    ("suppress_cache_control", Value::Bool(b)) => {
+                        options.headers.suppress_cache_control = *b
+                    }
+                    _ => {
+                        return Err(IntentError::type_error(format!(
+                            "invalid listen option: {key}"
+                        )))
+                    }
+                }
+            }
+        }
+        if !options.fixture
+            && (options.headers.suppress_server || options.headers.suppress_cache_control)
+        {
+            return Err(IntentError::type_error(
+                "header suppression requires fixture=true",
+            ));
+        }
+        Ok(options)
+    }
+    pub fn address(&self, port: u16, test_port: Option<u16>) -> Result<std::net::SocketAddr> {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        if (self.fixture || test_port.is_some()) && self.host.is_some_and(|h| !h.is_loopback()) {
+            return Err(IntentError::type_error(
+                "fixture/test listen requires loopback host",
+            ));
+        }
+        let host = if test_port.is_some() {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        } else {
+            self.host.unwrap_or(if self.fixture {
+                IpAddr::V4(Ipv4Addr::LOCALHOST)
+            } else {
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+            })
+        };
+        let port = test_port.unwrap_or_else(|| {
+            std::env::var("NTNT_LISTEN_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(port)
+        });
+        Ok(SocketAddr::new(host, port))
+    }
+}
+pub fn emit_readiness(addr: std::net::SocketAddr) -> Result<()> {
+    write_readiness(&mut std::io::stdout().lock(), addr)
+        .map_err(|e| IntentError::runtime_error(format!("readiness: {e}")))
+}
+fn write_readiness(
+    writer: &mut impl std::io::Write,
+    addr: std::net::SocketAddr,
+) -> std::io::Result<()> {
+    writeln!(
+        writer,
+        "NTNT_READY {}",
+        serde_json::json!({"host": addr.ip().to_string(), "port": addr.port()})
+    )?;
+    writer.flush()
+}
+
+/// Filters tiny_http's serialized headers (including dependency-inserted Server),
+/// then streams body bytes unchanged. No request parsing or alternate framing.
+struct HeaderFilter<W> {
+    writer: W,
+    pending: Vec<u8>,
+    headers: FixtureHeaders,
+    complete: bool,
+}
+impl<W: std::io::Write> std::io::Write for HeaderFilter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.complete {
+            return self.writer.write(bytes);
+        }
+        for (i, byte) in bytes.iter().enumerate() {
+            if self.pending.len() == 65536 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "response headers exceed 64 KiB",
+                ));
+            }
+            self.pending.push(*byte);
+            if self.pending.ends_with(b"\r\n\r\n") {
+                for line in self.pending.split_inclusive(|b| *b == b'\n') {
+                    let name = line.split(|b| *b == b':').next().unwrap_or_default();
+                    if (self.headers.suppress_server && name.eq_ignore_ascii_case(b"server"))
+                        || (self.headers.suppress_cache_control
+                            && name.eq_ignore_ascii_case(b"cache-control"))
+                    {
+                        continue;
+                    }
+                    self.writer.write_all(line)?;
+                }
+                self.pending.clear();
+                self.complete = true;
+                self.writer.write_all(&bytes[i + 1..])?;
+                return Ok(bytes.len());
+            }
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+fn emit_response<R: std::io::Read>(
+    request: tiny_http::Request,
+    response: tiny_http::Response<R>,
+    headers: FixtureHeaders,
+) -> Result<()> {
+    use std::io::Write;
+    let result = if !headers.suppress_server && !headers.suppress_cache_control {
+        request.respond(response)
+    } else {
+        let version = request.http_version().clone();
+        let request_headers = request.headers().to_vec();
+        let head = request.method() == &tiny_http::Method::Head;
+        let mut filter = HeaderFilter {
+            writer: request.into_writer(),
+            pending: Vec::new(),
+            headers,
+            complete: false,
+        };
+        response
+            .raw_print(&mut filter, version, &request_headers, head, None)
+            .and_then(|()| {
+                if !filter.complete {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "incomplete response headers",
+                    ));
+                }
+                filter.flush()
+            })
+    };
+    result.map_err(|e| IntentError::runtime_error(format!("Failed to send response: {e}")))
+}
+
+#[cfg(test)]
+mod listener_option_tests {
+    use super::*;
+    use std::io::{self, Write};
+    #[test]
+    fn fragmented_header_filter_caps_headers_and_preserves_body() {
+        let mut filter = HeaderFilter {
+            writer: Vec::new(),
+            pending: Vec::new(),
+            headers: FixtureHeaders {
+                suppress_server: true,
+                suppress_cache_control: true,
+            },
+            complete: false,
+        };
+        let wire=b"HTTP/1.1 200 OK\r\nServer: tiny-http\r\ncAcHe-CoNtRoL: no-cache\r\nX-Keep: true\r\n\r\n\0\xff\r\n";
+        for byte in wire {
+            filter.write_all(&[*byte]).unwrap();
+        }
+        assert_eq!(
+            filter.writer,
+            b"HTTP/1.1 200 OK\r\nX-Keep: true\r\n\r\n\0\xff\r\n"
+        );
+        let mut filter = HeaderFilter {
+            writer: Vec::new(),
+            pending: Vec::new(),
+            headers: FixtureHeaders::default(),
+            complete: false,
+        };
+        assert!(filter.write_all(&vec![b'x'; 65537]).is_err());
+        assert!(filter.writer.is_empty());
+    }
+    struct FlushFailure;
+    impl Write for FlushFailure {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("injected flush"))
+        }
+    }
+    #[test]
+    fn readiness_and_response_flush_failures_propagate() {
+        assert!(write_readiness(&mut FlushFailure, "127.0.0.1:1234".parse().unwrap()).is_err());
+        let mut filter = HeaderFilter {
+            writer: FlushFailure,
+            pending: Vec::new(),
+            headers: FixtureHeaders::default(),
+            complete: false,
+        };
+        filter
+            .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+            .unwrap();
+        assert!(filter.flush().is_err());
     }
 }

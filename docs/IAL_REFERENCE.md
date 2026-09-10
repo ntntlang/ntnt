@@ -2,7 +2,7 @@
 
 > **Auto-generated from [ial.toml](ial.toml)** - Do not edit directly.
 >
-> Last updated: v0.5.3
+> Last updated: v0.5.4
 
 IAL is a term rewriting engine that translates natural language assertions into executable tests
 

@@ -1,0 +1,33 @@
+import { json, redirect, parse_json } from "std/http/server"
+import { stringify } from "std/json"
+
+// One worker owns this in-memory fixture state. Stop with Ctrl+C; launchers
+// wait for NTNT_READY and always terminate/reap the child after their test.
+let mut version = 0
+let mut value = map {}
+get("/redirect", fn(req: Map<String, Any>) { redirect("/state") })
+get("/state", fn(req: Map<String, Any>) { json(map { "version": version, "data": value }) })
+post("/state", fn(req: Map<String, Any>) {
+    let update = parse_json(req) otherwise { return json(map { "error": err }, 400) }
+    if typeof(update) != "Map" {
+        return json(map { "error": "expected an object with integer cas and object data" }, 400)
+    }
+    if typeof(update["cas"]) != "Int" || typeof(update["data"]) != "Map" {
+        return json(map { "error": "expected an object with integer cas and object data" }, 400)
+    }
+    if update["cas"] != version { return json(map { "error": "version conflict" }, 409) }
+    value = update["data"]
+    version = version + 1
+    return json(map { "version": version })
+})
+post("/emails", fn(req: Map<String, Any>) {
+    let email = parse_json(req) otherwise { return json(map { "error": err }, 400) }
+    print("CAPTURE " + stringify(email))
+    return json(map { "id": "local-capture" })
+})
+listen(0, map {
+    "fixture": true,
+    "readiness": "json",
+    "suppress_server_header": true,
+    "suppress_cache_control": true
+})

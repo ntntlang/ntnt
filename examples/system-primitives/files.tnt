@@ -1,0 +1,48 @@
+import { contains } from "std/string"
+import { sha384, sha384_bytes, base64_encode_bytes, uuid } from "std/crypto"
+import { write_bytes, write_file_exclusive, mkdir_private, sync_file, sync_dir, file_permissions, chmod, chown, access, read_bytes, rename, remove, remove_dir } from "std/fs"
+import { resolve_missing } from "std/path"
+import { cwd } from "std/env"
+import { stringify } from "std/json"
+
+fn exclusive(path: String, data: Array<Int>) -> Result<Unit, String> {
+    write_file_exclusive(path, data, map { "mode": 384, "sync": true })
+}
+fn metadata(path: String) -> Result<Map<String, Any>, String> { file_permissions(path) }
+fn permitted(path: String) -> Result<Bool, String> { access(path, "rw") }
+fn resolve_new(path: String) -> Result<String, String> { resolve_missing(path) }
+fn write_binary(path: String, data: Array<Int>) -> Result<Unit, String> { write_bytes(path, data) }
+fn private(path: String) -> Result<Unit, String> { mkdir_private(path, 448) }
+fn durable(path: String) -> Result<Unit, String> { sync_file(path) }
+fn durable_dir(path: String) -> Result<Unit, String> { sync_dir(path) }
+fn set_mode(path: String) -> Result<Unit, String> { chmod(path, 384) }
+fn set_owner(path: String, uid: Int, gid: Int) -> Result<Unit, String> { chown(path, uid, gid) }
+
+assert(sha384("abc") == "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7")
+assert(base64_encode_bytes([0, 255]) == "AP8=")
+print("sha384-" + base64_encode_bytes(sha384_bytes([0, 255])))
+let dir = cwd() + "/ntnt-system-example-" + uuid()
+match private(dir) {
+    Ok(_) => {
+        let temp = unwrap(resolve_new(dir + "/temp"))
+        let published = dir + "/published"
+        unwrap(exclusive(temp, [0, 255, 13, 10]))
+        assert(is_err(exclusive(temp, [1])))
+        assert(stringify(unwrap(read_bytes(temp))) == "[0,255,13,10]")
+        unwrap(set_mode(temp))
+        let info = unwrap(metadata(temp))
+        unwrap(set_owner(temp, info["uid"], info["gid"]))
+        assert(unwrap(permitted(temp)))
+        unwrap(durable(temp))
+        unwrap(rename(temp, published))
+        unwrap(durable_dir(dir))
+        unwrap(write_binary(published, [0, 159, 255]))
+        unwrap(remove(published))
+        unwrap(remove_dir(dir))
+    },
+    Err(error) => {
+        // Unix-only secure operations report unsupported on other platforms.
+        assert(contains(error, "unsupported:"))
+    }
+}
+print("SYSTEM_FILES_OK")

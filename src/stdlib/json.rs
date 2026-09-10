@@ -61,7 +61,31 @@ pub(crate) fn intent_value_to_json_expose(
     intent_value_to_json_with_policy(value, SecretSerialization::Expose)
 }
 
+fn reject_tcp_authority(value: &Value) -> crate::error::Result<()> {
+    match value {
+        Value::TcpListener(_) | Value::TcpStream(_) => Err(IntentError::type_error(
+            "TCP handles cannot be serialized to JSON",
+        )),
+        Value::Array(values) | Value::EnumValue { values, .. } => {
+            values.iter().try_for_each(reject_tcp_authority)
+        }
+        Value::Map(values) | Value::Struct { fields: values, .. } => {
+            values.values().try_for_each(reject_tcp_authority)
+        }
+        Value::Return(value) => reject_tcp_authority(value),
+        _ => Ok(()),
+    }
+}
+
 fn intent_value_to_json_with_policy(
+    value: &Value,
+    policy: SecretSerialization,
+) -> crate::error::Result<serde_json::Value> {
+    reject_tcp_authority(value)?;
+    convert_json(value, policy)
+}
+
+fn convert_json(
     value: &Value,
     policy: SecretSerialization,
 ) -> crate::error::Result<serde_json::Value> {
@@ -72,6 +96,7 @@ fn intent_value_to_json_with_policy(
     }
 
     Ok(match value {
+        Value::TcpListener(_) | Value::TcpStream(_) => return Err(IntentError::type_error("TCP handles cannot be serialized to JSON")),
         Value::Unit => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
@@ -90,14 +115,14 @@ fn intent_value_to_json_with_policy(
         },
         Value::Array(arr) => serde_json::Value::Array(
             arr.iter()
-                .map(|item| intent_value_to_json_with_policy(item, policy))
+                .map(|item| convert_json(item, policy))
                 .collect::<crate::error::Result<Vec<_>>>()?,
         ),
         Value::Map(map) => {
             let obj: serde_json::Map<String, serde_json::Value> = map
                 .iter()
                 .map(|(key, item)| {
-                    intent_value_to_json_with_policy(item, policy)
+                    convert_json(item, policy)
                         .map(|converted| (key.clone(), converted))
                 })
                 .collect::<crate::error::Result<_>>()?;
@@ -107,7 +132,7 @@ fn intent_value_to_json_with_policy(
             let obj: serde_json::Map<String, serde_json::Value> = fields
                 .iter()
                 .map(|(key, item)| {
-                    intent_value_to_json_with_policy(item, policy)
+                    convert_json(item, policy)
                         .map(|converted| (key.clone(), converted))
                 })
                 .collect::<crate::error::Result<_>>()?;
@@ -120,7 +145,7 @@ fn intent_value_to_json_with_policy(
         } if enum_name == "Option" => match variant.as_str() {
             "None" => serde_json::Value::Null,
             "Some" => match values.first() {
-                Some(inner) => intent_value_to_json_with_policy(inner, policy)?,
+                Some(inner) => convert_json(inner, policy)?,
                 None => serde_json::Value::Null,
             },
             _ => serde_json::Value::String(value.to_string()),

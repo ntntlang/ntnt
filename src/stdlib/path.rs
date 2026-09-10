@@ -362,5 +362,188 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt resolve_missing
+    // @module std/path
+    // @signature resolve_missing(path: String) -> Result<String, String>
+    // Resolve existing symlinks in order, allowing genuinely missing suffixes.
+    //
+    // Processes dotdot after symlinks; caps expansions at 40 and path data at 64 KiB.
+    // Errors on loops, non-directories, invalid prefixes, NUL and non-UTF-8 paths.
+    // Best-effort identity only; concurrent ancestor replacement is not prevented.
+    // @param path Relative or absolute filesystem path.
+    // @since v0.5.4
+    // @example resolve_missing("new/output.bin") ~ "Resolve an unpublished destination"
+    module.insert(
+        "resolve_missing".into(),
+        Value::NativeFunction {
+            name: "resolve_missing".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match &args[0] {
+                    Value::String(path) => match resolve_missing_path(path) {
+                        Ok(path) => Value::ok(Value::String(path)),
+                        Err(e) => Value::err(Value::String(e)),
+                    },
+                    _ => Value::err(Value::String(
+                        "invalid_argument: path must be String".into(),
+                    )),
+                })
+            },
+        },
+    );
     module
+}
+
+// Shared by the original path and absolute symlink targets. A Windows UNC
+// prefix has an implicit RootDir even when no separator follows the share.
+// Count bytes from the original spelling, never from the reconstructed root.
+fn split_absolute_root(input: &str) -> Result<(PathBuf, &str), String> {
+    use std::path::Component;
+    let mut root = PathBuf::new();
+    let mut consumed = 0;
+    for component in Path::new(input).components() {
+        match component {
+            Component::Prefix(prefix) => {
+                root.push(prefix.as_os_str());
+                consumed = prefix.as_os_str().len();
+            }
+            Component::RootDir => {
+                root.push(component.as_os_str());
+                while input
+                    .as_bytes()
+                    .get(consumed)
+                    .is_some_and(|b| *b == b'/' || (cfg!(windows) && *b == b'\\'))
+                {
+                    consumed += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    if !root.is_absolute() {
+        return Err("invalid_argument: ambiguous path prefix".into());
+    }
+    // Path::strip_prefix would normalize file/. and lose non-directory errors.
+    Ok((root, &input[consumed..]))
+}
+
+fn resolve_missing_path(input: &str) -> Result<String, String> {
+    use std::collections::VecDeque;
+    use std::path::Component;
+    const LIMIT: usize = 65536;
+    fn tokens(path: &str) -> VecDeque<String> {
+        path.split(|c| c == '/' || (cfg!(windows) && c == '\\'))
+            .map(str::to_owned)
+            .collect()
+    }
+    if input.contains('\0') || input.len() > LIMIT || input.is_empty() {
+        return Err("invalid_argument: empty, NUL or oversized path".into());
+    }
+    let path = Path::new(input);
+    if cfg!(windows)
+        && (path.has_root() != path.is_absolute()
+            || matches!(path.components().next(), Some(Component::Prefix(_)))
+                && !path.is_absolute())
+    {
+        return Err("invalid_argument: ambiguous Windows prefix".into());
+    }
+    let (mut resolved, relative) = if path.is_absolute() {
+        split_absolute_root(input)?
+    } else {
+        (
+            std::env::current_dir().map_err(|e| format!("io: {e}"))?,
+            input,
+        )
+    };
+    let mut pending = tokens(relative);
+    let mut expansions = 0;
+    while let Some(part) = pending.pop_front() {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            resolved.pop();
+            continue;
+        }
+        resolved.push(&part);
+        match std::fs::symlink_metadata(&resolved) {
+            Ok(meta) if meta.is_symlink() => {
+                expansions += 1;
+                if expansions > 40 {
+                    return Err("io: symlink expansion limit (40)".into());
+                }
+                let target = std::fs::read_link(&resolved).map_err(|e| format!("io: {e}"))?;
+                resolved.pop();
+                let text = target
+                    .to_str()
+                    .ok_or("invalid_argument: non-UTF-8 symlink")?;
+                let text = if target.is_absolute() {
+                    let (root, suffix) = split_absolute_root(text)?;
+                    resolved = root;
+                    suffix
+                } else {
+                    if target.has_root()
+                        || matches!(target.components().next(), Some(Component::Prefix(_)))
+                    {
+                        return Err("invalid_argument: ambiguous symlink prefix".into());
+                    }
+                    text
+                };
+                let size = pending
+                    .iter()
+                    .try_fold(text.len(), |n, p| n.checked_add(p.len() + 1))
+                    .ok_or("invalid_argument: expanded path overflow")?;
+                if size > LIMIT {
+                    return Err("invalid_argument: expanded path exceeds 64 KiB".into());
+                }
+                let mut expanded = tokens(text);
+                expanded.append(&mut pending);
+                pending = expanded;
+            }
+            Ok(meta) => {
+                if !meta.is_dir() && !pending.is_empty() {
+                    return Err("io: path component is not a directory".into());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("io: {e}")),
+        }
+        if resolved.as_os_str().len() > LIMIT {
+            return Err("invalid_argument: resolved path exceeds 64 KiB".into());
+        }
+    }
+    resolved
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "invalid_argument: non-UTF-8 result".into())
+}
+
+#[cfg(all(test, windows))]
+mod windows_root_tests {
+    use super::*;
+
+    #[test]
+    fn unc_root_and_absolute_link_target_share_raw_suffix_handling() {
+        for spelling in [
+            r"\\server\share",
+            r"\\server\share\",
+            r"\\?\UNC\server\share",
+        ] {
+            let (root, suffix) = split_absolute_root(spelling).unwrap();
+            assert!(root.is_absolute());
+            assert_eq!(suffix, "");
+            // No filesystem access or network share is needed for a root alone.
+            assert_eq!(PathBuf::from(resolve_missing_path(spelling).unwrap()), root);
+            // read_link supplies a PathBuf; exercise that exact conversion too.
+            let target = PathBuf::from(spelling);
+            let (link_root, link_suffix) = split_absolute_root(target.to_str().unwrap()).unwrap();
+            assert_eq!(link_root, root);
+            assert_eq!(link_suffix, "");
+        }
+        for spelling in [r"\\server\share\file\.", r"C:\file\."] {
+            assert_eq!(split_absolute_root(spelling).unwrap().1, r"file\.");
+        }
+    }
 }

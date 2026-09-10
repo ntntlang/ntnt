@@ -3,6 +3,7 @@
 mod icmp;
 mod policy;
 mod probe;
+pub mod tcp;
 mod traceroute;
 mod transport;
 
@@ -224,6 +225,223 @@ fn validate_ping_method(value: Option<&Value>) -> Result<(), String> {
 
 pub fn init() -> HashMap<String, Value> {
     let mut module = HashMap::new();
+    // @ntnt tcp_listen
+    // @module std/net
+    // @signature tcp_listen(port: Int, options?: Map<String, Any>) -> Result<TcpListener, String>
+    // Bind a native TCP listener; Normal mode only. Default literal host is 127.0.0.1.
+    //
+    // At most 128 live/reserved sockets and 16 MiB transient IO buffers per process.
+    // No outgoing-connect authority. Handles alias identity and cannot transfer through tasks/channels or JSON.
+    // Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err.
+    // Concurrent operations on one owner return busy: rather than blocking on its lock.
+    // @param port Integer 0..65535; 0 selects an ephemeral port.
+    // @param options Optional map containing only host (literal IPv4/IPv6); explicit exposed hosts deliberately widen access.
+    // @since v0.5.4
+    // @example tcp_listen(0) ~ "Check Result and close owned sockets"
+    module.insert(
+        "tcp_listen".into(),
+        Value::NativeFunction {
+            name: "tcp_listen".into(),
+            arity: 1,
+            max_arity: 2,
+            requires: Some(crate::interpreter::RuntimeCapability::TcpServer),
+            func: |args| {
+                Ok(match tcp::listen(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt tcp_accept
+    // @module std/net
+    // @signature tcp_accept(listener: TcpListener, timeout_ms?: Int) -> Result<TcpStream, String>
+    // Accept one independent native stream or return timeout; Normal mode only.
+    //
+    // Nonblocking deadline loop; accepted sockets explicitly use nonblocking mode.
+    // Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err.
+    // Concurrent operations on one owner return busy: rather than blocking on its lock.
+    // @param listener Open native TcpListener.
+    // @param timeout_ms Deadline in 1..60000 ms; default 5000.
+    // @since v0.5.4
+    // @example tcp_accept(listener, 10) ~ "Check Result and close owned sockets"
+    module.insert(
+        "tcp_accept".into(),
+        Value::NativeFunction {
+            name: "tcp_accept".into(),
+            arity: 1,
+            max_arity: 2,
+            requires: Some(crate::interpreter::RuntimeCapability::TcpServer),
+            func: |args| {
+                Ok(match tcp::accept(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt tcp_read
+    // @module std/net
+    // @signature tcp_read(stream: TcpStream, max_bytes: Int, timeout_ms?: Int) -> Result<Array<Int>?, String>
+    // Read one bounded raw-byte chunk, with EOF distinct from timeout; Normal mode only.
+    //
+    // Returns Ok(Some(nonempty bytes)), Ok(None) at EOF, or Err(timeout: ...).
+    // Transient budget includes byte buffer and Value-array storage, not caller-retained arrays.
+    // Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err.
+    // Concurrent operations on one owner return busy: rather than blocking on its lock.
+    // @param stream Open native TcpStream.
+    // @param max_bytes Integer 1..65536; no retained read-ahead.
+    // @param timeout_ms Deadline in 1..60000 ms; default 5000.
+    // @since v0.5.4
+    // @example tcp_read(stream, 1024, 10) ~ "Check Result and close owned sockets"
+    module.insert(
+        "tcp_read".into(),
+        Value::NativeFunction {
+            name: "tcp_read".into(),
+            arity: 2,
+            max_arity: 3,
+            requires: Some(crate::interpreter::RuntimeCapability::TcpServer),
+            func: |args| {
+                Ok(match tcp::read(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt tcp_write
+    // @module std/net
+    // @signature tcp_write(stream: TcpStream, data: String | Array<Int>, timeout_ms?: Int) -> Result<Int, String>
+    // Write all input bytes or invalidate the stream; Normal mode only.
+    //
+    // Empty input returns 0. Failed attempted nonempty writes close the stream and report
+    // write_failed: stream_closed=true; bytes_written=N; never blindly replay an uncertain prefix.
+    // Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err.
+    // Concurrent operations on one owner return busy: rather than blocking on its lock.
+    // @param stream Open native TcpStream whose write side is not shut down.
+    // @param data Exact UTF-8 String or integer bytes 0..255, at most 65536 bytes.
+    // @param timeout_ms Deadline in 1..60000 ms; default 5000.
+    // @since v0.5.4
+    // @example tcp_write(stream, [0, 255], 10) ~ "Check Result and close owned sockets"
+    module.insert(
+        "tcp_write".into(),
+        Value::NativeFunction {
+            name: "tcp_write".into(),
+            arity: 2,
+            max_arity: 3,
+            requires: Some(crate::interpreter::RuntimeCapability::TcpServer),
+            func: |args| {
+                Ok(match tcp::write(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt tcp_local_addr
+    // @module std/net
+    // @signature tcp_local_addr(socket: TcpListener | TcpStream) -> Result<Map<String, Any>, String>
+    // Inspect the actual local bound address as {host, port}; Normal mode only.
+    //
+    // Port 0 reports the OS-assigned port. Closing after a bind checks availability, not future reservation.
+    // Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err.
+    // Concurrent operations on one owner return busy: rather than blocking on its lock.
+    // @param socket Genuine open TcpListener or TcpStream.
+    // @since v0.5.4
+    // @example tcp_local_addr(socket) ~ "Check Result and close owned sockets"
+    module.insert(
+        "tcp_local_addr".into(),
+        Value::NativeFunction {
+            name: "tcp_local_addr".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: Some(crate::interpreter::RuntimeCapability::TcpServer),
+            func: |args| {
+                Ok(match tcp::local_addr(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt tcp_peer_addr
+    // @module std/net
+    // @signature tcp_peer_addr(stream: TcpStream) -> Result<Map<String, Any>, String>
+    // Inspect accepted peer address as {host, port}; Normal mode only.
+    //
+    // Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err.
+    // Concurrent operations on one owner return busy: rather than blocking on its lock.
+    // @param stream Genuine open TcpStream.
+    // @since v0.5.4
+    // @example tcp_peer_addr(socket) ~ "Check Result and close owned sockets"
+    module.insert(
+        "tcp_peer_addr".into(),
+        Value::NativeFunction {
+            name: "tcp_peer_addr".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: Some(crate::interpreter::RuntimeCapability::TcpServer),
+            func: |args| {
+                Ok(match tcp::peer_addr(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt tcp_shutdown
+    // @module std/net
+    // @signature tcp_shutdown(stream: TcpStream, how: String) -> Result<Unit, String>
+    // Shut down a stream direction without releasing its descriptor; Normal mode only.
+    //
+    // Subsequent writes after write shutdown return Err; close releases capacity.
+    // Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err.
+    // Concurrent operations on one owner return busy: rather than blocking on its lock.
+    // @param stream Genuine open TcpStream.
+    // @param how Exactly read, write or both.
+    // @since v0.5.4
+    // @example tcp_shutdown(stream, "write") ~ "Check Result and close owned sockets"
+    module.insert(
+        "tcp_shutdown".into(),
+        Value::NativeFunction {
+            name: "tcp_shutdown".into(),
+            arity: 2,
+            max_arity: 2,
+            requires: Some(crate::interpreter::RuntimeCapability::TcpServer),
+            func: |args| {
+                Ok(match tcp::shutdown_stream(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt tcp_close
+    // @module std/net
+    // @signature tcp_close(socket: TcpListener | TcpStream) -> Result<Unit, String>
+    // Close a native socket and release capacity; Normal mode only.
+    //
+    // Aliases observe closed state; listener close leaves accepted streams independent.
+    // Invalid arguments, closed sockets, capacity exhaustion and IO errors return Err.
+    // Concurrent operations on one owner return busy: rather than blocking on its lock.
+    // @param socket Genuine TcpListener or TcpStream; close is idempotent for closed aliases.
+    // @since v0.5.4
+    // @example tcp_close(socket) ~ "Check Result and close owned sockets"
+    module.insert(
+        "tcp_close".into(),
+        Value::NativeFunction {
+            name: "tcp_close".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: Some(crate::interpreter::RuntimeCapability::TcpServer),
+            func: |args| {
+                Ok(match tcp::close(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
 
     // @ntnt ip_parse
     // @module std/net

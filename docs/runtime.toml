@@ -230,7 +230,7 @@ output = "[hot-reload] <file> changed, reloading..."
 # =============================================================================
 
 [http_server]
-description = "Built-in HTTP server runtime behavior"
+description = "Built-in HTTP server runtime behavior. Global listen(port, options?) supports literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool). Suppression requires fixture=true and loopback. NTNT_READY JSON is flushed once after bind/router initialization with actual host and ephemeral port. Startup errors propagate. Ordinary host defaults to 0.0.0.0; fixture defaults to 127.0.0.1. NTNT_LISTEN_PORT overrides the port; test mode retains test-port precedence and forced loopback. Both existing engines preserve auth/CSRF/CSP/CORS and request limits."
 
 [http_server.request_object]
 description = "Properties available on the request object passed to handlers"
@@ -351,7 +351,7 @@ example = "ntnt inspect server.tnt --pretty"
 # --- Test ---
 [cli.test]
 command = "ntnt test <FILE>"
-description = "Run HTTP tests against a server file"
+description = "Run HTTP tests against a server file. listen(port, options?) retains test-port precedence and forced loopback; explicitly exposed hosts are rejected. Optional readiness=json emits one flushed NTNT_READY JSON line after actual bind. Fixture options require loopback and may suppress Server/Cache-Control without changing security headers."
 options = [
     { name = "--get", short = "", type = "PATH", description = "Make a GET request to the specified path" },
     { name = "--post", short = "", type = "PATH", description = "Make a POST request to the specified path" },

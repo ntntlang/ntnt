@@ -625,5 +625,572 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt write_bytes
+    // @module std/fs
+    // @signature write_bytes(path: String, content: Array<Int>) -> Result<Unit, String>
+    // Write up to 16 MiB of validated bytes, creating or truncating with ordinary symlink semantics.
+    //
+    // Errors use invalid_argument:, already_exists:, unsupported: or io: classes.
+    // Unix-only operations return unsupported before mutation on other platforms.
+    // @param path Filesystem path with trusted ancestors; NUL is rejected.
+    // @param content Integer bytes 0..255, maximum 16 MiB; validated before opening.
+    // @since v0.5.4
+    // @example write_bytes("local-data", [0, 255]) ~ "Inspect Result before continuing"
+    module.insert(
+        "write_bytes".into(),
+        Value::NativeFunction {
+            name: "write_bytes".into(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                Ok(match system_write_bytes(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt write_file_exclusive
+    // @module std/fs
+    // @signature write_file_exclusive(path: String, content: String | Array<Int>, options?: Map<String, Any>) -> Result<Unit, String>
+    // Unix exclusive creation with initial mode (default 384, restricted by umask) and sync (default true). Options are mode and sync only. Trusted ancestors required. Never removes a partially written file.
+    //
+    // Errors use invalid_argument:, already_exists:, unsupported: or io: classes.
+    // Unix-only operations return unsupported before mutation on other platforms.
+    // @param path Filesystem path with trusted ancestors; NUL is rejected.
+    // @param content Exact UTF-8 String or checked integer bytes; maximum 16 MiB.
+    // @param options Optional mode (0..511, default 384) and sync (Bool, default true).
+    // @since v0.5.4
+    // @example write_file_exclusive("local-data", [0, 255]) ~ "Inspect Result before continuing"
+    module.insert(
+        "write_file_exclusive".into(),
+        Value::NativeFunction {
+            name: "write_file_exclusive".into(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                Ok(match system_write_file_exclusive(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt mkdir_private
+    // @module std/fs
+    // @signature mkdir_private(path: String, mode?: Int) -> Result<Unit, String>
+    // Unix single directory creation, default mode 448 restricted by umask; existing entries fail.
+    //
+    // Errors use invalid_argument:, already_exists:, unsupported: or io: classes.
+    // Unix-only operations return unsupported before mutation on other platforms.
+    // @param path Filesystem path with trusted ancestors; NUL is rejected.
+    // @param mode Optional integer 0..511, default 448; restricted by inherited umask.
+    // @since v0.5.4
+    // @example mkdir_private("local-data") ~ "Inspect Result before continuing"
+    module.insert(
+        "mkdir_private".into(),
+        Value::NativeFunction {
+            name: "mkdir_private".into(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                Ok(match system_mkdir_private(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt sync_file
+    // @module std/fs
+    // @signature sync_file(path: String) -> Result<Unit, String>
+    // Sync an existing regular file descriptor. Unix rejects terminal symlinks and special files; non-Unix terminal links follow OS open semantics.
+    //
+    // Errors use invalid_argument:, already_exists:, unsupported: or io: classes.
+    // Unix-only operations return unsupported before mutation on other platforms.
+    // @param path Filesystem path with trusted ancestors; NUL is rejected.
+    // @since v0.5.4
+    // @example sync_file("local-data") ~ "Inspect Result before continuing"
+    module.insert(
+        "sync_file".into(),
+        Value::NativeFunction {
+            name: "sync_file".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match system_sync_file(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt sync_dir
+    // @module std/fs
+    // @signature sync_dir(path: String) -> Result<Unit, String>
+    // Unix directory descriptor sync. OS/filesystem durability semantics apply; no physical-media guarantee.
+    //
+    // Errors use invalid_argument:, already_exists:, unsupported: or io: classes.
+    // Unix-only operations return unsupported before mutation on other platforms.
+    // @param path Filesystem path with trusted ancestors; NUL is rejected.
+    // @since v0.5.4
+    // @example sync_dir("local-data") ~ "Inspect Result before continuing"
+    module.insert(
+        "sync_dir".into(),
+        Value::NativeFunction {
+            name: "sync_dir".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match system_sync_dir(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt file_permissions
+    // @module std/fs
+    // @signature file_permissions(path: String) -> Result<Map<String, Any>, String>
+    // Unix lstat returns mode (including special bits), uid, gid, is_symlink, is_file and is_dir.
+    //
+    // Errors use invalid_argument:, already_exists:, unsupported: or io: classes.
+    // Unix-only operations return unsupported before mutation on other platforms.
+    // @param path Filesystem path with trusted ancestors; NUL is rejected.
+    // @since v0.5.4
+    // @example file_permissions("local-data") ~ "Inspect Result before continuing"
+    module.insert(
+        "file_permissions".into(),
+        Value::NativeFunction {
+            name: "file_permissions".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match system_file_permissions(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt chmod
+    // @module std/fs
+    // @signature chmod(path: String, mode: Int) -> Result<Unit, String>
+    // Unix chmod follows terminal symlinks, accepts 0..511. Not a race-free authorization operation.
+    //
+    // Errors use invalid_argument:, already_exists:, unsupported: or io: classes.
+    // Unix-only operations return unsupported before mutation on other platforms.
+    // @param path Filesystem path with trusted ancestors; NUL is rejected.
+    // @param mode Integer 0..511; special bits rejected.
+    // @since v0.5.4
+    // @example chmod("local-data", 384) ~ "Inspect Result before continuing"
+    module.insert(
+        "chmod".into(),
+        Value::NativeFunction {
+            name: "chmod".into(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                Ok(match system_chmod(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt chown
+    // @module std/fs
+    // @signature chown(path: String, uid: Int, gid: Int) -> Result<Unit, String>
+    // Unix chown follows terminal symlinks. IDs exclude negative values and all-ones sentinel. OS may clear set-ID bits.
+    //
+    // Errors use invalid_argument:, already_exists:, unsupported: or io: classes.
+    // Unix-only operations return unsupported before mutation on other platforms.
+    // @param path Filesystem path with trusted ancestors; NUL is rejected.
+    // @param uid Nonnegative OS user ID excluding the all-ones sentinel.
+    // @param gid Nonnegative OS group ID excluding the all-ones sentinel.
+    // @since v0.5.4
+    // @example chown("local-data", 1000, 1000) ~ "Inspect Result before continuing"
+    module.insert(
+        "chown".into(),
+        Value::NativeFunction {
+            name: "chown".into(),
+            arity: 3,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                Ok(match system_chown(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt access
+    // @module std/fs
+    // @signature access(path: String, mode: String) -> Result<Bool, String>
+    // Unix real-ID access check: empty mode checks existence; nonrepeating r/w/x combinations check access. Advisory and TOCTOU-prone, not permission to open.
+    //
+    // Errors use invalid_argument:, already_exists:, unsupported: or io: classes.
+    // Unix-only operations return unsupported before mutation on other platforms.
+    // @param path Filesystem path with trusted ancestors; NUL is rejected.
+    // @param mode Empty for existence or a nonrepeating r/w/x combination; real-ID semantics.
+    // @since v0.5.4
+    // @example access("local-data", "r") ~ "Inspect Result before continuing"
+    module.insert(
+        "access".into(),
+        Value::NativeFunction {
+            name: "access".into(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                Ok(match system_access(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+
     module
+}
+
+const MAX_WRITE_BYTES: usize = 16 * 1024 * 1024;
+type SystemResult = std::result::Result<Value, String>;
+fn system_path(args: &[Value]) -> std::result::Result<&str, String> {
+    match args.first() {
+        Some(Value::String(s)) if !s.contains('\0') => Ok(s),
+        _ => Err("invalid_argument: expected path without NUL".into()),
+    }
+}
+fn system_mode(value: Option<&Value>, default: u32) -> std::result::Result<u32, String> {
+    match value {
+        None => Ok(default),
+        Some(Value::Int(n)) if (0..=511).contains(n) => Ok(*n as u32),
+        _ => Err("invalid_argument: mode must be an integer in 0..511".into()),
+    }
+}
+fn system_io(e: std::io::Error) -> String {
+    format!(
+        "{}: {e}",
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            "already_exists"
+        } else {
+            "io"
+        }
+    )
+}
+fn system_bytes(value: &Value, text: bool) -> std::result::Result<Vec<u8>, String> {
+    match value {
+        Value::String(s) if text && s.len() <= MAX_WRITE_BYTES => Ok(s.as_bytes().to_vec()),
+        Value::Array(a) if a.len() <= MAX_WRITE_BYTES => {
+            // Validate the whole input before allocating a conversion buffer or opening a file.
+            if a.iter()
+                .any(|v| !matches!(v, Value::Int(n) if (0..=255).contains(n)))
+            {
+                return Err("invalid_argument: bytes must be integers in 0..255".into());
+            }
+            Ok(a.iter()
+                .map(|v| {
+                    if let Value::Int(n) = v {
+                        *n as u8
+                    } else {
+                        unreachable!()
+                    }
+                })
+                .collect())
+        }
+        _ => Err("invalid_argument: expected bytes (maximum 16 MiB)".into()),
+    }
+}
+fn system_write_bytes(args: &[Value]) -> SystemResult {
+    let path = system_path(args)?;
+    let bytes = system_bytes(&args[1], false)?;
+    fs::write(path, bytes).map_err(system_io)?;
+    Ok(Value::Unit)
+}
+fn system_write_file_exclusive(args: &[Value]) -> SystemResult {
+    let path = system_path(args)?;
+    let mut mode = 384;
+    let mut sync = true;
+    if let Some(options) = args.get(2) {
+        let Value::Map(options) = options else {
+            return Err("invalid_argument: options must be a map".into());
+        };
+        for (key, value) in options {
+            match key.as_str() {
+                "mode" => mode = system_mode(Some(value), 384)?,
+                "sync" => {
+                    if let Value::Bool(b) = value {
+                        sync = *b
+                    } else {
+                        return Err("invalid_argument: sync must be Bool".into());
+                    }
+                }
+                _ => return Err("invalid_argument: unknown exclusive-write option".into()),
+            }
+        }
+    }
+    let bytes = system_bytes(&args[1], true)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(path)
+            .map_err(system_io)?;
+        write_and_sync(&mut file, &bytes, sync, |file| file.sync_all())?;
+        Ok(Value::Unit)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode, sync, bytes);
+        Err("unsupported: secure initial-mode exclusive creation requires Unix".into())
+    }
+}
+#[cfg(unix)]
+fn write_and_sync<W: std::io::Write>(
+    file: &mut W,
+    bytes: &[u8],
+    sync: bool,
+    sync_all: impl FnOnce(&mut W) -> std::io::Result<()>,
+) -> std::result::Result<(), String> {
+    file.write_all(bytes).map_err(|e| {
+        format!("write_failed: file_created=true; content_may_be_partial=true; {e}")
+    })?;
+    if sync {
+        sync_all(file).map_err(|e| {
+            format!("durability_uncertain: file_created=true; write_completed=true; {e}")
+        })?;
+    }
+    Ok(())
+}
+fn system_mkdir_private(args: &[Value]) -> SystemResult {
+    let path = system_path(args)?;
+    let mode = system_mode(args.get(1), 448)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .mode(mode)
+            .create(path)
+            .map_err(system_io)?;
+        Ok(Value::Unit)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Err("unsupported: initial-mode directory creation requires Unix".into())
+    }
+}
+fn system_sync_file(args: &[Value]) -> SystemResult {
+    system_sync(args, false)
+}
+fn system_sync_dir(args: &[Value]) -> SystemResult {
+    system_sync(args, true)
+}
+fn system_sync(args: &[Value], directory: bool) -> SystemResult {
+    let path = system_path(args)?;
+    #[cfg(not(unix))]
+    if directory {
+        return Err("unsupported: directory sync requires Unix".into());
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    // Windows FlushFileBuffers requires GENERIC_WRITE on an existing handle.
+    #[cfg(windows)]
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(system_io)?;
+    let metadata = file.metadata().map_err(system_io)?;
+    if (directory && !metadata.is_dir()) || (!directory && !metadata.is_file()) {
+        return Err("invalid_argument: wrong file kind for sync".into());
+    }
+    file.sync_all().map_err(system_io)?;
+    Ok(Value::Unit)
+}
+fn system_file_permissions(args: &[Value]) -> SystemResult {
+    let path = system_path(args)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = fs::symlink_metadata(path).map_err(system_io)?;
+        Ok(Value::Map(HashMap::from([
+            ("mode".into(), Value::Int(i64::from(m.mode() & 0o7777))),
+            ("uid".into(), Value::Int(i64::from(m.uid()))),
+            ("gid".into(), Value::Int(i64::from(m.gid()))),
+            ("is_symlink".into(), Value::Bool(m.is_symlink())),
+            ("is_file".into(), Value::Bool(m.is_file())),
+            ("is_dir".into(), Value::Bool(m.is_dir())),
+        ])))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err("unsupported: POSIX metadata requires Unix".into())
+    }
+}
+fn system_chmod(args: &[Value]) -> SystemResult {
+    let path = system_path(args)?;
+    let mode = system_mode(args.get(1), 384)?;
+    #[cfg(unix)]
+    {
+        let path = std::ffi::CString::new(path).map_err(|_| "invalid_argument: NUL".to_string())?;
+        // SAFETY: live NUL-terminated path, validated permission bits.
+        if unsafe { libc::chmod(path.as_ptr(), mode as libc::mode_t) } != 0 {
+            return Err(system_io(std::io::Error::last_os_error()));
+        }
+        Ok(Value::Unit)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Err("unsupported: chmod requires Unix".into())
+    }
+}
+fn system_id(value: &Value) -> std::result::Result<u32, String> {
+    match value {
+        Value::Int(n) if (0..i64::from(u32::MAX)).contains(n) => Ok(*n as u32),
+        _ => Err("invalid_argument: ID must fit OS type and exclude all-ones sentinel".into()),
+    }
+}
+fn system_chown(args: &[Value]) -> SystemResult {
+    let path = system_path(args)?;
+    let uid = system_id(&args[1])?;
+    let gid = system_id(&args[2])?;
+    #[cfg(unix)]
+    {
+        let uid = libc::uid_t::try_from(uid)
+            .map_err(|_| "invalid_argument: uid out of range".to_string())?;
+        let gid = libc::gid_t::try_from(gid)
+            .map_err(|_| "invalid_argument: gid out of range".to_string())?;
+        if uid == libc::uid_t::MAX || gid == libc::gid_t::MAX {
+            return Err("invalid_argument: sentinel ID".into());
+        }
+        let path = std::ffi::CString::new(path).map_err(|_| "invalid_argument: NUL".to_string())?;
+        // SAFETY: live NUL-terminated path and checked OS ID types.
+        if unsafe { libc::chown(path.as_ptr(), uid, gid) } != 0 {
+            return Err(system_io(std::io::Error::last_os_error()));
+        }
+        Ok(Value::Unit)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, uid, gid);
+        Err("unsupported: chown requires Unix".into())
+    }
+}
+fn system_access(args: &[Value]) -> SystemResult {
+    let path = system_path(args)?;
+    let Value::String(mode) = &args[1] else {
+        return Err("invalid_argument: access mode must be String".into());
+    };
+    let mut bits = 0;
+    for c in mode.chars() {
+        let bit = match c {
+            'r' => 4,
+            'w' => 2,
+            'x' => 1,
+            _ => return Err("invalid_argument: access mode must contain only r/w/x".into()),
+        };
+        if bits & bit != 0 {
+            return Err("invalid_argument: repeated access mode".into());
+        }
+        bits |= bit;
+    }
+    #[cfg(unix)]
+    {
+        let flags = if bits == 0 {
+            libc::F_OK
+        } else {
+            (if bits & 4 != 0 { libc::R_OK } else { 0 })
+                | (if bits & 2 != 0 { libc::W_OK } else { 0 })
+                | (if bits & 1 != 0 { libc::X_OK } else { 0 })
+        };
+        let path = std::ffi::CString::new(path).map_err(|_| "invalid_argument: NUL".to_string())?;
+        // SAFETY: live NUL-terminated path and access(2) flags; no credential mutation.
+        if unsafe { libc::access(path.as_ptr(), flags) } == 0 {
+            return Ok(Value::Bool(true));
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::ENOENT | libc::ENOTDIR | libc::EACCES | libc::EPERM | libc::EROFS) => {
+                Ok(Value::Bool(false))
+            }
+            _ => Err(system_io(e)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, bits);
+        Err("unsupported: real-ID access requires Unix".into())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod system_tests {
+    use super::*;
+    use std::io::{self, Write};
+    struct ShortWriter {
+        bytes: Vec<u8>,
+        fail: bool,
+    }
+    impl Write for ShortWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail && self.bytes.len() >= 2 {
+                return Err(io::Error::other("injected write failure"));
+            }
+            let n = bytes.len().min(2);
+            self.bytes.extend_from_slice(&bytes[..n]);
+            Ok(n)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn short_write_and_sync_failures_report_committed_state() {
+        let mut writer = ShortWriter {
+            bytes: vec![],
+            fail: false,
+        };
+        write_and_sync(&mut writer, b"abcdef", true, |w| {
+            assert_eq!(w.bytes, b"abcdef");
+            Ok(())
+        })
+        .unwrap();
+        let mut writer = ShortWriter {
+            bytes: vec![],
+            fail: true,
+        };
+        let e = write_and_sync(&mut writer, b"abcdef", true, |_| {
+            panic!("must not sync partial write")
+        })
+        .unwrap_err();
+        assert!(e.starts_with("write_failed: file_created=true; content_may_be_partial=true"));
+        assert_eq!(writer.bytes, b"ab");
+        let mut writer = ShortWriter {
+            bytes: vec![],
+            fail: false,
+        };
+        let e = write_and_sync(&mut writer, b"abcdef", true, |_| {
+            Err(io::Error::other("injected sync failure"))
+        })
+        .unwrap_err();
+        assert!(e.starts_with("durability_uncertain: file_created=true; write_completed=true"));
+        assert_eq!(writer.bytes, b"abcdef");
+    }
 }

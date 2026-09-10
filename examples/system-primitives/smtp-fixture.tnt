@@ -1,0 +1,69 @@
+import { tcp_listen, tcp_accept, tcp_read, tcp_write, tcp_local_addr, tcp_close } from "std/net"
+import { stringify } from "std/json"
+import { now_millis } from "std/time"
+import { push } from "std/collections"
+
+// Bounded two-client event loop. The fixture accepts DATA and captures binary
+// CRLF-delimited lines with SMTP dot unstuffing; it is not an SMTP/MIME server.
+let listener = unwrap(tcp_listen(0))
+print("NTNT_READY " + stringify(unwrap(tcp_local_addr(listener))))
+let mut clients = []
+let mut buffers = []
+let mut captures = []
+let mut data_mode = []
+let deadline = now_millis() + 8000
+let mut complete = 0
+while now_millis() < deadline && complete < 2 {
+    if len(clients) < 2 {
+        match tcp_accept(listener, 2) {
+            Ok(client) => {
+                unwrap(tcp_write(client, "220 local\r\n", 100))
+                clients = push(clients, client)
+                buffers = push(buffers, [])
+                captures = push(captures, [])
+                data_mode = push(data_mode, false)
+            },
+            Err(_) => {}
+        }
+    }
+    for i in 0..len(clients) {
+        match tcp_read(clients[i], 256, 2) {
+            Ok(Some(chunk)) => {
+                for byte in chunk {
+                    let mut line = buffers[i]
+                    line = push(line, byte)
+                    assert(len(line) <= 4096)
+                    let n = len(line)
+                    if n >= 2 && line[n - 2] == 13 && line[n - 1] == 10 {
+                        if data_mode[i] {
+                            if n == 3 && line[0] == 46 {
+                                print("CAPTURE " + stringify(captures[i]))
+                                unwrap(tcp_write(clients[i], "250 OK\r\n", 100))
+                                unwrap(tcp_close(clients[i]))
+                                complete = complete + 1
+                            } else {
+                                let start = if n >= 4 && line[0] == 46 && line[1] == 46 { 1 } else { 0 }
+                                let mut capture = captures[i]
+                                if len(capture) > 0 {
+                                    capture = push(capture, 13)
+                                    capture = push(capture, 10)
+                                }
+                                for j in start..(n - 2) { capture = push(capture, line[j]) }
+                                assert(len(capture) <= 8192)
+                                captures[i] = capture
+                            }
+                        } else {
+                            assert(stringify(line) == "[68,65,84,65,13,10]")
+                            data_mode[i] = true
+                        }
+                        buffers[i] = []
+                    } else { buffers[i] = line }
+                }
+            },
+            Ok(None) => { tcp_close(clients[i]) },
+            Err(_) => {}
+        }
+    }
+}
+for client in clients { unwrap(tcp_close(client)) }
+unwrap(tcp_close(listener))

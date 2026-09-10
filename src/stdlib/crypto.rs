@@ -12,7 +12,7 @@ use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use regex::Regex;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use uuid::Uuid;
@@ -27,6 +27,80 @@ fn get_csrf_secret() -> &'static str {
 /// Initialize the std/crypto module
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
+
+    // @ntnt sha384
+    // @module std/crypto
+    // @signature sha384(data: String | Array<Int>) -> String
+    // SHA-384 lowercase hex of exact UTF-8 or checked raw bytes.
+    //
+    // Rejects non-integers and bytes outside 0..255 with a type error.
+    // @param data Exact input bytes; strings use UTF-8.
+    // @since v0.5.4
+    // @example sha384([97, 98, 99]) ~ "Encode exact bytes"
+    module.insert(
+        "sha384".into(),
+        Value::NativeFunction {
+            name: "sha384".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                let data = checked_crypto_bytes(&args[0], true)?;
+                Ok(Value::String(hex::encode(Sha384::digest(data))))
+            },
+        },
+    );
+
+    // @ntnt sha384_bytes
+    // @module std/crypto
+    // @signature sha384_bytes(data: String | Array<Int>) -> Array<Int>
+    // SHA-384 as 48 raw digest bytes for SRI.
+    //
+    // Rejects non-integers and bytes outside 0..255 with a type error.
+    // @param data Exact input bytes; strings use UTF-8.
+    // @since v0.5.4
+    // @example sha384_bytes([97, 98, 99]) ~ "Encode exact bytes"
+    module.insert(
+        "sha384_bytes".into(),
+        Value::NativeFunction {
+            name: "sha384_bytes".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                let data = checked_crypto_bytes(&args[0], true)?;
+                Ok(Value::Array(
+                    Sha384::digest(data)
+                        .iter()
+                        .map(|b| Value::Int(i64::from(*b)))
+                        .collect(),
+                ))
+            },
+        },
+    );
+
+    // @ntnt base64_encode_bytes
+    // @module std/crypto
+    // @signature base64_encode_bytes(data: Array<Int>) -> String
+    // RFC4648 standard padded base64 of checked raw bytes.
+    //
+    // Rejects non-integers and bytes outside 0..255 with a type error.
+    // @param data Array of integer bytes in 0..255; strings are not accepted.
+    // @since v0.5.4
+    // @example base64_encode_bytes([97, 98, 99]) ~ "Encode exact bytes"
+    module.insert(
+        "base64_encode_bytes".into(),
+        Value::NativeFunction {
+            name: "base64_encode_bytes".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                let data = checked_crypto_bytes(&args[0], false)?;
+                Ok(Value::String(STANDARD.encode(data)))
+            },
+        },
+    );
 
     // @ntnt sha256
     // @module std/crypto
@@ -1120,5 +1194,23 @@ mod tests {
             "argon2_verify",
             vec![Value::String("password".into()), bcrypt_hash],
         )));
+    }
+}
+
+fn checked_crypto_bytes(value: &Value, allow_text: bool) -> Result<Vec<u8>, IntentError> {
+    match value {
+        Value::String(s) if allow_text => Ok(s.as_bytes().to_vec()),
+        Value::Array(values) => values
+            .iter()
+            .map(|v| match v {
+                Value::Int(n) if (0..=255).contains(n) => Ok(*n as u8),
+                _ => Err(IntentError::type_error(
+                    "expected integer bytes in 0..255".to_string(),
+                )),
+            })
+            .collect(),
+        _ => Err(IntentError::type_error(
+            "expected raw byte array or permitted UTF-8 string".to_string(),
+        )),
     }
 }

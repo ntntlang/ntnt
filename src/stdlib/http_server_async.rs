@@ -876,6 +876,9 @@ fn html_escape_str(s: &str) -> String {
 /// Configuration for the async server
 #[derive(Clone)]
 pub struct AsyncServerConfig {
+    pub readiness: bool,
+    pub fixture_headers: super::http_server::FixtureHeaders,
+    pub startup: Option<std::sync::mpsc::SyncSender<()>>,
     pub port: u16,
     pub host: String,
     pub enable_compression: bool,
@@ -889,6 +892,9 @@ pub struct AsyncServerConfig {
 impl Default for AsyncServerConfig {
     fn default() -> Self {
         AsyncServerConfig {
+            readiness: false,
+            fixture_headers: super::http_server::FixtureHeaders::default(),
+            startup: None,
             port: 8080,
             host: "0.0.0.0".to_string(),
             enable_compression: true,
@@ -958,9 +964,13 @@ pub async fn start_server_with_bridge(
     interpreter_handle: SharedHandle,
     routes: Arc<AsyncServerState>,
 ) -> Result<()> {
-    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
-        .parse()
-        .map_err(|e| IntentError::runtime_error(format!("Invalid address: {}", e)))?;
+    let addr = SocketAddr::new(
+        config
+            .host
+            .parse()
+            .map_err(|e| IntentError::runtime_error(format!("Invalid address: {e}")))?,
+        config.port,
+    );
 
     let route_count = routes.route_count().await;
     let static_count = routes.static_dir_count().await;
@@ -1004,6 +1014,32 @@ pub async fn start_server_with_bridge(
         app = app.layer(cors_layer_from_config(cors));
     }
 
+    let policy = config.fixture_headers;
+    app = app.layer(axum::middleware::map_response(
+        move |mut response: axum::response::Response| async move {
+            if policy.suppress_server {
+                response.headers_mut().remove(header::SERVER);
+            }
+            if policy.suppress_cache_control {
+                response.headers_mut().remove(header::CACHE_CONTROL);
+            }
+            response
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| IntentError::runtime_error(format!("Failed to bind: {e}")))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|e| IntentError::runtime_error(format!("Failed to inspect listener: {e}")))?;
+    if config.readiness {
+        super::http_server::emit_readiness(addr)?;
+    }
+    if let Some(startup) = &config.startup {
+        startup
+            .send(())
+            .map_err(|_| IntentError::runtime_error("HTTP startup receiver closed"))?;
+    }
     // Show user-friendly URL (0.0.0.0 means all interfaces, so use localhost for display)
     let display_url = if addr.ip().is_unspecified() {
         format!("http://localhost:{}", addr.port())
@@ -1021,11 +1057,6 @@ pub async fn start_server_with_bridge(
     );
     println!();
     println!("Press Ctrl+C to stop");
-
-    // Create the listener
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| IntentError::runtime_error(format!("Failed to bind: {}", e)))?;
 
     // Run the server with graceful shutdown
     axum::serve(

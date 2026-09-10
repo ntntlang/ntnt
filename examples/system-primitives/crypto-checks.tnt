@@ -1,0 +1,8 @@
+import { sha384, sha384_bytes, base64_encode_bytes } from "std/crypto"
+
+// @implements: feature.system_crypto
+fn crypto_checks() -> Unit {
+    assert(sha384("abc") == "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7")
+    assert(len(sha384_bytes([0, 159, 146, 150, 255])) == 48)
+    assert(base64_encode_bytes([0, 255]) == "AP8=")
+}

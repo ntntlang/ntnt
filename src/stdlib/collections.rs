@@ -402,6 +402,11 @@ pub fn init() -> HashMap<String, Value> {
                 };
 
                 let comparator = match &args[1] {
+                    Value::NativeFunction { requires: Some(cap), .. } => {
+                        return Err(IntentError::runtime_error(format!(
+                            "capability: sort_by comparator requires {cap:?}; interpreter context required"
+                        )));
+                    }
                     Value::NativeFunction { func, .. } => *func,
                     _ => {
                         return Err(IntentError::type_error(
@@ -1111,6 +1116,8 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         // Handle equality: same variant + same id
         (Value::TaskHandle(a), Value::TaskHandle(b)) => a == b,
         (Value::ProcessHandle(a), Value::ProcessHandle(b)) => a == b,
+        (Value::TcpListener(a), Value::TcpListener(b))
+        | (Value::TcpStream(a), Value::TcpStream(b)) => std::sync::Arc::ptr_eq(a, b),
         (Value::TxChannelHandle(a, _), Value::TxChannelHandle(b, _)) => a == b,
         (Value::RxChannelHandle(a), Value::RxChannelHandle(b)) => a == b,
         (Value::ScheduleHandle(a), Value::ScheduleHandle(b)) => a == b,

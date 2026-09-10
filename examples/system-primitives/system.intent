@@ -1,0 +1,14 @@
+# Native system crypto checks
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| checking raw crypto | call: crypto_checks(), source: crypto-checks.tnt |
+
+Feature: Exact byte crypto
+  id: feature.system_crypto
+
+  Scenario: Hash and encode raw bytes
+    When checking raw crypto
+    → native assertions pass
