@@ -4,7 +4,7 @@ use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -70,6 +70,37 @@ fn run_ntnt_code_with_env(code: &str, envs: &[(&str, &str)]) -> (String, String,
     )
 }
 
+fn configure_tls_fixture_stream(stream: &std::net::TcpStream) {
+    // Accepted sockets may inherit the listener's nonblocking mode.
+    stream
+        .set_nonblocking(false)
+        .expect("blocking TLS fixture stream");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("TLS fixture read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("TLS fixture write timeout");
+}
+
+#[test]
+fn tls_fixture_accepts_delayed_bytes_on_nonblocking_stream() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut server, _) = listener.accept().unwrap();
+    server.set_nonblocking(true).unwrap();
+    configure_tls_fixture_stream(&server);
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        client.write_all(b"x").unwrap();
+    });
+    let mut byte = [0];
+    let result = server.read_exact(&mut byte);
+    writer.join().unwrap();
+    assert!(result.is_ok(), "delayed fixture read failed: {result:?}");
+    assert_eq!(byte, [b'x']);
+}
+
 fn start_local_tls_server(expected_connections: usize) -> (u16, std::thread::JoinHandle<usize>) {
     let certified = generate_simple_self_signed(vec!["localhost".to_string()])
         .expect("generate local TLS certificate");
@@ -94,8 +125,7 @@ fn start_local_tls_server(expected_connections: usize) -> (u16, std::thread::Joi
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     accepted += 1;
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                    configure_tls_fixture_stream(&stream);
                     let Ok(mut conn) = ServerConnection::new(config.clone()) else {
                         continue;
                     };

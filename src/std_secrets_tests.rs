@@ -318,7 +318,7 @@ fn http_fetch_exposes_secret_as_form_value() {
 }
 
 #[test]
-fn http_fetch_does_not_follow_redirects_when_request_contains_secrets() {
+fn http_fetch_manual_does_not_follow_redirects_when_request_contains_secrets() {
     let target = TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
     let target_addr = target.local_addr().expect("target address");
     target.set_nonblocking(true).expect("nonblocking target");
@@ -326,6 +326,10 @@ fn http_fetch_does_not_follow_redirects_when_request_contains_secrets() {
         for _ in 0..100 {
             match target.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
                     let mut request = Vec::new();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -351,6 +355,20 @@ fn http_fetch_does_not_follow_redirects_when_request_contains_secrets() {
     let redirect_addr = redirect.local_addr().expect("redirect address");
     let redirect_server = thread::spawn(move || {
         let (mut stream, _) = redirect.accept().expect("accept redirect request");
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&buffer[..count]);
+        }
         let response = format!(
             "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
@@ -359,7 +377,7 @@ fn http_fetch_does_not_follow_redirects_when_request_contains_secrets() {
             .expect("write redirect");
     });
 
-    let mut options = HashMap::new();
+    let mut options = HashMap::from([("redirect".into(), Value::String("manual".into()))]);
     options.insert(
         "url".to_string(),
         Value::String(format!("http://{redirect_addr}/start")),

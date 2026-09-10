@@ -1,8 +1,16 @@
 # NTNT v0.5.4 — proposed, unreleased
 
 This release adds native primitives for raw cryptography, filesystem operations,
-TCP listeners, and HTTP listener options.
+TCP listeners, HTTP listener options, and safe default HTTP redirect following.
 
+- `std/http`: fetch, cache misses and both download forms now follow redirects by
+  default. `redirect: "manual"` preserves terminal 3xx behavior; `"error"` refuses
+  redirects. Boolean `follow_redirects` aliases remain supported. Default/error
+  requests have a 30-second chain budget, configured response caps, and reject
+  explicit Host/userinfo. Charset/BOM text decoding remains compatible. Same-origin
+  Secrets may follow; crossing origins strips credentials and rejects body replay.
+  Download status errors no longer reflect server bodies. These are intentional
+  compatibility changes: see [Fetch migration notes](migration-v0.5.4-fetch.md).
 - `std/crypto`: `sha384`, `sha384_bytes` accept exact UTF-8 or checked integer bytes;
   `base64_encode_bytes` produces standard padded base64. Existing SHA256 and string
   base64 valid results remain unchanged. SHA256 now rejects out-of-range integer
@@ -61,4 +69,4 @@ reason phrases and HTTP framing may differ from other fixture servers; 204 has n
 `examples/system-io-completeness` adds strict typed imports, three native Intent
 scenarios, owned-file cleanup, and a Normal-mode loopback binary framing fixture.
 Outbound TCP/UDP/TLS/Unix sockets, general file streams/incremental hashing and HTTP
-lifecycle changes remain deferred. Package version stays 0.5.4, unreleased.
+lifecycle APIs remain deferred. Package version stays 0.5.4, unreleased.

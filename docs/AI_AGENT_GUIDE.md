@@ -3248,7 +3248,7 @@ NTNT_SECRETS_SOCKET_ENDPOINTS=/run/ntnt-secrets/agent.sock
 NTNT_SECRETS_AUTHORIZATION_SCOPE=deployment-a
 ```
 
-A `Secret` can enter approved `fetch()` header, cookie, auth, body, JSON-leaf, or form sinks. Secret-bearing requests require HTTPS and never follow redirects. `str(secret)`, logging, diagnostics, display, and error rendering emit `[REDACTED]`. Templates, public responses, JSON/CSV serialization, URL query construction, caches, databases, KV, jobs, and task/channel payloads reject secret-bearing values. There is no general plaintext reveal function.
+A `Secret` can enter approved `fetch()` header, cookie, auth, body, JSON-leaf, or form sinks. Secret-bearing requests require HTTPS and may follow same-origin redirects; cross-origin hops strip credentials and reject body replay. `str(secret)`, logging, diagnostics, display, and error rendering emit `[REDACTED]`. Templates, public responses, JSON/CSV serialization, URL query construction, caches, databases, KV, jobs, and task/channel payloads reject secret-bearing values. There is no general plaintext reveal function.
 
 See [the secrets-agent protocol](secrets-agent-protocol.md) and the [`std/secrets` reference](STDLIB_REFERENCE.md#stdsecrets) for the full provider and sink contracts.
 
@@ -3769,34 +3769,28 @@ print(blocks[1]["source"])
 print(blocks[1]["text"])
 ```
 
-## Explicit HTTP Redirects
+## HTTP Redirects
 
-Redirects are disabled by default. Enable them per request when the caller permits following:
+`fetch`, cache misses, and both `download` forms follow redirects by default in 0.5.4.
+Use `redirect: "manual"` to inspect a 3xx response or `redirect: "error"` to reject a redirect.
 
 ```ntnt
 import { fetch } from "std/http"
 
-fn fetch_following(url) {
-    match fetch(url, map {
-        "follow_redirects": true,
-        "max_redirects": 5,
-        "timeout": 30
-    }) {
-        Ok(response) => print(response["body"]),
-        Err(error) => print(error)
-    }
-}
-
-fetch_following("https://example.com")
+let response = fetch("https://example.com")
+let manual = fetch("https://example.com", map { "redirect": "manual" })
+let strict = fetch(map { "url": "https://example.com", "redirect": "error" })
 ```
 
-The same options work in a one-map `fetch`, `cache_fetch` request map, and request-map `download`. `max_redirects` must be an integer from 1 through 10 (default 5); setting it alone does not enable redirects. The limit counts followed edges. Cache entries are separated by redirect policy and hop limit; deleting a URL invalidates all its variants. This does not change the cache's existing method/header/auth identity limitations.
+`follow_redirects: true` aliases follow; false aliases manual. Contradictions fail before contact or cache lookup. `max_redirects` counts followed edges, defaults to 5, accepts 1..10, and does not override the mode. Cache identity includes normalized mode and hop limit; deleting a URL removes every variant. Secret-bearing requests remain forbidden in the cache. Existing method/header cache identity limitations remain.
 
-Every protected hop is validated and connected to its exact approved DNS addresses without an implicit proxy. Opt-in rejects opaque Secret values before contact, URL userinfo, explicit Host headers, HTTPS downgrades, cycles, and invalid, multiple, or oversized Location values. Only 301/302/303/307/308 are followed; a missing Location is terminal. URL-only cycle detection conservatively rejects POST→303→GET at the same normalized URL.
+Every protected hop validates all resolved addresses and connects to that exact set without proxies. Follow/error reject URL userinfo, controls and explicit Host headers. Follow rejects HTTPS downgrades, cycles and malformed/multiple/oversized Location. Only 301/302/303/307/308 are redirect statuses; follow returns a response with missing Location, while error rejects it. Fetch still returns HTTP 4xx/5xx as `Ok(response)` with `ok: false`.
 
-Same-origin ordinary credentials remain available. Crossing an origin (scheme, normalized hostname, effective port) permanently removes auth, cookies, and caller headers except Accept, Accept-Language, and User-Agent. POST on 301/302 and non-HEAD on 303 become GET with all body sources and entity headers removed. A redirect that would replay a body across origins fails before contacting that destination. Response cookies are not forwarded; redirect-cookie sessions and Secret-bearing traffic require explicit independently authorized requests.
+Same-origin credentials, including Secret values, survive. Cross-origin hops permanently strip auth, cookies and caller headers except non-Secret Accept, Accept-Language and User-Agent. Removed credentials never return on A→B→A; response cookies are not forwarded. POST on 301/302 and methods other than GET/HEAD on 303 become bodyless GET. Other replayable bodies may follow only on the same origin. Secret-bearing loopback HTTP may follow on the same origin under the existing `APP_ENV=development` transport exception and independent SSRF grant.
 
-Opt-in uses one timeout budget, defaulting to 30 seconds; zero expires before contact or a cache return. Synchronous system DNS and filesystem operations cannot be interrupted, so this is not a hard wall-clock return guarantee. Final fetch bodies decode as UTF-8 with replacement, ignoring the response charset; both received bytes and decoded UTF-8 bytes are bounded by `NTNT_MAX_RESPONSE_SIZE` (50 MiB by default). Opt-in downloads bound streamed bytes by the same limit. Successful file promotion is the commit point. If a no-overwrite download commits but cannot unlink its temporary file, it returns `Ok` with `cleanup_warning` and `temporary_path` rather than claiming the destination was preserved.
+Follow/error use one 30-second default timeout budget and cap both received bytes and decoded UTF-8 at `NTNT_MAX_RESPONSE_SIZE` (50 MiB by default). Text preserves Content-Type charset, BOM and replacement semantics. Downloads cap streamed bytes. Explicit manual retains legacy budgets and cancellation behavior. Synchronous DNS and filesystem calls cannot be interrupted, so the deadline is not a hard wall-clock return guarantee. A denied next request does not undo an earlier POST or imply a safe retry.
+
+Downloads preserve existing file options and atomic promotion. Non-success diagnostics report status without reflecting response bodies. A committed no-overwrite download with failed temporary cleanup returns `Ok` with `cleanup_warning` and `temporary_path`. See [0.5.4 migration notes](migration-v0.5.4-fetch.md).
 
 ## Streaming HTTP Downloads
 
