@@ -63,6 +63,9 @@ pub(crate) fn intent_value_to_json_expose(
 
 pub(crate) fn reject_runtime_authority(value: &Value) -> crate::error::Result<()> {
     match value {
+        Value::ProbeHandle(_) => Err(IntentError::type_error(
+            "ProbeHandle cannot be serialized to JSON",
+        )),
         Value::TcpListener(_) | Value::TcpStream(_) | Value::TcpReader(_) => Err(
             IntentError::type_error("TCP handles cannot be serialized to JSON"),
         ),
@@ -99,6 +102,7 @@ fn convert_json(
     }
 
     Ok(match value {
+        Value::ProbeHandle(_) => return Err(IntentError::type_error("ProbeHandle cannot be serialized to JSON")),
         Value::TcpListener(_) | Value::TcpStream(_) | Value::TcpReader(_) => return Err(IntentError::type_error("TCP handles cannot be serialized to JSON")),
         Value::TempFile(_) | Value::TempDir(_) => return Err(IntentError::type_error("Temporary handles cannot be serialized to JSON")),
         Value::Unit => serde_json::Value::Null,

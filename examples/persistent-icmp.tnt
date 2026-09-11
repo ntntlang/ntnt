@@ -1,0 +1,49 @@
+// Run in a capability-enabled process. The session is opened inside its task.
+// Application scheduling/history is intentionally outside the probe primitive.
+import { ping_open, ping_probe, ping_close } from "std/net"
+import { spawn, await_task, sleep_ms } from "std/concurrent"
+import { starts_with } from "std/string"
+
+let task = spawn(fn() {
+    fn sample() -> Result<Unit, String> {
+        let target = "1.1.1.1"
+        let mut handle = ping_open(target, map { "idle_timeout_ms": 60000 }) otherwise {
+            return Err(err)
+        }
+        for i in 0..3 {
+            match ping_probe(handle, 1000) {
+                Ok(attempt) => {
+                    // status is reply, timeout or target_error. Only replies have latency_ms.
+                    print(attempt)
+                },
+                Err(message) => {
+                    // Explicit application recovery: an expired handle sent no request.
+                    // Opening again selects a new address/socket and resets the counter.
+                    match ping_close(handle) {
+                        Ok(done) => {},
+                        Err(close_error) => { return Err(close_error) }
+                    }
+                    if starts_with(message, "expired:") {
+                        let reopened = ping_open(target) otherwise { return Err(err) }
+                        handle = reopened
+                    } else {
+                        return Err(message)
+                    }
+                }
+            }
+            sleep_ms(100)
+        }
+        // This Result becomes the task result. Teardown also closes on errors/cancellation.
+        ping_close(handle)
+    }
+    sample()
+})
+match await_task(task) {
+    Ok(result) => {
+        match result {
+            Ok(done) => { print("Session closed") },
+            Err(message) => { print("Probe session failed: " + message) }
+        }
+    },
+    Err(message) => { print("Task failed: " + message) }
+}

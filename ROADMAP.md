@@ -24,6 +24,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Exclusive initial-mode files, private directories, byte writes, POSIX metadata/access and descriptor sync.
 - [x] Missing-suffix resolution with ordered symlink expansion.
 - [x] Bounded opaque server-side TCP handles and multi-client native fixture.
+- [x] Persistent native ICMP ProbeHandle API with idle reaping, cancellable probes, correlation across rollover, and task/worker ownership (#199). Capability-enabled real-network verification remains a release gate.
 - [x] Existing HTTP engines: literal host, post-bind readiness and opt-in fixture header suppression.
 - [x] Binary Base64/UTF-8 completion, checked SHA256/SHA512 and HMAC verification.
 - [x] Process-local monotonic elapsed/deadline/remaining helpers.

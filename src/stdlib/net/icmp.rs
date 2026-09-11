@@ -258,6 +258,141 @@ fn icmp_ident_for_socket(socket: &Socket) -> Option<u16> {
         .filter(|port| *port != 0)
 }
 
+/// Shared connected echo socket setup for finite ping batches and persistent probes.
+pub(super) struct EchoSocket {
+    pub(super) socket: Socket,
+    pub(super) target: IpAddr,
+    local: Option<IpAddr>,
+    ident: u16,
+}
+impl EchoSocket {
+    #[cfg(test)]
+    pub(super) fn test_udp(socket: std::net::UdpSocket) -> Self {
+        Self {
+            socket: socket.into(),
+            target: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            local: None,
+            ident: 0x1234,
+        }
+    }
+
+    pub(super) fn open(target: IpAddr, timeout: Duration) -> std::io::Result<Self> {
+        let socket = create_icmp_socket(target, timeout)?;
+        let local = socket
+            .local_addr()
+            .ok()
+            .and_then(|a| a.as_socket())
+            .map(|a| a.ip());
+        let ident = icmp_ident_for_socket(&socket).unwrap_or_else(next_icmp_ident);
+        Ok(Self {
+            socket,
+            target,
+            local,
+            ident,
+        })
+    }
+    pub(super) fn send_persistent(
+        &self,
+        sequence: u16,
+        payload: &[u8],
+    ) -> Result<(), ProbeFailure> {
+        self.socket
+            .set_nonblocking(true)
+            .map_err(|e| probe_socket_unavailable(PING_LABEL, e))?;
+        let packet = build_icmp_echo_request(
+            PING_LABEL,
+            self.target,
+            self.local,
+            self.ident,
+            sequence,
+            payload,
+        )?;
+        // A local send failure (including EAGAIN/ENETUNREACH) is never a
+        // target timeout. No send retries or synthetic sent counts.
+        let sent = self
+            .socket
+            .send(&packet)
+            .map_err(|e| probe_socket_unavailable(PING_LABEL, e))?;
+        if sent != packet.len() {
+            return Err(ProbeFailure::Backend(
+                "incomplete ICMP datagram send".into(),
+            ));
+        }
+        Ok(())
+    }
+    pub(super) fn receive_persistent(
+        &self,
+        sequence: u16,
+        payload: &[u8],
+        sent_at: Instant,
+        wait: Duration,
+    ) -> Result<Option<IcmpProbeEvent>, ProbeFailure> {
+        // Bounded blocking receive wakes on arrival rather than inflating RTT
+        // with sleep polling. The owner protects the sole descriptor throughout.
+        self.socket
+            .set_read_timeout(Some(wait))
+            .and_then(|_| self.socket.set_nonblocking(false))
+            .map_err(|e| probe_socket_unavailable(PING_LABEL, e))?;
+        let mut buffer = [MaybeUninit::<u8>::uninit(); 2048];
+        let (len, from) = match self.socket.recv_from(&mut buffer) {
+            Ok(v) => v,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) =>
+            {
+                return Ok(None)
+            }
+            // Kernel errors lack a quoted generation. Treat them as backend
+            // failures, never attribute them to the current target measurement.
+            Err(e) => return Err(probe_socket_unavailable(PING_LABEL, e)),
+        };
+        // socket2 initialized exactly len bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), len) };
+        let source = from.as_socket().map(|a| a.ip()).unwrap_or(self.target);
+        if !persistent_packet_matches(bytes, source, self.target, payload) {
+            return Ok(None);
+        }
+        Ok(parse_icmp_probe_event(
+            bytes,
+            source,
+            self.target,
+            self.ident,
+            sequence,
+            sent_at.elapsed(),
+        ))
+    }
+}
+
+/// Full nonce + logical counter required even before first wire rollover.
+/// RFC-minimum error quotes with only the echo header are deliberately ignored.
+fn persistent_packet_matches(bytes: &[u8], source: IpAddr, target: IpAddr, payload: &[u8]) -> bool {
+    let Some(message) = parse_icmp_message(bytes, target, source) else {
+        return false;
+    };
+    let reply_type = if target.is_ipv4() { 0 } else { 129 };
+    if message.icmp_type == reply_type {
+        return message.source == target && message.icmp_code == 0 && message.quoted == payload;
+    }
+    let quoted = message.quoted;
+    let inner = match target {
+        IpAddr::V4(ip) => {
+            if quoted.get(16..20) != Some(ip.octets().as_slice()) {
+                return false;
+            }
+            quoted_inner_v4(quoted).filter(|(proto, _)| *proto == 1)
+        }
+        IpAddr::V6(ip) => {
+            if quoted.get(24..40) != Some(ip.octets().as_slice()) {
+                return false;
+            }
+            quoted_inner_v6(quoted).filter(|(proto, _)| *proto == 58)
+        }
+    };
+    inner.is_some_and(|(_, inner)| inner.get(8..8 + payload.len()) == Some(payload))
+}
+
 // ---------------------------------------------------------------------------
 // Packet substrate
 // ---------------------------------------------------------------------------
@@ -746,7 +881,7 @@ fn run_native_ping(
     count: usize,
     interval: Duration,
 ) -> Result<IcmpPingResult, ProbeFailure> {
-    let socket = match create_icmp_socket(target_ip, timeout) {
+    let core = match EchoSocket::open(target_ip, timeout) {
         Ok(socket) => socket,
         Err(err) if io_error_indicates_target_failure(&err) => {
             return Ok(failed_ping_result(
@@ -758,12 +893,9 @@ fn run_native_ping(
         }
         Err(err) => return Err(probe_socket_unavailable(PING_LABEL, err)),
     };
-    let local_ip = socket
-        .local_addr()
-        .ok()
-        .and_then(|addr| addr.as_socket())
-        .map(|addr| addr.ip());
-    let ident = icmp_ident_for_socket(&socket).unwrap_or_else(next_icmp_ident);
+    let socket = core.socket;
+    let local_ip = core.local;
+    let ident = core.ident;
     let count = count.max(1);
     let deadline = Instant::now() + timeout;
     let payload = [0u8; 56];
@@ -1084,6 +1216,159 @@ fn icmp_attempt_to_value(attempt: &IcmpPingAttempt) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn real_persistent_echo_datagram_and_raw_paths() {
+        let mut exercised = 0;
+        for target in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            let (domain, protocol) = if target.is_ipv4() {
+                (Domain::IPV4, Protocol::ICMPV4)
+            } else {
+                (Domain::IPV6, Protocol::ICMPV6)
+            };
+            for kind in [Type::DGRAM, Type::RAW] {
+                let socket = match open_connected_icmp_socket(
+                    domain,
+                    kind,
+                    protocol,
+                    target,
+                    Duration::from_secs(1),
+                ) {
+                    Ok(socket) => socket,
+                    Err(e) => {
+                        eprintln!("SKIP real ICMP {target} {kind:?}: {e}; no probes asserted for this path");
+                        continue;
+                    }
+                };
+                let local = socket.local_addr().unwrap().as_socket().map(|a| a.ip());
+                let ident = icmp_ident_for_socket(&socket).unwrap_or_else(next_icmp_ident);
+                socket.set_nonblocking(true).unwrap();
+                let core = EchoSocket {
+                    socket,
+                    target,
+                    local,
+                    ident,
+                };
+                let nonce: [u8; 16] = rand::random();
+                for logical in [65_535u64, 65_536] {
+                    let mut payload = nonce.to_vec();
+                    payload.extend_from_slice(&logical.to_be_bytes());
+                    let start = Instant::now();
+                    core.send_persistent(logical as u16, &payload).unwrap();
+                    loop {
+                        assert!(
+                            start.elapsed() < Duration::from_secs(1),
+                            "real ICMP {target} {kind:?} did not reply"
+                        );
+                        match core
+                            .receive_persistent(
+                                logical as u16,
+                                &payload,
+                                start,
+                                Duration::from_millis(5),
+                            )
+                            .unwrap()
+                        {
+                            Some(IcmpProbeEvent::Reply(r)) => {
+                                assert_eq!(r.source, target);
+                                break;
+                            }
+                            Some(event) => panic!("unexpected real loopback event {event:?}"),
+                            None => std::thread::sleep(Duration::from_millis(5)),
+                        }
+                    }
+                }
+                exercised += 1;
+                eprintln!("REAL ICMP {target} {kind:?}: same socket received two correlated replies across forced wire rollover");
+            }
+        }
+        if std::env::var("NTNT_ICMP_REQUIRE").as_deref() == Ok("1") {
+            assert!(exercised > 0, "required real ICMP, but all paths skipped");
+        }
+    }
+
+    #[test]
+    fn persistent_correlation_rejects_stale_malformed_and_truncated_v4_v6() {
+        let payload = [7u8; 24];
+        for target in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            let (reply_type, echo_type, error_type) = if target.is_ipv4() {
+                (0, 8, 3)
+            } else {
+                (129, 128, 1)
+            };
+            let mut reply = vec![reply_type, 0, 0, 0, 0x12, 0x34, 0, 0];
+            reply.extend_from_slice(&payload);
+            assert!(persistent_packet_matches(&reply, target, target, &payload));
+            assert!(
+                parse_icmp_probe_event(&reply, target, target, 0x1234, 0, Duration::ZERO).is_some()
+            );
+            assert!(
+                parse_icmp_probe_event(&reply, target, target, 0x1235, 0, Duration::ZERO).is_none()
+            );
+            assert!(
+                parse_icmp_probe_event(&reply, target, target, 0x1234, 1, Duration::ZERO).is_none()
+            );
+            let mut stale = payload;
+            stale[23] ^= 1;
+            assert!(!persistent_packet_matches(&reply, target, target, &stale));
+            for n in 0..reply.len() {
+                assert!(!persistent_packet_matches(
+                    &reply[..n],
+                    target,
+                    target,
+                    &payload
+                ));
+            }
+            let other = if target.is_ipv4() {
+                "127.0.0.2".parse().unwrap()
+            } else {
+                "::2".parse().unwrap()
+            };
+            assert!(!persistent_packet_matches(&reply, other, target, &payload));
+            let mut quoted = if let IpAddr::V4(ip) = target {
+                let mut q = vec![0; 20];
+                q[0] = 0x45;
+                q[9] = 1;
+                q[16..20].copy_from_slice(&ip.octets());
+                q
+            } else if let IpAddr::V6(ip) = target {
+                let mut q = vec![0; 40];
+                q[0] = 0x60;
+                q[6] = 58;
+                q[24..40].copy_from_slice(&ip.octets());
+                q
+            } else {
+                unreachable!()
+            };
+            reply[0] = echo_type;
+            quoted.extend_from_slice(&reply);
+            let mut error = vec![error_type, 0, 0, 0, 0, 0, 0, 0];
+            error.extend_from_slice(&quoted);
+            assert!(persistent_packet_matches(&error, other, target, &payload));
+            assert!(matches!(
+                parse_icmp_probe_event(&error, other, target, 0x1234, 0, Duration::ZERO),
+                Some(IcmpProbeEvent::Error(_))
+            ));
+            assert!(!persistent_packet_matches(&error, other, target, &stale));
+            for n in 0..error.len() {
+                assert!(!persistent_packet_matches(
+                    &error[..n],
+                    other,
+                    target,
+                    &payload
+                ));
+            }
+            // A different quoted destination with matching identifier/sequence/payload cannot be ours.
+            error[if target.is_ipv4() { 24 } else { 32 }] ^= 1;
+            assert!(!persistent_packet_matches(&error, other, target, &payload));
+        }
+    }
 
     #[test]
     fn icmp_echo_request_sets_checksum_and_identifiers() {

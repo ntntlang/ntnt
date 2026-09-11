@@ -1119,6 +1119,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::TcpListener(a), Value::TcpListener(b))
         | (Value::TcpStream(a), Value::TcpStream(b)) => std::sync::Arc::ptr_eq(a, b),
         (Value::TcpReader(a), Value::TcpReader(b)) => std::sync::Arc::ptr_eq(a, b),
+        (Value::ProbeHandle(a), Value::ProbeHandle(b)) => std::sync::Arc::ptr_eq(a, b),
         (Value::TempFile(a), Value::TempFile(b)) | (Value::TempDir(a), Value::TempDir(b)) => {
             std::sync::Arc::ptr_eq(a, b)
         }
