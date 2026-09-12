@@ -11906,7 +11906,7 @@ close(conn: Connection) -> Bool
 
 Close a PostgreSQL database connection handle.
 
-Invalidates this logical handle and clears any transaction pinned to it. The URL-keyed shared pool remains cached so future connect(url) calls can reuse the fast path instead of recreating a pool. Returns true if the handle was accepted for close, false otherwise.
+Invalidates this logical handle and clears any transaction pinned to it. Commit or rollback transactions explicitly before close; closing alone does not guarantee SQL rollback. The shared pool stays cached for reuse, but is eligible for LRU eviction when no handle or in-flight operation or transaction snapshot retains it. Returns true if the handle was accepted for close, false otherwise.
 
 **Parameters:**
 
@@ -11970,7 +11970,7 @@ connect(connection_string: String) -> Result<Connection, String>
 
 Open or reuse a shared connection pool to a PostgreSQL database.
 
-Establishes a URL-keyed shared connection pool using the provided connection string and returns an opaque connection handle that can be passed to query, execute, and transaction functions. Repeated connect() calls with the same connection string reuse the verified shared pool, so request-path connect() calls use the fast path instead of creating a new pool each time. close(handle) invalidates the logical handle and clears any transaction pinned to it, but keeps the shared pool cached for future connect() calls. Pool size defaults to 5 connections per pool (configurable via NTNT_DB_POOL_SIZE env var). Note: each worker has its own process-local shared pools, so total connections = num_workers × num_databases × pool_size.
+Establishes a URL-keyed shared connection pool using the provided connection string and returns an opaque connection handle that can be passed to query, execute, and transaction functions. Repeated connect() calls with the same connection string reuse the verified shared pool, so request-path connect() calls use the fast path instead of creating a new pool each time. close(handle) invalidates the logical handle; commit or rollback transactions explicitly before closing. Unused shared pools stay cached until LRU eviction is needed to admit a different connection key. Each process permits at most 32 shared pools, including pending creations. NTNT_POSTGRES_MAX_SHARED_POOLS overrides this with a positive integer and is read once at first connect; zero is invalid, not an unlimited mode. Invalid configuration or a full registry with no unused pool returns Err. Same-key concurrent connects share one verification. Active handles, in-flight operations and transaction snapshots prevent pool eviction. Pool size defaults to 5 connections per pool (configurable via NTNT_DB_POOL_SIZE env var). Note: each worker has its own process-local shared pools, so total connections = num_workers × num_databases × pool_size.
 
 **Parameters:**
 

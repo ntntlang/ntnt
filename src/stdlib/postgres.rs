@@ -17,10 +17,13 @@ use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::NoTls;
+
+mod pool_registry;
+use pool_registry::{PoolRegistry, SharedPool};
 
 type Result<T> = std::result::Result<T, IntentError>;
 
@@ -40,21 +43,38 @@ static DB_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::Laz
 /// URL reuse the same verified pool instead of creating a fresh pool per call.
 /// The raw URL may contain credentials, so it is used only to configure the pool
 /// and is never copied into the public handle or kept as the registry key.
-static SHARED_POOL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, Pool>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+// Read once on the first connect, including an invalid setting: no environment
+// mutation can silently change admission policy after the registry is in use.
+static SHARED_POOL_REGISTRY: std::sync::LazyLock<std::result::Result<PoolRegistry, &'static str>> =
+    std::sync::LazyLock::new(|| {
+        pool_registry::configured_capacity(std::env::var("NTNT_POSTGRES_MAX_SHARED_POOLS"))
+            .map(PoolRegistry::new)
+    });
 
 /// Transaction registry — maps connection handle IDs to dedicated client objects.
 /// Transactions must pin to a single connection, so we check out a client
 /// at BEGIN and hold it until COMMIT/ROLLBACK.
-static TXN_REGISTRY: std::sync::LazyLock<
-    Mutex<HashMap<u64, std::sync::Arc<tokio::sync::Mutex<deadpool_postgres::Client>>>>,
-> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static TXN_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Arc<TransactionEntry>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct TransactionEntry {
+    // Drop the checked-out client before releasing the registry-level lease.
+    client: tokio::sync::Mutex<deadpool_postgres::Client>,
+    _pool: Arc<SharedPool>,
+}
+
+impl std::ops::Deref for TransactionEntry {
+    type Target = tokio::sync::Mutex<deadpool_postgres::Client>;
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
 
 static CONNECTION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Clone)]
 struct HandleEntry {
-    pool: Pool,
+    pool: Arc<SharedPool>,
     token: String,
 }
 
@@ -562,7 +582,7 @@ fn create_verified_pool(connection_string: &str) -> std::result::Result<Pool, St
     Ok(pool)
 }
 
-fn register_pool_handle(pool: Pool) -> Result<Value> {
+fn register_pool_handle(pool: Arc<SharedPool>) -> Result<Value> {
     let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let token = uuid::Uuid::new_v4().to_string();
 
@@ -589,36 +609,21 @@ fn register_pool_handle(pool: Pool) -> Result<Value> {
 
 /// Connect to a PostgreSQL database — returns a handle backed by a shared pool.
 fn pg_connect(connection_string: &str) -> Result<Value> {
-    let pool_key = hash_connection_string(connection_string);
-
-    if let Some(entry) = SHARED_POOL_REGISTRY
-        .lock()
-        .map_err(|_| {
-            IntentError::runtime_error("Failed to lock Postgres pool registry".to_string())
-        })?
-        .get(&pool_key)
-        .cloned()
-    {
-        return register_pool_handle(entry);
-    }
-
-    let pool = match create_verified_pool(connection_string) {
+    let registry = match &*SHARED_POOL_REGISTRY {
+        Ok(registry) => registry,
+        Err(error) => return Ok(Value::err(Value::String((*error).into()))),
+    };
+    let pool = match registry.get_or_create(hash_connection_string(connection_string), || {
+        create_verified_pool(connection_string)
+    }) {
         Ok(pool) => pool,
         Err(error) => return Ok(Value::err(Value::String(error))),
     };
-
-    let pool = {
-        let mut registry = SHARED_POOL_REGISTRY.lock().map_err(|_| {
-            IntentError::runtime_error("Failed to lock Postgres pool registry".to_string())
-        })?;
-        registry.entry(pool_key).or_insert(pool).clone()
-    };
-
     register_pool_handle(pool)
 }
 
 /// Get a pool from the connection handle
-fn get_pool(conn: &Value) -> Result<Pool> {
+fn get_pool(conn: &Value) -> Result<Arc<SharedPool>> {
     match conn {
         Value::Map(map) => {
             let conn_id = match map.get("_pg_connection_id") {
@@ -1035,27 +1040,34 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
 /// Close a database connection handle.
 ///
 /// This invalidates the logical handle and clears any transaction pinned to it.
-/// The URL-keyed shared pool remains cached so repeated connect(url) calls keep
-/// using the fast path instead of recreating pools on request paths.
+/// The shared pool remains available for warm reuse, but becomes eligible for
+/// LRU eviction once no handle, operation or transaction snapshot retains it.
 fn pg_close(conn: &Value) -> Result<Value> {
     match conn {
-        Value::Map(_) => {
-            let conn_id = match get_connection_id(conn) {
-                Ok(id) => id,
-                Err(_) => return Ok(Value::Bool(false)),
+        Value::Map(map) => {
+            let (Some(Value::Int(id)), Some(Value::String(token))) =
+                (map.get("_pg_connection_id"), map.get("_pg_handle_token"))
+            else {
+                return Ok(Value::Bool(false));
             };
-
-            // Remove any active transaction for this handle. Dropping the
-            // pinned client aborts an uncommitted transaction, matching the
-            // previous handle-close behavior.
-            if let Ok(mut registry) = TXN_REGISTRY.lock() {
-                registry.remove(&conn_id);
-            }
-
-            if let Ok(mut handles) = HANDLE_REGISTRY.lock() {
-                handles.remove(&conn_id);
-            }
-
+            let id = *id as u64;
+            let removed = {
+                // All nested access uses HANDLE -> TXN, also used by BEGIN's
+                // final publication. Neither clients nor leases drop in locks.
+                let mut handles = HANDLE_REGISTRY.lock().map_err(|_| {
+                    IntentError::runtime_error("Failed to lock Postgres handle registry")
+                })?;
+                if handles.get(&id).is_none_or(|entry| entry.token != *token) {
+                    return Ok(Value::Bool(false));
+                }
+                let mut transactions = TXN_REGISTRY.lock().map_err(|_| {
+                    IntentError::runtime_error("Failed to lock Postgres transaction registry")
+                })?;
+                (handles.remove(&id), transactions.remove(&id))
+            };
+            // Preserve handle-close behavior; callers must explicitly commit or
+            // rollback SQL transactions. In-flight snapshots retain their lease.
+            drop(removed);
             Ok(Value::Bool(true))
         }
         _ => Err(IntentError::type_error(
@@ -1083,9 +1095,44 @@ fn pg_begin(conn: &Value) -> Result<Value> {
                 match client.execute("BEGIN", &[]).await {
                     Ok(_) => {
                         // Store the dedicated client in the transaction registry
-                        let txn_client = std::sync::Arc::new(tokio::sync::Mutex::new(client));
-                        if let Ok(mut registry) = TXN_REGISTRY.lock() {
-                            registry.insert(conn_id, txn_client);
+                        let txn_client = Arc::new(TransactionEntry {
+                            client: tokio::sync::Mutex::new(client),
+                            _pool: pool.clone(),
+                        });
+                        let publication = (|| -> std::result::Result<(), &'static str> {
+                            let handles = HANDLE_REGISTRY.lock().map_err(|_| {
+                                "BEGIN failed: could not lock handle registry"
+                            })?;
+                            let Value::Map(map) = conn else {
+                                return Err("BEGIN failed: invalid or closed database connection");
+                            };
+                            let Some(Value::String(token)) = map.get("_pg_handle_token") else {
+                                return Err("BEGIN failed: invalid or closed database connection");
+                            };
+                            if handles.get(&conn_id).is_none_or(|entry| entry.token != *token) {
+                                return Err("BEGIN failed: invalid or closed database connection");
+                            }
+                            let mut registry = TXN_REGISTRY.lock().map_err(|_| {
+                                "BEGIN failed: could not lock transaction registry"
+                            })?;
+                            if registry.contains_key(&conn_id) {
+                                return Err("BEGIN failed: a transaction is already active on this connection");
+                            }
+                            registry.insert(conn_id, txn_client.clone());
+                            Ok(())
+                        })();
+                        if let Err(error) = publication {
+                            // BEGIN already reached the server. A close or
+                            // competing BEGIN won admission: rollback outside
+                            // global locks before allowing pooled reuse.
+                            let rollback = txn_client.lock().await.batch_execute("ROLLBACK").await;
+                            if rollback.is_err() {
+                                // Never recycle a connection whose rollback failed.
+                                if let Ok(entry) = Arc::try_unwrap(txn_client) {
+                                    drop(deadpool_postgres::Client::take(entry.client.into_inner()));
+                                }
+                            }
+                            return Ok(Value::err(Value::String(error.into())));
                         }
                         // Return the same connection handle
                         Ok(Value::ok(conn.clone()))
@@ -1176,9 +1223,15 @@ pub fn init() -> HashMap<String, Value> {
     // passed to query, execute, and transaction functions. Repeated connect()
     // calls with the same connection string reuse the verified shared pool, so
     // request-path connect() calls use the fast path instead of creating a new
-    // pool each time. close(handle) invalidates the logical handle and clears any
-    // transaction pinned to it, but keeps the shared pool cached for future
-    // connect() calls.
+    // pool each time. close(handle) invalidates the logical handle; commit or
+    // rollback transactions explicitly before closing. Unused shared pools stay
+    // cached until LRU eviction is needed to admit a different connection key.
+    // Each process permits at most 32 shared pools, including pending creations.
+    // NTNT_POSTGRES_MAX_SHARED_POOLS overrides this with a positive integer and
+    // is read once at first connect; zero is invalid, not an unlimited mode.
+    // Invalid configuration or a full registry with no unused pool returns Err.
+    // Same-key concurrent connects share one verification. Active handles,
+    // in-flight operations and transaction snapshots prevent pool eviction.
     // Pool size defaults to 5 connections per pool (configurable via NTNT_DB_POOL_SIZE
     // env var). Note: each worker has its own process-local shared pools, so total
     // connections = num_workers × num_databases × pool_size.
@@ -1324,9 +1377,11 @@ pub fn init() -> HashMap<String, Value> {
     // Close a PostgreSQL database connection handle.
     //
     // Invalidates this logical handle and clears any transaction pinned to it.
-    // The URL-keyed shared pool remains cached so future connect(url) calls can
-    // reuse the fast path instead of recreating a pool. Returns true if the
-    // handle was accepted for close, false otherwise.
+    // Commit or rollback transactions explicitly before close; closing alone
+    // does not guarantee SQL rollback. The shared pool stays cached for reuse,
+    // but is eligible for LRU eviction when no handle or in-flight operation or
+    // transaction snapshot retains it. Returns true if the handle was accepted
+    // for close, false otherwise.
     // @param conn A Connection handle obtained from connect()
     // @returns true if the connection was successfully closed, false if it was not found
     // @see_also connect
@@ -1464,6 +1519,153 @@ mod tests {
     }
 
     #[test]
+    fn close_during_inflight_operation_keeps_shared_pool_leased() {
+        let registry = pool_registry::PoolRegistry::new(1);
+        let pool = registry
+            .get_or_create(hash_pool_key("inflight"), || {
+                let mut cfg = Config::new();
+                cfg.host = Some("localhost".into());
+                cfg.user = Some("postgres".into());
+                cfg.dbname = Some("postgres".into());
+                cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+                    .map_err(|_| "test pool".into())
+            })
+            .unwrap();
+        let handle = register_pool_handle(pool.clone()).unwrap();
+        let Value::EnumValue { values, .. } = handle else {
+            panic!("expected handle result")
+        };
+        let conn = &values[0];
+        drop(pool);
+        let inflight = get_pool(conn).unwrap();
+        assert!(matches!(pg_close(conn), Ok(Value::Bool(true))));
+        let other =
+            registry.get_or_create(hash_pool_key("other"), || panic!("busy pool was evicted"));
+        assert!(other.is_err());
+        assert!(!inflight.is_closed());
+        drop(inflight);
+        assert!(registry
+            .get_or_create(hash_pool_key("other"), || Err(
+                "factory ran after release".into()
+            ))
+            .unwrap_err()
+            .contains("factory ran"));
+    }
+
+    #[test]
+    #[ignore = "requires NTNT_POSTGRES_TEST_URL"]
+    fn transaction_snapshot_keeps_pool_leased_after_handle_close() {
+        let url = std::env::var("NTNT_POSTGRES_TEST_URL").expect("test database URL required");
+        let registry = PoolRegistry::new(1);
+        let pool = registry
+            .get_or_create(hash_pool_key("transaction-lease"), || {
+                create_verified_pool(&url)
+            })
+            .unwrap();
+        let handle = register_pool_handle(pool.clone()).unwrap();
+        let Value::EnumValue { values, .. } = handle else {
+            panic!("expected handle result")
+        };
+        let conn = &values[0];
+        drop(pool);
+        let begun = pg_begin(conn).unwrap();
+        assert!(matches!(begun, Value::EnumValue { ref variant, .. } if variant == "Ok"));
+        let id = get_connection_id(conn).unwrap();
+        let snapshot = TXN_REGISTRY.lock().unwrap().get(&id).unwrap().clone();
+        assert!(matches!(pg_close(conn), Ok(Value::Bool(true))));
+        let admission = registry.get_or_create(hash_pool_key("other"), || {
+            Err("factory must not run while transaction snapshot lives".into())
+        });
+        // Explicit cleanup: close alone has never promised SQL rollback.
+        DB_RUNTIME.block_on(async {
+            snapshot
+                .lock()
+                .await
+                .batch_execute("ROLLBACK")
+                .await
+                .unwrap();
+        });
+        drop(snapshot);
+        assert!(
+            admission
+                .unwrap_err()
+                .contains("NTNT_POSTGRES_MAX_SHARED_POOLS"),
+            "transaction snapshots must own the pool lease"
+        );
+        assert!(registry
+            .get_or_create(hash_pool_key("other"), || Err(
+                "factory ran after release".into()
+            ))
+            .unwrap_err()
+            .contains("factory ran"));
+    }
+
+    #[test]
+    #[ignore = "requires NTNT_POSTGRES_TEST_URL"]
+    fn begin_cannot_publish_after_close_while_checkout_waits() {
+        let url = std::env::var("NTNT_POSTGRES_TEST_URL").expect("test database URL required");
+        let pool = Arc::new(SharedPool(create_verified_pool(&url).unwrap()));
+        pool.resize(1);
+        let blocker = DB_RUNTIME.block_on(pool.get()).unwrap();
+        let handle = register_pool_handle(pool.clone()).unwrap();
+        let Value::EnumValue { values, .. } = handle else {
+            panic!("expected handle result")
+        };
+        let conn = values[0].clone();
+        let id = get_connection_id(&conn).unwrap();
+        let token = HANDLE_REGISTRY
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .token
+            .clone();
+        let worker = std::thread::spawn(move || {
+            let worker_conn = Value::Map(HashMap::from([
+                ("_pg_connection_id".into(), Value::Int(id as i64)),
+                ("_pg_handle_token".into(), Value::String(token)),
+            ]));
+            matches!(pg_begin(&worker_conn), Ok(Value::EnumValue { ref variant, .. }) if variant == "Err")
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.status().waiting == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "BEGIN did not reach pool checkout"
+            );
+            std::thread::yield_now();
+        }
+        assert!(matches!(pg_close(&conn), Ok(Value::Bool(true))));
+        drop(blocker);
+        let rejected = worker.join().unwrap();
+        let leaked = TXN_REGISTRY.lock().unwrap().remove(&id);
+        if let Some(entry) = &leaked {
+            DB_RUNTIME.block_on(async {
+                entry.lock().await.batch_execute("ROLLBACK").await.unwrap();
+            });
+        }
+        assert!(
+            leaked.is_none(),
+            "closed handle must not receive a late BEGIN publication"
+        );
+        assert!(rejected, "late BEGIN must return a recoverable error");
+        // The rejected BEGIN must be rolled back before the client is recycled.
+        let client = DB_RUNTIME.block_on(pool.get()).unwrap();
+        let first_txid = DB_RUNTIME
+            .block_on(client.query_one("SELECT txid_current()", &[]))
+            .unwrap()
+            .get::<_, i64>(0);
+        let second_txid = DB_RUNTIME
+            .block_on(client.query_one("SELECT txid_current()", &[]))
+            .unwrap()
+            .get::<_, i64>(0);
+        assert_ne!(
+            first_txid, second_txid,
+            "rejected BEGIN returned a client still in a transaction"
+        );
+    }
+
+    #[test]
     fn test_close_rejects_unregistered_handle() {
         let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut handle = HashMap::new();
@@ -1493,7 +1695,7 @@ mod tests {
         HANDLE_REGISTRY.lock().unwrap().insert(
             id,
             HandleEntry {
-                pool,
+                pool: Arc::new(SharedPool(pool)),
                 token: "real-token".to_string(),
             },
         );
