@@ -22,6 +22,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+mod padding_tests;
+
 static MISSING_MAGIC_LINK_CLIENT_ID_WARNED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone)]
@@ -347,12 +350,17 @@ fn parse_magic_link_flow_options(value: &Value) -> Result<MagicLinkFlowOptions> 
             900,
             "magic_link_flow",
         )?,
-        generic_response_floor_ms: positive_int_option(
+        generic_response_floor_ms: u64::try_from(int_option(
             options,
             "generic_response_floor_ms",
-            1200,
+            0,
             "magic_link_flow",
-        )? as u64,
+        )?)
+        .map_err(|_| {
+            IntentError::type_error(
+                "[auth] magic_link_flow() generic_response_floor_ms must be >= 0".to_string(),
+            )
+        })?,
         delivery_budget_hint_seconds: positive_int_option(
             options,
             "delivery_budget_hint_seconds",

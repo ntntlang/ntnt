@@ -4678,7 +4678,7 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Mount this same helper on your request route and consume route. It owns the
     // default request form, fragment-clearing confirmation page, bounded form
-    // parsing, generic request outcomes with best-effort padding, token issue/consume
+    // parsing, generic request outcomes with optional best-effort padding, token issue/consume
     // ordering, delivery cleanup, storage-backed rate limiting, trusted-origin
     // link construction, and request-aware session creation. The default client
     // budget uses immutable `req.peer_ip`; a forwarded header is used only when
@@ -4690,9 +4690,13 @@ pub fn init() -> HashMap<String, Value> {
     // a trusted site origin, or configure SITE_URL; request Host and forwarded
     // headers are not used to build outbound links. `eligible` must return bool
     // or Result<bool>; ambiguous record/map returns are rejected. Public response
-    // content and status remain generic, but timing padding is best-effort.
-    // `budget_hint_seconds` is a budget the delivery callback must enforce, not a
-    // preemptive runtime timeout.
+    // content and status remain generic. `generic_response_floor_ms` defaults to
+    // 0 (no added delay) and accepts non-negative integers. Positive values opt
+    // into best-effort timing padding, not a constant-time guarantee. To retain
+    // the previous default, explicitly set generic_response_floor_ms: 1200.
+    // Delivery callbacks remain synchronous and can exceed the selected floor;
+    // zero removes padding, not callback latency. `budget_hint_seconds` is a
+    // budget the delivery callback must enforce, not a preemptive runtime timeout.
     // @param req The current HTTP request map
     // @param options Map with request_path, consume_path, base_url, success_url, failure_url, eligible, deliver, authorize, and optional rate/session/UI settings
     // @returns Response for the request, confirmation, or consume step
@@ -6172,7 +6176,6 @@ mod tests {
                 "failure_url".to_string(),
                 Value::String("/email-login".to_string()),
             ),
-            ("generic_response_floor_ms".to_string(), Value::Int(1)),
             (
                 "eligible".to_string(),
                 flow_native("test_flow_eligible", test_flow_eligible),
@@ -12745,6 +12748,41 @@ mod tests {
     }
 
     #[test]
+    fn test_magic_link_flow_zero_floor_keeps_generic_responses() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        clear_magic_link_flow_test_events();
+        init_test_auth(SessionStore::Memory);
+        store_magic_flow_active_user("magic@example.com");
+        let mut options = expect_map(magic_flow_options(test_flow_deliver, test_flow_authorize));
+        options.insert("generic_response_floor_ms".into(), Value::Int(0));
+        let mut invoke = invoke_test_flow;
+        let mut bodies = Vec::new();
+        for body in ["email=magic%40example.com", "email=absent%40example.com"] {
+            let response = expect_map(
+                run_magic_link_flow(
+                    &[
+                        magic_flow_request("POST", "/email-login", body),
+                        Value::Map(options.clone()),
+                    ],
+                    &mut invoke,
+                )
+                .expect("zero padding must allow the real request flow"),
+            );
+            assert_eq!(map_int(&response, "status"), 200);
+            bodies.push(map_string(&response, "body"));
+        }
+        assert_eq!(bodies[0], bodies[1]);
+        assert_eq!(
+            magic_link_flow_test_events()
+                .iter()
+                .filter(|event| event.starts_with("deliver:"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn test_magic_link_flow_padding_is_best_effort_and_delivery_can_exceed_it() {
         let _guard = AUTH_TEST_MUTEX.lock().unwrap();
         reset_auth_test_state();
@@ -12936,7 +12974,6 @@ mod tests {
             "client_window_seconds",
             "identity_limit",
             "identity_window_seconds",
-            "generic_response_floor_ms",
             "delivery_budget_hint_seconds",
         ];
         for key in integer_keys {
