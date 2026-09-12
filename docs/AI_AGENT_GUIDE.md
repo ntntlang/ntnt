@@ -1699,6 +1699,26 @@ for user in users {
 close(db)
 ```
 
+**Transaction modes and lock waiting:**
+
+```ntnt
+import { connect, begin, commit, rollback, close } from "std/db/sqlite"
+let db = unwrap(connect("studio.db", map { "busy_timeout_ms": 5000 }))
+unwrap(begin(db, map { "mode": "immediate" }))
+// Check the migration ledger and apply any required DDL inside this transaction.
+commit(db)
+close(db)
+```
+
+`connect(path)` and `connect(path, map {})` preserve the bundled driver's existing **5000 ms** busy timeout. Set `busy_timeout_ms` to an integer from **0 through 2147483647**; `0` disables lock waiting. This is SQLite's per-lock busy-handler budget, not an overall request deadline or an application retry loop. SQLite can still return `SQLITE_BUSY` immediately in situations where waiting cannot resolve contention.
+
+`begin(conn)` and an omitted `mode` remain **deferred**. The optional `mode` is one of:
+- `"deferred"`: acquires the relevant locks when the transaction first reads or writes.
+- `"immediate"`: acquires the write reservation before returning. Use this **before reading** a migration ledger when multiple processes may initialize the same database.
+- `"exclusive"`: also excludes readers in rollback-journal mode; in WAL mode it behaves like `immediate`.
+
+Unknown options, non-map options, unknown modes, and invalid timeout values return descriptive `Err` values without echoing supplied values. Requested timeout setup errors are returned before publishing a connection handle. A failed `begin` must not be treated as a successful transaction. Check query/DDL/commit results and roll back an active transaction on failure before retrying or closing; do not merely catch a migration error and continue inside the same transaction. Applications still own the migration ledger, DDL, and retry policy.
+
 ### PostgreSQL (Connection Pooled)
 
 `connect()` returns a pooled connection handle (via deadpool-postgres). Connections are automatically managed — you don't need to worry about pool sizing or checkout/checkin.

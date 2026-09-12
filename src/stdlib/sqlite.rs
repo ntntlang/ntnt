@@ -61,7 +61,37 @@ fn sqlite_to_value(val: ValueRef) -> Value {
 }
 
 /// Connect to a SQLite database
+#[cfg(test)]
 fn sqlite_connect(path: &str) -> Result<Value> {
+    sqlite_connect_with_options(path, None)
+}
+
+fn sqlite_connect_with_options(path: &str, options: Option<&Value>) -> Result<Value> {
+    let timeout_ms = match options {
+        None => None,
+        Some(Value::Map(map)) => {
+            if map.keys().any(|key| key != "busy_timeout_ms") {
+                return Ok(Value::err(Value::String(
+                    "connect() options supports only busy_timeout_ms".to_string(),
+                )));
+            }
+            match map.get("busy_timeout_ms") {
+                None => None,
+                Some(Value::Int(ms)) if (0..=i32::MAX as i64).contains(ms) => Some(*ms as u64),
+                _ => {
+                    return Ok(Value::err(Value::String(
+                        "connect() busy_timeout_ms must be an Int in 0..=2147483647".to_string(),
+                    )))
+                }
+            }
+        }
+        _ => {
+            return Ok(Value::err(Value::String(
+                "connect() options must be a map with optional busy_timeout_ms".to_string(),
+            )))
+        }
+    };
+
     let result = if path == ":memory:" {
         Connection::open_in_memory()
     } else {
@@ -70,6 +100,19 @@ fn sqlite_connect(path: &str) -> Result<Value> {
 
     match result {
         Ok(conn) => {
+            // Validate the i32 millisecond bound before rusqlite (which panics on overflow).
+            // Apply explicit options before any setup that may contend for a database lock.
+            if let Some(ms) = timeout_ms {
+                if conn
+                    .busy_timeout(std::time::Duration::from_millis(ms))
+                    .is_err()
+                {
+                    return Ok(Value::err(Value::String(
+                        "connect() failed to apply busy_timeout_ms; connection was not registered"
+                            .to_string(),
+                    )));
+                }
+            }
             // Enable WAL mode for better concurrent read performance
             let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
             // Enable foreign keys (off by default in SQLite)
@@ -229,13 +272,46 @@ fn sqlite_close(conn: &Value) -> Result<Value> {
 }
 
 /// Begin a transaction
+#[cfg(test)]
 fn sqlite_begin(conn: &Value) -> Result<Value> {
+    sqlite_begin_with_options(conn, None)
+}
+
+fn sqlite_begin_with_options(conn: &Value, options: Option<&Value>) -> Result<Value> {
+    let begin_sql = match options {
+        None => "BEGIN DEFERRED",
+        Some(Value::Map(map)) => {
+            if map.keys().any(|key| key != "mode") {
+                return Ok(Value::err(Value::String(
+                    "begin() options supports only mode".to_string(),
+                )));
+            }
+            match map.get("mode") {
+                None => "BEGIN DEFERRED",
+                Some(Value::String(mode)) if mode == "deferred" => "BEGIN DEFERRED",
+                Some(Value::String(mode)) if mode == "immediate" => "BEGIN IMMEDIATE",
+                Some(Value::String(mode)) if mode == "exclusive" => "BEGIN EXCLUSIVE",
+                _ => {
+                    return Ok(Value::err(Value::String(
+                        "begin() mode must be a String: deferred, immediate, or exclusive"
+                            .to_string(),
+                    )))
+                }
+            }
+        }
+        _ => {
+            return Ok(Value::err(Value::String(
+                "begin() options must be a map with optional mode".to_string(),
+            )))
+        }
+    };
+
     let conn_arc = get_connection(conn)?;
     let conn_guard = conn_arc
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
-    match conn_guard.execute_batch("BEGIN") {
+    match conn_guard.execute_batch(begin_sql) {
         Ok(_) => Ok(Value::ok(conn.clone())),
         Err(e) => Ok(Value::err(Value::String(format!("BEGIN failed: {}", e)))),
     }
@@ -274,30 +350,41 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt connect
     // @module std/sqlite
     // @module_description SQLite database operations
-    // @signature connect(path: String) -> Result<Connection, String>
+    // @signature connect(path: String, options?: Map) -> Result<Connection, String>
     // Open a connection to a SQLite database.
     //
     // Opens a file-based or in-memory SQLite database. Automatically enables
     // WAL journal mode for better concurrent read performance and turns on
     // foreign key enforcement. Returns a connection handle for use with
     // query, execute, and transaction functions.
+    // Optional busy_timeout_ms sets the connection's lock-wait timeout before
+    // database setup. It must be an Int in 0..=2147483647; 0 disables waiting.
+    // Omitting options or passing map {} preserves the driver's default timeout
+    // (5000 ms). Invalid options return Result::Err before opening the database.
+    // Failure to apply a requested timeout returns Result::Err, not a connection.
     // @param path File path to the database, or ":memory:" for an in-memory database
+    // @param options Optional map with busy_timeout_ms: Int (0..=2147483647); no other keys are accepted
     // @returns Result containing a connection handle map on success, or an error string on failure
     // @see_also close, query, execute
     // @since v0.2.0
     // @tags #database
     // @example connect(":memory:") => Result::Ok(connection) ~ "Open in-memory database"
     // @example connect("app.db") => Result::Ok(connection) ~ "Open file-based database"
+    // @example connect("app.db", map { busy_timeout_ms: 5000 }) => Result::Ok(connection) ~ "Set the lock-wait timeout"
+    // @gotcha A busy timeout is not a guarantee that every lock conflict will wait; SQLite may return busy immediately to avoid deadlock
+    // @error Result::Err ~ "connect() busy_timeout_ms must be an Int in 0..=2147483647" fix: "Use an integer millisecond timeout within the supported range"
+    // @error Result::Err ~ "connect() options supports only busy_timeout_ms" fix: "Remove unknown option keys"
+    // @error Result::Err ~ "connect() options must be a map with optional busy_timeout_ms" fix: "Omit options or pass map { busy_timeout_ms: 5000 }"
     // @error TypeError ~ "connect() requires a database path string" fix: "Pass a String path argument"
     module.insert(
         "connect".to_string(),
         Value::NativeFunction {
             name: "connect".to_string(),
             arity: 1,
-            max_arity: 1,
+            max_arity: 2,
             requires: None,
             func: |args| match &args[0] {
-                Value::String(path) => sqlite_connect(path),
+                Value::String(path) => sqlite_connect_with_options(path, args.get(1)),
                 _ => Err(IntentError::type_error(
                     "connect() requires a database path string".to_string(),
                 )),
@@ -454,20 +541,32 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt begin
     // @module std/sqlite
-    // @signature begin(conn: Connection) -> Result<Connection, String>
+    // @signature begin(conn: Connection, options?: Map) -> Result<Connection, String>
     // Begin a database transaction.
     //
     // Starts a new SQLite transaction on the given connection. All subsequent
     // execute and query calls on this connection will be part of the transaction
     // until commit() or rollback() is called. Returns the same connection handle
     // wrapped in a Result for chaining.
+    // Omitting options or passing map {} starts a deferred transaction, as does
+    // mode: "deferred". Use mode: "immediate" to reserve the writer at BEGIN,
+    // before any read-modify-write work; competing writers may return Result::Err
+    // after the connection's busy timeout. Mode "exclusive" also blocks readers
+    // outside WAL mode; in WAL mode it has the same locking behavior as immediate.
+    // Modes are exact lowercase strings. Invalid options return Result::Err
+    // without starting a transaction. Nested transactions remain unsupported.
     // @param conn A connection handle obtained from connect()
+    // @param options Optional map with mode: "deferred", "immediate", or "exclusive"; no other keys are accepted
     // @returns Result containing the connection handle on success, or an error string on failure
     // @see_also commit, rollback
     // @since v0.2.0
     // @tags #database
     // @example begin(db) => Result::Ok(db) ~ "Start a transaction"
-    // @error RuntimeError ~ "BEGIN failed: ..." fix: "Ensure no transaction is already active on this connection"
+    // @example begin(db, map { mode: "immediate" }) => Result::Ok(db) ~ "Reserve the writer before read-modify-write work"
+    // @error Result::Err ~ "begin() mode must be a String: deferred, immediate, or exclusive" fix: "Pass one of the exact lowercase mode strings"
+    // @error Result::Err ~ "begin() options supports only mode" fix: "Remove unknown option keys"
+    // @error Result::Err ~ "begin() options must be a map with optional mode" fix: "Omit options or pass map { mode: \"immediate\" }"
+    // @error Result::Err ~ "BEGIN failed: ..." fix: "Ensure no transaction is already active; handle writer contention or configure busy_timeout_ms at connect()"
     // @error RuntimeError ~ "Invalid or closed SQLite connection" fix: "Use an open connection handle from connect()"
     // @error RuntimeError ~ "Failed to lock connection: ..." fix: "Ensure connection is not used concurrently in conflicting ways"
     module.insert(
@@ -475,9 +574,9 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "begin".to_string(),
             arity: 1,
-            max_arity: 1,
+            max_arity: 2,
             requires: None,
-            func: |args| sqlite_begin(&args[0]),
+            func: |args| sqlite_begin_with_options(&args[0], args.get(1)),
         },
     );
 
@@ -540,6 +639,9 @@ pub fn init() -> HashMap<String, Value> {
 
     module
 }
+
+#[cfg(test)]
+mod options_tests;
 
 #[cfg(test)]
 mod tests {

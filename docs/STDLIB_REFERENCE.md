@@ -12426,16 +12426,17 @@ import { connect, query, query_one } from "std/sqlite"
 #### `begin`
 
 ```ntnt
-begin(conn: Connection) -> Result<Connection, String>
+begin(conn: Connection, options?: Map) -> Result<Connection, String>
 ```
 
 Begin a database transaction.
 
-Starts a new SQLite transaction on the given connection. All subsequent execute and query calls on this connection will be part of the transaction until commit() or rollback() is called. Returns the same connection handle wrapped in a Result for chaining.
+Starts a new SQLite transaction on the given connection. All subsequent execute and query calls on this connection will be part of the transaction until commit() or rollback() is called. Returns the same connection handle wrapped in a Result for chaining. Omitting options or passing map {} starts a deferred transaction, as does mode: "deferred". Use mode: "immediate" to reserve the writer at BEGIN, before any read-modify-write work; competing writers may return Result::Err after the connection's busy timeout. Mode "exclusive" also blocks readers outside WAL mode; in WAL mode it has the same locking behavior as immediate. Modes are exact lowercase strings. Invalid options return Result::Err without starting a transaction. Nested transactions remain unsupported.
 
 **Parameters:**
 
 - `conn` — A connection handle obtained from connect()
+- `options` — Optional map with mode: "deferred", "immediate", or "exclusive"; no other keys are accepted
 
 **Returns:** Result containing the connection handle on success, or an error string on failure
 
@@ -12443,11 +12444,15 @@ Starts a new SQLite transaction on the given connection. All subsequent execute 
 
 ```ntnt
 begin(db)  // => Result::Ok(db)  // Start a transaction
+begin(db, map { mode: "immediate" })  // => Result::Ok(db)  // Reserve the writer before read-modify-write work
 ```
 
 **Errors:**
 
-- **RuntimeError**: BEGIN failed: ... — *Fix: Ensure no transaction is already active on this connection*
+- **Result::Err**: begin() mode must be a String: deferred, immediate, or exclusive — *Fix: Pass one of the exact lowercase mode strings*
+- **Result::Err**: begin() options supports only mode — *Fix: Remove unknown option keys*
+- **Result::Err**: begin() options must be a map with optional mode — *Fix: Omit options or pass map { mode: \"immediate\" }*
+- **Result::Err**: BEGIN failed: ... — *Fix: Ensure no transaction is already active; handle writer contention or configure busy_timeout_ms at connect()*
 - **RuntimeError**: Invalid or closed SQLite connection — *Fix: Use an open connection handle from connect()*
 - **RuntimeError**: Failed to lock connection: ... — *Fix: Ensure connection is not used concurrently in conflicting ways*
 
@@ -12526,16 +12531,17 @@ commit(db)  // => true  // Commit the active transaction
 #### `connect`
 
 ```ntnt
-connect(path: String) -> Result<Connection, String>
+connect(path: String, options?: Map) -> Result<Connection, String>
 ```
 
 Open a connection to a SQLite database.
 
-Opens a file-based or in-memory SQLite database. Automatically enables WAL journal mode for better concurrent read performance and turns on foreign key enforcement. Returns a connection handle for use with query, execute, and transaction functions.
+Opens a file-based or in-memory SQLite database. Automatically enables WAL journal mode for better concurrent read performance and turns on foreign key enforcement. Returns a connection handle for use with query, execute, and transaction functions. Optional busy_timeout_ms sets the connection's lock-wait timeout before database setup. It must be an Int in 0..=2147483647; 0 disables waiting. Omitting options or passing map {} preserves the driver's default timeout (5000 ms). Invalid options return Result::Err before opening the database. Failure to apply a requested timeout returns Result::Err, not a connection.
 
 **Parameters:**
 
 - `path` — File path to the database, or ":memory:" for an in-memory database
+- `options` — Optional map with busy_timeout_ms: Int (0..=2147483647); no other keys are accepted
 
 **Returns:** Result containing a connection handle map on success, or an error string on failure
 
@@ -12544,11 +12550,19 @@ Opens a file-based or in-memory SQLite database. Automatically enables WAL journ
 ```ntnt
 connect(":memory:")  // => Result::Ok(connection)  // Open in-memory database
 connect("app.db")  // => Result::Ok(connection)  // Open file-based database
+connect("app.db", map { busy_timeout_ms: 5000 })  // => Result::Ok(connection)  // Set the lock-wait timeout
 ```
 
 **Errors:**
 
+- **Result::Err**: connect() busy_timeout_ms must be an Int in 0..=2147483647 — *Fix: Use an integer millisecond timeout within the supported range*
+- **Result::Err**: connect() options supports only busy_timeout_ms — *Fix: Remove unknown option keys*
+- **Result::Err**: connect() options must be a map with optional busy_timeout_ms — *Fix: Omit options or pass map { busy_timeout_ms: 5000 }*
 - **TypeError**: connect() requires a database path string — *Fix: Pass a String path argument*
+
+**Gotchas:**
+
+- A busy timeout is not a guarantee that every lock conflict will wait; SQLite may return busy immediately to avoid deadlock
 
 **See also:** `close`, `query`, `execute`
 
