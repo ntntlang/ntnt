@@ -1594,14 +1594,16 @@ match msg {
 
 #[test]
 fn test_parallel_cancels_on_returned_err() {
-    let (stdout, _stderr, code) = run_ntnt_code(
+    let (stdout, stderr, code) = run_ntnt_code(
         r#"
-import { parallel, sleep_ms, channel, send, recv_timeout } from "std/concurrent"
+import { parallel, channel, send, recv, close, sleep_ms } from "std/concurrent"
 
 let [tx, rx] = channel()
+let [ready_tx, ready_rx] = channel()
+let [release_tx, release_rx] = channel()
 let result = parallel([
-    fn() { sleep_ms(50); Err("api down") },
-    fn() { sleep_ms(300); send(tx, "late"); "ok" }
+    fn() { recv(ready_rx); Err("api down") },
+    fn() { send(ready_tx, true); recv(release_rx); sleep_ms(1); send(tx, "late"); "ok" }
 ])
 
 match result {
@@ -1609,14 +1611,24 @@ match result {
     Err(e) => print("err: " + str(e))
 }
 
-let msg = recv_timeout(rx, 500)
-match msg {
-    None => print("cancelled"),
-    Some(v) => print("sent: " + str(v))
+// The sibling cannot send before parallel has handled the error. If cancellation
+// is broken, releasing it produces "late". Otherwise dropping the last task-owned
+// sender disconnects rx. The 1ms sleep is an explicit cancellation checkpoint,
+// not a relative timing assumption: release happens only after error handling.
+send(release_tx, true)
+tx = None
+let msg = recv(rx)
+if str(msg) == "late" {
+    print("sent: " + str(msg))
+} else {
+    print("cancelled")
 }
+close(rx)
+close(ready_rx)
+close(release_rx)
 "#,
     );
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "stdout={stdout}\nstderr={stderr}");
     assert!(
         stdout.contains("err:"),
         "should detect returned Err: {}",
