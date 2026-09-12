@@ -1743,6 +1743,21 @@ execute(db, "INSERT INTO users (id) VALUES ($1)", [id])  // Just works
 // No need for ::text::jsonb or ::text::uuid double casts
 ```
 
+**Temporal bind parameters:** Strings bound to `DATE`, `TIME`, `TIMESTAMP`, or `TIMESTAMPTZ` are parsed and encoded in PostgreSQL's binary format. This applies to `query`, `query_one`, and `execute`, including transactions and cached statements.
+
+- `DATE`: `YYYY-MM-DD` (for example, `2024-02-29`).
+- `TIME`: `HH:MM:SS` with optional fractional seconds, without a timezone.
+- `TIMESTAMP`: `YYYY-MM-DDTHH:MM:SS` or a space instead of `T`, with optional fractional seconds and no timezone.
+- `TIMESTAMPTZ`: RFC 3339 with an explicit `Z` or numeric offset, for example `2026-07-29T06:54:21.123456-06:00`. The instant is normalized to UTC; no machine or database-session timezone is guessed.
+
+Fractions are stored at PostgreSQL's microsecond precision (sub-microsecond digits are truncated). Invalid dates/times, timezone-less `TIMESTAMPTZ` strings, leap seconds, and PostgreSQL-specific text forms such as `now`, `infinity`, or named timezones return a descriptive `Err`. These errors do not echo the bound value. Pass `None` for SQL NULL, not an empty string. When PostgreSQL's own text parser is desired, `$1::text::timestamptz` remains available.
+
+```ntnt
+let row = unwrap(query_one(db,
+    "SELECT $1::timestamptz AS cursor_time",
+    ["2026-07-29T12:54:21.123456Z"]))
+```
+
 **NULL handling:** SQL NULL values are returned as `None` (not `Unit`) in query results. Use `None` when inserting NULL values:
 ```ntnt
 // Reading NULL from database

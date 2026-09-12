@@ -78,6 +78,29 @@ enum SqlParam {
     StringArray(Vec<String>),
 }
 
+/// Only this safe, input-free diagnostic is exposed through driver error chains.
+#[derive(Debug)]
+struct TemporalCoercionError(&'static str);
+
+impl std::fmt::Display for TemporalCoercionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cannot coerce string to {}", self.0)
+    }
+}
+
+impl std::error::Error for TemporalCoercionError {}
+
+/// PostgreSQL cannot represent leap seconds. Drop sub-microsecond digits before
+/// the driver computes the signed duration from 2000-01-01, so pre-epoch values
+/// truncate their fraction consistently instead of rounding toward the epoch.
+fn temporal_microseconds<T: chrono::Timelike>(value: T) -> Option<T> {
+    let nanos = value.nanosecond();
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
+    value.with_nanosecond(nanos / 1_000 * 1_000)
+}
+
 impl ToSql for SqlParam {
     fn to_sql(
         &self,
@@ -137,6 +160,35 @@ impl ToSql for SqlParam {
                         .parse()
                         .map_err(|e| format!("Cannot coerce string \"{}\" to UUID: {}", v, e))?;
                     uuid_val.to_sql(ty, out)
+                }
+                Type::DATE => {
+                    let parsed = NaiveDate::parse_from_str(v, "%Y-%m-%d")
+                        .map_err(|_| TemporalCoercionError("DATE; expected YYYY-MM-DD"))?;
+                    parsed.to_sql(ty, out)
+                }
+                Type::TIME => {
+                    let parsed = NaiveTime::parse_from_str(v, "%H:%M:%S%.f")
+                        .ok()
+                        .and_then(temporal_microseconds)
+                        .ok_or(TemporalCoercionError(
+                            "TIME; expected HH:MM:SS[.fraction] without a timezone or leap second",
+                        ))?;
+                    parsed.to_sql(ty, out)
+                }
+                Type::TIMESTAMP => {
+                    let parsed = NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M:%S%.f")
+                        .or_else(|_| NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S%.f"))
+                        .ok()
+                        .and_then(temporal_microseconds)
+                        .ok_or(TemporalCoercionError("TIMESTAMP; expected YYYY-MM-DD[T or space]HH:MM:SS[.fraction] without a timezone or leap second"))?;
+                    parsed.to_sql(ty, out)
+                }
+                Type::TIMESTAMPTZ => {
+                    let parsed = DateTime::parse_from_rfc3339(v)
+                        .ok()
+                        .and_then(temporal_microseconds)
+                        .ok_or(TemporalCoercionError("TIMESTAMPTZ; expected RFC 3339 with Z or a numeric offset, without a leap second"))?;
+                    parsed.to_sql(ty, out)
                 }
                 _ => v.to_sql(ty, out),
             },
@@ -660,6 +712,16 @@ fn has_active_txn(conn: &Value) -> bool {
 
 /// Format a tokio-postgres error with full detail from the database (#33)
 fn format_pg_error(prefix: &str, e: &tokio_postgres::Error) -> String {
+    // The driver Display omits the bind encoder's cause. Expose only our typed,
+    // input-free temporal diagnostic, not arbitrary sources or parameter values.
+    let mut source = std::error::Error::source(e);
+    while let Some(cause) = source {
+        if let Some(error) = cause.downcast_ref::<TemporalCoercionError>() {
+            return format!("{}: {}: {}", prefix, e, error);
+        }
+        source = cause.source();
+    }
+
     if let Some(db_err) = e.as_db_error() {
         let mut msg = format!("{}: {}", prefix, db_err.message());
         if let Some(detail) = db_err.detail() {
@@ -1152,6 +1214,10 @@ pub fn init() -> HashMap<String, Value> {
     // database. Parameters use PostgreSQL $1, $2, ... placeholders. Each
     // returned row is a Map whose keys are column names. Pass an empty array
     // or Unit when no parameters are needed.
+    // Strings bind directly to DATE (YYYY-MM-DD), TIME (HH:MM:SS[.fraction]),
+    // TIMESTAMP (date + T/space + time, no timezone), and TIMESTAMPTZ (RFC 3339
+    // with Z or a numeric offset). Fractions truncate to microseconds. Invalid
+    // temporal strings, including leap seconds, return Err without echoing input.
     // @param conn A Connection handle obtained from connect()
     // @param sql The SQL query string with optional $N parameter placeholders
     // @param params An Array of bind parameter values, or Unit for no parameters
@@ -1187,6 +1253,7 @@ pub fn init() -> HashMap<String, Value> {
     // Behaves like query() but uses PostgreSQL's query_opt internally to
     // return either a single row Map or None when no row matches.
     // Ideal for lookups by primary key or unique column.
+    // Uses the same temporal String parameter coercion as query().
     // @param conn A Connection handle obtained from connect()
     // @param sql The SQL query string with optional $N parameter placeholders
     // @param params An Array of bind parameter values, or Unit for no parameters
@@ -1224,6 +1291,7 @@ pub fn init() -> HashMap<String, Value> {
     // Use this for INSERT, UPDATE, DELETE, and other statements that do not
     // return row data. Parameters use $1, $2, ... placeholders. The Ok
     // variant contains an Int representing the count of rows affected.
+    // Uses the same temporal String parameter coercion as query().
     // @param conn A Connection handle obtained from connect()
     // @param sql The SQL statement string with optional $N parameter placeholders
     // @param params An Array of bind parameter values, or Unit for no parameters
@@ -1358,6 +1426,9 @@ pub fn init() -> HashMap<String, Value> {
 
     module
 }
+
+#[cfg(test)]
+mod temporal_tests;
 
 #[cfg(test)]
 mod tests {
