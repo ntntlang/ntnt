@@ -254,6 +254,9 @@ impl BandStats {
 ///   1. `band_worker_task_ids`
 ///   2. `band_cancel_arcs`
 ///   3. `active_bands`
+///   4. `active_queues`
+/// Startup and scaling hold these together to publish a coherent pool. Status
+/// snapshots task IDs and bands together, then releases them before reading stats.
 /// Prefer acquiring one lock at a time (release before acquiring another).
 /// When two locks must be held simultaneously (e.g., scale_workers), follow the order above.
 pub struct JobRuntime {
@@ -2474,6 +2477,34 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
     }
 }
 
+// Signal handlers are process-wide. An embedding host may already own shutdown.
+static HOST_MANAGES_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Tell blocking workers that the host's installed signal handler calls
+/// `stdlib::shutdown_runtimes()` and terminates the process on interruption.
+/// Call only after installing that handler successfully.
+pub fn use_host_shutdown_handler() {
+    HOST_MANAGES_SHUTDOWN.store(true, AtomicOrdering::Release);
+}
+
+/// Validate control options before opening a queue or starting any workers.
+fn control_options(args: &[Value]) -> Result<crate::control_socket::ControlOptions> {
+    let get = |key: &str| -> Result<Option<String>> {
+        match args.first() {
+            Some(Value::Map(opts)) => match opts.get(key) {
+                None => Ok(None),
+                Some(Value::String(s)) => Ok(Some(s.clone())),
+                Some(_) => Err(IntentError::type_error(format!("{key} must be a string"))),
+            },
+            _ => Ok(None),
+        }
+    };
+    Ok(crate::control_socket::ControlOptions {
+        control_socket: get("control_socket")?.map(std::path::PathBuf::from),
+        worker_group: get("worker_group")?,
+    })
+}
+
 /// Parse shared options for work_async() and work_jobs().
 ///
 /// Returns (poll_interval_ms, concurrency, queues).
@@ -2855,6 +2886,7 @@ fn spawn_worker_task(
     kv_handle: Value,
     band: BandConfig,
     queues: Option<Vec<String>>,
+    activation: Option<std::sync::mpsc::Receiver<()>>,
 ) -> Result<(Value, Arc<CancelToken>)> {
     // Extract serializable KvHandleInfo — Value is not Send due to Rc internals.
     let kv_info = extract_kv_handle_info(&kv_handle)?;
@@ -2876,6 +2908,14 @@ fn spawn_worker_task(
             *cell.borrow_mut() = Some(cancelled);
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Startup owns the sender until the whole pool is published. On any
+            // startup error it drops the sender, so even a late-scheduled worker
+            // exits without bootstrapping app code or claiming a single job.
+            if let Some(activation) = activation {
+                if activation.recv().is_err() {
+                    return Ok(Value::Unit);
+                }
+            }
             worker_loop(kv_info, band, queues);
             Ok(Value::Unit)
         }));
@@ -2883,6 +2923,79 @@ fn spawn_worker_task(
     });
 
     Ok((Value::TaskHandle(task_id), cancel_clone))
+}
+
+/// Stage workers behind activation channels and publish all pool metadata at
+/// once. Errors leave the old pool untouched; dropping the channels prevents
+/// every partially spawned worker from ever entering its consuming loop.
+fn start_worker_pool(
+    kv_handle: Value,
+    bands: Vec<BandConfig>,
+    queues: Option<Vec<String>>,
+    control: crate::control_socket::Startup,
+) -> Result<(Vec<Value>, Vec<Arc<CancelToken>>)> {
+    // Same lock order as scaling. Do not allow a scaler to read an old band or
+    // queue filter and subsequently apply it to the newly published task maps.
+    let mut task_ids = JOB_RUNTIME
+        .band_worker_task_ids
+        .lock()
+        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+    let mut cancel_arcs = JOB_RUNTIME
+        .band_cancel_arcs
+        .lock()
+        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+    let mut active_bands = JOB_RUNTIME
+        .active_bands
+        .lock()
+        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+    let mut active_queues = JOB_RUNTIME
+        .active_queues
+        .lock()
+        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+
+    let mut handles = Vec::new();
+    let mut all_cancel_arcs = Vec::new();
+    let mut staged_ids = HashMap::new();
+    let mut staged_arcs = HashMap::new();
+    let mut activations = Vec::new();
+    for band in &bands {
+        let mut ids = Vec::new();
+        let mut arcs = Vec::new();
+        for _ in 0..band.concurrency {
+            let (activate, activation) = std::sync::mpsc::channel();
+            let (handle, cancel_arc) = spawn_worker_task(
+                kv_handle.clone(),
+                band.clone(),
+                queues.clone(),
+                Some(activation),
+            )?;
+            if let Value::TaskHandle(id) = &handle {
+                ids.push(*id);
+            }
+            handles.push(handle);
+            all_cancel_arcs.push(Arc::clone(&cancel_arc));
+            arcs.push(cancel_arc);
+            activations.push(activate);
+        }
+        staged_ids.insert(band.name.clone(), ids);
+        staged_arcs.insert(band.name.clone(), arcs);
+    }
+    *task_ids = staged_ids;
+    *cancel_arcs = staged_arcs;
+    *active_bands = bands;
+    *active_queues = queues;
+    drop(active_queues);
+    drop(active_bands);
+    drop(cancel_arcs);
+    drop(task_ids);
+
+    // Replacing a listener joins its thread, which may be serving status/scale;
+    // never hold pool locks while committing (or dropping) the listener guard.
+    control.commit();
+    for activate in activations {
+        let _ = activate.send(());
+    }
+    Ok((handles, all_cancel_arcs))
 }
 
 // ============================================================================
@@ -3391,17 +3504,23 @@ pub(crate) fn worker_status_impl() -> crate::error::Result<Value> {
         .map(|keys| keys.len() as i64)
         .unwrap_or(0);
 
-    let active_bands = JOB_RUNTIME
-        .active_bands
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-
+    // Snapshot related metadata under the same locks used for publication.
+    // Release pool locks before taking band_stats to avoid a stats/IDs inversion.
+    let (active_bands, task_ids) = {
+        let task_ids = JOB_RUNTIME
+            .band_worker_task_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let active_bands = JOB_RUNTIME
+            .active_bands
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        (active_bands.clone(), task_ids.clone())
+    };
     let stats_map_guard = JOB_RUNTIME
         .band_stats
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let task_ids_guard = JOB_RUNTIME.band_worker_task_ids.lock();
 
     let mut band_entries = Vec::new();
     for band in &active_bands {
@@ -3424,10 +3543,7 @@ pub(crate) fn worker_status_impl() -> crate::error::Result<Value> {
             Value::Int(band.poll_interval_ms as i64),
         );
 
-        let worker_count = task_ids_guard
-            .as_ref()
-            .map(|m| m.get(&band.name).map(|v| v.len()).unwrap_or(0))
-            .unwrap_or(0);
+        let worker_count = task_ids.get(&band.name).map(|v| v.len()).unwrap_or(0);
         entry.insert("workers".to_string(), Value::Int(worker_count as i64));
 
         if let Some(stats) = stats_map_guard.get(&band.name) {
@@ -3487,31 +3603,8 @@ pub(crate) fn scale_workers_impl(
     band_name: &str,
     target_count: usize,
 ) -> crate::error::Result<Value> {
-    let band_config = {
-        let active = JOB_RUNTIME
-            .active_bands
-            .lock()
-            .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
-        active.iter().find(|b| b.name == band_name).cloned()
-    };
-    let band_config = match band_config {
-        Some(b) => b,
-        None => {
-            return Err(IntentError::runtime_error(format!(
-                "scale_workers(): band '{}' not found. Call work_async() or work_jobs() first.",
-                band_name
-            )))
-        }
-    };
-
     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-    let queues = JOB_RUNTIME
-        .active_queues
-        .lock()
-        .map(|q| q.clone())
-        .unwrap_or(None);
-
-    // Lock discipline: task_ids before cancel_arcs.
+    // Hold the publication locks from configuration lookup through map update.
     let mut task_ids_map = JOB_RUNTIME
         .band_worker_task_ids
         .lock()
@@ -3520,6 +3613,24 @@ pub(crate) fn scale_workers_impl(
         .band_cancel_arcs
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+    let mut active = JOB_RUNTIME
+        .active_bands
+        .lock()
+        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+    let queues = JOB_RUNTIME
+        .active_queues
+        .lock()
+        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+    let band_config = active
+        .iter()
+        .find(|b| b.name == band_name)
+        .cloned()
+        .ok_or_else(|| {
+            IntentError::runtime_error(format!(
+                "scale_workers(): band '{}' not found. Call work_async() or work_jobs() first.",
+                band_name
+            ))
+        })?;
 
     let arcs = cancel_map.entry(band_name.to_string()).or_default();
     let ids = task_ids_map.entry(band_name.to_string()).or_default();
@@ -3527,7 +3638,7 @@ pub(crate) fn scale_workers_impl(
 
     if target_count > current_count {
         for _ in current_count..target_count {
-            match spawn_worker_task(kv_handle.clone(), band_config.clone(), queues.clone()) {
+            match spawn_worker_task(kv_handle.clone(), band_config.clone(), queues.clone(), None) {
                 Ok((Value::TaskHandle(id), cancel_arc)) => {
                     ids.push(id);
                     arcs.push(cancel_arc);
@@ -3549,15 +3660,9 @@ pub(crate) fn scale_workers_impl(
         }
     }
 
-    // Update active_bands concurrency to reflect the new count.
-    {
-        let mut active = JOB_RUNTIME
-            .active_bands
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(band) = active.iter_mut().find(|b| b.name == band_name) {
-            band.concurrency = target_count;
-        }
+    // Update the configuration while still holding the publication locks.
+    if let Some(band) = active.iter_mut().find(|b| b.name == band_name) {
+        band.concurrency = target_count;
     }
 
     Ok(Value::ok(Value::Unit))
@@ -4187,6 +4292,9 @@ pub fn init() -> HashMap<String, Value> {
     //   - "poll_interval": poll interval in milliseconds (default 1000)
     //   - "concurrency": number of parallel worker threads (default 1)
     //   - "queues": array of queue names to process (default: all queues)
+    // Control options: "control_socket" and "worker_group" override NTNT_CONTROL_SOCKET
+    // and NTNT_WORKER_GROUP. Paths resolve from the source project; see docs/worker-control.md.
+    // Ownership failures raise an error before workers start.
     // @returns Array of TaskHandles (one per worker)
     // @see_also work_jobs, cancel_task
     // @example work_async() ~ "Start a single background worker"
@@ -4201,48 +4309,11 @@ pub fn init() -> HashMap<String, Value> {
             requires: Some(RuntimeCapability::JobWorkers),
             func: |args| {
                 let (bands, queues) = parse_bands_and_queues(args)?;
+                let options = control_options(args)?;
+                let control = crate::control_socket::start_control_socket(&options)
+                    .map_err(|e| IntentError::runtime_error(e.to_string()))?;
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-                // Store active bands in the runtime for worker_status
-                if let Ok(mut active) = JOB_RUNTIME.active_bands.lock() {
-                    *active = bands.clone();
-                }
-                let mut handles = Vec::new();
-                let mut band_task_ids: HashMap<String, Vec<u64>> = HashMap::new();
-                let mut band_cancel_arcs: HashMap<String, Vec<Arc<CancelToken>>> = HashMap::new();
-                // Store active queues so scale_workers can reuse the same filter
-                if let Ok(mut aq) = JOB_RUNTIME.active_queues.lock() {
-                    *aq = queues.clone();
-                }
-                for band in &bands {
-                    let mut ids = Vec::new();
-                    let mut arcs = Vec::new();
-                    for _ in 0..band.concurrency {
-                        match spawn_worker_task(kv_handle.clone(), band.clone(), queues.clone()) {
-                            Ok((Value::TaskHandle(id), cancel_arc)) => {
-                                ids.push(id);
-                                arcs.push(cancel_arc);
-                                handles.push(Value::TaskHandle(id));
-                            }
-                            Ok((h, cancel_arc)) => {
-                                arcs.push(cancel_arc);
-                                handles.push(h);
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-                    band_task_ids.insert(band.name.clone(), ids);
-                    band_cancel_arcs.insert(band.name.clone(), arcs);
-                }
-                if let Ok(mut task_ids) = JOB_RUNTIME.band_worker_task_ids.lock() {
-                    *task_ids = band_task_ids;
-                }
-                if let Ok(mut ca) = JOB_RUNTIME.band_cancel_arcs.lock() {
-                    *ca = band_cancel_arcs;
-                }
-                // Start control socket — lives until process exit or stop_control_socket().
-                // For work_async (non-blocking), the socket persists with the app process.
-                // For work_jobs (blocking), stop_control_socket() is called on Ctrl-C.
-                crate::control_socket::start_control_socket();
+                let (handles, _) = start_worker_pool(kv_handle, bands, queues, control)?;
                 Ok(Value::Array(handles))
             },
         },
@@ -4260,6 +4331,8 @@ pub fn init() -> HashMap<String, Value> {
     // @param opts Optional configuration map:
     //   - "poll_interval": poll interval in milliseconds (default 1000)
     //   - "queues": array of queue names to process (default: all queues)
+    //   - "control_socket": Unix endpoint path (env: NTNT_CONTROL_SOCKET)
+    //   - "worker_group": stable group name (env: NTNT_WORKER_GROUP; default "default")
     // @returns Unit (blocks until cancelled)
     // @see_also work_async, enqueue
     // @example work_jobs() ~ "Run a blocking worker (at end of worker script)"
@@ -4273,66 +4346,31 @@ pub fn init() -> HashMap<String, Value> {
             requires: Some(RuntimeCapability::JobWorkers),
             func: |args| {
                 let (bands, queues) = parse_bands_and_queues(args)?;
+                let options = control_options(args)?;
+                let control = crate::control_socket::start_control_socket(&options)
+                    .map_err(|e| IntentError::runtime_error(e.to_string()))?;
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-
-                // Store active bands and queues (same as work_async, so scale_workers works)
-                if let Ok(mut active) = JOB_RUNTIME.active_bands.lock() {
-                    *active = bands.clone();
-                }
-                if let Ok(mut aq) = JOB_RUNTIME.active_queues.lock() {
-                    *aq = queues.clone();
-                }
-
-                // Spawn all band workers (background threads), collect cancel arcs
-                let mut band_task_ids: HashMap<String, Vec<u64>> = HashMap::new();
-                let mut band_cancel_arcs_map: HashMap<String, Vec<Arc<CancelToken>>> =
-                    HashMap::new();
-                let mut all_cancel_arcs: Vec<Arc<CancelToken>> = Vec::new();
-
-                for band in &bands {
-                    let mut ids = Vec::new();
-                    let mut arcs = Vec::new();
-                    for _ in 0..band.concurrency {
-                        match spawn_worker_task(kv_handle.clone(), band.clone(), queues.clone()) {
-                            Ok((Value::TaskHandle(id), cancel_arc)) => {
-                                ids.push(id);
-                                all_cancel_arcs.push(Arc::clone(&cancel_arc));
-                                arcs.push(cancel_arc);
-                            }
-                            Ok((_, cancel_arc)) => {
-                                all_cancel_arcs.push(Arc::clone(&cancel_arc));
-                                arcs.push(cancel_arc);
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-                    band_task_ids.insert(band.name.clone(), ids);
-                    band_cancel_arcs_map.insert(band.name.clone(), arcs);
-                }
-
-                if let Ok(mut task_ids) = JOB_RUNTIME.band_worker_task_ids.lock() {
-                    *task_ids = band_task_ids;
-                }
-                if let Ok(mut ca) = JOB_RUNTIME.band_cancel_arcs.lock() {
-                    *ca = band_cancel_arcs_map;
-                }
-
-                crate::control_socket::start_control_socket();
 
                 // Set up Ctrl-C handler — sets a shared shutdown flag
                 let shutdown = Arc::new(AtomicBool::new(false));
                 let shutdown_clone = Arc::clone(&shutdown);
-                ctrlc::set_handler(move || {
-                    shutdown_clone.store(true, AtomicOrdering::Release);
-                })
-                .map_err(|e| {
-                    IntentError::runtime_error(format!("Failed to set Ctrl-C handler: {}", e))
-                })?;
+                if !HOST_MANAGES_SHUTDOWN.load(AtomicOrdering::Acquire) {
+                    ctrlc::set_handler(move || {
+                        shutdown_clone.store(true, AtomicOrdering::Release);
+                    })
+                    .map_err(|e| {
+                        IntentError::runtime_error(format!("Failed to set Ctrl-C handler: {}", e))
+                    })?;
+                }
+
+                let (_, all_cancel_arcs) = start_worker_pool(kv_handle, bands, queues, control)?;
 
                 // Block until Ctrl-C, then cooperatively cancel ALL workers
                 // (including any spawned later via scale_workers)
                 loop {
-                    if shutdown.load(AtomicOrdering::Acquire) {
+                    if shutdown.load(AtomicOrdering::Acquire)
+                        || crate::stdlib::concurrent::is_current_task_cancelled()
+                    {
                         // Signal workers from JOB_RUNTIME (includes scaled workers)
                         if let Ok(ca) = JOB_RUNTIME.band_cancel_arcs.lock() {
                             for arcs in ca.values() {

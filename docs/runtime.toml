@@ -20,6 +20,20 @@ description = "Controls runtime mode. Production mode disables hot-reload for be
 example = "NTNT_ENV=production ntnt run server.tnt"
 affects = ["hot-reload"]
 
+[env_vars.NTNT_CONTROL_SOCKET]
+type = "Unix socket path"
+default = "private runtime directory plus project/group digest"
+description = "Explicit worker control endpoint. Relative paths resolve from canonical project identity: nearest ntnt.toml ancestor of the main source directory (client: --dir or CWD), otherwise that directory itself. CLI --control-socket and embedded control_socket options win. Parent must be caller-owned and private (0700). Default sockets are outside the source tree. Explicit control configuration is unsupported on Windows. See worker-control.md."
+example = "NTNT_CONTROL_SOCKET=/run/user/1000/app/jobs.sock ntnt worker app.tnt"
+affects = ["job workers", "workers CLI"]
+
+[env_vars.NTNT_WORKER_GROUP]
+type = "nonempty string"
+default = "default"
+description = "Stable worker group within a canonical project. CLI --worker-group and embedded worker_group options win. Different groups have different default endpoints; an explicit socket path overrides group-based path selection. Explicit groups are unsupported on Windows."
+example = "NTNT_WORKER_GROUP=emails ntnt worker app.tnt"
+affects = ["job workers", "workers CLI"]
+
 [env_vars.NTNT_SECRETS_PROVIDER]
 values = ["env", "unix-socket"]
 default = "env"
@@ -441,13 +455,26 @@ description = "Start background job workers for jobs defined in a .tnt file. Loa
 options = [
     { name = "--concurrency", short = "", type = "number", default = "1", description = "Number of concurrent worker threads" },
     { name = "--queues", short = "", type = "STRING", description = "Comma-separated list of queues to process (default: all)" },
-    { name = "--poll-interval", short = "", type = "number", default = "1000", description = "Poll interval in milliseconds" }
+    { name = "--poll-interval", short = "", type = "number", default = "1000", description = "Poll interval in milliseconds" },
+    { name = "--control-socket", short = "", type = "PATH", description = "Unix endpoint path; overrides NTNT_CONTROL_SOCKET. Relative to canonical project identity; private parent required" },
+    { name = "--worker-group", short = "", type = "NAME", description = "Stable worker group; overrides NTNT_WORKER_GROUP (default: default)" }
 ]
 examples = [
     "ntnt worker server.tnt",
     "ntnt worker server.tnt --concurrency 4",
     "ntnt worker server.tnt --queues emails,payments"
 ]
+
+# --- Live worker management ---
+[cli.workers]
+command = "ntnt workers <status|scale BAND COUNT|pause QUEUE|resume QUEUE> [OPTIONS]"
+description = "Manage live workers over their owner-locked Unix control socket. Startup cannot steal a live endpoint. Unsupported on Windows."
+options = [
+    { name = "--dir", short = "", type = "DIR", description = "Project/source directory for discovery (default: CWD)" },
+    { name = "--control-socket", short = "", type = "PATH", description = "Explicit endpoint; overrides NTNT_CONTROL_SOCKET. Relative to canonical project identity" },
+    { name = "--worker-group", short = "", type = "NAME", description = "Stable group; overrides NTNT_WORKER_GROUP (default: default)" }
+]
+examples = ["ntnt workers status --dir /srv/app --worker-group emails", "ntnt workers scale normal 4 --dir /srv/app --worker-group emails"]
 
 # --- Jobs ---
 [cli.jobs]

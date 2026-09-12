@@ -24,6 +24,7 @@ Environment variables that control NTNT runtime behavior
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `NTNT_ALLOW_PRIVATE_IPS` | `true` | unset (disabled — private IPs blocked) | Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x). Required for Docker inter-container communication (e.g., calling a sidecar at 172.19.0.1). Disabled by default to prevent SSRF attacks. This does not enable `std/net` or `std/netmon` probes; use `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true` for those. |
+| `NTNT_CONTROL_SOCKET` | Unix socket path | private runtime directory plus project/group digest | Explicit worker control endpoint. Relative paths resolve from canonical project identity: nearest ntnt.toml ancestor of the main source directory (client: --dir or CWD), otherwise that directory itself. CLI --control-socket and embedded control_socket options win. Parent must be caller-owned and private (0700). Default sockets are outside the source tree. Explicit control configuration is unsupported on Windows. See worker-control.md. |
 | `NTNT_DB_POOL_SIZE` | `any positive integer` | 5 | Maximum number of connections per shared PostgreSQL database pool. Each worker keeps its own process-local pools keyed by connection string, so total connections = num_workers × num_databases × pool_size. Repeated connect(url) calls within a worker reuse the same shared pool. For multi-worker production deployments with multiple databases, keep this low (2-5) to avoid exhausting PostgreSQL max_connections. |
 | `NTNT_ENV` | `development`, `production`, `prod` | development (when unset) | Controls runtime mode. Production mode disables hot-reload for better performance. |
 | `NTNT_LINT_MODE` | `default`, `warn`, `strict` | default | Controls lint strictness for type annotations. `default`: only check annotated code. `warn`: also warn about missing annotations (non-fatal). `strict`: missing annotations are errors. CLI flags (`--strict`, `--warn-untyped`) override this. |
@@ -39,12 +40,16 @@ Environment variables that control NTNT runtime behavior
 | `NTNT_STRICT` | `1`, `true` | unset (disabled) | **Deprecated — use `NTNT_LINT_MODE=strict` instead.** Enable strict type checking. Still works but emits a deprecation warning. |
 | `NTNT_TIMEOUT` | integer (seconds) | 30 | Request timeout for HTTP server in seconds. |
 | `NTNT_TYPE_MODE` | `strict`, `warn`, `forgiving` | warn | Controls runtime behavior for type mismatches. `strict`: type mismatches crash (fail-closed, recommended for auth/payments). `warn`: log `[WARN]` and continue (default). `forgiving`: silent degradation (pre-v0.4 behavior). See [Type Safety Modes](#type-safety-modes). |
+| `NTNT_WORKER_GROUP` | nonempty string | default | Stable worker group within a canonical project. CLI --worker-group and embedded worker_group options win. Different groups have different default endpoints; an explicit socket path overrides group-based path selection. Explicit groups are unsupported on Windows. |
 
 ### Examples
 
 ```bash
 # Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x)
 NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt
+
+# Explicit worker control endpoint
+NTNT_CONTROL_SOCKET=/run/user/1000/app/jobs.sock ntnt worker app.tnt
 
 # Maximum number of connections per shared PostgreSQL database pool
 NTNT_DB_POOL_SIZE=3 ntnt run server.tnt
@@ -90,6 +95,9 @@ NTNT_TIMEOUT=60 ntnt run server.tnt
 
 # Controls runtime behavior for type mismatches
 NTNT_TYPE_MODE=strict ntnt run server.tnt
+
+# Stable worker group within a canonical project
+NTNT_WORKER_GROUP=emails ntnt worker app.tnt
 
 ```
 
@@ -434,12 +442,36 @@ Start background job workers for jobs defined in a .tnt file. Loads the source f
 | `--concurrency` | number | 1 | Number of concurrent worker threads |
 | `--queues` | STRING | - | Comma-separated list of queues to process (default: all) |
 | `--poll-interval` | number | 1000 | Poll interval in milliseconds |
+| `--control-socket` | PATH | - | Unix endpoint path; overrides NTNT_CONTROL_SOCKET. Relative to canonical project identity; private parent required |
+| `--worker-group` | NAME | - | Stable worker group; overrides NTNT_WORKER_GROUP (default: default) |
 
 **Examples:**
 ```bash
 ntnt worker server.tnt
 ntnt worker server.tnt --concurrency 4
 ntnt worker server.tnt --queues emails,payments
+```
+
+### Live Worker Management
+
+```
+ntnt workers <status|scale BAND COUNT|pause QUEUE|resume QUEUE> [OPTIONS]
+```
+
+Manage live workers over their owner-locked Unix control socket. Startup cannot steal a live endpoint. Unsupported on Windows.
+
+**Options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--dir` | DIR | - | Project/source directory for discovery (default: CWD) |
+| `--control-socket` | PATH | - | Explicit endpoint; overrides NTNT_CONTROL_SOCKET. Relative to canonical project identity |
+| `--worker-group` | NAME | - | Stable group; overrides NTNT_WORKER_GROUP (default: default) |
+
+**Examples:**
+```bash
+ntnt workers status --dir /srv/app --worker-group emails
+ntnt workers scale normal 4 --dir /srv/app --worker-group emails
 ```
 
 ### Jobs

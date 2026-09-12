@@ -9610,7 +9610,17 @@ impl Interpreter {
                         ));
                     }
                 }
-                let result = func(&args);
+                let result = if matches!(fn_name.as_str(), "work_async" | "work_jobs") {
+                    crate::control_socket::with_source(
+                        self.main_source_file
+                            .as_deref()
+                            .or(self.current_file.as_deref())
+                            .map(std::path::Path::new),
+                        || func(&args),
+                    )
+                } else {
+                    func(&args)
+                };
                 if fn_name == "assert" {
                     if let Some(assertions) = &mut self.native_assertions {
                         assertions.push(crate::native_test::NativeAssertion {

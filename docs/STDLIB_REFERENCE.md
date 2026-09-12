@@ -8856,7 +8856,7 @@ work_async(opts?: Map) -> Array<TaskHandle>
 
 Start one or more background worker threads that process jobs from the queue.
 
-Always returns an Array of TaskHandles (even for a single worker) that can be used with cancel_task() to stop the workers. Workers run until cancelled. If configure_queue() hasn't been called, auto-initializes with the default SQLite store.   - "poll_interval": poll interval in milliseconds (default 1000)   - "concurrency": number of parallel worker threads (default 1)   - "queues": array of queue names to process (default: all queues)
+Always returns an Array of TaskHandles (even for a single worker) that can be used with cancel_task() to stop the workers. Workers run until cancelled. If configure_queue() hasn't been called, auto-initializes with the default SQLite store.   - "poll_interval": poll interval in milliseconds (default 1000)   - "concurrency": number of parallel worker threads (default 1)   - "queues": array of queue names to process (default: all queues) Control options: "control_socket" and "worker_group" override NTNT_CONTROL_SOCKET and NTNT_WORKER_GROUP. Paths resolve from the source project; see docs/worker-control.md. Ownership failures raise an error before workers start.
 
 **Parameters:**
 
@@ -8884,7 +8884,7 @@ work_jobs(opts?: Map) -> Unit
 
 Run a blocking worker loop that processes jobs from the queue.
 
-Runs on the current thread until interrupted (Ctrl-C) or cancelled via cooperative cancellation. Typically called at the end of a worker script. If configure_queue() hasn't been called, auto-initializes with the default SQLite store.   - "poll_interval": poll interval in milliseconds (default 1000)   - "queues": array of queue names to process (default: all queues)
+Runs on the current thread until interrupted (Ctrl-C) or cancelled via cooperative cancellation. Typically called at the end of a worker script. If configure_queue() hasn't been called, auto-initializes with the default SQLite store.   - "poll_interval": poll interval in milliseconds (default 1000)   - "queues": array of queue names to process (default: all queues)   - "control_socket": Unix endpoint path (env: NTNT_CONTROL_SOCKET)   - "worker_group": stable group name (env: NTNT_WORKER_GROUP; default "default")
 
 **Parameters:**
 

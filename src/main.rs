@@ -331,6 +331,9 @@ enum Commands {
     ///   ntnt worker server.tnt --concurrency 4
     ///   ntnt worker server.tnt --queues emails,payments
     Worker {
+        #[command(flatten)]
+        control: ControlArgs,
+
         /// The source file containing job definitions
         #[arg(value_name = "FILE")]
         file: PathBuf,
@@ -365,7 +368,7 @@ enum Commands {
 
     /// Manage live job workers (status and dynamic scaling)
     ///
-    /// Connects to the control socket (.ntnt.sock) started automatically when
+    /// Connects to the resolved Unix control socket started automatically when
     /// `ntnt worker` or `work_jobs()`/`work_async()` is running.
     ///
     /// Examples:
@@ -375,6 +378,25 @@ enum Commands {
     ///   ntnt workers scale critical 2 --dir /var/app
     #[command(subcommand)]
     Workers(WorkersCommands),
+}
+
+/// Shared server/client endpoint options. Environment is resolved in the library.
+#[derive(clap::Args, Clone, Default)]
+struct ControlArgs {
+    /// Unix control socket path (relative to project root); env: NTNT_CONTROL_SOCKET
+    #[arg(long, value_name = "PATH")]
+    control_socket: Option<PathBuf>,
+    /// Stable worker group (default: default); env: NTNT_WORKER_GROUP
+    #[arg(long, value_name = "NAME")]
+    worker_group: Option<String>,
+}
+impl From<ControlArgs> for ntnt::control_socket::ControlOptions {
+    fn from(args: ControlArgs) -> Self {
+        Self {
+            control_socket: args.control_socket,
+            worker_group: args.worker_group,
+        }
+    }
 }
 
 /// Intent-Driven Development subcommands
@@ -678,7 +700,7 @@ enum JobsCommands {
 enum WorkersCommands {
     /// Show current worker band status
     ///
-    /// Connects to .ntnt.sock and prints a live status table showing band
+    /// Connects to the resolved Unix control socket and prints a live status table showing band
     /// names, worker counts, active jobs, completed/failed totals, and average
     /// execution time.
     ///
@@ -686,14 +708,16 @@ enum WorkersCommands {
     ///   ntnt workers status
     ///   ntnt workers status --dir /var/app
     Status {
-        /// Directory that contains .ntnt.sock (default: current directory)
+        /// Project/source directory for socket discovery (default: current directory)
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
+        #[command(flatten)]
+        control: ControlArgs,
     },
 
     /// Scale a worker band to a new concurrency level
     ///
-    /// Connects to .ntnt.sock and dynamically adjusts the number of worker
+    /// Connects to the resolved Unix control socket and dynamically adjusts the number of worker
     /// threads for the named band.  Workers are added or cooperatively
     /// cancelled without restarting the process.
     ///
@@ -709,9 +733,11 @@ enum WorkersCommands {
         #[arg(value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..))]
         count: u32,
 
-        /// Directory that contains .ntnt.sock (default: current directory)
+        /// Project/source directory for socket discovery (default: current directory)
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
+        #[command(flatten)]
+        control: ControlArgs,
     },
 
     /// Pause a queue — workers stop executing jobs from it.
@@ -721,9 +747,11 @@ enum WorkersCommands {
         #[arg(value_name = "QUEUE")]
         queue: String,
 
-        /// Directory that contains .ntnt.sock (default: current directory)
+        /// Project/source directory for socket discovery (default: current directory)
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
+        #[command(flatten)]
+        control: ControlArgs,
     },
 
     /// Resume a paused queue — workers resume claiming jobs from it.
@@ -733,9 +761,11 @@ enum WorkersCommands {
         #[arg(value_name = "QUEUE")]
         queue: String,
 
-        /// Directory that contains .ntnt.sock (default: current directory)
+        /// Project/source directory for socket discovery (default: current directory)
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
+        #[command(flatten)]
+        control: ControlArgs,
     },
 }
 
@@ -882,7 +912,9 @@ fn exit_with_runtime_cleanup(code: i32) -> ! {
 
 fn install_run_shutdown_handler() -> anyhow::Result<()> {
     ctrlc::set_handler(|| exit_with_runtime_cleanup(130))
-        .map_err(|error| anyhow::anyhow!("Failed to set Ctrl-C handler: {}", error))
+        .map_err(|error| anyhow::anyhow!("Failed to set Ctrl-C handler: {}", error))?;
+    ntnt::stdlib::jobs::use_host_shutdown_handler();
+    Ok(())
 }
 
 fn main() {
@@ -984,11 +1016,12 @@ fn main() {
             Ok(())
         }
         Some(Commands::Worker {
+            control,
             file,
             concurrency,
             queues,
             poll_interval,
-        }) => run_worker_command(&file, concurrency, queues, poll_interval),
+        }) => run_worker_command(&file, concurrency, queues, poll_interval, control),
         Some(Commands::Jobs(jobs_cmd)) => run_jobs_command(jobs_cmd),
         Some(Commands::Workers(workers_cmd)) => run_workers_command(workers_cmd),
         None => {
@@ -1374,6 +1407,7 @@ fn run_worker_command(
     concurrency: usize,
     queues: Option<Vec<String>>,
     poll_interval: u64,
+    control: ControlArgs,
 ) -> anyhow::Result<()> {
     if concurrency == 0 {
         anyhow::bail!("--concurrency must be at least 1");
@@ -1422,6 +1456,25 @@ fn run_worker_command(
         exit_with_runtime_cleanup(1);
     }
 
+    if control
+        .control_socket
+        .as_ref()
+        .is_some_and(|path| path.to_str().is_none())
+    {
+        anyhow::bail!("--control-socket must be UTF-8");
+    }
+    let options: ntnt::control_socket::ControlOptions = control.clone().into();
+    #[cfg(unix)]
+    ntnt::control_socket::resolve(&canonical_path, &options)?;
+    #[cfg(not(unix))]
+    if options.control_socket.is_some()
+        || options.worker_group.is_some()
+        || std::env::var_os("NTNT_CONTROL_SOCKET").is_some()
+        || std::env::var_os("NTNT_WORKER_GROUP").is_some()
+    {
+        ntnt::control_socket::resolve(&canonical_path, &options)?;
+    }
+
     // Evaluate the file to register all job definitions
     interpreter.eval(&ast)?;
 
@@ -1442,6 +1495,22 @@ fn run_worker_command(
         );
     }
 
+    if let Some(path) = control.control_socket {
+        opts.insert(
+            "control_socket".into(),
+            ntnt::interpreter::Value::String(
+                path.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("--control-socket must be UTF-8"))?
+                    .to_owned(),
+            ),
+        );
+    }
+    if let Some(group) = control.worker_group {
+        opts.insert(
+            "worker_group".into(),
+            ntnt::interpreter::Value::String(group),
+        );
+    }
     let module = ntnt::stdlib::jobs::init();
 
     // For multi-worker, use work_async + blocking wait
@@ -1461,7 +1530,9 @@ fn run_worker_command(
         })
         .map_err(|e| anyhow::anyhow!("Failed to set Ctrl-C handler: {}", e))?;
 
-        func(&[ntnt::interpreter::Value::Map(opts)])?;
+        ntnt::control_socket::with_source(Some(&canonical_path), || {
+            func(&[ntnt::interpreter::Value::Map(opts)])
+        })?;
 
         // Block until Ctrl-C, then shut down all workers
         let _ = rx.recv();
@@ -1474,71 +1545,115 @@ fn run_worker_command(
         Some(ntnt::interpreter::Value::NativeFunction { func, .. }) => *func,
         _ => anyhow::bail!("work_jobs not found in std/jobs module"),
     };
-    func(&[ntnt::interpreter::Value::Map(opts)])?;
+    ntnt::control_socket::with_source(Some(&canonical_path), || {
+        func(&[ntnt::interpreter::Value::Map(opts)])
+    })?;
     ntnt::stdlib::shutdown_runtimes();
     Ok(())
 }
 
 fn run_workers_command(cmd: WorkersCommands) -> anyhow::Result<()> {
     match cmd {
-        WorkersCommands::Status { dir } => run_workers_status(dir),
-        WorkersCommands::Scale { band, count, dir } => run_workers_scale(band, count, dir),
-        WorkersCommands::Pause { queue, dir } => run_workers_set_paused(queue, dir, true),
-        WorkersCommands::Resume { queue, dir } => run_workers_set_paused(queue, dir, false),
+        WorkersCommands::Status { dir, control } => run_workers_status(dir, control),
+        WorkersCommands::Scale {
+            band,
+            count,
+            dir,
+            control,
+        } => run_workers_scale(band, count, dir, control),
+        WorkersCommands::Pause {
+            queue,
+            dir,
+            control,
+        } => run_workers_set_paused(queue, dir, control, true),
+        WorkersCommands::Resume {
+            queue,
+            dir,
+            control,
+        } => run_workers_set_paused(queue, dir, control, false),
     }
 }
 
-/// Connect to .ntnt.sock, send a JSON command, return the parsed response.
-fn workers_socket_call(dir: Option<PathBuf>, payload: &str) -> anyhow::Result<serde_json::Value> {
+/// Connect to the resolved endpoint, send a JSON command, return the parsed response.
+fn workers_socket_call(
+    dir: Option<PathBuf>,
+    control: ControlArgs,
+    payload: &str,
+) -> anyhow::Result<serde_json::Value> {
     let base_dir = match dir {
         Some(d) => d,
         None => std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?,
     };
-    let sock_path = base_dir.join(".ntnt.sock");
+    let sock_path = ntnt::control_socket::resolve(&base_dir, &control.into())?;
 
     #[cfg(unix)]
     {
-        use std::io::{BufRead, BufReader, Read, Write};
-        use std::os::unix::net::UnixStream;
+        use std::io::{Read, Write};
+        let stream =
+            ntnt::control_socket::connect_client(&sock_path, std::time::Duration::from_secs(10))
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Cannot connect to {}: {} (is `ntnt worker` running?)",
+                        sock_path.display(),
+                        e
+                    )
+                })?;
 
-        let stream = UnixStream::connect(&sock_path).map_err(|e| {
+        // Set read/write timeouts to avoid indefinite hang if worker is stuck
+        let timeout = Some(std::time::Duration::from_secs(10));
+        stream
+            .set_read_timeout(timeout)
+            .map_err(|e| anyhow::anyhow!("{}: {}", sock_path.display(), e))?;
+        stream
+            .set_write_timeout(timeout)
+            .map_err(|e| anyhow::anyhow!("{}: {}", sock_path.display(), e))?;
+
+        {
+            let mut writer = std::io::BufWriter::new(&stream);
+            writeln!(writer, "{}", payload)
+                .and_then(|_| writer.flush())
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to write to {}: {}", sock_path.display(), e)
+                })?;
+        }
+
+        // A total deadline also bounds a peer trickling bytes between reads.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut stream = stream;
+        let mut line = Vec::new();
+        let mut buffer = [0; 4096];
+        while line.len() < 1_048_576 && !line.contains(&b'\n') {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Timeout reading control socket {}", sock_path.display())
+                })?;
+            stream
+                .set_read_timeout(Some(remaining))
+                .map_err(|e| anyhow::anyhow!("{}: {}", sock_path.display(), e))?;
+            let count = buffer.len().min(1_048_576 - line.len());
+            match stream.read(&mut buffer[..count]) {
+                Ok(0) => break,
+                Ok(n) => line.extend_from_slice(&buffer[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => anyhow::bail!(
+                    "Failed to read from control socket {}: {}",
+                    sock_path.display(),
+                    e
+                ),
+            }
+        }
+        if let Some(end) = line.iter().position(|b| *b == b'\n') {
+            line.truncate(end);
+        }
+        let v: serde_json::Value = serde_json::from_slice(&line).map_err(|e| {
             anyhow::anyhow!(
-                "Cannot connect to {}: {} (is `ntnt worker` running?)",
+                "Invalid response from control socket {}: {}",
                 sock_path.display(),
                 e
             )
         })?;
-
-        // Set read/write timeouts to avoid indefinite hang if worker is stuck
-        let timeout = Some(std::time::Duration::from_secs(10));
-        stream.set_read_timeout(timeout)?;
-        stream.set_write_timeout(timeout)?;
-
-        {
-            let mut writer = std::io::BufWriter::new(&stream);
-            writeln!(writer, "{}", payload)?;
-            writer.flush()?;
-        }
-
-        // Cap response at 1MB to prevent unbounded allocation
-        let limited = (&stream).take(1_048_576);
-        let mut reader = BufReader::new(limited);
-        let mut line = String::new();
-        reader.read_line(&mut line).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut
-            {
-                anyhow::anyhow!(
-                    "Timeout waiting for response from control socket (is the worker busy?)"
-                )
-            } else {
-                anyhow::anyhow!("Failed to read from control socket: {}", e)
-            }
-        })?;
-
-        let v: serde_json::Value = serde_json::from_str(line.trim())
-            .map_err(|e| anyhow::anyhow!("Invalid response from control socket: {}", e))?;
         Ok(v)
     }
 
@@ -1548,8 +1663,8 @@ fn workers_socket_call(dir: Option<PathBuf>, payload: &str) -> anyhow::Result<se
     }
 }
 
-fn run_workers_status(dir: Option<PathBuf>) -> anyhow::Result<()> {
-    let resp = workers_socket_call(dir, r#"{"cmd":"status"}"#)?;
+fn run_workers_status(dir: Option<PathBuf>, control: ControlArgs) -> anyhow::Result<()> {
+    let resp = workers_socket_call(dir, control, r#"{"cmd":"status"}"#)?;
 
     if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
         anyhow::bail!("{}", err);
@@ -1619,7 +1734,12 @@ fn run_workers_status(dir: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_workers_scale(band: String, count: u32, dir: Option<PathBuf>) -> anyhow::Result<()> {
+fn run_workers_scale(
+    band: String,
+    count: u32,
+    dir: Option<PathBuf>,
+    control: ControlArgs,
+) -> anyhow::Result<()> {
     let payload = serde_json::json!({
         "cmd": "scale",
         "band": &band,
@@ -1627,7 +1747,7 @@ fn run_workers_scale(band: String, count: u32, dir: Option<PathBuf>) -> anyhow::
     })
     .to_string();
 
-    let resp = workers_socket_call(dir, &payload)?;
+    let resp = workers_socket_call(dir, control, &payload)?;
 
     if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
         anyhow::bail!("{}", err);
@@ -1637,11 +1757,16 @@ fn run_workers_scale(band: String, count: u32, dir: Option<PathBuf>) -> anyhow::
     Ok(())
 }
 
-fn run_workers_set_paused(queue: String, dir: Option<PathBuf>, paused: bool) -> anyhow::Result<()> {
+fn run_workers_set_paused(
+    queue: String,
+    dir: Option<PathBuf>,
+    control: ControlArgs,
+    paused: bool,
+) -> anyhow::Result<()> {
     let cmd = if paused { "pause" } else { "resume" };
     let payload = serde_json::json!({ "cmd": cmd, "queue": &queue }).to_string();
 
-    let resp = workers_socket_call(dir, &payload)?;
+    let resp = workers_socket_call(dir, control, &payload)?;
 
     if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
         anyhow::bail!("{}", err);
@@ -7718,6 +7843,7 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             ("docs", "Docs"),
             ("completions", "Completions"),
             ("worker", "Worker"),
+            ("workers", "Live Worker Management"),
             ("jobs", "Jobs"),
             ("jobs_status", "Jobs Status"),
             ("jobs_list", "Jobs List"),
