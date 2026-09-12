@@ -12002,7 +12002,7 @@ execute(conn: Connection, sql: String, params: Array | Unit) -> Result<Int, Stri
 
 Execute a SQL statement and return the number of affected rows.
 
-Use this for INSERT, UPDATE, DELETE, and other statements that do not return row data. Parameters use $1, $2, ... placeholders. The Ok variant contains an Int representing the count of rows affected.
+Use this for INSERT, UPDATE, DELETE, and other statements that do not return row data. Parameters use $1, $2, ... placeholders. The Ok variant contains an Int representing the count of rows affected. Uses the same temporal String parameter coercion as query().
 
 **Parameters:**
 
@@ -12036,7 +12036,7 @@ query(conn: Connection, sql: String, params: Array | Unit) -> Result<Array<Map>,
 
 Execute a SQL query and return all matching rows.
 
-Runs a parameterized SELECT (or any row-returning statement) against the database. Parameters use PostgreSQL $1, $2, ... placeholders. Each returned row is a Map whose keys are column names. Pass an empty array or Unit when no parameters are needed.
+Runs a parameterized SELECT (or any row-returning statement) against the database. Parameters use PostgreSQL $1, $2, ... placeholders. Each returned row is a Map whose keys are column names. Pass an empty array or Unit when no parameters are needed. Strings bind directly to DATE (YYYY-MM-DD), TIME (HH:MM:SS[.fraction]), TIMESTAMP (date + T/space + time, no timezone), and TIMESTAMPTZ (RFC 3339 with Z or a numeric offset). Fractions truncate to microseconds. Invalid temporal strings, including leap seconds, return Err without echoing input.
 
 **Parameters:**
 
@@ -12074,7 +12074,7 @@ query_one(conn: Connection, sql: String, params: Array | Unit) -> Result<Map | N
 
 Execute a SQL query and return at most one row.
 
-Behaves like query() but uses PostgreSQL's query_opt internally to return either a single row Map or None when no row matches. Ideal for lookups by primary key or unique column.
+Behaves like query() but uses PostgreSQL's query_opt internally to return either a single row Map or None when no row matches. Ideal for lookups by primary key or unique column. Uses the same temporal String parameter coercion as query().
 
 **Parameters:**
 
