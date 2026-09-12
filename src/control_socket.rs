@@ -172,6 +172,113 @@ fn validate_parent(path: &Path) -> std::io::Result<()> {
         .map_err(|e| endpoint_error(path, e))
 }
 
+/// Probe without consuming a stream listener's backlog. A live stream socket
+/// rejects a datagram peer with EPROTOTYPE even before listen(). In particular,
+/// macOS STREAM connect can return ECONNREFUSED merely because a backlog is full.
+#[cfg(unix)]
+fn probe_live_endpoint(path: &Path) -> std::io::Result<()> {
+    let probe = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::DGRAM, None)?;
+    probe.set_nonblocking(true)?;
+    match probe.connect(&socket2::SockAddr::unix(path)?) {
+        Err(e) if e.raw_os_error() == Some(libc::EPROTOTYPE) => Ok(()),
+        result => result,
+    }
+}
+
+/// Connect within one deadline, including temporary listen-backlog saturation.
+/// No request bytes are sent until an actual connection has been established.
+#[cfg(unix)]
+pub fn connect_client(
+    path: &Path,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::os::unix::net::UnixStream> {
+    use std::io::ErrorKind;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| invalid("invalid connect timeout"))?;
+    let address = socket2::SockAddr::unix(path)?;
+    loop {
+        connect_remaining(deadline)?;
+        validate_client_endpoint(path)?;
+        let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+        socket.set_nonblocking(true)?;
+        let connected = match socket.connect(&address) {
+            Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {
+                wait_for_connect(&socket, deadline)
+            }
+            result => result,
+        };
+        match connected {
+            Ok(()) => {
+                socket.set_nonblocking(false)?;
+                return Ok(socket.into());
+            }
+            Err(e)
+                if e.kind() == ErrorKind::WouldBlock
+                    || e.kind() == ErrorKind::Interrupted
+                    || (e.kind() == ErrorKind::ConnectionRefused
+                        && probe_live_endpoint(path).is_ok()) =>
+            {
+                // Linux EAGAIN does not initiate a pending AF_UNIX connection:
+                // polling that unconnected fd can misleadingly report SO_ERROR=0.
+                // Close it and retry, without ever replaying a command. On macOS,
+                // retry ECONNREFUSED only when the independent probe proves live.
+                drop(socket);
+                std::thread::sleep(connect_remaining(deadline)?.min(Duration::from_millis(10)));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn connect_remaining(deadline: std::time::Instant) -> std::io::Result<std::time::Duration> {
+    deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "control socket connect deadline elapsed",
+            )
+        })
+}
+
+#[cfg(unix)]
+fn wait_for_connect(socket: &socket2::Socket, deadline: std::time::Instant) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    loop {
+        let timeout = connect_remaining(deadline)?
+            .as_millis()
+            .clamp(1, i32::MAX as u128) as i32;
+        let mut descriptor = libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // A single valid descriptor and a bounded millisecond timeout.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            continue;
+        }
+        if let Some(error) = socket.take_error()? {
+            return Err(error);
+        }
+        // Confirm connection completion rather than treating writability alone
+        // (including a hung-up/unconnected descriptor) as success.
+        socket.peer_addr()?;
+        return Ok(());
+    }
+}
+
 /// Refuse symlinks, non-sockets, and endpoints not restricted to this user.
 #[cfg(unix)]
 pub fn validate_client_endpoint(path: &Path) -> std::io::Result<()> {
@@ -311,11 +418,7 @@ impl SocketHandle {
                         "existing endpoint is not an owned, owner-only socket",
                     ));
                 }
-                // Nonblocking connect prevents a full listen backlog from hanging startup.
-                let probe =
-                    socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
-                probe.set_nonblocking(true)?;
-                match probe.connect(&socket2::SockAddr::unix(path)?) {
+                match probe_live_endpoint(path) {
                     Err(e) if e.raw_os_error() == Some(libc::ECONNREFUSED) => (),
                     Ok(()) => return Err(invalid("existing endpoint is live")),
                     Err(e) => {
@@ -636,6 +739,49 @@ mod ownership_tests {
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         d
     }
+    #[test]
+    fn client_deadline_and_stale_failure_are_distinct() {
+        let d = directory();
+        let path = d.path().join("pending.sock");
+        let socket =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        socket
+            .bind(&socket2::SockAddr::unix(&path).unwrap())
+            .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let timeout = std::time::Duration::from_millis(50);
+        let start = std::time::Instant::now();
+        assert_eq!(
+            connect_client(&path, timeout).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert!(start.elapsed() >= timeout);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        drop(socket);
+        assert_eq!(
+            connect_client(&path, timeout).unwrap_err().kind(),
+            std::io::ErrorKind::ConnectionRefused
+        );
+    }
+
+    #[test]
+    fn bound_socket_before_listen_is_not_stale() {
+        let d = directory();
+        let path = d.path().join("binding.sock");
+        let socket =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        socket
+            .bind(&socket2::SockAddr::unix(&path).unwrap())
+            .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        assert!(
+            SocketHandle::bind(&path).is_err(),
+            "a bound socket is live even before listen"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+    }
+
     #[test]
     fn failed_reconfiguration_and_uncommitted_start_preserve_listener() {
         let d = directory();

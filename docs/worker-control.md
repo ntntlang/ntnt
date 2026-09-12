@@ -69,7 +69,11 @@ never unlinked: deleting it could allow two processes to lock different inodes.
 Do not delete lock files while workers could be starting or running.
 
 After a crash the OS releases the lock. The next owner probes any existing
-owner-only socket and removes it only after `ECONNREFUSED` confirms it is stale.
+owner-only socket with a nonblocking datagram connection, which avoids consuming
+a stream listener's backlog, and removes it only after `ECONNREFUSED` confirms
+it is stale. A live stream socket returns `EPROTOTYPE` to this probe even before
+`listen()` or when its backlog is full. A stream connection alone is not a safe
+stale test: macOS can return `ECONNREFUSED` for a full, live backlog.
 Live listeners, full backlogs, other ambiguous failures, symlinks, ordinary files,
 unsafe modes, foreign ownership, and hard-linked lock files are refused. This
 also protects listeners that do not implement the lock protocol.
@@ -80,6 +84,10 @@ reconfiguration retains the previous in-process listener. Server connection IO
 has a five-second total deadline and checks cancellation; a trickling client
 cannot extend that deadline indefinitely. Requests remain limited to 64 KiB.
 Runtime shutdown closes the control socket, including for embedded workers.
+Clients wait for connection completion within a ten-second deadline, including
+temporary backlog saturation. In-progress connections use readiness polling and
+`SO_ERROR`; a backlog refusal retries only connection establishment, never a
+command that has already been sent.
 A host with its own Ctrl-C handler can call `jobs::use_host_shutdown_handler()`
 after installing a handler that shuts down the runtimes and exits; `ntnt run`
 does this automatically.

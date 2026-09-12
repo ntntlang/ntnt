@@ -322,20 +322,29 @@ mod unix {
     #[test]
     fn first_use_discovery_and_invalid_cli_are_side_effect_free() {
         let d = project();
+        // macOS's normal TMPDIR can exceed sockaddr_un's pathname limit. Keep
+        // this first-use XDG fixture short; fallback is a separate behavior.
+        let runtime = tempfile::tempdir_in("/tmp").unwrap();
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let result = command(d.path())
+            .env("XDG_RUNTIME_DIR", runtime.path())
             .args(["workers", "status"])
             .bounded_output();
         assert!(!result.status.success());
         assert!(String::from_utf8_lossy(&result.stderr)
-            .contains(d.path().join("ntnt").to_str().unwrap()));
-        assert_eq!(fs::metadata(d.path().join("ntnt")).unwrap().uid(), unsafe {
-            libc::geteuid()
-        });
+            .contains(runtime.path().join("ntnt").to_str().unwrap()));
         assert_eq!(
-            fs::metadata(d.path().join("ntnt")).unwrap().mode() & 0o777,
+            fs::metadata(runtime.path().join("ntnt")).unwrap().uid(),
+            unsafe { libc::geteuid() }
+        );
+        assert_eq!(
+            fs::metadata(runtime.path().join("ntnt")).unwrap().mode() & 0o777,
             0o700
         );
-        assert_eq!(fs::read_dir(d.path().join("ntnt")).unwrap().count(), 0);
+        assert_eq!(
+            fs::read_dir(runtime.path().join("ntnt")).unwrap().count(),
+            0
+        );
         let result = command(d.path())
             .args([
                 "worker",
@@ -537,6 +546,86 @@ sleep_ms(60000)
             .status
             .success());
         b.stop();
+    }
+
+    #[test]
+    fn client_waits_for_live_listener_backlog_to_clear() {
+        use std::io::{Read, Write};
+        let d = project();
+        let path = d.path().join("busy.sock");
+        let listener =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        let address = socket2::SockAddr::unix(&path).unwrap();
+        listener.bind(&address).unwrap();
+        listener.listen(1).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut pending = Vec::new();
+        let mut saturated = false;
+        for _ in 0..16 {
+            let stream =
+                socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+            if stream
+                .connect_timeout(&address, Duration::from_millis(100))
+                .is_err()
+                || stream.peer_addr().is_err()
+            {
+                saturated = true;
+                break;
+            }
+            pending.push(stream);
+        }
+        assert!(
+            saturated && !pending.is_empty(),
+            "fixture must fill the real listen backlog"
+        );
+        let occupied = pending.len();
+        listener.set_nonblocking(true).unwrap();
+        let listener: std::os::unix::net::UnixListener = listener.into();
+        let server = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut drained = 0;
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if drained < occupied {
+                            drained += 1;
+                            continue;
+                        }
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        let mut request = [0; 256];
+                        if stream.read(&mut request).is_ok_and(|n| n > 0) {
+                            return stream.write_all(b"{\"bands\":[]}\n").is_ok();
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(e) => panic!("accept failed: {e}"),
+                }
+            }
+            false
+        });
+        let result = command(d.path())
+            .args([
+                "workers",
+                "status",
+                "--control-socket",
+                path.to_str().unwrap(),
+            ])
+            .bounded_output();
+        let served = server.join().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(served, "client must receive the actual fixture response");
     }
 
     #[test]

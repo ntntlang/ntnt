@@ -1590,23 +1590,15 @@ fn workers_socket_call(
     #[cfg(unix)]
     {
         use std::io::{Read, Write};
-        use std::os::unix::net::UnixStream;
-
-        let stream = (|| -> std::io::Result<UnixStream> {
-            ntnt::control_socket::validate_client_endpoint(&sock_path)?;
-            let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
-            socket.set_nonblocking(true)?;
-            socket.connect(&socket2::SockAddr::unix(&sock_path)?)?;
-            socket.set_nonblocking(false)?;
-            Ok(socket.into())
-        })()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Cannot connect to {}: {} (is `ntnt worker` running?)",
-                sock_path.display(),
-                e
-            )
-        })?;
+        let stream =
+            ntnt::control_socket::connect_client(&sock_path, std::time::Duration::from_secs(10))
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Cannot connect to {}: {} (is `ntnt worker` running?)",
+                        sock_path.display(),
+                        e
+                    )
+                })?;
 
         // Set read/write timeouts to avoid indefinite hang if worker is stuck
         let timeout = Some(std::time::Duration::from_secs(10));
