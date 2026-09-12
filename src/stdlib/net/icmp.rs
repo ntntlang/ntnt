@@ -329,8 +329,12 @@ impl EchoSocket {
     ) -> Result<Option<IcmpProbeEvent>, ProbeFailure> {
         // Bounded blocking receive wakes on arrival rather than inflating RTT
         // with sleep polling. The owner protects the sole descriptor throughout.
+        // socket2 truncates timeouts to OS units (microseconds on Unix,
+        // milliseconds on Windows). A tiny positive remainder must not become
+        // zero, which disables the timeout. The caller still checks its absolute
+        // deadline and cancellation after this bounded receive.
         self.socket
-            .set_read_timeout(Some(wait))
+            .set_read_timeout(Some(wait.max(Duration::from_millis(1))))
             .and_then(|_| self.socket.set_nonblocking(false))
             .map_err(|e| probe_socket_unavailable(PING_LABEL, e))?;
         let mut buffer = [MaybeUninit::<u8>::uninit(); 2048];
@@ -1216,6 +1220,39 @@ fn icmp_attempt_to_value(attempt: &IcmpPingAttempt) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_receive_tiny_wait_never_disables_socket_timeout() {
+        // Blocking UDP exercises the same socket2 receive path without ICMP
+        // privileges. Existing nonblocking UDP fixtures cannot catch this bug.
+        for wait in [
+            Duration::from_nanos(1),
+            Duration::from_nanos(500),
+            Duration::from_nanos(999),
+            Duration::from_micros(1),
+            Duration::from_millis(1),
+        ] {
+            let udp = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let address = udp.local_addr().unwrap();
+            let echo = EchoSocket::test_udp(udp);
+            // Rescue an accidentally infinite receive so the red test is bounded.
+            let rescue = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                let sender = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                sender
+                    .send_to(b"timeout regression rescue", address)
+                    .unwrap();
+            });
+            let result = echo.receive_persistent(1, b"expected payload", Instant::now(), wait);
+            let installed = echo.socket.read_timeout().unwrap();
+            rescue.join().unwrap();
+            assert!(result.unwrap().is_none());
+            assert!(
+                installed.is_some_and(|timeout| !timeout.is_zero()),
+                "positive wait {wait:?} disabled the OS receive timeout: {installed:?}"
+            );
+        }
+    }
 
     #[test]
     fn real_persistent_echo_datagram_and_raw_paths() {
