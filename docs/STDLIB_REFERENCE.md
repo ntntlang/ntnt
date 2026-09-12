@@ -4486,7 +4486,7 @@ import { channel, send, recv } from "std/concurrent"
 | Function | Description |
 |----------|-------------|
 | [`after`](#after) | Runs a zero-parameter handler function after a delay. Returns a Task handle. Delay can be milliseconds (Int) or a human-readable string ("5s", "1m", "500ms"). The delay is cancellation-aware (50ms slices). |
-| [`await_task`](#awaittask) | Blocks until the task completes and returns its result. Marks the task as consumed (the handle remains valid for try_await, which returns {status: "consumed"}). Returns Ok(value) on success, Err(message) on failure or panic. |
+| [`await_task`](#awaittask) | Blocks until the task completes and consumes its result/error, releasing the serialized payload and heavy registry entry. Returns Ok(value) on success, Err(message) on failure or panic; the delivered value belongs to the caller. A compact consumed record remains for try_await subject to history age/count/byte limits. Invalid, expired or already-consumed handles raise a runtime error. |
 | [`cancel_schedule`](#cancelschedule) | Cancels a scheduled task. Sets the cancellation flag and removes from registry. Returns true if the schedule existed, false otherwise. |
 | [`cancel_task`](#canceltask) | Requests cooperative cancellation of a task. Sets the cancellation flag; the task thread will exit at the next yield point (recv, recv_timeout, sleep_ms, or fetch). Does NOT force immediate termination. Returns true if the task existed, false otherwise. |
 | [`channel`](#channel) | Creates a new unbounded channel and returns a [sender, receiver] pair. |
@@ -4501,7 +4501,7 @@ import { channel, send, recv } from "std/concurrent"
 | [`sleep_ms`](#sleepms) | Pauses execution for specified milliseconds. This is a cancellation yield point: a cancelled task will exit during sleep_ms(). Uses 50ms slices internally. Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks. |
 | [`spawn`](#spawn) | Spawns a zero-parameter function as a background task. Returns a Task handle. The handler's closure environment is serialized for cross-thread use. Serializable capture types: Int, Float, Bool, String, Array, Map, Struct, Enum. The handler must have zero parameters (including no defaults). |
 | [`thread_count`](#threadcount) | Returns the number of available CPU threads. Useful for sizing parallel work. |
-| [`try_await`](#tryawait) | Non-blocking peek at task state. Does NOT remove the task from registry. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired). |
+| [`try_await`](#tryawait) | Non-blocking peek; does not consume an available result. Enforces retention first, then refreshes available-result inactivity recency. Public results have a one-hour inactivity, 100000-result and 128 MiB estimated-storage budget. Consumed/expired records contain no payload and remain for at most 24 hours after retirement, 100000 records or 64 MiB estimated metadata. NTNT_TASK_REMOVAL_TTL overrides only history age. Pruned handles are unknown; this process-local history disappears on restart. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired). |
 | [`try_recv`](#tryrecv) | Non-blocking receive. Returns None if no value is available or all senders disconnected. |
 
 #### `after`
@@ -4537,7 +4537,7 @@ after(1000, fn() { print("delayed!") })  // Run after 1 second
 await_task(task: Task) -> Result<Any, String>
 ```
 
-Blocks until the task completes and returns its result. Marks the task as consumed (the handle remains valid for try_await, which returns {status: "consumed"}). Returns Ok(value) on success, Err(message) on failure or panic.
+Blocks until the task completes and consumes its result/error, releasing the serialized payload and heavy registry entry. Returns Ok(value) on success, Err(message) on failure or panic; the delivered value belongs to the caller. A compact consumed record remains for try_await subject to history age/count/byte limits. Invalid, expired or already-consumed handles raise a runtime error.
 
 **Parameters:**
 
@@ -4924,7 +4924,7 @@ thread_count()  // => 8  // Number of CPU threads
 try_await(task: Task) -> Map
 ```
 
-Non-blocking peek at task state. Does NOT remove the task from registry. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired).
+Non-blocking peek; does not consume an available result. Enforces retention first, then refreshes available-result inactivity recency. Public results have a one-hour inactivity, 100000-result and 128 MiB estimated-storage budget. Consumed/expired records contain no payload and remain for at most 24 hours after retirement, 100000 records or 64 MiB estimated metadata. NTNT_TASK_REMOVAL_TTL overrides only history age. Pruned handles are unknown; this process-local history disappears on restart. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired).
 
 **Parameters:**
 

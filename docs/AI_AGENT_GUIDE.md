@@ -2716,7 +2716,7 @@ let task = spawn(fn() {
 })
 
 // await_task blocks and returns Result, then marks the task as consumed
-// The handle remains valid for try_await, which returns {status: "consumed"}
+// While its bounded recent-history record remains, try_await returns {status: "consumed"}
 let result = await_task(task)  // Ok(42) or Err("message")
 match result {
     Ok(val) => print("got: " + str(val)),
@@ -2730,6 +2730,21 @@ let status = try_await(task)
 // cancel_task sets cooperative cancellation flag (checked at yield points)
 cancel_task(task)  // Task exits at next recv/recv_timeout/sleep_ms/fetch call
 ```
+
+### Task retention and recent history
+
+No retention configuration is required for normal use. `std/concurrent` keeps execution/results separate from compact, bounded **process-local RAM history**:
+
+- Running tasks are not evicted to satisfy a retention budget. Cancellation remains cooperative.
+- Completed, unconsumed public task results are retained for up to **one hour of inactivity**, subject to **100,000 results** and **128 MiB of estimated serialized storage**. Oldest eligible results expire when a limit is reached. Successful peeks refresh result recency, but cannot bypass count/byte limits.
+- `await_task()` consumes the result/error and releases the registry's heavy execution entry. The returned value belongs to the caller; consuming a task does not invalidate that value.
+- Compact history retains task ID, kind, state/outcome, timing and duration—not captures, full results, arbitrary error text, or synchronization objects. Its defaults are **24 hours after retirement**, **100,000 records**, and **64 MiB of conservatively estimated record/index storage**, whichever limit is reached first.
+- `try_await()` reports `consumed` or `expired` with `result: None` while that compact record remains. Once history is pruned, the handle is invalid; history is best-effort, not permanent.
+- `parallel()`/`race()` children belong to their enclosing operation. They do not become public recent history and are removed on collection or cleanup. Their actively owned results are not subject to the public unconsumed-result retention budget. A cancelled, non-cooperative loser may keep running until it exits; cleanup does not block a successful `race()` winner waiting for that loser.
+
+These budgets cover runtime-retained task state, not all process RSS: active execution, caller-owned values, separately owned channel buffers and allocator overhead have their own lifetimes. History disappears when the process restarts. Use the existing KV-backed `std/jobs` abstraction for durable/cross-process job status; this task-retention change does not modify durable job retention or add a global task-list API.
+
+**Advanced compatibility setting:** `NTNT_TASK_REMOVAL_TTL` now controls only compact-history age, in seconds from consumption/expiration; the default is **86400**, not the former seven-day heavy-entry lifetime. Set it before the concurrency runtime initializes (normally before starting the process). Zero disables compact-history retention; an unparseable value falls back to the default. Count/byte bounds still apply, so a longer TTL does not guarantee a handle remains available. Result and count/byte defaults are fixed in this slice; no additional tuning knobs are required or introduced.
 
 ### Delayed Execution
 

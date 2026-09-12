@@ -29,7 +29,7 @@ use crate::error::{IntentError, Result};
 use crate::interpreter::{FunctionContract, RuntimeCapability, Value};
 use crate::stdlib::concurrent::{
     check_task_limit, finalize_task, is_current_task_cancelled, sleep_cancellable, CancelToken,
-    CURRENT_CANCEL_TOKEN, RUNTIME,
+    TaskStartGuard, CURRENT_CANCEL_TOKEN, RUNTIME,
 };
 use crate::stdlib::kv;
 use sha2::{Digest, Sha256};
@@ -2898,29 +2898,34 @@ fn spawn_worker_task(
     let cancel_clone = Arc::clone(&cancelled);
     let task_id = RUNTIME.register_task(Arc::clone(&cancelled))?;
     RUNTIME.active_tasks.fetch_add(1, AtomicOrdering::Release);
+    let start_guard = TaskStartGuard::new(&RUNTIME, task_id);
     // Safe: task_id was just returned by register_task(), so it must be in the registry
     let arcs = RUNTIME
         .get_task_arcs(task_id)?
         .expect("task just registered must exist");
 
-    std::thread::spawn(move || {
-        CURRENT_CANCEL_TOKEN.with(|cell| {
-            *cell.borrow_mut() = Some(cancelled);
-        });
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Startup owns the sender until the whole pool is published. On any
-            // startup error it drops the sender, so even a late-scheduled worker
-            // exits without bootstrapping app code or claiming a single job.
-            if let Some(activation) = activation {
-                if activation.recv().is_err() {
-                    return Ok(Value::Unit);
+    std::thread::Builder::new()
+        .spawn(move || {
+            CURRENT_CANCEL_TOKEN.with(|cell| {
+                *cell.borrow_mut() = Some(cancelled);
+            });
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Startup owns the sender until the whole pool is published. On any
+                // startup error it drops the sender, so even a late-scheduled worker
+                // exits without bootstrapping app code or claiming a single job.
+                if let Some(activation) = activation {
+                    if activation.recv().is_err() {
+                        return Ok(Value::Unit);
+                    }
                 }
-            }
-            worker_loop(kv_info, band, queues);
-            Ok(Value::Unit)
-        }));
-        finalize_task(result, &arcs.inner, &arcs.completed_notify);
-    });
+                RUNTIME.mark_task_started(task_id);
+                worker_loop(kv_info, band, queues);
+                Ok(Value::Unit)
+            }));
+            finalize_task(task_id, result, &arcs.inner, &arcs.completed_notify);
+        })
+        .map_err(|e| IntentError::runtime_error(format!("Failed to spawn worker thread: {e}")))?;
+    start_guard.commit();
 
     Ok((Value::TaskHandle(task_id), cancel_clone))
 }

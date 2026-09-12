@@ -39,6 +39,7 @@ Environment variables that control NTNT runtime behavior
 | `NTNT_SECRETS_SOCKET_ENDPOINTS` | comma-separated absolute Unix socket paths | unset (required for unix-socket) | Ordered local secrets-agent endpoints for secret lookup. One through eight unique paths are allowed. Each endpoint is tried twice, and failover occurs only for bounded unavailable results. Production paths must be beneath the host-controlled `/run/ntnt-secrets` root; raw paths are never included in runtime diagnostics. |
 | `NTNT_SECRETS_TIMEOUT_MS` | integer (milliseconds) | 1000 | Per-attempt Unix-socket connect, write, and read timeout. Values must be between 10 and 10000 milliseconds. |
 | `NTNT_STRICT` | `1`, `true` | unset (disabled) | **Deprecated — use `NTNT_LINT_MODE=strict` instead.** Enable strict type checking. Still works but emits a deprecation warning. |
+| `NTNT_TASK_REMOVAL_TTL` | `non-negative integer (seconds)` | 86400 | Advanced compatibility setting for compact process-local task history age, measured from consumption/expiration. Read when the concurrency runtime initializes. Zero disables history; invalid values use the default. Count (100000) and estimated-memory (64 MiB) caps still apply. This no longer retains heavy task entries or results for seven days; public unconsumed results have a separate fixed one-hour inactivity/100000-result/128 MiB policy. |
 | `NTNT_TIMEOUT` | integer (seconds) | 30 | Request timeout for HTTP server in seconds. |
 | `NTNT_TYPE_MODE` | `strict`, `warn`, `forgiving` | warn | Controls runtime behavior for type mismatches. `strict`: type mismatches crash (fail-closed, recommended for auth/payments). `warn`: log `[WARN]` and continue (default). `forgiving`: silent degradation (pre-v0.4 behavior). See [Type Safety Modes](#type-safety-modes). |
 | `NTNT_WORKER_GROUP` | nonempty string | default | Stable worker group within a canonical project. CLI --worker-group and embedded worker_group options win. Different groups have different default endpoints; an explicit socket path overrides group-based path selection. Explicit groups are unsupported on Windows. |
@@ -93,6 +94,9 @@ NTNT_SECRETS_TIMEOUT_MS=500
 
 # **Deprecated — use `NTNT_LINT_MODE=strict` instead.** Enable strict type checking
 NTNT_STRICT=1 ntnt run server.tnt
+
+# Advanced compatibility setting for compact process-local task history age, measured from consumption/expiration
+NTNT_TASK_REMOVAL_TTL=86400 ntnt run server.tnt
 
 # Request timeout for HTTP server in seconds.
 NTNT_TIMEOUT=60 ntnt run server.tnt

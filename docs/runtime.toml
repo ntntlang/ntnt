@@ -146,6 +146,13 @@ description = "Maximum shared PostgreSQL pools per process, including in-progres
 example = "NTNT_POSTGRES_MAX_SHARED_POOLS=64 ntnt run server.tnt"
 affects = ["database", "postgres"]
 
+[env_vars.NTNT_TASK_REMOVAL_TTL]
+values = ["non-negative integer (seconds)"]
+default = "86400"
+description = "Advanced compatibility setting for compact process-local task history age, measured from consumption/expiration. Read when the concurrency runtime initializes. Zero disables history; invalid values use the default. Count (100000) and estimated-memory (64 MiB) caps still apply. This no longer retains heavy task entries or results for seven days; public unconsumed results have a separate fixed one-hour inactivity/100000-result/128 MiB policy."
+example = "NTNT_TASK_REMOVAL_TTL=86400 ntnt run server.tnt"
+affects = ["concurrency", "task-history"]
+
 # =============================================================================
 # TYPE SAFETY MODES (DD-009)
 # =============================================================================

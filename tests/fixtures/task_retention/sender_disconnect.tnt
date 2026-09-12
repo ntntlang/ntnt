@@ -1,0 +1,13 @@
+import { channel, spawn, await_task, try_await, recv, close } from "std/concurrent"
+let [tx, rx] = channel()
+let task = spawn(fn() { tx })
+tx = None
+let delivered = unwrap(await_task(task))
+assert(try_await(task)["status"] == "consumed")
+delivered = None
+print("BEFORE DISCONNECT")
+// No sender remains in application code or the completed task thread.
+// A retained serialized result would keep this receive blocked indefinitely.
+recv(rx)
+close(rx)
+print("PASS: consuming a task releases its serialized channel sender")
