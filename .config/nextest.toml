@@ -15,7 +15,7 @@
 net-fixtures = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(std_net_tests)'
+filter = 'binary(std_net_tests) | binary(sqlite_options_tests)'
 test-group = 'net-fixtures'
 
 [[profile.default.overrides]]

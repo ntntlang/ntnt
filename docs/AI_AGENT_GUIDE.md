@@ -1717,7 +1717,7 @@ close(db)
 - `"immediate"`: acquires the write reservation before returning. Use this **before reading** a migration ledger when multiple processes may initialize the same database.
 - `"exclusive"`: also excludes readers in rollback-journal mode; in WAL mode it behaves like `immediate`.
 
-Unknown options, non-map options, unknown modes, and invalid timeout values return descriptive `Err` values without echoing supplied values. Requested timeout setup errors are returned before publishing a connection handle. A failed `begin` must not be treated as a successful transaction. Check query/DDL/commit results and roll back an active transaction on failure before retrying or closing; do not merely catch a migration error and continue inside the same transaction. Applications still own the migration ledger, DDL, and retry policy.
+Unknown options, non-map options, unknown modes, and invalid timeout values return descriptive `Err` values without echoing supplied values. With an explicit `busy_timeout_ms`, timeout/WAL/foreign-key setup errors are returned before publishing a connection handle; release conflicting locks or choose a suitable timeout before retrying. Calls without that option retain legacy best-effort setup. WAL is attempted where SQLite supports it; in-memory databases retain memory journal mode. A failed `begin` must not be treated as a successful transaction. Check query/DDL/commit results and roll back an active transaction on failure before retrying or closing; do not merely catch a migration error and continue inside the same transaction. Applications still own the migration ledger, DDL, and retry policy.
 
 ### PostgreSQL (Connection Pooled)
 

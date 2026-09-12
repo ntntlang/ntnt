@@ -113,10 +113,17 @@ fn sqlite_connect_with_options(path: &str, options: Option<&Value>) -> Result<Va
                     )));
                 }
             }
-            // Enable WAL mode for better concurrent read performance
-            let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
-            // Enable foreign keys (off by default in SQLite)
-            let _ = conn.execute_batch("PRAGMA foreign_keys=ON;");
+            // Preserve legacy best-effort setup for omitted options. With an
+            // explicit timeout, report lock/setup failures instead of publishing
+            // a handle whose setup was interrupted by that requested budget.
+            for (sql, error) in [
+                ("PRAGMA journal_mode=WAL;", "connect() WAL setup failed; release conflicting locks or retry with a suitable busy_timeout_ms"),
+                ("PRAGMA foreign_keys=ON;", "connect() foreign-key setup failed; connection was not registered"),
+            ] {
+                if conn.execute_batch(sql).is_err() && timeout_ms.is_some() {
+                    return Ok(Value::err(Value::String(error.to_string())));
+                }
+            }
 
             let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let wrapped = Arc::new(Mutex::new(conn));
@@ -353,15 +360,17 @@ pub fn init() -> HashMap<String, Value> {
     // @signature connect(path: String, options?: Map) -> Result<Connection, String>
     // Open a connection to a SQLite database.
     //
-    // Opens a file-based or in-memory SQLite database. Automatically enables
-    // WAL journal mode for better concurrent read performance and turns on
-    // foreign key enforcement. Returns a connection handle for use with
-    // query, execute, and transaction functions.
+    // Opens a file-based or in-memory SQLite database. Attempts WAL journal mode
+    // where supported (in-memory databases remain in memory journal mode) and
+    // enables foreign key enforcement. Legacy calls without busy_timeout_ms keep
+    // best-effort setup; explicit timeout calls return setup errors before
+    // registering a connection. Returns a handle for query/execute/transactions.
     // Optional busy_timeout_ms sets the connection's lock-wait timeout before
     // database setup. It must be an Int in 0..=2147483647; 0 disables waiting.
     // Omitting options or passing map {} preserves the driver's default timeout
     // (5000 ms). Invalid options return Result::Err before opening the database.
-    // Failure to apply a requested timeout returns Result::Err, not a connection.
+    // Failure to apply a requested timeout or complete WAL/foreign-key setup
+    // under that explicit timeout returns Result::Err, not a connection.
     // @param path File path to the database, or ":memory:" for an in-memory database
     // @param options Optional map with busy_timeout_ms: Int (0..=2147483647); no other keys are accepted
     // @returns Result containing a connection handle map on success, or an error string on failure

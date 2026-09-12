@@ -134,6 +134,43 @@ fn connect_invalid_options_rejected_before_file_creation_without_input_leaks() {
     }
 }
 
+#[test]
+fn connect_explicit_timeout_reports_wal_setup_failure_and_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("setup.db");
+    let peer = Connection::open(&path).unwrap();
+    peer.execute_batch("CREATE TABLE existing (id INTEGER); BEGIN; SELECT * FROM existing;")
+        .unwrap();
+    let error = unwrap_err(call(
+        "connect",
+        vec![
+            Value::String(path.to_str().unwrap().into()),
+            options("busy_timeout_ms", Value::Int(0)),
+        ],
+    ));
+    assert!(error.contains("WAL setup failed"), "{error}");
+    peer.execute_batch("ROLLBACK").unwrap();
+    let db = TestConnection::open(
+        path.to_str().unwrap(),
+        Some(options("busy_timeout_ms", Value::Int(0))),
+    );
+    assert_eq!(db.timeout(), 0);
+    let connection = get_connection(&db.0).unwrap();
+    let connection = connection.lock().unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "wal"
+    );
+    assert_eq!(
+        connection
+            .query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
 // Rollback journal mode distinguishes EXCLUSIVE from IMMEDIATE (WAL intentionally does not).
 fn locking_pair() -> (tempfile::TempDir, TestConnection, Connection) {
     let dir = tempfile::tempdir().unwrap();

@@ -121,6 +121,9 @@ fn sqlite_options_typechecker_rejects_wrong_types_and_arity() {
 struct Control(BufReader<TcpStream>);
 impl Control {
     fn new(stream: TcpStream) -> Self {
+        // Accepted sockets may inherit the nonblocking listener flag on macOS.
+        // Control reads/writes use blocking I/O with explicit timeouts.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -195,7 +198,12 @@ fn accept(listener: &TcpListener, worker: &mut Process) -> Control {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return Control::new(stream),
+            Ok((stream, _)) => {
+                // BSD/macOS can inherit O_NONBLOCK from the listener. Exercise
+                // that accepted-socket state on every platform, including Linux.
+                stream.set_nonblocking(true).unwrap();
+                return Control::new(stream);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if worker.child.try_wait().unwrap().is_some() {
                     worker.finish();

@@ -12536,7 +12536,7 @@ connect(path: String, options?: Map) -> Result<Connection, String>
 
 Open a connection to a SQLite database.
 
-Opens a file-based or in-memory SQLite database. Automatically enables WAL journal mode for better concurrent read performance and turns on foreign key enforcement. Returns a connection handle for use with query, execute, and transaction functions. Optional busy_timeout_ms sets the connection's lock-wait timeout before database setup. It must be an Int in 0..=2147483647; 0 disables waiting. Omitting options or passing map {} preserves the driver's default timeout (5000 ms). Invalid options return Result::Err before opening the database. Failure to apply a requested timeout returns Result::Err, not a connection.
+Opens a file-based or in-memory SQLite database. Attempts WAL journal mode where supported (in-memory databases remain in memory journal mode) and enables foreign key enforcement. Legacy calls without busy_timeout_ms keep best-effort setup; explicit timeout calls return setup errors before registering a connection. Returns a handle for query/execute/transactions. Optional busy_timeout_ms sets the connection's lock-wait timeout before database setup. It must be an Int in 0..=2147483647; 0 disables waiting. Omitting options or passing map {} preserves the driver's default timeout (5000 ms). Invalid options return Result::Err before opening the database. Failure to apply a requested timeout or complete WAL/foreign-key setup under that explicit timeout returns Result::Err, not a connection.
 
 **Parameters:**
 
