@@ -2914,6 +2914,13 @@ enqueue_at("SendEmail", future_nanos, map { "to": "eve@example.com", "subject": 
 
 ### Running Workers
 
+Unix workers use an owner-locked control socket outside the source tree. Use
+`--worker-group NAME` / `NTNT_WORKER_GROUP` for independent groups, or
+`--control-socket PATH` / `NTNT_CONTROL_SOCKET` for an explicit endpoint.
+Clients share the same resolver; `ntnt workers status --dir /path/to/project`
+selects a project from another directory. See [worker control sockets](worker-control.md)
+for discovery, embedded options, permissions, and Windows behavior.
+
 ```ntnt
 import { work_async, work_jobs } from "std/jobs"
 
@@ -3007,7 +3014,7 @@ let status = worker_status()
 
 **CLI (via control socket):**
 ```bash
-ntnt workers status server.tnt
+ntnt workers status --dir /path/to/project
 ntnt workers scale critical 4
 ntnt workers scale low 1
 ```

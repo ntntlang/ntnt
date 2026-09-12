@@ -285,7 +285,7 @@ Batch DailyReport {
 - **KV-backed** — Jobs stored in `std/kv` (SQLite or Redis)
 - **Atomic dedup** — Content-hash deduplication with configurable TTL
 - **Batch system** — Dynamic adds, `batch_id()` context, TTL expiry, completion callbacks
-- **Control socket** — Unix domain socket (`.ntnt.sock`) for live management
+- **Control socket** — Owner-locked Unix endpoint in private runtime storage; stable project/group identity ([details](docs/worker-control.md))
 
 ### CLI
 ```bash
@@ -293,14 +293,15 @@ ntnt worker app.tnt                    # Start workers
 ntnt jobs status                       # Queue stats
 ntnt jobs list --status pending        # List jobs by status
 ntnt workers status                    # Live worker status
-ntnt workers scale --band low --count 8  # Dynamic scaling
+ntnt workers scale low 8  # Dynamic scaling
 ```
 
 ### Control Socket Protocol
 Newline-delimited JSON over Unix socket:
 ```bash
-echo '{"cmd":"status"}' | socat - UNIX-CONNECT:.ntnt.sock
-echo '{"cmd":"scale","band":"low","count":8}' | socat - UNIX-CONNECT:.ntnt.sock
+ntnt worker app.tnt --control-socket /run/user/1000/app/jobs.sock
+echo '{"cmd":"status"}' | socat - UNIX-CONNECT:/run/user/1000/app/jobs.sock
+echo '{"cmd":"scale","band":"low","count":8}' | socat - UNIX-CONNECT:/run/user/1000/app/jobs.sock
 ```
 
 ## Intent Assertion Language (IAL)

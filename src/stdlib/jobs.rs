@@ -2474,6 +2474,34 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
     }
 }
 
+// Signal handlers are process-wide. An embedding host may already own shutdown.
+static HOST_MANAGES_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Tell blocking workers that the host's installed signal handler calls
+/// `stdlib::shutdown_runtimes()` and terminates the process on interruption.
+/// Call only after installing that handler successfully.
+pub fn use_host_shutdown_handler() {
+    HOST_MANAGES_SHUTDOWN.store(true, AtomicOrdering::Release);
+}
+
+/// Validate control options before opening a queue or starting any workers.
+fn control_options(args: &[Value]) -> Result<crate::control_socket::ControlOptions> {
+    let get = |key: &str| -> Result<Option<String>> {
+        match args.first() {
+            Some(Value::Map(opts)) => match opts.get(key) {
+                None => Ok(None),
+                Some(Value::String(s)) => Ok(Some(s.clone())),
+                Some(_) => Err(IntentError::type_error(format!("{key} must be a string"))),
+            },
+            _ => Ok(None),
+        }
+    };
+    Ok(crate::control_socket::ControlOptions {
+        control_socket: get("control_socket")?.map(std::path::PathBuf::from),
+        worker_group: get("worker_group")?,
+    })
+}
+
 /// Parse shared options for work_async() and work_jobs().
 ///
 /// Returns (poll_interval_ms, concurrency, queues).
@@ -4187,6 +4215,9 @@ pub fn init() -> HashMap<String, Value> {
     //   - "poll_interval": poll interval in milliseconds (default 1000)
     //   - "concurrency": number of parallel worker threads (default 1)
     //   - "queues": array of queue names to process (default: all queues)
+    // Control options: "control_socket" and "worker_group" override NTNT_CONTROL_SOCKET
+    // and NTNT_WORKER_GROUP. Paths resolve from the source project; see docs/worker-control.md.
+    // Ownership failures raise an error before workers start.
     // @returns Array of TaskHandles (one per worker)
     // @see_also work_jobs, cancel_task
     // @example work_async() ~ "Start a single background worker"
@@ -4201,6 +4232,9 @@ pub fn init() -> HashMap<String, Value> {
             requires: Some(RuntimeCapability::JobWorkers),
             func: |args| {
                 let (bands, queues) = parse_bands_and_queues(args)?;
+                let options = control_options(args)?;
+                let control = crate::control_socket::start_control_socket(&options)
+                    .map_err(|e| IntentError::runtime_error(e.to_string()))?;
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
                 // Store active bands in the runtime for worker_status
                 if let Ok(mut active) = JOB_RUNTIME.active_bands.lock() {
@@ -4227,7 +4261,17 @@ pub fn init() -> HashMap<String, Value> {
                                 arcs.push(cancel_arc);
                                 handles.push(h);
                             }
-                            Err(e) => return Err(e),
+                            Err(e) => {
+                                for arc in &arcs {
+                                    arc.cancel();
+                                }
+                                for arcs in band_cancel_arcs.values() {
+                                    for arc in arcs {
+                                        arc.cancel();
+                                    }
+                                }
+                                return Err(e);
+                            }
                         }
                     }
                     band_task_ids.insert(band.name.clone(), ids);
@@ -4239,10 +4283,7 @@ pub fn init() -> HashMap<String, Value> {
                 if let Ok(mut ca) = JOB_RUNTIME.band_cancel_arcs.lock() {
                     *ca = band_cancel_arcs;
                 }
-                // Start control socket — lives until process exit or stop_control_socket().
-                // For work_async (non-blocking), the socket persists with the app process.
-                // For work_jobs (blocking), stop_control_socket() is called on Ctrl-C.
-                crate::control_socket::start_control_socket();
+                control.commit();
                 Ok(Value::Array(handles))
             },
         },
@@ -4260,6 +4301,8 @@ pub fn init() -> HashMap<String, Value> {
     // @param opts Optional configuration map:
     //   - "poll_interval": poll interval in milliseconds (default 1000)
     //   - "queues": array of queue names to process (default: all queues)
+    //   - "control_socket": Unix endpoint path (env: NTNT_CONTROL_SOCKET)
+    //   - "worker_group": stable group name (env: NTNT_WORKER_GROUP; default "default")
     // @returns Unit (blocks until cancelled)
     // @see_also work_async, enqueue
     // @example work_jobs() ~ "Run a blocking worker (at end of worker script)"
@@ -4273,7 +4316,22 @@ pub fn init() -> HashMap<String, Value> {
             requires: Some(RuntimeCapability::JobWorkers),
             func: |args| {
                 let (bands, queues) = parse_bands_and_queues(args)?;
+                let options = control_options(args)?;
+                let control = crate::control_socket::start_control_socket(&options)
+                    .map_err(|e| IntentError::runtime_error(e.to_string()))?;
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+
+                // Set up Ctrl-C handler — sets a shared shutdown flag
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let shutdown_clone = Arc::clone(&shutdown);
+                if !HOST_MANAGES_SHUTDOWN.load(AtomicOrdering::Acquire) {
+                    ctrlc::set_handler(move || {
+                        shutdown_clone.store(true, AtomicOrdering::Release);
+                    })
+                    .map_err(|e| {
+                        IntentError::runtime_error(format!("Failed to set Ctrl-C handler: {}", e))
+                    })?;
+                }
 
                 // Store active bands and queues (same as work_async, so scale_workers works)
                 if let Ok(mut active) = JOB_RUNTIME.active_bands.lock() {
@@ -4303,7 +4361,12 @@ pub fn init() -> HashMap<String, Value> {
                                 all_cancel_arcs.push(Arc::clone(&cancel_arc));
                                 arcs.push(cancel_arc);
                             }
-                            Err(e) => return Err(e),
+                            Err(e) => {
+                                for arc in &all_cancel_arcs {
+                                    arc.cancel();
+                                }
+                                return Err(e);
+                            }
                         }
                     }
                     band_task_ids.insert(band.name.clone(), ids);
@@ -4317,22 +4380,14 @@ pub fn init() -> HashMap<String, Value> {
                     *ca = band_cancel_arcs_map;
                 }
 
-                crate::control_socket::start_control_socket();
-
-                // Set up Ctrl-C handler — sets a shared shutdown flag
-                let shutdown = Arc::new(AtomicBool::new(false));
-                let shutdown_clone = Arc::clone(&shutdown);
-                ctrlc::set_handler(move || {
-                    shutdown_clone.store(true, AtomicOrdering::Release);
-                })
-                .map_err(|e| {
-                    IntentError::runtime_error(format!("Failed to set Ctrl-C handler: {}", e))
-                })?;
+                control.commit();
 
                 // Block until Ctrl-C, then cooperatively cancel ALL workers
                 // (including any spawned later via scale_workers)
                 loop {
-                    if shutdown.load(AtomicOrdering::Acquire) {
+                    if shutdown.load(AtomicOrdering::Acquire)
+                        || crate::stdlib::concurrent::is_current_task_cancelled()
+                    {
                         // Signal workers from JOB_RUNTIME (includes scaled workers)
                         if let Ok(ca) = JOB_RUNTIME.band_cancel_arcs.lock() {
                             for arcs in ca.values() {

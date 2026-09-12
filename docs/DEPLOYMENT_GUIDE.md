@@ -206,6 +206,13 @@ services:
     # Dedicated email queue worker
 ```
 
+Workers expose a Unix control socket in private runtime storage, outside the source
+checkout. Set `--worker-group` / `NTNT_WORKER_GROUP` for separate groups and use
+the same identity with `ntnt workers status --dir /path/to/project`. For an
+explicit deployment endpoint, set `--control-socket` / `NTNT_CONTROL_SOCKET` and
+reserve its parent directory with `0700`. See [worker control sockets](worker-control.md)
+for crash recovery, permissions, discovery rules, and Windows limitations.
+
 `ntnt worker` evaluates the source file in Worker mode — `listen()`, `work_async()`, and `serve_static()` are automatically suppressed. Only job definitions, imports, and configuration run.
 
 ### Pattern 2: Separate Files

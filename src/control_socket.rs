@@ -1,167 +1,402 @@
-//! Unix domain socket control plane for ntnt job workers.
-//!
-//! Provides a JSON command interface for live worker management over a Unix
-//! domain socket at `.ntnt.sock` in the current working directory.
-//!
-//! ## Protocol
-//!
-//! Newline-delimited JSON: send one JSON object + newline, receive one JSON
-//! object + newline, then the connection is closed.
-//!
-//! Commands:
-//! - `{"cmd": "status"}` → worker status snapshot (same shape as worker_status())
-//! - `{"cmd": "scale", "band": "low", "count": 8}` → scale a worker band
-//!
-//! ## Example
-//!
-//! ```bash
-//! echo '{"cmd":"status"}' | socat - UNIX-CONNECT:.ntnt.sock
-//! ```
+//! Owner-locked Unix worker control endpoints. See docs/worker-control.md.
+//! Protocol: one newline-delimited JSON request and response per connection.
 
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::sync::{Arc, LazyLock, Mutex};
 
-// ── Global handle ────────────────────────────────────────────────────────────
-
-/// Globally held socket handle — dropping it cancels the accept thread and
-/// removes the socket file.  Replaced each time start_control_socket() is called.
-static SOCKET_HANDLE: LazyLock<Mutex<Option<SocketHandle>>> = LazyLock::new(|| Mutex::new(None));
-
-struct SocketHandle {
-    cancel: Arc<AtomicBool>,
-    path: std::path::PathBuf,
+/// Explicit options take precedence over NTNT_CONTROL_SOCKET / NTNT_WORKER_GROUP.
+#[derive(Clone, Debug, Default)]
+pub struct ControlOptions {
+    pub control_socket: Option<PathBuf>,
+    pub worker_group: Option<String>,
 }
 
+thread_local! {
+    static SOURCE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Scope source identity to a native worker call, without changing process environment.
+pub fn with_source<T>(source: Option<&Path>, call: impl FnOnce() -> T) -> T {
+    struct Restore(Option<PathBuf>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SOURCE.with(|s| {
+                s.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(SOURCE.with(|s| s.replace(source.map(Path::to_path_buf))));
+    call()
+}
+
+/// Canonical nearest ntnt.toml ancestor, or the supplied source directory.
+pub fn project_identity(context: &Path) -> std::io::Result<PathBuf> {
+    let canonical = context.canonicalize()?;
+    let directory = if canonical.is_file() {
+        canonical.parent().unwrap()
+    } else {
+        &canonical
+    };
+    Ok(directory
+        .ancestors()
+        .find(|p| p.join("ntnt.toml").is_file())
+        .unwrap_or(directory)
+        .to_path_buf())
+}
+
+/// Resolve an endpoint identically for server and client. Relative explicit paths
+/// are relative to canonical project identity, not the shell's working directory.
+/// On Unix, creates/validates the private default runtime directory on first use.
+pub fn resolve(context: &Path, options: &ControlOptions) -> std::io::Result<PathBuf> {
+    let explicit = options
+        .control_socket
+        .clone()
+        .or_else(|| std::env::var_os("NTNT_CONTROL_SOCKET").map(PathBuf::from));
+    let group = options.worker_group.clone().or_else(|| {
+        std::env::var_os("NTNT_WORKER_GROUP").map(|s| s.to_string_lossy().into_owned())
+    });
+    #[cfg(not(unix))]
+    {
+        let _ = (context, explicit, group);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Unix worker control sockets and worker groups are unsupported on Windows",
+        ))
+    }
+    #[cfg(unix)]
+    {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::ffi::OsStrExt;
+        let group = group.as_deref().unwrap_or("default");
+        if group.is_empty() {
+            return Err(invalid("worker group must not be empty"));
+        }
+        let path = if let Some(path) = explicit {
+            if path.as_os_str().is_empty() {
+                return Err(invalid("control socket path must not be empty"));
+            }
+            let path = if path.is_absolute() {
+                path
+            } else {
+                project_identity(context)?.join(path)
+            };
+            let parent = path
+                .parent()
+                .ok_or_else(|| invalid("control socket requires a parent directory"))?;
+            let parent = parent
+                .canonicalize()
+                .map_err(|e| endpoint_error(&path, e))?;
+            parent.join(
+                path.file_name()
+                    .ok_or_else(|| invalid("control socket requires a filename"))?,
+            )
+        } else {
+            let project = project_identity(context)?;
+            let mut hash = Sha256::new();
+            hash.update(project.as_os_str().as_bytes());
+            hash.update([0]);
+            hash.update(group.as_bytes());
+            runtime_directory()?.join(format!("{}.sock", hex::encode(&hash.finalize()[..20])))
+        };
+        // macOS has the smallest supported sockaddr_un pathname (104 bytes).
+        if path.as_os_str().as_bytes().len() > 103 || path.as_os_str().as_bytes().contains(&0) {
+            return Err(endpoint_error(
+                &path,
+                "Unix socket path must be at most 103 bytes and contain no NUL",
+            ));
+        }
+        validate_parent(&path)?;
+        Ok(path)
+    }
+}
+
+#[cfg(unix)]
+fn invalid(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
+}
+#[cfg(unix)]
+fn endpoint_error(path: &Path, error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(format!("control socket {}: {error}", path.display()))
+}
+
+#[cfg(unix)]
+fn uid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(unix)]
+fn validate_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(path)?;
+    if !m.is_dir() || m.uid() != uid() || m.mode() & 0o077 != 0 {
+        return Err(endpoint_error(path, "directory must be owned by the caller and have safe permissions (runtime and explicit parent: 0700)"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn private_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+        Err(e) => return Err(endpoint_error(path, e)),
+    }
+    validate_directory(path)
+}
+
+#[cfg(unix)]
+fn runtime_directory() -> std::io::Result<PathBuf> {
+    if let Some(base) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+        if base.is_absolute()
+            && base.as_os_str().len() + "/ntnt/".len() + 40 + ".sock".len() <= 103
+            && validate_directory(&base).is_ok()
+        {
+            let path = base.join("ntnt");
+            private_directory(&path)?;
+            return Ok(path);
+        }
+    }
+    // A short, stable path on Linux/macOS; do not inherit a long or untrusted TMPDIR.
+    let path = PathBuf::from(format!("/tmp/ntnt-{}", uid()));
+    private_directory(&path)?;
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn validate_parent(path: &Path) -> std::io::Result<()> {
+    validate_directory(path.parent().ok_or_else(|| invalid("missing parent"))?)
+        .map_err(|e| endpoint_error(path, e))
+}
+
+/// Refuse symlinks, non-sockets, and endpoints not restricted to this user.
+#[cfg(unix)]
+pub fn validate_client_endpoint(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    validate_parent(path)?;
+    let m = std::fs::symlink_metadata(path)?;
+    if !m.file_type().is_socket() || m.uid() != uid() || m.mode() & 0o077 != 0 {
+        return Err(endpoint_error(
+            path,
+            "endpoint must be an owned, owner-only socket (no symlinks)",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+static SOCKET_HANDLE: LazyLock<Mutex<Option<SocketHandle>>> = LazyLock::new(|| Mutex::new(None));
+
+/// A staged listener: dropping on startup failure preserves the previous listener.
+/// Commit only after all workers have been started successfully.
+pub struct Startup {
+    #[cfg(unix)]
+    guard: std::sync::MutexGuard<'static, Option<SocketHandle>>,
+    #[cfg(unix)]
+    new: Option<SocketHandle>,
+}
+impl Startup {
+    pub fn commit(self) {
+        #[cfg(unix)]
+        {
+            let mut startup = self;
+            if let Some(new) = startup.new.take() {
+                new.ready.store(true, Ordering::Release);
+                *startup.guard = Some(new);
+            }
+        }
+    }
+}
+
+/// Acquire ownership and start listening before any workers run.
+pub fn start_control_socket(options: &ControlOptions) -> std::io::Result<Startup> {
+    #[cfg(not(unix))]
+    {
+        if options.control_socket.is_some()
+            || options.worker_group.is_some()
+            || std::env::var_os("NTNT_CONTROL_SOCKET").is_some()
+            || std::env::var_os("NTNT_WORKER_GROUP").is_some()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Unix worker control sockets and worker groups are unsupported on Windows",
+            ));
+        }
+        Ok(Startup {})
+    }
+    #[cfg(unix)]
+    {
+        let context = SOURCE
+            .with(|s| s.borrow().clone())
+            .map(Ok)
+            .unwrap_or_else(std::env::current_dir)?;
+        let path = resolve(&context, options)?;
+        let guard = SOCKET_HANDLE
+            .lock()
+            .map_err(|_| endpoint_error(&path, "listener mutex poisoned"))?;
+        if guard.as_ref().is_some_and(|h| {
+            h.path == path && h.owns_path() && !h.thread.as_ref().unwrap().is_finished()
+        }) {
+            return Ok(Startup { guard, new: None });
+        }
+        let new = SocketHandle::bind(&path).map_err(|e| endpoint_error(&path, e))?;
+        Ok(Startup {
+            guard,
+            new: Some(new),
+        })
+    }
+}
+
+/// Stop accepting, join the listener, remove only its inode, then release the lock.
+pub fn stop_control_socket() {
+    #[cfg(unix)]
+    if let Ok(mut guard) = SOCKET_HANDLE.lock() {
+        *guard = None;
+    }
+}
+
+#[cfg(unix)]
+struct SocketHandle {
+    ready: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+    path: PathBuf,
+    identity: (u64, u64),
+    thread: Option<std::thread::JoinHandle<()>>,
+    // Never unlink the sidecar: its stable inode is the cross-process lock identity.
+    _lock: std::fs::File,
+}
+
+#[cfg(unix)]
+impl SocketHandle {
+    fn owns_path(&self) -> bool {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        std::fs::symlink_metadata(&self.path)
+            .is_ok_and(|m| m.file_type().is_socket() && (m.dev(), m.ino()) == self.identity)
+    }
+    fn bind(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+        use std::os::unix::net::UnixListener;
+        validate_parent(path)?;
+        let mut lock_path = path.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&lock_path)
+            .map_err(|e| endpoint_error(Path::new(&lock_path), e))?;
+        let m = lock.metadata()?;
+        if !m.is_file() || m.uid() != uid() || m.mode() & 0o777 != 0o600 || m.nlink() != 1 {
+            return Err(invalid(format!(
+                "unsafe lock file {} (requires owned regular file, 0600, one link)",
+                Path::new(&lock_path).display()
+            )));
+        }
+        lock.try_lock().map_err(|e| {
+            std::io::Error::other(format!(
+                "cannot acquire ownership lock {}: {e}",
+                Path::new(&lock_path).display()
+            ))
+        })?;
+        match std::fs::symlink_metadata(path) {
+            Ok(m) => {
+                if !m.file_type().is_socket() || m.uid() != uid() || m.mode() & 0o077 != 0 {
+                    return Err(invalid(
+                        "existing endpoint is not an owned, owner-only socket",
+                    ));
+                }
+                // Nonblocking connect prevents a full listen backlog from hanging startup.
+                let probe =
+                    socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+                probe.set_nonblocking(true)?;
+                match probe.connect(&socket2::SockAddr::unix(path)?) {
+                    Err(e) if e.raw_os_error() == Some(libc::ECONNREFUSED) => (),
+                    Ok(()) => return Err(invalid("existing endpoint is live")),
+                    Err(e) => {
+                        return Err(std::io::Error::other(format!(
+                            "existing endpoint is live or ambiguous: {e}"
+                        )))
+                    }
+                }
+                let current = std::fs::symlink_metadata(path)?;
+                if (current.dev(), current.ino()) != (m.dev(), m.ino()) {
+                    return Err(invalid("endpoint changed during stale probe"));
+                }
+                std::fs::remove_file(path)?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e),
+        }
+        let listener = UnixListener::bind(path)?;
+        let m = std::fs::symlink_metadata(path)?;
+        let mut handle = Self {
+            ready: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            path: path.to_path_buf(),
+            identity: (m.dev(), m.ino()),
+            thread: None,
+            _lock: lock,
+        };
+        let setup = (|| {
+            if !handle.owns_path() {
+                return Err(invalid("endpoint replaced during bind"));
+            }
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            listener.set_nonblocking(true)
+        })();
+        if let Err(e) = setup {
+            // Close the actual listener before the handle cleans up/releases its lock.
+            drop(listener);
+            return Err(e);
+        }
+        let cancel = handle.cancel.clone();
+        let ready = handle.ready.clone();
+        handle.thread = Some(
+            std::thread::Builder::new()
+                .name("ntnt-control-socket".into())
+                .spawn(move || run_accept_loop(listener, cancel, ready))?,
+        );
+        Ok(handle)
+    }
+}
+#[cfg(unix)]
 impl Drop for SocketHandle {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Release);
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-// ── Public API ───────────────────────────────────────────────────────────────
-
-/// Start the control socket in a background thread.
-///
-/// On Unix: binds `.ntnt.sock` in the current working directory, removing any
-/// stale socket file first.  Stores the handle globally — calling this a second
-/// time replaces the previous socket (the old handle is dropped, removing its
-/// socket file and stopping its thread).
-///
-/// On Windows: logs a message and returns immediately.
-pub fn start_control_socket() {
-    #[cfg(unix)]
-    start_unix();
-
-    #[cfg(not(unix))]
-    {
-        eprintln!("[ntnt] control socket is not available on Windows");
-    }
-}
-
-/// Stop the control socket (cancel the accept thread, remove the socket file).
-pub fn stop_control_socket() {
-    if let Ok(mut guard) = SOCKET_HANDLE.lock() {
-        *guard = None;
-    }
-}
-
-// ── Unix implementation ───────────────────────────────────────────────────────
-
-#[cfg(unix)]
-fn start_unix() {
-    use std::os::unix::net::UnixListener;
-
-    let path = match std::env::current_dir() {
-        Ok(d) => d.join(".ntnt.sock"),
-        Err(e) => {
-            eprintln!("[ntnt] control socket: failed to get CWD: {}", e);
-            return;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
-    };
-
-    // Drop the old handle BEFORE binding — SocketHandle::drop removes the socket
-    // file, so dropping after bind would unlink the newly-bound socket.
-    if let Ok(mut guard) = SOCKET_HANDLE.lock() {
-        *guard = None;
-    }
-
-    // Remove stale socket file from a previous run (e.g., crash without cleanup).
-    let _ = std::fs::remove_file(&path);
-
-    let listener = match UnixListener::bind(&path) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!(
-                "[ntnt] control socket: failed to bind {}: {}",
-                path.display(),
-                e
-            );
-            return;
-        }
-    };
-
-    // Restrict socket permissions to owner only (0600) immediately after bind.
-    // If this fails, remove the socket and abort — don't leave a permissive socket.
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
-            eprintln!(
-                "[ntnt] control socket: failed to set permissions on {}: {} — removing socket",
-                path.display(),
-                e
-            );
-            let _ = std::fs::remove_file(&path);
-            return;
-        }
-    }
-
-    // Non-blocking accept so the loop can check the cancellation flag.
-    if let Err(e) = listener.set_nonblocking(true) {
-        eprintln!("[ntnt] control socket: set_nonblocking failed: {}", e);
-        let _ = std::fs::remove_file(&path);
-        return;
-    }
-
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_thread = Arc::clone(&cancel);
-
-    match std::thread::Builder::new()
-        .name("ntnt-control-socket".to_string())
-        .spawn(move || run_accept_loop(listener, cancel_thread))
-    {
-        Ok(_) => {
-            let handle = SocketHandle { cancel, path };
-            if let Ok(mut guard) = SOCKET_HANDLE.lock() {
-                *guard = Some(handle);
-            }
-        }
-        Err(e) => {
-            eprintln!("[ntnt] control socket: failed to spawn thread: {}", e);
-            let _ = std::fs::remove_file(&path);
+        if self.owns_path() {
+            let _ = std::fs::remove_file(&self.path);
         }
     }
 }
 
 #[cfg(unix)]
-fn run_accept_loop(listener: std::os::unix::net::UnixListener, cancel: Arc<AtomicBool>) {
-    loop {
-        if cancel.load(Ordering::Acquire) {
-            break;
+fn run_accept_loop(
+    listener: std::os::unix::net::UnixListener,
+    cancel: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+) {
+    while !cancel.load(Ordering::Acquire) {
+        if !ready.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
         }
-
         match listener.accept() {
-            Ok((stream, _)) => handle_connection(stream),
+            Ok((stream, _)) => handle_connection(stream, &cancel),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(25))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                continue; // EINTR from signal delivery — retry accept
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => (),
             Err(e) => {
-                if !cancel.load(Ordering::Acquire) {
-                    eprintln!("[ntnt] control socket: accept error: {}", e);
-                }
+                eprintln!("[ntnt] control socket accept: {e}");
                 break;
             }
         }
@@ -169,38 +404,59 @@ fn run_accept_loop(listener: std::os::unix::net::UnixListener, cancel: Arc<Atomi
 }
 
 #[cfg(unix)]
-fn handle_connection(stream: std::os::unix::net::UnixStream) {
-    use std::io::{BufRead, BufReader, Read, Write};
-
-    // Switch to blocking with a 5-second timeout — prevents a misbehaving
-    // client from blocking the control socket thread indefinitely.
-    let _ = stream.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
-
-    // Enforce 64KB max request size at the Read level — take() limits how many
-    // bytes BufReader can read, preventing large allocations before the newline check.
-    const MAX_REQUEST_SIZE: u64 = 65_536;
-    let limited = (&stream).take(MAX_REQUEST_SIZE);
-    let mut reader = BufReader::new(limited);
-    let mut line = String::new();
-
-    match reader.read_line(&mut line) {
-        Ok(0) => return,
-        Err(_) => return,
-        _ => {}
+fn handle_connection(mut stream: std::os::unix::net::UnixStream, cancel: &AtomicBool) {
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+    if stream.set_nonblocking(true).is_err() {
+        return;
     }
-
-    // Detect truncation: max bytes reached without a newline
-    let response = if line.len() as u64 >= MAX_REQUEST_SIZE && !line.ends_with('\n') {
-        serde_json::json!({ "error": format!("request too large (max {}KB)", MAX_REQUEST_SIZE / 1024) }).to_string()
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut line = Vec::new();
+    let mut buf = [0; 1024];
+    while line.len() < 65_536 && !line.contains(&b'\n') {
+        if cancel.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return;
+        }
+        let count = buf.len().min(65_536 - line.len());
+        match stream.read(&mut buf[..count]) {
+            Ok(0) => break,
+            Ok(n) => line.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => (),
+            Err(_) => return,
+        }
+    }
+    if line.is_empty() || cancel.load(Ordering::Acquire) {
+        return;
+    }
+    let response = if let Some(end) = line.iter().position(|b| *b == b'\n') {
+        match std::str::from_utf8(&line[..end]) {
+            Ok(line) => dispatch_command(line.trim()),
+            Err(_) => return,
+        }
+    } else if line.len() == 65_536 {
+        serde_json::json!({"error": "request too large (max 64KB)"}).to_string()
     } else {
-        dispatch_command(line.trim())
+        match std::str::from_utf8(&line) {
+            Ok(line) => dispatch_command(line.trim()),
+            Err(_) => return,
+        }
     };
-
-    let mut writer = std::io::BufWriter::new(&stream);
-    let _ = writeln!(writer, "{}", response);
-    let _ = writer.flush();
+    let response = format!("{response}\n");
+    let mut remaining = response.as_bytes();
+    while !remaining.is_empty() && !cancel.load(Ordering::Acquire) && Instant::now() < deadline {
+        match stream.write(remaining) {
+            Ok(0) => break,
+            Ok(n) => remaining = &remaining[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => (),
+            Err(_) => break,
+        }
+    }
 }
 
 // ── Command dispatch ──────────────────────────────────────────────────────────
@@ -368,5 +624,92 @@ mod tests {
     fn test_dispatch_no_cmd_field() {
         let resp = dispatch_command(r#"{"band":"low"}"#);
         assert!(resp.contains("unknown command"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ownership_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    fn directory() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        d
+    }
+    #[test]
+    fn failed_reconfiguration_and_uncommitted_start_preserve_listener() {
+        let d = directory();
+        let path = d.path().join("first.sock");
+        let options = ControlOptions {
+            control_socket: Some(path.clone()),
+            worker_group: None,
+        };
+        start_control_socket(&options).unwrap().commit();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        start_control_socket(&options).unwrap().commit();
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        let other = d.path().join("other.sock");
+        let options = ControlOptions {
+            control_socket: Some(other.clone()),
+            worker_group: None,
+        };
+        std::fs::write(&other, "preserve").unwrap();
+        assert!(start_control_socket(&options).is_err());
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        std::fs::remove_file(&other).unwrap();
+        drop(start_control_socket(&options).unwrap());
+        assert!(!other.exists());
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        stop_control_socket();
+        assert!(!path.exists());
+    }
+    #[test]
+    fn private_runtime_paths_reject_symlinks_files_and_unsafe_modes() {
+        let d = directory();
+        let path = d.path().join("runtime");
+        std::fs::write(&path, "untouched").unwrap();
+        assert!(private_directory(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "untouched");
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(d.path(), &path).unwrap();
+        assert!(private_directory(&path).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(private_directory(&path).is_err());
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o777);
+    }
+    #[test]
+    fn canonical_source_identity_uses_nearest_manifest() {
+        let d = directory();
+        let nested = d.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let source = nested.join("worker.tnt");
+        std::fs::write(&source, "").unwrap();
+        assert_eq!(
+            project_identity(&source).unwrap(),
+            nested.canonicalize().unwrap()
+        );
+        std::fs::write(d.path().join("ntnt.toml"), "").unwrap();
+        assert_eq!(
+            project_identity(&source).unwrap(),
+            d.path().canonicalize().unwrap()
+        );
+        std::fs::write(nested.join("ntnt.toml"), "").unwrap();
+        assert_eq!(
+            project_identity(&source).unwrap(),
+            nested.canonicalize().unwrap()
+        );
+    }
+    #[test]
+    fn hard_linked_lock_is_rejected() {
+        let d = directory();
+        let path = d.path().join("socket");
+        let lock = d.path().join("socket.lock");
+        std::fs::write(&lock, "preserve").unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&lock, d.path().join("alias")).unwrap();
+        assert!(SocketHandle::bind(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&lock).unwrap(), "preserve");
     }
 }

@@ -45,6 +45,7 @@ pub type StdlibModule = HashMap<String, Value>;
 
 /// Stop process-local runtimes before the host exits.
 pub fn shutdown_runtimes() {
+    crate::control_socket::stop_control_socket();
     net::persistent::shutdown();
     concurrent::RUNTIME.shutdown();
     process::RUNTIME.shutdown();
