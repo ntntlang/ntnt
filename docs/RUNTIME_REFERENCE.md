@@ -31,6 +31,7 @@ Environment variables that control NTNT runtime behavior
 | `NTNT_MAX_RECURSION` | integer | 256 | Maximum recursion depth for function calls. Prevents stack overflow from runaway recursion. |
 | `NTNT_NETMON_ENABLE` | `1`, `true`, `yes`, `on` | unset (disabled — std/netmon protocol calls rejected) | Explicitly enables std/netmon protocol calls for the process. This gate is required for public and private targets. Private/internal targets additionally require NTNT_NET_ALLOW_PRIVATE=1 and per-call allow_private: true. |
 | `NTNT_NET_ALLOW_PRIVATE` | `1`, `true`, `yes` | unset (disabled — private targets blocked) | Process-level opt-in for `std/net` probes (`ping`, `tcp_connect`, `reachable`, `port_scan`, `tls_info`, `traceroute`) and `std/netmon` protocol calls against private/internal targets. Each call must also pass `allow_private: true`; std/netmon independently requires `NTNT_NETMON_ENABLE=1`. Special-purpose targets such as cloud metadata, multicast, broadcast, unspecified, and documentation ranges remain blocked. This is separate from `NTNT_ALLOW_PRIVATE_IPS`, which only applies to `fetch()`. |
+| `NTNT_POSTGRES_MAX_SHARED_POOLS` | `any positive integer` | 32 | Maximum shared PostgreSQL pools per process, including in-progress creation. Read once on first PostgreSQL connect; invalid values return Err. New targets evict the least-recently-connected unused pool. Live handles, operations and transactions prevent eviction; if all slots are in use, connect returns a recoverable capacity Err. Zero is invalid, not an unlimited mode. |
 | `NTNT_PROCESS_ALLOW` | platform-path-delimited executable paths | unset (all executables allowed after NTNT_PROCESS_ENABLE opt-in) | Optional exact allowlist for `std/process`, separated with the platform path delimiter (`:` on Unix and `;` on Windows). Both configured entries and requested executables are canonicalized before comparison. On Windows, `.bat` and `.cmd` files are rejected because the OS invokes `cmd.exe` implicitly; explicitly allowlist and invoke `cmd.exe` only when shell authority is intentional. |
 | `NTNT_PROCESS_ENABLE` | `1`, `true`, `yes`, `on` | unset (disabled — std/process calls rejected) | Explicitly enables native process execution through `std/process`. Arguments are passed directly to approved executables without an implicit shell. |
 | `NTNT_SECRETS_AUTHORIZATION_SCOPE` | opaque ASCII deployment identifier | unset (required for unix-socket) | Trusted non-credential deployment scope expected in every secrets-agent response. It detects endpoint miswiring but is not authentication and is never rendered in diagnostics. Leading or trailing whitespace is rejected. |
@@ -68,6 +69,9 @@ NTNT_NETMON_ENABLE=1 NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
 
 # Process-level opt-in for `std/net` probes (`ping`, `tcp_connect`, `reachable`, `port_scan`, `tls_info`, `traceroute`) and `std/netmon` protocol calls against private/internal targets
 NTNT_NET_ALLOW_PRIVATE=1 ntnt run monitor.tnt
+
+# Maximum shared PostgreSQL pools per process, including in-progress creation
+NTNT_POSTGRES_MAX_SHARED_POOLS=64 ntnt run server.tnt
 
 # Optional exact allowlist for `std/process`, separated with the platform path delimiter (`:` on Unix and `;` on Windows)
 NTNT_PROCESS_ENABLE=1 NTNT_PROCESS_ALLOW=/usr/bin/ffmpeg:/usr/bin/sox ntnt run audio.tnt

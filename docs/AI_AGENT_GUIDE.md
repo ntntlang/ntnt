@@ -1721,7 +1721,15 @@ Unknown options, non-map options, unknown modes, and invalid timeout values retu
 
 ### PostgreSQL (Connection Pooled)
 
-`connect()` returns a pooled connection handle (via deadpool-postgres). Connections are automatically managed — you don't need to worry about pool sizing or checkout/checkin.
+`connect()` returns a fresh logical handle backed by a process-local shared pool (via deadpool-postgres). Repeated calls with the same normalized connection target reuse the verified pool; module-scope handles and request-local `connect → query → close` both keep this fast path.
+
+**Shared-pool limit:** `NTNT_POSTGRES_MAX_SHARED_POOLS` defaults to **32 per process**, including pools currently being opened. Set a positive integer before the first PostgreSQL `connect()`; the setting is read once per process. Zero, invalid text, and integer overflow produce a recoverable `Err` without echoing the value. Restart the process after changing this setting.
+
+When admitting a new target at capacity, the registry closes the least-recently-connected unused pool. Live logical handles, in-flight operations, and pinned transaction clients prevent eviction. If every slot is in use or being opened, `connect()` returns a recoverable capacity `Err`; it does not exceed the cap. Concurrent calls for the same new target share one creation attempt, and a failed attempt releases its slot. A slow new target does not block cached connections to other targets.
+
+`NTNT_DB_POOL_SIZE` separately controls connections per pool (default **5**). Both settings are per process/worker; budget database connections across workers. Idle connection teardown may take a short time to become visible in PostgreSQL's server activity view.
+
+**Migration:** applications using more than 32 simultaneously live targets must set a larger positive cap intentionally. Prefer stable, trusted, env-backed URLs rather than request-supplied connection strings. Always close logical handles when finished; this pool cap does not bound leaked logical handles. Explicitly commit or roll back transactions before `close()`—closing a logical handle is not a substitute for transaction cleanup. Registry metadata uses hashed keys, never raw credential-bearing URLs.
 
 ```ntnt
 import { connect, query, execute, close } from "std/db/postgres"
@@ -1737,7 +1745,7 @@ for user in users {
 let age = int(age_str) otherwise { return Err("age must be an integer") }
 execute(db, "INSERT INTO users (name, age) VALUES ($1, $2)", [name, age])
 
-close(db)  // Releases the connection pool
+close(db)  // Invalidates this handle; leaves the unused pool cached until eviction
 ```
 
 **Type conversion for database:**

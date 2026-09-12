@@ -139,6 +139,13 @@ description = "Maximum number of connections per shared PostgreSQL database pool
 example = "NTNT_DB_POOL_SIZE=3 ntnt run server.tnt"
 affects = ["database", "postgres"]
 
+[env_vars.NTNT_POSTGRES_MAX_SHARED_POOLS]
+values = ["any positive integer"]
+default = "32"
+description = "Maximum shared PostgreSQL pools per process, including in-progress creation. Read once on first PostgreSQL connect; invalid values return Err. New targets evict the least-recently-connected unused pool. Live handles, operations and transactions prevent eviction; if all slots are in use, connect returns a recoverable capacity Err. Zero is invalid, not an unlimited mode."
+example = "NTNT_POSTGRES_MAX_SHARED_POOLS=64 ntnt run server.tnt"
+affects = ["database", "postgres"]
+
 # =============================================================================
 # TYPE SAFETY MODES (DD-009)
 # =============================================================================

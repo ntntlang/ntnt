@@ -295,7 +295,8 @@ volumes:
 
 **Connection pooling:** ntnt reuses a process-local shared pool for each PostgreSQL connection string in each worker. `connect(url)` is the fast path; repeated calls with the same URL return new handles backed by the same shared pool.
 ```bash
-NTNT_DB_POOL_SIZE=5  # per-worker, per-database pool size (total = workers × databases × pool_size)
+export NTNT_DB_POOL_SIZE=5  # per-worker, per-database connection pool size
+export NTNT_POSTGRES_MAX_SHARED_POOLS=32  # shared pools per worker, including pending opens
 ```
 
 ### SQLite (Simpler, Single-Server)
@@ -544,6 +545,7 @@ sudo systemctl start ntnt-web ntnt-worker
 | `NTNT_SECURITY_HEADERS` | `true` | Auto security headers (HSTS, X-Frame-Options, etc.) |
 | `NTNT_SSRF_PROTECTION` | `true` (prod) | Block SSRF in `fetch()` |
 | `NTNT_DB_POOL_SIZE` | `5` | Database connections per pool per worker |
+| `NTNT_POSTGRES_MAX_SHARED_POOLS` | `32` | Positive shared-pool cap per worker, read once at first connect. Evicts unused LRU pools; returns recoverable Err if all slots are in use. Increase intentionally for more simultaneously live targets. |
 | `NTNT_DETAILED_ERRORS` | `true` (dev) | Show stack traces in error responses |
 | `NTNT_NETMON_ENABLE` | unset | Explicitly enable `std/netmon` protocol calls for the process |
 | `NTNT_NET_ALLOW_PRIVATE` | unset | Process-level opt-in for `std/net` and `std/netmon` calls against private/loopback targets (each call must also pass `allow_private: true`) |
