@@ -331,6 +331,44 @@ fn atomic_options() -> Value {
     map(&[("sync", Value::Bool(cfg!(unix)))])
 }
 
+// MoveFileEx can temporarily reject replacement while another Windows handle
+// is closing. Only retry a fully cleaned, unpublished sharing/access failure;
+// never hide publication, durability, cleanup, validation or arbitrary IO errors.
+fn windows_atomic_replacement_contention(result: &Value) -> bool {
+    matches!(result,
+        Value::EnumValue { enum_name, variant, values }
+        if enum_name == "Result" && variant == "Err"
+            && matches!(values.as_slice(), [Value::String(error)]
+                if error.starts_with("unpublished: ")
+                    && !error.contains("cleanup_failed:")
+                    && (error.ends_with("(os error 5)") || error.ends_with("(os error 32)"))))
+}
+
+#[test]
+fn atomic_contention_retry_classification_is_narrow() {
+    for error in [
+        "unpublished: Access is denied. (os error 5)",
+        "unpublished: The process cannot access the file. (os error 32)",
+    ] {
+        assert!(windows_atomic_replacement_contention(&Value::err(string(
+            error
+        ))));
+    }
+    for error in [
+        "published: durability_uncertain: Access is denied. (os error 5)",
+        "unpublished: Access is denied. (os error 13)",
+        "unpublished: Access is denied. (os error 5); cleanup_failed: denied (os error 5)",
+        "invalid_argument: invalid path (os error 5)",
+    ] {
+        assert!(!windows_atomic_replacement_contention(&Value::err(string(
+            error
+        ))));
+    }
+    assert!(!windows_atomic_replacement_contention(&Value::ok(
+        Value::Unit
+    )));
+}
+
 #[test]
 fn atomic_write_publishes_complete_bytes_and_preserves_old_on_failure() {
     let dir = tempfile::tempdir().unwrap();
@@ -380,16 +418,48 @@ fn atomic_write_publishes_complete_bytes_and_preserves_old_on_failure() {
             assert!(data.iter().all(|b| *b == data[0]));
         }
     });
-    for n in 2..8 {
-        ok(call(
-            "fs",
-            "write_file_atomic",
-            &[path(&file), bytes(&vec![n; 16384]), atomic_options()],
-        )
-        .unwrap());
-    }
+    // Always stop/join the observer before unwinding and deleting its directory.
+    // Otherwise a writer assertion failure causes a secondary NotFound panic in
+    // the detached observer, hiding the actual publication error.
+    let writing = std::panic::catch_unwind(|| {
+        for n in 2..8 {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let result = call(
+                    "fs",
+                    "write_file_atomic",
+                    &[path(&file), bytes(&vec![n; 16384]), atomic_options()],
+                )
+                .unwrap();
+                if cfg!(windows) && windows_atomic_replacement_contention(&result) {
+                    assert_eq!(
+                        std::fs::read(&file).unwrap(),
+                        vec![n - 1; 16384],
+                        "failed publication must preserve the previous complete contents"
+                    );
+                    assert_eq!(
+                        std::fs::read_dir(dir.path()).unwrap().count(),
+                        2,
+                        "failed publication must remove its staging file"
+                    );
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "Windows replacement contention did not clear: {result:?}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
+                ok(result);
+                break;
+            }
+        }
+    });
     reading.store(false, std::sync::atomic::Ordering::Release);
-    observer.join().unwrap();
+    let observed = observer.join();
+    if let Err(panic) = writing {
+        std::panic::resume_unwind(panic);
+    }
+    observed.unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
