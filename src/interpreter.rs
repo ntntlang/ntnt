@@ -784,6 +784,9 @@ pub struct Interpreter {
     request_timeout_secs: u64,
     /// Execution mode controls how server-related functions behave
     execution_mode: ExecutionMode,
+    /// Secondary HTTP request phase adds only task/scheduling capabilities;
+    /// Worker mode continues to suppress server lifecycle actions.
+    http_worker_request_tasks: bool,
     /// Lib modules for file-based routing (stored for hot-reload)
     lib_modules: HashMap<String, HashMap<String, Value>>,
     /// Tracked lib module files for hot-reload (file_path -> mtime)
@@ -1072,6 +1075,7 @@ impl Interpreter {
             imported_files: HashMap::new(),
             request_timeout_secs: 30,
             execution_mode: ExecutionMode::Normal,
+            http_worker_request_tasks: false,
             probe_scope: crate::stdlib::net::persistent::Scope::new(),
             lib_modules: HashMap::new(),
             lib_module_files: HashMap::new(),
@@ -1135,6 +1139,17 @@ impl Interpreter {
     /// Set the execution mode for the interpreter
     pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
         self.execution_mode = mode;
+        self.http_worker_request_tasks = false;
+    }
+
+    fn has_runtime_capability(&self, cap: RuntimeCapability) -> bool {
+        self.execution_mode.has(cap)
+            || (self.execution_mode == ExecutionMode::Worker
+                && self.http_worker_request_tasks
+                && matches!(
+                    cap,
+                    RuntimeCapability::TaskSpawning | RuntimeCapability::Scheduling
+                ))
     }
 
     /// Look up `name` in the server action registry. Returns `None` if no action is registered
@@ -1164,7 +1179,7 @@ impl Interpreter {
         }
         // Capability gate
         if let Some(cap) = requires {
-            if !self.execution_mode.has(cap) {
+            if !self.has_runtime_capability(cap) {
                 if self.native_test_entry.is_some() {
                     return Some(Err(self.reject_native_action(format!(
                         "Unsupported native test capability: {name} requires {cap:?}"
@@ -7047,7 +7062,7 @@ impl Interpreter {
                             // Route patterns start with /, URLs start with http
                             if pattern_str.starts_with('/') {
                                 // Route registration requires HttpServer capability
-                                if !self.execution_mode.has(RuntimeCapability::HttpServer) {
+                                if !self.has_runtime_capability(RuntimeCapability::HttpServer) {
                                     if self.native_test_entry.is_some() {
                                         return Err(self.reject_native_action(format!("Unsupported native test capability: {name} requires HttpServer")));
                                     }
@@ -9533,7 +9548,7 @@ impl Interpreter {
                             "Unsupported native test capability: {fn_name} requires {cap:?}"
                         )));
                     }
-                    if !self.execution_mode.has(cap) {
+                    if !self.has_runtime_capability(cap) {
                         if self.native_test_entry.is_some() {
                             return Err(self.reject_native_action(format!(
                                 "Unsupported native test capability: {fn_name} requires {cap:?}"
@@ -10839,8 +10854,8 @@ impl Interpreter {
         }
 
         // Worker mode suppresses once-only side effects during initialization.
-        // Requests need the same capabilities as those served by the primary.
-        interpreter.set_execution_mode(ExecutionMode::Normal);
+        // Requests need task APIs, not Normal-mode server lifecycle authority.
+        interpreter.http_worker_request_tasks = true;
 
         // Worker request loop — no hot-reload, just process requests
         loop {
@@ -16023,6 +16038,45 @@ c")
     }
 
     #[test]
+    fn test_http_worker_task_phase_does_not_grant_other_capabilities() {
+        let mut interpreter = Interpreter::new();
+        interpreter.set_execution_mode(ExecutionMode::Worker);
+        for cap in ExecutionMode::Normal.capabilities() {
+            assert_eq!(
+                interpreter.has_runtime_capability(*cap),
+                ExecutionMode::Worker.has(*cap)
+            );
+        }
+        interpreter.http_worker_request_tasks = true;
+        for cap in ExecutionMode::Normal.capabilities() {
+            assert_eq!(
+                interpreter.has_runtime_capability(*cap),
+                ExecutionMode::Worker.has(*cap)
+                    || matches!(
+                        cap,
+                        RuntimeCapability::TaskSpawning | RuntimeCapability::Scheduling
+                    ),
+                "unexpected request-worker authority: {cap:?}"
+            );
+        }
+        interpreter.set_execution_mode(ExecutionMode::Worker);
+        assert!(!interpreter.http_worker_request_tasks);
+        assert!(!interpreter.has_runtime_capability(RuntimeCapability::TaskSpawning));
+        for mode in [
+            ExecutionMode::Normal,
+            ExecutionMode::Job,
+            ExecutionMode::UnitTest,
+            ExecutionMode::HotReload,
+        ] {
+            interpreter.set_execution_mode(mode);
+            interpreter.http_worker_request_tasks = true;
+            for cap in ExecutionMode::Normal.capabilities() {
+                assert_eq!(interpreter.has_runtime_capability(*cap), mode.has(*cap));
+            }
+        }
+    }
+
+    #[test]
     fn test_http_worker_request_tasks_preserve_bootstrap_suppression() {
         use crate::stdlib::http_bridge::{BridgeRequest, HandlerRequest};
 
@@ -16034,7 +16088,7 @@ c")
             &source_file,
             format!(
                 r#"
-import {{ spawn, await_task, parallel, schedule, after }} from "std/concurrent"
+import {{ spawn, await_task, parallel, schedule, after, cancel_schedule }} from "std/concurrent"
 import {{ json }} from "std/http/server"
 import {{ write_file }} from "std/fs"
 let marker = {marker_literal}
@@ -16053,6 +16107,20 @@ get("/parallel", fn(req) {{
     let results = parallel([fn() {{ 21 }}, fn() {{ 42 }}])
     json([unwrap(results[0]), unwrap(results[1])])
 }})
+get("/scheduled", fn(req) {{
+    let delayed = after(1, fn() {{ 84 }})
+    let repeating = schedule(60000, fn() {{ 1 }})
+    let cancelled = cancel_schedule(repeating)
+    json([unwrap(await_task(delayed)), cancelled])
+}})
+get("/lifecycle", fn(req) {{
+    // Invalid arguments prove suppression happens before evaluation, without
+    // risking another listener or installing hooks in the request worker.
+    let ignored = listen(-1)
+    on_shutdown(assert(false))
+    on_error(assert(false))
+    json(ignored)
+}})
 listen(0)
 "#
             ),
@@ -16064,7 +16132,15 @@ listen(0)
         // requests also verify that serving one request does not consume the fix.
         let (tx, rx) = flume::unbounded();
         let mut replies = Vec::new();
-        for path in ["/bootstrap", "/spawn", "/parallel", "/spawn", "/bootstrap"] {
+        for path in [
+            "/bootstrap",
+            "/spawn",
+            "/parallel",
+            "/scheduled",
+            "/lifecycle",
+            "/spawn",
+            "/bootstrap",
+        ] {
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             tx.send(HandlerRequest {
                 request: BridgeRequest {
@@ -16106,6 +16182,8 @@ listen(0)
                 "/bootstrap" => serde_json::json!([null, null, null, null]),
                 "/spawn" => serde_json::json!(42),
                 "/parallel" => serde_json::json!([21, 42]),
+                "/scheduled" => serde_json::json!([84, true]),
+                "/lifecycle" => serde_json::Value::Null,
                 _ => unreachable!(),
             };
             assert_eq!(
