@@ -1235,17 +1235,25 @@ mod tests {
             let udp = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
             let address = udp.local_addr().unwrap();
             let echo = EchoSocket::test_udp(udp);
-            // Rescue an accidentally infinite receive so the red test is bounded.
+            // Rescue an accidentally infinite receive so the red test is bounded,
+            // but cancel the pending rescue as soon as the receive returns.
+            let (cancel, cancelled) = std::sync::mpsc::channel();
             let rescue = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(150));
-                let sender = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-                sender
-                    .send_to(b"timeout regression rescue", address)
-                    .unwrap();
+                if matches!(
+                    cancelled.recv_timeout(Duration::from_millis(150)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    let sender = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                    sender
+                        .send_to(b"timeout regression rescue", address)
+                        .unwrap();
+                }
             });
             let result = echo.receive_persistent(1, b"expected payload", Instant::now(), wait);
-            let installed = echo.socket.read_timeout().unwrap();
+            // The receiver is already gone if the rescue fired; that is harmless.
+            let _ = cancel.send(());
             rescue.join().unwrap();
+            let installed = echo.socket.read_timeout().unwrap();
             assert!(result.unwrap().is_none());
             assert!(
                 installed.is_some_and(|timeout| !timeout.is_zero()),
