@@ -4498,7 +4498,12 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("close", ["conn" => Type::Any], Type::Unit);
         }
         "std/db/sqlite" => {
-            sig!("connect", ["path" => Type::String], Type::Any);
+            let options = Type::Map {
+                key_type: Box::new(Type::String),
+                value_type: Box::new(Type::Any),
+            };
+            sig!("connect", ["path" => Type::String, "options" => options.clone()], Type::Any, required(1));
+            sig!("begin", ["conn" => Type::Any, "options" => options], Type::Any, required(1));
             sig!("query", ["conn" => Type::Any, "sql" => Type::String], Type::Any, variadic);
             sig!("query_one", ["conn" => Type::Any, "sql" => Type::String], Type::Any, variadic);
             sig!("execute", ["conn" => Type::Any, "sql" => Type::String], Type::Any, variadic);
