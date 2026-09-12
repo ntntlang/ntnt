@@ -80,7 +80,9 @@ mod unix {
         }
     }
     fn project() -> tempfile::TempDir {
-        let d = tempfile::tempdir().unwrap();
+        // Control endpoint fixtures need a short runtime path on every Unix.
+        // Long source/runtime paths are constructed explicitly in their tests.
+        let d = tempfile::tempdir_in("/tmp").unwrap();
         fs::set_permissions(d.path(), fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(d.path().join("worker.tnt"), SOURCE).unwrap();
         d
@@ -495,6 +497,45 @@ sleep_ms(60000)
         wait_for(|| !d.path().join("cancel.sock").exists());
         assert!(host.0.try_wait().unwrap().is_none());
         host.stop();
+    }
+
+    #[test]
+    fn long_xdg_runtime_uses_the_same_safe_fallback_for_server_and_client() {
+        let d = project();
+        let long_runtime = d.path().join("r".repeat(140));
+        fs::create_dir(&long_runtime).unwrap();
+        fs::set_permissions(&long_runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let before = command(d.path())
+            .env("XDG_RUNTIME_DIR", &long_runtime)
+            .args(["workers", "status"])
+            .bounded_output();
+        assert!(!before.status.success());
+        let fallback = format!("/tmp/ntnt-{}", unsafe { libc::geteuid() });
+        assert!(String::from_utf8_lossy(&before.stderr).contains(&fallback));
+        assert!(!long_runtime.join("ntnt").exists());
+        let mut worker = Worker(
+            command(d.path())
+                .env("XDG_RUNTIME_DIR", &long_runtime)
+                .args(["worker", "worker.tnt", "--concurrency", "2"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        wait_for(|| {
+            command(d.path())
+                .env("XDG_RUNTIME_DIR", &long_runtime)
+                .args(["workers", "status"])
+                .bounded_output()
+                .status
+                .success()
+        });
+        assert_eq!(fs::metadata(&fallback).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&fallback).unwrap().uid(), unsafe {
+            libc::geteuid()
+        });
+        assert!(!d.path().join(".ntnt.sock").exists());
+        worker.stop();
     }
 
     #[test]
