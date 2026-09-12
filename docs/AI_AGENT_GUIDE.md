@@ -1073,6 +1073,49 @@ These helpers return `Result<..., String>`; use `unwrap(...)` for quick scripts/
 
 `ping()` is ICMP-only and does **not** silently fall back to TCP ports. It uses native ICMP sockets (unprivileged datagram ICMP when the OS allows it, raw ICMP as fallback); when no ICMP socket can be opened (e.g. missing permissions) it returns `Err(String)`, while unreachable targets return `Ok` with failed attempts. Defaults: `count` 1 (max 10), `timeout_ms` 2000, `interval_ms` 0 (max 5000). If an app intentionally wants a single TCP port check, use `tcp_connect(host, port, opts?)`. If it wants a high-level “is this host reachable somehow?” check, use `reachable(host, opts?)`; it probes ICMP plus TCP ports 80 and 443 by default, and `tcp_ports` adds more explicit TCP ports.
 
+For repeated measurements in a running task or worker, use `ping_open(target, options?)`,
+`ping_probe(handle, timeout_ms?)`, and `ping_close(handle)`. Each returns a `Result`.
+See [the complete task example](../examples/persistent-icmp.tnt) for error handling,
+cleanup, and explicit recovery from expiry. Open **inside** the task/worker; captured
+handles, channel values and JSON/job payloads cannot carry this authority.
+
+`ProbeHandle` is opaque. Aliases in one owner share a socket and a logical counter;
+`ping_probe` sends one request, with no retries, using the next 16-bit wire sequence.
+Open sends nothing and pins the first address in resolver order after checking **all**
+resolved addresses against target policy. If that address cannot be opened, open fails;
+there is no address fallback, re-resolution or automatic reopen. IPv4/IPv6 use the
+same native datagram-first/raw-fallback setup as `ping`; raw normally needs `CAP_NET_RAW`.
+
+Open options are `idle_timeout_ms` (1000–86400000, default 60000) and `allow_private`
+(Bool, also requiring `NTNT_NET_ALLOW_PRIVATE=1`). Batch options are rejected.
+The probe timeout is 50–30000 ms, default 1000, for the whole send/wait operation.
+A successful result has `status` (`reply`, `timeout`, `target_error`), `probe_id`,
+`seq`, `target_addr`, and `reachable`. `from`, `ttl`, `latency_ms`, and `error` appear
+only when applicable; non-replies have no latency. Kernel/local errors return
+`Err("backend: ...")` and close the session instead of fabricating a timeout.
+Full per-probe payload correlation prevents stale replies across sequence rollover.
+Error quotations without the full correlation payload are ignored; on platforms
+that surface only uncorrelated kernel errors these become backend errors.
+
+The idle lease renews after a reply, timeout or target error. An active probe is
+protected from idle expiry. A shared reaper closes unused sockets even if aliases
+or closure cycles remain, within one second of expiry subject to runtime scheduling.
+Probe entry also checks expiry atomically, so a late call cannot revive a handle.
+There are at most 128 live/reserved sockets per process. Closed/expired handles do
+not consume capacity. Stable error prefixes are `invalid_argument:`, `policy:`,
+`capacity:`, `backend:`, `ownership:`, `expired:`, `closed:`, `busy:`, and `cancelled:`.
+Denied execution modes raise `capability:` errors.
+
+Close is idempotent across aliases and cancels an active probe. Socket calls are
+nonblocking; close does not wait for the probe deadline (normally within 50 ms,
+subject to OS scheduling), and the probe observes cancellation at its next 5 ms
+checkpoint. Last-owner drop, owning interpreter/task/worker teardown and runtime
+shutdown also release sockets. Each job invocation has its own scope, cleaned on
+success, error and unwind without closing another job's or worker's resources.
+Normal, Worker and Job modes are supported; HotReload and UnitTest/native assertion
+execution are denied explicitly. Handles are process-local and never survive worker
+replacement. Applications own scheduling, storage and the decision to reopen.
+
 `net_capabilities()` reports which probe paths the current process can use without sending any traffic — useful to check whether `ping()` can work before probing:
 
 ```ntnt

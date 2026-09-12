@@ -134,6 +134,7 @@ pub enum Value {
     /// Shared native accepted-stream authority; not transferable between tasks.
     TcpStream(std::sync::Arc<crate::stdlib::net::tcp::Owner>),
     TcpReader(std::sync::Arc<crate::stdlib::net::tcp::ReaderLease>),
+    ProbeHandle(std::sync::Arc<crate::stdlib::net::persistent::Owner>),
     TempFile(std::sync::Arc<crate::stdlib::fs::owned::TempOwner>),
     TempDir(std::sync::Arc<crate::stdlib::fs::owned::TempOwner>),
 
@@ -253,6 +254,7 @@ impl Value {
             Value::TcpListener(_) => "TcpListener",
             Value::TcpStream(_) => "TcpStream",
             Value::TcpReader(_) => "TcpReader",
+            Value::ProbeHandle(_) => "ProbeHandle",
             Value::TempFile(_) => "TempFile",
             Value::TempDir(_) => "TempDir",
             Value::TxChannelHandle(_, _) => "TxChannel",
@@ -369,6 +371,7 @@ impl fmt::Display for Value {
             Value::TcpListener(_) => f.write_str("<TcpListener>"),
             Value::TcpStream(_) => f.write_str("<TcpStream>"),
             Value::TcpReader(_) => f.write_str("<TcpReader>"),
+            Value::ProbeHandle(_) => f.write_str("<ProbeHandle>"),
             Value::TempFile(_) => f.write_str("<TempFile>"),
             Value::TempDir(_) => f.write_str("<TempDir>"),
             Value::TxChannelHandle(id, _) => write!(f, "TxChannel({})", id),
@@ -734,6 +737,7 @@ struct CachedExternalTemplate {
 
 /// The Intent interpreter
 pub struct Interpreter {
+    pub(crate) probe_scope: crate::stdlib::net::persistent::Scope,
     /// Actual builtin calls, enabled only for the selected native test invocation.
     native_assertions: Option<Vec<crate::native_test::NativeAssertion>>,
     native_test_entry: Option<String>,
@@ -1068,6 +1072,7 @@ impl Interpreter {
             imported_files: HashMap::new(),
             request_timeout_secs: 30,
             execution_mode: ExecutionMode::Normal,
+            probe_scope: crate::stdlib::net::persistent::Scope::new(),
             lib_modules: HashMap::new(),
             lib_module_files: HashMap::new(),
             builtin_bindings: HashMap::new(),
@@ -1991,6 +1996,11 @@ impl Interpreter {
             eprintln!("[hot-reload] Fix type errors to reload. Keeping previous version.");
             return false;
         }
+
+        // Validation succeeded: retire resources belonging to the discarded
+        // application generation, including handles retained by closure cycles.
+        // Other workers and partial lib-module reloads keep their own scopes.
+        self.probe_scope = crate::stdlib::net::persistent::Scope::new();
 
         // Clear current state (routes, middleware, etc.) but keep server running
         self.server_state.clear();
@@ -9568,6 +9578,23 @@ impl Interpreter {
                 if fn_name == "sort_by" && args.len() == 2 {
                     return self.sort_by_hof(args[0].clone(), args[1].clone());
                 }
+                let _probe_context = self.probe_scope.enter();
+                if matches!(fn_name.as_str(), "ping_open" | "ping_probe" | "ping_close") {
+                    if self.native_test_entry.is_some() {
+                        return Err(self.reject_native_action(
+                            "capability: persistent ICMP is unsupported in native assertions"
+                                .into(),
+                        ));
+                    }
+                    if matches!(
+                        self.execution_mode,
+                        ExecutionMode::UnitTest | ExecutionMode::HotReload
+                    ) {
+                        return Err(IntentError::runtime_error(
+                            "capability: persistent ICMP requires Normal, Worker, or Job mode",
+                        ));
+                    }
+                }
                 let result = func(&args);
                 if fn_name == "assert" {
                     if let Some(assertions) = &mut self.native_assertions {
@@ -11313,6 +11340,7 @@ impl Interpreter {
             (Value::TcpListener(a), Value::TcpListener(b))
             | (Value::TcpStream(a), Value::TcpStream(b)) => std::sync::Arc::ptr_eq(a, b),
             (Value::TcpReader(a), Value::TcpReader(b)) => std::sync::Arc::ptr_eq(a, b),
+            (Value::ProbeHandle(a), Value::ProbeHandle(b)) => std::sync::Arc::ptr_eq(a, b),
             (Value::TempFile(a), Value::TempFile(b)) | (Value::TempDir(a), Value::TempDir(b)) => {
                 std::sync::Arc::ptr_eq(a, b)
             }
@@ -11341,6 +11369,7 @@ impl Interpreter {
                     | Value::TcpListener(_)
                     | Value::TcpStream(_)
                     | Value::TcpReader(_)
+                    | Value::ProbeHandle(_)
                     | Value::TempFile(_)
                     | Value::TempDir(_)
                     | Value::TxChannelHandle(_, _)
@@ -11354,6 +11383,7 @@ impl Interpreter {
                     | Value::TcpListener(_)
                     | Value::TcpStream(_)
                     | Value::TcpReader(_)
+                    | Value::ProbeHandle(_)
                     | Value::TempFile(_)
                     | Value::TempDir(_)
                     | Value::TxChannelHandle(_, _)
@@ -17888,6 +17918,47 @@ page
         assert!(err
             .to_string()
             .contains("config[\"protected_paths\"] must be String or [String]"));
+    }
+
+    #[test]
+    fn persistent_probe_full_reload_closes_only_discarded_generation() {
+        use crate::stdlib::net::persistent::tests::{eval, install_fake, live, SERIAL};
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let baseline = live();
+        let mut interp = Interpreter::new();
+        let mut other = Interpreter::new();
+        install_fake(&mut interp);
+        install_fake(&mut other);
+        let retained = eval(
+            &mut interp,
+            "let h = test_probe_open()\nlet cycle = fn() { h }\nh",
+        )
+        .unwrap();
+        let independent = eval(&mut other, "test_probe_open()").unwrap();
+        assert_eq!(live(), baseline + 2);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "let broken = {").unwrap();
+        interp.set_main_source_file(file.path().to_str().unwrap());
+        interp.main_source_mtime = Some(std::time::UNIX_EPOCH);
+        interp.server_state.hot_reload = true;
+        assert!(!interp.check_and_reload_main_source());
+        assert_eq!(
+            live(),
+            baseline + 2,
+            "failed validation must retain old resources"
+        );
+        std::fs::write(file.path(), "let replacement = 1").unwrap();
+        assert!(interp.check_and_reload_main_source());
+        assert_eq!(
+            live(),
+            baseline + 1,
+            "full reset must close discarded generation immediately"
+        );
+        drop(retained);
+        assert_eq!(live(), baseline + 1, "another interpreter must remain open");
+        drop(other);
+        assert_eq!(live(), baseline);
+        drop(independent);
     }
 
     #[test]

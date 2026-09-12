@@ -1056,6 +1056,15 @@ impl TypeContext {
                         Type::Named("std/net::TcpStream".to_string())
                     }
                 }
+                "ProbeHandle" => {
+                    if let Some(resolved) = self.type_aliases.get(name) {
+                        resolved.clone()
+                    } else if self.structs.contains_key(name) || self.enums.contains_key(name) {
+                        Type::Named(name.clone())
+                    } else {
+                        Type::Named("std/net::ProbeHandle".into())
+                    }
+                }
                 "TcpReader" => {
                     if let Some(resolved) = self.type_aliases.get(name) {
                         resolved.clone()
@@ -4566,6 +4575,9 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             // deprecated alias
         }
         "std/net" => {
+            sig!("ping_open", ["target" => Type::String, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".into(), args: vec![Type::Named("std/net::ProbeHandle".into()), Type::String] }, required(1));
+            sig!("ping_probe", ["handle" => Type::Named("std/net::ProbeHandle".into()), "timeout_ms" => Type::Int], Type::Generic { name: "Result".into(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] }, required(1));
+            sig!("ping_close", ["handle" => Type::Named("std/net::ProbeHandle".into())], Type::Generic { name: "Result".into(), args: vec![Type::Unit, Type::String] });
             sig!("tcp_listen", ["port" => Type::Int, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".into(), args: vec![Type::Named("std/net::TcpListener".into()), Type::String] }, required(1));
             sig!("tcp_accept", ["listener" => Type::Named("std/net::TcpListener".into()), "timeout_ms" => Type::Int], Type::Generic { name: "Result".into(), args: vec![Type::Named("std/net::TcpStream".into()), Type::String] }, required(1));
             sig!("tcp_reader", ["stream" => Type::Named("std/net::TcpStream".into()), "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".into(), args: vec![Type::Named("std/net::TcpReader".into()), Type::String] }, required(1));
