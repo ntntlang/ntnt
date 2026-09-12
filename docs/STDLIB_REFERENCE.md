@@ -10732,7 +10732,7 @@ tanh(1)  // => 0.7615941559557649  // Hyperbolic tangent of one
 Safe network primitives: IPAM-grade CIDR math and reachability probes
 
 ```ntnt
-import { tcp_listen, tcp_accept, tcp_reader } from "std/net"
+import { ping_open, ping_probe, ping_close } from "std/net"
 ```
 
 ### Functions
@@ -10745,6 +10745,9 @@ import { tcp_listen, tcp_accept, tcp_reader } from "std/net"
 | [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
 | [`net_capabilities`](#netcapabilities) | Reports which network probe capabilities are available to the current process without sending any traffic. The ICMP flags reflect whether the probe socket setup that ping() uses (create, configure, connect to loopback) succeeds: datagram ICMP is unprivileged where the OS allows it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW). ping is true when any ICMP echo path is available; traceroute is true when a raw ICMP path is available for either family (traceroute requires raw sockets). These are convenience aggregates: a caller targeting a specific family should check the per-family flags (e.g. icmpv6_raw), since a host may resolve only to a family whose raw socket is unavailable — in that case the probe call still returns a clear Err. traceroute_udp and traceroute_tcp are reported true only on Linux, where their probe send and reply handling are validated; traceroute_tcp also requires a raw TCP socket. ICMP traceroute remains cross-platform. |
 | [`ping`](#ping) | Performs an ICMP ping using native sockets (unprivileged datagram ICMP when available, raw ICMP as fallback). Unreachable targets return Ok with failed attempts; missing socket permissions and resolver/system failures return Err(String). Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable(). |
+| [`ping_close`](#pingclose) | Idempotently close all aliases and release descriptor/capacity, including expired handles. Cancels an active probe; sends are nonblocking, receives use short kernel-woken waits. Close never waits for the full probe deadline, and releases capacity before returning. Cleanup normally completes within 50 ms, subject to OS/thread scheduling; probe cancellation is observed at the next bounded 5 ms receive checkpoint (OS timeout rounding may apply). No descriptor duplication or unsafe reuse; no sleep polling is added to RTT. |
+| [`ping_open`](#pingopen) | Open a process-local native IPv4/IPv6 ICMP session without sending. Pins the first resolver address after applying policy to every resolved address. Setup failure returns Err; no address fallback or automatic reopen. Options: idle_timeout_ms (1000..86400000, default 60000), allow_private (Bool). Private targets also require NTNT_NET_ALLOW_PRIVATE=1. Other options are rejected. At most 128 live/reserved sockets per process. Datagram first, raw fallback; socket permissions depend on the platform (raw normally requires CAP_NET_RAW). Aliases share state; handles cannot be forged, serialized, or transferred to tasks/channels/jobs. Open inside the owning task/worker. Normal, Worker and Job modes are supported; HotReload and UnitTest/native assertion execution are explicitly denied. Unused retained aliases expire with at most one second cleanup lag, subject to scheduling. Owner teardown, runtime shutdown, last-handle drop and fatal backend errors close sockets. |
+| [`ping_probe`](#pingprobe) | Send exactly one echo on the same socket; one in-flight operation per handle. Whole-operation timeout is 50..30000 ms (default 1000); no retries. Result fields: status (reply/timeout/target_error), probe_id (logical counter), seq (16-bit wire sequence), target_addr, reachable; from, ttl, latency_ms and error are present only when applicable. Non-replies never contain latency_ms. RTT uses a monotonic clock, excluding DNS/setup/idle time. Full payload correlation rejects late/duplicate packets across rollover; truncated error quotes are ignored. Kernel errors without generation proof return backend Err and invalidate the handle. Completion (including timeout/target_error) renews idle lease; in-flight probes do not expire. Entry checks expiry atomically; invalid/busy calls do not renew it. Fatal errors close. |
 | [`port_scan`](#portscan) | Performs a bounded TCP scan of explicit ports for one host. Only explicit port arrays are accepted; ranges are intentionally not expanded. Results are sorted by port. |
 | [`reachable`](#reachable) | Performs a high-level reachability check using ICMP plus TCP ports 80 and 443 by default. Caller-provided tcp_ports add extra explicit TCP ports. The result records the method that established reachability without pretending TCP is ping. |
 | [`subnet_contains`](#subnetcontains) | Returns true when the parent CIDR contains the entire child address or subnet. |
@@ -10896,6 +10899,80 @@ ping("example.com", map { "count": 3 })  // Send three ICMP echo requests
 ```
 
 *Since v0.4.10*
+
+---
+
+#### `ping_close`
+
+```ntnt
+ping_close(handle: ProbeHandle) -> Result<Unit, String>
+```
+
+Idempotently close all aliases and release descriptor/capacity, including expired handles. Cancels an active probe; sends are nonblocking, receives use short kernel-woken waits. Close never waits for the full probe deadline, and releases capacity before returning. Cleanup normally completes within 50 ms, subject to OS/thread scheduling; probe cancellation is observed at the next bounded 5 ms receive checkpoint (OS timeout rounding may apply). No descriptor duplication or unsafe reuse; no sleep polling is added to RTT.
+
+**Parameters:**
+
+- `handle` — Genuine handle belonging to this owner.
+
+**Returns:** Ok(Unit), or invalid_argument/ownership Err. Closed/expired aliases succeed.
+
+**Examples:**
+
+```ntnt
+ping_close(handle)  // Handle the Result; all aliases become inert
+```
+
+**See also:** `ping_open`, `ping_probe`
+
+---
+
+#### `ping_open`
+
+```ntnt
+ping_open(target: String, options?: Map<String, Any>) -> Result<ProbeHandle, String>
+```
+
+Open a process-local native IPv4/IPv6 ICMP session without sending. Pins the first resolver address after applying policy to every resolved address. Setup failure returns Err; no address fallback or automatic reopen. Options: idle_timeout_ms (1000..86400000, default 60000), allow_private (Bool). Private targets also require NTNT_NET_ALLOW_PRIVATE=1. Other options are rejected. At most 128 live/reserved sockets per process. Datagram first, raw fallback; socket permissions depend on the platform (raw normally requires CAP_NET_RAW). Aliases share state; handles cannot be forged, serialized, or transferred to tasks/channels/jobs. Open inside the owning task/worker. Normal, Worker and Job modes are supported; HotReload and UnitTest/native assertion execution are explicitly denied. Unused retained aliases expire with at most one second cleanup lag, subject to scheduling. Owner teardown, runtime shutdown, last-handle drop and fatal backend errors close sockets.
+
+**Parameters:**
+
+- `target` — Hostname or IP literal.
+- `options` — Optional idle lease and private-target policy.
+
+**Returns:** Opaque ProbeHandle or prefixed error (invalid_argument, policy, capacity, cancelled, backend).
+
+**Examples:**
+
+```ntnt
+ping_open("1.1.1.1", map { "idle_timeout_ms": 120000 })  // Handle Result before probing; see examples/persistent-icmp.tnt
+```
+
+**See also:** `ping_probe`, `ping_close`, `ping`
+
+---
+
+#### `ping_probe`
+
+```ntnt
+ping_probe(handle: ProbeHandle, timeout_ms?: Int) -> Result<Map<String, Any>, String>
+```
+
+Send exactly one echo on the same socket; one in-flight operation per handle. Whole-operation timeout is 50..30000 ms (default 1000); no retries. Result fields: status (reply/timeout/target_error), probe_id (logical counter), seq (16-bit wire sequence), target_addr, reachable; from, ttl, latency_ms and error are present only when applicable. Non-replies never contain latency_ms. RTT uses a monotonic clock, excluding DNS/setup/idle time. Full payload correlation rejects late/duplicate packets across rollover; truncated error quotes are ignored. Kernel errors without generation proof return backend Err and invalidate the handle. Completion (including timeout/target_error) renews idle lease; in-flight probes do not expire. Entry checks expiry atomically; invalid/busy calls do not renew it. Fatal errors close.
+
+**Parameters:**
+
+- `handle` — Genuine handle belonging to this owner.
+- `timeout_ms` — Optional bounded operation deadline.
+
+**Returns:** Attempt map or prefixed error: invalid_argument, ownership, expired, closed, busy, cancelled, backend.
+
+**Examples:**
+
+```ntnt
+ping_probe(handle, 1000)  // Handle Result and inspect status; timeout is a valid measurement
+```
+
+**See also:** `ping_open`, `ping_close`
 
 ---
 

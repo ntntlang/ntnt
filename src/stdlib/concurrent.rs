@@ -226,6 +226,7 @@ impl SerializedValue {
                 })
             }
             Value::TaskHandle(id) => Ok(SerializedValue::TaskHandle(*id)),
+            Value::ProbeHandle(_) => Err(IntentError::type_error("ProbeHandle cannot transfer between tasks or channels")),
             Value::TcpListener(_) | Value::TcpStream(_) | Value::TcpReader(_) => Err(IntentError::type_error("TCP handles cannot transfer between tasks or channels")),
             Value::TempFile(_) | Value::TempDir(_) => Err(IntentError::type_error("Temporary handles cannot transfer between tasks or channels")),
             Value::ProcessHandle(_) => Err(IntentError::type_error(
@@ -1915,6 +1916,7 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
             | Value::TcpListener(_)
             | Value::TcpStream(_)
             | Value::TcpReader(_)
+            | Value::ProbeHandle(_)
             | Value::TempFile(_)
             | Value::TempDir(_)
             | Value::TxChannelHandle(_, _)

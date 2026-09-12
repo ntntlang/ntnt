@@ -1,6 +1,7 @@
 //! std/net module - IPAM-grade IP/CIDR helpers and reachability probes.
 
 mod icmp;
+pub mod persistent;
 mod policy;
 mod probe;
 pub mod tcp;
@@ -225,6 +226,102 @@ fn validate_ping_method(value: Option<&Value>) -> Result<(), String> {
 
 pub fn init() -> HashMap<String, Value> {
     let mut module = HashMap::new();
+    // @ntnt ping_open
+    // @module std/net
+    // @signature ping_open(target: String, options?: Map<String, Any>) -> Result<ProbeHandle, String>
+    // Open a process-local native IPv4/IPv6 ICMP session without sending.
+    // Pins the first resolver address after applying policy to every resolved address.
+    // Setup failure returns Err; no address fallback or automatic reopen.
+    // Options: idle_timeout_ms (1000..86400000, default 60000), allow_private (Bool).
+    // Private targets also require NTNT_NET_ALLOW_PRIVATE=1. Other options are rejected.
+    // At most 128 live/reserved sockets per process. Datagram first, raw fallback;
+    // socket permissions depend on the platform (raw normally requires CAP_NET_RAW).
+    // Aliases share state; handles cannot be forged, serialized, or transferred to tasks/channels/jobs.
+    // Open inside the owning task/worker. Normal, Worker and Job modes are supported;
+    // HotReload and UnitTest/native assertion execution are explicitly denied.
+    // Unused retained aliases expire with at most one second cleanup lag, subject to scheduling.
+    // Owner teardown, runtime shutdown, last-handle drop and fatal backend errors close sockets.
+    // @param target Hostname or IP literal.
+    // @param options Optional idle lease and private-target policy.
+    // @returns Opaque ProbeHandle or prefixed error (invalid_argument, policy, capacity, cancelled, backend).
+    // @example ping_open("1.1.1.1", map { "idle_timeout_ms": 120000 }) ~ "Handle Result before probing; see examples/persistent-icmp.tnt"
+    // @see_also ping_probe, ping_close, ping
+    module.insert(
+        "ping_open".into(),
+        Value::NativeFunction {
+            name: "ping_open".into(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                Ok(match persistent::open(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt ping_probe
+    // @module std/net
+    // @signature ping_probe(handle: ProbeHandle, timeout_ms?: Int) -> Result<Map<String, Any>, String>
+    // Send exactly one echo on the same socket; one in-flight operation per handle.
+    // Whole-operation timeout is 50..30000 ms (default 1000); no retries.
+    // Result fields: status (reply/timeout/target_error), probe_id (logical counter),
+    // seq (16-bit wire sequence), target_addr, reachable; from, ttl, latency_ms and error
+    // are present only when applicable. Non-replies never contain latency_ms.
+    // RTT uses a monotonic clock, excluding DNS/setup/idle time. Full payload correlation
+    // rejects late/duplicate packets across rollover; truncated error quotes are ignored.
+    // Kernel errors without generation proof return backend Err and invalidate the handle.
+    // Completion (including timeout/target_error) renews idle lease; in-flight probes do not expire.
+    // Entry checks expiry atomically; invalid/busy calls do not renew it. Fatal errors close.
+    // @param handle Genuine handle belonging to this owner.
+    // @param timeout_ms Optional bounded operation deadline.
+    // @returns Attempt map or prefixed error: invalid_argument, ownership, expired, closed, busy, cancelled, backend.
+    // @example ping_probe(handle, 1000) ~ "Handle Result and inspect status; timeout is a valid measurement"
+    // @see_also ping_open, ping_close
+    module.insert(
+        "ping_probe".into(),
+        Value::NativeFunction {
+            name: "ping_probe".into(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                Ok(match persistent::probe(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
+    // @ntnt ping_close
+    // @module std/net
+    // @signature ping_close(handle: ProbeHandle) -> Result<Unit, String>
+    // Idempotently close all aliases and release descriptor/capacity, including expired handles.
+    // Cancels an active probe; sends are nonblocking, receives use short kernel-woken waits.
+    // Close never waits for the full probe deadline, and releases capacity before returning.
+    // Cleanup normally completes within 50 ms, subject to OS/thread scheduling; probe cancellation
+    // is observed at the next bounded 5 ms receive checkpoint (OS timeout rounding may apply).
+    // No descriptor duplication or unsafe reuse; no sleep polling is added to RTT.
+    // @param handle Genuine handle belonging to this owner.
+    // @returns Ok(Unit), or invalid_argument/ownership Err. Closed/expired aliases succeed.
+    // @example ping_close(handle) ~ "Handle the Result; all aliases become inert"
+    // @see_also ping_open, ping_probe
+    module.insert(
+        "ping_close".into(),
+        Value::NativeFunction {
+            name: "ping_close".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                Ok(match persistent::close(args) {
+                    Ok(v) => Value::ok(v),
+                    Err(e) => Value::err(Value::String(e)),
+                })
+            },
+        },
+    );
     // @ntnt tcp_listen
     // @module std/net
     // @signature tcp_listen(port: Int, options?: Map<String, Any>) -> Result<TcpListener, String>

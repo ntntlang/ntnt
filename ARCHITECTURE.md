@@ -16,6 +16,28 @@ budget. Closed aliases remain closed; JSON, native-value serialization and task/
 transfer cannot reconstruct or transport socket authority. `TcpServer` capability is
 Normal-only and denied calls throw rather than returning fake handles.
 
+`std/net/persistent.rs` owns ICMP `ProbeHandle` leases. It shares connected echo
+socket setup, packet construction and parsing with `icmp.rs`; finite `ping` batches
+retain their existing deadlines, address fallback and result contract. Persistent
+probes use a random 128-bit session nonce and 64-bit logical counter in the payload;
+full quoted correlation is mandatory, including after wire sequence rollover.
+Truncated error quotes are ignored. Existing traceroute parsing remains unchanged.
+
+A process-wide weak registry and one 100 ms sweeper reclaim unused sockets without
+API activity. The 128 permits bound reserved/live resources and active bookkeeping.
+Owner locks cover nonblocking sends and kernel-woken receives bounded to short
+5 ms slices (subject to OS timeout rounding). Close signals cancellation before
+locking, removes the sole socket, and releases capacity before returning; it cannot
+race descriptor reuse. Rejected packets are drained without sleep polling or RTT
+quantization. A flight guard invalidates on backend failure or
+unwind. Every interpreter owns a probe scope outside its cyclic lexical environments;
+native dispatch enters that scope with a restoring thread-local guard. Dropping the
+interpreter closes its resources despite retained aliases; a validated full main-source
+reload retires only that interpreter's discarded generation before resetting its environment.
+Reused job interpreters
+install temporary invocation scopes and restore them after caught errors/unwinds.
+This is separate from TCP's Normal-only capability and from global runtime shutdown.
+
 Filesystem helpers validate before mutation, create exclusively with Unix initial
 permissions, and sync the descriptor they opened. Missing-path resolution expands
 symlinks before processing dotdot. These operations require trusted ancestors and

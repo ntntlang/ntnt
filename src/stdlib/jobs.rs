@@ -1348,9 +1348,16 @@ fn execute_in_worker(
     let body = def.perform_body.clone();
     let name = def.name.clone();
     let contract = def.perform_contract.clone();
+    let previous_probes = std::mem::replace(
+        &mut interp.probe_scope,
+        super::net::persistent::Scope::new(),
+    );
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         interp.eval_block_with_contract(&body, &name, contract.as_ref())
     }));
+    // Drop the invocation scope on success, error and caught unwind; preserve
+    // worker bootstrap resources and other interpreters' independent owners.
+    interp.probe_scope = previous_probes;
 
     // Unconditionally restore to the snapshot — works regardless of how many
     // nested scopes eval_block leaked on panic.
@@ -1417,8 +1424,13 @@ fn execute_on_failure_in_worker(
     }
 
     let body = body.clone();
+    let previous_probes = std::mem::replace(
+        &mut interp.probe_scope,
+        super::net::persistent::Scope::new(),
+    );
     let panic_result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interp.eval_block(&body)));
+    interp.probe_scope = previous_probes;
 
     // Unconditionally restore — depth-safe regardless of nested scope leaks
     interp.restore_env(snapshot);
@@ -1437,7 +1449,7 @@ fn reject_secret_job_payload(payload: &Value) -> Result<()> {
                 .to_string(),
         ));
     }
-    Ok(())
+    crate::stdlib::json::reject_runtime_authority(payload)
 }
 
 /// Convert an `EnqueueResult` to the `Value::ok(Value::String(job_id))` format
@@ -5714,6 +5726,48 @@ pub(crate) mod tests {
         JOB_RUNTIME.reset();
         BATCH_RUNTIME.reset();
         f();
+    }
+
+    #[test]
+    fn persistent_probe_job_scope_cleans_success_error_panic_and_preserves_worker() {
+        use super::super::net::persistent::tests::{eval, install_fake, live, SERIAL};
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        with_clean_runtime(|| {
+            let baseline = live();
+            let mut interp = crate::interpreter::Interpreter::new();
+            interp.set_execution_mode(crate::interpreter::ExecutionMode::Job);
+            install_fake(&mut interp);
+            eval(&mut interp, "let worker_handle = test_probe_open()").unwrap();
+            let payload = Value::Map(HashMap::from([(
+                "nested".into(),
+                Value::Array(vec![interp.get_global("worker_handle").unwrap()]),
+            )]));
+            assert!(reject_secret_job_payload(&payload)
+                .unwrap_err()
+                .to_string()
+                .contains("ProbeHandle"));
+            interp.define_in_scope(
+                "test_panic".into(),
+                Value::NativeFunction {
+                    name: "test_panic".into(),
+                    arity: 0,
+                    max_arity: 0,
+                    requires: None,
+                    func: |_| panic!("probe job unwind fixture"),
+                },
+            );
+            for (index, body) in ["h", "test_probe_fail()", "test_panic()", "h"]
+                .into_iter()
+                .enumerate()
+            {
+                let def = parse_job_def(&format!("job ProbeScope{index} on q {{ perform() {{ let h = test_probe_open()\nlet cycle = fn() {{ h }}\n{body} }} }}"));
+                let result = execute_in_worker(&mut interp, &def, &HashMap::new());
+                assert_eq!(live(), baseline + 1, "job resources leaked for {body}");
+                assert_eq!(result.is_ok(), body == "h");
+            }
+            drop(interp);
+            assert_eq!(live(), baseline);
+        });
     }
 
     #[test]

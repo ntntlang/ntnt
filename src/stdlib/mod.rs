@@ -45,6 +45,7 @@ pub type StdlibModule = HashMap<String, Value>;
 
 /// Stop process-local runtimes before the host exits.
 pub fn shutdown_runtimes() {
+    net::persistent::shutdown();
     concurrent::RUNTIME.shutdown();
     process::RUNTIME.shutdown();
     if let Err(e) = fs::owned::shutdown() {
