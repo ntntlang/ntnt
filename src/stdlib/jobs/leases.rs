@@ -182,11 +182,10 @@ impl Scope {
 pub(super) fn ready_data(data: &HashMap<String, Value>) -> HashMap<String, Value> {
     let mut ready = data.clone();
     let status = match data.get("_lease_ready_status") {
-        Some(Value::String(s))
-            if matches!(s.as_str(), "pending" | "scheduled" | "retrying" | "failed") =>
-        {
+        Some(Value::String(s)) if matches!(s.as_str(), "pending" | "scheduled" | "retrying") => {
             s.clone()
         }
+        // Queued legacy "failed" records are runnable retries, not terminal history.
         _ => "pending".into(),
     };
     ready.insert("status".into(), Value::String(status));

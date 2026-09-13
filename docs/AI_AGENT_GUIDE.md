@@ -3112,7 +3112,8 @@ part of this first slice. Existing semaphore TTL and batch-finalization crash
 windows are not redesigned; recovery does not replay batch callbacks.
 
 **Upgrade:** stop/drain old workers before starting upgraded workers. Existing
-ready jobs are eligible; old `active` records without a lease are shown read-only
+ready jobs are eligible (queued legacy `failed` jobs normalize to pending when
+deferred); old `active` records without a lease are shown read-only
 as `outcome_unknown` and are never automatically replayed. There is no history
 backfill. Inspection does not start workers or perform recovery.
 

@@ -21,6 +21,25 @@ fn requeue_detaches_attempt_before_worker_backoff() {
 }
 
 #[test]
+fn deferring_a_legacy_failed_ready_job_keeps_it_runnable() {
+    let h = kv::open_kv(":memory:").unwrap();
+    let sent = Instant::now();
+    let c = seed_status(&h, "failed");
+    let keeper = leases::Keeper::new(extract_kv_handle_info(&h).unwrap()).unwrap();
+    let mut scope = keeper.attach(&c, sent, leases::Policy { duration_ms: 500 });
+    let mut expected = Some(c.snapshot);
+    reenqueue_job(&h, &mut expected, &c.data, &c.id, &mut scope);
+    let Value::Map(data) = kv::kv_get(&h, "jobs:data:lease-fixture").unwrap() else {
+        panic!()
+    };
+    assert!(matches!(data.get("status"),Some(Value::String(s)) if s=="pending"));
+    let Some(Value::String(pk)) = data.get("pending_key") else {
+        panic!()
+    };
+    assert!(matches!(kv::kv_get(&h,pk).unwrap(),Value::String(s) if s==c.id));
+    assert_eq!(kv::kv_ttl(&h, "jobs:data:lease-fixture").unwrap(), None);
+}
+#[test]
 fn inspection_refreshes_a_previous_attempt_snapshot() {
     let h = kv::open_kv(":memory:").unwrap();
     let c = seed(&h);
@@ -31,11 +50,14 @@ fn inspection_refreshes_a_previous_attempt_snapshot() {
     assert!(matches!(previous.get("status"),Some(Value::String(s)) if s=="claimed"));
 }
 fn seed(h: &Value) -> kv::job_leases::Claim {
+    seed_status(h, "pending")
+}
+fn seed_status(h: &Value, status: &str) -> kv::job_leases::Claim {
     let id = "lease-fixture";
     let pk = "jobs:pending:050:00000000000000000000:lease-fixture";
     let data = HashMap::from([
         ("id".into(), Value::String(id.into())),
-        ("status".into(), Value::String("pending".into())),
+        ("status".into(), Value::String(status.into())),
         ("pending_key".into(), Value::String(pk.into())),
     ]);
     kv::kv_set(h, &format!("jobs:data:{id}"), &Value::Map(data), None).unwrap();
