@@ -51,6 +51,12 @@ fn fixture_store(
     let id = dir.join("id.txt");
     let quote = |p: &Path| serde_json::to_string(p.to_str().unwrap()).unwrap();
     let scope = quote(dir);
+    // Worker-group control is Unix-only; Windows still runs the crash cases.
+    let worker_group = if cfg!(unix) {
+        r#", "worker_group": unwrap(get_env("CLAIM_FIXTURE_GROUP"))"#
+    } else {
+        ""
+    };
     let pause = if pause_after_effect {
         "sleep_ms(60000)"
     } else {
@@ -70,7 +76,7 @@ job Once on default (retry: 0, unique: 3600, concurrency: 1) {{
 if unwrap(get_env("CLAIM_FIXTURE_MODE")) == "seed" {{
  let id=unwrap(enqueue("Once",map {{ "scope": {scope} }}))
  unwrap(write_file({},id))
-}} else {{ work_jobs(map {{ "concurrency": 1, "poll_interval": 50, "worker_group": unwrap(get_env("CLAIM_FIXTURE_GROUP")) }}) }}
+}} else {{ work_jobs(map {{ "concurrency": 1, "poll_interval": 50{worker_group} }}) }}
 "#,
         store
             .map(|s| serde_json::to_string(s).unwrap())
