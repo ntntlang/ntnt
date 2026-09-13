@@ -178,6 +178,34 @@ job RetentionFixture on idle {{ perform() {{ print("EXECUTED_FAILURE_FIXTURE"); 
                 event.get("will_retry").is_none(),
                 "must not claim a retry was persisted"
             );
+            // Storage recovers. Persist the already-produced failure without
+            // executing the job (or its external side effects) a second time.
+            conn.execute_batch("DROP TRIGGER reject_terminal").unwrap();
+            loop {
+                let raw: String = conn
+                    .query_row(
+                        "SELECT value FROM _kv WHERE key='jobs:data:write-failure'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                if serde_json::from_str::<Value>(&raw).unwrap()["status"] == "dead" {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "recovered storage left the executed job stranded active"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(
+                fs::read_to_string(out.path())
+                    .unwrap()
+                    .lines()
+                    .filter(|s| *s == "EXECUTED_FAILURE_FIXTURE")
+                    .count(),
+                1
+            );
             break;
         }
         assert!(
@@ -187,6 +215,73 @@ job RetentionFixture on idle {{ perform() {{ print("EXECUTED_FAILURE_FIXTURE"); 
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn claimed_job_runs_once_after_activation_write_recovers() {
+    let dir = fixture_dir();
+    let (conn, _, _) = seed(dir.path());
+    let mut job = record("activation", "pending", 0);
+    job["queue"] = json!("idle");
+    job["attempts"] = json!(0);
+    job["pending_key"] = json!("jobs:pending:50:0:activation");
+    insert(&conn, "jobs:data:activation", &job);
+    conn.execute("INSERT INTO _kv(key,value,type) VALUES('jobs:pending:50:0:activation','activation','string')",[]).unwrap();
+    conn.execute_batch("CREATE TRIGGER reject_active BEFORE UPDATE ON _kv WHEN OLD.key='jobs:data:activation' BEGIN SELECT CASE WHEN json_extract(NEW.value,'$.status')='active' THEN RAISE(ABORT,'injected active write failure') END; END;").unwrap();
+    let out = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+    let err = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+    let mut worker = OwnedWorker(
+        command(dir.path())
+            .args([
+                "worker",
+                "app.tnt",
+                "--queues",
+                "idle",
+                "--poll-interval",
+                "20",
+            ])
+            .stdout(Stdio::from(out.reopen().unwrap()))
+            .stderr(Stdio::from(err.reopen().unwrap()))
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !fs::read_to_string(err.path())
+        .unwrap()
+        .contains("job.state_persistence_failed")
+    {
+        assert!(worker.0.try_wait().unwrap().is_none() && Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!fs::read_to_string(out.path())
+        .unwrap()
+        .contains("UNEXPECTED_JOB_EXECUTION"));
+    conn.execute_batch("DROP TRIGGER reject_active").unwrap();
+    loop {
+        let raw: String = conn
+            .query_row(
+                "SELECT value FROM _kv WHERE key='jobs:data:activation'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if serde_json::from_str::<Value>(&raw).unwrap()["status"] == "completed" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "claimed job remained stranded after storage recovered"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        fs::read_to_string(out.path())
+            .unwrap()
+            .lines()
+            .filter(|s| *s == "UNEXPECTED_JOB_EXECUTION")
+            .count(),
+        1
+    );
 }
 
 fn user_keys(conn: &Connection) -> BTreeSet<String> {

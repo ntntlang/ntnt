@@ -1858,7 +1858,7 @@ fn report_result_persistence_failure(
         // Do not publish will_retry=true or claim that the job became dead.
         "job.failed"
     } else {
-        "job.result_persistence_failed"
+        "job.state_persistence_failed"
     };
     emit_job_event(event, &fields);
 }
@@ -1881,6 +1881,102 @@ fn persist_job(
     }
     *expected = next;
     Ok(())
+}
+
+fn persist_worker_job(
+    kv_handle: &Value,
+    key: &str,
+    expected: &mut job_store::Snapshot,
+    data: &mut HashMap<String, Value>,
+    execution_error: Option<(&str, i64)>,
+    delay: std::time::Duration,
+) -> bool {
+    let id = match data.get("id") {
+        Some(Value::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let kind = match data.get("type") {
+        Some(Value::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let prepared = match job_store::prepare_change(
+        kv_handle,
+        key,
+        Some(expected),
+        &Value::Map(data.clone()),
+        retention::now_ms(),
+    ) {
+        Ok(p) => p,
+        Err(error) => {
+            report_result_persistence_failure(&id, &kind, execution_error, &error);
+            return false;
+        }
+    };
+    let mut reported = false;
+    loop {
+        let result = if reported {
+            job_store::commit_change_recovering(kv_handle, &prepared)
+        } else {
+            job_store::commit_change(kv_handle, &prepared)
+        };
+        match result {
+            Ok(next) => {
+                if let Value::Map(m) = next.value() {
+                    *data = m;
+                }
+                *expected = next;
+                return true;
+            }
+            Err(error) => {
+                let conflict = matches!(&error, IntentError::RuntimeError { message, .. }
+                    if message == "job changed concurrently; retry operation");
+                if !reported || conflict {
+                    report_result_persistence_failure(&id, &kind, execution_error, &error);
+                }
+                reported = true;
+                if conflict {
+                    return false;
+                }
+                // Retry only this prepared metadata mutation, never perform() or
+                // on_failure. A stable revision also handles lost acknowledgements.
+                if sleep_or_break(delay.max(std::time::Duration::from_millis(100))) {
+                    let previous = expected.value();
+                    let live = matches!(&previous, Value::Map(m) if matches!(m.get("status"),Some(Value::String(s)) if matches!(s.as_str(),"pending"|"scheduled"|"retrying")));
+                    let restored = if live {
+                        // No application work has run yet. Restore the pending
+                        // entry only if this worker still owns the same revision.
+                        job_store::change(
+                            kv_handle,
+                            key,
+                            Some(expected),
+                            &previous,
+                            retention::now_ms(),
+                        )
+                        .is_ok()
+                            || job_store::change(
+                                kv_handle,
+                                key,
+                                Some(prepared.replacement()),
+                                &previous,
+                                retention::now_ms(),
+                            )
+                            .is_ok()
+                    } else {
+                        false
+                    };
+                    emit_job_event(
+                        "job.persistence_interrupted",
+                        &[
+                            ("job_id", Value::String(id)),
+                            ("queue_restored", Value::Bool(restored)),
+                            ("execution_may_have_occurred", Value::Bool(!live)),
+                        ],
+                    );
+                    return false;
+                }
+            }
+        }
+    }
 }
 
 fn reenqueue_job(kv_handle: &Value, job_data: &HashMap<String, Value>, job_id: &str) {
@@ -2086,14 +2182,14 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                                         "expired_at".to_string(),
                                         Value::String(timestamp_key()),
                                     );
-                                    if persist_job(
+                                    if !persist_worker_job(
                                         &kv_handle,
                                         &data_key,
                                         &mut expected,
                                         &mut job_data,
-                                    )
-                                    .is_err()
-                                    {
+                                        None,
+                                        poll_duration,
+                                    ) {
                                         continue;
                                     }
                                     emit_job_event(
@@ -2177,7 +2273,14 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     Value::String(format!("No job definition found for '{}'", job_type)),
                 );
                 job_data.insert("dead_at".to_string(), Value::String(timestamp_key()));
-                if persist_job(&kv_handle, &data_key, &mut expected, &mut job_data).is_err() {
+                if !persist_worker_job(
+                    &kv_handle,
+                    &data_key,
+                    &mut expected,
+                    &mut job_data,
+                    None,
+                    poll_duration,
+                ) {
                     continue;
                 }
                 if let Err(e) = update_batch_on_terminal(&kv_handle, &job_data, &job_id, "dead") {
@@ -2316,7 +2419,14 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
 
         // Mark status as "active"
         job_data.insert("status".to_string(), Value::String("active".to_string()));
-        if persist_job(&kv_handle, &data_key, &mut expected, &mut job_data).is_err() {
+        if !persist_worker_job(
+            &kv_handle,
+            &data_key,
+            &mut expected,
+            &mut job_data,
+            None,
+            poll_duration,
+        ) {
             continue;
         }
 
@@ -2436,9 +2546,14 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 // Success
                 job_data.insert("status".to_string(), Value::String("completed".to_string()));
                 job_data.insert("completed_at".to_string(), Value::String(timestamp_key()));
-                if let Err(error) = persist_job(&kv_handle, &data_key, &mut expected, &mut job_data)
-                {
-                    report_result_persistence_failure(&job_id, &job_type, None, &error);
+                if !persist_worker_job(
+                    &kv_handle,
+                    &data_key,
+                    &mut expected,
+                    &mut job_data,
+                    None,
+                    poll_duration,
+                ) {
                     continue;
                 }
 
@@ -2525,15 +2640,14 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     );
                     job_data.insert("scheduled_at".to_string(), Value::String(future_ts.clone()));
 
-                    if let Err(error) =
-                        persist_job(&kv_handle, &data_key, &mut expected, &mut job_data)
-                    {
-                        report_result_persistence_failure(
-                            &job_id,
-                            &job_type,
-                            Some((&err_msg, new_attempts)),
-                            &error,
-                        );
+                    if !persist_worker_job(
+                        &kv_handle,
+                        &data_key,
+                        &mut expected,
+                        &mut job_data,
+                        Some((&err_msg, new_attempts)),
+                        poll_duration,
+                    ) {
                         continue;
                     }
 
@@ -2551,15 +2665,14 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     // Exhausted retries — mark as dead
                     job_data.insert("status".to_string(), Value::String("dead".to_string()));
                     job_data.insert("dead_at".to_string(), Value::String(timestamp_key()));
-                    if let Err(error) =
-                        persist_job(&kv_handle, &data_key, &mut expected, &mut job_data)
-                    {
-                        report_result_persistence_failure(
-                            &job_id,
-                            &job_type,
-                            Some((&err_msg, new_attempts)),
-                            &error,
-                        );
+                    if !persist_worker_job(
+                        &kv_handle,
+                        &data_key,
+                        &mut expected,
+                        &mut job_data,
+                        Some((&err_msg, new_attempts)),
+                        poll_duration,
+                    ) {
                         continue;
                     }
                     emit_job_event(

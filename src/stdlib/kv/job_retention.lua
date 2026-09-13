@@ -169,6 +169,8 @@ local page,overflow,newcursor,done=nil,nil,nil,nil
 if a.op=='change' or a.op=='remove' then
   local raw,hint=get(a.key)
   local expected=a.expected
+  -- Retrying a prepared revision after a lost acknowledgement is idempotent.
+  if a.op=='change' and raw==a.raw and not hint then return '0' end
   if expected==cjson.null then
     if raw then return '-1' end
   elseif raw~=expected.raw or (hint or '')~=expected.kind then return '-1' end

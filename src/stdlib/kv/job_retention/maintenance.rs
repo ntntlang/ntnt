@@ -60,6 +60,37 @@ pub(crate) fn step(handle: &Value, now: i64) -> Result<(usize, bool, Policy)> {
     result
 }
 
+/// Recover a metadata write using a fresh connection after the worker's
+/// connection reports an error. The prepared revision makes retries idempotent.
+pub(crate) fn command(handle: &Value, args: serde_json::Value) -> Result<String> {
+    let Value::Map(h) = handle else {
+        return Err(storage_error(()));
+    };
+    let client = redis::Client::open(field(h, "_url").replacen("valkey://", "redis://", 1))
+        .map_err(storage_error)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(storage_error)?;
+    let result = runtime.block_on(async {
+        tokio::time::timeout(IO_DEADLINE, async {
+            let mut connection = client
+                .get_multiplexed_async_connection()
+                .await
+                .map_err(storage_error)?;
+            redis::Script::new(include_str!("../job_retention.lua"))
+                .arg(args.to_string())
+                .invoke_async(&mut connection)
+                .await
+                .map_err(storage_error)
+        })
+        .await
+        .map_err(storage_error)?
+    });
+    runtime.shutdown_timeout(std::time::Duration::ZERO);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

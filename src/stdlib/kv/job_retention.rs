@@ -643,13 +643,25 @@ pub(crate) fn snapshot(handle: &Value, key: &str) -> Result<Option<Snapshot>> {
         }
     }
 }
-pub(crate) fn change(
+pub(crate) struct PreparedChange {
+    key: String,
+    expected: Option<Snapshot>,
+    replacement: Snapshot,
+    now: i64,
+}
+impl PreparedChange {
+    pub(crate) fn replacement(&self) -> &Snapshot {
+        &self.replacement
+    }
+}
+
+pub(crate) fn prepare_change(
     handle: &Value,
     key: &str,
     expected: Option<&Snapshot>,
     value: &Value,
     now: i64,
-) -> Result<Snapshot> {
+) -> Result<PreparedChange> {
     let Value::Map(mut map) = value.clone() else {
         return Err(storage_error(()));
     };
@@ -684,6 +696,32 @@ pub(crate) fn change(
         serialize_value(value)?
     };
     let replacement = Snapshot { raw, kind };
+    Ok(PreparedChange {
+        key: key.into(),
+        expected: expected.cloned(),
+        replacement,
+        now,
+    })
+}
+
+pub(crate) fn commit_change(handle: &Value, prepared: &PreparedChange) -> Result<Snapshot> {
+    commit_change_inner(handle, prepared, false)
+}
+pub(crate) fn commit_change_recovering(
+    handle: &Value,
+    prepared: &PreparedChange,
+) -> Result<Snapshot> {
+    commit_change_inner(handle, prepared, true)
+}
+fn commit_change_inner(
+    handle: &Value,
+    prepared: &PreparedChange,
+    reconnect: bool,
+) -> Result<Snapshot> {
+    let key = prepared.key.as_str();
+    let expected = prepared.expected.as_ref();
+    let replacement = &prepared.replacement;
+    let now = prepared.now;
     match get_backend_type(handle)? {
         KVBackend::SQLite => {
             let store = get_sqlite_kv(handle)?;
@@ -693,25 +731,33 @@ pub(crate) fn change(
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(storage_error)?;
-            if sql_snapshot(&tx, key)?.as_ref() != expected {
+            let current = sql_snapshot(&tx, key)?;
+            // A lost acknowledgement is not a new logical transition. The
+            // prepared revision is stable across retries and unique to its owner.
+            if current.as_ref() == Some(replacement) {
+                return Ok(replacement.clone());
+            }
+            if current.as_ref() != expected {
                 return Err(IntentError::runtime_error(
                     "job changed concurrently; retry operation",
                 ));
             }
             tx.execute("INSERT INTO _kv(key,value,type) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,type=excluded.type,expires_at=NULL",params![key,replacement.raw,replacement.kind]).map_err(storage_error)?;
             if expected.is_none() {
-                sql_callback(&tx, &replacement, true)?;
+                sql_callback(&tx, replacement, true)?;
             }
-            sql_related(&tx, key, expected, Some(&replacement), false)?;
-            sql_index(&tx, key, Some(&replacement), now)?;
+            sql_related(&tx, key, expected, Some(replacement), false)?;
+            sql_index(&tx, key, Some(replacement), now)?;
             tx.commit().map_err(storage_error)?;
         }
         KVBackend::Redis => {
             let expected=expected.map(|s|serde_json::json!({"raw":s.raw,"kind":s.kind.strip_prefix("redis:").unwrap_or("")}));
-            let result = redis_op(
-                handle,
-                serde_json::json!({"op":"change","key":key,"expected":expected,"raw":replacement.raw,"now":now}),
-            )?;
+            let args = serde_json::json!({"op":"change","key":key,"expected":expected,"raw":replacement.raw,"now":now});
+            let result = if reconnect {
+                maintenance::command(handle, args)?
+            } else {
+                redis_op(handle, args)?
+            };
             if result == "-1" {
                 return Err(IntentError::runtime_error(
                     "job changed concurrently; retry operation",
@@ -719,7 +765,17 @@ pub(crate) fn change(
             }
         }
     }
-    Ok(replacement)
+    Ok(replacement.clone())
+}
+
+pub(crate) fn change(
+    handle: &Value,
+    key: &str,
+    expected: Option<&Snapshot>,
+    value: &Value,
+    now: i64,
+) -> Result<Snapshot> {
+    commit_change(handle, &prepare_change(handle, key, expected, value, now)?)
 }
 #[cfg(test)]
 mod backend_tests;

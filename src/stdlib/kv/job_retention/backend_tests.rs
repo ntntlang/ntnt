@@ -309,6 +309,54 @@ fn changed_policy_fences_stale_batches(h: &Value) {
     assert_eq!(converge(h, &longer, 61 * DAY_MS).0, 1);
 }
 
+fn prepared_write_recovers_a_closed_redis_connection(h: &Value) {
+    if get_backend_type(h).unwrap() != KVBackend::Redis {
+        return;
+    }
+    let old = insert(h, "reconnect", "active", 0);
+    let prepared = prepare_change(
+        h,
+        "jobs:data:reconnect",
+        Some(&old),
+        &value("reconnect", "completed", 1),
+        1,
+    )
+    .unwrap();
+    let store = get_redis_kv(h).unwrap();
+    let _: redis::RedisResult<String> = redis::cmd("QUIT").query(&mut store.lock().unwrap().conn);
+    assert!(commit_change(h, &prepared).is_err());
+    let committed = commit_change_recovering(h, &prepared).unwrap();
+    assert_eq!(commit_change_recovering(h, &prepared).unwrap(), committed);
+}
+
+fn prepared_writes_are_idempotent_but_do_not_overwrite_newer_states(h: &Value) {
+    let before = insert(h, "prepared", "pending", 0);
+    let prepared = prepare_change(
+        h,
+        "jobs:data:prepared",
+        Some(&before),
+        &value("prepared", "active", 0),
+        1,
+    )
+    .unwrap();
+    let committed = commit_change(h, &prepared).unwrap();
+    // Simulate an acknowledgement lost after a successful atomic write.
+    assert_eq!(commit_change(h, &prepared).unwrap(), committed);
+    let cancelled = change(
+        h,
+        "jobs:data:prepared",
+        Some(&committed),
+        &value("prepared", "cancelled", 2),
+        2,
+    )
+    .unwrap();
+    assert!(commit_change(h, &prepared).is_err());
+    assert_eq!(
+        snapshot(h, "jobs:data:prepared").unwrap().unwrap(),
+        cancelled
+    );
+}
+
 fn suite(fixture: impl Fn() -> Value) {
     for case in [
         category_age,
@@ -319,6 +367,8 @@ fn suite(fixture: impl Fn() -> Value) {
         duplicate_backfill,
         backfill_pressure_preserves_unseen_ordering,
         changed_policy_fences_stale_batches,
+        prepared_writes_are_idempotent_but_do_not_overwrite_newer_states,
+        prepared_write_recovers_a_closed_redis_connection,
     ] {
         case(&fixture());
     }
