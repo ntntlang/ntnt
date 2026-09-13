@@ -3027,6 +3027,53 @@ delete_jobs(map { "status": "completed" })              // Bulk delete
 delete_jobs(map { "status": "dead", "older_than_secs": 604800 })  // 7 days
 ```
 
+### Job History Expiration
+
+Job records already live in KV. Terminal-state writes now include a TTL:
+**30 days** for completed/cancelled and **90 days** for dead/failed/expired.
+Live jobs have no history TTL; retrying a job clears its TTL in the same write
+that makes it live again. Expiration removes the history key only, not separate
+uniqueness reservations or batch coordination. Existing inspection APIs remain.
+
+```ntnt
+configure_queue(map {
+    "store": "sqlite:./jobs.db",
+    "retention": map { "completed_days": 30, "failed_days": 90 }
+})
+// Optional: retention: map { "enabled": false } disables TTL on future writes.
+```
+
+Settings are process-local; use the same configuration in every writer.
+Omitting `retention` uses defaults. Days must be integers from 1 through 365000.
+Changing settings does **not** rewrite existing expiry dates, and disabling does
+not revoke TTLs already assigned. Legacy job records without TTL remain until
+explicitly deleted with the existing management tools; there is no automatic
+migration/backfill, count/byte quota, or history-maintenance job.
+
+Redis/Valkey expires keys natively. SQLite uses one generic KV maintenance thread
+per process, deleting up to 256 expired rows per registered store each second,
+including while callers are idle. Busy stores are skipped until a later tick;
+large backlogs take multiple ticks. Deleted SQLite pages are reusable, but the
+file need not shrink. SQLite cleanup stops with the process; Redis expiration
+continues independently in the Redis server.
+
+Job-state persistence retries retain one prepared mutation; they do not rerun
+`perform` or `on_failure`. State, TTL and queue publication commit together
+(SQLite transaction / Redis WATCH + MULTI/EXEC). Retrying a write after a lost acknowledgement
+does not republish claimed work or refresh its TTL. A concurrent state
+change wins over a stale writer. Redis credentials need WATCH, UNWATCH, MULTI, EXEC
+and DISCARD permissions in addition to the usual KV commands. Upgrade all writers
+together; direct KV mutations bypass these job-state safeguards.
+
+Death/cancellation/expiration retain their existing early-release semantics for
+their **own** uniqueness reservation, never a subsequent owner's reservation.
+Automatic expiry and explicit history deletion do not shorten uniqueness TTLs.
+If a process stops during an unresolved storage outage, reconcile its recorded
+state before replaying external effects; this is not crash-time exactly-once
+execution. Redis reconnect work is bounded to one pending connector per store,
+so even a stalled protocol handshake does not block worker cancellation or
+create a new connector thread on each retry.
+
 ### Testing Mode
 
 ```ntnt

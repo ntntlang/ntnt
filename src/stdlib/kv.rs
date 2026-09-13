@@ -11,14 +11,16 @@
 //! let user = get(cache, "user:123")?
 //! ```
 
+pub(crate) mod conditional;
+
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
 use crate::stdlib::json::json_to_intent_value;
 use redis::Commands;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Thread-safe SQLite KV store registry
 static SQLITE_KV_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Arc<Mutex<SQLiteKV>>>>> =
@@ -29,6 +31,42 @@ static REDIS_KV_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Arc<Mutex<Redis
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static KV_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+const SQLITE_TTL_BATCH_SIZE: usize = 256;
+const SQLITE_TTL_INTERVAL: Duration = Duration::from_secs(1);
+static SQLITE_TTL_MAINTENANCE: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+
+/// One process-wide worker; TTL deletion also runs when callers leave KV idle.
+fn start_sqlite_ttl_maintenance() -> Result<()> {
+    SQLITE_TTL_MAINTENANCE
+        .get_or_init(|| {
+            std::thread::Builder::new()
+                .name("ntnt-kv-ttl".into())
+                .spawn(|| loop {
+                    std::thread::sleep(SQLITE_TTL_INTERVAL);
+                    sweep_sqlite_ttl();
+                })
+                .map(|_| ())
+                .map_err(|e| format!("Failed to start KV TTL maintenance: {e}"))
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|e| IntentError::runtime_error(e.clone()))
+}
+
+fn sweep_sqlite_ttl() {
+    let stores: Vec<_> = match SQLITE_KV_REGISTRY.try_lock() {
+        Ok(registry) => registry.values().cloned().collect(),
+        Err(_) => return,
+    };
+    // Never hold the registry during SQL, or wait behind an active store.
+    for store in stores {
+        if let Ok(kv) = store.try_lock() {
+            // Contention/errors are retried on the next tick, not in a job queue.
+            let _ = kv.delete_expired(now_unix());
+        }
+    }
+}
 
 /// Backend type identifier
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,6 +83,9 @@ pub struct SQLiteKV {
 /// Wrapper for Redis connection
 pub struct RedisKV {
     conn: redis::Connection,
+    // At most one pending reconnect per store; a stalled AUTH/SELECT handshake
+    // must not block workers or spawn another connector on every retry.
+    reconnecting: bool,
 }
 
 /// Get current Unix timestamp
@@ -243,7 +284,26 @@ impl SQLiteKV {
         conn.execute("CREATE INDEX IF NOT EXISTS _kv_prefix ON _kv(key)", [])
             .ok();
 
+        start_sqlite_ttl_maintenance()?;
         Ok(SQLiteKV { conn })
+    }
+
+    /// Bounded, indexed deletion in one statement keeps renewed keys safe.
+    fn delete_expired(&self, now: i64) -> rusqlite::Result<usize> {
+        // A lock held by another connection must not stall all other stores.
+        let timeout: u64 = self
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+        self.conn.busy_timeout(Duration::ZERO)?;
+        let deleted = self.conn.execute(
+            "DELETE FROM _kv WHERE key IN (
+                SELECT key FROM _kv WHERE expires_at <= ?
+                ORDER BY expires_at LIMIT ?
+            )",
+            params![now, SQLITE_TTL_BATCH_SIZE],
+        );
+        self.conn.busy_timeout(Duration::from_millis(timeout))?;
+        deleted
     }
 
     /// Get a value by key
@@ -609,7 +669,10 @@ impl RedisKV {
             IntentError::runtime_error(format!("Failed to connect to Redis: {}", e))
         })?;
 
-        Ok(RedisKV { conn })
+        Ok(RedisKV {
+            conn,
+            reconnecting: false,
+        })
     }
 
     /// Get a value by key
@@ -2518,6 +2581,104 @@ mod tests {
             } if variant == "Err" => values.into_iter().next().unwrap_or(Value::Unit),
             other => panic!("Expected Err result, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_sqlite_kv_ttl_cleanup_bounded_and_preserves_live_keys() {
+        // An unregistered store makes batch boundaries deterministic.
+        let kv = SQLiteKV::new(":memory:").unwrap();
+        for i in 0..SQLITE_TTL_BATCH_SIZE + 3 {
+            kv.set(&format!("expired:{i}"), &Value::Int(1), Some(-1))
+                .unwrap();
+        }
+        kv.set("future", &Value::Int(2), Some(3600)).unwrap();
+        kv.set("permanent", &Value::Int(3), None).unwrap();
+        kv.set("renewed", &Value::Int(4), Some(-1)).unwrap();
+        kv.set("renewed", &Value::Int(5), Some(3600)).unwrap();
+        let now = now_unix();
+        // Include a row expiring exactly at the sweep cutoff.
+        kv.conn
+            .execute(
+                "UPDATE _kv SET expires_at = ? WHERE key = 'expired:0'",
+                [now],
+            )
+            .unwrap();
+        let count = || {
+            kv.conn
+                .query_row("SELECT COUNT(*) FROM _kv", [], |row| row.get::<_, usize>(0))
+                .unwrap()
+        };
+        assert_eq!(count(), SQLITE_TTL_BATCH_SIZE + 6);
+        assert_eq!(kv.delete_expired(now).unwrap(), SQLITE_TTL_BATCH_SIZE);
+        assert_eq!(count(), 6);
+        assert_eq!(kv.delete_expired(now).unwrap(), 3);
+        assert_eq!(count(), 3);
+        assert_eq!(kv.delete_expired(now).unwrap(), 0);
+        for (key, expected) in [("future", 2), ("permanent", 3), ("renewed", 5)] {
+            assert!(matches!(kv.get(key).unwrap(), Some(Value::Int(n)) if n == expected));
+        }
+    }
+
+    #[test]
+    fn test_sqlite_kv_ttl_cleanup_skips_database_lock_and_restores_timeout() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("locked.db");
+        let kv = SQLiteKV::new(path.to_str().unwrap()).unwrap();
+        kv.set("expired", &Value::Int(1), Some(-1)).unwrap();
+        kv.conn.busy_timeout(Duration::from_secs(2)).unwrap();
+        let blocker = Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let start = std::time::Instant::now();
+        let error = kv.delete_expired(now_unix()).unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+        let timeout: u64 = kv
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 2000);
+        blocker.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(kv.delete_expired(now_unix()).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_sqlite_kv_ttl_cleanup_while_idle() {
+        // A busy store must not prevent idle cleanup of other registered stores.
+        let busy_handle = open_kv(":memory:").unwrap();
+        let busy_store = get_sqlite_kv(&busy_handle).unwrap();
+        let _busy_guard = busy_store.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("idle.db");
+        let handle = open_kv(path.to_str().unwrap()).unwrap();
+        kv_set(&handle, "expired", &Value::Int(1), Some(1)).unwrap();
+        kv_set(&handle, "persistent", &Value::Int(2), None).unwrap();
+        let observer = Connection::open(&path).unwrap();
+        let count = || {
+            observer
+                .query_row("SELECT COUNT(*) FROM _kv", [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(count(), 2, "fixture must contain physical rows");
+
+        // No KV calls after setup: only an independent SQL reader observes cleanup.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        while count() == 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(
+            count(),
+            1,
+            "idle maintenance must physically delete expired rows"
+        );
+        assert_eq!(
+            observer
+                .query_row("SELECT key FROM _kv", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "persistent"
+        );
     }
 
     #[test]

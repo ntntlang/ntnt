@@ -8233,8 +8233,8 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`batch_status`](#batchstatus) | Get the current status and counters for a batch. |
 | [`cancel_job`](#canceljob) | Cancel a job by its ID. |
 | [`clear_jobs`](#clearjobs) | Clear all jobs from the test queue without executing them. |
-| [`configure_queue`](#configurequeue) | Configure the job queue storage backend. |
-| [`delete_jobs`](#deletejobs) | Bulk delete jobs by status. |
+| [`configure_queue`](#configurequeue) | Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits. |
+| [`delete_jobs`](#deletejobs) | Bulk delete jobs by status. Deleting history does not shorten independent uniqueness windows. |
 | [`drain_jobs`](#drainjobs) | Execute all enqueued test jobs synchronously and return the count. |
 | [`enqueue`](#enqueue) | Enqueue a background job for processing, or buffer a job into an open batch. |
 | [`enqueue_at`](#enqueueat) | Enqueue a job to run at a specific future time. |
@@ -8444,13 +8444,11 @@ clear_jobs()  // Clear all enqueued test jobs
 configure_queue(opts: Map) -> Result<Unit, String>
 ```
 
-Configure the job queue storage backend.
-
-Pass a map with a "store" key to set the KV backend for job storage. If never called, enqueue() auto-initializes with "sqlite:./jobs.db".
+Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits.
 
 **Parameters:**
 
-- `opts` — Configuration map with optional "store" key (e.g., "redis://localhost:6379" or "sqlite:./jobs.db")
+- `opts` — Map with optional store, retention and testing-mode options
 
 **Returns:** Result indicating success or error
 
@@ -8469,7 +8467,7 @@ configure_queue(map { "store": "redis://localhost:6379" })  // Use Redis for job
 delete_jobs(opts: Map) -> Result<Int, String>
 ```
 
-Bulk delete jobs by status.
+Bulk delete jobs by status. Deleting history does not shorten independent uniqueness windows.
 
 Requires a "status" key in the options map to prevent accidental deletion of all jobs. Returns the number of jobs deleted.
 
