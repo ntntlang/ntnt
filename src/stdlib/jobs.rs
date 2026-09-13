@@ -29,7 +29,7 @@ use crate::error::{IntentError, Result};
 use crate::interpreter::{FunctionContract, RuntimeCapability, Value};
 use crate::stdlib::concurrent::{
     check_task_limit, finalize_task, is_current_task_cancelled, sleep_cancellable, CancelToken,
-    CURRENT_CANCEL_TOKEN, RUNTIME,
+    TaskStartGuard, CURRENT_CANCEL_TOKEN, RUNTIME,
 };
 use crate::stdlib::kv;
 use sha2::{Digest, Sha256};
@@ -2898,29 +2898,34 @@ fn spawn_worker_task(
     let cancel_clone = Arc::clone(&cancelled);
     let task_id = RUNTIME.register_task(Arc::clone(&cancelled))?;
     RUNTIME.active_tasks.fetch_add(1, AtomicOrdering::Release);
+    let start_guard = TaskStartGuard::new(&RUNTIME, task_id);
     // Safe: task_id was just returned by register_task(), so it must be in the registry
     let arcs = RUNTIME
         .get_task_arcs(task_id)?
         .expect("task just registered must exist");
 
-    std::thread::spawn(move || {
-        CURRENT_CANCEL_TOKEN.with(|cell| {
-            *cell.borrow_mut() = Some(cancelled);
-        });
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Startup owns the sender until the whole pool is published. On any
-            // startup error it drops the sender, so even a late-scheduled worker
-            // exits without bootstrapping app code or claiming a single job.
-            if let Some(activation) = activation {
-                if activation.recv().is_err() {
-                    return Ok(Value::Unit);
+    std::thread::Builder::new()
+        .spawn(move || {
+            CURRENT_CANCEL_TOKEN.with(|cell| {
+                *cell.borrow_mut() = Some(cancelled);
+            });
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Startup owns the sender until the whole pool is published. On any
+                // startup error it drops the sender, so even a late-scheduled worker
+                // exits without bootstrapping app code or claiming a single job.
+                if let Some(activation) = activation {
+                    if activation.recv().is_err() {
+                        return Ok(Value::Unit);
+                    }
                 }
-            }
-            worker_loop(kv_info, band, queues);
-            Ok(Value::Unit)
-        }));
-        finalize_task(result, &arcs.inner, &arcs.completed_notify);
-    });
+                RUNTIME.mark_task_started(task_id);
+                worker_loop(kv_info, band, queues);
+                Ok(Value::Unit)
+            }));
+            finalize_task(task_id, result, &arcs.inner, &arcs.completed_notify);
+        })
+        .map_err(|e| IntentError::runtime_error(format!("Failed to spawn worker thread: {e}")))?;
+    start_guard.commit();
 
     Ok((Value::TaskHandle(task_id), cancel_clone))
 }
@@ -3603,6 +3608,19 @@ pub(crate) fn scale_workers_impl(
     band_name: &str,
     target_count: usize,
 ) -> crate::error::Result<Value> {
+    scale_workers_with_spawn(band_name, target_count, spawn_worker_task)
+}
+
+fn scale_workers_with_spawn(
+    band_name: &str,
+    target_count: usize,
+    mut spawn: impl FnMut(
+        Value,
+        BandConfig,
+        Option<Vec<String>>,
+        Option<std::sync::mpsc::Receiver<()>>,
+    ) -> Result<(Value, Arc<CancelToken>)>,
+) -> Result<Value> {
     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
     // Hold the publication locks from configuration lookup through map update.
     let mut task_ids_map = JOB_RUNTIME
@@ -3632,26 +3650,42 @@ pub(crate) fn scale_workers_impl(
             ))
         })?;
 
-    let arcs = cancel_map.entry(band_name.to_string()).or_default();
-    let ids = task_ids_map.entry(band_name.to_string()).or_default();
-    let current_count = arcs.len();
-
+    let current_count = cancel_map.get(band_name).map_or(0, Vec::len);
+    let mut activations = Vec::new();
     if target_count > current_count {
+        // Reuse pool startup's activation protocol: no worker may bootstrap or
+        // claim a job before the entire scale-up has succeeded. On error all
+        // senders drop, and already-staged threads exit without doing any work.
+        let mut staged_ids = Vec::new();
+        let mut staged_arcs = Vec::new();
         for _ in current_count..target_count {
-            match spawn_worker_task(kv_handle.clone(), band_config.clone(), queues.clone(), None) {
-                Ok((Value::TaskHandle(id), cancel_arc)) => {
-                    ids.push(id);
-                    arcs.push(cancel_arc);
-                }
-                Ok((_, _)) => {
-                    return Err(IntentError::runtime_error(
-                        "spawn_worker_task returned unexpected value type".to_string(),
-                    ));
-                }
-                Err(e) => return Err(e),
-            }
+            let (activate, activation) = std::sync::mpsc::channel();
+            let (handle, cancel_arc) = spawn(
+                kv_handle.clone(),
+                band_config.clone(),
+                queues.clone(),
+                Some(activation),
+            )?;
+            let Value::TaskHandle(id) = handle else {
+                return Err(IntentError::runtime_error(
+                    "spawn_worker_task returned unexpected value type",
+                ));
+            };
+            staged_ids.push(id);
+            staged_arcs.push(cancel_arc);
+            activations.push(activate);
         }
+        task_ids_map
+            .entry(band_name.to_string())
+            .or_default()
+            .extend(staged_ids);
+        cancel_map
+            .entry(band_name.to_string())
+            .or_default()
+            .extend(staged_arcs);
     } else if target_count < current_count {
+        let arcs = cancel_map.entry(band_name.to_string()).or_default();
+        let ids = task_ids_map.entry(band_name.to_string()).or_default();
         for arc in arcs.drain(target_count..) {
             arc.cancel();
         }
@@ -3660,11 +3694,18 @@ pub(crate) fn scale_workers_impl(
         }
     }
 
-    // Update the configuration while still holding the publication locks.
+    // Publish count, IDs and cancellation handles before allowing any new worker
+    // to enter app code. Lock order matches start_worker_pool and status readers.
     if let Some(band) = active.iter_mut().find(|b| b.name == band_name) {
         band.concurrency = target_count;
     }
-
+    drop(queues);
+    drop(active);
+    drop(cancel_map);
+    drop(task_ids_map);
+    for activate in activations {
+        let _ = activate.send(());
+    }
     Ok(Value::ok(Value::Unit))
 }
 
@@ -8110,6 +8151,98 @@ pub(crate) mod tests {
     }
 
     /// scale_workers() errors when called before work_async() (no active bands).
+    fn seed_scale_test_band() -> Arc<CancelToken> {
+        let token = Arc::new(CancelToken::new());
+        *JOB_RUNTIME.active_bands.lock().unwrap() = vec![BandConfig {
+            name: "scale_test".into(),
+            min_priority: 0,
+            max_priority: 99,
+            concurrency: 1,
+            poll_interval_ms: 10,
+        }];
+        JOB_RUNTIME
+            .band_worker_task_ids
+            .lock()
+            .unwrap()
+            .insert("scale_test".into(), vec![777]);
+        JOB_RUNTIME
+            .band_cancel_arcs
+            .lock()
+            .unwrap()
+            .insert("scale_test".into(), vec![token.clone()]);
+        token
+    }
+
+    #[test]
+    fn scale_up_failure_preserves_old_pool_and_never_activates_partial_workers() {
+        with_temp_kv("scale_failure", |_| {
+            let original = seed_scale_test_band();
+            let mut calls = 0;
+            let mut worker = None;
+            let result = scale_workers_with_spawn("scale_test", 3, |_, _, _, activation| {
+                calls += 1;
+                if calls == 2 {
+                    return Err(IntentError::runtime_error(
+                        "injected thread creation failure",
+                    ));
+                }
+                worker = Some(std::thread::spawn(move || {
+                    activation.map_or(true, |gate| gate.recv().is_ok())
+                }));
+                Ok((Value::TaskHandle(888), Arc::new(CancelToken::new())))
+            });
+            assert!(result.is_err());
+            let entered_consuming_loop = worker.unwrap().join().unwrap();
+            assert_eq!(
+                JOB_RUNTIME.band_worker_task_ids.lock().unwrap()["scale_test"],
+                vec![777]
+            );
+            let tokens = JOB_RUNTIME.band_cancel_arcs.lock().unwrap();
+            assert_eq!(tokens["scale_test"].len(), 1);
+            assert!(Arc::ptr_eq(&tokens["scale_test"][0], &original));
+            assert!(!original.is_cancelled());
+            assert_eq!(JOB_RUNTIME.active_bands.lock().unwrap()[0].concurrency, 1);
+            assert!(
+                !entered_consuming_loop,
+                "an unpublished worker could process jobs after failed scaling"
+            );
+        });
+    }
+
+    #[test]
+    fn scale_up_activates_only_after_publication_and_scale_down_is_preserved() {
+        with_temp_kv("scale_success", |_| {
+            let original = seed_scale_test_band();
+            let added = Arc::new(CancelToken::new());
+            let mut worker = None;
+            scale_workers_with_spawn("scale_test", 2, |_, _, _, activation| {
+                let gate = activation.expect("new workers must be staged");
+                worker = Some(std::thread::spawn(move || {
+                    gate.recv().unwrap();
+                    assert_eq!(
+                        JOB_RUNTIME.band_worker_task_ids.lock().unwrap()["scale_test"],
+                        vec![777, 888]
+                    );
+                    assert_eq!(JOB_RUNTIME.active_bands.lock().unwrap()[0].concurrency, 2);
+                }));
+                Ok((Value::TaskHandle(888), added.clone()))
+            })
+            .unwrap();
+            worker.unwrap().join().unwrap();
+            scale_workers_with_spawn("scale_test", 1, |_, _, _, _| {
+                panic!("scale-down must not spawn")
+            })
+            .unwrap();
+            assert!(added.is_cancelled());
+            assert!(!original.is_cancelled());
+            assert_eq!(
+                JOB_RUNTIME.band_worker_task_ids.lock().unwrap()["scale_test"],
+                vec![777]
+            );
+            assert_eq!(JOB_RUNTIME.active_bands.lock().unwrap()[0].concurrency, 1);
+        });
+    }
+
     #[test]
     fn test_scale_workers_no_active_bands() {
         with_clean_runtime(|| {

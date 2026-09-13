@@ -1,0 +1,44 @@
+import { spawn, after, await_task, try_await, parallel, race, sleep_ms, channel, send, recv, close } from "std/concurrent"
+import { sleep } from "std/time"
+
+let task = spawn(fn() { map { "items": [1, 2], "ok": true } })
+let delivered = unwrap(await_task(task))
+assert(delivered["items"][1] == 2)
+assert(delivered["ok"] == true)
+let consumed = try_await(task)
+assert(consumed["status"] == "consumed")
+assert(consumed["result"] == None)
+assert(delivered["items"][0] == 1)
+
+let failed = spawn(fn() { assert(false) })
+match await_task(failed) {
+    Err(_) => assert(true),
+    Ok(_) => assert(false)
+}
+let failed_status = try_await(failed)
+assert(failed_status["status"] == "consumed")
+assert(failed_status["result"] == None)
+
+let delayed = after("1ms", fn() { 7 })
+assert(unwrap(await_task(delayed)) == 7)
+assert(try_await(delayed)["status"] == "consumed")
+
+let ordered = parallel([fn() { sleep_ms(10); 3 }, fn() { 1 }])
+assert(unwrap(ordered[0]) == 3)
+assert(unwrap(ordered[1]) == 1)
+let winner = race([fn() { sleep_ms(60000); 9 }, fn() { 8 }])
+assert(unwrap(winner) == 8)
+let all_failed = parallel([fn() { Err("expected") }, fn() { sleep_ms(60000); 2 }])
+match all_failed {
+    Err(_) => assert(true),
+    Ok(_) => assert(false)
+}
+// A running non-cooperative loser must not hold the winner for its full sleep.
+let [tx, rx] = channel()
+let detached = race([
+    fn() { send(tx, "started"); sleep(60000); 1 },
+    fn() { recv(rx); 2 }
+])
+assert(unwrap(detached) == 2)
+close(rx)
+print("PASS: retained task handles, consumed results, after, ordered parallel, race and failure cleanup compatibility")
