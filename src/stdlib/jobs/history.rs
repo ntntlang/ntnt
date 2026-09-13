@@ -117,6 +117,20 @@ impl Prepared {
                 remove.push(key);
             }
         }
+        if matches!(
+            status.as_str(),
+            "pending" | "scheduled" | "retrying" | "failed"
+        ) {
+            for key in [
+                "claim_token",
+                "worker_id",
+                "execution_phase",
+                "lease_expires_at_ms",
+                "_lease_ready_status",
+            ] {
+                data.remove(key);
+            }
+        }
         let ttl = JOB_RUNTIME
             .history_retention
             .read()
@@ -148,10 +162,24 @@ impl Prepared {
             &self.owner,
             &self.remove,
             self.pending.as_deref(),
+            false,
+        )
+    }
+    pub fn apply_owned(&self, handle: &Value) -> Result<bool> {
+        kv::conditional::write(
+            handle,
+            &self.key,
+            self.expected.as_ref(),
+            &self.next,
+            self.ttl,
+            &self.owner,
+            &self.remove,
+            self.pending.as_deref(),
+            true,
         )
     }
     pub fn retry(&self, handle: &Value) -> Result<bool> {
-        retry_storage(&self.owner, || self.apply(handle))
+        retry_storage(&self.owner, || self.apply_owned(handle))
     }
 }
 

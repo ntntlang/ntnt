@@ -110,7 +110,7 @@ job Fault on default (retry: {retries}, backoff: "constant", backoff_base: 60, e
         let Value::Map(blocked) = kv::kv_get(&handle, &key).unwrap() else {
             panic!()
         };
-        let expected = if ran { "active" } else { "pending" };
+        let expected = if ran { "active" } else { "claimed" };
         assert!(
             matches!(blocked.get("status"),Some(Value::String(s)) if s==expected),
             "write must still be blocked"

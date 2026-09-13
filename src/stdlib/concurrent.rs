@@ -76,45 +76,334 @@ use retention::*;
 // =============================================================================
 
 /// Cooperative cancellation token. `cancel()` sets the flag and wakes all
-/// threads blocked in `wait_timeout()` instantly.
+/// threads blocked in `wait_timeout()` instantly. Children additionally observe
+/// an immutable parent and a renewable monotonic deadline; they never cancel
+/// their parent or own a background thread.
 pub struct CancelToken {
-    inner: Mutex<bool>,
+    inner: Mutex<CancelState>,
     condvar: Condvar,
+    parent: Option<Arc<CancelToken>>,
+}
+
+struct CancelState {
+    cancelled: bool,
+    deadline: Option<Instant>,
+}
+
+impl CancelState {
+    /// Latch expiry so no subsequent renewal can revive this token.
+    fn observe_cancellation(&mut self, parent_cancelled: bool) -> bool {
+        self.cancelled |= parent_cancelled
+            || self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline);
+        self.cancelled
+    }
 }
 
 impl CancelToken {
     pub fn new() -> Self {
         CancelToken {
-            inner: Mutex::new(false),
+            inner: Mutex::new(CancelState {
+                cancelled: false,
+                deadline: None,
+            }),
             condvar: Condvar::new(),
+            parent: None,
         }
+    }
+
+    /// Create a child which cancels on parent cancellation or deadline expiry.
+    /// The parent link is immutable and one-way, including when it is absent.
+    pub(crate) fn with_parent_deadline(
+        parent: Option<Arc<CancelToken>>,
+        deadline: Instant,
+    ) -> Self {
+        CancelToken {
+            inner: Mutex::new(CancelState {
+                cancelled: false,
+                deadline: Some(deadline),
+            }),
+            condvar: Condvar::new(),
+            parent,
+        }
+    }
+
+    /// Replace a live child's deadline and wake waiters to recalculate it.
+    /// Returns false for roots, poisoned/cancelled/expired tokens, or a proposed
+    /// deadline that is not in the future. Rejection never revives a token.
+    pub(crate) fn renew_deadline(&self, deadline: Instant) -> bool {
+        let parent_cancelled = self.parent_is_cancelled();
+        let mut state = match self.inner.lock() {
+            Ok(state) => state,
+            Err(_) => return false,
+        };
+        if state.observe_cancellation(parent_cancelled)
+            || state.deadline.is_none()
+            || deadline <= Instant::now()
+        {
+            return false;
+        }
+        state.deadline = Some(deadline);
+        self.condvar.notify_all();
+        true
+    }
+
+    // Never hold our state lock while entering a parent: no nested token locks.
+    fn parent_is_cancelled(&self) -> bool {
+        self.parent
+            .as_ref()
+            .is_some_and(|parent| parent.is_cancelled())
     }
 
     /// Signal cancellation. Sets flag and wakes all waiting threads instantly.
     pub fn cancel(&self) {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = true;
+        guard.cancelled = true;
         self.condvar.notify_all();
     }
 
-    /// Returns true if cancelled (or if mutex is poisoned).
+    /// Returns true if cancelled, expired, parent-cancelled or mutex-poisoned.
     pub fn is_cancelled(&self) -> bool {
-        self.inner.lock().map_or(true, |g| *g)
+        let parent_cancelled = self.parent_is_cancelled();
+        self.inner.lock().map_or(true, |mut state| {
+            state.observe_cancellation(parent_cancelled)
+        })
     }
 
-    /// Sleep for up to `duration`, waking instantly if cancelled.
+    /// Sleep for up to `duration`, waking instantly if explicitly cancelled.
+    /// Children wake at their deadline and poll their parent at most every 50ms.
     /// Returns true if cancelled, false if timeout elapsed.
     pub fn wait_timeout(&self, duration: Duration) -> bool {
-        let guard = match self.inner.lock() {
-            Ok(g) => g,
-            Err(_) => return true,
-        };
-        if *guard {
-            return true;
+        let started = Instant::now();
+        loop {
+            let parent_cancelled = self.parent_is_cancelled();
+            let mut guard = match self.inner.lock() {
+                Ok(g) => g,
+                Err(_) => return true,
+            };
+            if guard.observe_cancellation(parent_cancelled) {
+                return true;
+            }
+            let Some(deadline) = guard.deadline else {
+                // Preserve root waiting behavior, including spurious wakeups.
+                return self
+                    .condvar
+                    .wait_timeout_while(guard, duration, |state| !state.cancelled)
+                    .map_or(true, |(g, _)| g.cancelled);
+            };
+            let remaining = duration.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return false;
+            }
+            let mut wait = remaining.min(deadline.saturating_duration_since(Instant::now()));
+            if self.parent.is_some() {
+                wait = wait.min(Duration::from_millis(50));
+            }
+            // A plain timed wait lets renewal notifications recalculate the
+            // deadline. Holding the state lock until waiting avoids lost wakes.
+            match self.condvar.wait_timeout(guard, wait) {
+                Ok((guard, _)) => drop(guard),
+                Err(_) => return true,
+            }
         }
-        self.condvar
-            .wait_timeout_while(guard, duration, |cancelled| !*cancelled)
-            .map_or(true, |(g, _)| *g)
+    }
+}
+
+#[cfg(test)]
+mod cancel_token_tests {
+    use super::*;
+
+    #[test]
+    fn root_timeout_and_cancellation_are_unchanged() {
+        let token = CancelToken::new();
+        assert!(!token.is_cancelled());
+        assert!(!token.wait_timeout(Duration::ZERO));
+        let start = Instant::now();
+        assert!(!token.wait_timeout(Duration::from_millis(20)));
+        assert!(start.elapsed() >= Duration::from_millis(20));
+        assert!(!token.renew_deadline(Instant::now() + Duration::from_secs(1)));
+        assert!(!token.is_cancelled());
+        token.cancel();
+        token.cancel();
+        assert!(token.is_cancelled());
+        assert!(token.wait_timeout(Duration::ZERO));
+    }
+
+    #[test]
+    fn root_cancel_wakes_waiters() {
+        let token = Arc::new(CancelToken::new());
+        let waiter = token.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            waiter.wait_timeout(Duration::from_secs(2))
+        });
+        ready_rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(20));
+        let start = Instant::now();
+        token.cancel();
+        assert!(handle.join().unwrap());
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn poisoned_root_remains_cancelled() {
+        let token = Arc::new(CancelToken::new());
+        let poisoner = token.clone();
+        assert!(thread::spawn(move || {
+            let _guard = poisoner.inner.lock().unwrap();
+            panic!("poison token state");
+        })
+        .join()
+        .is_err());
+        assert!(token.is_cancelled());
+        assert!(token.wait_timeout(Duration::ZERO));
+        assert!(!token.renew_deadline(Instant::now() + Duration::from_secs(1)));
+        token.cancel();
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn unobserved_expiry_rejects_late_renewal() {
+        let token =
+            CancelToken::with_parent_deadline(None, Instant::now() + Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(40));
+        assert!(!token.renew_deadline(Instant::now() + Duration::from_secs(1)));
+        assert!(token.is_cancelled());
+        assert!(token.wait_timeout(Duration::ZERO));
+        assert!(!token.renew_deadline(Instant::now() + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn already_expired_child_is_cancelled() {
+        let token = CancelToken::with_parent_deadline(None, Instant::now());
+        assert!(token.is_cancelled());
+        assert!(token.wait_timeout(Duration::ZERO));
+        assert!(!token.renew_deadline(Instant::now() + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn parent_cancel_wakes_child_wait() {
+        let parent = Arc::new(CancelToken::new());
+        let child = Arc::new(CancelToken::with_parent_deadline(
+            Some(parent.clone()),
+            Instant::now() + Duration::from_secs(5),
+        ));
+        let waiter = child.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            waiter.wait_timeout(Duration::from_secs(2))
+        });
+        ready_rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(20));
+        let start = Instant::now();
+        parent.cancel();
+        assert!(handle.join().unwrap());
+        // Polling is capped at 50ms; allow scheduler slack in the wall-clock test.
+        assert!(start.elapsed() < Duration::from_millis(250));
+        assert!(child.is_cancelled());
+        assert!(!child.renew_deadline(Instant::now() + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn child_cancel_preserves_parent_and_sibling() {
+        let parent = Arc::new(CancelToken::new());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let child = Arc::new(CancelToken::with_parent_deadline(
+            Some(parent.clone()),
+            deadline,
+        ));
+        let sibling = CancelToken::with_parent_deadline(Some(parent.clone()), deadline);
+        let waiter = child.clone();
+        let handle = thread::spawn(move || waiter.wait_timeout(Duration::from_secs(2)));
+        thread::sleep(Duration::from_millis(20));
+        let start = Instant::now();
+        child.cancel();
+        assert!(handle.join().unwrap());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(!child.renew_deadline(Instant::now() + Duration::from_secs(5)));
+        assert!(child.is_cancelled());
+        assert!(!parent.is_cancelled());
+        assert!(!sibling.is_cancelled());
+    }
+
+    #[test]
+    fn parent_expiry_propagates_through_child_chain() {
+        let parent = Arc::new(CancelToken::with_parent_deadline(None, Instant::now()));
+        let child = Arc::new(CancelToken::with_parent_deadline(
+            Some(parent),
+            Instant::now() + Duration::from_secs(5),
+        ));
+        let grandchild =
+            CancelToken::with_parent_deadline(Some(child), Instant::now() + Duration::from_secs(5));
+        assert!(!grandchild.renew_deadline(Instant::now() + Duration::from_secs(10)));
+        assert!(grandchild.is_cancelled());
+        assert!(grandchild.wait_timeout(Duration::ZERO));
+    }
+
+    #[test]
+    fn shortened_deadline_wakes_waiters_to_recalculate() {
+        let token = Arc::new(CancelToken::with_parent_deadline(
+            None,
+            Instant::now() + Duration::from_secs(5),
+        ));
+        let waiter = token.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            waiter.wait_timeout(Duration::from_secs(2))
+        });
+        ready_rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(20));
+        let deadline = Instant::now() + Duration::from_millis(40);
+        assert!(token.renew_deadline(deadline));
+        assert!(handle.join().unwrap());
+        assert!(Instant::now() >= deadline);
+        assert!(deadline.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn invalid_renewal_leaves_live_deadline_unchanged() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let token = CancelToken::with_parent_deadline(None, deadline);
+        assert!(!token.renew_deadline(Instant::now()));
+        assert!(!token.is_cancelled());
+        assert_eq!(token.inner.lock().unwrap().deadline, Some(deadline));
+    }
+
+    #[test]
+    fn renewal_extends_an_existing_wait() {
+        let original_deadline = Instant::now() + Duration::from_millis(200);
+        let token = Arc::new(CancelToken::with_parent_deadline(None, original_deadline));
+        let waiter = token.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            waiter.wait_timeout(Duration::from_millis(350))
+        });
+        ready_rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(30));
+        assert!(token.renew_deadline(Instant::now() + Duration::from_secs(2)));
+        assert!(!handle.join().unwrap());
+        assert!(Instant::now() >= original_deadline);
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn child_deadline_cancels_sleep() {
+        let token = Arc::new(CancelToken::with_parent_deadline(
+            None,
+            Instant::now() + Duration::from_millis(40),
+        ));
+        CURRENT_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = Some(token.clone()));
+        let start = Instant::now();
+        let cancelled = sleep_cancellable(Duration::from_secs(2));
+        CURRENT_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = None);
+        assert!(cancelled);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(token.is_cancelled());
     }
 }
 

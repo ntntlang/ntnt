@@ -5,9 +5,9 @@ use rusqlite::OptionalExtension;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
-    raw: String,
-    kind: Option<String>,
-    redis: bool,
+    pub(super) raw: String,
+    pub(super) kind: Option<String>,
+    pub(super) redis: bool,
 }
 impl Snapshot {
     pub fn value(&self) -> Value {
@@ -34,10 +34,10 @@ impl Snapshot {
         }
     }
 }
-fn error<E>(_: E) -> IntentError {
+pub(super) fn error<E>(_: E) -> IntentError {
     IntentError::runtime_error("job state storage operation failed")
 }
-fn sql_read(conn: &Connection, key: &str) -> Result<Option<Snapshot>> {
+pub(super) fn sql_read(conn: &Connection, key: &str) -> Result<Option<Snapshot>> {
     conn.query_row(
         "SELECT value,type FROM _kv WHERE key=? AND (expires_at IS NULL OR expires_at>?)",
         params![key, now_unix()],
@@ -52,12 +52,23 @@ fn sql_read(conn: &Connection, key: &str) -> Result<Option<Snapshot>> {
     .optional()
     .map_err(error)
 }
-fn redis_call<T>(
+pub(super) fn redis_call<T>(
     handle: &Value,
     call: impl FnOnce(&mut redis::Connection) -> redis::RedisResult<T>,
 ) -> Result<T> {
-    let shared = get_redis_kv(handle)?;
-    let mut store = shared.lock().map_err(error)?;
+    let Value::Map(map) = handle else {
+        return Err(error(()));
+    };
+    let Some(Value::Int(id)) = map.get("_kv_store_id") else {
+        return Err(error(()));
+    };
+    let shared = REDIS_KV_REGISTRY
+        .try_lock()
+        .map_err(error)?
+        .get(&(*id as u64))
+        .cloned()
+        .ok_or_else(|| error(()))?;
+    let mut store = shared.try_lock().map_err(error)?;
     if store.reconnecting {
         return Err(error(()));
     }
@@ -122,6 +133,14 @@ pub(crate) fn read(handle: &Value, key: &str) -> Result<Option<Snapshot>> {
     }
 }
 
+// Exact terminal/ready receipts acknowledge an already committed mutation,
+// whose lease was removed. Only a receipt permitting more execution needs
+// ownership; raw snapshot equality above includes the stable _job_write_id.
+fn execution_receipt(next: &Snapshot) -> bool {
+    matches!(next.value(), Value::Map(m)
+        if matches!(m.get("status"), Some(Value::String(s)) if s == "claimed" || s == "active"))
+}
+
 /// Publish state and related queue changes in one transaction. A repeat of the
 /// same prepared write is acknowledged without refreshing TTL or republishing
 /// a pending key that another worker may already have claimed.
@@ -134,7 +153,19 @@ pub(crate) fn write(
     owner: &str,
     remove: &[String],
     pending: Option<&str>,
+    require_lease: bool,
 ) -> Result<bool> {
+    // Invalid EX arguments fail during EXEC, not queueing: reject them before
+    // any transaction can mutate related keys.
+    if ttl.is_some_and(|t| {
+        t <= 0
+            || now_unix()
+                .checked_add(t)
+                .and_then(|s| s.checked_mul(1000))
+                .is_none()
+    }) {
+        return Err(error(()));
+    }
     match get_backend_type(handle)? {
         KVBackend::SQLite => {
             let store = get_sqlite_kv(handle)?;
@@ -145,9 +176,15 @@ pub(crate) fn write(
                 .map_err(error)?;
             let current = sql_read(&tx, key)?;
             if current.as_ref() == Some(next) {
+                if require_lease && execution_receipt(next) {
+                    return job_leases::sql_transition(&tx, key, expected, next, true);
+                }
                 return Ok(true);
             }
             if current.as_ref() != expected {
+                return Ok(false);
+            }
+            if !job_leases::sql_transition(&tx, key, expected, next, require_lease)? {
                 return Ok(false);
             }
             tx.execute("INSERT INTO _kv(key,value,type,expires_at) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,type=excluded.type,expires_at=excluded.expires_at",params![key,next.raw,next.kind,ttl.map(|t|now_unix()+t)]).map_err(error)?;
@@ -189,6 +226,20 @@ pub(crate) fn write(
                     redis: true,
                 });
                 if current.as_ref() == Some(next) {
+                    if require_lease && execution_receipt(next) {
+                        let mut fence = redis::pipe();
+                        if !job_leases::redis_transition(
+                            conn, &mut fence, key, expected, next, true,
+                        )? {
+                            return Ok(false);
+                        }
+                        // A receipt must not replay writes. Still EXEC a read-only
+                        // transaction so expiry or a changed watched snapshot
+                        // between validation and acknowledgement aborts the fence.
+                        fence.clear();
+                        fence.atomic().cmd("PING").ignore();
+                        return redis_commit(conn, &fence);
+                    }
                     return Ok(true);
                 }
                 if current.as_ref() != expected {
@@ -201,6 +252,10 @@ pub(crate) fn write(
                 };
                 let mut tx = redis::pipe();
                 tx.atomic();
+                if !job_leases::redis_transition(conn, &mut tx, key, expected, next, require_lease)?
+                {
+                    return Ok(false);
+                }
                 tx.cmd("SET").arg(key).arg(&next.raw);
                 if let Some(ttl) = ttl {
                     tx.arg("EX").arg(ttl);
@@ -214,18 +269,22 @@ pub(crate) fn write(
                 if let Some(key) = pending {
                     tx.set(key, owner).ignore();
                 }
-                let committed: Option<()> = tx.query(conn)?;
-                committed.map(|_| true).ok_or_else(|| {
-                    redis::RedisError::from((
-                        redis::ErrorKind::ResponseError,
-                        "job state transaction conflicted; retry",
-                    ))
-                })
+                redis_commit(conn, &tx)
             })();
             let _ = redis::cmd("UNWATCH").query::<()>(conn);
             result
         }),
     }
+}
+
+fn redis_commit(conn: &mut redis::Connection, tx: &redis::Pipeline) -> redis::RedisResult<bool> {
+    let committed: Option<()> = tx.query(conn)?;
+    committed.map(|_| true).ok_or_else(|| {
+        redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "job state transaction conflicted; retry",
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -237,7 +296,18 @@ pub(crate) fn check_redis_reconnect(handle: &Value) {
         let mut store = store.lock().unwrap();
         redis::cmd("QUIT").query::<String>(&mut store.conn).unwrap();
     }
-    assert!(write(handle, key, None, &next, Some(60), "owner", &[], None).is_err());
+    assert!(write(
+        handle,
+        key,
+        None,
+        &next,
+        Some(60),
+        "owner",
+        &[],
+        None,
+        false
+    )
+    .is_err());
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     // Handoff must also heal ordinary KV callers, without a conditional poll.
     while kv_get(handle, key).is_err() {
@@ -247,7 +317,18 @@ pub(crate) fn check_redis_reconnect(handle: &Value) {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(write(handle, key, None, &next, Some(60), "owner", &[], None).unwrap());
+    assert!(write(
+        handle,
+        key,
+        None,
+        &next,
+        Some(60),
+        "owner",
+        &[],
+        None,
+        false
+    )
+    .unwrap());
     assert_eq!(read(handle, key).unwrap(), Some(next));
     kv_del(handle, key).unwrap();
 }
@@ -259,7 +340,7 @@ pub(crate) fn check_redis_acl_abort(handle: &Value) {
     let unique = "conditional-acl:unique";
     let old = Snapshot::prepare(handle, &Value::String("old".into())).unwrap();
     let next = Snapshot::prepare(handle, &Value::String("new".into())).unwrap();
-    assert!(write(handle, key, None, &old, None, "owner", &[], None).unwrap());
+    assert!(write(handle, key, None, &old, None, "owner", &[], None, false).unwrap());
     kv_set(handle, unique, &Value::String("owner".into()), Some(60)).unwrap();
     let name = format!("ntnt-test-{}", uuid::Uuid::new_v4());
     let store = get_redis_kv(handle).unwrap();
@@ -293,7 +374,8 @@ pub(crate) fn check_redis_acl_abort(handle: &Value) {
         None,
         "owner",
         &[unique.into()],
-        Some(pending)
+        Some(pending),
+        false
     )
     .is_err());
     assert_eq!(read(handle, key).unwrap(), Some(old));
@@ -314,7 +396,8 @@ pub(crate) fn check_redis_acl_abort(handle: &Value) {
         None,
         "owner",
         &[unique.into()],
-        Some(pending)
+        Some(pending),
+        false
     )
     .is_err());
     assert!(matches!(kv_get(handle,key).unwrap(),Value::String(s) if s=="old"));
@@ -332,7 +415,8 @@ pub(crate) fn check_redis_acl_abort(handle: &Value) {
         None,
         "owner",
         &[unique.into()],
-        Some(pending)
+        Some(pending),
+        false
     )
     .unwrap());
     assert!(matches!(kv_get(handle,pending).unwrap(),Value::String(s) if s=="owner"));

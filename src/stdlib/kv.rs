@@ -12,6 +12,7 @@
 //! ```
 
 pub(crate) mod conditional;
+pub(crate) mod job_leases;
 
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;

@@ -8233,7 +8233,7 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`batch_status`](#batchstatus) | Get the current status and counters for a batch. |
 | [`cancel_job`](#canceljob) | Cancel a job by its ID. |
 | [`clear_jobs`](#clearjobs) | Clear all jobs from the test queue without executing them. |
-| [`configure_queue`](#configurequeue) | Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits. |
+| [`configure_queue`](#configurequeue) | Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits. Durable execution leases default to 300 seconds, renewed every 30 seconds. Advanced lease_seconds accepts integers 10..86400; renewal uses one-third of the duration capped at 30 seconds. Configure before starting workers. Expired unstarted claims recover automatically; authorized executions become outcome_unknown with no TTL or automatic replay. Upgrade workers together; old active jobs without leases are shown as outcome_unknown. |
 | [`delete_jobs`](#deletejobs) | Bulk delete jobs by status. Deleting history does not shorten independent uniqueness windows. |
 | [`drain_jobs`](#drainjobs) | Execute all enqueued test jobs synchronously and return the count. |
 | [`enqueue`](#enqueue) | Enqueue a background job for processing, or buffer a job into an open batch. |
@@ -8396,7 +8396,7 @@ cancel_job(job_id: String, opts?: Map) -> Result<Bool, String>
 
 Cancel a job by its ID.
 
-By default, only pending, scheduled, retrying, or failed jobs can be cancelled. Pass `map { "force": true }` to cancel an active (running) job — this marks it as cancelled and removes its visibility timeout key. The worker thread may still be executing, but the result will be discarded when it checks the status. Returns true if the job was cancelled, false if it was not in a cancellable state.
+By default, pending, claimed, scheduled, retrying, or failed jobs can be cancelled. Pass `map { "force": true }` to cancel active or outcome_unknown work. This removes its lease and fences subsequent state writes; cooperative execution stops when lease loss is observed. An external request already in flight cannot be undone. Reconcile uncertain effects before manual replay. Returns true if the job was cancelled, false if it was not in a cancellable state.
 
 **Parameters:**
 
@@ -8444,11 +8444,11 @@ clear_jobs()  // Clear all enqueued test jobs
 configure_queue(opts: Map) -> Result<Unit, String>
 ```
 
-Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits.
+Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits. Durable execution leases default to 300 seconds, renewed every 30 seconds. Advanced lease_seconds accepts integers 10..86400; renewal uses one-third of the duration capped at 30 seconds. Configure before starting workers. Expired unstarted claims recover automatically; authorized executions become outcome_unknown with no TTL or automatic replay. Upgrade workers together; old active jobs without leases are shown as outcome_unknown.
 
 **Parameters:**
 
-- `opts` — Map with optional store, retention and testing-mode options
+- `opts` — Map with optional store, retention, lease_seconds and testing-mode options
 
 **Returns:** Result indicating success or error
 
@@ -8668,7 +8668,7 @@ job_status(job_id: String) -> Result<Map, String>
 
 Get the current status and data for a job by its ID.
 
-Returns the full job data map including status, type, queue, payload, attempts, and timestamps. Returns an error if the job ID is not found.
+Returns the full job data map including status, type, queue, payload, attempts, and timestamps. Claimed/active records include worker_id, claim_token, execution_phase and lease_expires_at_ms. Expired executing leases become outcome_unknown, never automatically retried or expired as history. Legacy active records without leases are shown as outcome_unknown. Returns an error if the job ID is not found.
 
 **Parameters:**
 

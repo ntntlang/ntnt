@@ -3068,11 +3068,62 @@ together; direct KV mutations bypass these job-state safeguards.
 Death/cancellation/expiration retain their existing early-release semantics for
 their **own** uniqueness reservation, never a subsequent owner's reservation.
 Automatic expiry and explicit history deletion do not shorten uniqueness TTLs.
-If a process stops during an unresolved storage outage, reconcile its recorded
-state before replaying external effects; this is not crash-time exactly-once
-execution. Redis reconnect work is bounded to one pending connector per store,
-so even a stalled protocol handshake does not block worker cancellation or
-create a new connector thread on each retry.
+Redis reconnect work is bounded to one pending connector per store,
+so even a stalled protocol handshake does not create a new connector thread
+on each retry.
+
+### Durable Claims and Crash Recovery
+
+Workers atomically remove a ready entry and persist a `claimed` record, unique
+`claim_token`, worker identity, lease and indexed deadline. Nothing is erased
+merely because its lease expires. Redis additionally uses an expiring, watched
+**authorization** key, so expiry itself aborts a delayed ownership transaction;
+the durable lease/index still preserve recovery evidence. Before acquiring execution resources or
+calling `perform`, the worker durably authorizes execution (`active`, phase
+`executing`). This means **may have executed**, not proof that the body ran.
+
+Leases default to **300 seconds**, renewed every 30 seconds by one supervisor
+per worker (not another job or job-history entry). Advanced `configure_queue`
+option `lease_seconds` accepts integers 10–86400; renewal is every one-third of
+the lease, capped at 30 seconds. A monotonic child cancellation deadline stops
+cooperative execution if renewal cannot be confirmed; it does not stop the
+whole worker pool. Before ready/terminal persistence and post-requeue backoff,
+the attempt scope detaches; the worker token governs prepared-receipt retries
+and backoff. Backend fences still govern the first state commit, while an exact
+already-committed receipt remains acknowledgeable after its lease is removed.
+Stale attempt tokens cannot overwrite recovered state.
+Cancellation cannot retract an external request already in flight.
+
+On startup and between jobs, workers attempt recovery at most every five seconds,
+reading up to 64 due lease-index entries per pass, not scanning job history:
+- Expired `claimed` work is restored to its original ready state/key without
+  incrementing attempts. It had not been authorized to execute.
+- Expired executing work becomes **`outcome_unknown`**, with recovery reason,
+  worker/token/phase and lease deadline. It is not automatically retried, counted
+  as a batch completion, or given a history TTL. Its uniqueness window remains.
+- A lost claim acknowledgement leaves discoverable unstarted work for recovery.
+  Ordinary failure retries still apply while a valid worker owns execution.
+
+`job_status`, `list_jobs`, and CLI `jobs inspect/list/status` expose these states.
+`retry_job` rejects unknown outcomes. Reconcile downstream effects before any
+manual replay; explicit force-cancellation can archive the job, but cannot undo
+an effect. A general reconciliation/replay API and idempotency policy are not
+part of this first slice. Existing semaphore TTL and batch-finalization crash
+windows are not redesigned; recovery does not replay batch callbacks.
+
+**Upgrade:** stop/drain old workers before starting upgraded workers. Existing
+ready jobs are eligible; old `active` records without a lease are shown read-only
+as `outcome_unknown` and are never automatically replayed. There is no history
+backfill. Inspection does not start workers or perform recovery.
+
+**Durability:** use file-backed SQLite (not `:memory:`) or Redis/Valkey with
+persistence and a `noeviction` policy appropriate to the required loss window.
+Recovery cannot restore evicted/lost backend data. Redis **6.2+** (or Valkey) is
+required for absolute authorization expiry (`SET PXAT`). Redis also needs TIME, TYPE,
+ZADD, ZREM, ZRANGEBYSCORE and PERSIST, plus existing KV/transaction permissions.
+Ready-key discovery retains the existing Redis SCAN behavior; the new recovery
+pass uses its due index. This provides recoverable ownership, **not exactly-once
+external effects**.
 
 ### Testing Mode
 
