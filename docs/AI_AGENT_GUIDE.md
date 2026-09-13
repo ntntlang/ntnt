@@ -3057,6 +3057,23 @@ large backlogs take multiple ticks. Deleted SQLite pages are reusable, but the
 file need not shrink. SQLite cleanup stops with the process; Redis expiration
 continues independently in the Redis server.
 
+Job-state persistence retries retain one prepared mutation; they do not rerun
+`perform` or `on_failure`. State, TTL and queue publication commit together
+(SQLite transaction / Redis WATCH + MULTI/EXEC). Retrying a write after a lost acknowledgement
+does not republish claimed work or refresh its TTL. A concurrent state
+change wins over a stale writer. Redis credentials need WATCH, UNWATCH, MULTI, EXEC
+and DISCARD permissions in addition to the usual KV commands. Upgrade all writers
+together; direct KV mutations bypass these job-state safeguards.
+
+Death/cancellation/expiration retain their existing early-release semantics for
+their **own** uniqueness reservation, never a subsequent owner's reservation.
+Automatic expiry and explicit history deletion do not shorten uniqueness TTLs.
+If a process stops during an unresolved storage outage, reconcile its recorded
+state before replaying external effects; this is not crash-time exactly-once
+execution. Redis reconnect work is bounded to one pending connector per store,
+so even a stalled protocol handshake does not block worker cancellation or
+create a new connector thread on each retry.
+
 ### Testing Mode
 
 ```ntnt

@@ -11,6 +11,8 @@
 //! let user = get(cache, "user:123")?
 //! ```
 
+pub(crate) mod conditional;
+
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
 use crate::stdlib::json::json_to_intent_value;
@@ -81,6 +83,9 @@ pub struct SQLiteKV {
 /// Wrapper for Redis connection
 pub struct RedisKV {
     conn: redis::Connection,
+    // At most one pending reconnect per store; a stalled AUTH/SELECT handshake
+    // must not block workers or spawn another connector on every retry.
+    reconnecting: bool,
 }
 
 /// Get current Unix timestamp
@@ -664,7 +669,10 @@ impl RedisKV {
             IntentError::runtime_error(format!("Failed to connect to Redis: {}", e))
         })?;
 
-        Ok(RedisKV { conn })
+        Ok(RedisKV {
+            conn,
+            reconnecting: false,
+        })
     }
 
     /// Get a value by key

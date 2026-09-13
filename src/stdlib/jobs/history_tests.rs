@@ -34,7 +34,53 @@ fn assert_ttl(handle: &Value, key: &str, expected: Option<i64>) {
     }
 }
 
+fn conditional_contract(handle: &Value) {
+    use history::Prepared;
+    use kv::conditional::{read, release};
+    let key = "jobs:data:conditional";
+    let pending = "jobs:pending:50:00000000000000000000:conditional";
+    let unique = "jobs:unique:conditional";
+    let mut job = data("conditional", "pending");
+    job.insert("pending_key".into(), Value::String(pending.into()));
+    job.insert("dedup_key".into(), Value::String(unique.into()));
+    let create = Prepared::new(handle, key, None, job.clone()).unwrap();
+    assert!(create.apply(handle).unwrap());
+    // Lost acknowledgement: retry must not republish a claimed queue key.
+    kv::kv_del(handle, pending).unwrap();
+    assert!(create.apply(handle).unwrap());
+    assert!(matches!(kv::kv_get(handle, pending).unwrap(), Value::Unit));
+    let before = read(handle, key).unwrap();
+    job.insert("status".into(), Value::String("active".into()));
+    let active = Prepared::new(handle, key, before, job.clone()).unwrap();
+    assert!(active.apply(handle).unwrap());
+    let before = read(handle, key).unwrap();
+    job.insert("status".into(), Value::String("completed".into()));
+    let stale = Prepared::new(handle, key, before.clone(), job.clone()).unwrap();
+    kv::kv_set(
+        handle,
+        unique,
+        &Value::String("new-owner".into()),
+        Some(3600),
+    )
+    .unwrap();
+    job.insert("status".into(), Value::String("cancelled".into()));
+    let cancel = Prepared::new(handle, key, before, job).unwrap();
+    assert!(cancel.apply(handle).unwrap());
+    assert!(
+        !stale.apply(handle).unwrap(),
+        "retry must not overwrite a concurrent cancellation"
+    );
+    assert!(matches!(kv::kv_get(handle,unique).unwrap(),Value::String(id) if id=="new-owner"));
+    assert!(!release(handle, unique, "conditional").unwrap());
+    assert_ttl(handle, unique, Some(3600));
+    kv::kv_expire(handle, key, 17).unwrap();
+    assert!(cancel.apply(handle).unwrap());
+    assert_ttl(handle, key, Some(17)); // ACK retry must not refresh history TTL.
+    assert!(release(handle, unique, "new-owner").unwrap());
+}
+
 fn expiry_contract(handle: &Value) {
+    conditional_contract(handle);
     for (state, ttl) in [
         ("completed", Some(30 * 86400)),
         ("cancelled", Some(30 * 86400)),
@@ -138,7 +184,10 @@ fn history_ttl_redis_contract() {
         };
         flush(std::slice::from_ref(handle)).unwrap();
         expiry_contract(handle);
+        kv::conditional::check_redis_reconnect(handle);
+        kv::conditional::check_redis_acl_abort(handle);
         flush(std::slice::from_ref(handle)).unwrap();
+        kv::conditional::check_stalled_reconnect(handle);
     });
 }
 
@@ -230,6 +279,24 @@ fn history_expiry_keeps_existing_dedup_and_callback_guards() {
         // Redis/SQLite TTL expiry removes only the history key, not its uniqueness key.
         kv::kv_expire(handle, &format!("jobs:data:{first}"), -1).unwrap();
         assert!(matches!(enqueue(), EnqueueResult::Deduplicated(id) if id == first));
+        history::save(
+            handle,
+            &format!("jobs:data:{first}"),
+            data(&first, "completed"),
+        )
+        .unwrap();
+        assert_eq!(
+            delete_jobs_filtered(DeleteJobsOpts {
+                status: "completed".into(),
+                older_than_secs: None
+            })
+            .unwrap(),
+            1
+        );
+        assert!(
+            matches!(enqueue(), EnqueueResult::Deduplicated(id) if id == first),
+            "manual history deletion must preserve the uniqueness window too"
+        );
 
         let batch = "ttl-batch";
         let snapshot = build_batch_meta(batch, "test", "0", "sealed", 1, 0);

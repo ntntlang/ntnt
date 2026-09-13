@@ -8234,7 +8234,7 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`cancel_job`](#canceljob) | Cancel a job by its ID. |
 | [`clear_jobs`](#clearjobs) | Clear all jobs from the test queue without executing them. |
 | [`configure_queue`](#configurequeue) | Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits. |
-| [`delete_jobs`](#deletejobs) | Bulk delete jobs by status. |
+| [`delete_jobs`](#deletejobs) | Bulk delete jobs by status. Deleting history does not shorten independent uniqueness windows. |
 | [`drain_jobs`](#drainjobs) | Execute all enqueued test jobs synchronously and return the count. |
 | [`enqueue`](#enqueue) | Enqueue a background job for processing, or buffer a job into an open batch. |
 | [`enqueue_at`](#enqueueat) | Enqueue a job to run at a specific future time. |
@@ -8467,7 +8467,7 @@ configure_queue(map { "store": "redis://localhost:6379" })  // Use Redis for job
 delete_jobs(opts: Map) -> Result<Int, String>
 ```
 
-Bulk delete jobs by status.
+Bulk delete jobs by status. Deleting history does not shorten independent uniqueness windows.
 
 Requires a "status" key in the options map to prevent accidental deletion of all jobs. Returns the number of jobs deleted.
 
