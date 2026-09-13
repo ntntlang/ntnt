@@ -3027,43 +3027,35 @@ delete_jobs(map { "status": "completed" })              // Bulk delete
 delete_jobs(map { "status": "dead", "older_than_secs": 604800 })  // 7 days
 ```
 
-### Automatic Durable Job Retention
+### Job History Expiration
 
-Job workers automatically maintain bounded terminal history in the configured SQLite or Redis/Valkey store. Normal applications need no cleanup cron or retention settings. This is separate from the short-lived, process-local `std/concurrent` task history.
-
-| Retained job records | Default |
-|---|---|
-| `completed`, `cancelled` | 30 days after the terminal transition |
-| `dead`, legacy `failed`, `expired` | 90 days after the terminal transition |
-| Terminal record count, across the store | 10,000,000 |
-| Serialized terminal-record bytes | 20 GiB |
-
-Age and capacity limits apply together: count/byte pressure can remove the oldest eligible terminal records before their age limit. **Pending, scheduled, retrying, active, and unrecognized states are not automatic-pruning candidates.** Creation time is not completion time: an old job which completed recently gets a fresh retention window.
-
-Cleanup runs in bounded batches while workers run, including idle workers. Limits are incremental maintenance targets, not an instantaneous storage quota; initial backfill and backlogs require catch-up. Stored records and the policy are rechecked atomically against concurrent retry/cancellation/state/configuration changes before deletion. Capacity eviction waits until initial backfill completes so newer discovered records are not deleted ahead of unseen older ones. Existing stores are indexed incrementally rather than scanned into application memory at startup. Legacy terminal records without a usable terminal timestamp receive a conservative first-observed-terminal age.
-
-Job errors remain in the job record until it is pruned. Workers retry transient state-write failures using a stable prepared revision, without rerunning the job body or failure callback; a changed revision remains authoritative. Lost acknowledgements can be recognized idempotently, and recovery writes use a fresh bounded Redis connection when needed. This is not process-crash replay: interruption while storage remains unavailable can require operator reconciliation, and the runtime logs that uncertainty instead of blindly rerunning external effects. Structured failure logging is preserved even when recording the outcome fails: `job.failed` then includes `state_persisted:false` and `persistence_error` (`storage_error` or `conflict`), without claiming a retry/dead transition was committed. Redis maintenance uses its own connection with a deadline spanning setup and commands; shutdown stops future batches without waiting indefinitely for maintenance I/O. Management/inspection commands neither start pruning nor overwrite a retention policy used by other workers when loading the source configuration. Uniqueness reservations and batch coordination/idempotency state are not disposable job-history payloads; pruning must not release a live uniqueness window or re-fire an old callback. Application records and unrelated KV keys are outside this policy.
-
-**Advanced tuning:** configure one retention map, consistently for every writer/worker using the same store. This is store-wide, not restricted by a worker’s queue filter; isolate unrelated applications/clients in separate stores. Within an explicit retention map, omitted fields use defaults. Omitting the entire retention map preserves the store’s existing policy; an empty map resets defaults.
+Job records already live in KV. Terminal-state writes now include a TTL:
+**30 days** for completed/cancelled and **90 days** for dead/failed/expired.
+Live jobs have no history TTL; retrying a job clears its TTL in the same write
+that makes it live again. Expiration removes the history key only, not separate
+uniqueness reservations or batch coordination. Existing inspection APIs remain.
 
 ```ntnt
-import { configure_queue } from "std/jobs"
 configure_queue(map {
     "store": "sqlite:./jobs.db",
-    "retention": map {
-        "completed_days": 30,
-        "failed_days": 90,
-        "max_records": 10000000,
-        "max_bytes": 21474836480,
-        "batch_size": 128,
-        "interval_secs": 60
-    }
+    "retention": map { "completed_days": 30, "failed_days": 90 }
 })
+// Optional: retention: map { "enabled": false } disables TTL on future writes.
 ```
 
-`interval_secs` is idle maintenance spacing, not a limit on catch-up throughput. Use `"enabled": false` inside the retention map to disable automatic pruning. Numeric settings must be positive integers within the documented supported ranges; invalid configuration must not partially switch stores or policy. Explicit `delete_jobs()`/CLI clearing remains available for manual operations.
+Settings are process-local; use the same configuration in every writer.
+Omitting `retention` uses defaults. Days must be integers from 1 through 365000.
+Changing settings does **not** rewrite existing expiry dates, and disabling does
+not revoke TTLs already assigned. Legacy job records without TTL remain until
+explicitly deleted with the existing management tools; there is no automatic
+migration/backfill, count/byte quota, or history-maintenance job.
 
-**Storage and upgrades:** the byte budget measures serialized job records, not total Redis RAM, index/coordination overhead, or SQLite file size. SQLite can reuse freed pages without shrinking its file; choose a smaller advanced budget where the backend has less capacity. This is operational history, not a permanent audit archive. Back up needed history before deploying automatic cleanup to an existing store. Drain/upgrade all job writers together, or keep retention disabled during mixed-version rollout; older binaries and direct writes to internal `jobs:*` keys cannot honor the new transactional protocol.
+Redis/Valkey expires keys natively. SQLite uses one generic KV maintenance thread
+per process, deleting up to 256 expired rows per registered store each second,
+including while callers are idle. Busy stores are skipped until a later tick;
+large backlogs take multiple ticks. Deleted SQLite pages are reusable, but the
+file need not shrink. SQLite cleanup stops with the process; Redis expiration
+continues independently in the Redis server.
 
 ### Testing Mode
 

@@ -24,28 +24,6 @@
 //! let status = job_status(id)
 //! ```
 
-thread_local! {
-    static INSPECTING_QUEUE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Load queue definitions for management commands without changing a policy
-/// shared with live workers. Restores the caller's mode on errors and unwinds.
-pub fn with_queue_inspection<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            INSPECTING_QUEUE.with(|flag| flag.set(self.0));
-        }
-    }
-    let previous = INSPECTING_QUEUE.with(|flag| flag.replace(true));
-    let _restore = Restore(previous);
-    f()
-}
-
-pub(crate) mod retention;
-#[cfg(test)]
-mod retention_tests;
-
 use crate::ast::{Block, Parameter};
 use crate::error::{IntentError, Result};
 use crate::interpreter::{FunctionContract, RuntimeCapability, Value};
@@ -54,7 +32,6 @@ use crate::stdlib::concurrent::{
     TaskStartGuard, CURRENT_CANCEL_TOKEN, RUNTIME,
 };
 use crate::stdlib::kv;
-use crate::stdlib::kv::job_retention as job_store;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -62,6 +39,11 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+mod history;
+#[cfg(test)]
+mod history_tests;
+use history::HistoryRetention;
 
 // ============================================================================
 // Job Runtime — global singleton (mirrors ConcurrencyRuntime pattern)
@@ -289,6 +271,8 @@ pub struct JobRuntime {
     kv_handle_info: Mutex<Option<KvHandleInfo>>,
     /// Default KV store URL (set by configure_queue, default "sqlite:./jobs.db").
     kv_url: Mutex<String>,
+    /// TTLs applied by this process when a job enters a terminal state.
+    history_retention: RwLock<HistoryRetention>,
     /// Test queue: when Some, enqueue() collects here instead of writing to KV.
     test_queue: Mutex<Option<Vec<EnqueuedJob>>>,
     /// Per-band stats: map from band name to atomic counters.
@@ -317,6 +301,7 @@ impl JobRuntime {
             job_registry: RwLock::new(HashMap::new()),
             kv_handle_info: Mutex::new(None),
             kv_url: Mutex::new("sqlite:./jobs.db".to_string()),
+            history_retention: RwLock::new(HistoryRetention::default()),
             test_queue: Mutex::new(None),
             band_stats: RwLock::new(HashMap::new()),
             band_worker_task_ids: Mutex::new(HashMap::new()),
@@ -457,7 +442,7 @@ impl JobRuntime {
     /// Reset the runtime (for testing).
     #[cfg(test)]
     pub fn reset(&self) {
-        retention::reset();
+        *self.history_retention.write().unwrap() = HistoryRetention::default();
         if let Ok(mut reg) = self.job_registry.write() {
             reg.clear();
         }
@@ -693,19 +678,13 @@ fn fire_batch_callback(
     // attempt), skip — avoids duplicate pending keys for the same callback.
     let data_key = format!("jobs:data:{}", cb_job_id);
     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-    if matches!(
-        kv::kv_get(
-            &kv_handle,
-            &job_store::callback_key(batch_id, callback_type)
-        )?,
-        Value::Bool(true)
-    ) {
-        return Ok(());
-    }
-    if !matches!(
-        kv::kv_get(&kv_handle, &format!("jobs:batch:{batch_id}"))?,
-        Value::Map(_)
-    ) {
+    // History may have expired. Existing batch coordination, not the history
+    // record, remains authoritative about callbacks already dispatched.
+    let flag = format!("jobs:batch:{batch_id}:fired:{callback_type}");
+    let meta_flag = format!("fired_{}", callback_type.trim_start_matches("on_"));
+    if matches!(kv::kv_get(&kv_handle, &flag)?, Value::Bool(true))
+        || matches!(batch_status.get(&meta_flag), Some(Value::Bool(true)))
+    {
         return Ok(());
     }
     if let Ok(Value::Map(_)) = kv::kv_get(&kv_handle, &data_key) {
@@ -1261,9 +1240,7 @@ fn update_batch_on_terminal(
         } else {
             batch_ttl
         };
-        if let Err(e) =
-            job_store::set_batch_meta(kv_handle, &meta_key, &Value::Map(meta), meta_write_ttl)
-        {
+        if let Err(e) = kv::kv_set(kv_handle, &meta_key, &Value::Map(meta), meta_write_ttl) {
             eprintln!(
                 "[ntnt] warning: batch '{}' metadata update failed: {} — batch_status() may show stale data",
                 batch_id, e
@@ -1669,7 +1646,7 @@ fn enqueue_internal_with_def(
                 }
             };
             if is_terminal {
-                job_store::release_unique(&kv_handle, dk, existing_id)?;
+                let _ = kv::kv_del(&kv_handle, dk);
             }
         }
 
@@ -1692,14 +1669,6 @@ fn enqueue_internal_with_def(
             match kv::kv_get(&kv_handle, dk) {
                 Ok(Value::String(existing_id)) => {
                     return Ok(EnqueueResult::Deduplicated(existing_id));
-                }
-                Ok(Value::Map(reservation)) => {
-                    if let Some(Value::String(id)) = reservation.get("__ntnt_retired_job") {
-                        return Ok(EnqueueResult::Deduplicated(id.clone()));
-                    }
-                    return Err(IntentError::runtime_error(
-                        "invalid job uniqueness reservation",
-                    ));
                 }
                 _ => {
                     // Key vanished between set_nx and get (TTL race).
@@ -1804,12 +1773,14 @@ fn enqueue_internal_with_def(
 
     // Write to KV: jobs:data:<id>
     let data_key = format!("jobs:data:{}", job_id);
-    job_store::change(
+    history::save(&kv_handle, &data_key, job_data)?;
+
+    // Write queue ordering key: jobs:pending:<priority>:<timestamp>:<id>
+    kv::kv_set(
         &kv_handle,
-        &data_key,
+        &pending_key,
+        &Value::String(job_id.clone()),
         None,
-        &Value::Map(job_data),
-        retention::now_ms(),
     )?;
 
     // Note: dedup key was already written atomically via kv_set_nx above (before job_data).
@@ -1827,166 +1798,9 @@ fn enqueue_internal_with_def(
     Ok(EnqueueResult::Created(job_id))
 }
 
-fn report_result_persistence_failure(
-    job_id: &str,
-    job_type: &str,
-    execution_error: Option<(&str, i64)>,
-    persistence_error: &IntentError,
-) {
-    let conflict = matches!(persistence_error, IntentError::RuntimeError { message, .. }
-        if message == "job changed concurrently; retry operation");
-    let mut fields = vec![
-        ("job_id", Value::String(job_id.into())),
-        ("type", Value::String(job_type.into())),
-        ("state_persisted", Value::Bool(false)),
-        (
-            "persistence_error",
-            Value::String(
-                if conflict {
-                    "conflict"
-                } else {
-                    "storage_error"
-                }
-                .into(),
-            ),
-        ),
-    ];
-    let event = if let Some((error, attempt)) = execution_error {
-        fields.push(("error", Value::String(error.into())));
-        fields.push(("attempt", Value::Int(attempt)));
-        // Execution failed, but no retry/dead transition was committed.
-        // Do not publish will_retry=true or claim that the job became dead.
-        "job.failed"
-    } else {
-        "job.state_persistence_failed"
-    };
-    emit_job_event(event, &fields);
-}
-
-fn persist_job(
-    kv_handle: &Value,
-    key: &str,
-    expected: &mut job_store::Snapshot,
-    data: &mut HashMap<String, Value>,
-) -> Result<()> {
-    let next = job_store::change(
-        kv_handle,
-        key,
-        Some(expected),
-        &Value::Map(data.clone()),
-        retention::now_ms(),
-    )?;
-    if let Value::Map(m) = next.value() {
-        *data = m;
-    }
-    *expected = next;
-    Ok(())
-}
-
-fn persist_worker_job(
-    kv_handle: &Value,
-    key: &str,
-    expected: &mut job_store::Snapshot,
-    data: &mut HashMap<String, Value>,
-    execution_error: Option<(&str, i64)>,
-    delay: std::time::Duration,
-) -> bool {
-    let id = match data.get("id") {
-        Some(Value::String(s)) => s.clone(),
-        _ => String::new(),
-    };
-    let kind = match data.get("type") {
-        Some(Value::String(s)) => s.clone(),
-        _ => String::new(),
-    };
-    let prepared = match job_store::prepare_change(
-        kv_handle,
-        key,
-        Some(expected),
-        &Value::Map(data.clone()),
-        retention::now_ms(),
-    ) {
-        Ok(p) => p,
-        Err(error) => {
-            report_result_persistence_failure(&id, &kind, execution_error, &error);
-            return false;
-        }
-    };
-    let mut reported = false;
-    loop {
-        let result = if reported {
-            job_store::commit_change_recovering(kv_handle, &prepared)
-        } else {
-            job_store::commit_change(kv_handle, &prepared)
-        };
-        match result {
-            Ok(next) => {
-                if let Value::Map(m) = next.value() {
-                    *data = m;
-                }
-                *expected = next;
-                return true;
-            }
-            Err(error) => {
-                let conflict = matches!(&error, IntentError::RuntimeError { message, .. }
-                    if message == "job changed concurrently; retry operation");
-                if !reported || conflict {
-                    report_result_persistence_failure(&id, &kind, execution_error, &error);
-                }
-                reported = true;
-                if conflict {
-                    return false;
-                }
-                // Retry only this prepared metadata mutation, never perform() or
-                // on_failure. A stable revision also handles lost acknowledgements.
-                if sleep_or_break(delay.max(std::time::Duration::from_millis(100))) {
-                    let previous = expected.value();
-                    let live = matches!(&previous, Value::Map(m) if matches!(m.get("status"),Some(Value::String(s)) if matches!(s.as_str(),"pending"|"scheduled"|"retrying")));
-                    let restored = if live {
-                        // No application work has run yet. Restore the pending
-                        // entry only if this worker still owns the same revision.
-                        job_store::change(
-                            kv_handle,
-                            key,
-                            Some(expected),
-                            &previous,
-                            retention::now_ms(),
-                        )
-                        .is_ok()
-                            || job_store::change(
-                                kv_handle,
-                                key,
-                                Some(prepared.replacement()),
-                                &previous,
-                                retention::now_ms(),
-                            )
-                            .is_ok()
-                    } else {
-                        false
-                    };
-                    emit_job_event(
-                        "job.persistence_interrupted",
-                        &[
-                            ("job_id", Value::String(id)),
-                            ("queue_restored", Value::Bool(restored)),
-                            ("execution_may_have_occurred", Value::Bool(!live)),
-                        ],
-                    );
-                    return false;
-                }
-            }
-        }
-    }
-}
-
 fn reenqueue_job(kv_handle: &Value, job_data: &HashMap<String, Value>, job_id: &str) {
-    let key = format!("jobs:data:{job_id}");
-    if let Ok(Some(s)) = job_store::snapshot(kv_handle, &key) {
-        if kv::value_to_json_public(&s.value())
-            == kv::value_to_json_public(&Value::Map(job_data.clone()))
-        {
-            let _ = job_store::change(kv_handle, &key, Some(&s), &s.value(), retention::now_ms());
-        }
+    if let Some(Value::String(pk)) = job_data.get("pending_key") {
+        let _ = kv::kv_set(kv_handle, pk, &Value::String(job_id.to_string()), None);
     }
 }
 
@@ -2037,7 +1851,6 @@ fn reenqueue_and_backoff(
 }
 
 fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<String>>) {
-    let _retention_owner = retention::acquire(&kv_info);
     let kv_handle = kv_info.to_value();
     let poll_duration = std::time::Duration::from_millis(band.poll_interval_ms);
     let band_stats = JOB_RUNTIME.get_or_create_band_stats(&band.name);
@@ -2087,11 +1900,10 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
 
         // Read full job data
         let data_key = format!("jobs:data:{}", job_id);
-        let mut expected = match job_store::snapshot(&kv_handle, &data_key) {
-            Ok(Some(v)) => v,
-            _ => continue,
+        let job_data_val = match kv::kv_get(&kv_handle, &data_key) {
+            Ok(v) => v,
+            Err(_) => continue,
         };
-        let job_data_val = expected.value();
 
         let mut job_data = match job_data_val {
             Value::Map(m) => m,
@@ -2103,7 +1915,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             Some(Value::String(s)) => s.clone(),
             _ => "pending".to_string(),
         };
-        if !matches!(status.as_str(), "pending" | "scheduled" | "retrying") {
+        if status == "cancelled" {
             continue;
         }
 
@@ -2117,7 +1929,10 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 // Re-enqueue: restore pending key so another worker (or next poll)
                 // can pick it up.  Use the original pending_key so ordering is
                 // preserved.
-                reenqueue_job(&kv_handle, &job_data, &job_id);
+                if let Some(Value::String(pk)) = job_data.get("pending_key") {
+                    let pk = pk.clone();
+                    let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
+                }
                 if sleep_or_break(poll_duration) {
                     break;
                 }
@@ -2144,7 +1959,12 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                         ),
                     ],
                 );
-                reenqueue_job(&kv_handle, &job_data, &job_id);
+                // Re-enqueue: use stored pending_key, or reconstruct from scheduled_at
+                let pk = match job_data.get("pending_key") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => format!("jobs:pending:{}:{}", scheduled_at, job_id),
+                };
+                let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
                 if sleep_or_break(poll_duration) {
                     break;
                 }
@@ -2174,6 +1994,10 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                                         Some(Value::String(s)) => s.clone(),
                                         _ => String::new(),
                                     };
+                                    // Clean up dedup key before expiring
+                                    if let Some(Value::String(dk)) = job_data.get("dedup_key") {
+                                        let _ = kv::kv_del(&kv_handle, dk);
+                                    }
                                     job_data.insert(
                                         "status".to_string(),
                                         Value::String("expired".to_string()),
@@ -2182,16 +2006,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                                         "expired_at".to_string(),
                                         Value::String(timestamp_key()),
                                     );
-                                    if !persist_worker_job(
-                                        &kv_handle,
-                                        &data_key,
-                                        &mut expected,
-                                        &mut job_data,
-                                        None,
-                                        poll_duration,
-                                    ) {
-                                        continue;
-                                    }
+                                    let _ = history::save(&kv_handle, &data_key, job_data.clone());
                                     emit_job_event(
                                         "job.expired",
                                         &[
@@ -2273,16 +2088,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     Value::String(format!("No job definition found for '{}'", job_type)),
                 );
                 job_data.insert("dead_at".to_string(), Value::String(timestamp_key()));
-                if !persist_worker_job(
-                    &kv_handle,
-                    &data_key,
-                    &mut expected,
-                    &mut job_data,
-                    None,
-                    poll_duration,
-                ) {
-                    continue;
-                }
+                let _ = history::save(&kv_handle, &data_key, job_data.clone());
                 if let Err(e) = update_batch_on_terminal(&kv_handle, &job_data, &job_id, "dead") {
                     eprintln!(
                         "[ntnt] warning: batch counter update failed for unknown-type job '{}': {}",
@@ -2417,16 +2223,19 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             }
         }
 
+        // Write visibility timeout key: jobs:active:<id> with TTL 300s
+        let active_key = format!("jobs:active:{}", job_id);
+        let _ = kv::kv_set(
+            &kv_handle,
+            &active_key,
+            &Value::String(job_id.clone()),
+            Some(300),
+        );
+
         // Mark status as "active"
         job_data.insert("status".to_string(), Value::String("active".to_string()));
-        if !persist_worker_job(
-            &kv_handle,
-            &data_key,
-            &mut expected,
-            &mut job_data,
-            None,
-            poll_duration,
-        ) {
+        if history::save(&kv_handle, &data_key, job_data.clone()).is_err() {
+            let _ = kv::kv_del(&kv_handle, &active_key);
             continue;
         }
 
@@ -2546,17 +2355,8 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 // Success
                 job_data.insert("status".to_string(), Value::String("completed".to_string()));
                 job_data.insert("completed_at".to_string(), Value::String(timestamp_key()));
-                if !persist_worker_job(
-                    &kv_handle,
-                    &data_key,
-                    &mut expected,
-                    &mut job_data,
-                    None,
-                    poll_duration,
-                ) {
-                    continue;
-                }
-
+                let _ = history::save(&kv_handle, &data_key, job_data.clone());
+                let _ = kv::kv_del(&kv_handle, &active_key);
                 emit_job_event(
                     "job.completed",
                     &[
@@ -2640,17 +2440,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     );
                     job_data.insert("scheduled_at".to_string(), Value::String(future_ts.clone()));
 
-                    if !persist_worker_job(
+                    let _ = history::save(&kv_handle, &data_key, job_data);
+                    let _ = kv::kv_set(
                         &kv_handle,
-                        &data_key,
-                        &mut expected,
-                        &mut job_data,
-                        Some((&err_msg, new_attempts)),
-                        poll_duration,
-                    ) {
-                        continue;
-                    }
-
+                        &new_pending_key,
+                        &Value::String(job_id.clone()),
+                        None,
+                    );
                     emit_job_event(
                         "job.failed",
                         &[
@@ -2663,18 +2459,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     );
                 } else {
                     // Exhausted retries — mark as dead
+                    // Clean up dedup key on death
+                    if let Some(Value::String(dk)) = job_data.get("dedup_key") {
+                        let _ = kv::kv_del(&kv_handle, dk);
+                    }
                     job_data.insert("status".to_string(), Value::String("dead".to_string()));
                     job_data.insert("dead_at".to_string(), Value::String(timestamp_key()));
-                    if !persist_worker_job(
-                        &kv_handle,
-                        &data_key,
-                        &mut expected,
-                        &mut job_data,
-                        Some((&err_msg, new_attempts)),
-                        poll_duration,
-                    ) {
-                        continue;
-                    }
+                    let _ = history::save(&kv_handle, &data_key, job_data.clone());
                     emit_job_event(
                         "job.dead",
                         &[
@@ -2692,6 +2483,8 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                         );
                     }
                 }
+
+                let _ = kv::kv_del(&kv_handle, &active_key);
             }
         }
     }
@@ -3298,9 +3091,8 @@ pub fn retry_job_by_id(job_id: &str) -> Result<RetryResult> {
     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
     let data_key = format!("jobs:data:{}", job_id);
 
-    let mut expected = job_store::snapshot(&kv_handle, &data_key)?
-        .ok_or_else(|| IntentError::runtime_error("job not found"))?;
-    let mut job_data = match expected.value() {
+    let current = kv::kv_get(&kv_handle, &data_key)?;
+    let mut job_data = match current {
         Value::Map(m) => m,
         Value::Unit => {
             return Err(IntentError::runtime_error(format!(
@@ -3331,6 +3123,12 @@ pub fn retry_job_by_id(job_id: &str) -> Result<RetryResult> {
         _ => "default".to_string(),
     };
 
+    // Delete old pending key to prevent double execution
+    if let Some(Value::String(old_pk)) = job_data.get("pending_key") {
+        let old_pk = old_pk.clone();
+        let _ = kv::kv_del(&kv_handle, &old_pk);
+    }
+
     let pending_ts = timestamp_key();
     // Priority was validated at enqueue time — default 50 is defensive
     // for any jobs missing the field (shouldn't happen normally)
@@ -3356,7 +3154,13 @@ pub fn retry_job_by_id(job_id: &str) -> Result<RetryResult> {
     job_data.remove("failed_at");
     job_data.remove("dead_at");
 
-    persist_job(&kv_handle, &data_key, &mut expected, &mut job_data)?;
+    history::save(&kv_handle, &data_key, job_data)?;
+    kv::kv_set(
+        &kv_handle,
+        &new_pending_key,
+        &Value::String(job_id.to_string()),
+        None,
+    )?;
 
     Ok(RetryResult::Requeued(queue))
 }
@@ -3366,9 +3170,8 @@ pub fn cancel_job_by_id(job_id: &str, force: bool) -> Result<CancelResult> {
     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
     let data_key = format!("jobs:data:{}", job_id);
 
-    let mut expected = job_store::snapshot(&kv_handle, &data_key)?
-        .ok_or_else(|| IntentError::runtime_error("job not found"))?;
-    let mut job_data = match expected.value() {
+    let current = kv::kv_get(&kv_handle, &data_key)?;
+    let mut job_data = match current {
         Value::Map(m) => m,
         Value::Unit => {
             return Err(IntentError::runtime_error(format!(
@@ -3411,9 +3214,25 @@ pub fn cancel_job_by_id(job_id: &str, force: bool) -> Result<CancelResult> {
 
     let was_active = status == "active";
 
+    // Remove pending key
+    if let Some(Value::String(pk)) = job_data.get("pending_key") {
+        let pk = pk.clone();
+        let _ = kv::kv_del(&kv_handle, &pk);
+    }
+
+    // If force-cancelling active job, remove visibility timeout key
+    if was_active {
+        let _ = kv::kv_del(&kv_handle, &format!("jobs:active:{}", job_id));
+    }
+
+    // Clean up dedup key on cancellation
+    if let Some(Value::String(dk)) = job_data.get("dedup_key") {
+        let _ = kv::kv_del(&kv_handle, dk);
+    }
+
     job_data.insert("status".to_string(), Value::String("cancelled".to_string()));
     job_data.insert("cancelled_at".to_string(), Value::String(timestamp_key()));
-    persist_job(&kv_handle, &data_key, &mut expected, &mut job_data)?;
+    history::save(&kv_handle, &data_key, job_data.clone())?;
 
     if let Err(e) = update_batch_on_terminal(&kv_handle, &job_data, job_id, "cancelled") {
         eprintln!(
@@ -3483,10 +3302,7 @@ pub fn delete_jobs_filtered(opts: DeleteJobsOpts) -> Result<i64> {
 
     let mut deleted = 0i64;
     for key in &data_keys {
-        let Some(expected) = job_store::snapshot(&kv_handle, key)? else {
-            continue;
-        };
-        if let Value::Map(data) = expected.value() {
+        if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
             match data.get("status") {
                 Some(Value::String(s)) if s == &opts.status => {}
                 _ => continue,
@@ -3503,9 +3319,18 @@ pub fn delete_jobs_filtered(opts: DeleteJobsOpts) -> Result<i64> {
                 }
             }
 
-            if job_store::remove(&kv_handle, key, &expected, retention::now_ms())? {
-                deleted += 1;
+            // Clean up associated keys
+            if let Some(Value::String(pk)) = data.get("pending_key") {
+                let _ = kv::kv_del(&kv_handle, pk);
             }
+            if let Some(Value::String(id)) = data.get("id") {
+                let _ = kv::kv_del(&kv_handle, &format!("jobs:active:{}", id));
+            }
+            if let Some(Value::String(dk)) = data.get("dedup_key") {
+                let _ = kv::kv_del(&kv_handle, dk);
+            }
+            let _ = kv::kv_del(&kv_handle, key);
+            deleted += 1;
         }
     }
 
@@ -4037,22 +3862,15 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/jobs
     // @module_description Background job queue with persistent storage
     // @signature configure_queue(opts: Map) -> Result<Unit, String>
-    // Configure job storage and automatic terminal-history retention.
-    // Pass "store" for SQLite or Redis/Valkey; without it the default is
-    // "sqlite:./jobs.db". If never called, enqueue() uses that store automatically.
-    // Workers prune in bounded batches: completed/cancelled 30 days,
-    // dead/failed/expired 90 days, at most 10000000 terminal records or 20 GiB
-    // serialized record bytes. Capacity pressure may shorten history; active,
-    // pending, scheduled and retrying jobs are protected. Initial backfill must
-    // finish before capacity eviction; age expiry can run during backfill.
-    // Optional "retention" map: enabled (boolean), completed_days and failed_days
-    // (1..365000), max_records (1..1000000000), max_bytes (1..1125899906842624),
-    // batch_size (1..4096, default 128), interval_secs (1..86400, default 60).
-    // The interval is idle spacing; catch-up yields between batches. Settings
-    // are store-wide and persistent: omitting retention preserves existing policy,
-    // or defaults for a new store; an empty retention map resets defaults.
-    // Inspection/configuration does not start pruning. Set enabled:false to pause
-    // automatic pruning. Upgrade all writers before enabling on existing stores.
+    // Configure job storage and terminal-history TTLs for this process.
+    // Default store: "sqlite:./jobs.db". Completed/cancelled records expire
+    // 30 days after finishing; dead/failed/expired records expire after 90 days.
+    // Optional retention map: enabled (boolean), completed_days and failed_days
+    // (integers 1..365000). Omitting retention uses defaults. Use the same
+    // configuration in every writer. Settings affect subsequent state writes,
+    // not existing TTLs or legacy history without TTL. Live jobs have no TTL.
+    // Redis expires keys natively; SQLite physically sweeps expired KV rows in
+    // bounded batches while the store is open. No count/byte eviction limits.
     // @param opts Map with optional store, retention and testing-mode options
     // @returns Result indicating success or error
     // @example configure_queue(map { "store": "sqlite:./jobs.db" }) ~ "Use SQLite for job storage"
@@ -4080,8 +3898,18 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                let _retention = retention::Policy::parse(opts.get("retention"))?;
+                let retention = HistoryRetention::parse(opts.get("retention"))?;
 
+                // Check for testing mode
+                if let Some(Value::String(mode)) = opts.get("mode") {
+                    if mode == "testing" {
+                        let mut tq = JOB_RUNTIME.test_queue.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("Lock error: {}", e))
+                        })?;
+                        *tq = Some(Vec::new());
+                        return Ok(Value::ok(Value::Unit));
+                    }
+                }
 
                 // Extract store URL
                 let store_url = match opts.get("store") {
@@ -4100,27 +3928,25 @@ pub fn init() -> HashMap<String, Value> {
                     && !store_url.starts_with("redis://")
                     && !store_url.starts_with("valkey://")
                 {
-                    return Err(IntentError::runtime_error("Invalid store URL. Use a file path for SQLite, or redis:// / valkey:// for Redis"));
+                    return Err(IntentError::runtime_error(format!(
+                        "Invalid store URL '{}'. Use a file path for SQLite, or redis:// / valkey:// for Redis",
+                        store_url
+                    )));
                 }
 
-                // Validate every setting before even applying testing mode.
-                if matches!(opts.get("mode"),Some(Value::String(m)) if m=="testing") {
-                    *JOB_RUNTIME.test_queue.lock().map_err(|_|IntentError::runtime_error("job runtime lock failed"))?=Some(Vec::new());
-                    return Ok(Value::ok(Value::Unit));
-                }
-                let mut info=JOB_RUNTIME.kv_handle_info.lock().map_err(|_|IntentError::runtime_error("job runtime lock failed"))?;
-                let mut url=JOB_RUNTIME.kv_url.lock().map_err(|_|IntentError::runtime_error("job runtime lock failed"))?;
-                // Bootstrap reexecutes configure_queue; reuse its connection.
-                let next=match info.as_ref() {
-                    Some(h) if h.url==store_url=>h.clone(),
-                    _=>extract_kv_handle_info(&kv::open_kv(&store_url)?)?,
+                // Worker bootstrap re-evaluates configuration. Reuse the same
+                // store instead of registering another connection per worker.
+                let mut info = JOB_RUNTIME.kv_handle_info.lock()
+                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+                let next = match info.as_ref() {
+                    Some(h) if h.url == store_url => h.clone(),
+                    _ => extract_kv_handle_info(&kv::open_kv(&store_url)?)?,
                 };
-                if !INSPECTING_QUEUE.with(|flag| flag.get()) {
-                    job_store::policy(&next.to_value(), opts.get("retention").map(|_| &_retention))?;
-                }
-                *url=store_url;
-                *info=Some(next);
-                retention::wake();
+                *JOB_RUNTIME.kv_url.lock()
+                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))? = store_url;
+                *JOB_RUNTIME.history_retention.write()
+                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))? = retention;
+                *info = Some(next);
 
                 Ok(Value::ok(Value::Unit))
             },
@@ -5632,7 +5458,7 @@ pub fn init() -> HashMap<String, Value> {
                         let now = timestamp_key();
                         meta.insert("sealed_at".to_string(), Value::String(now.clone()));
                         meta.insert("completed_at".to_string(), Value::String(now));
-                        job_store::set_batch_meta(&kv_handle, &meta_key, &Value::Map(meta), completion_ttl)?;
+                        kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), completion_ttl)?;
                         // Initialize atomic counter keys at 0 for consistency.
                         let cp = format!("jobs:batch:{}:counter", batch_id);
                         kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(0), completion_ttl)?;
@@ -5704,7 +5530,7 @@ pub fn init() -> HashMap<String, Value> {
                         &batch_id, &batch_state.name, &batch_state.created_at,
                         "sealing", total, total,
                     );
-                    job_store::set_batch_meta(&kv_handle, &meta_key, &Value::Map(meta), batch_ttl_30d)?;
+                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), batch_ttl_30d)?;
 
                     // Flush jobs to KV.
                     // Mark each flushed so retries skip already-written jobs.
@@ -5720,7 +5546,7 @@ pub fn init() -> HashMap<String, Value> {
                         "sealed", total, total,
                     );
                     meta.insert("sealed_at".to_string(), Value::String(sealed_at));
-                    job_store::set_batch_meta(&kv_handle, &meta_key, &Value::Map(meta), batch_ttl_30d)?;
+                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), batch_ttl_30d)?;
 
                     emit_job_event(
                         "batch.sealed",

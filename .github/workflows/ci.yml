@@ -153,7 +153,7 @@ jobs:
       - name: Run auth storage contract tests against Postgres and Redis
         run: |
           cargo test --locked --lib stdlib::postgres:: -- --include-ignored --test-threads=1 --nocapture
-          cargo test --locked --lib stdlib::kv::job_retention -- --include-ignored --test-threads=1 --nocapture
+          cargo test --locked --lib stdlib::jobs::history_tests::history_ttl_redis_contract -- --ignored --exact --nocapture
           cargo test --locked --test postgres_pool_lifecycle_tests -- --ignored --test-threads=1 --nocapture
           cargo test --locked --lib test_auth_storage_contract_postgres_round_trip_all_record_types -- --test-threads=1 --nocapture
           cargo test --locked --lib test_auth_storage_contract_redis_round_trip_all_record_types -- --test-threads=1 --nocapture
