@@ -94,7 +94,7 @@ chrono = "0.4"
 chrono-tz = "0.10.4"
 
 # Redis/Valkey KV store
-redis = "0.27"
+redis = { version = "0.27", features = ["tokio-comp"] }
 
 # JWT for auth
 jsonwebtoken = "9"

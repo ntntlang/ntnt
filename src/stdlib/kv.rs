@@ -11,6 +11,8 @@
 //! let user = get(cache, "user:123")?
 //! ```
 
+pub(crate) mod job_retention;
+
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
 use crate::stdlib::json::json_to_intent_value;

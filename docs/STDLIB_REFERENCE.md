@@ -8233,7 +8233,7 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`batch_status`](#batchstatus) | Get the current status and counters for a batch. |
 | [`cancel_job`](#canceljob) | Cancel a job by its ID. |
 | [`clear_jobs`](#clearjobs) | Clear all jobs from the test queue without executing them. |
-| [`configure_queue`](#configurequeue) | Configure the job queue storage backend. |
+| [`configure_queue`](#configurequeue) | Configure job storage and automatic terminal-history retention. Pass "store" for SQLite or Redis/Valkey; without it the default is "sqlite:./jobs.db". If never called, enqueue() uses that store automatically. Workers prune in bounded batches: completed/cancelled 30 days, dead/failed/expired 90 days, at most 10000000 terminal records or 20 GiB serialized record bytes. Capacity pressure may shorten history; active, pending, scheduled and retrying jobs are protected. Initial backfill must finish before capacity eviction; age expiry can run during backfill. Optional "retention" map: enabled (boolean), completed_days and failed_days (1..365000), max_records (1..1000000000), max_bytes (1..1125899906842624), batch_size (1..4096, default 128), interval_secs (1..86400, default 60). The interval is idle spacing; catch-up yields between batches. Settings are store-wide and persistent: omitting retention preserves existing policy, or defaults for a new store; an empty retention map resets defaults. Inspection/configuration does not start pruning. Set enabled:false to pause automatic pruning. Upgrade all writers before enabling on existing stores. |
 | [`delete_jobs`](#deletejobs) | Bulk delete jobs by status. |
 | [`drain_jobs`](#drainjobs) | Execute all enqueued test jobs synchronously and return the count. |
 | [`enqueue`](#enqueue) | Enqueue a background job for processing, or buffer a job into an open batch. |
@@ -8444,13 +8444,11 @@ clear_jobs()  // Clear all enqueued test jobs
 configure_queue(opts: Map) -> Result<Unit, String>
 ```
 
-Configure the job queue storage backend.
-
-Pass a map with a "store" key to set the KV backend for job storage. If never called, enqueue() auto-initializes with "sqlite:./jobs.db".
+Configure job storage and automatic terminal-history retention. Pass "store" for SQLite or Redis/Valkey; without it the default is "sqlite:./jobs.db". If never called, enqueue() uses that store automatically. Workers prune in bounded batches: completed/cancelled 30 days, dead/failed/expired 90 days, at most 10000000 terminal records or 20 GiB serialized record bytes. Capacity pressure may shorten history; active, pending, scheduled and retrying jobs are protected. Initial backfill must finish before capacity eviction; age expiry can run during backfill. Optional "retention" map: enabled (boolean), completed_days and failed_days (1..365000), max_records (1..1000000000), max_bytes (1..1125899906842624), batch_size (1..4096, default 128), interval_secs (1..86400, default 60). The interval is idle spacing; catch-up yields between batches. Settings are store-wide and persistent: omitting retention preserves existing policy, or defaults for a new store; an empty retention map resets defaults. Inspection/configuration does not start pruning. Set enabled:false to pause automatic pruning. Upgrade all writers before enabling on existing stores.
 
 **Parameters:**
 
-- `opts` — Configuration map with optional "store" key (e.g., "redis://localhost:6379" or "sqlite:./jobs.db")
+- `opts` — Map with optional store, retention and testing-mode options
 
 **Returns:** Result indicating success or error
 

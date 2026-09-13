@@ -153,6 +153,7 @@ jobs:
       - name: Run auth storage contract tests against Postgres and Redis
         run: |
           cargo test --locked --lib stdlib::postgres:: -- --include-ignored --test-threads=1 --nocapture
+          cargo test --locked --lib stdlib::kv::job_retention -- --include-ignored --test-threads=1 --nocapture
           cargo test --locked --test postgres_pool_lifecycle_tests -- --ignored --test-threads=1 --nocapture
           cargo test --locked --lib test_auth_storage_contract_postgres_round_trip_all_record_types -- --test-threads=1 --nocapture
           cargo test --locked --lib test_auth_storage_contract_redis_round_trip_all_record_types -- --test-threads=1 --nocapture
@@ -173,6 +174,7 @@ jobs:
           NTNT_POSTGRES_TEST_URL: postgres://postgres:ntnt@localhost:5432/ntnt_auth_test
           NTNT_AUTH_TEST_POSTGRES_URL: postgres://postgres:ntnt@localhost:5432/ntnt_auth_test
           NTNT_AUTH_TEST_REDIS_URL: redis://127.0.0.1:6379/0
+          NTNT_RETENTION_TEST_REDIS: redis://127.0.0.1:6379/15
 
   lint:
     name: Lint
