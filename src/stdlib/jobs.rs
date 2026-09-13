@@ -2518,6 +2518,10 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 job_data.insert("error".to_string(), Value::String(err_msg.clone()));
                 job_data.insert("attempts".to_string(), Value::Int(new_attempts));
 
+                // Do not start handler side effects after confirmed lease loss.
+                if _lease_scope.cancel.is_cancelled() {
+                    continue;
+                }
                 // Call on_failure handler (fire-and-forget)
                 execute_on_failure_in_worker(&mut interp, &def, &err_msg, new_attempts);
                 if _lease_scope.cancel.is_cancelled() {

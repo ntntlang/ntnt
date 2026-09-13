@@ -3105,6 +3105,8 @@ reading up to 64 due lease-index entries per pass, not scanning job history:
   Ordinary failure retries still apply while a valid worker owns execution.
 
 `job_status`, `list_jobs`, and CLI `jobs inspect/list/status` expose these states.
+Inspection performs one bounded refresh if ownership changes; a sustained race
+returns an explicit retry error rather than silently omitting uncertain jobs.
 `retry_job` rejects unknown outcomes. Reconcile downstream effects before any
 manual replay; explicit force-cancellation can archive the job, but cannot undo
 an effect. A general reconciliation/replay API and idempotency policy are not
