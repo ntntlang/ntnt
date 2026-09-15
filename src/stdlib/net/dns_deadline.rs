@@ -335,6 +335,8 @@ mod tests {
                         Ok((mut stream, src)) => {
                             assert!(src.ip().is_loopback());
                             c.fetch_add(1, Ordering::SeqCst);
+                            // BSD/macOS may inherit the nonblocking listener mode.
+                            stream.set_nonblocking(false).unwrap();
                             stream
                                 .set_read_timeout(Some(Duration::from_millis(500)))
                                 .unwrap();
