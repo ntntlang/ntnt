@@ -100,7 +100,11 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-release-
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@4dc1969decfa71b34f25aa7f3dd4656654d9ad1e # nextest installer
+        with:
+          tool: cargo-nextest@0.9.144
+          checksum: true
+          fallback: none
 
       - name: Build release
         run: cargo build --release --locked --target ${{ matrix.target }}
