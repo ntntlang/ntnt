@@ -1780,7 +1780,7 @@ fn relative_time(value: &Value, fn_name: &str) -> Result<Value, IntentError> {
     Ok(Value::String(rendered))
 }
 
-fn monotonic_millis() -> i64 {
+pub(crate) fn monotonic_millis() -> i64 {
     static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     i64::try_from(
         ORIGIN
