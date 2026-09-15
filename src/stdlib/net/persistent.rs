@@ -539,18 +539,37 @@ pub(crate) mod tests {
         assert!(lock(&owner.state).resource.is_none());
     }
     #[test]
+    fn active_owner_is_protected_from_idle_reaping() {
+        let _serial = lock(&SERIAL);
+        let before = LIVE.load(Ordering::Acquire);
+        let (owner, _peer) = fake(Duration::from_secs(60));
+        {
+            let mut state = lock(&owner.state);
+            state.active = true;
+            state.deadline = Instant::now() - Duration::from_secs(1);
+        }
+        // Exercise the reaper's active-state rule without racing a live receiver
+        // for its mutex. That receiver can finish before a waiting test thread
+        // acquires the lock, making expiry of the now-idle owner correct.
+        sweep();
+        assert!(lock(&owner.state).resource.is_some());
+        assert_eq!(LIVE.load(Ordering::Acquire), before + 1);
+        assert!(probe(&[value(&owner)]).unwrap_err().starts_with("busy:"));
+        close(&[value(&owner)]).unwrap();
+        assert_eq!(LIVE.load(Ordering::Acquire), before);
+    }
+    #[test]
     fn active_protected_busy_close_cancels_and_releases_exactly_once() {
         let _serial = lock(&SERIAL);
         let before = LIVE.load(Ordering::Acquire);
-        let (owner, peer) = fake(Duration::from_secs(1));
+        let (owner, peer) = fake(Duration::from_secs(60));
         let active = owner.clone();
         let thread =
             std::thread::spawn(move || probe(&[value(&active), Value::Int(30_000)]).map(|_| ()));
         let mut bytes = [0; 128];
         peer.recv_from(&mut bytes).unwrap();
-        lock(&owner.state).deadline = Instant::now() - Duration::from_secs(1);
-        sweep();
-        assert!(lock(&owner.state).resource.is_some());
+        // The packet proves probe entry. Do not take the blocking owner mutex
+        // before close: close itself signals cancellation before taking it.
         assert!(probe(&[value(&owner)]).unwrap_err().starts_with("busy:"));
         let start = Instant::now();
         close(&[value(&owner)]).unwrap();
