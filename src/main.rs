@@ -1805,7 +1805,12 @@ fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
     println!("================");
     println!("  Pending:    {}", counts.pending);
     println!("  Scheduled:  {}", counts.scheduled);
+    println!("  Claimed:    {}", counts.claimed);
     println!("  Active:     {}", counts.active);
+    println!(
+        "  Unknown:    {} (needs reconciliation)",
+        counts.outcome_unknown
+    );
     println!("  Completed:  {}", counts.completed);
     println!("  Retrying:   {}", counts.retrying);
     println!("  Dead:       {}", counts.dead);
@@ -1996,7 +2001,8 @@ fn run_jobs_list_command(
             let status_col = match status.as_str() {
                 "pending" => status_padded.yellow().to_string(),
                 "scheduled" => status_padded.blue().to_string(),
-                "active" => status_padded.cyan().to_string(),
+                "active" | "claimed" => status_padded.cyan().to_string(),
+                "outcome_unknown" => status_padded.red().bold().to_string(),
                 "completed" => status_padded.green().to_string(),
                 "retrying" => status_padded.red().to_string(),
                 "dead" => status_padded.red().bold().to_string(),
@@ -2026,7 +2032,7 @@ fn run_jobs_inspect_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> 
     let data_key = format!("jobs:data:{}", job_id);
     let val = ntnt::stdlib::kv::kv_get(&kv_handle, &data_key)?;
 
-    let job_data = match val {
+    let mut job_data = match val {
         Value::Map(m) => m,
         Value::Unit => {
             eprintln!("{}: Job '{}' not found", "error".red().bold(), job_id);
@@ -2035,11 +2041,13 @@ fn run_jobs_inspect_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> 
         _ => anyhow::bail!("Unexpected value type for job data"),
     };
 
+    ntnt::stdlib::jobs::inspect_job_data(&kv_handle, &mut job_data)?;
     let status = jobs_str_field(&job_data, "status");
     let status_colored = match status.as_str() {
         "pending" => status.yellow().to_string(),
         "scheduled" => status.blue().to_string(),
-        "active" => status.cyan().to_string(),
+        "active" | "claimed" => status.cyan().to_string(),
+        "outcome_unknown" => status.red().bold().to_string(),
         "completed" => status.green().to_string(),
         "retrying" => status.red().to_string(),
         "dead" => status.red().bold().to_string(),
@@ -2065,6 +2073,28 @@ fn run_jobs_inspect_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> 
         "Attempts",
         &jobs_int_field(&job_data, "attempts").to_string(),
     );
+    for (key, label) in [
+        ("worker_id", "Worker"),
+        ("claim_token", "Attempt Token"),
+        ("execution_phase", "Execution Phase"),
+        ("recovery_reason", "Recovery Reason"),
+    ] {
+        if let Some(v) = job_data.get(key) {
+            print_job_field(label, &jobs_value_display(v));
+        }
+    }
+    if let Some(Value::Int(ms)) = job_data.get("lease_expires_at_ms") {
+        print_job_field(
+            "Lease Expires",
+            &format_ns_timestamp(&format!("{}", (*ms as i128) * 1_000_000)),
+        );
+    }
+    if status == "outcome_unknown" {
+        print_job_field(
+            "Action",
+            "Reconcile external effects before any manual replay; automatic retry is disabled.",
+        );
+    }
     if let Some(v) = job_data.get("retry") {
         print_job_field("Max Retries", &jobs_value_display(v));
     }

@@ -5,9 +5,11 @@
 //! ## KV Key Layout
 //!
 //! ```text
-//! jobs:pending:<priority>:<zero-padded-timestamp>:<id>   →  "" (queue ordering key)
+//! jobs:pending:<priority>:<zero-padded-timestamp>:<id>   →  job ID (queue ordering key)
 //! jobs:data:<id>                                          →  full job data map (type, queue, payload, status, etc.)
-//! jobs:active:<id>                                        →  TTL key for visibility timeout (PR 2b)
+//! jobs:lease:<id>                                        →  durable ownership and execution phase
+//! jobs:lease_due                                         →  bounded recovery index (backend-specific)
+//! jobs:lease_auth:<id>                                   →  expiring Redis authorization, not recovery evidence
 //! ```
 //!
 //! Priority is a 2-digit zero-padded integer (00-99). Lower = higher priority.
@@ -43,6 +45,9 @@ use uuid::Uuid;
 mod history;
 #[cfg(test)]
 mod history_tests;
+#[cfg(test)]
+mod lease_tests;
+mod leases;
 #[cfg(test)]
 mod persistence_tests;
 use history::HistoryRetention;
@@ -275,6 +280,7 @@ pub struct JobRuntime {
     kv_url: Mutex<String>,
     /// TTLs applied by this process when a job enters a terminal state.
     history_retention: RwLock<HistoryRetention>,
+    lease_policy: RwLock<leases::Policy>,
     /// Test queue: when Some, enqueue() collects here instead of writing to KV.
     test_queue: Mutex<Option<Vec<EnqueuedJob>>>,
     /// Per-band stats: map from band name to atomic counters.
@@ -304,6 +310,7 @@ impl JobRuntime {
             kv_handle_info: Mutex::new(None),
             kv_url: Mutex::new("sqlite:./jobs.db".to_string()),
             history_retention: RwLock::new(HistoryRetention::default()),
+            lease_policy: RwLock::new(leases::Policy::default()),
             test_queue: Mutex::new(None),
             band_stats: RwLock::new(HashMap::new()),
             band_worker_task_ids: Mutex::new(HashMap::new()),
@@ -445,6 +452,7 @@ impl JobRuntime {
     #[cfg(test)]
     pub fn reset(&self) {
         *self.history_retention.write().unwrap() = HistoryRetention::default();
+        *self.lease_policy.write().unwrap() = leases::Policy::default();
         if let Ok(mut reg) = self.job_registry.write() {
             reg.clear();
         }
@@ -1795,9 +1803,33 @@ fn enqueue_internal_with_def(
     Ok(EnqueueResult::Created(job_id))
 }
 
-fn reenqueue_job(kv_handle: &Value, job_data: &HashMap<String, Value>, job_id: &str) {
-    if let Some(Value::String(pk)) = job_data.get("pending_key") {
-        let _ = kv::kv_set(kv_handle, pk, &Value::String(job_id.to_string()), None);
+fn persist_job(
+    handle: &Value,
+    key: &str,
+    expected: &mut Option<kv::conditional::Snapshot>,
+    data: &HashMap<String, Value>,
+    scope: &mut leases::Scope,
+) -> bool {
+    scope.detach();
+    history::worker_write(handle, key, expected, data)
+}
+
+fn reenqueue_job(
+    kv_handle: &Value,
+    expected: &mut Option<kv::conditional::Snapshot>,
+    job_data: &HashMap<String, Value>,
+    _job_id: &str,
+    scope: &mut leases::Scope,
+) {
+    let ready = leases::ready_data(job_data);
+    if let Some(Value::String(id)) = ready.get("id") {
+        persist_job(
+            kv_handle,
+            &format!("jobs:data:{id}"),
+            expected,
+            &ready,
+            scope,
+        );
     }
 }
 
@@ -1839,11 +1871,13 @@ fn sleep_or_break(dur: std::time::Duration) -> bool {
 /// Re-enqueue a job then sleep for `dur`; returns `true` if cancelled (caller should `break`).
 fn reenqueue_and_backoff(
     kv_handle: &Value,
+    expected: &mut Option<kv::conditional::Snapshot>,
     job_data: &HashMap<String, Value>,
     job_id: &str,
     dur: std::time::Duration,
+    scope: &mut leases::Scope,
 ) -> bool {
-    reenqueue_job(kv_handle, job_data, job_id);
+    reenqueue_job(kv_handle, expected, job_data, job_id, scope);
     sleep_cancellable(dur)
 }
 
@@ -1855,6 +1889,19 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
     // Build a fully-initialised interpreter once per worker thread so that
     // job perform blocks have access to all imports and user-defined functions.
     let mut interp = create_job_interpreter();
+    let policy = *JOB_RUNTIME
+        .lease_policy
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let keeper = match leases::Keeper::new(kv_info.clone()) {
+        Ok(keeper) => keeper,
+        Err(error) => {
+            eprintln!("[ntnt] {error}");
+            return;
+        }
+    };
+    let worker_id = format!("{}:{}", band.name, Uuid::new_v4());
+    let mut recovery_at = std::time::Instant::now();
 
     loop {
         if is_current_task_cancelled() {
@@ -1866,68 +1913,38 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         let floor = band.floor_key();
         let ceiling = band.ceiling_key();
 
-        let (claimed_key, claimed) =
-            match kv::kv_claim(&kv_handle, "jobs:pending:", Some(&floor), Some(&ceiling)) {
-                Ok(Some((key, value))) => (key, value),
-                Ok(None) => {
-                    // Queue empty — sleep and try again
-                    if sleep_or_break(poll_duration) {
-                        break;
-                    }
-                    continue;
-                }
-                Err(_) => {
-                    if sleep_or_break(poll_duration) {
-                        break;
-                    }
-                    continue;
-                }
-            };
-
-        // The claimed value is the job_id string
-        let job_id = match &claimed {
-            Value::String(s) => s.clone(),
-            _ => {
-                if sleep_or_break(poll_duration) {
+        if std::time::Instant::now() >= recovery_at {
+            match kv::job_leases::recover(&kv_handle, 64) {
+                Ok(recovered) if recovered.requeued + recovered.unknown > 0 => eprintln!(
+                    "[ntnt] recovered {} unstarted jobs; {} need reconciliation",
+                    recovered.requeued, recovered.unknown
+                ),
+                Err(error) => eprintln!("[ntnt] job recovery deferred: {error}"),
+                _ => {}
+            }
+            recovery_at = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        }
+        let sent = std::time::Instant::now();
+        let claim = match kv::job_leases::claim(
+            &kv_handle,
+            &floor,
+            &ceiling,
+            &worker_id,
+            policy.duration_ms,
+        ) {
+            Ok(Some(claim)) => claim,
+            Ok(None) | Err(_) => {
+                if sleep_or_break(poll_duration.min(std::time::Duration::from_secs(5))) {
                     break;
                 }
                 continue;
             }
         };
-
-        // Read full job data
-        let data_key = format!("jobs:data:{}", job_id);
-        let mut expected = match history::retry_storage(&job_id, || {
-            kv::conditional::read(&kv_handle, &data_key)
-        }) {
-            Ok(value) => value,
-            Err(_) => {
-                // Nothing executed. Restore the claimed entry if storage is
-                // reachable at interruption; later workers validate its state.
-                if kv::kv_set_nx(&kv_handle, &claimed_key, &claimed, None).is_err() {
-                    eprintln!(
-                        "[ntnt] job '{job_id}': claimed queue entry needs operator restoration"
-                    );
-                }
-                break;
-            }
-        };
-        let mut job_data = match expected.as_ref().map(|s| s.value()).unwrap_or(Value::Unit) {
-            Value::Map(m) => m,
-            _ => continue,
-        };
-
-        // Stale queue entries must not execute active or terminal work.
-        let status = match job_data.get("status") {
-            Some(Value::String(s)) => s.clone(),
-            _ => "pending".to_string(),
-        };
-        if !matches!(
-            status.as_str(),
-            "pending" | "scheduled" | "retrying" | "failed"
-        ) {
-            continue;
-        }
+        let mut _lease_scope = keeper.attach(&claim, sent, policy);
+        let job_id = claim.id;
+        let data_key = format!("jobs:data:{job_id}");
+        let mut expected = Some(claim.snapshot);
+        let mut job_data = claim.data;
 
         // Queue filtering: skip jobs whose queue doesn't match our filter
         if let Some(ref filter) = queues {
@@ -1939,10 +1956,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 // Re-enqueue: restore pending key so another worker (or next poll)
                 // can pick it up.  Use the original pending_key so ordering is
                 // preserved.
-                if let Some(Value::String(pk)) = job_data.get("pending_key") {
-                    let pk = pk.clone();
-                    let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
-                }
+                reenqueue_job(
+                    &kv_handle,
+                    &mut expected,
+                    &job_data,
+                    &job_id,
+                    &mut _lease_scope,
+                );
                 if sleep_or_break(poll_duration) {
                     break;
                 }
@@ -1970,11 +1990,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     ],
                 );
                 // Re-enqueue: use stored pending_key, or reconstruct from scheduled_at
-                let pk = match job_data.get("pending_key") {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => format!("jobs:pending:{}:{}", scheduled_at, job_id),
-                };
-                let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
+                reenqueue_job(
+                    &kv_handle,
+                    &mut expected,
+                    &job_data,
+                    &job_id,
+                    &mut _lease_scope,
+                );
                 if sleep_or_break(poll_duration) {
                     break;
                 }
@@ -2072,7 +2094,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             _ => String::new(),
         };
         if is_queue_paused(&job_queue_for_pause, &kv_handle) {
-            reenqueue_job(&kv_handle, &job_data, &job_id);
+            reenqueue_job(
+                &kv_handle,
+                &mut expected,
+                &job_data,
+                &job_id,
+                &mut _lease_scope,
+            );
             emit_job_event(
                 "job.queue_paused",
                 &[
@@ -2101,7 +2129,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     Value::String(format!("No job definition found for '{}'", job_type)),
                 );
                 job_data.insert("dead_at".to_string(), Value::String(timestamp_key()));
-                if !history::worker_write(&kv_handle, &data_key, &mut expected, &job_data) {
+                if !persist_job(
+                    &kv_handle,
+                    &data_key,
+                    &mut expected,
+                    &job_data,
+                    &mut _lease_scope,
+                ) {
                     continue;
                 }
                 if let Err(e) = update_batch_on_terminal(&kv_handle, &job_data, &job_id, "dead") {
@@ -2114,6 +2148,55 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             }
         };
 
+        if _lease_scope.cancel.is_cancelled() {
+            reenqueue_job(
+                &kv_handle,
+                &mut expected,
+                &job_data,
+                &job_id,
+                &mut _lease_scope,
+            );
+            continue;
+        }
+        // Authorize execution before acquiring non-idempotent limiter slots.
+        // A crashed claimed-phase job therefore owns no such resources.
+        let before_activation = leases::ready_data(&job_data);
+        job_data.insert("status".to_string(), Value::String("active".to_string()));
+        job_data.insert("execution_phase".into(), Value::String("executing".into()));
+        let active_write =
+            match history::Prepared::new(&kv_handle, &data_key, expected.clone(), job_data.clone())
+            {
+                Ok(write) => write,
+                Err(error) => {
+                    eprintln!("[ntnt] cannot prepare active state: {error}");
+                    break;
+                }
+            };
+        match active_write.retry(&kv_handle) {
+            Ok(true) => expected = Some(active_write.next),
+            Ok(false) => continue, // A concurrent state change won.
+            Err(_) => {
+                let mut restored = false;
+                for previous in [Some(active_write.next), expected.clone()] {
+                    if let Ok(write) = history::Prepared::new(
+                        &kv_handle,
+                        &data_key,
+                        previous,
+                        before_activation.clone(),
+                    ) {
+                        if matches!(write.apply_owned(&kv_handle), Ok(true)) {
+                            restored = true;
+                            break;
+                        }
+                    }
+                }
+                if !restored {
+                    eprintln!("[ntnt] job '{job_id}': active transition interrupted; indexed lease recovery will classify it");
+                }
+                continue;
+            }
+        }
+
         // Concurrency limit: atomic counter semaphore via kv_incr.
         let has_concurrency_limit =
             if let Some(JobOptionValue::Int(max_slots)) = def.options.get("concurrency") {
@@ -2125,7 +2208,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                         let _ = kv::kv_expire(&kv_handle, &counter_key, 310);
                         if new_count > max {
                             let _ = kv::kv_incr(&kv_handle, &counter_key, -1);
-                            reenqueue_job(&kv_handle, &job_data, &job_id);
+                            reenqueue_job(
+                                &kv_handle,
+                                &mut expected,
+                                &job_data,
+                                &job_id,
+                                &mut _lease_scope,
+                            );
                             emit_job_event(
                                 "job.concurrency_limited",
                                 &[
@@ -2145,9 +2234,11 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     Err(_) => {
                         if reenqueue_and_backoff(
                             &kv_handle,
+                            &mut expected,
                             &job_data,
                             &job_id,
                             std::time::Duration::from_millis(500),
+                            &mut _lease_scope,
                         ) {
                             break;
                         }
@@ -2198,7 +2289,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                         if weighted > rl.count as f64 {
                             let _ = kv::kv_incr(&kv_handle, &rl_key, -1);
                             concurrency_guard.release();
-                            reenqueue_job(&kv_handle, &job_data, &job_id);
+                            reenqueue_job(
+                                &kv_handle,
+                                &mut expected,
+                                &job_data,
+                                &job_id,
+                                &mut _lease_scope,
+                            );
                             let remaining = ws - (now_secs % ws);
                             emit_job_event(
                                 "job.rate_limited",
@@ -2229,7 +2326,14 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                                 ("error", Value::String(e.to_string())),
                             ],
                         );
-                        if reenqueue_and_backoff(&kv_handle, &job_data, &job_id, poll_duration) {
+                        if reenqueue_and_backoff(
+                            &kv_handle,
+                            &mut expected,
+                            &job_data,
+                            &job_id,
+                            poll_duration,
+                            &mut _lease_scope,
+                        ) {
                             break;
                         }
                         continue;
@@ -2238,49 +2342,15 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             }
         }
 
-        // Write visibility timeout key: jobs:active:<id> with TTL 300s
-        let active_key = format!("jobs:active:{}", job_id);
-        let _ = kv::kv_set(
-            &kv_handle,
-            &active_key,
-            &Value::String(job_id.clone()),
-            Some(300),
-        );
-
-        let before_activation = job_data.clone();
-        job_data.insert("status".to_string(), Value::String("active".to_string()));
-        let active_write =
-            match history::Prepared::new(&kv_handle, &data_key, expected.clone(), job_data.clone())
-            {
-                Ok(write) => write,
-                Err(error) => {
-                    eprintln!("[ntnt] cannot prepare active state: {error}");
-                    break;
-                }
-            };
-        match active_write.retry(&kv_handle) {
-            Ok(true) => expected = Some(active_write.next),
-            Ok(false) => continue, // A concurrent state change won.
-            Err(_) => {
-                let mut restored = false;
-                for previous in [Some(active_write.next), expected.clone()] {
-                    if let Ok(write) = history::Prepared::new(
-                        &kv_handle,
-                        &data_key,
-                        previous,
-                        before_activation.clone(),
-                    ) {
-                        if matches!(write.apply(&kv_handle), Ok(true)) {
-                            restored = true;
-                            break;
-                        }
-                    }
-                }
-                if !restored {
-                    eprintln!("[ntnt] job '{job_id}': active transition interrupted; reconcile before replay");
-                }
-                break;
-            }
+        if _lease_scope.cancel.is_cancelled() {
+            reenqueue_job(
+                &kv_handle,
+                &mut expected,
+                &job_data,
+                &job_id,
+                &mut _lease_scope,
+            );
+            continue;
         }
 
         // Extract payload map
@@ -2358,6 +2428,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             exec_result
         };
 
+        band_stats
+            .active
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        if _lease_scope.cancel.is_cancelled() {
+            continue;
+        }
+
         // Check if job was force-cancelled while we were executing —
         // re-read status from KV and discard our result if cancelled.
         if let Ok(Value::Map(fresh_data)) = kv::kv_get(&kv_handle, &data_key) {
@@ -2385,10 +2462,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         // Execute result handling
         match exec_result {
             Ok(_) => {
-                // Update band stats: decrement active, increment completed, add duration
-                band_stats
-                    .active
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                // Execution already decremented active; count the completed body., add duration
                 band_stats
                     .completed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2399,7 +2473,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 // Success
                 job_data.insert("status".to_string(), Value::String("completed".to_string()));
                 job_data.insert("completed_at".to_string(), Value::String(timestamp_key()));
-                if !history::worker_write(&kv_handle, &data_key, &mut expected, &job_data) {
+                if !persist_job(
+                    &kv_handle,
+                    &data_key,
+                    &mut expected,
+                    &job_data,
+                    &mut _lease_scope,
+                ) {
                     continue;
                 }
                 emit_job_event(
@@ -2419,10 +2499,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 }
             }
             Err(err_msg) => {
-                // Update band stats: decrement active, increment failed
-                band_stats
-                    .active
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                // Execution already decremented active; count the failed body.
                 band_stats
                     .failed
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2441,8 +2518,15 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 job_data.insert("error".to_string(), Value::String(err_msg.clone()));
                 job_data.insert("attempts".to_string(), Value::Int(new_attempts));
 
+                // Do not start handler side effects after confirmed lease loss.
+                if _lease_scope.cancel.is_cancelled() {
+                    continue;
+                }
                 // Call on_failure handler (fire-and-forget)
                 execute_on_failure_in_worker(&mut interp, &def, &err_msg, new_attempts);
+                if _lease_scope.cancel.is_cancelled() {
+                    continue;
+                }
 
                 if new_attempts < retry_limit {
                     // Re-enqueue with backoff
@@ -2485,7 +2569,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     );
                     job_data.insert("scheduled_at".to_string(), Value::String(future_ts.clone()));
 
-                    if !history::worker_write(&kv_handle, &data_key, &mut expected, &job_data) {
+                    if !persist_job(
+                        &kv_handle,
+                        &data_key,
+                        &mut expected,
+                        &job_data,
+                        &mut _lease_scope,
+                    ) {
                         continue;
                     }
                     emit_job_event(
@@ -2502,7 +2592,13 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     // Exhausted retries — mark as dead
                     job_data.insert("status".to_string(), Value::String("dead".to_string()));
                     job_data.insert("dead_at".to_string(), Value::String(timestamp_key()));
-                    if !history::worker_write(&kv_handle, &data_key, &mut expected, &job_data) {
+                    if !persist_job(
+                        &kv_handle,
+                        &data_key,
+                        &mut expected,
+                        &job_data,
+                        &mut _lease_scope,
+                    ) {
                         continue;
                     }
                     emit_job_event(
@@ -3115,6 +3211,8 @@ pub struct JobStatusCounts {
     pub pending: u64,
     pub scheduled: u64,
     pub active: u64,
+    pub claimed: u64,
+    pub outcome_unknown: u64,
     pub completed: u64,
     pub retrying: u64,
     pub dead: u64,
@@ -3225,6 +3323,7 @@ pub fn cancel_job_by_id(job_id: &str, force: bool) -> Result<CancelResult> {
     // Without force: only non-active, non-terminal jobs
     if !force
         && status != "pending"
+        && status != "claimed"
         && status != "scheduled"
         && status != "retrying"
         && status != "failed"
@@ -3263,6 +3362,11 @@ pub fn cancel_job_by_id(job_id: &str, force: bool) -> Result<CancelResult> {
     Ok(CancelResult::Cancelled { was_active })
 }
 
+/// Enrich a read-only job snapshot with current lease/recovery information.
+pub fn inspect_job_data(handle: &Value, data: &mut HashMap<String, Value>) -> Result<()> {
+    leases::inspect(handle, data)
+}
+
 /// List jobs with optional filters, sorted newest-first.
 pub fn list_jobs_filtered(opts: ListJobsOpts) -> Result<Vec<HashMap<String, Value>>> {
     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
@@ -3270,7 +3374,8 @@ pub fn list_jobs_filtered(opts: ListJobsOpts) -> Result<Vec<HashMap<String, Valu
 
     let mut results = Vec::new();
     for key in &data_keys {
-        if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
+        if let Ok(Value::Map(mut data)) = kv::kv_get(&kv_handle, key) {
+            leases::inspect(&kv_handle, &mut data)?;
             if let Some(ref sf) = opts.status {
                 match data.get("status") {
                     Some(Value::String(s)) if s == sf.as_str() => {}
@@ -3304,9 +3409,9 @@ pub fn list_jobs_filtered(opts: ListJobsOpts) -> Result<Vec<HashMap<String, Valu
 
 /// Bulk delete jobs by status. Returns count of deleted jobs.
 pub fn delete_jobs_filtered(opts: DeleteJobsOpts) -> Result<i64> {
-    if opts.status == "active" {
+    if matches!(opts.status.as_str(), "active" | "claimed") {
         return Err(IntentError::runtime_error(
-            "Cannot delete active jobs — workers are currently processing them. Stop workers first."
+            "Cannot delete active or claimed jobs — workers own them. Cancel them explicitly first."
                 .to_string(),
         ));
     }
@@ -3363,6 +3468,8 @@ pub fn job_status_counts() -> Result<JobStatusCounts> {
         pending: 0,
         scheduled: 0,
         active: 0,
+        claimed: 0,
+        outcome_unknown: 0,
         completed: 0,
         retrying: 0,
         dead: 0,
@@ -3372,12 +3479,15 @@ pub fn job_status_counts() -> Result<JobStatusCounts> {
     };
 
     for key in &data_keys {
-        if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
+        if let Ok(Value::Map(mut data)) = kv::kv_get(&kv_handle, key) {
+            leases::inspect(&kv_handle, &mut data)?;
             if let Some(Value::String(s)) = data.get("status") {
                 match s.as_str() {
                     "pending" => counts.pending += 1,
                     "scheduled" => counts.scheduled += 1,
                     "active" => counts.active += 1,
+                    "claimed" => counts.claimed += 1,
+                    "outcome_unknown" => counts.outcome_unknown += 1,
                     "completed" => counts.completed += 1,
                     "retrying" => counts.retrying += 1,
                     "dead" => counts.dead += 1,
@@ -3888,7 +3998,13 @@ pub fn init() -> HashMap<String, Value> {
     // not existing TTLs or legacy history without TTL. Live jobs have no TTL.
     // Redis expires keys natively; SQLite physically sweeps expired KV rows in
     // bounded batches while the store is open. No count/byte eviction limits.
-    // @param opts Map with optional store, retention and testing-mode options
+    // Durable execution leases default to 300 seconds, renewed every 30 seconds.
+    // Advanced lease_seconds accepts integers 10..86400; renewal uses one-third
+    // of the duration capped at 30 seconds. Configure before starting workers.
+    // Expired unstarted claims recover automatically; authorized executions
+    // become outcome_unknown with no TTL or automatic replay. Upgrade workers
+    // together; old active jobs without leases are shown as outcome_unknown.
+    // @param opts Map with optional store, retention, lease_seconds and testing-mode options
     // @returns Result indicating success or error
     // @example configure_queue(map { "store": "sqlite:./jobs.db" }) ~ "Use SQLite for job storage"
     // @example configure_queue(map { "store": "redis://localhost:6379" }) ~ "Use Redis for job storage"
@@ -3916,6 +4032,7 @@ pub fn init() -> HashMap<String, Value> {
                 };
 
                 let retention = HistoryRetention::parse(opts.get("retention"))?;
+                let lease_policy = leases::Policy::parse(opts.get("lease_seconds"))?;
 
                 // Check for testing mode
                 if let Some(Value::String(mode)) = opts.get("mode") {
@@ -3963,6 +4080,7 @@ pub fn init() -> HashMap<String, Value> {
                     .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))? = store_url;
                 *JOB_RUNTIME.history_retention.write()
                     .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))? = retention;
+                *JOB_RUNTIME.lease_policy.write().map_err(|_| IntentError::runtime_error("lease configuration lock poisoned"))? = lease_policy;
                 *info = Some(next);
 
                 Ok(Value::ok(Value::Unit))
@@ -4106,7 +4224,11 @@ pub fn init() -> HashMap<String, Value> {
     // Get the current status and data for a job by its ID.
     //
     // Returns the full job data map including status, type, queue, payload,
-    // attempts, and timestamps. Returns an error if the job ID is not found.
+    // attempts, and timestamps. Claimed/active records include worker_id,
+    // claim_token, execution_phase and lease_expires_at_ms. Expired executing
+    // leases become outcome_unknown, never automatically retried or expired as
+    // history. Legacy active records without leases are shown as outcome_unknown.
+    // Returns an error if the job ID is not found.
     // @param job_id The job ID returned by enqueue()
     // @returns Result containing the job data map or an error
     // @example job_status("abc-123") ~ "Check job status"
@@ -4142,6 +4264,10 @@ pub fn init() -> HashMap<String, Value> {
                         "Job '{}' not found",
                         job_id
                     ))),
+                    Value::Map(mut data) => {
+                        leases::inspect(&kv_handle, &mut data)?;
+                        Ok(Value::ok(Value::Map(data)))
+                    }
                     other => Ok(Value::ok(other)),
                 }
             },
@@ -4154,10 +4280,11 @@ pub fn init() -> HashMap<String, Value> {
     // @signature cancel_job(job_id: String, opts?: Map) -> Result<Bool, String>
     // Cancel a job by its ID.
     //
-    // By default, only pending, scheduled, retrying, or failed jobs can be cancelled.
-    // Pass `map { "force": true }` to cancel an active (running) job — this marks it
-    // as cancelled and removes its visibility timeout key. The worker thread may still
-    // be executing, but the result will be discarded when it checks the status.
+    // By default, pending, claimed, scheduled, retrying, or failed jobs can be cancelled.
+    // Pass `map { "force": true }` to cancel active or outcome_unknown work.
+    // This removes its lease and fences subsequent state writes; cooperative
+    // execution stops when lease loss is observed. An external request already
+    // in flight cannot be undone. Reconcile uncertain effects before manual replay.
     // Returns true if the job was cancelled, false if it was not in a cancellable state.
     // @param job_id The job ID returned by enqueue()
     // @param opts Optional map. Pass `map { "force": true }` to force-cancel active jobs.
