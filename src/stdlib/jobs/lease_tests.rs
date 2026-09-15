@@ -66,6 +66,53 @@ fn seed_status(h: &Value, status: &str) -> kv::job_leases::Claim {
         .unwrap()
         .unwrap()
 }
+fn recover_fixture(h: &Value) -> kv::job_leases::RecoveryCounts {
+    // Lease operations intentionally fast-fail on handle/SQLite contention.
+    // The keeper uses this handle concurrently, so retry the observation rather
+    // than assuming every recovery poll succeeds. Persistent errors still fail.
+    let until = Instant::now() + Duration::from_secs(1);
+    loop {
+        match kv::job_leases::recover(h, 64) {
+            Ok(counts) => return counts,
+            Err(error) => {
+                assert!(
+                    Instant::now() < until,
+                    "recovery remained unavailable: {error}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+#[test]
+#[should_panic(expected = "recovery remained unavailable")]
+fn recovery_fixture_does_not_hide_permanent_storage_failure() {
+    recover_fixture(&Value::Unit);
+}
+#[test]
+fn recovery_fixture_handles_transient_sqlite_writer_contention() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recovery-contention.db");
+    let h = kv::open_kv(path.to_str().unwrap()).unwrap();
+    let c = seed(&h);
+    let locked = rusqlite::Connection::open(&path).unwrap();
+    locked.execute_batch("BEGIN IMMEDIATE").unwrap();
+    // Fast failure is the storage API contract, not a failed lease renewal.
+    assert!(kv::job_leases::recover(&h, 64).is_err());
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        locked.execute_batch("ROLLBACK").unwrap();
+    });
+    let counts = recover_fixture(&h);
+    release.join().unwrap();
+    assert_eq!((counts.requeued, counts.unknown), (0, 0));
+    assert_eq!(
+        kv::conditional::read(&h, "jobs:data:lease-fixture")
+            .unwrap()
+            .unwrap(),
+        c.snapshot
+    );
+}
 #[test]
 fn keeper_renews_claim_without_changing_primary_snapshot() {
     let h = kv::open_kv(":memory:").unwrap();
@@ -75,7 +122,7 @@ fn keeper_renews_claim_without_changing_primary_snapshot() {
     let scope = keeper.attach(&c, sent, leases::Policy { duration_ms: 500 });
     for _ in 0..8 {
         std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(kv::job_leases::recover(&h, 64).unwrap().requeued, 0);
+        assert_eq!(recover_fixture(&h).requeued, 0);
         assert!(!scope.cancel.is_cancelled());
     }
     let current = kv::conditional::read(&h, "jobs:data:lease-fixture")
