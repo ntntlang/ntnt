@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - 'v*'
+  # Exercise changes to packaging itself before moving a public release tag.
+  # Pull requests build/test/upload artifacts but cannot publish a release.
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - '.config/nextest.toml'
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -89,6 +99,13 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-release-
 
+      - name: Install nextest
+        uses: taiki-e/install-action@4dc1969decfa71b34f25aa7f3dd4656654d9ad1e # nextest installer
+        with:
+          tool: cargo-nextest@0.9.144
+          checksum: true
+          fallback: none
+
       - name: Build release
         run: cargo build --release --locked --target ${{ matrix.target }}
 
@@ -98,13 +115,17 @@ jobs:
           ls -la target/${{ matrix.target }}/release/
           test -f target/${{ matrix.target }}/release/${{ matrix.binary }}
 
+      # Match CI's process-per-test isolation: test-local environment changes and
+      # JOB_RUNTIME mutations must not leak across concurrently executing tests.
+      # Keep release optimization, target triples, library scope, and macOS's
+      # conservative socket-fixture concurrency. Do not mask failures with retries.
       - name: Run unit tests (macOS, serialized local-socket fixtures)
         if: runner.os == 'macOS'
-        run: cargo test --release --locked --target ${{ matrix.target }} --lib -- --test-threads=1
+        run: cargo nextest run --release --locked --target ${{ matrix.target }} --lib --test-threads 1 --retries 0
 
       - name: Run unit tests
         if: runner.os != 'macOS'
-        run: cargo test --release --locked --target ${{ matrix.target }} --lib
+        run: cargo nextest run --release --locked --target ${{ matrix.target }} --lib --retries 0
 
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
@@ -147,6 +168,7 @@ jobs:
 
   release:
     name: Create Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [build, docs]
     runs-on: ubuntu-latest
     permissions:
