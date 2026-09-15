@@ -1,7 +1,11 @@
-# NTNT v0.5.4 — proposed, unreleased
+# NTNT v0.5.4 — Durable job claims and native system primitives
 
-This release adds native primitives for raw cryptography, filesystem operations,
-TCP listeners, HTTP listener options, and safe default HTTP redirect following.
+This release adds crash-recoverable job claims, bounded task-result retention,
+TTL-based job history, persistent ICMP probes, and native system primitives.
+It also includes database and worker-lifecycle fixes. **Read the upgrade guidance
+below before updating workers or applications from v0.5.3.**
+
+## Native system APIs and HTTP behavior
 
 - `std/http`: fetch, cache misses and both download forms now follow redirects by
   default. `redirect: "manual"` preserves terminal 3xx behavior; `"error"` refuses
@@ -69,4 +73,110 @@ reason phrases and HTTP framing may differ from other fixture servers; 204 has n
 `examples/system-io-completeness` adds strict typed imports, three native Intent
 scenarios, owned-file cleanup, and a Normal-mode loopback binary framing fixture.
 Outbound TCP/UDP/TLS/Unix sockets, general file streams/incremental hashing and HTTP
-lifecycle APIs remain deferred. Package version stays 0.5.4, unreleased.
+lifecycle APIs remain deferred.
+
+## Durable jobs: claims, recovery, and terminal-history TTL
+
+- Ready work is claimed atomically with durable owner/attempt identity, execution
+  phase, and an indexed renewable lease on SQLite and Redis/Valkey. Healthy leases
+  renew; stale workers and late Redis transactions cannot overwrite fenced state.
+- Bounded recovery runs at worker startup and between jobs. Claims provably not
+  authorized to execute can be requeued. Interrupted authorized execution becomes
+  inspectable `outcome_unknown`, not a blind replay. Unknown work has no automatic
+  history TTL, uniqueness release, or batch completion accounting.
+- Prepared state writes recover from acknowledgement loss without rerunning the
+  job body or failure handler. Native/CLI inspection exposes ownership and recovery
+  metadata; legacy active records without leases are conservatively shown read-only
+  as unknown. Inspection itself does not start recovery.
+- Completed/cancelled history defaults to 30 days after finishing;
+  dead/failed/expired history defaults to 90 days. `configure_queue` accepts
+  `retention: map { "enabled": true, "completed_days": 30, "failed_days": 90 }`.
+  Live jobs do not receive terminal-history TTLs.
+- Redis/Valkey uses native expiry. SQLite uses bounded generic KV expiry maintenance,
+  not cleanup jobs. Physical deletion may lag under load and makes database pages
+  reusable; it does not promise to shrink the file.
+
+### Jobs upgrade requirements
+
+1. **Upgrade all writers/workers sharing a queue together.** Do not mix old and new
+   claim protocols. Pause producers/schedulers and drain or orderly-stop old workers;
+   inspect pending and legacy active work before resuming. Do not discard queue data
+   or automatically replay ambiguous external actions as an upgrade shortcut.
+2. **Use Redis 6.2+ or compatible Valkey.** Redis authorization expiry requires the
+   newer absolute-expiry support. Credentials also need the transaction commands
+   documented in the [jobs guide](AI_AGENT_GUIDE.md#background-jobs-stdjobs).
+3. **Configure durable, non-evicting storage for recovery guarantees.** Use file-backed
+   SQLite or appropriately persisted Redis/Valkey. Recovery cannot reconstruct data
+   the storage backend has lost or evicted.
+4. The execution lease defaults to 300 seconds with renewal every 30 seconds.
+   Optional `lease_seconds` is 10–86400. This is ownership protection, **not an
+   application freshness deadline** or rollback of an external request already sent.
+5. Use matching retention settings in every writer. New settings affect subsequent
+   state writes, not existing TTLs or legacy history without TTL. Disabling retention
+   does not remove previously assigned expirations; there is no automatic backfill.
+6. **Unknown outcomes require reconciliation.** `retry_job` rejects blind replay of
+   unknown work. A general auditable reconciliation/replay API, downstream idempotency
+   integration, and remaining semaphore/batch-finalization crash windows are follow-up
+   work in [#209](https://github.com/ntntlang/ntnt/issues/209), not an exactly-once
+   execution guarantee in this release. Applications with their own recovery layer
+   must not independently redispatch the same uncertain logical operation.
+
+## Bounded in-memory task retention
+
+Consumed task results release registry-owned payloads and synchronization state.
+Unconsumed public results have independent inactivity/count/estimated-byte limits:
+1 hour, 100,000 records, and 128 MiB. Compact history defaults to 24 hours after
+retirement, 100,000 records, and 64 MiB. Running tasks are not evicted to satisfy
+these limits. `parallel`/`race` children are cleaned up as internally owned work;
+late completion cannot resurrect a forgotten result.
+
+`NTNT_TASK_REMOVAL_TTL` now controls compact-history age, defaults to 86400 seconds,
+and accepts zero to disable history. Expired/evicted task handles are not permanent
+records. The limits do not include caller-owned results, active execution, or
+separately owned channel buffers. This history remains process-local; durable
+job state is separate. Partial worker scale-up failures no longer publish or
+activate an incomplete worker pool.
+
+## Persistent ICMP probes and worker lifecycle
+
+- `std/net` adds owner-local `ping_open`, `ping_probe`, and `ping_close` handles for
+  repeated single measurements without reopening the socket each time. Idle expiry,
+  bounded ownership, sequence correlation, and finite receive deadlines apply.
+  Handles cannot be transferred through tasks/channels or public JSON.
+- Persistent receive deadlines remain finite across platform socket behavior.
+- HTTP worker request evaluation restores task capabilities without granting unrelated
+  capabilities; nested opaque Secret/resource captures fail before task startup.
+- Worker control sockets use explicit ownership-safe identities, preserve worker
+  state, and tolerate busy control endpoints without treating them as abandoned.
+  Platform fixture fixes cover Windows atomic replacement and macOS socket behavior.
+
+## Database and authentication fixes
+
+- PostgreSQL String parameters bind correctly to DATE, TIME, TIMESTAMP, and
+  TIMESTAMPTZ through typed encoders. TIMESTAMPTZ requires an explicit RFC 3339
+  offset; invalid forms and leap seconds fail without echoing input. Existing
+  text-first casts remain available for PostgreSQL-specific textual expressions.
+- Shared PostgreSQL pools are bounded by `NTNT_POSTGRES_MAX_SHARED_POOLS` (default
+  32, a positive integer read at first connect). Admission includes pending creation;
+  unused pools can be evicted, but live handles/operations/transactions retain their
+  leases. This is a pool-count cap, not a per-pool connection cap. Applications with
+  more simultaneously live database targets must configure it intentionally.
+  **Explicitly commit or roll back before close; close is not an implicit rollback
+  guarantee.**
+- SQLite `connect(path, map { "busy_timeout_ms": 5000 })` and
+  `begin(db, map { "mode": "immediate" })` expose lock-wait and transaction-mode
+  control. Modes are deferred/immediate/exclusive; existing one-argument defaults
+  remain. Explicit setup failures are surfaced before publishing a connection.
+  Busy timeout is not an overall request deadline.
+- Magic-link `generic_response_floor_ms` now defaults to 0 instead of 1200.
+  Set it explicitly to 1200 to retain prior padding. Padding is opt-in, best-effort,
+  not constant-time protection; delivery callbacks remain synchronous.
+
+## Scope and verification
+
+This release packages merged work; it does not migrate or deploy consuming apps.
+The source baseline passed cross-platform CI, real PostgreSQL/Redis contracts,
+formatting, release-build documentation validation/generation, and example lint.
+The tag-triggered release workflow separately builds and tests Linux x64, macOS
+ARM64, and Windows x64 packages and publishes SHA256 checksums plus the generated
+stdlib reference. See the GitHub release and its workflow for artifact status.
