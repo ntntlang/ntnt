@@ -53,6 +53,9 @@ fn seed(h: &Value) -> kv::job_leases::Claim {
     seed_status(h, "pending")
 }
 fn seed_status(h: &Value, status: &str) -> kv::job_leases::Claim {
+    seed_status_with_lease(h, status, 500)
+}
+fn seed_status_with_lease(h: &Value, status: &str, duration_ms: i64) -> kv::job_leases::Claim {
     let id = "lease-fixture";
     let pk = "jobs:pending:050:00000000000000000000:lease-fixture";
     let data = HashMap::from([
@@ -62,9 +65,15 @@ fn seed_status(h: &Value, status: &str) -> kv::job_leases::Claim {
     ]);
     kv::kv_set(h, &format!("jobs:data:{id}"), &Value::Map(data), None).unwrap();
     kv::kv_set(h, pk, &Value::String(id.into()), None).unwrap();
-    kv::job_leases::claim(h, "jobs:pending:", "jobs:pending:zzz", "keeper", 500)
-        .unwrap()
-        .unwrap()
+    kv::job_leases::claim(
+        h,
+        "jobs:pending:",
+        "jobs:pending:zzz",
+        "keeper",
+        duration_ms,
+    )
+    .unwrap()
+    .unwrap()
 }
 fn recover_fixture(h: &Value) -> kv::job_leases::RecoveryCounts {
     // Lease operations intentionally fast-fail on handle/SQLite contention.
@@ -94,13 +103,17 @@ fn recovery_fixture_handles_transient_sqlite_writer_contention() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("recovery-contention.db");
     let h = kv::open_kv(path.to_str().unwrap()).unwrap();
-    let c = seed(&h);
+    // This fixture tests contention, not renewal: keep its lease longer than
+    // the recovery observation's one-second retry budget.
+    let c = seed_status_with_lease(&h, "pending", 10_000);
     let locked = rusqlite::Connection::open(&path).unwrap();
     locked.execute_batch("BEGIN IMMEDIATE").unwrap();
     // Fast failure is the storage API contract, not a failed lease renewal.
     assert!(kv::job_leases::recover(&h, 64).is_err());
     let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
+        // Exceed the former 500 ms lease to guard against expiry masquerading
+        // as a contention-handling failure after delayed CI scheduling.
+        std::thread::sleep(Duration::from_millis(600));
         locked.execute_batch("ROLLBACK").unwrap();
     });
     let counts = recover_fixture(&h);
