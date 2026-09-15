@@ -7248,7 +7248,7 @@ write_file_exclusive("local-data", [0, 255])  // Inspect Result before continuin
 HTTP client for making requests to external services
 
 ```ntnt
-import { fetch, download, Cache } from "std/http"
+import { probe_fetch, fetch, download } from "std/http"
 ```
 
 ### Functions
@@ -7261,6 +7261,7 @@ import { fetch, download, Cache } from "std/http"
 | [`cache_fetch`](#cachefetch) | Fetch a URL using a cache, returning a cached response if available. |
 | [`download`](#download) | Stream an HTTP response to a file and promote it atomically. |
 | [`fetch`](#fetch) | Make an HTTP request to a URL. |
+| [`probe_fetch`](#probefetch) | Perform a fresh direct HTTP/1.1 GET monitoring sample; never follow redirects, use proxies/pools, retry addresses, or replay HTTP. Select only the first address from the existing SSRF-approved DNS set (a failed first address is terminal). Options: url, timeout_ms (default 30000; Int 1..60000), optional start_deadline_ms (UTC epoch ms) and start_monotonic_deadline_ms (std/time monotonic_now origin). Start authorization is checked after DNS/socket setup immediately before TCP connect, the first target contact (SYN), not the later HTTP write. Expiry returns exactly start_deadline_expired. This is userspace check-adjacent-syscall timing, not a guarantee about NIC wire time. Once contact is authorized, TLS and response may complete after the start deadline, subject to the independent timeout budget. sample_started_at_ms records the first connect attempt, sample_finished_at_ms the completed response; these UTC timestamps are not admission/queue timestamps. TLS verifies public trust roots and hostname. Existing HTTP SSRF policy applies; disabling SSRF protection rejects this probe API rather than bypassing validation. GET is the only method; redirect:manual/follow_redirects:false are optional. All other fetch options, credentials, headers, and Secret values are rejected. Timeout includes DNS, setup, connect, TLS and response. Blocking system DNS can outlive caller waiting, but its worker cannot connect; at most 16 DNS workers run simultaneously, including timed-out workers (saturation returns an error). Body bytes and decoded UTF-8 are capped by NTNT_MAX_RESPONSE_SIZE (default 50 MiB). |
 
 #### `Cache`
 
@@ -7485,6 +7486,24 @@ fetch("https://api.example.com", map {
 **See also:** `download`, `cache_fetch`
 
 *Since v0.1.0*
+
+---
+
+#### `probe_fetch`
+
+```ntnt
+probe_fetch(options: Map) -> Result<Map, String>
+```
+
+Perform a fresh direct HTTP/1.1 GET monitoring sample; never follow redirects, use proxies/pools, retry addresses, or replay HTTP. Select only the first address from the existing SSRF-approved DNS set (a failed first address is terminal). Options: url, timeout_ms (default 30000; Int 1..60000), optional start_deadline_ms (UTC epoch ms) and start_monotonic_deadline_ms (std/time monotonic_now origin). Start authorization is checked after DNS/socket setup immediately before TCP connect, the first target contact (SYN), not the later HTTP write. Expiry returns exactly start_deadline_expired. This is userspace check-adjacent-syscall timing, not a guarantee about NIC wire time. Once contact is authorized, TLS and response may complete after the start deadline, subject to the independent timeout budget. sample_started_at_ms records the first connect attempt, sample_finished_at_ms the completed response; these UTC timestamps are not admission/queue timestamps. TLS verifies public trust roots and hostname. Existing HTTP SSRF policy applies; disabling SSRF protection rejects this probe API rather than bypassing validation. GET is the only method; redirect:manual/follow_redirects:false are optional. All other fetch options, credentials, headers, and Secret values are rejected. Timeout includes DNS, setup, connect, TLS and response. Blocking system DNS can outlive caller waiting, but its worker cannot connect; at most 16 DNS workers run simultaneously, including timed-out workers (saturation returns an error). Body bytes and decoded UTF-8 are capped by NTNT_MAX_RESPONSE_SIZE (default 50 MiB).
+
+**Parameters:**
+
+- `options` — Probe options Map
+
+**Returns:** Result<Map, String> with status, body, headers and sample timestamps
+
+**See also:** `fetch`
 
 ---
 
@@ -10737,12 +10756,12 @@ import { ping_open, ping_probe, ping_close } from "std/net"
 
 | Function | Description |
 |----------|-------------|
-| [`dns_lookup`](#dnslookup) | Looks up DNS records for a name. Supports A, AAAA, ANAME, CAA, CDNSKEY, CDS, CNAME, CSYNC, DNSKEY, DS, HINFO, HTTPS, KEY, MX, NAPTR, NS, NSEC, NSEC3, NSEC3PARAM, NULL, OPENPGPKEY, PTR, RRSIG, SIG, SOA, SRV, SSHFP, SVCB, TLSA, and TXT records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
+| [`dns_lookup`](#dnslookup) | Looks up DNS records for a name. Supports A, AAAA, ANAME, CAA, CDNSKEY, CDS, CNAME, CSYNC, DNSKEY, DS, HINFO, HTTPS, KEY, MX, NAPTR, NS, NSEC, NSEC3, NSEC3PARAM, NULL, OPENPGPKEY, PTR, RRSIG, SIG, SOA, SRV, SSHFP, SVCB, TLSA, and TXT records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). Optional start_deadline_ms (UTC epoch milliseconds) and start_monotonic_deadline_ms (std/time monotonic_now process-origin milliseconds) are nonnegative Ints or None. Either expired clock denies the first UDP send or TCP connect after socket setup, returning Err("start_deadline_expired") only when no earlier contact was possible. A first in-budget contact commits the lookup; replies, retries and TCP fallback may complete later under timeout_ms. Local/cached answers need no transmission. These userspace syscall checks cannot guarantee NIC wire-time against preemption. |
 | [`dns_reverse`](#dnsreverse) | Performs a reverse DNS/PTR lookup for an IPv4 or IPv6 address. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
 | [`ip_parse`](#ipparse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
 | [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
 | [`net_capabilities`](#netcapabilities) | Reports which network probe capabilities are available to the current process without sending any traffic. The ICMP flags reflect whether the probe socket setup that ping() uses (create, configure, connect to loopback) succeeds: datagram ICMP is unprivileged where the OS allows it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW). ping is true when any ICMP echo path is available; traceroute is true when a raw ICMP path is available for either family (traceroute requires raw sockets). These are convenience aggregates: a caller targeting a specific family should check the per-family flags (e.g. icmpv6_raw), since a host may resolve only to a family whose raw socket is unavailable — in that case the probe call still returns a clear Err. traceroute_udp and traceroute_tcp are reported true only on Linux, where their probe send and reply handling are validated; traceroute_tcp also requires a raw TCP socket. ICMP traceroute remains cross-platform. |
-| [`ping`](#ping) | Performs an ICMP ping using native sockets (unprivileged datagram ICMP when available, raw ICMP as fallback). Unreachable targets return Ok with failed attempts; missing socket permissions and resolver/system failures return Err(String). Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable(). |
+| [`ping`](#ping) | Performs an ICMP ping using native sockets (unprivileged datagram ICMP when available, raw ICMP as fallback). Unreachable targets return Ok with failed attempts; missing socket permissions and resolver/system failures return Err(String). Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable(). Optional start_deadline_ms (UTC epoch milliseconds) and start_monotonic_deadline_ms (std/time monotonic_now process-origin milliseconds) are independently optional nonnegative Ints; absent/None preserves behavior. Both supplied clocks must remain before their deadline immediately before the first socket send, after resolution, policy, socket and packet setup; expiry returns Err("start_deadline_expired") without an attempted send. Malformed fields fail closed. The first attempted send commits the sample: requested later packets may continue after expiry, still bounded by timeout_ms. This userspace syscall check cannot guarantee NIC wire-time against preemption. |
 | [`ping_close`](#pingclose) | Idempotently close all aliases and release descriptor/capacity, including expired handles. Cancels an active probe; sends are nonblocking, receives use short kernel-woken waits. Close never waits for the full probe deadline, and releases capacity before returning. Cleanup normally completes within 50 ms, subject to OS/thread scheduling; probe cancellation is observed at the next bounded 5 ms receive checkpoint (OS timeout rounding may apply). No descriptor duplication or unsafe reuse; no sleep polling is added to RTT. |
 | [`ping_open`](#pingopen) | Open a process-local native IPv4/IPv6 ICMP session without sending. Pins the first resolver address after applying policy to every resolved address. Setup failure returns Err; no address fallback or automatic reopen. Options: idle_timeout_ms (1000..86400000, default 60000), allow_private (Bool). Private targets also require NTNT_NET_ALLOW_PRIVATE=1. Other options are rejected. At most 128 live/reserved sockets per process. Datagram first, raw fallback; socket permissions depend on the platform (raw normally requires CAP_NET_RAW). Aliases share state; handles cannot be forged, serialized, or transferred to tasks/channels/jobs. Open inside the owning task/worker. Normal, Worker and Job modes are supported; HotReload and UnitTest/native assertion execution are explicitly denied. Unused retained aliases expire with at most one second cleanup lag, subject to scheduling. Owner teardown, runtime shutdown, last-handle drop and fatal backend errors close sockets. |
 | [`ping_probe`](#pingprobe) | Send exactly one echo on the same socket; one in-flight operation per handle. Whole-operation timeout is 50..30000 ms (default 1000); no retries. Result fields: status (reply/timeout/target_error), probe_id (logical counter), seq (16-bit wire sequence), target_addr, reachable; from, ttl, latency_ms and error are present only when applicable. Non-replies never contain latency_ms. RTT uses a monotonic clock, excluding DNS/setup/idle time. Full payload correlation rejects late/duplicate packets across rollover; truncated error quotes are ignored. Kernel errors without generation proof return backend Err and invalidate the handle. Completion (including timeout/target_error) renews idle lease; in-flight probes do not expire. Entry checks expiry atomically; invalid/busy calls do not renew it. Fatal errors close. |
@@ -10774,13 +10793,13 @@ import { ping_open, ping_probe, ping_close } from "std/net"
 dns_lookup(name: String, record_type?: String, opts?: Map) -> Result<Array<Map>, String>
 ```
 
-Looks up DNS records for a name. Supports A, AAAA, ANAME, CAA, CDNSKEY, CDS, CNAME, CSYNC, DNSKEY, DS, HINFO, HTTPS, KEY, MX, NAPTR, NS, NSEC, NSEC3, NSEC3PARAM, NULL, OPENPGPKEY, PTR, RRSIG, SIG, SOA, SRV, SSHFP, SVCB, TLSA, and TXT records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String).
+Looks up DNS records for a name. Supports A, AAAA, ANAME, CAA, CDNSKEY, CDS, CNAME, CSYNC, DNSKEY, DS, HINFO, HTTPS, KEY, MX, NAPTR, NS, NSEC, NSEC3, NSEC3PARAM, NULL, OPENPGPKEY, PTR, RRSIG, SIG, SOA, SRV, SSHFP, SVCB, TLSA, and TXT records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). Optional start_deadline_ms (UTC epoch milliseconds) and start_monotonic_deadline_ms (std/time monotonic_now process-origin milliseconds) are nonnegative Ints or None. Either expired clock denies the first UDP send or TCP connect after socket setup, returning Err("start_deadline_expired") only when no earlier contact was possible. A first in-budget contact commits the lookup; replies, retries and TCP fallback may complete later under timeout_ms. Local/cached answers need no transmission. These userspace syscall checks cannot guarantee NIC wire-time against preemption.
 
 **Parameters:**
 
 - `name` — DNS name to query
 - `record_type` — Optional supported DNS record type. Defaults to A.
-- `opts` — Optional map with timeout_ms. When passing opts, include an explicit record_type such as "A".
+- `opts` — Optional map with timeout_ms, retries (Int 0..2, default 1 preserves the initial request plus one retry), start_deadline_ms, and start_monotonic_deadline_ms. When passing opts, include an explicit record_type such as "A".
 
 **Returns:** Result containing an array of records with actual returned type, name, value, and ttl
 
@@ -10881,12 +10900,12 @@ net_capabilities()  // Check whether ping() and traceroute() can work before pro
 ping(host: String, opts?: Map) -> Result<Map, String>
 ```
 
-Performs an ICMP ping using native sockets (unprivileged datagram ICMP when available, raw ICMP as fallback). Unreachable targets return Ok with failed attempts; missing socket permissions and resolver/system failures return Err(String). Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable().
+Performs an ICMP ping using native sockets (unprivileged datagram ICMP when available, raw ICMP as fallback). Unreachable targets return Ok with failed attempts; missing socket permissions and resolver/system failures return Err(String). Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable(). Optional start_deadline_ms (UTC epoch milliseconds) and start_monotonic_deadline_ms (std/time monotonic_now process-origin milliseconds) are independently optional nonnegative Ints; absent/None preserves behavior. Both supplied clocks must remain before their deadline immediately before the first socket send, after resolution, policy, socket and packet setup; expiry returns Err("start_deadline_expired") without an attempted send. Malformed fields fail closed. The first attempted send commits the sample: requested later packets may continue after expiry, still bounded by timeout_ms. This userspace syscall check cannot guarantee NIC wire-time against preemption.
 
 **Parameters:**
 
 - `host` — Hostname or IP address to resolve and probe
-- `opts` — Optional map with count (default 1, max 10), timeout_ms (default 2000), interval_ms (default 0, max 5000), and allow_private
+- `opts` — Optional map with count (default 1, max 10), timeout_ms (default 2000), interval_ms (default 0, max 5000), allow_private, start_deadline_ms, and start_monotonic_deadline_ms
 
 **Returns:** Result containing reachability status, latency summary, and per-attempt results
 
@@ -11457,14 +11476,14 @@ snmp_get(target: String, auth: Map, oids: Array<String>, opts?: Map) -> Result<M
 
 Reads one bounded set of numeric OIDs from an SNMP agent. Slice 1 supports SNMPv2c only. The strict auth map must contain `version: "2c"` and a `community` Secret, normally returned by `require_secret()`; plaintext community strings are rejected. Unknown auth and option keys are rejected. SNMPv2c does not encrypt or authenticate its community or payload; use this slice only on trusted management networks or protected tunnels.
 
-`NTNT_NETMON_ENABLE=1` is required for every call. Slice 1 accepts literal IPv4 and IPv6 targets only, eliminating unbounded hostname resolution. Private/internal targets additionally require `NTNT_NET_ALLOW_PRIVATE=1` and `allow_private: true`; special-purpose targets remain denied. `timeout_ms` is one global budget across request encoding, UDP send/receive, and retries. Encoded requests are capped at 8 KiB; responses are capped at 8 KiB and must be complete, strict SNMPv2c BER with exactly the requested OIDs in order.
+`NTNT_NETMON_ENABLE=1` is required for every call. Slice 1 accepts literal IPv4 and IPv6 targets only, eliminating unbounded hostname resolution. Private/internal targets additionally require `NTNT_NET_ALLOW_PRIVATE=1` and `allow_private: true`; special-purpose targets remain denied. `timeout_ms` is one global budget across request encoding, UDP send/receive, and retries. Encoded requests are capped at 8 KiB; responses are capped at 8 KiB and must be complete, strict SNMPv2c BER with exactly the requested OIDs in order. Optional start_deadline_ms (UTC epoch milliseconds) and start_monotonic_deadline_ms (std/time monotonic_now process-origin milliseconds) are independently optional nonnegative Ints; absent/None preserves behavior. After packet/policy/socket setup, both supplied clocks are checked immediately before the first UDP send. Expiry returns exactly Err("start_deadline_expired") with no attempted send, without retry wrapping. Malformed guards fail closed. The first attempted send commits the sample; response/retry completion remains bounded by timeout_ms, not the start deadline. Use retries: 0 for one-shot probes. This is a userspace syscall boundary, not a NIC wire-time guarantee against preemption. These options apply only to snmp_get; snmp_walk rejects them.
 
 **Parameters:**
 
 - `target` — Literal IPv4 or IPv6 address without a port
 - `auth` — Strict map with version (`"2c"`) and community (Secret)
 - `oids` — One to 64 unique numeric OIDs
-- `opts` — Optional strict map with port (default 161), timeout_ms (default 2000), retries (default 0, max 3), and allow_private
+- `opts` — Optional strict map with port (default 161), timeout_ms (default 2000), retries (default 0, max 3), allow_private, start_deadline_ms, and start_monotonic_deadline_ms
 
 **Returns:** Result containing target, checked address, port, version, duration_ms, attempts, and normalized values
 

@@ -1,5 +1,6 @@
 //! std/net module - IPAM-grade IP/CIDR helpers and reachability probes.
 
+mod dns_deadline;
 mod icmp;
 pub mod persistent;
 mod policy;
@@ -807,8 +808,17 @@ pub fn init() -> HashMap<String, Value> {
     // attempts; missing socket permissions and resolver/system failures return
     // Err(String). Apps that want TCP port checks should use tcp_connect();
     // high-level reachability checks can use reachable().
+    // Optional start_deadline_ms (UTC epoch milliseconds) and
+    // start_monotonic_deadline_ms (std/time monotonic_now process-origin milliseconds)
+    // are independently optional nonnegative Ints; absent/None preserves behavior.
+    // Both supplied clocks must remain before their deadline immediately before the
+    // first socket send, after resolution, policy, socket and packet setup; expiry
+    // returns Err("start_deadline_expired") without an attempted send. Malformed
+    // fields fail closed. The first attempted send commits the sample: requested
+    // later packets may continue after expiry, still bounded by timeout_ms.
+    // This userspace syscall check cannot guarantee NIC wire-time against preemption.
     // @param host Hostname or IP address to resolve and probe
-    // @param opts Optional map with count (default 1, max 10), timeout_ms (default 2000), interval_ms (default 0, max 5000), and allow_private
+    // @param opts Optional map with count (default 1, max 10), timeout_ms (default 2000), interval_ms (default 0, max 5000), allow_private, start_deadline_ms, and start_monotonic_deadline_ms
     // @returns Result containing reachability status, latency summary, and per-attempt results
     // @since v0.4.10
     // @tags #network
@@ -938,7 +948,14 @@ pub fn init() -> HashMap<String, Value> {
     // No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String).
     // @param name DNS name to query
     // @param record_type Optional supported DNS record type. Defaults to A.
-    // @param opts Optional map with timeout_ms. When passing opts, include an explicit record_type such as "A".
+    // Optional start_deadline_ms (UTC epoch milliseconds) and start_monotonic_deadline_ms
+    // (std/time monotonic_now process-origin milliseconds) are nonnegative Ints or None.
+    // Either expired clock denies the first UDP send or TCP connect after socket setup,
+    // returning Err("start_deadline_expired") only when no earlier contact was possible.
+    // A first in-budget contact commits the lookup; replies, retries and TCP fallback
+    // may complete later under timeout_ms. Local/cached answers need no transmission.
+    // These userspace syscall checks cannot guarantee NIC wire-time against preemption.
+    // @param opts Optional map with timeout_ms, retries (Int 0..2, default 1 preserves the initial request plus one retry), start_deadline_ms, and start_monotonic_deadline_ms. When passing opts, include an explicit record_type such as "A".
     // @returns Result containing an array of records with actual returned type, name, value, and ttl
     // @since v0.4.10
     // @tags #network
@@ -1369,8 +1386,13 @@ fn ping_fn(args: &[Value]) -> Result<Value, IntentError> {
 
     Ok(result_value((|| {
         validate_ping_method(opts.and_then(|m| m.get("method")))?;
+        let start_deadline = crate::stdlib::send_deadline::SendDeadline::parse(opts)?;
         let options = parse_probe_options(opts)?;
-        Ok(Value::Map(icmp::icmp_ping_for_host(host, &options)?))
+        Ok(Value::Map(icmp::icmp_ping_for_host_guarded(
+            host,
+            &options,
+            Some(&start_deadline),
+        )?))
     })()))
 }
 
@@ -1454,8 +1476,13 @@ fn dns_lookup_fn(args: &[Value]) -> Result<Value, IntentError> {
 
     Ok(result_value((|| {
         let record_type = DnsRecordType::parse(record_type)?;
-        let resolver = dns_resolver(opts)?;
-        let answers = dns_lookup_records(&resolver, name, record_type)?;
+        let deadline = crate::stdlib::send_deadline::SendDeadline::parse(opts)?;
+        let answers = if deadline.is_configured() {
+            dns_deadline::lookup(name, record_type, opts, deadline)?
+        } else {
+            let resolver = dns_resolver(opts)?;
+            dns_lookup_records(&resolver, name, record_type)?
+        };
         Ok(dns_answers_to_value(answers))
     })()))
 }
@@ -1814,13 +1841,25 @@ fn dns_lookup_args(args: &[Value]) -> Result<(&str, Option<&HashMap<String, Valu
 }
 
 fn dns_resolver(opts: Option<&HashMap<String, Value>>) -> Result<Resolver, String> {
-    let timeout_ms = parse_u64_option(opts, "timeout_ms", DEFAULT_TIMEOUT_MS)?
-        .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
-    let (config, mut resolver_opts) = system_resolver_config()?;
-    resolver_opts.timeout = Duration::from_millis(timeout_ms);
-    resolver_opts.attempts = 1;
+    let (config, resolver_opts) = dns_resolver_options(opts)?;
     Resolver::new(config, resolver_opts)
         .map_err(|e| format!("failed to initialize DNS resolver: {}", e))
+}
+
+fn dns_resolver_options(
+    opts: Option<&HashMap<String, Value>>,
+) -> Result<(ResolverConfig, ResolverOpts), String> {
+    let timeout_ms = parse_u64_option(opts, "timeout_ms", DEFAULT_TIMEOUT_MS)?
+        .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+    let retries = parse_u64_option(opts, "retries", 1)?;
+    if retries > 2 {
+        return Err("option 'retries' must be between 0 and 2".into());
+    }
+    let (config, mut resolver_opts) = system_resolver_config()?;
+    resolver_opts.timeout = Duration::from_millis(timeout_ms);
+    // Hickory interprets attempts as retries after the initial request.
+    resolver_opts.attempts = retries as usize;
+    Ok((config, resolver_opts))
 }
 
 fn system_resolver_config() -> Result<(ResolverConfig, ResolverOpts), String> {
@@ -1840,7 +1879,19 @@ fn dns_lookup_records(
     name: &str,
     record_type: DnsRecordType,
 ) -> Result<Vec<DnsAnswer>, String> {
-    let lookup = match resolver.lookup(name, record_type.hickory_type()) {
+    dns_lookup_result(
+        resolver.lookup(name, record_type.hickory_type()),
+        name,
+        record_type,
+    )
+}
+
+fn dns_lookup_result(
+    result: Result<hickory_resolver::lookup::Lookup, ResolveError>,
+    name: &str,
+    record_type: DnsRecordType,
+) -> Result<Vec<DnsAnswer>, String> {
+    let lookup = match result {
         Ok(lookup) => lookup,
         Err(err) if is_dns_no_records(&err) => return Ok(vec![]),
         Err(err) => {

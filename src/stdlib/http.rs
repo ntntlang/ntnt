@@ -25,6 +25,8 @@
 //! - `follow_redirects`: Boolean alias (true = follow, false = manual)
 //! - `max_redirects`: Maximum followed edges (default: 5, allowed: 1..10)
 
+mod probe;
+
 use crate::error::IntentError;
 use crate::interpreter::Value;
 use crate::stdlib::json::intent_value_to_json_expose;
@@ -1733,6 +1735,53 @@ fn download_from_args(args: &[Value]) -> Result<Value> {
 /// Initialize the std/http module
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
+
+    // @ntnt probe_fetch
+    // @module std/http
+    // @signature probe_fetch(options: Map) -> Result<Map, String>
+    // Perform a fresh direct HTTP/1.1 GET monitoring sample; never follow redirects,
+    // use proxies/pools, retry addresses, or replay HTTP. Select only the first address
+    // from the existing SSRF-approved DNS set (a failed first address is terminal).
+    // Options: url, timeout_ms (default 30000; Int 1..60000), optional start_deadline_ms
+    // (UTC epoch ms) and start_monotonic_deadline_ms (std/time monotonic_now origin).
+    // Start authorization is checked after DNS/socket setup immediately before TCP
+    // connect, the first target contact (SYN), not the later HTTP write. Expiry returns
+    // exactly start_deadline_expired. This is userspace check-adjacent-syscall timing,
+    // not a guarantee about NIC wire time. Once contact is authorized, TLS and response
+    // may complete after the start deadline, subject to the independent timeout budget.
+    // sample_started_at_ms records the first connect attempt, sample_finished_at_ms
+    // the completed response; these UTC timestamps are not admission/queue timestamps.
+    // TLS verifies public trust roots and hostname. Existing HTTP SSRF policy applies;
+    // disabling SSRF protection rejects this probe API rather than bypassing validation.
+    // GET is the only method; redirect:manual/follow_redirects:false are optional.
+    // All other fetch options, credentials, headers, and Secret values are rejected.
+    // Timeout includes DNS, setup, connect, TLS and response. Blocking system DNS can
+    // outlive caller waiting, but its worker cannot connect; at most 16 DNS workers
+    // run simultaneously, including timed-out workers (saturation returns an error).
+    // Body bytes and decoded UTF-8 are capped by NTNT_MAX_RESPONSE_SIZE (default 50 MiB).
+    // @param options Probe options Map
+    // @returns Result<Map, String> with status, body, headers and sample timestamps
+    // @see_also fetch
+    // @tags #network
+    module.insert(
+        "probe_fetch".into(),
+        Value::NativeFunction {
+            name: "probe_fetch".into(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                let result = match args.first() {
+                    Some(Value::Map(opts)) => probe::fetch(opts),
+                    _ => Err("probe_fetch requires an options Map".into()),
+                };
+                Ok(match result {
+                    Ok(value) => Value::ok(value),
+                    Err(error) => Value::err(Value::String(error)),
+                })
+            },
+        },
+    );
 
     // @ntnt fetch
     // @module std/http
