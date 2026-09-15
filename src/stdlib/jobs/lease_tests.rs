@@ -129,14 +129,30 @@ fn recovery_fixture_handles_transient_sqlite_writer_contention() {
 #[test]
 fn keeper_renews_claim_without_changing_primary_snapshot() {
     let h = kv::open_kv(":memory:").unwrap();
+    // Use the shortest public lease policy rather than requiring a loaded CI
+    // scheduler to service a test-only 500 ms lease. Observe real renewal below.
+    let duration_ms = 10_000;
     let sent = Instant::now();
-    let c = seed(&h);
+    let c = seed_status_with_lease(&h, "pending", duration_ms);
     let keeper = leases::Keeper::new(extract_kv_handle_info(&h).unwrap()).unwrap();
-    let scope = keeper.attach(&c, sent, leases::Policy { duration_ms: 500 });
-    for _ in 0..8 {
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(recover_fixture(&h).requeued, 0);
+    let scope = keeper.attach(&c, sent, leases::Policy { duration_ms });
+    let renewal_deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let counts = recover_fixture(&h);
+        assert_eq!((counts.requeued, counts.unknown), (0, 0));
         assert!(!scope.cancel.is_cancelled());
+        // This read can also contend with the renewing keeper. A successful
+        // read must prove a later persisted deadline, not just an unexpired job.
+        if let Ok(Some(lease)) = kv::job_leases::get(&h, &c.id) {
+            if lease.deadline_ms > c.deadline_ms {
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < renewal_deadline,
+            "keeper did not renew lease"
+        );
+        std::thread::sleep(Duration::from_millis(50));
     }
     let current = kv::conditional::read(&h, "jobs:data:lease-fixture")
         .unwrap()
@@ -144,8 +160,20 @@ fn keeper_renews_claim_without_changing_primary_snapshot() {
     assert_eq!(current, c.snapshot);
     drop(scope);
     assert!(!is_current_task_cancelled());
-    std::thread::sleep(Duration::from_millis(550));
-    assert_eq!(kv::job_leases::recover(&h, 64).unwrap().requeued, 1);
+    let expiry_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let counts = recover_fixture(&h);
+        assert_eq!(counts.unknown, 0);
+        if counts.requeued == 1 {
+            break;
+        }
+        assert_eq!(counts.requeued, 0);
+        assert!(
+            Instant::now() < expiry_deadline,
+            "detached claim did not expire"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 #[test]
 fn expired_child_stops_even_when_backend_cannot_renew() {
