@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.4
+
+See the [complete release notes](docs/release-notes-v0.5.4.md) for compatibility changes, storage requirements, and coordinated worker-upgrade guidance.
+
+### Added
+
+- Crash-recoverable durable job claims, renewable fenced execution leases, and inspectable `outcome_unknown` states. Only provably unstarted work is automatically requeued; general reconciliation remains follow-up work.
+- Terminal job-history expiry through KV TTL: 30 days for completed/cancelled records and 90 days for dead/failed/expired records by default. No cleanup jobs or legacy-history backfill.
+- Bounded process-local task-result/history retention and structured-concurrency cleanup.
+- Owner-local persistent ICMP probe handles through `ping_open`, `ping_probe`, and `ping_close`.
+- Native binary crypto, owned filesystem/temp resources, atomic file publication, monotonic timing, bounded TCP listeners/readers, and HTTP listener fixture options.
+- SQLite transaction-mode and busy-timeout options.
+
+### Fixed
+
+- PostgreSQL temporal String parameter encoding and bounded shared-pool lifecycle.
+- HTTP worker task capabilities, pre-spawn rejection of nested opaque captures, worker control-socket ownership/state preservation, and finite persistent ICMP receive deadlines.
+- Partial job-worker scale-up publication and state-persistence acknowledgement recovery without re-executing job bodies.
+
+### Compatibility
+
+- Safe HTTP redirects are now followed by default. Use `redirect: "manual"` for terminal 3xx behavior; see the [fetch migration guide](docs/migration-v0.5.4-fetch.md).
+- Magic-link response padding now defaults to zero; set `generic_response_floor_ms: 1200` to retain the previous floor.
+- Job workers require Redis 6.2+ or compatible Valkey for the Redis backend. Upgrade writers/workers sharing each queue together; mixed old/new claim protocols are unsupported. Recovery requires durable, non-evicting storage and does not provide universal exactly-once execution.
+- Shared PostgreSQL pools default to a process-local cap of 32; `NTNT_POSTGRES_MAX_SHARED_POOLS` configures the positive bound before first connect.
+- `NTNT_TASK_REMOVAL_TTL` now controls compact task-history age and defaults to 86400 seconds. Task handles are not permanent history records.
+
 ## 0.5.3
 
 The next published release after v0.5.1; v0.5.2 was an unpublished development version. This entry includes that work. See the [complete release notes](docs/release-notes/v0.5.3.md) for upgrade guidance, capability boundaries, and known limitations.
