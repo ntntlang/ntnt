@@ -11,6 +11,11 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - '.config/nextest.toml'
+      - 'scripts/release/**'
+      - 'tests/release/**'
+      - 'install.sh'
+      - 'install.ps1'
+      - 'docs/RELEASING.md'
 
 permissions:
   contents: read
@@ -166,10 +171,59 @@ jobs:
             ntnt-${{ matrix.name }}.${{ matrix.archive }}.sha256
           if-no-files-found: error  # Fail if artifact is missing
 
+  packaging-tests:
+    name: Installer and release structure tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install PyYAML==6.0.3
+      - run: python -m unittest discover -s tests/release -v
+      - run: bash -n install.sh scripts/release/*.sh
+
+  armv7:
+    name: Build Linux ARMv7 and QEMU smoke
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read pinned tool versions
+        id: pins
+        shell: bash
+        run: |
+          source scripts/release/armv7.env
+          echo "rust=$ARMV7_RUST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "cross=$ARMV7_CROSS_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.pins.outputs.rust }}
+          targets: armv7-unknown-linux-gnueabihf
+      - name: Install pinned cross
+        env:
+          CROSS_VERSION: ${{ steps.pins.outputs.cross }}
+        run: cargo install cross --version "$CROSS_VERSION" --locked
+      - name: Build, inspect ELF, smoke via QEMU and package
+        run: bash scripts/release/build-armv7.sh
+      - name: Upload ARMv7 release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntnt-linux-armv7
+          path: |
+            dist/ntnt-linux-armv7.tar.gz
+            dist/ntnt-linux-armv7.tar.gz.sha256
+            dist/ntnt-linux-armv7.provenance.json
+          if-no-files-found: error
+
   release:
     name: Create Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [build, docs]
+    needs: [build, docs, armv7, packaging-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -190,6 +244,13 @@ jobs:
           test -f artifacts/ntnt-linux-x64/ntnt-linux-x64.tar.gz
           test -f artifacts/ntnt-windows-x64/ntnt-windows-x64.zip
           test -f artifacts/documentation/STDLIB_REFERENCE.md
+          test -f artifacts/ntnt-linux-armv7/ntnt-linux-armv7.tar.gz
+          test -f artifacts/ntnt-linux-armv7/ntnt-linux-armv7.tar.gz.sha256
+          test -f artifacts/ntnt-linux-armv7/ntnt-linux-armv7.provenance.json
+          # All release archives must have a matching checksum before publishing.
+          for platform in macos-arm64 linux-x64 linux-armv7 windows-x64; do
+            (cd "artifacts/ntnt-$platform" && sha256sum -c *.sha256)
+          done
           echo "All artifacts present!"
 
       - name: Get version from tag
@@ -210,5 +271,8 @@ jobs:
             artifacts/ntnt-linux-x64/ntnt-linux-x64.tar.gz.sha256
             artifacts/ntnt-windows-x64/ntnt-windows-x64.zip
             artifacts/ntnt-windows-x64/ntnt-windows-x64.zip.sha256
+            artifacts/ntnt-linux-armv7/ntnt-linux-armv7.tar.gz
+            artifacts/ntnt-linux-armv7/ntnt-linux-armv7.tar.gz.sha256
+            artifacts/ntnt-linux-armv7/ntnt-linux-armv7.provenance.json
             artifacts/documentation/STDLIB_REFERENCE.md
           fail_on_unmatched_files: true
