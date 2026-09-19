@@ -118,6 +118,19 @@ printf 'Installed %s to %s/ntnt\n' "$BINARY_VERSION" "$INSTALL_DIR"
 printf 'Add to your shell PATH if needed: export PATH="$HOME/.local/bin:$PATH"\n'
 printf 'For shell completion: ntnt completions bash (or zsh/fish)\n'
 
+copy_starter_files() {
+    mkdir ./ntnt || return 1
+    for item in docs examples CLAUDE.md .github; do
+        if [ -e "$SOURCE/$item" ]; then
+            cp -R "$SOURCE/$item" ./ntnt/ || return 1
+        fi
+    done
+    if [ -d "$SOURCE/.claude/skills" ]; then
+        mkdir -p ./ntnt/.claude || return 1
+        cp -R "$SOURCE/.claude/skills" ./ntnt/.claude/ || return 1
+    fi
+}
+
 # Optional convenience files come from the SAME tag, never main. Do not overwrite
 # an existing project or clone. Starter-kit failure does not undo a valid binary.
 if "$STARTER_KIT"; then
@@ -127,15 +140,11 @@ if "$STARTER_KIT"; then
          tar -xzf "$TMP_DIR/source.tar.gz" -C "$TMP_DIR"; then
         SOURCE="$TMP_DIR/ntnt-${VERSION#v}"
         if [ -d "$SOURCE/docs" ]; then
-            mkdir ./ntnt
-            for item in docs examples CLAUDE.md .github; do
-                [ ! -e "$SOURCE/$item" ] || cp -R "$SOURCE/$item" ./ntnt/
-            done
-            if [ -d "$SOURCE/.claude/skills" ]; then
-                mkdir -p ./ntnt/.claude
-                cp -R "$SOURCE/.claude/skills" ./ntnt/.claude/
+            if copy_starter_files; then
+                printf 'Starter kit for %s saved to ./ntnt/\n' "$VERSION"
+            else
+                printf 'Starter kit incomplete; binary installation succeeded. Check ./ntnt before retrying.\n' >&2
             fi
-            printf 'Starter kit for %s saved to ./ntnt/\n' "$VERSION"
         else
             printf 'Starter kit unavailable; binary installation succeeded.\n' >&2
         fi

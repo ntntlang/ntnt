@@ -200,7 +200,7 @@ jobs:
           echo "rust=$ARMV7_RUST_VERSION" >> "$GITHUB_OUTPUT"
           echo "cross=$ARMV7_CROSS_VERSION" >> "$GITHUB_OUTPUT"
       - name: Install pinned Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # pinned action; toolchain pinned below
         with:
           toolchain: ${{ steps.pins.outputs.rust }}
           targets: armv7-unknown-linux-gnueabihf

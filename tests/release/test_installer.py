@@ -225,6 +225,28 @@ shutil.copyfile(source, out)
         self.assertEqual(len(self.requests()), 2)
         self.assertEqual((self.work / "ntnt/keep").read_text(), "keep")
 
+    def test_starter_kit_filesystem_failures_are_nonfatal(self):
+        with tarfile.open(self.fixtures / "v0.5.4.tar.gz", "w:gz") as tar:
+            data = b"tagged docs"
+            info = tarfile.TarInfo("ntnt-0.5.4/docs/README.md")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        for tool in ("mkdir", "cp"):
+            with self.subTest(tool=tool):
+                real = shutil.which(tool)
+                assert real is not None
+                (self.bin / tool).unlink()
+                self.script(tool, f'#!/bin/bash\ncase "$*" in *./ntnt*) exit 7;; esac\nexec "{real}" "$@"\n')
+                try:
+                    result = self.install("--version", "0.5.4")
+                    self.assertIn("Starter kit incomplete", result.stderr)
+                    self.assertTrue((self.home / ".local/bin/ntnt").is_file())
+                    self.assertIn("Installed ntnt 0.5.4", result.stdout)
+                finally:
+                    (self.bin / tool).unlink()
+                    (self.bin / tool).symlink_to(real)
+                    shutil.rmtree(self.work / "ntnt", ignore_errors=True)
+
     def test_starter_kit_download_failure_is_nonfatal(self):
         self.install("--version", "0.5.4")
         self.assertTrue((self.home / ".local/bin/ntnt").exists())

@@ -48,6 +48,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
         self.assertEqual(publish["with"]["fail_on_unmatched_files"], "true")
 
+    def test_new_toolchain_action_is_immutable(self):
+        action = next(s["uses"] for s in self.jobs["armv7"]["steps"]
+                      if s.get("uses", "").startswith("dtolnay/rust-toolchain@"))
+        self.assertRegex(action, r"^dtolnay/rust-toolchain@[0-9a-f]{40}$")
+
     def test_original_platform_matrix_preserved(self):
         matrix = self.jobs["build"]["strategy"]["matrix"]["include"]
         self.assertEqual({item["name"]: item["target"] for item in matrix}, {
