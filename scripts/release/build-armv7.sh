@@ -10,6 +10,9 @@ docker build --file scripts/release/Dockerfile.armv7 --tag "$IMAGE" scripts/rele
 IMAGE=$(docker image inspect "$IMAGE" --format '{{.Id}}')
 export CROSS_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_IMAGE="$IMAGE"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+# Build, smoke and packaging must consume the same output tree, even when the
+# caller or global Cargo config selects another directory.
+export CARGO_TARGET_DIR="$PWD/target"
 cross "+$ARMV7_RUST_VERSION" build --release --locked --target "$ARMV7_TARGET"
 # Direct QEMU execution: no binfmt registration and no privileged container.
 bash scripts/release/smoke-armv7.sh "$IMAGE"

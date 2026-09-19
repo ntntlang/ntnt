@@ -89,6 +89,36 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("--network none", smoke)
 
 
+class BuildDriverTests(unittest.TestCase):
+    def test_output_directory_cannot_be_redirected_to_stale_artifact(self):
+        with tempfile.TemporaryDirectory(prefix="ntnt-build-driver-") as directory:
+            root = Path(directory)
+            release = root / "scripts/release"
+            release.mkdir(parents=True)
+            for name in ("build-armv7.sh", "armv7.env"):
+                shutil.copyfile(ROOT / "scripts/release" / name, release / name)
+            (release / "smoke-armv7.sh").write_text("#!/bin/bash\nexit 0\n")
+            tools = root / "mock-bin"
+            tools.mkdir()
+            commands = {
+                "docker": '#!/bin/sh\nif [ "$1" = image ]; then printf "sha256:fixture\\n"; fi\n',
+                "rustc": '#!/bin/sh\nprintf "rustc 1.94.0 fixture\\n"\n',
+                "python3": '#!/bin/sh\nexit 0\n',
+                "cross": '#!/bin/sh\nif [ "$1" = --version ]; then printf "cross 0.2.5 fixture\\n"; else printf "%s" "$CARGO_TARGET_DIR" > "$CAPTURE"; fi\n',
+            }
+            for name, content in commands.items():
+                file = tools / name
+                file.write_text(content)
+                file.chmod(0o755)
+            capture = root / "capture"
+            env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"],
+                       CARGO_TARGET_DIR=str(root / "foreign-output"), CAPTURE=str(capture))
+            result = subprocess.run(["bash", str(release / "build-armv7.sh")], env=env,
+                                    text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(capture.read_text(), str(root / "target"))
+
+
 class PackageTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="ntnt-package-fixture-")
