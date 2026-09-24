@@ -1755,9 +1755,10 @@ pub fn init() -> HashMap<String, Value> {
     // disabling SSRF protection rejects this probe API rather than bypassing validation.
     // GET is the only method; redirect:manual/follow_redirects:false are optional.
     // All other fetch options, credentials, headers, and Secret values are rejected.
-    // Timeout includes DNS, setup, connect, TLS and response. Blocking system DNS can
-    // outlive caller waiting, but its worker cannot connect; at most 16 DNS workers
-    // run simultaneously, including timed-out workers (saturation returns an error).
+    // Timeout includes DNS, setup, connect, TLS and response. At most 16 complete probes
+    // run concurrently. Blocking system DNS can outlive caller waiting, but its worker
+    // cannot connect; at most 16 DNS workers run simultaneously, including timed-out
+    // workers. Probe or resolver saturation returns an error without target contact.
     // Body bytes and decoded UTF-8 are capped by NTNT_MAX_RESPONSE_SIZE (default 50 MiB).
     // @param options Probe options Map
     // @returns Result<Map, String> with status, body, headers and sample timestamps

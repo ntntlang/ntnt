@@ -9,6 +9,41 @@ use std::time::Duration;
 
 type ProbeResult<T> = std::result::Result<T, String>;
 
+const PROBE_LIMIT: usize = 16;
+static PROBES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[derive(Debug)]
+struct ProbeSlot {
+    counter: &'static std::sync::atomic::AtomicUsize,
+}
+
+impl ProbeSlot {
+    fn reserve() -> ProbeResult<Self> {
+        Self::reserve_from(&PROBES, PROBE_LIMIT)
+    }
+
+    fn reserve_from(
+        counter: &'static std::sync::atomic::AtomicUsize,
+        limit: usize,
+    ) -> ProbeResult<Self> {
+        use std::sync::atomic::Ordering;
+
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < limit).then_some(n + 1)
+            })
+            .map_err(|_| "HTTP probe worker busy")?;
+        Ok(Self { counter })
+    }
+}
+
+impl Drop for ProbeSlot {
+    fn drop(&mut self) {
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static TLS_ROOTS: std::cell::RefCell<Vec<rustls_pki_types::CertificateDer<'static>>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -61,6 +96,9 @@ pub(super) fn fetch(opts: &HashMap<String, Value>) -> ProbeResult<Value> {
     };
     let deadline = crate::stdlib::send_deadline::SendDeadline::parse(Some(opts))?;
     let url = super::redirect_url(url)?;
+    // Hold one process-wide admission slot from resolution through the joined I/O
+    // worker so slow targets cannot create an unbounded number of runtimes/threads.
+    let _probe_slot = ProbeSlot::reserve()?;
     let address = resolve_target(url.as_str(), expires)?;
     let uri: hyper::Uri = url.as_str().parse().map_err(|_| "Invalid probe URL")?;
     let request = Request::get(uri.path_and_query().map(|p| p.as_str()).unwrap_or("/"))
@@ -431,6 +469,21 @@ mod tests {
         let _ = stream.read(&mut buf);
         let _ = stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    }
+
+    #[test]
+    fn probe_worker_admission_is_bounded_and_released() {
+        static TEST_PROBES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        let slots: Vec<_> = (0..2)
+            .map(|_| super::ProbeSlot::reserve_from(&TEST_PROBES, 2).unwrap())
+            .collect();
+        assert_eq!(
+            super::ProbeSlot::reserve_from(&TEST_PROBES, 2).unwrap_err(),
+            "HTTP probe worker busy"
+        );
+        drop(slots);
+        assert!(super::ProbeSlot::reserve_from(&TEST_PROBES, 2).is_ok());
     }
 
     #[test]

@@ -39,7 +39,9 @@ An ambiguous post-send failure is not permission to repeat the measurement.
 - `std/http.probe_fetch`: bounded monitoring GET over a fresh, direct HTTP/1.1
   connection. The first TCP connect attempt starts the sample, before TLS and HTTP
   exchange. Redirects are returned rather than followed. There is no pooled
-  connection, proxy, or automatic HTTP-request replay. Ordinary `fetch` is unchanged.
+  connection, proxy, or automatic HTTP-request replay. At most 16 complete probes run
+  concurrently process-wide; saturation fails before target contact. Ordinary `fetch`
+  is unchanged.
 - `std/net.dns_lookup`: the first UDP send, or a TCP connection attempt when DNS
   starts over TCP, starts resolution. Deadline-enabled resolution uses Hickory's
   normal DNS behavior through a guarded runtime provider, not a replacement DNS

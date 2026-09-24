@@ -4443,6 +4443,10 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 key_type: Box::new(Type::String),
                 value_type: Box::new(Type::Any),
             };
+            sig!("probe_fetch", ["options" => string_map.clone()], Type::Generic {
+                name: "Result".to_string(),
+                args: vec![string_map.clone(), Type::String],
+            });
             sig!("fetch", ["url_or_options" => Type::Union(vec![Type::String, Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }])], Type::Generic {
                 name: "Result".to_string(),
                 args: vec![Type::Named("Response".to_string()), Type::String],
@@ -5716,6 +5720,33 @@ mod tests {
             "#,
         );
         assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("Type mismatch"));
+        assert!(errs[0].message.contains("String"));
+        assert!(errs[0].message.contains("Result"));
+    }
+
+    #[test]
+    fn test_std_http_probe_fetch_signature_checks_args() {
+        let errs = check_errors(
+            r#"
+            import { probe_fetch } from "std/http"
+            probe_fetch("https://example.com")
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs[0].message.contains("expected Map"));
+        assert!(errs[0].message.contains("got String"));
+    }
+
+    #[test]
+    fn test_std_http_probe_fetch_preserves_its_result_type() {
+        let errs = check_errors(
+            r#"
+            import { probe_fetch } from "std/http"
+            let result: String = probe_fetch(map { "url": "https://example.com" })
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
         assert!(errs[0].message.contains("Type mismatch"));
         assert!(errs[0].message.contains("String"));
         assert!(errs[0].message.contains("Result"));
