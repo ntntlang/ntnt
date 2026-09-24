@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.5.4
+> Last updated: v0.5.5
 
 ## Table of Contents
 
