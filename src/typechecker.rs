@@ -922,15 +922,61 @@ impl TypeContext {
         object_type: &Type,
         argument_types: &[Type],
     ) -> Option<Type> {
+        let arg_types: Vec<Type> = std::iter::once(object_type.clone())
+            .chain(argument_types.iter().cloned())
+            .collect();
+        let line = self.find_line_near(&format!(".{}(", method));
+
+        // Runtime UFCS resolves lexical bindings before global functions and
+        // builtins. Preserve that shadowing order for both checks and inference.
+        match self.lookup(method).cloned() {
+            Some(Type::Function {
+                params,
+                return_type,
+            }) => {
+                if arg_types.len() != params.len() {
+                    self.error(
+                        format!(
+                            "Function '{}' expects {} argument(s), got {}",
+                            method,
+                            params.len(),
+                            arg_types.len()
+                        ),
+                        line,
+                        None,
+                    );
+                    return Some(*return_type);
+                }
+                for (i, (arg_type, param_type)) in arg_types.iter().zip(params.iter()).enumerate() {
+                    if !self.compatible(arg_type, param_type)
+                        && !matches!(arg_type, Type::Any)
+                        && !matches!(param_type, Type::Any)
+                    {
+                        self.error(
+                            format!(
+                                "Argument {} of '{}': expected {} but got {}",
+                                i + 1,
+                                method,
+                                param_type.name(),
+                                arg_type.name()
+                            ),
+                            line,
+                            Some(format!("Expected {}", param_type.name())),
+                        );
+                    }
+                }
+                return Some(*return_type);
+            }
+            Some(Type::Any) => return Some(Type::Any),
+            Some(_) => return None,
+            None => {}
+        }
+
         let sig = self
             .functions
             .get(method)
             .cloned()
             .or_else(|| self.builtin_sigs.get(method).cloned())?;
-        let arg_types: Vec<Type> = std::iter::once(object_type.clone())
-            .chain(argument_types.iter().cloned())
-            .collect();
-        let line = self.find_line_near(&format!(".{}(", method));
 
         let wrong_arity = if sig.variadic {
             arg_types.len() < sig.required_params
@@ -5994,6 +6040,27 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("expected"));
         assert!(errs[0].message.contains("String"));
+    }
+
+    #[test]
+    fn test_dot_call_uses_shadowing_callable_signature() {
+        let errs = check_errors(
+            r#"
+            let round = fn(x: String) -> String { return x }
+            let result: String = "abc".round()
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
+
+        let errs = check_errors(
+            r#"
+            let round = fn(x: String) -> String { return x }
+            let result: Int = "abc".round()
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs[0].message.contains("declared as Int"));
+        assert!(errs[0].message.contains("initialized with String"));
     }
 
     #[test]
