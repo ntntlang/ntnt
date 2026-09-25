@@ -114,9 +114,6 @@ pub struct TypeContext {
     /// Whole-module aliases by lexical scope, parallel to `scopes`. Calls on
     /// these values dispatch to exported fields rather than through UFCS.
     module_aliases: Vec<HashSet<String>>,
-    /// Minimum arity for lexically bound lambdas, parallel to `scopes`.
-    /// `Type::Function` intentionally describes types, not default values.
-    callable_required_params: Vec<HashMap<String, usize>>,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -681,7 +678,6 @@ impl TypeContext {
             strict_lint: false,
             has_unresolved_import: false,
             module_aliases: vec![HashSet::new()],
-            callable_required_params: vec![HashMap::new()],
             current_file: None,
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
@@ -696,13 +692,11 @@ impl TypeContext {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.module_aliases.push(HashSet::new());
-        self.callable_required_params.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.module_aliases.pop();
-        self.callable_required_params.pop();
     }
 
     fn bind(&mut self, name: &str, typ: Type) {
@@ -711,9 +705,6 @@ impl TypeContext {
         }
         if let Some(aliases) = self.module_aliases.last_mut() {
             aliases.remove(name);
-        }
-        if let Some(required_params) = self.callable_required_params.last_mut() {
-            required_params.remove(name);
         }
     }
 
@@ -746,16 +737,6 @@ impl TypeContext {
             }
         }
         false
-    }
-
-    fn callable_required_params(&self, name: &str) -> Option<usize> {
-        for (scope, required_params) in self.scopes.iter().zip(&self.callable_required_params).rev()
-        {
-            if scope.contains_key(name) {
-                return required_params.get(name).copied();
-            }
-        }
-        None
     }
 
     // ── Diagnostics ───────────────────────────────────────────────────
@@ -951,11 +932,9 @@ impl TypeContext {
         match self.lookup(method).cloned() {
             Some(Type::Function {
                 params,
+                required_params,
                 return_type,
             }) => {
-                let required_params = self
-                    .callable_required_params(method)
-                    .unwrap_or(params.len());
                 if arg_types.len() < required_params || arg_types.len() > params.len() {
                     let expected = if required_params == params.len() {
                         params.len().to_string()
@@ -1313,6 +1292,7 @@ impl TypeContext {
                 return_type,
             } => Type::Function {
                 params: params.iter().map(|t| self.resolve_type_expr(t)).collect(),
+                required_params: params.len(),
                 return_type: Box::new(self.resolve_type_expr(return_type)),
             },
             TypeExpr::Generic { name, args } => {
@@ -1866,17 +1846,6 @@ impl TypeContext {
                     self.bind_pattern(pattern, &inferred);
                 } else {
                     self.bind(name, inferred);
-                }
-                if pattern.is_none() {
-                    if let Some(Expression::Lambda { params, .. }) = value {
-                        let required_params = params
-                            .iter()
-                            .filter(|param| param.default.is_none())
-                            .count();
-                        if let Some(callables) = self.callable_required_params.last_mut() {
-                            callables.insert(name.clone(), required_params);
-                        }
-                    }
                 }
             }
 
@@ -3138,6 +3107,10 @@ impl TypeContext {
                 self.pop_scope();
                 Type::Function {
                     params: param_types,
+                    required_params: params
+                        .iter()
+                        .filter(|param| param.default.is_none())
+                        .count(),
                     return_type: Box::new(ret),
                 }
             }
@@ -3371,6 +3344,10 @@ impl TypeContext {
         self.pop_scope();
         Type::Function {
             params: param_types,
+            required_params: params
+                .iter()
+                .filter(|param| param.default.is_none())
+                .count(),
             return_type: Box::new(ret),
         }
     }
@@ -3829,10 +3806,12 @@ impl TypeContext {
             Type::Function {
                 params: fn_params,
                 return_type: fn_ret,
+                ..
             } => {
                 if let Type::Function {
                     params: concrete_params,
                     return_type: concrete_ret,
+                    ..
                 } = concrete
                 {
                     for (fp, cp) in fn_params.iter().zip(concrete_params.iter()) {
@@ -3865,12 +3844,14 @@ impl TypeContext {
             }
             Type::Function {
                 params,
+                required_params,
                 return_type,
             } => Type::Function {
                 params: params
                     .iter()
                     .map(|p| Self::substitute_type_params(p, bindings))
                     .collect(),
+                required_params: *required_params,
                 return_type: Box::new(Self::substitute_type_params(return_type, bindings)),
             },
             Type::Tuple(types) => Type::Tuple(
@@ -4556,6 +4537,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     "array" => Type::Array(Box::new(Type::Any)),
                     "comparator" => Type::Function {
                         params: vec![Type::Any, Type::Any],
+                        required_params: 2,
                         return_type: Box::new(Type::Int),
                     }
                 ],
@@ -6102,14 +6084,25 @@ mod tests {
     }
 
     #[test]
-    fn test_dot_call_allows_defaulted_lambda_arguments() {
+    fn test_dot_call_preserves_callable_arity_through_aliases_and_assignments() {
         let errs = check_errors(
             r#"
             let add = fn(x: Int, y: Int = 1) -> Int { return x + y }
-            let result: Int = 2.add()
+            let alias = add
+            let result: Int = 2.alias()
             "#,
         );
         assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
+
+        let errs = check_errors(
+            r#"
+            let add = fn(x: Int, y: Int = 1) -> Int { return x + y }
+            add = fn(x: Int, y: Int) -> Int { return x + y }
+            2.add()
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs[0].message.contains("expects 2 argument(s), got 1"));
     }
 
     #[test]
@@ -8713,6 +8706,7 @@ let n: Int = double(5)"#;
                         "transform".to_string(),
                         Type::Function {
                             params: vec![Type::Int],
+                            required_params: 1,
                             return_type: Box::new(Type::String),
                         },
                     ),
