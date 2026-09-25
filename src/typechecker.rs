@@ -4,7 +4,7 @@
 //! Produces diagnostics (errors/warnings) without blocking execution.
 //! Uses gradual typing: untyped code defaults to `Any`, which is compatible with everything.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::types::Type;
@@ -111,6 +111,9 @@ pub struct TypeContext {
     /// True when an import could not be resolved — unknown-method warnings
     /// are suppressed because unseen imports make the check unreliable
     has_unresolved_import: bool,
+    /// Whole-module aliases by lexical scope, parallel to `scopes`. Calls on
+    /// these values dispatch to exported fields rather than through UFCS.
+    module_aliases: Vec<HashSet<String>>,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -674,6 +677,7 @@ impl TypeContext {
             search_after: 0,
             strict_lint: false,
             has_unresolved_import: false,
+            module_aliases: vec![HashSet::new()],
             current_file: None,
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
@@ -687,10 +691,12 @@ impl TypeContext {
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.module_aliases.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.module_aliases.pop();
     }
 
     fn bind(&mut self, name: &str, typ: Type) {
@@ -719,6 +725,15 @@ impl TypeContext {
             }
         }
         None
+    }
+
+    fn is_module_alias(&self, name: &str) -> bool {
+        for (scope, aliases) in self.scopes.iter().zip(&self.module_aliases).rev() {
+            if scope.contains_key(name) {
+                return aliases.contains(name);
+            }
+        }
+        false
     }
 
     // ── Diagnostics ───────────────────────────────────────────────────
@@ -968,7 +983,24 @@ impl TypeContext {
         if sig.type_params.is_empty() {
             Some(sig.return_type)
         } else {
-            let (bindings, _) = Self::unify_type_params(&sig.type_params, &sig.params, &arg_types);
+            let (bindings, conflicts) =
+                Self::unify_type_params(&sig.type_params, &sig.params, &arg_types);
+            for (param_name, first_type, second_type) in conflicts {
+                self.error(
+                    format!(
+                        "Type parameter '{}' in '{}': conflicting types {} and {}",
+                        param_name,
+                        method,
+                        first_type.name(),
+                        second_type.name()
+                    ),
+                    line,
+                    Some(format!(
+                        "All arguments for '{}' must have the same type",
+                        param_name
+                    )),
+                );
+            }
             Some(Self::substitute_type_params(&sig.return_type, &bindings))
         }
     }
@@ -2551,6 +2583,10 @@ impl TypeContext {
                 self.check_unknown_method(object, method, &obj_type);
                 let method_arg_types: Vec<Type> =
                     arguments.iter().map(|a| self.infer_expression(a)).collect();
+                let is_module_call = matches!(
+                    object.as_ref(),
+                    Expression::Identifier(name) if self.is_module_alias(name)
+                );
                 // Method calls: infer return type from known methods
                 match method.as_str() {
                     "unwrap" | "unwrap_or" => match &obj_type {
@@ -2624,9 +2660,10 @@ impl TypeContext {
                         Type::Map { value_type, .. } => (**value_type).clone(),
                         _ => Type::Any,
                     },
-                    _ => self
+                    "int_or" if !is_module_call => self
                         .infer_ufcs_signature(method, &obj_type, &method_arg_types)
                         .unwrap_or(Type::Any),
+                    _ => Type::Any,
                 }
             }
 
@@ -4030,6 +4067,9 @@ impl TypeContext {
         // If it's a module alias import, bind the module name
         if let Some(alias_name) = alias {
             self.bind(alias_name, Type::Any);
+            if let Some(aliases) = self.module_aliases.last_mut() {
+                aliases.insert(alias_name.to_string());
+            }
             return;
         }
 
@@ -5638,6 +5678,34 @@ mod tests {
             }),
             "missing fallback-type diagnostic: {errs:?}"
         );
+    }
+
+    #[test]
+    fn test_int_or_dot_call_preserves_generic_conflicts_when_shadowed() {
+        let errs = check_errors(
+            r#"
+            fn int_or<T>(value: T, fallback: T) -> T { return value }
+            1.int_or("not an int")
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs[0].message.contains("conflicting types Int and String"));
+    }
+
+    #[test]
+    fn test_module_int_or_call_does_not_gain_ufcs_receiver() {
+        let errs = check_errors(
+            r#"
+            import "./conversion.tnt" as conversion
+            conversion.int_or("42", 0)
+
+            fn parse_shadowed() -> Int {
+                let conversion = "42"
+                return conversion.int_or(0)
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
     }
 
     // ── Return type checking ────────────────────────────────────
