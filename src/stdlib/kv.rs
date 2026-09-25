@@ -707,22 +707,32 @@ impl RedisKV {
         // Use envelope format — single key, no __type sibling
         let serialized = serialize_value_envelope(value)?;
 
-        match ttl_seconds {
-            Some(ttl) => {
-                self.conn
-                    .set_ex::<_, _, ()>(key, &serialized, ttl as u64)
-                    .map_err(|e| IntentError::runtime_error(format!("Redis set error: {}", e)))?;
-            }
-            None => {
-                self.conn
-                    .set::<_, _, ()>(key, &serialized)
-                    .map_err(|e| IntentError::runtime_error(format!("Redis set error: {}", e)))?;
-            }
-        }
-
-        // Clean up legacy __type key if it exists (migration)
         let type_key = format!("{}:__type", key);
-        let _: std::result::Result<i32, _> = self.conn.del(&type_key);
+        if job_leases::is_pending_key(key) {
+            job_leases::watch_ready_index(&mut self.conn)
+                .map_err(|e| IntentError::runtime_error(format!("Redis set error: {e}")))?;
+            let mut tx = redis::pipe();
+            tx.atomic().cmd("SET").arg(key).arg(&serialized);
+            if let Some(ttl) = ttl_seconds {
+                tx.arg("EX").arg(ttl);
+            }
+            tx.ignore().del(&type_key).ignore();
+            job_leases::add_ready(&mut tx, key);
+            tx.query::<()>(&mut self.conn)
+                .map_err(|e| IntentError::runtime_error(format!("Redis set error: {e}")))?;
+        } else {
+            match ttl_seconds {
+                Some(ttl) => self
+                    .conn
+                    .set_ex::<_, _, ()>(key, &serialized, ttl as u64)
+                    .map_err(|e| IntentError::runtime_error(format!("Redis set error: {e}")))?,
+                None => self
+                    .conn
+                    .set::<_, _, ()>(key, &serialized)
+                    .map_err(|e| IntentError::runtime_error(format!("Redis set error: {e}")))?,
+            }
+            let _: std::result::Result<i32, _> = self.conn.del(&type_key);
+        }
 
         Ok(())
     }
@@ -734,21 +744,52 @@ impl RedisKV {
     pub fn set_nx(&mut self, key: &str, value: &Value, ttl_seconds: Option<i64>) -> Result<bool> {
         let serialized = serialize_value_envelope(value)?;
 
-        let result: Option<String> = match ttl_seconds {
-            Some(ttl) => redis::cmd("SET")
-                .arg(key)
-                .arg(&serialized)
-                .arg("NX")
-                .arg("EX")
-                .arg(ttl)
-                .query(&mut self.conn)
-                .map_err(|e| IntentError::runtime_error(format!("Redis set_nx error: {}", e)))?,
-            None => redis::cmd("SET")
-                .arg(key)
-                .arg(&serialized)
-                .arg("NX")
-                .query(&mut self.conn)
-                .map_err(|e| IntentError::runtime_error(format!("Redis set_nx error: {}", e)))?,
+        let result: Option<String> = if job_leases::is_pending_key(key) {
+            let inserted: i32 = redis::Script::new(
+                r#"
+                    local kind = redis.call('TYPE', KEYS[2])
+                    if type(kind) == 'table' then kind = kind['ok'] end
+                    if kind ~= 'none' and kind ~= 'zset' then
+                        return redis.error_reply('WRONGTYPE job ready index must be a sorted set')
+                    end
+                    local result
+                    if ARGV[2] == '' then
+                        result = redis.call('SET', KEYS[1], ARGV[1], 'NX')
+                    else
+                        result = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2])
+                    end
+                    if result then redis.call('ZADD', KEYS[2], 0, KEYS[1]); return 1 end
+                    return 0
+                "#,
+            )
+            .key(key)
+            .key(job_leases::READY)
+            .arg(&serialized)
+            .arg(ttl_seconds.map_or_else(String::new, |ttl| ttl.to_string()))
+            .invoke(&mut self.conn)
+            .map_err(|e| IntentError::runtime_error(format!("Redis set_nx error: {e}")))?;
+            return Ok(inserted == 1);
+        } else {
+            match ttl_seconds {
+                Some(ttl) => redis::cmd("SET")
+                    .arg(key)
+                    .arg(&serialized)
+                    .arg("NX")
+                    .arg("EX")
+                    .arg(ttl)
+                    .query(&mut self.conn)
+                    .map_err(|e| {
+                        IntentError::runtime_error(format!("Redis set_nx error: {}", e))
+                    })?,
+                None => redis::cmd("SET")
+                    .arg(key)
+                    .arg(&serialized)
+                    .arg("NX")
+                    .query(&mut self.conn)
+                    .map_err(|e| {
+                        IntentError::runtime_error(format!("Redis set_nx error: {}", e))
+                    })?,
+            }
         };
 
         // Redis returns "OK" if set, nil if key existed
@@ -758,11 +799,21 @@ impl RedisKV {
     /// Delete a key
     pub fn del(&mut self, key: &str) -> Result<bool> {
         let type_key = format!("{}:__type", key);
+        if job_leases::is_pending_key(key) {
+            job_leases::watch_ready_index(&mut self.conn)
+                .map_err(|e| IntentError::runtime_error(format!("Redis del error: {e}")))?;
+            let mut tx = redis::pipe();
+            tx.atomic().del(key).del(&type_key);
+            job_leases::remove_ready(&mut tx, key);
+            let deleted: Vec<i32> = tx
+                .query(&mut self.conn)
+                .map_err(|e| IntentError::runtime_error(format!("Redis del error: {e}")))?;
+            return Ok(deleted.first().copied().unwrap_or_default() > 0);
+        }
         let deleted: i32 = self
             .conn
             .del(key)
-            .map_err(|e| IntentError::runtime_error(format!("Redis del error: {}", e)))?;
-        // Also delete the type key
+            .map_err(|e| IntentError::runtime_error(format!("Redis del error: {e}")))?;
         let _: i32 = self.conn.del(&type_key).unwrap_or(0);
         Ok(deleted > 0)
     }
@@ -864,61 +915,70 @@ impl RedisKV {
         floor: Option<&str>,
         ceiling: Option<&str>,
     ) -> Result<Option<(String, Value)>> {
-        let pattern = format!("{}*", prefix);
-        let ceil = ceiling.unwrap_or("");
-        let fl = floor.unwrap_or("");
-
-        // Lua script runs atomically in Redis — KEYS+sort+GET+DEL in one operation.
-        // Note: KEYS scans the entire Redis keyspace (O(total keys), not O(matching keys)).
-        // This is acceptable for typical job queue sizes. For very large Redis instances
-        // with millions of non-job keys, consider a sorted-set approach instead.
-        let lua_script = r#"
-            local keys = redis.call('KEYS', ARGV[1])
-            if #keys == 0 then return nil end
-            table.sort(keys)
-            local floor_val = ARGV[2]
-            local ceiling = ARGV[3]
-            local past_floor = (floor_val == '')
-            for _, key in ipairs(keys) do
-                -- Skip internal type metadata keys
-                if not string.find(key, ':__type$') then
-                    -- Floor filter: keys are sorted ascending, so once we pass floor
-                    -- all subsequent keys are also past it — stop checking
-                    if not past_floor then
-                        if key >= floor_val then
-                            past_floor = true
-                        end
-                    end
-                    if past_floor then
-                        if ceiling ~= '' and key > ceiling then
-                            -- Early exit: all remaining keys exceed ceiling (sorted ascending)
-                            break
-                        end
-                        local val = redis.call('GET', key)
-                        if val then
-                            -- Read legacy type hint before deleting
-                            local type_hint = redis.call('GET', key .. ':__type')
-                            redis.call('DEL', key)
-                            redis.call('DEL', key .. ':__type')
-                            if type_hint then
-                                return {key, val, type_hint}
+        let result: redis::Value = if prefix.starts_with("jobs:pending:") {
+            job_leases::ensure_ready_index(&mut self.conn)
+                .map_err(|e| IntentError::runtime_error(format!("Redis claim error: {e}")))?;
+            let min = floor.map_or_else(|| format!("[{prefix}"), |value| format!("[{value}"));
+            let max = ceiling.map_or_else(|| format!("[{prefix}~"), |value| format!("[{value}"));
+            redis::cmd("EVAL")
+                .arg(
+                    r#"
+                        local candidates = redis.call('ZRANGEBYLEX', KEYS[1], ARGV[1], ARGV[2], 'LIMIT', 0, 256)
+                        for _, key in ipairs(candidates) do
+                            local val = redis.call('GET', key)
+                            redis.call('ZREM', KEYS[1], key)
+                            if val then
+                                local type_hint = redis.call('GET', key .. ':__type')
+                                redis.call('DEL', key)
+                                redis.call('DEL', key .. ':__type')
+                                if type_hint then return {key, val, type_hint} end
+                                return {key, val}
                             end
-                            return {key, val}
                         end
-                    end
-                end
-            end
-            return nil
-        "#;
-
-        let result: redis::Value = redis::cmd("EVAL")
-            .arg(lua_script)
-            .arg(0) // no KEYS args, using ARGV only
-            .arg(&pattern)
-            .arg(fl)
-            .arg(ceil)
-            .query(&mut self.conn)
-            .map_err(|e| IntentError::runtime_error(format!("Redis claim error: {}", e)))?;
+                        return nil
+                    "#,
+                )
+                .arg(1)
+                .arg(job_leases::READY)
+                .arg(min)
+                .arg(max)
+                .query(&mut self.conn)
+                .map_err(|e| IntentError::runtime_error(format!("Redis claim error: {e}")))?
+        } else {
+            let candidates: Vec<String> = self
+                .list(Some(prefix))?
+                .into_iter()
+                .filter(|key| {
+                    floor.is_none_or(|value| key.as_str() >= value)
+                        && ceiling.is_none_or(|value| key.as_str() <= value)
+                })
+                .collect();
+            if candidates.is_empty() {
+                return Ok(None);
+            }
+            let mut command = redis::cmd("EVAL");
+            command
+                .arg(
+                    r#"
+                        for _, key in ipairs(ARGV) do
+                            local val = redis.call('GET', key)
+                            if val then
+                                local type_hint = redis.call('GET', key .. ':__type')
+                                redis.call('DEL', key)
+                                redis.call('DEL', key .. ':__type')
+                                if type_hint then return {key, val, type_hint} end
+                                return {key, val}
+                            end
+                        end
+                        return nil
+                    "#,
+                )
+                .arg(0)
+                .arg(candidates);
+            command
+                .query(&mut self.conn)
+                .map_err(|e| IntentError::runtime_error(format!("Redis claim error: {e}")))?
+        };
 
         match result {
             redis::Value::Array(ref items) if items.len() >= 2 => {

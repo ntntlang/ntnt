@@ -8,7 +8,145 @@ use serde::{Deserialize, Serialize};
 type R<T> = redis::RedisResult<T>;
 const DUE: &str = "jobs:lease_due";
 const DUE_PREFIX: &str = "jobs:lease_due:";
+pub(super) const READY: &str = "jobs:ready";
+const READY_INITIALIZED: &str = "jobs:ready:initialized";
+const READY_MIGRATION_LOCK: &str = "jobs:ready:migration_lock";
 const MAX_RECOVERY: usize = 256;
+
+pub(super) fn is_pending_key(key: &str) -> bool {
+    key.starts_with("jobs:pending:") && !key.ends_with(":__type")
+}
+
+pub(super) fn add_ready(tx: &mut redis::Pipeline, key: &str) {
+    if is_pending_key(key) {
+        tx.cmd("ZADD").arg(READY).arg(0).arg(key).ignore();
+    }
+}
+
+pub(super) fn remove_ready(tx: &mut redis::Pipeline, key: &str) {
+    if is_pending_key(key) {
+        tx.cmd("ZREM").arg(READY).arg(key).ignore();
+    }
+}
+
+pub(super) fn watch_ready_index(conn: &mut redis::Connection) -> R<()> {
+    redis::cmd("WATCH").arg(READY).query::<()>(conn)?;
+    let kind: String = redis::cmd("TYPE").arg(READY).query(conn)?;
+    if kind != "none" && kind != "zset" {
+        let _ = redis::cmd("UNWATCH").query::<()>(conn);
+        return Err(redis::RedisError::from((
+            redis::ErrorKind::TypeError,
+            "job ready index has the wrong Redis type",
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_ready_index(conn: &mut redis::Connection) -> R<()> {
+    if redis::cmd("EXISTS")
+        .arg(READY_INITIALIZED)
+        .query::<bool>(conn)?
+    {
+        return Ok(());
+    }
+
+    let token = uuid::Uuid::new_v4().to_string();
+    let acquired: Option<String> = redis::cmd("SET")
+        .arg(READY_MIGRATION_LOCK)
+        .arg(&token)
+        .arg("NX")
+        .arg("EX")
+        .arg(300)
+        .query(conn)?;
+    if acquired.is_none() {
+        if redis::cmd("EXISTS")
+            .arg(READY_INITIALIZED)
+            .query::<bool>(conn)?
+        {
+            return Ok(());
+        }
+        return Err(redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "job ready-index migration is already running; retry",
+        )));
+    }
+
+    let result = (|| {
+        let kind: String = redis::cmd("TYPE").arg(READY).query(conn)?;
+        if kind != "none" && kind != "zset" {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::TypeError,
+                "job ready index has the wrong Redis type",
+            )));
+        }
+        let add_live = redis::Script::new(
+            r#"
+                local kind = redis.call('TYPE', KEYS[1])
+                if type(kind) == 'table' then kind = kind['ok'] end
+                if kind ~= 'none' and kind ~= 'zset' then
+                    return redis.error_reply('WRONGTYPE job ready index must be a sorted set')
+                end
+                for i = 1, #ARGV do
+                    if redis.call('EXISTS', ARGV[i]) == 1 then
+                        redis.call('ZADD', KEYS[1], 0, ARGV[i])
+                    end
+                end
+                return 1
+            "#,
+        );
+        let mut cursor = 0u64;
+        loop {
+            let (next, mut batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("jobs:pending:*")
+                .arg("COUNT")
+                .arg(256)
+                .query(conn)?;
+            batch.retain(|key| is_pending_key(key));
+            if !batch.is_empty() {
+                let mut invocation = add_live.prepare_invoke();
+                invocation.key(READY);
+                for key in batch {
+                    invocation.arg(key);
+                }
+                invocation.invoke::<i32>(conn)?;
+            }
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
+        }
+        redis::cmd("SET")
+            .arg(READY_INITIALIZED)
+            .arg("1")
+            .query::<()>(conn)
+    })();
+    let _ = redis::Script::new(
+        "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+    )
+    .key(READY_MIGRATION_LOCK)
+    .arg(token)
+    .invoke::<i32>(conn);
+    result
+}
+
+fn ready_candidate(conn: &mut redis::Connection, floor: &str, ceiling: &str) -> R<Option<String>> {
+    redis::Script::new(
+        r#"
+            local candidates = redis.call('ZRANGEBYLEX', KEYS[1], ARGV[1], ARGV[2], 'LIMIT', 0, 256)
+            for _, key in ipairs(candidates) do
+                if redis.call('EXISTS', key) == 1 then return key end
+                redis.call('ZREM', KEYS[1], key)
+            end
+            return nil
+        "#,
+    )
+    .key(READY)
+    .arg(format!("[{floor}"))
+    .arg(format!("[{ceiling}"))
+    .invoke(conn)
+}
 
 pub(crate) struct Claim {
     pub snapshot: Snapshot,
@@ -79,6 +217,7 @@ struct Store<'a> {
     redis: Option<&'a mut redis::Connection>,
     writes: redis::Pipeline,
     index_checked: bool,
+    ready_checked: bool,
 }
 impl<'a> Store<'a> {
     fn sql(conn: &'a Connection) -> Self {
@@ -87,6 +226,7 @@ impl<'a> Store<'a> {
             redis: None,
             writes: redis::pipe(),
             index_checked: false,
+            ready_checked: false,
         }
     }
     fn redis(conn: &'a mut redis::Connection) -> Self {
@@ -97,6 +237,7 @@ impl<'a> Store<'a> {
             redis: Some(conn),
             writes,
             index_checked: false,
+            ready_checked: false,
         }
     }
     fn now(&mut self) -> R<i64> {
@@ -146,11 +287,15 @@ impl<'a> Store<'a> {
         if let Some(conn) = self.sql {
             conn.execute("INSERT INTO _kv(key,value,type,expires_at) VALUES(?,?,?,NULL) ON CONFLICT(key) DO UPDATE SET value=excluded.value,type=excluded.type,expires_at=NULL", params![key, snapshot.raw, snapshot.kind]).map_err(err)?;
         } else {
+            if is_pending_key(key) {
+                self.ready_index()?;
+            }
             self.writes
                 .set(key, &snapshot.raw)
                 .ignore()
                 .del(format!("{key}:__type"))
                 .ignore();
+            add_ready(&mut self.writes, key);
         }
         Ok(())
     }
@@ -159,11 +304,15 @@ impl<'a> Store<'a> {
             conn.execute("DELETE FROM _kv WHERE key=?", [key])
                 .map_err(err)?;
         } else {
+            if is_pending_key(key) {
+                self.ready_index()?;
+            }
             self.writes
                 .cmd("DEL")
                 .arg(key)
                 .arg(format!("{key}:__type"))
                 .ignore();
+            remove_ready(&mut self.writes, key);
         }
         Ok(())
     }
@@ -194,6 +343,16 @@ impl<'a> Store<'a> {
             }
         }
         self.index_checked = true;
+        Ok(())
+    }
+    fn ready_index(&mut self) -> R<()> {
+        if self.ready_checked {
+            return Ok(());
+        }
+        if let Some(conn) = self.redis.as_deref_mut() {
+            watch_ready_index(conn)?;
+        }
+        self.ready_checked = true;
         Ok(())
     }
     fn remove_due(&mut self, member: &str) -> R<()> {
@@ -358,27 +517,9 @@ pub(crate) fn claim(
         let candidate: Option<String> = if let Some(conn) = store.sql {
             conn.query_row("SELECT key FROM _kv WHERE key LIKE 'jobs:pending:%' AND key>=? AND key<=? AND (expires_at IS NULL OR expires_at>?) ORDER BY key LIMIT 1", params![floor, ceiling, now/1000], |r| r.get(0)).optional().map_err(err)?
         } else {
-            // Preserve lexicographic ready ordering. SCAN is only the existing
-            // ready selection path, never recovery/history discovery.
-            let mut keys = Vec::new();
-            let mut cursor = 0u64;
-            loop {
-                let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                    .arg(cursor)
-                    .arg("MATCH")
-                    .arg("jobs:pending:*")
-                    .arg("COUNT")
-                    .arg(256)
-                    .query(store.redis.as_deref_mut().unwrap())?;
-                keys.extend(batch.into_iter().filter(|k| {
-                    !k.ends_with(":__type") && k.as_str() >= floor && k.as_str() <= ceiling
-                }));
-                cursor = next;
-                if cursor == 0 {
-                    break;
-                }
-            }
-            keys.into_iter().min()
+            let conn = store.redis.as_deref_mut().unwrap();
+            ensure_ready_index(conn)?;
+            ready_candidate(conn, floor, ceiling)?
         };
         let Some(pending_key) = candidate else {
             return Ok(None);
@@ -1141,6 +1282,167 @@ mod tests {
         let handle = open_kv(&url).unwrap();
         conditional::redis_call(&handle, |conn| redis::cmd("FLUSHDB").query::<()>(conn)).unwrap();
         (url, handle)
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_claim_does_not_scan_unrelated_history() {
+        let (_, handle) = redis_fixture();
+        for n in 0..1_000 {
+            kv_set(
+                &handle,
+                &format!("jobs:data:history-{n}"),
+                &Value::String("completed".into()),
+                None,
+            )
+            .unwrap();
+        }
+        assert!(claim(
+            &handle,
+            "jobs:pending:05:",
+            "jobs:pending:05:~",
+            "worker-a",
+            60_000,
+        )
+        .unwrap()
+        .is_none());
+        fixture(&handle, "pending");
+        conditional::redis_call(&handle, |conn| {
+            redis::cmd("CONFIG").arg("RESETSTAT").query::<()>(conn)
+        })
+        .unwrap();
+
+        assert!(take(&handle).id.len() > 1);
+        let stats: String = conditional::redis_call(&handle, |conn| {
+            redis::cmd("INFO").arg("commandstats").query(conn)
+        })
+        .unwrap();
+        assert!(!stats.contains("cmdstat_scan:"), "claim used SCAN: {stats}");
+        assert!(!stats.contains("cmdstat_keys:"), "claim used KEYS: {stats}");
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_ready_index_tracks_claim_recovery_and_migration() {
+        let (_, handle) = redis_fixture();
+        let (id, pending) = fixture(&handle, "pending");
+        let indexed = |handle: &Value, pending: &str| {
+            conditional::redis_call(handle, |conn| {
+                redis::cmd("ZSCORE")
+                    .arg(READY)
+                    .arg(pending)
+                    .query::<Option<f64>>(conn)
+            })
+            .unwrap()
+            .is_some()
+        };
+        assert!(indexed(&handle, &pending));
+
+        let claimed = take(&handle);
+        assert_eq!(claimed.id, id);
+        assert!(!indexed(&handle, &pending));
+        expire(&handle, &id);
+        assert_eq!(recover(&handle, 1).unwrap().requeued, 1);
+        assert!(indexed(&handle, &pending));
+
+        // Simulate an upgrade from a deployment that predates the ready index.
+        conditional::redis_call(&handle, |conn| {
+            redis::pipe()
+                .del(READY)
+                .del(READY_INITIALIZED)
+                .query::<()>(conn)
+        })
+        .unwrap();
+        assert_eq!(take(&handle).id, id);
+        assert!(!indexed(&handle, &pending));
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_claim_prunes_stale_ready_members() {
+        let (_, handle) = redis_fixture();
+        let (id, _) = fixture(&handle, "pending");
+        let stale = "jobs:pending:05:0000000000:00000000-stale";
+        conditional::redis_call(&handle, |conn| {
+            redis::cmd("ZADD")
+                .arg(READY)
+                .arg(0)
+                .arg(stale)
+                .query::<()>(conn)
+        })
+        .unwrap();
+
+        assert_eq!(take(&handle).id, id);
+        let stale_score: Option<f64> = conditional::redis_call(&handle, |conn| {
+            redis::cmd("ZSCORE").arg(READY).arg(stale).query(conn)
+        })
+        .unwrap();
+        assert!(stale_score.is_none());
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_ready_claim_preserves_order_bounds_and_legacy_prefix() {
+        let (_, handle) = redis_fixture();
+        let (id_a, pending_a) = fixture(&handle, "pending");
+        let (id_b, pending_b) = fixture(&handle, "pending");
+        let (first_id, first_pending) = if pending_a < pending_b {
+            (id_a, pending_a)
+        } else {
+            (id_b, pending_b)
+        };
+
+        let exact = claim(
+            &handle,
+            &first_pending,
+            &first_pending,
+            "worker-exact",
+            60_000,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(exact.id, first_id);
+
+        let claimed = super::super::kv_claim(&handle, "jobs:pending:05:", None, None)
+            .unwrap()
+            .unwrap();
+        assert!(claimed.0.starts_with("jobs:pending:05:"));
+        let indexed: Option<f64> = conditional::redis_call(&handle, |conn| {
+            redis::cmd("ZSCORE").arg(READY).arg(&claimed.0).query(conn)
+        })
+        .unwrap();
+        assert!(indexed.is_none());
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_ready_wrong_type_cannot_partially_publish() {
+        let (_, handle) = redis_fixture();
+        conditional::redis_call(&handle, |conn| {
+            redis::cmd("SET")
+                .arg(READY)
+                .arg("wrong-type")
+                .query::<()>(conn)
+        })
+        .unwrap();
+        let state_key = "jobs:data:wrong-ready-type";
+        let pending = "jobs:pending:05:0000000000:wrong-ready-type";
+        let next = Snapshot::prepare(&handle, &Value::String("pending".into())).unwrap();
+        assert!(conditional::write(
+            &handle,
+            state_key,
+            None,
+            &next,
+            None,
+            "wrong-ready-type",
+            &[],
+            Some(pending),
+            false,
+        )
+        .is_err());
+        assert!(matches!(kv_get(&handle, state_key).unwrap(), Value::Unit));
+        assert!(matches!(kv_get(&handle, pending).unwrap(), Value::Unit));
+        assert!(!conditional::redis_call(&handle, |conn| {
+            redis::cmd("EXISTS")
+                .arg(READY_INITIALIZED)
+                .query::<bool>(conn)
+        })
+        .unwrap());
     }
     fn short_claim(handle: &Value) -> Claim {
         claim(
