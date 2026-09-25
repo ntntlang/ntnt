@@ -918,8 +918,13 @@ impl RedisKV {
         let result: redis::Value = if prefix.starts_with("jobs:pending:") {
             job_leases::ensure_ready_index(&mut self.conn)
                 .map_err(|e| IntentError::runtime_error(format!("Redis claim error: {e}")))?;
-            let min = floor.map_or_else(|| format!("[{prefix}"), |value| format!("[{value}"));
-            let max = ceiling.map_or_else(|| format!("[{prefix}~"), |value| format!("[{value}"));
+            let prefix_ceiling = format!("{prefix}~");
+            let min = floor.map(|value| value.max(prefix)).unwrap_or(prefix);
+            let max = ceiling
+                .map(|value| value.min(prefix_ceiling.as_str()))
+                .unwrap_or(prefix_ceiling.as_str());
+            let min = format!("[{min}");
+            let max = format!("[{max}");
             redis::cmd("EVAL")
                 .arg(
                     r#"

@@ -11,6 +11,7 @@ const DUE_PREFIX: &str = "jobs:lease_due:";
 pub(super) const READY: &str = "jobs:ready";
 const READY_INITIALIZED: &str = "jobs:ready:initialized";
 const READY_MIGRATION_LOCK: &str = "jobs:ready:migration_lock";
+const READY_SENTINEL: &str = "__ntnt_ready_index__";
 const MAX_RECOVERY: usize = 256;
 
 pub(super) fn is_pending_key(key: &str) -> bool {
@@ -43,11 +44,27 @@ pub(super) fn watch_ready_index(conn: &mut redis::Connection) -> R<()> {
 }
 
 pub(super) fn ensure_ready_index(conn: &mut redis::Connection) -> R<()> {
-    if redis::cmd("EXISTS")
+    let initialized = redis::cmd("EXISTS")
         .arg(READY_INITIALIZED)
-        .query::<bool>(conn)?
-    {
-        return Ok(());
+        .query::<bool>(conn)?;
+    if initialized {
+        let kind: String = redis::cmd("TYPE").arg(READY).query(conn)?;
+        if kind != "none" && kind != "zset" {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::TypeError,
+                "job ready index has the wrong Redis type",
+            )));
+        }
+        if kind == "zset"
+            && redis::cmd("ZSCORE")
+                .arg(READY)
+                .arg(READY_SENTINEL)
+                .query::<Option<f64>>(conn)?
+                .is_some()
+        {
+            return Ok(());
+        }
+        redis::cmd("DEL").arg(READY_INITIALIZED).query::<()>(conn)?;
     }
 
     let token = uuid::Uuid::new_v4().to_string();
@@ -117,6 +134,11 @@ pub(super) fn ensure_ready_index(conn: &mut redis::Connection) -> R<()> {
                 break;
             }
         }
+        redis::cmd("ZADD")
+            .arg(READY)
+            .arg(0)
+            .arg(READY_SENTINEL)
+            .query::<()>(conn)?;
         redis::cmd("SET")
             .arg(READY_INITIALIZED)
             .arg("1")
@@ -132,20 +154,30 @@ pub(super) fn ensure_ready_index(conn: &mut redis::Connection) -> R<()> {
 }
 
 fn ready_candidate(conn: &mut redis::Connection, floor: &str, ceiling: &str) -> R<Option<String>> {
-    redis::Script::new(
+    const RETRY: &str = "__ntnt_ready_retry__";
+    let script = redis::Script::new(
         r#"
             local candidates = redis.call('ZRANGEBYLEX', KEYS[1], ARGV[1], ARGV[2], 'LIMIT', 0, 256)
             for _, key in ipairs(candidates) do
-                if redis.call('EXISTS', key) == 1 then return key end
+                if redis.call('EXISTS', key) == 1 then return {key} end
                 redis.call('ZREM', KEYS[1], key)
             end
-            return nil
+            if #candidates == 256 then return {ARGV[3]} end
+            return {}
         "#,
-    )
-    .key(READY)
-    .arg(format!("[{floor}"))
-    .arg(format!("[{ceiling}"))
-    .invoke(conn)
+    );
+    loop {
+        let result: Vec<String> = script
+            .key(READY)
+            .arg(format!("[{floor}"))
+            .arg(format!("[{ceiling}"))
+            .arg(RETRY)
+            .invoke(conn)?;
+        match result.first().map(String::as_str) {
+            Some(RETRY) => continue,
+            candidate => return Ok(candidate.map(str::to_owned)),
+        }
+    }
 }
 
 pub(crate) struct Claim {
@@ -1353,6 +1385,15 @@ mod tests {
         .unwrap();
         assert_eq!(take(&handle).id, id);
         assert!(!indexed(&handle, &pending));
+
+        // Losing the derived index while retaining its marker must rebuild it.
+        let (next_id, next_pending) = fixture(&handle, "pending");
+        assert!(indexed(&handle, &next_pending));
+        conditional::redis_call(&handle, |conn| {
+            redis::cmd("DEL").arg(READY).query::<()>(conn)
+        })
+        .unwrap();
+        assert_eq!(take(&handle).id, next_id);
     }
     #[test]
     #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
@@ -1361,20 +1402,28 @@ mod tests {
         let (id, _) = fixture(&handle, "pending");
         let stale = "jobs:pending:05:0000000000:00000000-stale";
         conditional::redis_call(&handle, |conn| {
-            redis::cmd("ZADD")
-                .arg(READY)
-                .arg(0)
-                .arg(stale)
-                .query::<()>(conn)
+            let mut tx = redis::pipe();
+            for n in 0..300 {
+                tx.cmd("ZADD")
+                    .arg(READY)
+                    .arg(0)
+                    .arg(format!("{stale}-{n:03}"))
+                    .ignore();
+            }
+            tx.query::<()>(conn)
         })
         .unwrap();
 
         assert_eq!(take(&handle).id, id);
-        let stale_score: Option<f64> = conditional::redis_call(&handle, |conn| {
-            redis::cmd("ZSCORE").arg(READY).arg(stale).query(conn)
+        let remaining: usize = conditional::redis_call(&handle, |conn| {
+            redis::cmd("ZCOUNT")
+                .arg(READY)
+                .arg("-inf")
+                .arg("+inf")
+                .query(conn)
         })
         .unwrap();
-        assert!(stale_score.is_none());
+        assert_eq!(remaining, 1, "only the persistent sentinel should remain");
     }
     #[test]
     #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
@@ -1399,10 +1448,21 @@ mod tests {
         .unwrap();
         assert_eq!(exact.id, first_id);
 
-        let claimed = super::super::kv_claim(&handle, "jobs:pending:05:", None, None)
-            .unwrap()
-            .unwrap();
+        let lower_band = "jobs:pending:04:0000000000:lower-band";
+        kv_set(&handle, lower_band, &Value::String("owner".into()), None).unwrap();
+        let claimed = super::super::kv_claim(
+            &handle,
+            "jobs:pending:05:",
+            Some("jobs:pending:00:"),
+            Some("jobs:pending:99:~"),
+        )
+        .unwrap()
+        .unwrap();
         assert!(claimed.0.starts_with("jobs:pending:05:"));
+        assert!(matches!(
+            kv_get(&handle, lower_band).unwrap(),
+            Value::String(_)
+        ));
         let indexed: Option<f64> = conditional::redis_call(&handle, |conn| {
             redis::cmd("ZSCORE").arg(READY).arg(&claimed.0).query(conn)
         })
