@@ -703,6 +703,9 @@ impl TypeContext {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), typ);
         }
+        if let Some(aliases) = self.module_aliases.last_mut() {
+            aliases.remove(name);
+        }
     }
 
     /// Update a variable's type in the scope where it was originally defined.
@@ -2660,7 +2663,7 @@ impl TypeContext {
                         Type::Map { value_type, .. } => (**value_type).clone(),
                         _ => Type::Any,
                     },
-                    "int_or" if !is_module_call => self
+                    _ if !is_module_call => self
                         .infer_ufcs_signature(method, &obj_type, &method_arg_types)
                         .unwrap_or(Type::Any),
                     _ => Type::Any,
@@ -5681,11 +5684,11 @@ mod tests {
     }
 
     #[test]
-    fn test_int_or_dot_call_preserves_generic_conflicts_when_shadowed() {
+    fn test_generic_dot_call_preserves_type_conflicts() {
         let errs = check_errors(
             r#"
-            fn int_or<T>(value: T, fallback: T) -> T { return value }
-            1.int_or("not an int")
+            fn merge<T>(value: T, fallback: T) -> T { return value }
+            1.merge("not an int")
             "#,
         );
         assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
@@ -5699,13 +5702,13 @@ mod tests {
             import "./conversion.tnt" as conversion
             conversion.int_or("42", 0)
 
-            fn parse_shadowed() -> Int {
-                let conversion = "42"
-                return conversion.int_or(0)
-            }
+            let conversion = "42"
+            conversion.int_or("not an int")
             "#,
         );
-        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs[0].message.contains("expected Int"));
+        assert!(errs[0].message.contains("got String"));
     }
 
     // ── Return type checking ────────────────────────────────────
