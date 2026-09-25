@@ -1941,9 +1941,11 @@ fn reenqueue_and_backoff(
     sleep_cancellable(dur)
 }
 
-const WORKER_CONNECTION_ATTEMPTS: usize = 5;
-const WORKER_PRIVATE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-const WORKER_PRIVATE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+// Leave room for remote Redis deployments while keeping a failed fallback
+// probe bounded and infrequent enough that shared-path workers keep moving.
+const WORKER_CONNECTION_ATTEMPTS: usize = 2;
+const WORKER_PRIVATE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const WORKER_PRIVATE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn retry_worker_resource<T>(
     attempts: usize,
