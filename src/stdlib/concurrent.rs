@@ -992,6 +992,20 @@ impl ConcurrencyRuntime {
         }
     }
 
+    pub(crate) fn task_is_running(&self, task_id: u64) -> bool {
+        let tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(entry) = tasks.entries.get(&task_id) else {
+            return false;
+        };
+        let is_running = entry
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .state
+            == TaskState::Running;
+        is_running
+    }
+
     /// Get cloned Arcs for a task's core state.
     /// Returns Ok(None) if the task doesn't exist, Err if the registry mutex is poisoned.
     pub(crate) fn get_task_arcs(&self, task_id: u64) -> Result<Option<TaskArcs>> {
