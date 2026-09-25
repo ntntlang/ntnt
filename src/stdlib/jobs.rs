@@ -1941,11 +1941,21 @@ fn reenqueue_and_backoff(
     sleep_cancellable(dur)
 }
 
-// Leave room for remote Redis deployments while keeping a failed fallback
-// probe bounded and infrequent enough that shared-path workers keep moving.
+// Use a generous startup budget, then probe cheaply and occasionally allow a
+// longer fallback attempt for higher-latency deployments.
 const WORKER_CONNECTION_ATTEMPTS: usize = 2;
-const WORKER_PRIVATE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-const WORKER_PRIVATE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const WORKER_PRIVATE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const WORKER_PRIVATE_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const WORKER_PRIVATE_FAST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+const WORKER_PRIVATE_LONG_RETRY_EVERY: u64 = 6;
+
+fn worker_private_retry_timeout(attempt: u64) -> std::time::Duration {
+    if attempt % WORKER_PRIVATE_LONG_RETRY_EVERY == 0 {
+        WORKER_PRIVATE_STARTUP_TIMEOUT
+    } else {
+        WORKER_PRIVATE_FAST_TIMEOUT
+    }
+}
 
 fn retry_worker_resource<T>(
     attempts: usize,
@@ -1974,7 +1984,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
     let mut owned_kv = if redis_worker {
         retry_worker_resource(
             WORKER_CONNECTION_ATTEMPTS,
-            || kv::open_owned_kv(&kv_info.url, WORKER_PRIVATE_CONNECT_TIMEOUT),
+            || kv::open_owned_kv(&kv_info.url, WORKER_PRIVATE_STARTUP_TIMEOUT),
             |delay| sleep_cancellable(delay),
         )
     } else {
@@ -2017,6 +2027,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
     };
     let worker_id = format!("{}:{}", band.name, Uuid::new_v4());
     let mut next_private_retry = std::time::Instant::now() + WORKER_PRIVATE_RETRY_INTERVAL;
+    let mut private_retry_attempt = 0_u64;
 
     loop {
         if is_current_task_cancelled() {
@@ -2024,7 +2035,9 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         }
 
         if redis_worker && owned_kv.is_none() && std::time::Instant::now() >= next_private_retry {
-            match kv::open_owned_kv(&kv_info.url, WORKER_PRIVATE_CONNECT_TIMEOUT) {
+            private_retry_attempt = private_retry_attempt.saturating_add(1);
+            let connect_timeout = worker_private_retry_timeout(private_retry_attempt);
+            match kv::open_owned_kv(&kv_info.url, connect_timeout) {
                 Ok(candidate) => {
                     let candidate_handle = candidate.value().clone();
                     match extract_kv_handle_info(&candidate_handle).and_then(leases::Keeper::new) {
@@ -6157,6 +6170,15 @@ pub(crate) mod tests {
         JOB_RUNTIME.reset();
         BATCH_RUNTIME.reset();
         f();
+    }
+
+    #[test]
+    fn worker_private_retry_uses_fast_and_periodic_long_budgets() {
+        assert_eq!(worker_private_retry_timeout(1), WORKER_PRIVATE_FAST_TIMEOUT);
+        assert_eq!(
+            worker_private_retry_timeout(WORKER_PRIVATE_LONG_RETRY_EVERY),
+            WORKER_PRIVATE_STARTUP_TIMEOUT
+        );
     }
 
     #[test]
