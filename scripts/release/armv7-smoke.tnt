@@ -1,0 +1,11 @@
+// Execute the interpreter and native SQLite/crypto code, not just CLI parsing.
+import { connect, execute, query, close } from "std/db/sqlite"
+import { sha256 } from "std/crypto"
+let db = unwrap(connect(":memory:"))
+unwrap(execute(db, "CREATE TABLE smoke (value INTEGER)", []))
+unwrap(execute(db, "INSERT INTO smoke VALUES (42)", []))
+let rows = unwrap(query(db, "SELECT value FROM smoke", []))
+assert(rows[0].value == 42)
+assert(sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+close(db)
+print("ARMV7_SMOKE_OK")
