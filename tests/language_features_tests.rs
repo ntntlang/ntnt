@@ -2035,9 +2035,9 @@ fn test_int_or_rejects_non_integer_fallback_at_runtime() {
 }
 
 #[test]
-fn test_runtime_errors_show_approximate_source_context() {
+fn test_runtime_errors_highlight_exact_failing_expression() {
     let code = r#"
-let x = 1 / 0
+let x = 100 + 1 / 0
 "#;
     let (_stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_ne!(exit_code, 0, "division by zero should fail");
@@ -2047,10 +2047,226 @@ let x = 1 / 0
         stderr
     );
     assert!(
-        stderr.contains("approximate failing statement"),
-        "runtime error without expression column should label the pointer approximate: {}",
+        stderr.contains(":2:15"),
+        "runtime error should identify the division expression start: {}",
         stderr
     );
+    assert!(
+        stderr.contains("^~~~~"),
+        "runtime error should underline the complete `1 / 0` expression: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("approximate failing statement"),
+        "an exact expression span must not be labeled approximate: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_runtime_errors_prefer_nested_call_span() {
+    let code = r#"
+let x = 10 + unwrap(None)
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "unwrap(None) should fail");
+    assert!(
+        stderr.contains(":2:14"),
+        "runtime error should point at the nested call: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("^~~~~~~~~~~~"),
+        "runtime error should underline `unwrap(None)`: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_runtime_errors_highlight_exact_index_expression() {
+    let code = r#"
+let x = [1, 2][5]
+"#;
+    let (_stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_ne!(exit_code, 0, "strict out-of-bounds access should fail");
+    assert!(
+        stderr.contains(":2:9"),
+        "runtime error should point at the full index expression: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("^~~~~~~~~"),
+        "runtime error should underline `[1, 2][5]`: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_runtime_errors_highlight_exact_type_mismatch_expression() {
+    let code = r#"
+let x = 1 + true
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "invalid addition should fail");
+    assert!(
+        stderr.contains(":2:9"),
+        "runtime error should point at the complete binary expression: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("^~~~~~~~"),
+        "runtime error should underline `1 + true`: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_runtime_errors_preserve_imported_helper_and_call_site() {
+    let project = unique_test_dir("runtime_span_import");
+    let helper = project.join("helper.tnt");
+    let main = project.join("main.tnt");
+    write_test_file(
+        &helper,
+        "export fn explode() -> Int {\n    return 100 + 1 / 0\n}",
+    );
+    write_test_file(&main, "import { explode } from \"./helper.tnt\"\nexplode()");
+
+    let (_stdout, stderr, exit_code) = run_ntnt_file(&main, &[]);
+    assert_ne!(exit_code, 0, "imported helper should fail");
+    assert!(
+        stderr.contains("helper.tnt:2:18"),
+        "runtime error should identify the exact helper expression: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("called from") && stderr.contains("main.tnt:2:1"),
+        "runtime error should preserve the importing call site: {}",
+        stderr
+    );
+    fs::remove_dir_all(project).ok();
+}
+
+#[test]
+fn test_runtime_errors_highlight_interpolated_expression() {
+    let code = r#"
+let x = "value: #{1 / 0}"
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "division in interpolation should fail");
+    assert!(
+        stderr.contains(":2:19"),
+        "runtime error should point inside the interpolated string: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("^~~~~"),
+        "runtime error should underline `1 / 0`: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_runtime_errors_include_string_delimiters_in_expression_span() {
+    let code = r#"
+let x = "a" - 1
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "invalid subtraction should fail");
+    assert!(
+        stderr.contains(":2:9"),
+        "runtime span should begin at the opening quote: {}",
+        stderr
+    );
+    assert!(stderr.contains("^~~~~~~"), "stderr:\n{}", stderr);
+}
+
+#[test]
+fn test_runtime_errors_highlight_failing_map_expression() {
+    let code = r#"
+let x = map { true: 1 }
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "non-string map key should fail");
+    assert!(stderr.contains(":2:9"), "stderr:\n{}", stderr);
+    assert!(!stderr.contains("approximate failing statement"));
+}
+
+#[test]
+fn test_runtime_errors_highlight_non_matching_match_expression() {
+    let code = r#"
+let x = match 1 { 2 => "no" }
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "non-matching match should fail");
+    assert!(stderr.contains(":2:9"), "stderr:\n{}", stderr);
+    assert!(!stderr.contains("approximate failing statement"));
+}
+
+#[test]
+fn test_runtime_errors_translate_template_expression_span() {
+    let code = r#"
+let x = """
+before
+{{1 / 0}}
+"""
+"#;
+    let (_stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_ne!(
+        exit_code, 0,
+        "division in template interpolation should fail"
+    );
+    assert!(
+        stderr.contains(":4:3"),
+        "runtime span should point inside the template source: {}",
+        stderr
+    );
+    assert!(stderr.contains("^~~~~"), "stderr:\n{}", stderr);
+}
+
+#[test]
+fn test_template_missing_values_remain_empty_with_source_spans() {
+    let code = r#"
+let x = """{{missing}}"""
+print("[" + x + "]")
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_eq!(exit_code, 0, "stderr:\n{}", stderr);
+    assert!(stdout.contains("[]"), "stdout:\n{}", stdout);
+}
+
+#[test]
+fn test_runtime_errors_skip_escaped_template_markers_when_locating_expression() {
+    let code = r#"
+let x = 1
+let y = """x\#{a {{x - true}}"""
+"#;
+    let (_stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_ne!(exit_code, 0, "invalid subtraction should fail");
+    assert!(
+        stderr.contains(":3:20"),
+        "runtime span should skip escaped template markers: {}",
+        stderr
+    );
+    assert!(stderr.contains("^~~~~~~~"), "stderr:\n{}", stderr);
+}
+
+#[test]
+fn test_runtime_errors_ignore_quoted_template_delimiters_when_locating_expression() {
+    let code = r#"
+let y = """{{ "}}" - 1 }}"""
+"#;
+    let (_stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_ne!(exit_code, 0, "invalid subtraction should fail");
+    assert!(
+        stderr.contains(":2:15"),
+        "runtime span should ignore quoted closing delimiters: {}",
+        stderr
+    );
+    assert!(stderr.contains("^~~~~~~~"), "stderr:\n{}", stderr);
 }
 
 // ============================================================================

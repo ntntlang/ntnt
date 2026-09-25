@@ -1737,6 +1737,7 @@ fn collect_free_vars_expr(
     use crate::ast::{Expression, StringPart};
 
     match expr {
+        Expression::Located { expr, .. } => collect_free_vars_expr(expr, referenced, bound),
         Expression::Identifier(name) => {
             if !bound.contains(name) {
                 referenced.insert(name.clone());

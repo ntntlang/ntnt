@@ -414,6 +414,7 @@ impl ConstValue {
 fn render_const_expr(expr: &Expression) -> String {
     use crate::ast::{BinaryOp, UnaryOp};
     match expr {
+        Expression::Located { expr, .. } => render_const_expr(expr),
         Expression::Integer(n) => n.to_string(),
         Expression::Float(f) => f.to_string(),
         Expression::Bool(b) => b.to_string(),
@@ -465,6 +466,7 @@ fn const_eval(expr: &Expression, bindings: &HashMap<String, ConstValue>) -> Opti
     use crate::ast::{BinaryOp, UnaryOp};
 
     Some(match expr {
+        Expression::Located { expr, .. } => return const_eval(expr, bindings),
         Expression::Integer(n) => ConstValue::Int(*n),
         Expression::Float(f) => ConstValue::Float(*f),
         Expression::Bool(b) => ConstValue::Bool(*b),
@@ -569,6 +571,7 @@ fn const_eval(expr: &Expression, bindings: &HashMap<String, ConstValue>) -> Opti
 /// Returns a string that is likely unique near the expression's source location.
 fn expr_search_hint(expr: &Expression) -> String {
     match expr {
+        Expression::Located { expr, .. } => expr_search_hint(expr),
         Expression::Identifier(name) => name.clone(),
         Expression::Call { function, .. } => {
             if let Expression::Identifier(name) = function.as_ref() {
@@ -1378,11 +1381,11 @@ impl TypeContext {
         left_ty: &Type,
     ) -> Type {
         let left_is_result = matches!(left_ty, Type::Generic { name, .. } if name == "Result");
-        let known_variant = match left {
+        let known_variant = match left.unlocated() {
             Expression::EnumVariant {
                 enum_name, variant, ..
             } if enum_name == "Option" || enum_name == "Result" => Some(variant.as_str()),
-            Expression::Call { function, .. } => match function.as_ref() {
+            Expression::Call { function, .. } => match function.unlocated() {
                 Expression::Identifier(name)
                     if name == "Some" && matches!(left_ty, Type::Optional(_)) =>
                 {
@@ -1439,6 +1442,7 @@ impl TypeContext {
 
     fn return_otherwise_expr_may_runtime_fail(expr: &Expression) -> bool {
         match expr {
+            Expression::Located { expr, .. } => Self::return_otherwise_expr_may_runtime_fail(expr),
             Expression::Integer(_)
             | Expression::Float(_)
             | Expression::String(_)
@@ -2310,6 +2314,7 @@ impl TypeContext {
         &self,
         condition: &Expression,
     ) -> (Vec<(String, Type)>, Vec<(String, Type)>) {
+        let condition = condition.unlocated();
         match condition {
             // x == None → true: x is None, false: x is unwrapped
             Expression::Binary {
@@ -2549,6 +2554,7 @@ impl TypeContext {
 
     fn infer_expression(&mut self, expr: &Expression) -> Type {
         match expr {
+            Expression::Located { expr, .. } => self.infer_expression(expr),
             Expression::Integer(_) => Type::Int,
             Expression::Float(_) => Type::Float,
             Expression::String(s) => {
@@ -2661,7 +2667,7 @@ impl TypeContext {
                 let method_arg_types: Vec<Type> =
                     arguments.iter().map(|a| self.infer_expression(a)).collect();
                 let is_module_call = matches!(
-                    object.as_ref(),
+                    object.unlocated(),
                     Expression::Identifier(name) if self.is_module_alias(name)
                 );
                 // Method calls: infer return type from known methods
