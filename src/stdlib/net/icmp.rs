@@ -19,6 +19,7 @@ use super::probe::{
 };
 use super::{policy::enforce_resolved_target_policy, ProbeOptions};
 use crate::interpreter::Value;
+use crate::stdlib::send_deadline::SendDeadline;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::collections::HashMap;
 use std::io::ErrorKind;
@@ -277,6 +278,10 @@ impl EchoSocket {
     }
 
     pub(super) fn open(target: IpAddr, timeout: Duration) -> std::io::Result<Self> {
+        #[cfg(test)]
+        if let Some(socket) = tests::TEST_ECHO_SOCKET.with(|slot| slot.borrow_mut().take()) {
+            return Ok(socket);
+        }
         let socket = create_icmp_socket(target, timeout)?;
         let local = socket
             .local_addr()
@@ -623,6 +628,24 @@ pub(super) fn send_echo_probe(
     timeout: Duration,
     delivery: ProbeDelivery,
 ) -> Result<Option<IcmpProbeEvent>, ProbeFailure> {
+    send_echo_probe_guarded(
+        label, socket, target_ip, local_ip, ident, sequence, payload, timeout, delivery, &mut None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_echo_probe_guarded(
+    label: &str,
+    socket: &Socket,
+    target_ip: IpAddr,
+    local_ip: Option<IpAddr>,
+    ident: u16,
+    sequence: u16,
+    payload: &[u8],
+    timeout: Duration,
+    delivery: ProbeDelivery,
+    start_deadline: &mut Option<&SendDeadline>,
+) -> Result<Option<IcmpProbeEvent>, ProbeFailure> {
     let deadline = Instant::now() + timeout;
     socket
         .set_read_timeout(Some(timeout))
@@ -631,7 +654,17 @@ pub(super) fn send_echo_probe(
         .set_write_timeout(Some(timeout))
         .map_err(|err| probe_socket_unavailable(label, err))?;
     let packet = build_icmp_echo_request(label, target_ip, local_ip, ident, sequence, payload)?;
+    #[cfg(test)]
+    tests::delay_before_send();
     let sent_at = Instant::now();
+    // Userspace authorization adjacent to the OS send, after packet/socket setup.
+    // Preemption can still occur before the syscall: this is not a NIC wire-time guarantee.
+    if let Some(guard) = start_deadline.as_ref() {
+        guard.check().map_err(ProbeFailure::Backend)?;
+    }
+    // An attempted send commits this finite sample, even if the syscall fails.
+    // Requested later packets keep their original global timeout, not this start guard.
+    *start_deadline = None;
     let send_result = match delivery {
         ProbeDelivery::Connected => socket.send(&packet),
         ProbeDelivery::Unconnected => {
@@ -797,10 +830,18 @@ pub(super) fn icmp_ping_for_host(
     host: &str,
     options: &ProbeOptions,
 ) -> Result<HashMap<String, Value>, String> {
+    icmp_ping_for_host_guarded(host, options, None)
+}
+
+pub(super) fn icmp_ping_for_host_guarded(
+    host: &str,
+    options: &ProbeOptions,
+    start_deadline: Option<&SendDeadline>,
+) -> Result<HashMap<String, Value>, String> {
     let targets = resolve_probe_targets(host)?;
     enforce_resolved_target_policy(&targets, options.allow_private)?;
     let target_ips = unique_target_ips(&targets)?;
-    let result = icmp_ping(host, &target_ips, options)?;
+    let result = icmp_ping(host, &target_ips, options, start_deadline)?;
     Ok(icmp_ping_result_map(result))
 }
 
@@ -830,6 +871,7 @@ fn icmp_ping(
     display_host: &str,
     target_ips: &[IpAddr],
     options: &ProbeOptions,
+    mut start_deadline: Option<&SendDeadline>,
 ) -> Result<IcmpPingResult, String> {
     let deadline = Instant::now() + options.timeout;
     let mut results = Vec::new();
@@ -848,6 +890,7 @@ fn icmp_ping(
             remaining,
             options.count,
             options.interval,
+            &mut start_deadline,
         );
         let result = match result {
             Ok(result) => result,
@@ -857,6 +900,9 @@ fn icmp_ping(
                 failure.into_message(),
                 options.count,
             ),
+            Err(ProbeFailure::Backend(error)) if error == "start_deadline_expired" => {
+                return Err(error);
+            }
             Err(failure) => {
                 first_fatal_error.get_or_insert(failure.into_message());
                 continue;
@@ -884,6 +930,7 @@ fn run_native_ping(
     timeout: Duration,
     count: usize,
     interval: Duration,
+    start_deadline: &mut Option<&SendDeadline>,
 ) -> Result<IcmpPingResult, ProbeFailure> {
     let core = match EchoSocket::open(target_ip, timeout) {
         Ok(socket) => socket,
@@ -938,7 +985,7 @@ fn run_native_ping(
                 break;
             }
         };
-        match send_echo_probe(
+        match send_echo_probe_guarded(
             PING_LABEL,
             &socket,
             target_ip,
@@ -949,6 +996,7 @@ fn run_native_ping(
             per_attempt_timeout,
             // Ping's socket (datagram or raw) is connected to the target.
             ProbeDelivery::Connected,
+            start_deadline,
         ) {
             Ok(Some(IcmpProbeEvent::Reply(reply))) => {
                 latencies.push(reply.latency_ms);
@@ -1221,6 +1269,241 @@ fn icmp_attempt_to_value(attempt: &IcmpPingAttempt) -> Value {
 mod tests {
     use super::*;
 
+    thread_local! {
+        pub(super) static TEST_ECHO_SOCKET: std::cell::RefCell<Option<EchoSocket>> = const { std::cell::RefCell::new(None) };
+        static SETUP_EXPIRY: std::cell::RefCell<Option<SendDeadline>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn delay_before_send() {
+        if let Some(guard) = SETUP_EXPIRY.with(|slot| slot.borrow_mut().take()) {
+            // Controlled last-setup barrier: proceed only once this exact guard expires.
+            while guard.check().is_ok() {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    fn wall_deadline_after(ms: i64) -> SendDeadline {
+        SendDeadline::parse(Some(&HashMap::from([(
+            "start_deadline_ms".into(),
+            Value::Int(chrono::Utc::now().timestamp_millis() + ms),
+        )])))
+        .unwrap()
+    }
+
+    fn udp_pair() -> (Socket, std::net::UdpSocket) {
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let client = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        client.connect(peer.local_addr().unwrap()).unwrap();
+        (client.into(), peer)
+    }
+
+    #[test]
+    fn ping_start_deadline_delayed_setup_sends_zero_datagrams() {
+        let (socket, peer) = udp_pair();
+        let guard = wall_deadline_after(1000);
+        guard.check().unwrap();
+        SETUP_EXPIRY.with(|slot| *slot.borrow_mut() = Some(guard.clone()));
+        let mut pending = Some(&guard);
+        let result = send_echo_probe_guarded(
+            PING_LABEL,
+            &socket,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            None,
+            7,
+            1,
+            b"fixture",
+            Duration::from_millis(300),
+            ProbeDelivery::Connected,
+            &mut pending,
+        );
+        let mut packet = [0u8; 128];
+        let received = peer.recv_from(&mut packet);
+        assert!(
+            matches!(received, Err(ref e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)),
+            "unexpected datagram: {received:?}"
+        );
+        assert_eq!(result.unwrap_err().into_message(), "start_deadline_expired");
+        assert!(
+            pending.is_some(),
+            "no attempted send must leave start uncommitted"
+        );
+    }
+
+    #[test]
+    fn ping_start_deadline_monotonic_expiry_stops_driver_before_send() {
+        let (socket, peer) = udp_pair();
+        TEST_ECHO_SOCKET.with(|slot| {
+            *slot.borrow_mut() = Some(EchoSocket {
+                socket,
+                target: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                local: None,
+                ident: 7,
+            })
+        });
+        let guard = SendDeadline::parse(Some(&HashMap::from([
+            (
+                "start_monotonic_deadline_ms".into(),
+                Value::Int(crate::stdlib::time::monotonic_millis() + 1000),
+            ),
+            ("start_deadline_ms".into(), Value::Int(i64::MAX)),
+        ])))
+        .unwrap();
+        guard.check().unwrap();
+        SETUP_EXPIRY.with(|slot| *slot.borrow_mut() = Some(guard.clone()));
+        let options = ProbeOptions {
+            timeout: Duration::from_secs(1),
+            count: 2,
+            interval: Duration::ZERO,
+            allow_private: true,
+        };
+        let result = icmp_ping(
+            "loopback fixture",
+            &[IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            &options,
+            Some(&guard),
+        );
+        assert_eq!(result.unwrap_err(), "start_deadline_expired");
+        let mut packet = [0u8; 128];
+        assert!(
+            matches!(peer.recv_from(&mut packet), Err(ref e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut))
+        );
+    }
+
+    #[test]
+    fn ping_start_deadline_in_budget_burst_completes_after_expiry() {
+        let (socket, peer) = udp_pair();
+        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        TEST_ECHO_SOCKET.with(|slot| {
+            *slot.borrow_mut() = Some(EchoSocket {
+                socket,
+                target: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                local: None,
+                ident: 7,
+            })
+        });
+        let guard = wall_deadline_after(1000);
+        let reply_guard = guard.clone();
+        let fixture = thread::spawn(move || {
+            for sequence in 1..=2 {
+                let mut packet = [0u8; 128];
+                let (len, from) = peer.recv_from(&mut packet).unwrap();
+                assert_eq!(u16::from_be_bytes([packet[6], packet[7]]), sequence);
+                if sequence == 1 {
+                    while reply_guard.check().is_ok() {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                packet[0] = 0;
+                peer.send_to(&packet[..len], from).unwrap();
+            }
+        });
+        let mut pending = Some(&guard);
+        let result = run_native_ping(
+            "loopback fixture",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Duration::from_secs(4),
+            2,
+            Duration::from_millis(10),
+            &mut pending,
+        )
+        .unwrap();
+        fixture.join().unwrap();
+        assert_eq!(guard.check(), Err("start_deadline_expired".into()));
+        assert_eq!(result.sent, 2);
+        assert_eq!(result.received, 2);
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn ping_start_deadline_real_icmp_loopback_optional() {
+        let target = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let core = match EchoSocket::open(target, Duration::from_secs(4)) {
+            Ok(core) => core,
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                eprintln!("SKIP real first-send ICMP fixture: {error}; UDP-backed boundary assertions run separately");
+                return;
+            }
+            Err(error) => panic!("native loopback ICMP setup failed: {error}"),
+        };
+        // This descriptor is a real native ICMP socket, not the UDP fixture.
+        TEST_ECHO_SOCKET.with(|slot| *slot.borrow_mut() = Some(core));
+        let guard = wall_deadline_after(1000);
+        let mut pending = Some(&guard);
+        let result = run_native_ping(
+            "127.0.0.1",
+            target,
+            Duration::from_secs(4),
+            2,
+            Duration::from_millis(1200),
+            &mut pending,
+        )
+        .unwrap();
+        assert_eq!(result.sent, 2);
+        assert_eq!(result.received, 2);
+        assert!(pending.is_none());
+        assert_eq!(guard.check(), Err("start_deadline_expired".into()));
+    }
+
+    #[test]
+    fn ping_start_deadline_does_not_extend_global_timeout() {
+        let (socket, peer) = udp_pair();
+        TEST_ECHO_SOCKET.with(|slot| {
+            *slot.borrow_mut() = Some(EchoSocket {
+                socket,
+                target: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                local: None,
+                ident: 7,
+            })
+        });
+        let guard = wall_deadline_after(1000);
+        let mut pending = Some(&guard);
+        let started = Instant::now();
+        let result = run_native_ping(
+            "silent loopback fixture",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Duration::from_millis(150),
+            1,
+            Duration::ZERO,
+            &mut pending,
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(750));
+        assert_eq!(result.received, 0);
+        assert_eq!(result.sent, 1);
+        assert!(pending.is_none());
+        for _ in 0..1 {
+            let mut packet = [0u8; 128];
+            assert!(peer.recv_from(&mut packet).is_ok());
+        }
+        let mut packet = [0u8; 128];
+        assert!(
+            matches!(peer.recv_from(&mut packet), Err(ref e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut))
+        );
+    }
+
+    #[test]
+    fn ping_start_deadline_malformed_fails_closed() {
+        for key in ["start_deadline_ms", "start_monotonic_deadline_ms"] {
+            let result = super::super::ping_fn(&[
+                Value::String("127.0.0.1".into()),
+                Value::Map(HashMap::from([
+                    ("allow_private".into(), Value::Bool(true)),
+                    ("count".into(), Value::Int(1)),
+                    (key.into(), Value::String("bad".into())),
+                ])),
+            ])
+            .unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, ref values, .. }
+            if variant == "Err" && matches!(values.first(), Some(Value::String(s)) if s.contains(key))),
+                "{result:?}"
+            );
+        }
+    }
+
     #[test]
     fn persistent_receive_tiny_wait_never_disables_socket_timeout() {
         // Blocking UDP exercises the same socket2 receive path without ICMP
@@ -1487,7 +1770,7 @@ mod tests {
             allow_private: false,
         };
 
-        let err = icmp_ping("example.com", &[], &options).unwrap_err();
+        let err = icmp_ping("example.com", &[], &options, None).unwrap_err();
         assert!(err.contains("no probe could be sent"));
     }
 

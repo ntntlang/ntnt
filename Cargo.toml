@@ -1,6 +1,6 @@
 [package]
 name = "ntnt"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2021"
 authors = ["NTNT Language Team"]
 description = "NTNT (Intent) - A programming language designed for AI-driven development"
@@ -70,6 +70,8 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "compression-gzip", "trace", "fs", "timeout"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
+# Bounded monitoring HTTP transport; ordinary fetch remains on reqwest.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 # Worker pool channels and CPU detection
 flume = "0.11"

@@ -14,6 +14,7 @@ use self::codec::{
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
 use crate::stdlib::net::enforce_resolved_target_policy;
+use crate::stdlib::send_deadline::SendDeadline;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
@@ -92,10 +93,20 @@ pub fn init() -> HashMap<String, Value> {
     // and retries. Encoded requests are capped at 8 KiB; responses are capped at
     // 8 KiB and must be complete, strict SNMPv2c BER with exactly the requested
     // OIDs in order.
+    // Optional start_deadline_ms (UTC epoch milliseconds) and
+    // start_monotonic_deadline_ms (std/time monotonic_now process-origin milliseconds)
+    // are independently optional nonnegative Ints; absent/None preserves behavior.
+    // After packet/policy/socket setup, both supplied clocks are checked immediately
+    // before the first UDP send. Expiry returns exactly Err("start_deadline_expired")
+    // with no attempted send, without retry wrapping. Malformed guards fail closed.
+    // The first attempted send commits the sample; response/retry completion remains
+    // bounded by timeout_ms, not the start deadline. Use retries: 0 for one-shot probes.
+    // This is a userspace syscall boundary, not a NIC wire-time guarantee against
+    // preemption. These options apply only to snmp_get; snmp_walk rejects them.
     // @param target Literal IPv4 or IPv6 address without a port
     // @param auth Strict map with version (`"2c"`) and community (Secret)
     // @param oids One to 64 unique numeric OIDs
-    // @param opts Optional strict map with port (default 161), timeout_ms (default 2000), retries (default 0, max 3), and allow_private
+    // @param opts Optional strict map with port (default 161), timeout_ms (default 2000), retries (default 0, max 3), allow_private, start_deadline_ms, and start_monotonic_deadline_ms
     // @returns Result containing target, checked address, port, version, duration_ms, attempts, and normalized values
     // @error TypeError ~ "snmp_get() argument 1 must be String" fix: "Pass an IPv4 or IPv6 literal"
     // @error RuntimeError ~ "std/netmon is disabled" fix: "Set NTNT_NETMON_ENABLE=1 for the process"
@@ -636,6 +647,8 @@ fn snmp_get(
     let target_ip = parse_target(target)?;
     let auth = parse_v2c_auth(auth)?;
     let options = parse_options(opts)?;
+    let guard = SendDeadline::parse(opts)?;
+    let mut start_deadline = Some(&guard);
     let parsed_oids = parse_oids(oid_values)?;
     let address = SocketAddr::new(target_ip, options.port);
     enforce_resolved_target_policy(&[(options.port, address)], options.allow_private)?;
@@ -659,7 +672,7 @@ fn snmp_get(
         let request = encode_bounded_request(request_id, auth.community.as_bytes(), &oid_arcs)?;
 
         attempts_made += 1;
-        match send_and_receive(address, request, attempt_deadline) {
+        match send_and_receive(address, request, attempt_deadline, &mut start_deadline) {
             Ok(packet) => {
                 if Instant::now() >= deadline {
                     last_error = "global timeout expired after receiving response".to_string();
@@ -724,6 +737,7 @@ fn snmp_get(
                 result.insert("values".to_string(), Value::Array(values));
                 return Ok(result);
             }
+            Err(error) if error == "start_deadline_expired" => return Err(error),
             Err(error) => last_error = error,
         }
     }
@@ -867,6 +881,7 @@ fn send_and_receive(
     address: SocketAddr,
     request: Zeroizing<Vec<u8>>,
     attempt_deadline: Instant,
+    start_deadline: &mut Option<&SendDeadline>,
 ) -> std::result::Result<Zeroizing<Vec<u8>>, String> {
     let bind_address = match address {
         SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
@@ -884,6 +899,15 @@ fn send_and_receive(
             "attempt timeout expired before send",
         )?))
         .map_err(|error| format!("SNMP UDP write-timeout setup failed: {error}"))?;
+    #[cfg(test)]
+    tests::delay_before_get_send();
+    // Last userspace authorization after encoding, policy, bind/connect and setup.
+    // OS scheduling can preempt before send: this does not guarantee NIC wire-time.
+    if let Some(guard) = start_deadline.as_ref() {
+        guard.check()?;
+    }
+    // Only the first attempted datagram starts this sampling window.
+    *start_deadline = None;
     let sent = socket
         .send(request.as_slice())
         .map_err(|error| format!("SNMP UDP send failed: {error}"))?;
@@ -1003,7 +1027,14 @@ fn parse_options(
     };
     reject_unknown_keys(
         opts,
-        &["port", "timeout_ms", "retries", "allow_private"],
+        &[
+            "port",
+            "timeout_ms",
+            "retries",
+            "allow_private",
+            "start_deadline_ms",
+            "start_monotonic_deadline_ms",
+        ],
         "options",
     )?;
     let port = parse_bounded_int(
@@ -1265,6 +1296,113 @@ mod tests {
     use super::*;
     use crate::interpreter::SecretValue;
 
+    thread_local! {
+        static GET_SETUP_EXPIRY: std::cell::RefCell<Option<SendDeadline>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn delay_before_get_send() {
+        if let Some(guard) = GET_SETUP_EXPIRY.with(|slot| slot.borrow_mut().take()) {
+            // Last-setup barrier waits for the actual guard, not a guessed sleep.
+            while guard.check().is_ok() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    #[test]
+    fn snmp_start_deadline_get_expiry_escapes_retries() {
+        // Keep opt-in policy flags isolated from parallel tests in this process.
+        const CHILD: &str = "NTNT_SNMP_DEADLINE_FIXTURE_CHILD";
+        if env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "stdlib::netmon::tests::snmp_start_deadline_get_expiry_escapes_retries",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("NTNT_NETMON_ENABLE", "1")
+                .env("NTNT_NET_ALLOW_PRIVATE", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let auth = HashMap::from([
+            ("version".into(), Value::String("2c".into())),
+            (
+                "community".into(),
+                Value::Secret(SecretValue::new("SNMP_COMMUNITY", "fixture").unwrap()),
+            ),
+        ]);
+        for (retries, key) in [
+            (0, "start_deadline_ms"),
+            (3, "start_deadline_ms"),
+            (0, "start_monotonic_deadline_ms"),
+        ] {
+            let now = if key == "start_deadline_ms" {
+                chrono::Utc::now().timestamp_millis()
+            } else {
+                crate::stdlib::time::monotonic_millis()
+            };
+            let opts = HashMap::from([
+                (
+                    "port".into(),
+                    Value::Int(peer.local_addr().unwrap().port().into()),
+                ),
+                ("timeout_ms".into(), Value::Int(1000)),
+                ("allow_private".into(), Value::Bool(true)),
+                ("retries".into(), Value::Int(retries)),
+                (key.into(), Value::Int(now + 1000)),
+            ]);
+            let guard = SendDeadline::parse(Some(&opts)).unwrap();
+            guard.check().unwrap();
+            GET_SETUP_EXPIRY.with(|slot| *slot.borrow_mut() = Some(guard));
+            let result = snmp_get(
+                "127.0.0.1",
+                &auth,
+                &[Value::String("1.3.6.1.2.1.1.1.0".into())],
+                Some(&opts),
+            );
+            let mut packet = [0u8; 2048];
+            let received = peer.recv_from(&mut packet);
+            assert!(
+                matches!(received, Err(ref e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
+                "unexpected send: {received:?}"
+            );
+            assert_eq!(result.unwrap_err(), "start_deadline_expired");
+        }
+        for key in ["start_deadline_ms", "start_monotonic_deadline_ms"] {
+            let opts = HashMap::from([
+                (
+                    "port".into(),
+                    Value::Int(peer.local_addr().unwrap().port().into()),
+                ),
+                ("allow_private".into(), Value::Bool(true)),
+                (key.into(), Value::String("bad".into())),
+            ]);
+            let error = snmp_get(
+                "127.0.0.1",
+                &auth,
+                &[Value::String("1.3.6.1.2.1.1.1.0".into())],
+                Some(&opts),
+            )
+            .unwrap_err();
+            assert!(error.contains(key), "{error}");
+            let mut packet = [0u8; 2048];
+            assert!(
+                matches!(peer.recv_from(&mut packet), Err(ref e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
+            );
+        }
+    }
+
     #[test]
     fn v2c_auth_requires_opaque_community_and_never_renders_plaintext() {
         let canary = "netmon-community-plain-canary";
@@ -1286,6 +1424,126 @@ mod tests {
             parse_v2c_auth(&opaque).expect("opaque community").community,
             canary
         );
+    }
+
+    #[test]
+    fn snmp_start_deadline_in_budget_get_completes_later() {
+        const CHILD: &str = "NTNT_SNMP_COMPLETION_FIXTURE_CHILD";
+        if env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "stdlib::netmon::tests::snmp_start_deadline_in_budget_get_completes_later",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("NTNT_NETMON_ENABLE", "1")
+                .env("NTNT_NET_ALLOW_PRIVATE", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let auth = HashMap::from([
+            ("version".into(), Value::String("2c".into())),
+            (
+                "community".into(),
+                Value::Secret(SecretValue::new("SNMP_COMMUNITY", "fixture").unwrap()),
+            ),
+        ]);
+        // Guarded, absent and explicit None callers all retain response timeout semantics.
+        for mode in 0..4 {
+            let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut opts = HashMap::from([
+                (
+                    "port".into(),
+                    Value::Int(peer.local_addr().unwrap().port().into()),
+                ),
+                (
+                    "timeout_ms".into(),
+                    Value::Int(if mode == 3 { 100 } else { 3000 }),
+                ),
+                ("allow_private".into(), Value::Bool(true)),
+                ("retries".into(), Value::Int(0)),
+            ]);
+            if mode == 0 || mode == 3 {
+                opts.insert(
+                    "start_deadline_ms".into(),
+                    Value::Int(chrono::Utc::now().timestamp_millis() + 1000),
+                );
+            } else if mode == 2 {
+                opts.insert("start_deadline_ms".into(), Value::none());
+                opts.insert("start_monotonic_deadline_ms".into(), Value::none());
+            }
+            let reply_guard = SendDeadline::parse(Some(&opts)).unwrap();
+            let fixture = std::thread::spawn(move || {
+                let mut packet = [0u8; 2048];
+                let (len, from) = peer.recv_from(&mut packet).unwrap();
+                // Fixture requests use short-form BER lengths. Preserve ID/OIDs and
+                // turn GetRequest's NULL varbind into a valid NULL-valued response.
+                assert!(packet[1] < 128);
+                let mut pdu = 2;
+                for _ in 0..2 {
+                    assert!(packet[pdu + 1] < 128);
+                    pdu += 2 + packet[pdu + 1] as usize;
+                }
+                assert_eq!(packet[pdu], 0xa0);
+                packet[pdu] = 0xa2;
+                if mode == 0 {
+                    while reply_guard.check().is_ok() {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                } else if mode == 3 {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                peer.send_to(&packet[..len], from).unwrap();
+            });
+            let result = snmp_get(
+                "127.0.0.1",
+                &auth,
+                &[Value::String("1.3.6.1.2.1.1.1.0".into())],
+                Some(&opts),
+            );
+            fixture.join().unwrap();
+            if mode == 3 {
+                let error = result.unwrap_err();
+                assert_ne!(error, "start_deadline_expired");
+                assert!(
+                    error.contains("receive") || error.contains("timeout"),
+                    "{error}"
+                );
+            } else {
+                let result = result.unwrap();
+                assert!(matches!(result.get("attempts"), Some(Value::Int(1))));
+                assert!(
+                    matches!(result.get("values"), Some(Value::Array(values)) if values.len() == 1)
+                );
+                if mode == 0 {
+                    assert_eq!(
+                        SendDeadline::parse(Some(&opts)).unwrap().check(),
+                        Err("start_deadline_expired".into())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn snmp_start_deadline_options_are_accepted() {
+        for key in ["start_deadline_ms", "start_monotonic_deadline_ms"] {
+            let opts = HashMap::from([(key.into(), Value::Int(1))]);
+            assert!(parse_options(Some(&opts)).is_ok(), "{key}");
+            assert!(
+                parse_walk_options(Some(&opts)).unwrap_err().contains(key),
+                "walk must reject {key}"
+            );
+        }
     }
 
     #[test]
