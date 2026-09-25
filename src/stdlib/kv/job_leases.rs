@@ -15,6 +15,7 @@ const READY_MIGRATION_LOCK_MS: usize = 5_000;
 const READY_SENTINEL: &str = "__ntnt_ready_index__";
 const MAX_STALE_BATCHES_PER_CLAIM: usize = 4;
 const MAX_RECOVERY: usize = 256;
+static REDIS_TRANSACTION_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(super) fn is_pending_key(key: &str) -> bool {
     key.starts_with("jobs:pending:") && !key.ends_with(":__type")
@@ -582,9 +583,16 @@ fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) 
             result.map_err(conditional::error)
         }
         KVBackend::Redis => {
-            // One connection per worker allows useful Redis concurrency, but all
-            // lease mutations intentionally fence on shared indexes. Give a full
-            // 32-slot worker wave a bounded chance to serialize its WATCH/EXEC.
+            // Worker slots own separate connections, while lease transactions
+            // still mutate process-shared ready/due indexes. Serialize those
+            // short local transactions so same-process workers do not create a
+            // WATCH/EXEC conflict storm; retain retries for other processes.
+            let _transaction_guard = REDIS_TRANSACTION_GATE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            // Other processes can still mutate those indexes concurrently. Give
+            // a full 32-slot external wave a bounded chance to serialize its
+            // WATCH/EXEC transactions.
             const ATTEMPTS: usize = 32;
             for attempt in 0..ATTEMPTS {
                 let result = conditional::redis_call_raw(handle, |conn| {
@@ -1719,6 +1727,40 @@ mod tests {
             thread.join().unwrap().unwrap();
         }
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_private_handles_serialize_local_transactions() {
+        let (url, _) = redis_fixture();
+        let barrier = Arc::new(Barrier::new(33));
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let maximum = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let threads: Vec<_> = (0..32)
+            .map(|_| {
+                let url = url.clone();
+                let barrier = Arc::clone(&barrier);
+                let active = Arc::clone(&active);
+                let maximum = Arc::clone(&maximum);
+                std::thread::spawn(move || {
+                    let handle = open_kv(&url)?;
+                    barrier.wait();
+                    transaction(&handle, |store| {
+                        let concurrent =
+                            active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        maximum.fetch_max(concurrent, std::sync::atomic::Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(5));
+                        active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        store.now()
+                    })?;
+                    Ok::<(), IntentError>(())
+                })
+            })
+            .collect();
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        assert_eq!(maximum.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
     #[test]
     #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
