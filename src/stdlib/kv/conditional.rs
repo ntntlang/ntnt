@@ -421,6 +421,7 @@ pub(crate) fn check_redis_acl_abort(handle: &Value) {
         .arg("SETUSER")
         .arg(&name)
         .arg("+exec")
+        .arg("+type")
         .query::<()>(&mut store.lock().unwrap().conn)
         .unwrap();
     assert!(write(

@@ -12,6 +12,7 @@ pub(super) const READY: &str = "jobs:ready";
 const READY_INITIALIZED: &str = "jobs:ready:initialized";
 const READY_MIGRATION_LOCK: &str = "jobs:ready:migration_lock";
 const READY_SENTINEL: &str = "__ntnt_ready_index__";
+const MAX_STALE_BATCHES_PER_CLAIM: usize = 4;
 const MAX_RECOVERY: usize = 256;
 
 pub(super) fn is_pending_key(key: &str) -> bool {
@@ -166,7 +167,7 @@ fn ready_candidate(conn: &mut redis::Connection, floor: &str, ceiling: &str) -> 
             return {}
         "#,
     );
-    loop {
+    for _ in 0..MAX_STALE_BATCHES_PER_CLAIM {
         let result: Vec<String> = script
             .key(READY)
             .arg(format!("[{floor}"))
@@ -178,6 +179,7 @@ fn ready_candidate(conn: &mut redis::Connection, floor: &str, ceiling: &str) -> 
             candidate => return Ok(candidate.map(str::to_owned)),
         }
     }
+    Ok(None)
 }
 
 pub(crate) struct Claim {
@@ -1403,7 +1405,7 @@ mod tests {
         let stale = "jobs:pending:05:0000000000:00000000-stale";
         conditional::redis_call(&handle, |conn| {
             let mut tx = redis::pipe();
-            for n in 0..300 {
+            for n in 0..1300 {
                 tx.cmd("ZADD")
                     .arg(READY)
                     .arg(0)
@@ -1414,6 +1416,15 @@ mod tests {
         })
         .unwrap();
 
+        assert!(claim(
+            &handle,
+            "jobs:pending:05:",
+            "jobs:pending:05:~",
+            "worker-bounded-stale-cleanup",
+            60_000,
+        )
+        .unwrap()
+        .is_none());
         assert_eq!(take(&handle).id, id);
         let remaining: usize = conditional::redis_call(&handle, |conn| {
             redis::cmd("ZCOUNT")
