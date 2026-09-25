@@ -893,6 +893,86 @@ impl TypeContext {
         );
     }
 
+    /// Apply a known function signature to its UFCS/dot-call form.
+    ///
+    /// `value.f(arg)` is runtime sugar for `f(value, arg)`, so methods that do
+    /// not need the more precise collection-specific inference below should
+    /// still get the ordinary function's argument checks and return type.
+    fn infer_ufcs_signature(
+        &mut self,
+        method: &str,
+        object_type: &Type,
+        argument_types: &[Type],
+    ) -> Option<Type> {
+        let sig = self
+            .functions
+            .get(method)
+            .cloned()
+            .or_else(|| self.builtin_sigs.get(method).cloned())?;
+        let arg_types: Vec<Type> = std::iter::once(object_type.clone())
+            .chain(argument_types.iter().cloned())
+            .collect();
+        let line = self.find_line_near(&format!(".{}(", method));
+
+        let wrong_arity = if sig.variadic {
+            arg_types.len() < sig.required_params
+        } else {
+            arg_types.len() < sig.required_params || arg_types.len() > sig.params.len()
+        };
+        if wrong_arity {
+            let expected = if sig.variadic {
+                format!("at least {}", sig.required_params)
+            } else if sig.required_params == sig.params.len() {
+                sig.params.len().to_string()
+            } else {
+                format!("{} to {}", sig.required_params, sig.params.len())
+            };
+            self.error(
+                format!(
+                    "Function '{}' expects {} argument(s), got {}",
+                    method,
+                    expected,
+                    arg_types.len()
+                ),
+                line,
+                None,
+            );
+            return Some(sig.return_type);
+        }
+
+        for (i, (arg_type, (param_name, param_type))) in
+            arg_types.iter().zip(sig.params.iter()).enumerate()
+        {
+            let is_type_param =
+                matches!(param_type, Type::Named(name) if sig.type_params.contains(name));
+            if !is_type_param
+                && !self.compatible(arg_type, param_type)
+                && !matches!(arg_type, Type::Any)
+                && !matches!(param_type, Type::Any)
+            {
+                self.error(
+                    format!(
+                        "Argument {} ('{}') of '{}': expected {} but got {}",
+                        i + 1,
+                        param_name,
+                        method,
+                        param_type.name(),
+                        arg_type.name()
+                    ),
+                    line,
+                    Some(format!("Expected {}", param_type.name())),
+                );
+            }
+        }
+
+        if sig.type_params.is_empty() {
+            Some(sig.return_type)
+        } else {
+            let (bindings, _) = Self::unify_type_params(&sig.type_params, &sig.params, &arg_types);
+            Some(Self::substitute_type_params(&sig.return_type, &bindings))
+        }
+    }
+
     /// Warn when a string literal contains JavaScript-style `${ident}` and
     /// `ident` is a variable in scope. NTNT interpolation is `#{expr}`, so
     /// the `${...}` text would be output literally.
@@ -2544,7 +2624,9 @@ impl TypeContext {
                         Type::Map { value_type, .. } => (**value_type).clone(),
                         _ => Type::Any,
                     },
-                    _ => Type::Any,
+                    _ => self
+                        .infer_ufcs_signature(method, &obj_type, &method_arg_types)
+                        .unwrap_or(Type::Any),
                 }
             }
 
@@ -5531,6 +5613,31 @@ mod tests {
         assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
         assert!(errs[0].message.contains("expected Int"));
         assert!(errs[0].message.contains("got String"));
+    }
+
+    #[test]
+    fn test_int_or_dot_call_uses_builtin_signature() {
+        let errs = check_errors(
+            r#"
+            let parsed: Int = "42".int_or(0)
+            let wrong_return: String = "42".int_or(0)
+            "42".int_or("not an int")
+            "#,
+        );
+        assert_eq!(errs.len(), 2, "unexpected diagnostics: {errs:?}");
+        assert!(
+            errs.iter().any(|e| {
+                e.message.contains("declared as String")
+                    && e.message.contains("initialized with Int")
+            }),
+            "missing return-type diagnostic: {errs:?}"
+        );
+        assert!(
+            errs.iter().any(|e| {
+                e.message.contains("expected Int") && e.message.contains("got String")
+            }),
+            "missing fallback-type diagnostic: {errs:?}"
+        );
     }
 
     // ── Return type checking ────────────────────────────────────
