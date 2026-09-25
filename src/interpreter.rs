@@ -735,6 +735,22 @@ struct CachedExternalTemplate {
     mtime: Option<std::time::SystemTime>,
 }
 
+fn convert_to_int(value: &Value) -> std::result::Result<Value, String> {
+    match value {
+        Value::Int(n) => Ok(Value::Int(*n)),
+        Value::Float(f) => Ok(Value::Int(*f as i64)),
+        Value::String(s) => s.parse::<i64>().map(Value::Int).map_err(|_| {
+            if s.is_empty() {
+                "Cannot parse as int: empty string".to_string()
+            } else {
+                format!("Cannot parse as int: {}", s)
+            }
+        }),
+        Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
+        other => Err(format!("Cannot convert {} to int", other.type_name())),
+    }
+}
+
 /// The Intent interpreter
 pub struct Interpreter {
     pub(crate) probe_scope: crate::stdlib::net::persistent::Scope,
@@ -2661,7 +2677,7 @@ impl Interpreter {
         // @param x The value to convert
         // @returns Result containing the integer value, or Err with a parse/conversion message
         // @tags #pure, #deterministic
-        // @see_also float, str, unwrap
+        // @see_also int_or, float, str, unwrap
         // @since v0.1.0
         // @example int(3.7) => Ok(3) ~ "Float truncated to int"
         // @example int("42") => Ok(42) ~ "String parsed to int"
@@ -2674,23 +2690,44 @@ impl Interpreter {
                 max_arity: 1,
                 requires: None,
                 func: |args| {
-                    let result = match &args[0] {
-                        Value::Int(n) => Ok(Value::Int(*n)),
-                        Value::Float(f) => Ok(Value::Int(*f as i64)),
-                        Value::String(s) => s.parse::<i64>().map(Value::Int).map_err(|_| {
-                            if s.is_empty() {
-                                "Cannot parse as int: empty string".to_string()
-                            } else {
-                                format!("Cannot parse as int: {}", s)
-                            }
-                        }),
-                        Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
-                        other => Err(format!("Cannot convert {} to int", other.type_name())),
-                    };
-                    Ok(match result {
+                    Ok(match convert_to_int(&args[0]) {
                         Ok(value) => Value::ok(value),
                         Err(message) => Value::err(Value::String(message)),
                     })
+                },
+            },
+        );
+
+        // @ntnt int_or
+        // @signature int_or(value: Any, fallback: Int) -> Int
+        // Converts a value to an integer, returning a local fallback on failure.
+        //
+        // Accepts the same convertible inputs as int(): Int, Float, String, and Bool.
+        // Invalid strings, None, and other unsupported values return fallback.
+        // @param value The value to convert
+        // @param fallback The integer returned when conversion fails
+        // @returns The converted integer or fallback
+        // @tags #pure, #deterministic
+        // @see_also int, float, unwrap
+        // @since v0.5.5
+        // @example int_or("42", 0) => 42 ~ "String parsed to int"
+        // @example int_or("none", -1) => -1 ~ "Invalid strings use the fallback"
+        // @error TypeError ~ "int_or() fallback must be Int" fix: "Pass an Int as the fallback argument"
+        self.environment.borrow_mut().define(
+            "int_or".to_string(),
+            Value::NativeFunction {
+                name: "int_or".to_string(),
+                arity: 2,
+                max_arity: 2,
+                requires: None,
+                func: |args| {
+                    let Value::Int(fallback) = &args[1] else {
+                        return Err(IntentError::type_error(format!(
+                            "int_or() fallback must be Int, got {}",
+                            args[1].type_name()
+                        )));
+                    };
+                    Ok(convert_to_int(&args[0]).unwrap_or(Value::Int(*fallback)))
                 },
             },
         );

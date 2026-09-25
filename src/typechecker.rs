@@ -4087,6 +4087,7 @@ impl TypeContext {
         // Conversion
         sig!("str", ["value" => Type::Any], Type::String);
         sig!("int", ["value" => Type::Any], Type::Generic { name: "Result".to_string(), args: vec![Type::Int, Type::String] });
+        sig!("int_or", ["value" => Type::Any, "fallback" => Type::Int], Type::Int);
         sig!("float", ["value" => Type::Any], Type::Generic { name: "Result".to_string(), args: vec![Type::Float, Type::String] });
         sig!("bool", ["value" => Type::Any], Type::Bool);
         sig!("type", ["value" => Type::Any], Type::String);
@@ -5517,6 +5518,19 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("expected String"));
         assert!(errs[0].message.contains("got Int"));
+    }
+
+    #[test]
+    fn test_int_or_signature_returns_int_and_checks_fallback() {
+        let errs = check_errors(
+            r#"
+            let parsed: Int = int_or("42", 0)
+            int_or("42", "not an int")
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs[0].message.contains("expected Int"));
+        assert!(errs[0].message.contains("got String"));
     }
 
     // ── Return type checking ────────────────────────────────────

@@ -1999,6 +1999,42 @@ print(fbad)
 }
 
 #[test]
+fn test_int_or_returns_converted_value_or_fallback() {
+    let code = r#"
+print(int_or("42", 0))
+print(int_or(3.7, 0))
+print(int_or(true, 0))
+print(int_or(false, 9))
+print(int_or("", 7))
+print(int_or("nope", -1))
+print(int_or(None, 8))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "int_or() should convert supported values and fall back locally\nstdout:\n{}\nstderr:\n{}",
+        stdout, stderr
+    );
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec!["42", "3", "1", "0", "7", "-1", "8"]
+    );
+}
+
+#[test]
+fn test_int_or_rejects_non_integer_fallback_at_runtime() {
+    let code = r#"print(int_or("nope", "bad"))"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(stdout, "");
+    assert_eq!(exit_code, 1, "stderr:\n{}", stderr);
+    assert!(
+        stderr.contains("int_or() fallback must be Int, got String"),
+        "stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn test_runtime_errors_show_approximate_source_context() {
     let code = r#"
 let x = 1 / 0
