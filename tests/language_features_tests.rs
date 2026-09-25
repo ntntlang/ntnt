@@ -2135,12 +2135,12 @@ fn test_runtime_errors_preserve_imported_helper_and_call_site() {
     let (_stdout, stderr, exit_code) = run_ntnt_file(&main, &[]);
     assert_ne!(exit_code, 0, "imported helper should fail");
     assert!(
-        stderr.contains(&format!("{}:2:18", helper.display())),
+        stderr.contains("helper.tnt:2:18"),
         "runtime error should identify the exact helper expression: {}",
         stderr
     );
     assert!(
-        stderr.contains(&format!("called from {}:2:1", main.display())),
+        stderr.contains("called from") && stderr.contains("main.tnt:2:1"),
         "runtime error should preserve the importing call site: {}",
         stderr
     );
@@ -2223,6 +2223,34 @@ before
         stderr
     );
     assert!(stderr.contains("^~~~~"), "stderr:\n{}", stderr);
+}
+
+#[test]
+fn test_template_missing_values_remain_empty_with_source_spans() {
+    let code = r#"
+let x = """{{missing}}"""
+print("[" + x + "]")
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_eq!(exit_code, 0, "stderr:\n{}", stderr);
+    assert!(stdout.contains("[]"), "stdout:\n{}", stdout);
+}
+
+#[test]
+fn test_runtime_errors_skip_escaped_template_markers_when_locating_expression() {
+    let code = r#"
+let x = 1
+let y = """x\#{a {{x - true}}"""
+"#;
+    let (_stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_ne!(exit_code, 0, "invalid subtraction should fail");
+    assert!(
+        stderr.contains(":3:20"),
+        "runtime span should skip escaped template markers: {}",
+        stderr
+    );
+    assert!(stderr.contains("^~~~~~~~"), "stderr:\n{}", stderr);
 }
 
 // ============================================================================

@@ -267,6 +267,15 @@ impl IntentError {
         }
     }
 
+    /// Return whether this error's underlying cause is an undefined variable.
+    pub fn is_undefined_variable(&self) -> bool {
+        match self {
+            IntentError::UndefinedVariable { .. } => true,
+            IntentError::Spanned { error, .. } => error.is_undefined_variable(),
+            _ => false,
+        }
+    }
+
     /// Get the TypeContext if this error has one
     pub fn type_context(&self) -> Option<&TypeContext> {
         match self {

@@ -2481,6 +2481,80 @@ impl Parser {
         Ok(Expression::TemplateString(ast_parts))
     }
 
+    fn template_expression_byte(expr: &str, lexeme: &str, source_cursor: usize) -> Option<usize> {
+        let mut scan = 0;
+
+        while scan < lexeme.len() {
+            let remainder = &lexeme[scan..];
+            let mut opening = [("{{{", "}}}"), ("{{", "}}"), ("#{", "}")]
+                .into_iter()
+                .filter_map(|(open, close)| {
+                    remainder.find(open).map(|offset| (offset, open, close))
+                })
+                .min_by_key(|(offset, open, _)| (*offset, std::cmp::Reverse(open.len())));
+
+            let Some((offset, open, close)) = opening.take() else {
+                break;
+            };
+            let open_byte = scan + offset;
+            let escaped = lexeme[..open_byte]
+                .chars()
+                .rev()
+                .take_while(|ch| *ch == '\\')
+                .count()
+                % 2
+                == 1;
+            if escaped {
+                scan = open_byte + open.len();
+                continue;
+            }
+
+            let content_start = open_byte + open.len();
+            let Some(close_offset) = lexeme[content_start..].find(close) else {
+                break;
+            };
+            let content_end = content_start + close_offset;
+            let content = &lexeme[content_start..content_end];
+            let leading = content.len() - content.trim_start().len();
+            let trimmed = content.trim_start();
+            let mut semantic_start = content_start + leading;
+
+            if open != "#{" {
+                if trimmed.starts_with('!')
+                    || trimmed.starts_with('/')
+                    || trimmed == "else"
+                    || trimmed == "#empty"
+                {
+                    scan = content_end + close.len();
+                    continue;
+                }
+                for prefix in ["#if", "#elif"] {
+                    if let Some(rest) = trimmed.strip_prefix(prefix) {
+                        semantic_start += prefix.len() + (rest.len() - rest.trim_start().len());
+                    }
+                }
+                if trimmed.starts_with("#for") {
+                    if let Some(offset) = content.find(" in ") {
+                        semantic_start = content_start + offset + " in ".len();
+                    }
+                } else if let Some(rest) = trimmed.strip_prefix('>') {
+                    let rest_leading = rest.len() - rest.trim_start().len();
+                    let partial = rest.trim_start();
+                    let name_len = partial.find(char::is_whitespace).unwrap_or(partial.len());
+                    semantic_start += 1 + rest_leading + name_len;
+                }
+            }
+
+            let search_start = source_cursor.max(semantic_start).min(content_end);
+            if let Some(expr_offset) = lexeme[search_start..content_end].find(expr) {
+                return Some(search_start + expr_offset);
+            }
+            scan = content_end + close.len();
+        }
+
+        None
+    }
+
     fn parse_template_expression_at(
         expr: &str,
         line: usize,
@@ -2488,10 +2562,8 @@ impl Parser {
         lexeme: &str,
         source_cursor: &mut usize,
     ) -> Result<Expression> {
-        let expr_byte = lexeme[*source_cursor..]
-            .find(expr)
-            .map(|offset| *source_cursor + offset)
-            .unwrap_or(*source_cursor);
+        let expr_byte =
+            Self::template_expression_byte(expr, lexeme, *source_cursor).unwrap_or(*source_cursor);
         *source_cursor = expr_byte.saturating_add(expr.len());
 
         let mut expr_line = line;
@@ -2525,9 +2597,6 @@ impl Parser {
         for part in parts {
             match part {
                 LexerTemplatePart::Literal(s) => {
-                    if let Some(offset) = lexeme[*source_cursor..].find(s) {
-                        *source_cursor += offset + s.len();
-                    }
                     ast_parts.push(TemplatePart::Literal(s.clone()));
                 }
                 LexerTemplatePart::Expr(expr_str) => {
@@ -2721,9 +2790,6 @@ impl Parser {
                     body,
                     empty_body,
                 } => {
-                    if let Some(offset) = lexeme[*source_cursor..].find(" in ") {
-                        *source_cursor += offset + " in ".len();
-                    }
                     let iterable_expr = match Self::parse_template_expression_at(
                         iterable,
                         line,
@@ -2841,9 +2907,6 @@ impl Parser {
                 }
                 LexerTemplatePart::Partial { name, data_expr } => {
                     let data_ast = if let Some(expr_str) = data_expr {
-                        if let Some(offset) = lexeme[*source_cursor..].find(name) {
-                            *source_cursor += offset + name.len();
-                        }
                         match Self::parse_template_expression_at(
                             expr_str,
                             line,

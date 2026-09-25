@@ -8688,7 +8688,7 @@ impl Interpreter {
                 Ok(false)
             }
             Ok(v) => Ok(v.is_truthy()),
-            Err(IntentError::UndefinedVariable { .. }) => Ok(false),
+            Err(e) if e.is_undefined_variable() => Ok(false),
             Err(e) => {
                 Self::handle_template_error(e, context, result)?;
                 Ok(false)
@@ -8724,7 +8724,7 @@ impl Interpreter {
                             result.push_str(&html_escape_string(&s));
                         }
                         // Undefined template variables render as empty string
-                        Err(IntentError::UndefinedVariable { .. }) => {}
+                        Err(e) if e.is_undefined_variable() => {}
                         Err(e) => Self::handle_template_error(e, "expression", &mut result)?,
                     }
                 }
@@ -8745,7 +8745,7 @@ impl Interpreter {
                             result.push_str(&v.to_string());
                         }
                         // Undefined template variables render as empty string
-                        Err(IntentError::UndefinedVariable { .. }) => {}
+                        Err(e) if e.is_undefined_variable() => {}
                         Err(e) => Self::handle_template_error(e, "raw expression", &mut result)?,
                     }
                 }
@@ -8756,7 +8756,7 @@ impl Interpreter {
                     let mut value = match self.eval_expression(expr) {
                         Ok(v) => v,
                         Err(e) => {
-                            if has_default && matches!(e, IntentError::UndefinedVariable { .. }) {
+                            if has_default && e.is_undefined_variable() {
                                 Value::Unit
                             } else if has_default {
                                 Self::handle_template_error(
@@ -8820,7 +8820,7 @@ impl Interpreter {
                     let mut value = match self.eval_expression(expr) {
                         Ok(v) => v,
                         Err(e) => {
-                            if has_default && matches!(e, IntentError::UndefinedVariable { .. }) {
+                            if has_default && e.is_undefined_variable() {
                                 Value::Unit
                             } else if has_default {
                                 Self::handle_template_error(
@@ -10614,7 +10614,7 @@ impl Interpreter {
     /// retaining the statement-start excerpt as an explicit fallback.
     fn format_route_error_context(&self, error: &IntentError, handler_file: &str) -> String {
         let mut message = error.to_string();
-        if handler_file.is_empty() {
+        if handler_file.is_empty() && error.source_file().is_none() {
             return message;
         }
         let source_file = error.source_file().unwrap_or(handler_file);
@@ -12049,6 +12049,30 @@ mod tests {
             std::process::id(),
             now
         ))
+    }
+
+    #[test]
+    fn route_error_context_uses_error_source_for_inline_handlers() {
+        let dir = unique_template_test_dir("inline_route_error");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source_file = dir.join("route.tnt");
+        std::fs::write(&source_file, "let x = 1 / 0\n").unwrap();
+        let error = IntentError::runtime_error("Division by zero".to_string()).at_span_in(
+            Some(source_file.to_string_lossy().into_owned()),
+            crate::error::SourceSpan {
+                start_line: 1,
+                start_column: 9,
+                end_line: 1,
+                end_column: 14,
+            },
+        );
+
+        let rendered = Interpreter::new().format_route_error_context(&error, "");
+
+        assert!(rendered.contains(&source_file.to_string_lossy().into_owned()));
+        assert!(rendered.contains("let x = 1 / 0"));
+        assert!(rendered.contains("^~~~~"));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
