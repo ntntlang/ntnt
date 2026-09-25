@@ -316,8 +316,8 @@ struct RecoveryPermit<'a> {
 }
 
 impl RecoveryPermit<'_> {
-    fn finish(mut self, now: std::time::Instant, success: bool, contention: bool) {
-        self.runtime.finish_recovery(now, success, contention);
+    fn finish(mut self, now: std::time::Instant, retry_soon: bool) {
+        self.runtime.finish_recovery(now, retry_soon);
         self.finished = true;
     }
 }
@@ -326,7 +326,7 @@ impl Drop for RecoveryPermit<'_> {
     fn drop(&mut self) {
         if !self.finished {
             self.runtime
-                .finish_recovery(std::time::Instant::now(), false, true);
+                .finish_recovery(std::time::Instant::now(), true);
         }
     }
 }
@@ -373,17 +373,17 @@ impl JobRuntime {
         })
     }
 
-    fn finish_recovery(&self, now: std::time::Instant, success: bool, contention: bool) {
+    fn finish_recovery(&self, now: std::time::Instant, retry_soon: bool) {
         let mut gate = self
             .recovery_gate
             .lock()
             .expect("job recovery gate lock poisoned");
         gate.in_flight = false;
         gate.next_at = now
-            + if success || !contention {
-                std::time::Duration::from_secs(5)
-            } else {
+            + if retry_soon {
                 std::time::Duration::from_millis(25)
+            } else {
+                std::time::Duration::from_secs(5)
             };
     }
 
@@ -1941,21 +1941,38 @@ fn reenqueue_and_backoff(
     sleep_cancellable(dur)
 }
 
+fn retry_worker_resource<T>(
+    mut open: impl FnMut() -> Result<T>,
+    mut wait_for_retry: impl FnMut(std::time::Duration) -> bool,
+) -> Option<T> {
+    loop {
+        match open() {
+            Ok(resource) => return Some(resource),
+            Err(error) => {
+                eprintln!("[ntnt] worker Redis connection unavailable: {error}");
+                if wait_for_retry(std::time::Duration::from_secs(1)) {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<String>>) {
     // Redis/Valkey workers own one bounded-lifetime connection per slot. The
     // control-plane handle remains shared, but no worker data-plane traffic is
     // serialized through it.
     let owned_kv = if matches!(kv_info.backend.as_str(), "redis" | "valkey") {
-        match kv::open_owned_kv(&kv_info.url) {
-            Ok(handle) => Some(handle),
-            Err(error) => {
-                eprintln!("[ntnt] worker Redis connection unavailable: {error}");
-                return;
-            }
-        }
+        retry_worker_resource(
+            || kv::open_owned_kv(&kv_info.url),
+            |delay| sleep_cancellable(delay),
+        )
     } else {
         None
     };
+    if matches!(kv_info.backend.as_str(), "redis" | "valkey") && owned_kv.is_none() {
+        return;
+    }
     let kv_handle = owned_kv
         .as_ref()
         .map_or_else(|| kv_info.to_value(), |owned| owned.value().clone());
@@ -1998,7 +2015,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         if let Some(recovery) = JOB_RUNTIME.begin_recovery(std::time::Instant::now()) {
             match kv::job_leases::recover(&kv_handle, 64) {
                 Ok(recovered) => {
-                    recovery.finish(std::time::Instant::now(), true, false);
+                    recovery.finish(std::time::Instant::now(), recovered.more_due);
                     if recovered.requeued + recovered.unknown > 0 {
                         eprintln!(
                             "[ntnt] recovered {} unstarted jobs; {} need reconciliation",
@@ -2008,7 +2025,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 }
                 Err(error) => {
                     let contention = kv::conditional::is_contention_error(&error);
-                    recovery.finish(std::time::Instant::now(), false, contention);
+                    recovery.finish(std::time::Instant::now(), contention);
                     eprintln!("[ntnt] job recovery deferred: {error}");
                 }
             }
@@ -6104,6 +6121,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn worker_resource_retries_transient_startup_failure() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let resource = retry_worker_resource(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(IntentError::runtime_error("transient startup failure"))
+                } else {
+                    Ok("ready")
+                }
+            },
+            |delay| {
+                assert_eq!(delay, std::time::Duration::from_secs(1));
+                waits += 1;
+                false
+            },
+        );
+        assert_eq!(resource, Some("ready"));
+        assert_eq!(attempts, 3);
+        assert_eq!(waits, 2);
+    }
+
+    #[test]
     fn recovery_gate_allows_one_process_worker_per_interval() {
         let runtime = Arc::new(JobRuntime::new());
         let now = std::time::Instant::now();
@@ -6123,7 +6164,7 @@ pub(crate) mod tests {
                 barrier.wait();
                 if let Some(permit) = runtime.begin_recovery(now) {
                     winners.fetch_add(1, AtomicOrdering::Relaxed);
-                    permit.finish(now, true, false);
+                    permit.finish(now, false);
                 }
             }));
         }
@@ -6138,14 +6179,14 @@ pub(crate) mod tests {
         runtime
             .begin_recovery(now + std::time::Duration::from_secs(5))
             .unwrap()
-            .finish(now + std::time::Duration::from_secs(5), false, true);
+            .finish(now + std::time::Duration::from_secs(5), true);
         assert!(runtime
             .begin_recovery(now + std::time::Duration::from_millis(5_024))
             .is_none());
         runtime
             .begin_recovery(now + std::time::Duration::from_millis(5_025))
             .unwrap()
-            .finish(now + std::time::Duration::from_millis(5_025), true, false);
+            .finish(now + std::time::Duration::from_millis(5_025), false);
     }
 
     #[test]

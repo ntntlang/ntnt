@@ -259,6 +259,7 @@ pub(crate) struct Lease {
 pub(crate) struct RecoveryCounts {
     pub requeued: usize,
     pub unknown: usize,
+    pub more_due: bool,
 }
 fn err<E>(_: E) -> redis::RedisError {
     redis::RedisError::from((
@@ -640,6 +641,20 @@ pub(crate) fn claim(
     worker_id: &str,
     duration_ms: i64,
 ) -> Result<Option<Claim>> {
+    if get_backend_type(handle)? == KVBackend::Redis {
+        // Serialize the normal fast check with lease transactions, but release
+        // the gate before a potentially long cross-process migration wait so
+        // keepers can continue renewing.
+        let initialized = {
+            let _gate = REDIS_TRANSACTION_GATE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            conditional::redis_call(handle, ready_index_initialized)?
+        };
+        if !initialized {
+            conditional::redis_call(handle, ensure_ready_index)?;
+        }
+    }
     transaction(handle, |store| {
         let now = store.now()?;
         let deadline_ms = deadline(now, duration_ms)?;
@@ -647,7 +662,6 @@ pub(crate) fn claim(
             conn.query_row("SELECT key FROM _kv WHERE key LIKE 'jobs:pending:%' AND key>=? AND key<=? AND (expires_at IS NULL OR expires_at>?) ORDER BY key LIMIT 1", params![floor, ceiling, now/1000], |r| r.get(0)).optional().map_err(err)?
         } else {
             let conn = store.redis.as_deref_mut().unwrap();
-            ensure_ready_index(conn)?;
             ready_candidate(conn, floor, ceiling)?
         };
         let Some(pending_key) = candidate else {
@@ -732,7 +746,10 @@ pub(crate) fn recover(handle: &Value, limit: usize) -> Result<RecoveryCounts> {
     transaction(handle, |store| {
         let now = store.now()?;
         let mut counts = RecoveryCounts::default();
-        for (member, id) in store.due(now, limit.min(MAX_RECOVERY))? {
+        let limit = limit.min(MAX_RECOVERY);
+        let due = store.due(now, limit)?;
+        counts.more_due = due.len() == limit;
+        for (member, id) in due {
             let Some(lease) = store.lease(&id)? else {
                 store.remove_due(&member)?;
                 continue;
@@ -1217,10 +1234,18 @@ mod tests {
         // A legacy active record without a lease is not discovered/replayed.
         let (legacy, pending) = fixture(&handle, "active");
         kv_del(&handle, &pending).unwrap();
-        assert_eq!(recover(&handle, 0).unwrap().requeued, 0);
-        assert_eq!(recover(&handle, 1).unwrap().requeued, 1);
-        assert_eq!(recover(&handle, 1).unwrap().requeued, 1);
-        assert_eq!(recover(&handle, 10).unwrap().requeued, 1);
+        let none = recover(&handle, 0).unwrap();
+        assert_eq!(none.requeued, 0);
+        assert!(!none.more_due);
+        let first = recover(&handle, 1).unwrap();
+        assert_eq!(first.requeued, 1);
+        assert!(first.more_due);
+        let second = recover(&handle, 1).unwrap();
+        assert_eq!(second.requeued, 1);
+        assert!(second.more_due);
+        let final_batch = recover(&handle, 10).unwrap();
+        assert_eq!(final_batch.requeued, 1);
+        assert!(!final_batch.more_due);
         assert_eq!(text(&state(&handle, &legacy), "status"), Some("active"));
     }
     fn concurrency(url: &str) {
@@ -1510,6 +1535,43 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_millis(100));
         assert!(start.elapsed() < Duration::from_secs(2));
         assert!(conditional::redis_call(&handle, ready_index_initialized).unwrap());
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_migration_wait_does_not_hold_transaction_gate() {
+        let (url, handle) = redis_fixture();
+        fixture(&handle, "pending");
+        conditional::redis_call(&handle, |conn| {
+            redis::cmd("DEL").arg(READY_INITIALIZED).query::<()>(conn)?;
+            redis::cmd("ZREM")
+                .arg(READY)
+                .arg(READY_SENTINEL)
+                .query::<()>(conn)?;
+            redis::cmd("SET")
+                .arg(READY_MIGRATION_LOCK)
+                .arg("slow-other-process")
+                .arg("PX")
+                .arg(500)
+                .query::<()>(conn)
+        })
+        .unwrap();
+        let waiting_claim = std::thread::spawn(move || {
+            let handle = open_kv(&url).unwrap();
+            claim(
+                &handle,
+                "jobs:pending:00:",
+                "jobs:pending:99:~",
+                "waiting-worker",
+                10_000,
+            )
+            .unwrap()
+            .is_some()
+        });
+        std::thread::sleep(Duration::from_millis(75));
+        let start = std::time::Instant::now();
+        assert!(transaction(&handle, |store| store.now()).unwrap() > 0);
+        assert!(start.elapsed() < Duration::from_millis(200));
+        assert!(waiting_claim.join().unwrap());
     }
     #[test]
     #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
