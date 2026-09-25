@@ -3790,7 +3790,14 @@ pub(crate) fn worker_status_impl() -> crate::error::Result<Value> {
             Value::Int(band.poll_interval_ms as i64),
         );
 
-        let worker_count = task_ids.get(&band.name).map(|v| v.len()).unwrap_or(0);
+        let worker_count = task_ids
+            .get(&band.name)
+            .map(|ids| {
+                ids.iter()
+                    .filter(|id| RUNTIME.task_is_running(**id))
+                    .count()
+            })
+            .unwrap_or(0);
         entry.insert("workers".to_string(), Value::Int(worker_count as i64));
 
         if let Some(stats) = stats_map_guard.get(&band.name) {
@@ -3857,7 +3864,37 @@ pub(crate) fn scale_workers_impl(
     scale_workers_with_spawn(band_name, target_count, spawn_worker_task)
 }
 
+fn prune_finished_workers(
+    ids: &mut Vec<u64>,
+    arcs: &mut Vec<Arc<CancelToken>>,
+    is_running: &mut impl FnMut(u64) -> bool,
+) {
+    debug_assert_eq!(ids.len(), arcs.len());
+    let workers: Vec<_> = ids.drain(..).zip(arcs.drain(..)).collect();
+    for (id, arc) in workers {
+        if is_running(id) {
+            ids.push(id);
+            arcs.push(arc);
+        }
+    }
+}
+
 fn scale_workers_with_spawn(
+    band_name: &str,
+    target_count: usize,
+    spawn: impl FnMut(
+        Value,
+        BandConfig,
+        Option<Vec<String>>,
+        Option<std::sync::mpsc::Receiver<()>>,
+    ) -> Result<(Value, Arc<CancelToken>)>,
+) -> Result<Value> {
+    scale_workers_with_spawn_and_liveness(band_name, target_count, spawn, |id| {
+        RUNTIME.task_is_running(id)
+    })
+}
+
+fn scale_workers_with_spawn_and_liveness(
     band_name: &str,
     target_count: usize,
     mut spawn: impl FnMut(
@@ -3866,6 +3903,7 @@ fn scale_workers_with_spawn(
         Option<Vec<String>>,
         Option<std::sync::mpsc::Receiver<()>>,
     ) -> Result<(Value, Arc<CancelToken>)>,
+    mut is_running: impl FnMut(u64) -> bool,
 ) -> Result<Value> {
     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
     // Hold the publication locks from configuration lookup through map update.
@@ -3896,7 +3934,10 @@ fn scale_workers_with_spawn(
             ))
         })?;
 
-    let current_count = cancel_map.get(band_name).map_or(0, Vec::len);
+    let ids = task_ids_map.entry(band_name.to_string()).or_default();
+    let arcs = cancel_map.entry(band_name.to_string()).or_default();
+    prune_finished_workers(ids, arcs, &mut is_running);
+    let current_count = arcs.len();
     let mut activations = Vec::new();
     if target_count > current_count {
         // Reuse pool startup's activation protocol: no worker may bootstrap or
@@ -3921,23 +3962,13 @@ fn scale_workers_with_spawn(
             staged_arcs.push(cancel_arc);
             activations.push(activate);
         }
-        task_ids_map
-            .entry(band_name.to_string())
-            .or_default()
-            .extend(staged_ids);
-        cancel_map
-            .entry(band_name.to_string())
-            .or_default()
-            .extend(staged_arcs);
+        ids.extend(staged_ids);
+        arcs.extend(staged_arcs);
     } else if target_count < current_count {
-        let arcs = cancel_map.entry(band_name.to_string()).or_default();
-        let ids = task_ids_map.entry(band_name.to_string()).or_default();
         for arc in arcs.drain(target_count..) {
             arc.cancel();
         }
-        if ids.len() > target_count {
-            ids.drain(target_count..ids.len());
-        }
+        ids.drain(target_count..ids.len());
     }
 
     // Publish count, IDs and cancellation handles before allowing any new worker
@@ -8488,23 +8519,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn scale_replaces_finished_workers_at_the_same_target() {
+        with_temp_kv("scale_replace_finished", |_| {
+            seed_scale_test_band();
+            let mut calls = 0;
+            scale_workers_with_spawn_and_liveness(
+                "scale_test",
+                1,
+                |_, _, _, activation| {
+                    calls += 1;
+                    drop(activation);
+                    Ok((Value::TaskHandle(888), Arc::new(CancelToken::new())))
+                },
+                |_| false,
+            )
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(
+                JOB_RUNTIME.band_worker_task_ids.lock().unwrap()["scale_test"],
+                vec![888]
+            );
+            assert_eq!(
+                JOB_RUNTIME.band_cancel_arcs.lock().unwrap()["scale_test"].len(),
+                1
+            );
+        });
+    }
+
+    #[test]
     fn scale_up_failure_preserves_old_pool_and_never_activates_partial_workers() {
         with_temp_kv("scale_failure", |_| {
             let original = seed_scale_test_band();
             let mut calls = 0;
             let mut worker = None;
-            let result = scale_workers_with_spawn("scale_test", 3, |_, _, _, activation| {
-                calls += 1;
-                if calls == 2 {
-                    return Err(IntentError::runtime_error(
-                        "injected thread creation failure",
-                    ));
-                }
-                worker = Some(std::thread::spawn(move || {
-                    activation.map_or(true, |gate| gate.recv().is_ok())
-                }));
-                Ok((Value::TaskHandle(888), Arc::new(CancelToken::new())))
-            });
+            let result = scale_workers_with_spawn_and_liveness(
+                "scale_test",
+                3,
+                |_, _, _, activation| {
+                    calls += 1;
+                    if calls == 2 {
+                        return Err(IntentError::runtime_error(
+                            "injected thread creation failure",
+                        ));
+                    }
+                    worker = Some(std::thread::spawn(move || {
+                        activation.map_or(true, |gate| gate.recv().is_ok())
+                    }));
+                    Ok((Value::TaskHandle(888), Arc::new(CancelToken::new())))
+                },
+                |_| true,
+            );
             assert!(result.is_err());
             let entered_consuming_loop = worker.unwrap().join().unwrap();
             assert_eq!(
@@ -8529,23 +8593,31 @@ pub(crate) mod tests {
             let original = seed_scale_test_band();
             let added = Arc::new(CancelToken::new());
             let mut worker = None;
-            scale_workers_with_spawn("scale_test", 2, |_, _, _, activation| {
-                let gate = activation.expect("new workers must be staged");
-                worker = Some(std::thread::spawn(move || {
-                    gate.recv().unwrap();
-                    assert_eq!(
-                        JOB_RUNTIME.band_worker_task_ids.lock().unwrap()["scale_test"],
-                        vec![777, 888]
-                    );
-                    assert_eq!(JOB_RUNTIME.active_bands.lock().unwrap()[0].concurrency, 2);
-                }));
-                Ok((Value::TaskHandle(888), added.clone()))
-            })
+            scale_workers_with_spawn_and_liveness(
+                "scale_test",
+                2,
+                |_, _, _, activation| {
+                    let gate = activation.expect("new workers must be staged");
+                    worker = Some(std::thread::spawn(move || {
+                        gate.recv().unwrap();
+                        assert_eq!(
+                            JOB_RUNTIME.band_worker_task_ids.lock().unwrap()["scale_test"],
+                            vec![777, 888]
+                        );
+                        assert_eq!(JOB_RUNTIME.active_bands.lock().unwrap()[0].concurrency, 2);
+                    }));
+                    Ok((Value::TaskHandle(888), added.clone()))
+                },
+                |_| true,
+            )
             .unwrap();
             worker.unwrap().join().unwrap();
-            scale_workers_with_spawn("scale_test", 1, |_, _, _, _| {
-                panic!("scale-down must not spawn")
-            })
+            scale_workers_with_spawn_and_liveness(
+                "scale_test",
+                1,
+                |_, _, _, _| panic!("scale-down must not spawn"),
+                |_| true,
+            )
             .unwrap();
             assert!(added.is_cancelled());
             assert!(!original.is_cancelled());

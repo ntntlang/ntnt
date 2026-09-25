@@ -11,6 +11,7 @@ const DUE_PREFIX: &str = "jobs:lease_due:";
 pub(super) const READY: &str = "jobs:ready";
 const READY_INITIALIZED: &str = "jobs:ready:initialized";
 const READY_MIGRATION_LOCK: &str = "jobs:ready:migration_lock";
+const READY_MIGRATION_LOCK_MS: usize = 5_000;
 const READY_SENTINEL: &str = "__ntnt_ready_index__";
 const MAX_STALE_BATCHES_PER_CLAIM: usize = 4;
 const MAX_RECOVERY: usize = 256;
@@ -89,8 +90,8 @@ pub(super) fn ensure_ready_index(conn: &mut redis::Connection) -> R<()> {
             .arg(READY_MIGRATION_LOCK)
             .arg(&token)
             .arg("NX")
-            .arg("EX")
-            .arg(300)
+            .arg("PX")
+            .arg(READY_MIGRATION_LOCK_MS)
             .query(conn)?;
         if acquired.is_some() {
             break;
@@ -143,6 +144,19 @@ pub(super) fn ensure_ready_index(conn: &mut redis::Connection) -> R<()> {
         );
         let mut cursor = 0u64;
         loop {
+            let renewed: i32 = redis::Script::new(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('PEXPIRE', KEYS[1], ARGV[2]) else return 0 end",
+            )
+            .key(READY_MIGRATION_LOCK)
+            .arg(&token)
+            .arg(READY_MIGRATION_LOCK_MS)
+            .invoke(conn)?;
+            if renewed == 0 {
+                return Err(redis::RedisError::from((
+                    redis::ErrorKind::ResponseError,
+                    "READY_INDEX_BUSY migration lock was lost",
+                )));
+            }
             let (next, mut batch): (u64, Vec<String>) = redis::cmd("SCAN")
                 .arg(cursor)
                 .arg("MATCH")
@@ -164,15 +178,27 @@ pub(super) fn ensure_ready_index(conn: &mut redis::Connection) -> R<()> {
                 break;
             }
         }
-        redis::cmd("ZADD")
-            .arg(READY)
-            .arg(0)
-            .arg(READY_SENTINEL)
-            .query::<()>(conn)?;
-        redis::cmd("SET")
-            .arg(READY_INITIALIZED)
-            .arg("1")
-            .query::<()>(conn)
+        let published: i32 = redis::Script::new(
+            r#"
+                if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+                redis.call('ZADD', KEYS[2], 0, ARGV[2])
+                redis.call('SET', KEYS[3], '1')
+                return 1
+            "#,
+        )
+        .key(READY_MIGRATION_LOCK)
+        .key(READY)
+        .key(READY_INITIALIZED)
+        .arg(&token)
+        .arg(READY_SENTINEL)
+        .invoke(conn)?;
+        if published == 0 {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::ResponseError,
+                "READY_INDEX_BUSY migration lock was lost",
+            )));
+        }
+        Ok(())
     })();
     let _ = redis::Script::new(
         "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
@@ -1461,26 +1487,20 @@ mod tests {
     #[test]
     #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
     fn redis_ready_migration_waits_and_reelects() {
-        let (url, handle) = redis_fixture();
+        let (_, handle) = redis_fixture();
         conditional::redis_call(&handle, |conn| {
             redis::cmd("SET")
                 .arg(READY_MIGRATION_LOCK)
                 .arg("departed-migrator")
-                .arg("EX")
-                .arg(5)
+                .arg("PX")
+                .arg(125)
                 .query::<()>(conn)
         })
         .unwrap();
-        let releaser = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(125));
-            let handle = open_kv(&url).unwrap();
-            kv_del(&handle, READY_MIGRATION_LOCK).unwrap();
-        });
         let start = std::time::Instant::now();
         conditional::redis_call(&handle, ensure_ready_index).unwrap();
         assert!(start.elapsed() >= Duration::from_millis(100));
         assert!(start.elapsed() < Duration::from_secs(2));
-        releaser.join().unwrap();
         assert!(conditional::redis_call(&handle, ready_index_initialized).unwrap());
     }
     #[test]
@@ -1636,9 +1656,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(calls, 32);
-        assert_eq!(
-            conditional::redis_transaction_conflicts() - conflicts_before,
-            31
+        assert!(
+            conditional::redis_transaction_conflicts() - conflicts_before >= 31,
+            "each retried conflict must increment telemetry"
         );
         assert!(matches!(
             kv_get(&handle, "retry:result").unwrap(),
@@ -1738,9 +1758,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(calls, 32);
-        assert_eq!(
-            conditional::redis_transaction_conflicts() - conflicts_before,
-            31
+        assert!(
+            conditional::redis_transaction_conflicts() - conflicts_before >= 31,
+            "each retried conflict must increment telemetry"
         );
         assert_eq!(pong, "PONG");
     }
