@@ -208,6 +208,11 @@ pub(crate) fn write(
             // committed write ID that falsely certifies missing queue work.
             let mut watch = redis::cmd("WATCH");
             watch.arg(key).arg(format!("{key}:__type"));
+            let touches_ready =
+                pending.is_some() || remove.iter().any(|key| job_leases::is_pending_key(key));
+            if touches_ready {
+                watch.arg(job_leases::READY);
+            }
             for key in remove {
                 watch.arg(key);
             }
@@ -216,6 +221,15 @@ pub(crate) fn write(
             }
             watch.query::<()>(conn)?;
             let result = (|| {
+                if touches_ready {
+                    let kind: String = redis::cmd("TYPE").arg(job_leases::READY).query(conn)?;
+                    if kind != "none" && kind != "zset" {
+                        return Err(redis::RedisError::from((
+                            redis::ErrorKind::TypeError,
+                            "job ready index has the wrong Redis type",
+                        )));
+                    }
+                }
                 let (raw, kind): (Option<String>, Option<String>) = redis::cmd("MGET")
                     .arg(key)
                     .arg(format!("{key}:__type"))
@@ -264,10 +278,12 @@ pub(crate) fn write(
                 for (key, value) in remove.iter().zip(owners) {
                     if value.as_deref() == Some(owner) {
                         tx.cmd("DEL").arg(key).arg(format!("{key}:__type")).ignore();
+                        job_leases::remove_ready(&mut tx, key);
                     }
                 }
                 if let Some(key) = pending {
                     tx.set(key, owner).ignore();
+                    job_leases::add_ready(&mut tx, key);
                 }
                 redis_commit(conn, &tx)
             })();
@@ -405,6 +421,7 @@ pub(crate) fn check_redis_acl_abort(handle: &Value) {
         .arg("SETUSER")
         .arg(&name)
         .arg("+exec")
+        .arg("+type")
         .query::<()>(&mut store.lock().unwrap().conn)
         .unwrap();
     assert!(write(
