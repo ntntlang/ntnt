@@ -1941,21 +1941,25 @@ fn reenqueue_and_backoff(
     sleep_cancellable(dur)
 }
 
+const WORKER_CONNECTION_ATTEMPTS: usize = 5;
+
 fn retry_worker_resource<T>(
+    attempts: usize,
     mut open: impl FnMut() -> Result<T>,
     mut wait_for_retry: impl FnMut(std::time::Duration) -> bool,
 ) -> Option<T> {
-    loop {
+    for attempt in 0..attempts {
         match open() {
             Ok(resource) => return Some(resource),
             Err(error) => {
                 eprintln!("[ntnt] worker Redis connection unavailable: {error}");
-                if wait_for_retry(std::time::Duration::from_secs(1)) {
+                if attempt + 1 == attempts || wait_for_retry(std::time::Duration::from_secs(1)) {
                     return None;
                 }
             }
         }
     }
+    None
 }
 
 fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<String>>) {
@@ -1964,6 +1968,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
     // serialized through it.
     let owned_kv = if matches!(kv_info.backend.as_str(), "redis" | "valkey") {
         retry_worker_resource(
+            WORKER_CONNECTION_ATTEMPTS,
             || kv::open_owned_kv(&kv_info.url),
             |delay| sleep_cancellable(delay),
         )
@@ -1971,7 +1976,12 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         None
     };
     if matches!(kv_info.backend.as_str(), "redis" | "valkey") && owned_kv.is_none() {
-        return;
+        if is_current_task_cancelled() {
+            return;
+        }
+        eprintln!(
+            "[ntnt] worker using shared Redis connection after private connection retries exhausted"
+        );
     }
     let kv_handle = owned_kv
         .as_ref()
@@ -6125,6 +6135,7 @@ pub(crate) mod tests {
         let mut attempts = 0;
         let mut waits = 0;
         let resource = retry_worker_resource(
+            5,
             || {
                 attempts += 1;
                 if attempts < 3 {
@@ -6140,6 +6151,26 @@ pub(crate) mod tests {
             },
         );
         assert_eq!(resource, Some("ready"));
+        assert_eq!(attempts, 3);
+        assert_eq!(waits, 2);
+    }
+
+    #[test]
+    fn worker_resource_falls_back_after_bounded_failures() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let resource = retry_worker_resource::<()>(
+            3,
+            || {
+                attempts += 1;
+                Err(IntentError::runtime_error("persistent startup failure"))
+            },
+            |_| {
+                waits += 1;
+                false
+            },
+        );
+        assert!(resource.is_none());
         assert_eq!(attempts, 3);
         assert_eq!(waits, 2);
     }
