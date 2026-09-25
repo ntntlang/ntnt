@@ -44,49 +44,78 @@ pub(super) fn watch_ready_index(conn: &mut redis::Connection) -> R<()> {
     Ok(())
 }
 
-pub(super) fn ensure_ready_index(conn: &mut redis::Connection) -> R<()> {
-    let initialized = redis::cmd("EXISTS")
+fn ready_index_initialized(conn: &mut redis::Connection) -> R<bool> {
+    if !redis::cmd("EXISTS")
         .arg(READY_INITIALIZED)
-        .query::<bool>(conn)?;
-    if initialized {
-        let kind: String = redis::cmd("TYPE").arg(READY).query(conn)?;
-        if kind != "none" && kind != "zset" {
-            return Err(redis::RedisError::from((
-                redis::ErrorKind::TypeError,
-                "job ready index has the wrong Redis type",
-            )));
-        }
-        if kind == "zset"
-            && redis::cmd("ZSCORE")
-                .arg(READY)
-                .arg(READY_SENTINEL)
-                .query::<Option<f64>>(conn)?
-                .is_some()
-        {
-            return Ok(());
-        }
-        redis::cmd("DEL").arg(READY_INITIALIZED).query::<()>(conn)?;
+        .query::<bool>(conn)?
+    {
+        return Ok(false);
+    }
+    let kind: String = redis::cmd("TYPE").arg(READY).query(conn)?;
+    if kind != "none" && kind != "zset" {
+        return Err(redis::RedisError::from((
+            redis::ErrorKind::TypeError,
+            "job ready index has the wrong Redis type",
+        )));
+    }
+    if kind == "zset"
+        && redis::cmd("ZSCORE")
+            .arg(READY)
+            .arg(READY_SENTINEL)
+            .query::<Option<f64>>(conn)?
+            .is_some()
+    {
+        return Ok(true);
+    }
+    redis::cmd("DEL").arg(READY_INITIALIZED).query::<()>(conn)?;
+    Ok(false)
+}
+
+pub(super) fn ensure_ready_index(conn: &mut redis::Connection) -> R<()> {
+    if ready_index_initialized(conn)? {
+        return Ok(());
     }
 
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let token = uuid::Uuid::new_v4().to_string();
-    let acquired: Option<String> = redis::cmd("SET")
-        .arg(READY_MIGRATION_LOCK)
-        .arg(&token)
-        .arg("NX")
-        .arg("EX")
-        .arg(300)
-        .query(conn)?;
-    if acquired.is_none() {
-        if redis::cmd("EXISTS")
-            .arg(READY_INITIALIZED)
-            .query::<bool>(conn)?
-        {
-            return Ok(());
+    'acquire: loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::ResponseError,
+                "READY_INDEX_BUSY migration did not finish within 30 seconds",
+            )));
         }
-        return Err(redis::RedisError::from((
-            redis::ErrorKind::ResponseError,
-            "job ready-index migration is already running; retry",
-        )));
+        let acquired: Option<String> = redis::cmd("SET")
+            .arg(READY_MIGRATION_LOCK)
+            .arg(&token)
+            .arg("NX")
+            .arg("EX")
+            .arg(300)
+            .query(conn)?;
+        if acquired.is_some() {
+            break;
+        }
+
+        // Multiple worker processes can start together. Observe the elected
+        // migrator, and re-elect immediately if its lock disappears.
+        loop {
+            if ready_index_initialized(conn)? {
+                return Ok(());
+            }
+            if !redis::cmd("EXISTS")
+                .arg(READY_MIGRATION_LOCK)
+                .query::<bool>(conn)?
+            {
+                continue 'acquire;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(redis::RedisError::from((
+                    redis::ErrorKind::ResponseError,
+                    "READY_INDEX_BUSY migration did not finish within 30 seconds",
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     let result = (|| {
@@ -474,16 +503,19 @@ impl<'a> Store<'a> {
         if let Some(conn) = self.redis.as_deref_mut() {
             let committed: Option<()> = self.writes.query(conn)?;
             if committed.is_none() {
-                return Err(err(()));
+                return Err(redis::RedisError::from((
+                    redis::ErrorKind::ResponseError,
+                    "job state transaction conflicted; retry",
+                )));
             }
         }
         Ok(())
     }
 }
 
-/// Fast-fail behind another handle user or SQLite writer; restore the original
+/// Redis handle ownership waits are bounded; SQLite restores the original
 /// connection busy timeout on every normal/error exit after the transaction.
-fn transaction<T>(handle: &Value, call: impl FnOnce(&mut Store<'_>) -> R<T>) -> Result<T> {
+fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) -> Result<T> {
     match get_backend_type(handle)? {
         KVBackend::SQLite => {
             let Value::Map(map) = handle else {
@@ -523,15 +555,44 @@ fn transaction<T>(handle: &Value, call: impl FnOnce(&mut Store<'_>) -> R<T>) -> 
             restored?;
             result.map_err(conditional::error)
         }
-        KVBackend::Redis => conditional::redis_call(handle, |conn| {
-            let mut store = Store::redis(conn);
-            let result = call(&mut store).and_then(|value| {
-                store.commit()?;
-                Ok(value)
-            });
-            let _ = redis::cmd("UNWATCH").query::<()>(store.redis.as_deref_mut().unwrap());
-            result
-        }),
+        KVBackend::Redis => {
+            // One connection per worker allows useful Redis concurrency, but all
+            // lease mutations intentionally fence on shared indexes. Give a full
+            // 32-slot worker wave a bounded chance to serialize its WATCH/EXEC.
+            const ATTEMPTS: usize = 32;
+            for attempt in 0..ATTEMPTS {
+                let result = conditional::redis_call_raw(handle, |conn| {
+                    let mut store = Store::redis(conn);
+                    let result = call(&mut store).and_then(|value| {
+                        store.commit()?;
+                        Ok(value)
+                    });
+                    let _ = redis::cmd("UNWATCH").query::<()>(store.redis.as_deref_mut().unwrap());
+                    result
+                });
+                match result {
+                    Ok(value) => return Ok(value),
+                    Err(failure) if failure.retryable() && attempt + 1 < ATTEMPTS => {
+                        if failure == conditional::StorageFailure::Conflict {
+                            conditional::record_redis_transaction_conflict();
+                        }
+                        let base_ms = 1u64 << attempt.min(3);
+                        let jitter_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|duration| duration.subsec_nanos() as u64 % (base_ms + 1))
+                            .unwrap_or(0);
+                        std::thread::sleep(Duration::from_millis(base_ms + jitter_ms));
+                    }
+                    Err(failure) => {
+                        if failure == conditional::StorageFailure::Conflict {
+                            conditional::record_redis_transaction_conflict();
+                        }
+                        return Err(failure.intent());
+                    }
+                }
+            }
+            unreachable!()
+        }
     }
 }
 
@@ -1399,6 +1460,46 @@ mod tests {
     }
     #[test]
     #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_ready_migration_waits_and_reelects() {
+        let (url, handle) = redis_fixture();
+        conditional::redis_call(&handle, |conn| {
+            redis::cmd("SET")
+                .arg(READY_MIGRATION_LOCK)
+                .arg("departed-migrator")
+                .arg("EX")
+                .arg(5)
+                .query::<()>(conn)
+        })
+        .unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(125));
+            let handle = open_kv(&url).unwrap();
+            kv_del(&handle, READY_MIGRATION_LOCK).unwrap();
+        });
+        let start = std::time::Instant::now();
+        conditional::redis_call(&handle, ensure_ready_index).unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(100));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        releaser.join().unwrap();
+        assert!(conditional::redis_call(&handle, ready_index_initialized).unwrap());
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_owned_valkey_handle_unregisters_on_drop() {
+        let (url, _) = redis_fixture();
+        let valkey_url = url.replacen("redis://", "valkey://", 1);
+        let owned = open_owned_kv(&valkey_url).unwrap();
+        let handle = owned.value().clone();
+        assert!(matches!(
+            &handle,
+            Value::Map(map) if matches!(map.get("_backend"), Some(Value::String(name)) if name == "valkey")
+        ));
+        assert!(get_redis_kv(&handle).is_ok());
+        drop(owned);
+        assert!(get_redis_kv(&handle).is_err());
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
     fn redis_claim_prunes_stale_ready_members() {
         let (_, handle) = redis_fixture();
         let (id, _) = fixture(&handle, "pending");
@@ -1494,7 +1595,7 @@ mod tests {
         let state_key = "jobs:data:wrong-ready-type";
         let pending = "jobs:pending:05:0000000000:wrong-ready-type";
         let next = Snapshot::prepare(&handle, &Value::String("pending".into())).unwrap();
-        assert!(conditional::write(
+        let error = conditional::write(
             &handle,
             state_key,
             None,
@@ -1505,7 +1606,8 @@ mod tests {
             Some(pending),
             false,
         )
-        .is_err());
+        .unwrap_err();
+        assert!(error.to_string().contains("(wrong_type)"));
         assert!(matches!(kv_get(&handle, state_key).unwrap(), Value::Unit));
         assert!(matches!(kv_get(&handle, pending).unwrap(), Value::Unit));
         assert!(!conditional::redis_call(&handle, |conn| {
@@ -1514,6 +1616,133 @@ mod tests {
                 .query::<bool>(conn)
         })
         .unwrap());
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_transaction_serializes_32_worker_wave() {
+        let (url, handle) = redis_fixture();
+        let other = open_kv(&url).unwrap();
+        kv_set(&handle, "retry:watch", &Value::Int(1), None).unwrap();
+        let mut calls = 0;
+        let conflicts_before = conditional::redis_transaction_conflicts();
+        transaction(&handle, |store| {
+            calls += 1;
+            let _ = store.read("retry:watch")?;
+            if calls < 32 {
+                kv_set(&other, "retry:watch", &Value::Int(calls), None).map_err(err)?;
+            }
+            let value = store.snapshot(&Value::String("committed".into()))?;
+            store.put("retry:result", &value)
+        })
+        .unwrap();
+        assert_eq!(calls, 32);
+        assert_eq!(
+            conditional::redis_transaction_conflicts() - conflicts_before,
+            31
+        );
+        assert!(matches!(
+            kv_get(&handle, "retry:result").unwrap(),
+            Value::String(value) if value == "committed"
+        ));
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_transaction_retries_shared_handle_busy() {
+        let (_, handle) = redis_fixture();
+        let shared = get_redis_kv(&handle).unwrap();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = shared.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(8));
+        });
+        locked_rx.recv().unwrap();
+        let now = transaction(&handle, |store| store.now()).unwrap();
+        assert!(now > 0);
+        holder.join().unwrap();
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_shared_handle_serializes_32_callers() {
+        let (_, handle) = redis_fixture();
+        let Value::Map(info) = &handle else { panic!() };
+        let Value::String(url) = info.get("_url").unwrap() else {
+            panic!()
+        };
+        let Value::Int(store_id) = info.get("_kv_store_id").unwrap() else {
+            panic!()
+        };
+        let url = url.clone();
+        let store_id = *store_id;
+        let barrier = Arc::new(Barrier::new(33));
+        let start = std::time::Instant::now();
+        let threads: Vec<_> = (0..32)
+            .map(|_| {
+                let url = url.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let handle = Value::Map(HashMap::from([
+                        ("_backend".into(), Value::String("redis".into())),
+                        ("_url".into(), Value::String(url)),
+                        ("_kv_store_id".into(), Value::Int(store_id)),
+                    ]));
+                    barrier.wait();
+                    for _ in 0..25 {
+                        transaction(&handle, |store| store.now())?;
+                    }
+                    Ok::<(), IntentError>(())
+                })
+            })
+            .collect();
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_shared_handle_wait_is_bounded_and_typed() {
+        let (_, handle) = redis_fixture();
+        let shared = get_redis_kv(&handle).unwrap();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = shared.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(350));
+        });
+        locked_rx.recv().unwrap();
+        let start = std::time::Instant::now();
+        let error = transaction(&handle, |store| store.now()).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(error.to_string().contains("(local_busy)"));
+        assert!(elapsed >= Duration::from_millis(200));
+        assert!(elapsed < Duration::from_millis(500));
+        holder.join().unwrap();
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_call_serializes_32_conflicts() {
+        let (_, handle) = redis_fixture();
+        let mut calls = 0;
+        let conflicts_before = conditional::redis_transaction_conflicts();
+        let pong: String = conditional::redis_call(&handle, |conn| {
+            calls += 1;
+            if calls < 32 {
+                return Err(redis::RedisError::from((
+                    redis::ErrorKind::ResponseError,
+                    "job state transaction conflicted; retry",
+                )));
+            }
+            redis::cmd("PING").query(conn)
+        })
+        .unwrap();
+        assert_eq!(calls, 32);
+        assert_eq!(
+            conditional::redis_transaction_conflicts() - conflicts_before,
+            31
+        );
+        assert_eq!(pong, "PONG");
     }
     fn short_claim(handle: &Value) -> Claim {
         claim(
@@ -1875,12 +2104,14 @@ mod tests {
             .arg(&username)
             .query::<i64>(&mut shared.lock().unwrap().conn)
             .unwrap();
-        // Registry and handle contention must not wait for a busy connection.
+        // Registry lookup remains immediate; each store operation waits for the
+        // shared connection only up to the bounded local-ownership deadline.
         let guard = shared.lock().unwrap();
         let start = std::time::Instant::now();
         assert!(renew(&handle, &id, &claim.token, 60_000).is_err());
         assert!(recover(&handle, 1).is_err());
-        assert!(start.elapsed() < Duration::from_millis(100));
+        assert!(start.elapsed() >= Duration::from_millis(400));
+        assert!(start.elapsed() < Duration::from_millis(750));
         drop(guard);
         conditional::check_redis_reconnect(&handle);
     }
