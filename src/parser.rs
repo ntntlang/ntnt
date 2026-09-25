@@ -2481,6 +2481,40 @@ impl Parser {
         Ok(Expression::TemplateString(ast_parts))
     }
 
+    fn template_tag_end(lexeme: &str, content_start: usize, close: &str) -> Option<usize> {
+        let mut brace_depth = 0usize;
+        let mut quote = None;
+        let mut escaped = false;
+
+        for (offset, ch) in lexeme[content_start..].char_indices() {
+            let byte = content_start + offset;
+            if let Some(delimiter) = quote {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == delimiter {
+                    quote = None;
+                }
+                continue;
+            }
+
+            if close != "}" && (ch == '"' || ch == '\'') {
+                quote = Some(ch);
+            } else if ch == '{' {
+                brace_depth += 1;
+            } else if ch == '}' {
+                if brace_depth > 0 {
+                    brace_depth -= 1;
+                } else if lexeme[byte..].starts_with(close) {
+                    return Some(byte);
+                }
+            }
+        }
+
+        None
+    }
+
     fn template_expression_byte(expr: &str, lexeme: &str, source_cursor: usize) -> Option<usize> {
         let mut scan = 0;
 
@@ -2510,10 +2544,9 @@ impl Parser {
             }
 
             let content_start = open_byte + open.len();
-            let Some(close_offset) = lexeme[content_start..].find(close) else {
+            let Some(content_end) = Self::template_tag_end(lexeme, content_start, close) else {
                 break;
             };
-            let content_end = content_start + close_offset;
             let content = &lexeme[content_start..content_end];
             let leading = content.len() - content.trim_start().len();
             let trimmed = content.trim_start();

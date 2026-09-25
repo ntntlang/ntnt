@@ -2253,6 +2253,22 @@ let y = """x\#{a {{x - true}}"""
     assert!(stderr.contains("^~~~~~~~"), "stderr:\n{}", stderr);
 }
 
+#[test]
+fn test_runtime_errors_ignore_quoted_template_delimiters_when_locating_expression() {
+    let code = r#"
+let y = """{{ "}}" - 1 }}"""
+"#;
+    let (_stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_TYPE_MODE", "strict")]);
+    assert_ne!(exit_code, 0, "invalid subtraction should fail");
+    assert!(
+        stderr.contains(":2:15"),
+        "runtime span should ignore quoted closing delimiters: {}",
+        stderr
+    );
+    assert!(stderr.contains("^~~~~~~~"), "stderr:\n{}", stderr);
+}
+
 // ============================================================================
 // String Functions: replace_chars, remove_chars, keep_chars
 // ============================================================================
