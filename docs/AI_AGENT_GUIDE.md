@@ -441,7 +441,8 @@ len("hello")            // compute a value from input
 split(text, ",")        // create a new array from a string
 trim(input)             // create a new string
 push(arr, item)         // create a new array with item added
-int(form.age) ?? 0      // convert a value to a new type, handling parse failure
+int_or(form.age, 0)     // convert to Int with a local fallback
+int(form.age)           // preserve parse failure as Result<Int, String>
 ```
 
 **Dot-call sugar (UFCS):** `x.f(a)` resolves to `f(x, a)` for any builtin,

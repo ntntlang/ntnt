@@ -35,6 +35,7 @@ pub enum Type {
     /// Function type
     Function {
         params: Vec<Type>,
+        required_params: usize,
         return_type: Box<Type>,
     },
 
@@ -159,10 +160,12 @@ impl Type {
                 Type::Function {
                     params: p1,
                     return_type: r1,
+                    ..
                 },
                 Type::Function {
                     params: p2,
                     return_type: r2,
+                    ..
                 },
             ) => {
                 p1.len() == p2.len()
@@ -190,6 +193,7 @@ impl Type {
             Type::Function {
                 params,
                 return_type,
+                ..
             } => {
                 let param_names: Vec<_> = params.iter().map(|t| t.name()).collect();
                 format!("({}) -> {}", param_names.join(", "), return_type.name())

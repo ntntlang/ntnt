@@ -4,7 +4,7 @@
 //! Produces diagnostics (errors/warnings) without blocking execution.
 //! Uses gradual typing: untyped code defaults to `Any`, which is compatible with everything.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::types::Type;
@@ -111,6 +111,9 @@ pub struct TypeContext {
     /// True when an import could not be resolved — unknown-method warnings
     /// are suppressed because unseen imports make the check unreliable
     has_unresolved_import: bool,
+    /// Whole-module aliases by lexical scope, parallel to `scopes`. Calls on
+    /// these values dispatch to exported fields rather than through UFCS.
+    module_aliases: Vec<HashSet<String>>,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -674,6 +677,7 @@ impl TypeContext {
             search_after: 0,
             strict_lint: false,
             has_unresolved_import: false,
+            module_aliases: vec![HashSet::new()],
             current_file: None,
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
@@ -687,15 +691,20 @@ impl TypeContext {
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.module_aliases.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.module_aliases.pop();
     }
 
     fn bind(&mut self, name: &str, typ: Type) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), typ);
+        }
+        if let Some(aliases) = self.module_aliases.last_mut() {
+            aliases.remove(name);
         }
     }
 
@@ -719,6 +728,15 @@ impl TypeContext {
             }
         }
         None
+    }
+
+    fn is_module_alias(&self, name: &str) -> bool {
+        for (scope, aliases) in self.scopes.iter().zip(&self.module_aliases).rev() {
+            if scope.contains_key(name) {
+                return aliases.contains(name);
+            }
+        }
+        false
     }
 
     // ── Diagnostics ───────────────────────────────────────────────────
@@ -891,6 +909,155 @@ impl TypeContext {
             line,
             Some(hint),
         );
+    }
+
+    /// Apply a known function signature to its UFCS/dot-call form.
+    ///
+    /// `value.f(arg)` is runtime sugar for `f(value, arg)`, so methods that do
+    /// not need the more precise collection-specific inference below should
+    /// still get the ordinary function's argument checks and return type.
+    fn infer_ufcs_signature(
+        &mut self,
+        method: &str,
+        object_type: &Type,
+        argument_types: &[Type],
+    ) -> Option<Type> {
+        let arg_types: Vec<Type> = std::iter::once(object_type.clone())
+            .chain(argument_types.iter().cloned())
+            .collect();
+        let line = self.find_line_near(&format!(".{}(", method));
+
+        // Runtime UFCS resolves lexical bindings before global functions and
+        // builtins. Preserve that shadowing order for both checks and inference.
+        match self.lookup(method).cloned() {
+            Some(Type::Function {
+                params,
+                required_params,
+                return_type,
+            }) => {
+                if arg_types.len() < required_params || arg_types.len() > params.len() {
+                    let expected = if required_params == params.len() {
+                        params.len().to_string()
+                    } else {
+                        format!("{} to {}", required_params, params.len())
+                    };
+                    self.error(
+                        format!(
+                            "Function '{}' expects {} argument(s), got {}",
+                            method,
+                            expected,
+                            arg_types.len()
+                        ),
+                        line,
+                        None,
+                    );
+                    return Some(*return_type);
+                }
+                for (i, (arg_type, param_type)) in arg_types.iter().zip(params.iter()).enumerate() {
+                    if !self.compatible(arg_type, param_type)
+                        && !matches!(arg_type, Type::Any)
+                        && !matches!(param_type, Type::Any)
+                    {
+                        self.error(
+                            format!(
+                                "Argument {} of '{}': expected {} but got {}",
+                                i + 1,
+                                method,
+                                param_type.name(),
+                                arg_type.name()
+                            ),
+                            line,
+                            Some(format!("Expected {}", param_type.name())),
+                        );
+                    }
+                }
+                return Some(*return_type);
+            }
+            Some(Type::Any) => return Some(Type::Any),
+            Some(_) => return None,
+            None => {}
+        }
+
+        let sig = self
+            .functions
+            .get(method)
+            .cloned()
+            .or_else(|| self.builtin_sigs.get(method).cloned())?;
+
+        let wrong_arity = if sig.variadic {
+            arg_types.len() < sig.required_params
+        } else {
+            arg_types.len() < sig.required_params || arg_types.len() > sig.params.len()
+        };
+        if wrong_arity {
+            let expected = if sig.variadic {
+                format!("at least {}", sig.required_params)
+            } else if sig.required_params == sig.params.len() {
+                sig.params.len().to_string()
+            } else {
+                format!("{} to {}", sig.required_params, sig.params.len())
+            };
+            self.error(
+                format!(
+                    "Function '{}' expects {} argument(s), got {}",
+                    method,
+                    expected,
+                    arg_types.len()
+                ),
+                line,
+                None,
+            );
+            return Some(sig.return_type);
+        }
+
+        for (i, (arg_type, (param_name, param_type))) in
+            arg_types.iter().zip(sig.params.iter()).enumerate()
+        {
+            let is_type_param =
+                matches!(param_type, Type::Named(name) if sig.type_params.contains(name));
+            if !is_type_param
+                && !self.compatible(arg_type, param_type)
+                && !matches!(arg_type, Type::Any)
+                && !matches!(param_type, Type::Any)
+            {
+                self.error(
+                    format!(
+                        "Argument {} ('{}') of '{}': expected {} but got {}",
+                        i + 1,
+                        param_name,
+                        method,
+                        param_type.name(),
+                        arg_type.name()
+                    ),
+                    line,
+                    Some(format!("Expected {}", param_type.name())),
+                );
+            }
+        }
+
+        if sig.type_params.is_empty() {
+            Some(sig.return_type)
+        } else {
+            let (bindings, conflicts) =
+                Self::unify_type_params(&sig.type_params, &sig.params, &arg_types);
+            for (param_name, first_type, second_type) in conflicts {
+                self.error(
+                    format!(
+                        "Type parameter '{}' in '{}': conflicting types {} and {}",
+                        param_name,
+                        method,
+                        first_type.name(),
+                        second_type.name()
+                    ),
+                    line,
+                    Some(format!(
+                        "All arguments for '{}' must have the same type",
+                        param_name
+                    )),
+                );
+            }
+            Some(Self::substitute_type_params(&sig.return_type, &bindings))
+        }
     }
 
     /// Warn when a string literal contains JavaScript-style `${ident}` and
@@ -1125,6 +1292,7 @@ impl TypeContext {
                 return_type,
             } => Type::Function {
                 params: params.iter().map(|t| self.resolve_type_expr(t)).collect(),
+                required_params: params.len(),
                 return_type: Box::new(self.resolve_type_expr(return_type)),
             },
             TypeExpr::Generic { name, args } => {
@@ -1672,7 +1840,28 @@ impl TypeContext {
                             ),
                         );
                     }
-                    self.bind(name, expected);
+                    // A function-type annotation describes parameter and return
+                    // types but has no syntax for defaults. Keep the inferred
+                    // lambda's minimum arity so annotated callables retain their
+                    // runtime default-argument behavior through UFCS.
+                    let bound_type = match (&expected, &inferred) {
+                        (
+                            Type::Function {
+                                params,
+                                return_type,
+                                ..
+                            },
+                            Type::Function {
+                                required_params, ..
+                            },
+                        ) => Type::Function {
+                            params: params.clone(),
+                            required_params: *required_params,
+                            return_type: return_type.clone(),
+                        },
+                        _ => expected,
+                    };
+                    self.bind(name, bound_type);
                 } else if let Some(pattern) = pattern {
                     // Destructuring: bind pattern variables with inferred types
                     self.bind_pattern(pattern, &inferred);
@@ -2471,6 +2660,10 @@ impl TypeContext {
                 self.check_unknown_method(object, method, &obj_type);
                 let method_arg_types: Vec<Type> =
                     arguments.iter().map(|a| self.infer_expression(a)).collect();
+                let is_module_call = matches!(
+                    object.as_ref(),
+                    Expression::Identifier(name) if self.is_module_alias(name)
+                );
                 // Method calls: infer return type from known methods
                 match method.as_str() {
                     "unwrap" | "unwrap_or" => match &obj_type {
@@ -2544,6 +2737,9 @@ impl TypeContext {
                         Type::Map { value_type, .. } => (**value_type).clone(),
                         _ => Type::Any,
                     },
+                    _ if !is_module_call => self
+                        .infer_ufcs_signature(method, &obj_type, &method_arg_types)
+                        .unwrap_or(Type::Any),
                     _ => Type::Any,
                 }
             }
@@ -2932,6 +3128,10 @@ impl TypeContext {
                 self.pop_scope();
                 Type::Function {
                     params: param_types,
+                    required_params: params
+                        .iter()
+                        .filter(|param| param.default.is_none())
+                        .count(),
                     return_type: Box::new(ret),
                 }
             }
@@ -3165,6 +3365,10 @@ impl TypeContext {
         self.pop_scope();
         Type::Function {
             params: param_types,
+            required_params: params
+                .iter()
+                .filter(|param| param.default.is_none())
+                .count(),
             return_type: Box::new(ret),
         }
     }
@@ -3623,10 +3827,12 @@ impl TypeContext {
             Type::Function {
                 params: fn_params,
                 return_type: fn_ret,
+                ..
             } => {
                 if let Type::Function {
                     params: concrete_params,
                     return_type: concrete_ret,
+                    ..
                 } = concrete
                 {
                     for (fp, cp) in fn_params.iter().zip(concrete_params.iter()) {
@@ -3659,12 +3865,14 @@ impl TypeContext {
             }
             Type::Function {
                 params,
+                required_params,
                 return_type,
             } => Type::Function {
                 params: params
                     .iter()
                     .map(|p| Self::substitute_type_params(p, bindings))
                     .collect(),
+                required_params: *required_params,
                 return_type: Box::new(Self::substitute_type_params(return_type, bindings)),
             },
             Type::Tuple(types) => Type::Tuple(
@@ -3948,6 +4156,9 @@ impl TypeContext {
         // If it's a module alias import, bind the module name
         if let Some(alias_name) = alias {
             self.bind(alias_name, Type::Any);
+            if let Some(aliases) = self.module_aliases.last_mut() {
+                aliases.insert(alias_name.to_string());
+            }
             return;
         }
 
@@ -4087,6 +4298,7 @@ impl TypeContext {
         // Conversion
         sig!("str", ["value" => Type::Any], Type::String);
         sig!("int", ["value" => Type::Any], Type::Generic { name: "Result".to_string(), args: vec![Type::Int, Type::String] });
+        sig!("int_or", ["value" => Type::Any, "fallback" => Type::Int], Type::Int);
         sig!("float", ["value" => Type::Any], Type::Generic { name: "Result".to_string(), args: vec![Type::Float, Type::String] });
         sig!("bool", ["value" => Type::Any], Type::Bool);
         sig!("type", ["value" => Type::Any], Type::String);
@@ -4346,6 +4558,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     "array" => Type::Array(Box::new(Type::Any)),
                     "comparator" => Type::Function {
                         params: vec![Type::Any, Type::Any],
+                        required_params: 2,
                         return_type: Box::new(Type::Int),
                     }
                 ],
@@ -5519,6 +5732,72 @@ mod tests {
         assert!(errs[0].message.contains("got Int"));
     }
 
+    #[test]
+    fn test_int_or_signature_returns_int_and_checks_fallback() {
+        let errs = check_errors(
+            r#"
+            let parsed: Int = int_or("42", 0)
+            int_or("42", "not an int")
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs[0].message.contains("expected Int"));
+        assert!(errs[0].message.contains("got String"));
+    }
+
+    #[test]
+    fn test_int_or_dot_call_uses_builtin_signature() {
+        let errs = check_errors(
+            r#"
+            let parsed: Int = "42".int_or(0)
+            let wrong_return: String = "42".int_or(0)
+            "42".int_or("not an int")
+            "#,
+        );
+        assert_eq!(errs.len(), 2, "unexpected diagnostics: {errs:?}");
+        assert!(
+            errs.iter().any(|e| {
+                e.message.contains("declared as String")
+                    && e.message.contains("initialized with Int")
+            }),
+            "missing return-type diagnostic: {errs:?}"
+        );
+        assert!(
+            errs.iter().any(|e| {
+                e.message.contains("expected Int") && e.message.contains("got String")
+            }),
+            "missing fallback-type diagnostic: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_generic_dot_call_preserves_type_conflicts() {
+        let errs = check_errors(
+            r#"
+            fn merge<T>(value: T, fallback: T) -> T { return value }
+            1.merge("not an int")
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs[0].message.contains("conflicting types Int and String"));
+    }
+
+    #[test]
+    fn test_module_int_or_call_does_not_gain_ufcs_receiver() {
+        let errs = check_errors(
+            r#"
+            import "./conversion.tnt" as conversion
+            conversion.int_or("42", 0)
+
+            let conversion = "42"
+            conversion.int_or("not an int")
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs[0].message.contains("expected Int"));
+        assert!(errs[0].message.contains("got String"));
+    }
+
     // ── Return type checking ────────────────────────────────────
 
     #[test]
@@ -5802,6 +6081,57 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("expected"));
         assert!(errs[0].message.contains("String"));
+    }
+
+    #[test]
+    fn test_dot_call_uses_shadowing_callable_signature() {
+        let errs = check_errors(
+            r#"
+            let round = fn(x: String) -> String { return x }
+            let result: String = "abc".round()
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
+
+        let errs = check_errors(
+            r#"
+            let round = fn(x: String) -> String { return x }
+            let result: Int = "abc".round()
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs[0].message.contains("declared as Int"));
+        assert!(errs[0].message.contains("initialized with String"));
+    }
+
+    #[test]
+    fn test_dot_call_preserves_callable_arity_through_aliases_and_assignments() {
+        let errs = check_errors(
+            r#"
+            let add = fn(x: Int, y: Int = 1) -> Int { return x + y }
+            let alias = add
+            let result: Int = 2.alias()
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
+
+        let errs = check_errors(
+            r#"
+            let add: (Int, Int) -> Int = fn(x: Int, y: Int = 1) -> Int { return x + y }
+            let result: Int = 2.add()
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
+
+        let errs = check_errors(
+            r#"
+            let add = fn(x: Int, y: Int = 1) -> Int { return x + y }
+            add = fn(x: Int, y: Int) -> Int { return x + y }
+            2.add()
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+        assert!(errs[0].message.contains("expects 2 argument(s), got 1"));
     }
 
     #[test]
@@ -8405,6 +8735,7 @@ let n: Int = double(5)"#;
                         "transform".to_string(),
                         Type::Function {
                             params: vec![Type::Int],
+                            required_params: 1,
                             return_type: Box::new(Type::String),
                         },
                     ),

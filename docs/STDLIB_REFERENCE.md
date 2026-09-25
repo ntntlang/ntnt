@@ -59,6 +59,7 @@ These functions are available everywhere without importing.
 | [`floor(x: Int \| Float)`](#floor) | Rounds down to the nearest integer. |
 | [`get(pattern: String, handler: Function)`](#get) | Registers a GET route handler. |
 | [`int(x: Int \| Float \| String \| Bool)`](#int) | Converts a value to integer without throwing on parse failure. |
+| [`int_or(value: Any, fallback: Int)`](#intor) | Converts a value to an integer, returning a local fallback on failure. |
 | [`is_array(val: Any)`](#isarray) | Returns true if the value is an Array. |
 | [`is_bool(val: Any)`](#isbool) | Returns true if the value is a Bool. |
 | [`is_err(res: Result<Any, Any>)`](#iserr) | Checks if a Result is Err. |
@@ -579,9 +580,43 @@ int("42")  // => Ok(42)  // String parsed to int
 int("none")  // => Err("Cannot parse as int: none")  // Invalid strings are handleable
 ```
 
-**See also:** `float`, `str`, `unwrap`
+**See also:** `int_or`, `float`, `str`, `unwrap`
 
 *Since v0.1.0*
+
+---
+
+#### `int_or`
+
+```ntnt
+int_or(value: Any, fallback: Int) -> Int
+```
+
+Converts a value to an integer, returning a local fallback on failure.
+
+Accepts the same convertible inputs as int(): Int, Float, String, and Bool. Invalid strings, None, and other unsupported values return fallback.
+
+**Parameters:**
+
+- `value` — The value to convert
+- `fallback` — The integer returned when conversion fails
+
+**Returns:** The converted integer or fallback
+
+**Examples:**
+
+```ntnt
+int_or("42", 0)  // => 42  // String parsed to int
+int_or("none", -1)  // => -1  // Invalid strings use the fallback
+```
+
+**Errors:**
+
+- **TypeError**: int_or() fallback must be Int — *Fix: Pass an Int as the fallback argument*
+
+**See also:** `int`, `float`, `unwrap`
+
+*Since v0.5.5*
 
 ---
 
