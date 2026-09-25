@@ -242,6 +242,7 @@ fn valid_enum(name: &str, variant: &str, len: usize) -> bool {
 
 fn literal_expression(expr: &Expression) -> Result<NativeValue, String> {
     Ok(match expr {
+        Expression::Located { expr, .. } => return literal_expression(expr),
         Expression::Integer(v) => NativeValue::Int(*v),
         Expression::Float(v) if v.is_finite() => NativeValue::Float(*v),
         Expression::String(v) => NativeValue::String(v.clone()),

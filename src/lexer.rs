@@ -311,11 +311,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn scan_string(&mut self, quote: char) -> Token {
-        let start_line = self.line;
-        let start_column = self.column;
-        self.current_lexeme.clear();
-
+    fn scan_string(&mut self, quote: char, start_line: usize, start_column: usize) -> Token {
         let mut value = String::new();
         let mut has_interpolation = false;
         let mut parts: Vec<StringPart> = Vec::new();
@@ -402,7 +398,7 @@ impl<'a> Lexer<'a> {
                 TokenKind::String(value.clone()),
                 start_line,
                 start_column,
-                format!("{}{}{}", quote, value, quote),
+                self.current_lexeme.clone(),
             )
         }
     }
@@ -489,11 +485,7 @@ impl<'a> Lexer<'a> {
     /// Scan a template string literal: """..."""
     /// Uses {{expr}} for interpolation (double braces, CSS-safe)
     /// Supports {{#for x in items}}...{{/for}} and {{#if cond}}...{{#else}}...{{/if}}
-    fn scan_template_string(&mut self) -> Token {
-        let start_line = self.line;
-        let start_column = self.column;
-        self.current_lexeme.clear();
-
+    fn scan_template_string(&mut self, start_line: usize, start_column: usize) -> Token {
         let mut content = String::new();
 
         // Read until closing """
@@ -1389,7 +1381,7 @@ impl<'a> Lexer<'a> {
                     self.advance(); // consume second "
                     if self.peek() == Some(&'"') {
                         self.advance(); // consume third "
-                        self.scan_template_string()
+                        self.scan_template_string(start_line, start_column)
                     } else {
                         // Empty string ""
                         Token::new(
@@ -1400,7 +1392,7 @@ impl<'a> Lexer<'a> {
                         )
                     }
                 } else {
-                    self.scan_string(ch)
+                    self.scan_string(ch, start_line, start_column)
                 }
             }
 

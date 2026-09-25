@@ -28,6 +28,9 @@ pub struct Parser {
     last_error_line: usize,
     /// Token position of the last recorded error (cascade suppression)
     last_error_pos: usize,
+    /// Offsets used by parsers created for expressions embedded in strings.
+    origin_line_offset: usize,
+    origin_first_line_column_offset: usize,
 }
 
 impl Parser {
@@ -40,7 +43,16 @@ impl Parser {
             errors: Vec::new(),
             last_error_line: 0,
             last_error_pos: 0,
+            origin_line_offset: 0,
+            origin_first_line_column_offset: 0,
         }
+    }
+
+    fn with_origin(tokens: Vec<Token>, line: usize, column: usize) -> Self {
+        let mut parser = Self::new(tokens);
+        parser.origin_line_offset = line.saturating_sub(1);
+        parser.origin_first_line_column_offset = column.saturating_sub(1);
+        parser
     }
 
     /// Parse a complete program
@@ -236,6 +248,49 @@ impl Parser {
             .map(|t| t.column)
             .or_else(|| self.previous().map(|t| t.column))
             .unwrap_or(0)
+    }
+
+    fn locate_expression(&self, start: usize, expr: Expression) -> Expression {
+        let Some(first) = self.tokens.get(start) else {
+            return expr;
+        };
+        let Some(last) = self.current.checked_sub(1).and_then(|i| self.tokens.get(i)) else {
+            return expr;
+        };
+
+        let mut end_line = last.line;
+        let mut end_column = last.column;
+        for ch in last.lexeme.chars() {
+            if ch == '\n' {
+                end_line += 1;
+                end_column = 1;
+            } else {
+                end_column += 1;
+            }
+        }
+
+        let map_position = |line: usize, column: usize| {
+            (
+                line + self.origin_line_offset,
+                if line == 1 {
+                    column + self.origin_first_line_column_offset
+                } else {
+                    column
+                },
+            )
+        };
+        let (start_line, start_column) = map_position(first.line, first.column);
+        let (end_line, end_column) = map_position(end_line, end_column);
+
+        Expression::Located {
+            span: crate::error::SourceSpan {
+                start_line,
+                start_column,
+                end_line,
+                end_column,
+            },
+            expr: Box::new(expr),
+        }
     }
 
     // Parsing methods
@@ -1600,14 +1655,18 @@ impl Parser {
     }
 
     fn assignment(&mut self) -> Result<Expression> {
+        let start = self.current;
         let expr = self.pipe()?;
 
         if self.match_token(&[TokenKind::Assign]) {
             let value = self.assignment()?;
-            return Ok(Expression::Assign {
-                target: Box::new(expr),
-                value: Box::new(value),
-            });
+            return Ok(self.locate_expression(
+                start,
+                Expression::Assign {
+                    target: Box::new(expr),
+                    value: Box::new(value),
+                },
+            ));
         }
 
         Ok(expr)
@@ -1618,12 +1677,17 @@ impl Parser {
     ///   x |> f        => f(x)
     ///   x |> f(a, b)  => f(x, a, b)
     fn pipe(&mut self) -> Result<Expression> {
+        let start = self.current;
         let mut expr = self.null_coalesce()?;
 
         while self.match_token(&[TokenKind::PipeArrow]) {
             let right = self.null_coalesce()?;
+            let right = match right {
+                Expression::Located { expr, .. } => *expr,
+                right => right,
+            };
 
-            expr = match right {
+            let piped = match right {
                 // x |> f(a, b) => f(x, a, b) — insert LHS as first argument
                 Expression::Call {
                     function,
@@ -1648,57 +1712,71 @@ impl Parser {
                     });
                 }
             };
+            expr = self.locate_expression(start, piped);
         }
 
         Ok(expr)
     }
 
     fn null_coalesce(&mut self) -> Result<Expression> {
+        let start = self.current;
         let mut expr = self.or()?;
 
         while self.match_token(&[TokenKind::QuestionQuestion]) {
             let right = self.or()?;
-            expr = Expression::Binary {
-                left: Box::new(expr),
-                operator: BinaryOp::NullCoalesce,
-                right: Box::new(right),
-            };
+            expr = self.locate_expression(
+                start,
+                Expression::Binary {
+                    left: Box::new(expr),
+                    operator: BinaryOp::NullCoalesce,
+                    right: Box::new(right),
+                },
+            );
         }
 
         Ok(expr)
     }
 
     fn or(&mut self) -> Result<Expression> {
+        let start = self.current;
         let mut expr = self.and()?;
 
         while self.match_token(&[TokenKind::Or]) {
             let right = self.and()?;
-            expr = Expression::Binary {
-                left: Box::new(expr),
-                operator: BinaryOp::Or,
-                right: Box::new(right),
-            };
+            expr = self.locate_expression(
+                start,
+                Expression::Binary {
+                    left: Box::new(expr),
+                    operator: BinaryOp::Or,
+                    right: Box::new(right),
+                },
+            );
         }
 
         Ok(expr)
     }
 
     fn and(&mut self) -> Result<Expression> {
+        let start = self.current;
         let mut expr = self.equality()?;
 
         while self.match_token(&[TokenKind::And]) {
             let right = self.equality()?;
-            expr = Expression::Binary {
-                left: Box::new(expr),
-                operator: BinaryOp::And,
-                right: Box::new(right),
-            };
+            expr = self.locate_expression(
+                start,
+                Expression::Binary {
+                    left: Box::new(expr),
+                    operator: BinaryOp::And,
+                    right: Box::new(right),
+                },
+            );
         }
 
         Ok(expr)
     }
 
     fn equality(&mut self) -> Result<Expression> {
+        let start = self.current;
         let mut expr = self.comparison()?;
 
         while self.match_token(&[TokenKind::Equal, TokenKind::NotEqual]) {
@@ -1708,17 +1786,21 @@ impl Parser {
                 _ => unreachable!(),
             };
             let right = self.comparison()?;
-            expr = Expression::Binary {
-                left: Box::new(expr),
-                operator,
-                right: Box::new(right),
-            };
+            expr = self.locate_expression(
+                start,
+                Expression::Binary {
+                    left: Box::new(expr),
+                    operator,
+                    right: Box::new(right),
+                },
+            );
         }
 
         Ok(expr)
     }
 
     fn comparison(&mut self) -> Result<Expression> {
+        let start = self.current;
         let mut expr = self.range()?;
 
         while self.match_token(&[
@@ -1735,40 +1817,51 @@ impl Parser {
                 _ => unreachable!(),
             };
             let right = self.range()?;
-            expr = Expression::Binary {
-                left: Box::new(expr),
-                operator,
-                right: Box::new(right),
-            };
+            expr = self.locate_expression(
+                start,
+                Expression::Binary {
+                    left: Box::new(expr),
+                    operator,
+                    right: Box::new(right),
+                },
+            );
         }
 
         Ok(expr)
     }
 
     fn range(&mut self) -> Result<Expression> {
+        let span_start = self.current;
         let expr = self.term()?;
 
         // Check for range operators: .. or ..=
         if self.match_token(&[TokenKind::DotDot]) {
             let end = self.term()?;
-            return Ok(Expression::Range {
-                start: Box::new(expr),
-                end: Box::new(end),
-                inclusive: false,
-            });
+            return Ok(self.locate_expression(
+                span_start,
+                Expression::Range {
+                    start: Box::new(expr),
+                    end: Box::new(end),
+                    inclusive: false,
+                },
+            ));
         } else if self.match_token(&[TokenKind::DotDotEqual]) {
             let end = self.term()?;
-            return Ok(Expression::Range {
-                start: Box::new(expr),
-                end: Box::new(end),
-                inclusive: true,
-            });
+            return Ok(self.locate_expression(
+                span_start,
+                Expression::Range {
+                    start: Box::new(expr),
+                    end: Box::new(end),
+                    inclusive: true,
+                },
+            ));
         }
 
         Ok(expr)
     }
 
     fn term(&mut self) -> Result<Expression> {
+        let start = self.current;
         let mut expr = self.factor()?;
 
         while self.match_token(&[TokenKind::Plus, TokenKind::Minus]) {
@@ -1778,17 +1871,21 @@ impl Parser {
                 _ => unreachable!(),
             };
             let right = self.factor()?;
-            expr = Expression::Binary {
-                left: Box::new(expr),
-                operator,
-                right: Box::new(right),
-            };
+            expr = self.locate_expression(
+                start,
+                Expression::Binary {
+                    left: Box::new(expr),
+                    operator,
+                    right: Box::new(right),
+                },
+            );
         }
 
         Ok(expr)
     }
 
     fn factor(&mut self) -> Result<Expression> {
+        let start = self.current;
         let mut expr = self.unary()?;
 
         while self.match_token(&[TokenKind::Star, TokenKind::Slash, TokenKind::Percent]) {
@@ -1799,17 +1896,21 @@ impl Parser {
                 _ => unreachable!(),
             };
             let right = self.unary()?;
-            expr = Expression::Binary {
-                left: Box::new(expr),
-                operator,
-                right: Box::new(right),
-            };
+            expr = self.locate_expression(
+                start,
+                Expression::Binary {
+                    left: Box::new(expr),
+                    operator,
+                    right: Box::new(right),
+                },
+            );
         }
 
         Ok(expr)
     }
 
     fn unary(&mut self) -> Result<Expression> {
+        let start = self.current;
         if self.match_token(&[TokenKind::Not, TokenKind::Minus]) {
             let operator = match self.previous().map(|t| &t.kind) {
                 Some(TokenKind::Not) => UnaryOp::Not,
@@ -1817,21 +1918,26 @@ impl Parser {
                 _ => unreachable!(),
             };
             let operand = self.unary()?;
-            return Ok(Expression::Unary {
-                operator,
-                operand: Box::new(operand),
-            });
+            return Ok(self.locate_expression(
+                start,
+                Expression::Unary {
+                    operator,
+                    operand: Box::new(operand),
+                },
+            ));
         }
 
         self.call()
     }
 
     fn call(&mut self) -> Result<Expression> {
+        let start = self.current;
         let mut expr = self.primary()?;
 
         loop {
             if self.match_token(&[TokenKind::LeftParen]) {
-                expr = self.finish_call(expr)?;
+                let call = self.finish_call(expr)?;
+                expr = self.locate_expression(start, call);
             } else if self.check(&TokenKind::LeftBrace) {
                 // Check if this is a struct literal (Identifier followed by { name: })
                 // Only treat as struct literal if it's an identifier and looks like struct syntax
@@ -1850,26 +1956,35 @@ impl Parser {
                 if self.match_token(&[TokenKind::LeftParen]) {
                     let arguments = self.arguments()?;
                     self.consume(&TokenKind::RightParen, "Expected ')' after arguments")?;
-                    expr = Expression::MethodCall {
-                        object: Box::new(expr),
-                        method: name,
-                        arguments,
-                    };
+                    expr = self.locate_expression(
+                        start,
+                        Expression::MethodCall {
+                            object: Box::new(expr),
+                            method: name,
+                            arguments,
+                        },
+                    );
                 } else {
-                    expr = Expression::FieldAccess {
-                        object: Box::new(expr),
-                        field: name,
-                    };
+                    expr = self.locate_expression(
+                        start,
+                        Expression::FieldAccess {
+                            object: Box::new(expr),
+                            field: name,
+                        },
+                    );
                 }
             } else if self.match_token(&[TokenKind::LeftBracket]) {
                 let index = self.expression()?;
                 self.consume(&TokenKind::RightBracket, "Expected ']' after index")?;
-                expr = Expression::Index {
-                    object: Box::new(expr),
-                    index: Box::new(index),
-                };
+                expr = self.locate_expression(
+                    start,
+                    Expression::Index {
+                        object: Box::new(expr),
+                        index: Box::new(index),
+                    },
+                );
             } else if self.match_token(&[TokenKind::Question]) {
-                expr = Expression::Try(Box::new(expr));
+                expr = self.locate_expression(start, Expression::Try(Box::new(expr)));
             } else {
                 break;
             }
@@ -2049,6 +2164,7 @@ impl Parser {
     }
 
     fn primary(&mut self) -> Result<Expression> {
+        let start = self.current;
         // Integer literal
         if let Some(token) = self.peek() {
             if let TokenKind::Integer(n) = token.kind {
@@ -2079,8 +2195,10 @@ impl Parser {
             if let TokenKind::InterpolatedString(ref parts) = token.kind {
                 let parts = parts.clone();
                 let line = token.line;
+                let column = token.column;
+                let lexeme = token.lexeme.clone();
                 self.advance();
-                return self.parse_interpolated_string(&parts, line);
+                return self.parse_interpolated_string(&parts, line, column, &lexeme);
             }
         }
 
@@ -2089,8 +2207,10 @@ impl Parser {
             if let TokenKind::TemplateString(ref parts) = token.kind {
                 let parts = parts.clone();
                 let line = token.line;
+                let column = token.column;
+                let lexeme = token.lexeme.clone();
                 self.advance();
-                return self.parse_template_string(&parts, line);
+                return self.parse_template_string(&parts, line, column, &lexeme);
             }
         }
 
@@ -2195,13 +2315,15 @@ impl Parser {
         // Map literal: map { key: value, ... }
         if self.match_token(&[TokenKind::Map]) {
             self.consume(&TokenKind::LeftBrace, "Expected '{' after 'map'")?;
-            return self.parse_map_contents();
+            let map = self.parse_map_contents()?;
+            return Ok(self.locate_expression(start, map));
         }
 
         // Nested map inference: when in map context, { "key": value } is treated as a map
         if self.in_map_context && self.is_nested_map_literal() {
             self.advance(); // consume the {
-            return self.parse_map_contents();
+            let map = self.parse_map_contents()?;
+            return Ok(self.locate_expression(start, map));
         }
 
         // Try-catch expression: try { block } catches runtime errors as Result
@@ -2219,7 +2341,8 @@ impl Parser {
 
         // Match expression
         if self.match_token(&[TokenKind::Match]) {
-            return self.match_expression();
+            let match_expr = self.match_expression()?;
+            return Ok(self.locate_expression(start, match_expr));
         }
 
         // If expression: if cond { expr } else { expr }
@@ -2281,8 +2404,11 @@ impl Parser {
         &mut self,
         parts: &[LexerStringPart],
         line: usize,
+        column: usize,
+        lexeme: &str,
     ) -> Result<Expression> {
         let mut ast_parts = Vec::new();
+        let mut search_from = 0;
 
         for part in parts {
             match part {
@@ -2293,7 +2419,23 @@ impl Parser {
                     // Parse the expression string
                     let lexer = crate::lexer::Lexer::new(expr_str);
                     let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
+                    let marker = format!("#{{{expr_str}}}");
+                    let expr_byte = lexeme[search_from..]
+                        .find(&marker)
+                        .map(|offset| search_from + offset + 2)
+                        .unwrap_or(search_from);
+                    search_from = expr_byte.saturating_add(expr_str.len()).saturating_add(1);
+                    let mut expr_line = line;
+                    let mut expr_column = column;
+                    for ch in lexeme[..expr_byte].chars() {
+                        if ch == '\n' {
+                            expr_line += 1;
+                            expr_column = 1;
+                        } else {
+                            expr_column += 1;
+                        }
+                    }
+                    let mut parser = Parser::with_origin(tokens, expr_line, expr_column);
                     match parser.expression() {
                         Ok(expr) => ast_parts.push(StringPart::Expr(expr)),
                         Err(e) => {
@@ -2330,9 +2472,43 @@ impl Parser {
         &mut self,
         parts: &[LexerTemplatePart],
         line: usize,
+        column: usize,
+        lexeme: &str,
     ) -> Result<Expression> {
-        let ast_parts = self.parse_template_parts(parts, line)?;
+        let mut source_cursor = 0;
+        let ast_parts =
+            self.parse_template_parts(parts, line, column, lexeme, &mut source_cursor)?;
         Ok(Expression::TemplateString(ast_parts))
+    }
+
+    fn parse_template_expression_at(
+        expr: &str,
+        line: usize,
+        column: usize,
+        lexeme: &str,
+        source_cursor: &mut usize,
+    ) -> Result<Expression> {
+        let expr_byte = lexeme[*source_cursor..]
+            .find(expr)
+            .map(|offset| *source_cursor + offset)
+            .unwrap_or(*source_cursor);
+        *source_cursor = expr_byte.saturating_add(expr.len());
+
+        let mut expr_line = line;
+        let mut expr_column = column;
+        for ch in lexeme[..expr_byte].chars() {
+            if ch == '\n' {
+                expr_line += 1;
+                expr_column = 1;
+            } else {
+                expr_column += 1;
+            }
+        }
+
+        let lexer = crate::lexer::Lexer::new(expr);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::with_origin(tokens, expr_line, expr_column);
+        parser.expression()
     }
 
     /// Recursively parse template parts from lexer format to AST format
@@ -2340,20 +2516,28 @@ impl Parser {
         &mut self,
         parts: &[LexerTemplatePart],
         line: usize,
+        column: usize,
+        lexeme: &str,
+        source_cursor: &mut usize,
     ) -> Result<Vec<TemplatePart>> {
         let mut ast_parts = Vec::new();
 
         for part in parts {
             match part {
                 LexerTemplatePart::Literal(s) => {
+                    if let Some(offset) = lexeme[*source_cursor..].find(s) {
+                        *source_cursor += offset + s.len();
+                    }
                     ast_parts.push(TemplatePart::Literal(s.clone()));
                 }
                 LexerTemplatePart::Expr(expr_str) => {
-                    // Parse the expression string
-                    let lexer = crate::lexer::Lexer::new(expr_str);
-                    let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
-                    match parser.expression() {
+                    match Self::parse_template_expression_at(
+                        expr_str,
+                        line,
+                        column,
+                        lexeme,
+                        source_cursor,
+                    ) {
                         Ok(expr) => ast_parts.push(TemplatePart::Expr(expr)),
                         Err(e) => {
                             let original_msg = match &e {
@@ -2378,10 +2562,13 @@ impl Parser {
                     }
                 }
                 LexerTemplatePart::RawExpr(expr_str) => {
-                    let lexer = crate::lexer::Lexer::new(expr_str);
-                    let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
-                    match parser.expression() {
+                    match Self::parse_template_expression_at(
+                        expr_str,
+                        line,
+                        column,
+                        lexeme,
+                        source_cursor,
+                    ) {
                         Ok(expr) => ast_parts.push(TemplatePart::RawExpr(expr)),
                         Err(e) => {
                             let original_msg = match &e {
@@ -2400,11 +2587,13 @@ impl Parser {
                     }
                 }
                 LexerTemplatePart::FilteredExpr { expr, filters } => {
-                    // Parse the base expression
-                    let lexer = crate::lexer::Lexer::new(expr);
-                    let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
-                    let base_expr = match parser.expression() {
+                    let base_expr = match Self::parse_template_expression_at(
+                        expr,
+                        line,
+                        column,
+                        lexeme,
+                        source_cursor,
+                    ) {
                         Ok(e) => e,
                         Err(e) => {
                             let original_msg = match &e {
@@ -2427,10 +2616,13 @@ impl Parser {
                     for filter in filters {
                         let mut parsed_args = Vec::new();
                         for arg_str in &filter.args {
-                            let lexer = crate::lexer::Lexer::new(arg_str);
-                            let tokens: Vec<_> = lexer.collect();
-                            let mut parser = Parser::new(tokens);
-                            match parser.expression() {
+                            match Self::parse_template_expression_at(
+                                arg_str,
+                                line,
+                                column,
+                                lexeme,
+                                source_cursor,
+                            ) {
                                 Ok(arg_expr) => parsed_args.push(arg_expr),
                                 Err(e) => {
                                     let original_msg = match &e {
@@ -2460,11 +2652,13 @@ impl Parser {
                     });
                 }
                 LexerTemplatePart::RawFilteredExpr { expr, filters } => {
-                    // Parse the base expression
-                    let lexer = crate::lexer::Lexer::new(expr);
-                    let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
-                    let base_expr = match parser.expression() {
+                    let base_expr = match Self::parse_template_expression_at(
+                        expr,
+                        line,
+                        column,
+                        lexeme,
+                        source_cursor,
+                    ) {
                         Ok(e) => e,
                         Err(e) => {
                             let original_msg = match &e {
@@ -2486,10 +2680,13 @@ impl Parser {
                     for filter in filters {
                         let mut parsed_args = Vec::new();
                         for arg_str in &filter.args {
-                            let lexer = crate::lexer::Lexer::new(arg_str);
-                            let tokens: Vec<_> = lexer.collect();
-                            let mut parser = Parser::new(tokens);
-                            match parser.expression() {
+                            match Self::parse_template_expression_at(
+                                arg_str,
+                                line,
+                                column,
+                                lexeme,
+                                source_cursor,
+                            ) {
                                 Ok(arg_expr) => parsed_args.push(arg_expr),
                                 Err(e) => {
                                     let original_msg = match &e {
@@ -2524,11 +2721,16 @@ impl Parser {
                     body,
                     empty_body,
                 } => {
-                    // Parse the iterable expression
-                    let lexer = crate::lexer::Lexer::new(iterable);
-                    let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
-                    let iterable_expr = match parser.expression() {
+                    if let Some(offset) = lexeme[*source_cursor..].find(" in ") {
+                        *source_cursor += offset + " in ".len();
+                    }
+                    let iterable_expr = match Self::parse_template_expression_at(
+                        iterable,
+                        line,
+                        column,
+                        lexeme,
+                        source_cursor,
+                    ) {
                         Ok(expr) => expr,
                         Err(e) => {
                             let original_msg = match &e {
@@ -2547,8 +2749,10 @@ impl Parser {
                     };
 
                     // Recursively parse the body and empty body
-                    let body_parts = self.parse_template_parts(body, line)?;
-                    let empty_parts = self.parse_template_parts(empty_body, line)?;
+                    let body_parts =
+                        self.parse_template_parts(body, line, column, lexeme, source_cursor)?;
+                    let empty_parts =
+                        self.parse_template_parts(empty_body, line, column, lexeme, source_cursor)?;
 
                     ast_parts.push(TemplatePart::ForLoop {
                         var: var.clone(),
@@ -2563,11 +2767,13 @@ impl Parser {
                     elif_chains,
                     else_parts,
                 } => {
-                    // Parse the condition expression
-                    let lexer = crate::lexer::Lexer::new(condition);
-                    let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
-                    let condition_expr = match parser.expression() {
+                    let condition_expr = match Self::parse_template_expression_at(
+                        condition,
+                        line,
+                        column,
+                        lexeme,
+                        source_cursor,
+                    ) {
                         Ok(expr) => expr,
                         Err(e) => {
                             let original_msg = match &e {
@@ -2585,13 +2791,18 @@ impl Parser {
                         }
                     };
 
-                    // Parse elif chains
+                    let then_ast =
+                        self.parse_template_parts(then_parts, line, column, lexeme, source_cursor)?;
+
                     let mut ast_elif_chains = Vec::new();
                     for (elif_condition, elif_body) in elif_chains {
-                        let lexer = crate::lexer::Lexer::new(elif_condition);
-                        let tokens: Vec<_> = lexer.collect();
-                        let mut parser = Parser::new(tokens);
-                        let elif_cond_expr = match parser.expression() {
+                        let elif_cond_expr = match Self::parse_template_expression_at(
+                            elif_condition,
+                            line,
+                            column,
+                            lexeme,
+                            source_cursor,
+                        ) {
                             Ok(expr) => expr,
                             Err(e) => {
                                 let original_msg = match &e {
@@ -2608,13 +2819,18 @@ impl Parser {
                                 });
                             }
                         };
-                        let elif_body_ast = self.parse_template_parts(elif_body, line)?;
+                        let elif_body_ast = self.parse_template_parts(
+                            elif_body,
+                            line,
+                            column,
+                            lexeme,
+                            source_cursor,
+                        )?;
                         ast_elif_chains.push((elif_cond_expr, elif_body_ast));
                     }
 
-                    // Recursively parse then and else parts
-                    let then_ast = self.parse_template_parts(then_parts, line)?;
-                    let else_ast = self.parse_template_parts(else_parts, line)?;
+                    let else_ast =
+                        self.parse_template_parts(else_parts, line, column, lexeme, source_cursor)?;
 
                     ast_parts.push(TemplatePart::IfBlock {
                         condition: condition_expr,
@@ -2625,10 +2841,16 @@ impl Parser {
                 }
                 LexerTemplatePart::Partial { name, data_expr } => {
                     let data_ast = if let Some(expr_str) = data_expr {
-                        let lexer = crate::lexer::Lexer::new(expr_str);
-                        let tokens: Vec<_> = lexer.collect();
-                        let mut expr_parser = crate::parser::Parser::new(tokens);
-                        match expr_parser.expression() {
+                        if let Some(offset) = lexeme[*source_cursor..].find(name) {
+                            *source_cursor += offset + name.len();
+                        }
+                        match Self::parse_template_expression_at(
+                            expr_str,
+                            line,
+                            column,
+                            lexeme,
+                            source_cursor,
+                        ) {
                             Ok(expr) => Some(expr),
                             Err(e) => {
                                 return Err(crate::error::IntentError::ParserError {

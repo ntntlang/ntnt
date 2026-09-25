@@ -2,6 +2,21 @@
 
 use thiserror::Error;
 
+/// Exact half-open source span carried by parsed runtime expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SourceSpan {
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFrame {
+    pub file: Option<String>,
+    pub span: SourceSpan,
+}
+
 /// Result type alias for Intent operations
 pub type Result<T> = std::result::Result<T, IntentError>;
 
@@ -47,6 +62,14 @@ impl std::fmt::Display for TypeContext {
 /// Main error type for Intent language operations
 #[derive(Error, Debug)]
 pub enum IntentError {
+    #[error("{error}")]
+    Spanned {
+        error: Box<IntentError>,
+        span: SourceSpan,
+        file: Option<String>,
+        call_frames: Vec<SourceFrame>,
+    },
+
     #[error("Lexer error at line {line}, column {column}: {message}")]
     LexerError {
         line: usize,
@@ -193,9 +216,61 @@ impl IntentError {
         self
     }
 
+    /// Attach the innermost exact expression span to an error.
+    pub fn at_span(self, span: SourceSpan) -> Self {
+        self.at_span_in(None, span)
+    }
+
+    pub fn at_span_in(self, file: Option<String>, span: SourceSpan) -> Self {
+        if matches!(
+            self,
+            IntentError::Spanned { .. } | IntentError::ContractViolation { .. }
+        ) {
+            self
+        } else {
+            IntentError::Spanned {
+                error: Box::new(self),
+                span,
+                file,
+                call_frames: Vec::new(),
+            }
+        }
+    }
+
+    pub fn with_call_frame(mut self, file: Option<String>, span: SourceSpan) -> Self {
+        if let IntentError::Spanned { call_frames, .. } = &mut self {
+            call_frames.push(SourceFrame { file, span });
+            self
+        } else {
+            self.at_span_in(file, span)
+        }
+    }
+
+    pub fn span(&self) -> Option<SourceSpan> {
+        match self {
+            IntentError::Spanned { span, .. } => Some(*span),
+            _ => None,
+        }
+    }
+
+    pub fn source_file(&self) -> Option<&str> {
+        match self {
+            IntentError::Spanned { file, .. } => file.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn call_frames(&self) -> &[SourceFrame] {
+        match self {
+            IntentError::Spanned { call_frames, .. } => call_frames,
+            _ => &[],
+        }
+    }
+
     /// Get the TypeContext if this error has one
     pub fn type_context(&self) -> Option<&TypeContext> {
         match self {
+            IntentError::Spanned { error, .. } => error.type_context(),
             IntentError::TypeError { context, .. } => context.as_ref(),
             IntentError::RuntimeError { context, .. } => context.as_ref(),
             _ => None,
@@ -229,6 +304,7 @@ impl IntentError {
     /// Return a unique error code for this error variant
     pub fn error_code(&self) -> &'static str {
         match self {
+            IntentError::Spanned { error, .. } => error.error_code(),
             IntentError::LexerError { .. } => "E001",
             IntentError::ParserError { .. } => "E002",
             IntentError::TypeError { .. } => "E003",
@@ -247,6 +323,7 @@ impl IntentError {
     /// Return the line number if this error has one
     pub fn line(&self) -> Option<usize> {
         match self {
+            IntentError::Spanned { span, .. } => Some(span.start_line),
             IntentError::LexerError { line, .. } => Some(*line),
             IntentError::ParserError { line, .. } => Some(*line),
             IntentError::TypeError { line, .. } if *line > 0 => Some(*line),
@@ -263,6 +340,7 @@ impl IntentError {
     /// Return the column number if this error has one
     pub fn column(&self) -> Option<usize> {
         match self {
+            IntentError::Spanned { span, .. } => Some(span.start_column),
             IntentError::LexerError { column, .. } => Some(*column),
             IntentError::ParserError { column, .. } => Some(*column),
             _ => None,
@@ -272,6 +350,7 @@ impl IntentError {
     /// Return the suggestion if this error has one
     pub fn suggestion(&self) -> Option<&str> {
         match self {
+            IntentError::Spanned { error, .. } => error.suggestion(),
             IntentError::UndefinedVariable { suggestion, .. } => suggestion.as_deref(),
             IntentError::UndefinedFunction { suggestion, .. } => suggestion.as_deref(),
             _ => None,
@@ -281,6 +360,7 @@ impl IntentError {
     /// Return the extra hint if this error has one
     pub fn hint(&self) -> Option<&str> {
         match self {
+            IntentError::Spanned { error, .. } => error.hint(),
             IntentError::UndefinedFunction { hint, .. } => hint.as_deref(),
             _ => None,
         }

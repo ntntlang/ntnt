@@ -773,9 +773,12 @@ enum WorkersCommands {
 fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
     // Try to downcast to IntentError for rich formatting
     if let Some(intent_err) = error.downcast_ref::<IntentError>() {
+        let exact_file = intent_err.source_file().map(PathBuf::from);
+        let file_path = exact_file.as_ref().or(file_path);
         let code = intent_err.error_code();
         let line_info = intent_err.line();
         let col_info = intent_err.column();
+        let span_info = intent_err.span();
 
         // Error header: error[E006]: Undefined variable: usres
         eprintln!(
@@ -788,7 +791,17 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
         // Show file:line location if available
         if let (Some(line), Some(path)) = (line_info, file_path) {
             let display_path = path.display();
-            eprintln!("  {} {}:{}", "-->".blue().bold(), display_path, line);
+            if let Some(column) = col_info {
+                eprintln!(
+                    "  {} {}:{}:{}",
+                    "-->".blue().bold(),
+                    display_path,
+                    line,
+                    column
+                );
+            } else {
+                eprintln!("  {} {}:{}", "-->".blue().bold(), display_path, line);
+            }
         }
         eprintln!("  {} {}", "=".blue().bold(), intent_err);
 
@@ -823,13 +836,21 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
                         error_line
                     );
 
-                    // Column pointer. Runtime/type errors currently carry statement-start
-                    // lines unless the parser supplied a true column, so label those
-                    // locations honestly instead of implying expression precision.
                     if let Some(col) = col_info {
                         if col > 0 {
                             let padding = " ".repeat(col.saturating_sub(1));
-                            eprintln!("     {} {}{}", "|".blue().bold(), padding, "^".red().bold());
+                            let width = span_info
+                                .filter(|span| span.start_line == span.end_line)
+                                .map(|span| span.end_column.saturating_sub(span.start_column))
+                                .unwrap_or(1)
+                                .max(1);
+                            let marker = format!("^{}", "~".repeat(width.saturating_sub(1)));
+                            eprintln!(
+                                "     {} {}{}",
+                                "|".blue().bold(),
+                                padding,
+                                marker.red().bold()
+                            );
                         }
                     } else {
                         eprintln!(
@@ -853,6 +874,17 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
 
                 eprintln!("   {}", "|".blue().bold());
             }
+        }
+
+        for frame in intent_err.call_frames() {
+            let file = frame.file.as_deref().unwrap_or("<unknown>");
+            eprintln!(
+                "  {} called from {}:{}:{}",
+                "=".blue().bold(),
+                file,
+                frame.span.start_line,
+                frame.span.start_column
+            );
         }
 
         // Rich type context (expected/got)
@@ -3237,6 +3269,8 @@ fn extract_route_with_line(
     use ntnt::ast::Expression;
     use serde_json::json;
 
+    let expr = expr.unlocated();
+
     if let Expression::Call {
         function,
         arguments,
@@ -3305,6 +3339,8 @@ fn extract_middleware(
     use ntnt::ast::Expression;
     use serde_json::json;
 
+    let expr = expr.unlocated();
+
     if let Expression::Call {
         function,
         arguments,
@@ -3341,6 +3377,8 @@ fn extract_static_dir(
 ) -> Option<serde_json::Value> {
     use ntnt::ast::Expression;
     use serde_json::json;
+
+    let expr = expr.unlocated();
 
     if let Expression::Call {
         function,
@@ -3861,6 +3899,9 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
         http_route_functions: &std::collections::HashSet<&str>,
     ) {
         match expr {
+            Expression::Located { expr, .. } => {
+                check_expr_for_issues(expr, source_lines, issues, http_route_functions);
+            }
             // Check for route patterns without raw strings
             Expression::Call {
                 function,
@@ -5317,6 +5358,7 @@ fn contract_to_json(contract: &Option<ntnt::ast::Contract>) -> serde_json::Value
 fn expr_to_string(expr: &ntnt::ast::Expression) -> String {
     use ntnt::ast::Expression;
     match expr {
+        Expression::Located { expr, .. } => expr_to_string(expr),
         Expression::Identifier(name) => name.clone(),
         Expression::Integer(n) => n.to_string(),
         Expression::Float(n) => n.to_string(),
@@ -5416,6 +5458,7 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
 
     fn collect_from_expr(expr: &Expression, names: &mut std::collections::HashSet<String>) {
         match expr {
+            Expression::Located { expr, .. } => collect_from_expr(expr, names),
             // Identifiers - the core of what we're tracking
             Expression::Identifier(name) => {
                 names.insert(name.clone());

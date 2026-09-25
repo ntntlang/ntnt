@@ -1015,15 +1015,17 @@ impl Interpreter {
         self.native_test_error.clone()
     }
 
-    // A native-only lexical proxy gives each function a stable identity without
-    // changing Value::Function or the ordinary interpreter's closure semantics.
+    // A native-only lexical proxy gives selected test functions a stable identity
+    // without changing ordinary closure semantics. Source provenance is recorded
+    // for both native and ordinary functions using their existing closure identity.
     fn native_function_closure(&mut self, name: &str) -> Rc<RefCell<Environment>> {
-        if self.native_test_entry.is_none() {
-            return Rc::clone(&self.environment);
-        }
-        let closure = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(
-            &self.environment,
-        ))));
+        let closure = if self.native_test_entry.is_none() {
+            Rc::clone(&self.environment)
+        } else {
+            Rc::new(RefCell::new(Environment::with_parent(Rc::clone(
+                &self.environment,
+            ))))
+        };
         if let Some(source) = &self.current_file {
             self.native_function_sources.insert(
                 (Rc::as_ptr(&closure) as usize, name.to_string()),
@@ -5240,7 +5242,7 @@ impl Interpreter {
                         // With otherwise block: catch runtime errors too.
                         // A guarded index stays silent-None so the otherwise
                         // path is taken cleanly instead of via a caught error.
-                        let evaluated = if matches!(expr, Expression::Index { .. }) {
+                        let evaluated = if matches!(expr.unlocated(), Expression::Index { .. }) {
                             self.eval_with_index_warn_suppressed(expr)
                         } else {
                             self.eval_expression(expr)
@@ -5471,7 +5473,7 @@ impl Interpreter {
                 let value = if let Some(expr) = value {
                     if otherwise.is_some() {
                         // Guarded index stays silent-None (see let-otherwise)
-                        let evaluated = if matches!(expr, Expression::Index { .. }) {
+                        let evaluated = if matches!(expr.unlocated(), Expression::Index { .. }) {
                             self.eval_with_index_warn_suppressed(expr)
                         } else {
                             self.eval_expression(expr)
@@ -6078,6 +6080,7 @@ impl Interpreter {
 
     fn expression_is_side_effect_free(expr: &Expression) -> bool {
         match expr {
+            Expression::Located { expr, .. } => Self::expression_is_side_effect_free(expr),
             Expression::Integer(_)
             | Expression::Float(_)
             | Expression::String(_)
@@ -6337,7 +6340,31 @@ impl Interpreter {
     }
 
     fn eval_expression(&mut self, expr: &Expression) -> Result<Value> {
+        if let Expression::Located { span, expr } = expr {
+            let source_file = self.current_file.clone();
+            let is_call = matches!(
+                expr.unlocated(),
+                Expression::Call { .. } | Expression::MethodCall { .. }
+            );
+            return self.eval_expression_unlocated(expr).map_err(|error| {
+                if source_file.is_none() {
+                    return error;
+                }
+                if is_call && error.span().is_some() {
+                    error.with_call_frame(source_file, *span)
+                } else {
+                    error.at_span_in(source_file, *span)
+                }
+            });
+        }
+        self.eval_expression_unlocated(expr)
+    }
+
+    fn eval_expression_unlocated(&mut self, expr: &Expression) -> Result<Value> {
         match expr {
+            Expression::Located { .. } => {
+                unreachable!("location wrappers are removed before evaluation")
+            }
             Expression::Integer(n) => Ok(Value::Int(*n)),
             Expression::Float(n) => Ok(Value::Float(*n)),
             Expression::String(s) => {
@@ -6367,7 +6394,7 @@ impl Interpreter {
                 // `arr[i] ?? default` is the documented safety net for
                 // optional access — don't warn/error on the guarded index
                 let lhs = if matches!(operator, BinaryOp::NullCoalesce)
-                    && matches!(left.as_ref(), Expression::Index { .. })
+                    && matches!(left.unlocated(), Expression::Index { .. })
                 {
                     self.eval_with_index_warn_suppressed(left)?
                 } else {
@@ -7481,7 +7508,7 @@ impl Interpreter {
 
             Expression::Assign { target, value } => {
                 let val = self.eval_expression(value)?;
-                match target.as_ref() {
+                match target.unlocated() {
                     Expression::Identifier(name) => {
                         if self.environment.borrow_mut().set(name, val.clone()) {
                             // After assignment, check if this is a struct and verify invariants
@@ -7504,7 +7531,7 @@ impl Interpreter {
                     }
                     Expression::FieldAccess { object, field } => {
                         // Handle field assignment (e.g., obj.field = value)
-                        if let Expression::Identifier(var_name) = object.as_ref() {
+                        if let Expression::Identifier(var_name) = object.unlocated() {
                             // Get the current struct
                             let current =
                                 self.environment.borrow().get(var_name).ok_or_else(|| {
@@ -7561,7 +7588,7 @@ impl Interpreter {
                         let mut chain: Vec<Expression> = Vec::new();
                         let mut current = target.as_ref();
                         loop {
-                            match current {
+                            match current.unlocated() {
                                 Expression::Index { object, index } => {
                                     chain.push(*index.clone());
                                     current = object.as_ref();
@@ -7577,7 +7604,7 @@ impl Interpreter {
                         // chain is in reverse order (innermost first), reverse it
                         chain.reverse();
 
-                        let root_name = if let Expression::Identifier(name) = current {
+                        let root_name = if let Expression::Identifier(name) = current.unlocated() {
                             name.clone()
                         } else {
                             unreachable!()
@@ -7788,7 +7815,7 @@ impl Interpreter {
                     // This requires looking up the updated value if it was bound to a variable
                     if let Some(struct_name) = struct_name {
                         // If the object came from a variable, check the updated value's invariants
-                        if let Expression::Identifier(var_name) = object.as_ref() {
+                        if let Expression::Identifier(var_name) = object.unlocated() {
                             // Clone to avoid borrow conflict
                             let updated_obj = self.environment.borrow().get(var_name);
                             if let Some(updated_obj) = updated_obj {
@@ -7922,7 +7949,7 @@ impl Interpreter {
             }
 
             Expression::Try(inner) => {
-                let value = if matches!(inner.as_ref(), Expression::Index { .. }) {
+                let value = if matches!(inner.unlocated(), Expression::Index { .. }) {
                     self.eval_with_index_warn_suppressed(inner)?
                 } else {
                     self.eval_expression(inner)?
@@ -9244,6 +9271,9 @@ impl Interpreter {
             Pattern::Literal(expr) => {
                 // For literals, we need to check if the value matches
                 match expr {
+                    Expression::Located { expr, .. } => {
+                        return self.match_pattern(&Pattern::Literal((**expr).clone()), value);
+                    }
                     Expression::Integer(n) => {
                         if let Value::Int(v) = value {
                             if v == n {
@@ -9529,14 +9559,15 @@ impl Interpreter {
                     )));
                 }
                 self.call_depth += 1;
+                let function_source = self
+                    .native_function_sources
+                    .get(&(Rc::as_ptr(&closure) as usize, name.clone()))
+                    .cloned();
                 let result = if self.native_test_entry.is_some() {
                     let previous_file = self.current_file.clone();
                     let previous_line = self.current_line;
                     let previous_environment = Rc::clone(&self.environment);
-                    if let Some(source) = self
-                        .native_function_sources
-                        .get(&(Rc::as_ptr(&closure) as usize, name.clone()))
-                    {
+                    if let Some(source) = &function_source {
                         self.current_file = Some(source.clone());
                     }
                     let result = self
@@ -9554,7 +9585,16 @@ impl Interpreter {
                     self.current_line = previous_line;
                     result
                 } else {
-                    self.call_user_function(name, params, body, closure, contract, args)
+                    let previous_file = self.current_file.clone();
+                    let previous_line = self.current_line;
+                    if let Some(source) = &function_source {
+                        self.current_file = Some(source.clone());
+                    }
+                    let result =
+                        self.call_user_function(name, params, body, closure, contract, args);
+                    self.current_file = previous_file;
+                    self.current_line = previous_line;
+                    result
                 };
                 self.call_depth -= 1;
                 result
@@ -10129,8 +10169,10 @@ impl Interpreter {
                                         .get_route_source(route_index)
                                         .and_then(|s| s.file_path.clone())
                                         .unwrap_or_default();
-                                    let loc = if handler_file.is_empty() {
-                                        String::new()
+                                    let failure_file =
+                                        e.source_file().unwrap_or(&handler_file).to_string();
+                                    let loc = if let Some(span) = e.span() {
+                                        format!(":{}:{}", span.start_line, span.start_column)
                                     } else {
                                         e.line()
                                             .map(|line| {
@@ -10141,8 +10183,8 @@ impl Interpreter {
                                     let error_context =
                                         self.format_route_error_context(&e, &handler_file);
                                     eprintln!(
-                                        "[ERROR] {} {} | handler: {}{} | {}",
-                                        method, path, handler_file, loc, e
+                                        "[ERROR] {} {} | handler: {} | failure: {}{} | {}",
+                                        method, path, handler_file, failure_file, loc, e
                                     );
                                     // Try on_error handler if registered
                                     if let Some(error_handler) =
@@ -10568,22 +10610,30 @@ impl Interpreter {
         Ok(Value::Unit)
     }
 
-    /// Format route runtime errors with source context for dev error pages.
-    /// Runtime errors currently carry statement-start lines, not expression spans, so the
-    /// location is explicitly labeled approximate instead of pretending to be exact.
+    /// Format route runtime errors with exact expression context when available,
+    /// retaining the statement-start excerpt as an explicit fallback.
     fn format_route_error_context(&self, error: &IntentError, handler_file: &str) -> String {
         let mut message = error.to_string();
         if handler_file.is_empty() {
             return message;
         }
+        let source_file = error.source_file().unwrap_or(handler_file);
 
         if let Some(line) = error.line() {
-            message.push_str(&format!(
-                "\n\nLocation: {}:{} (approximate statement start)",
-                handler_file, line
-            ));
+            let span = error.span();
+            if let Some(span) = span {
+                message.push_str(&format!(
+                    "\n\nLocation: {}:{}:{}-{}:{}",
+                    source_file, span.start_line, span.start_column, span.end_line, span.end_column
+                ));
+            } else {
+                message.push_str(&format!(
+                    "\n\nLocation: {}:{} (approximate statement start)",
+                    source_file, line
+                ));
+            }
 
-            if let Ok(source) = std::fs::read_to_string(handler_file) {
+            if let Ok(source) = std::fs::read_to_string(source_file) {
                 let lines: Vec<&str> = source.lines().collect();
                 let idx = line.saturating_sub(1);
                 message.push_str("\n\nSource excerpt:");
@@ -10594,14 +10644,37 @@ impl Interpreter {
                 }
                 if let Some(current) = lines.get(idx) {
                     message.push_str(&format!("\n {:>4} | {}", line, current));
-                    message.push_str("\n      | ^ approximate failing statement");
+                    if let Some(span) = span {
+                        let padding = " ".repeat(span.start_column.saturating_sub(1));
+                        let width = if span.start_line == span.end_line {
+                            span.end_column.saturating_sub(span.start_column).max(1)
+                        } else {
+                            current.chars().count().saturating_sub(span.start_column) + 2
+                        };
+                        message.push_str(&format!(
+                            "\n      | {}^{}",
+                            padding,
+                            "~".repeat(width.saturating_sub(1))
+                        ));
+                    } else {
+                        message.push_str("\n      | ^ approximate failing statement");
+                    }
                 }
                 if let Some(next) = lines.get(idx + 1) {
                     message.push_str(&format!("\n {:>4} | {}", line + 1, next));
                 }
             }
         } else {
-            message.push_str(&format!("\n\nLocation: {} (line unknown)", handler_file));
+            message.push_str(&format!("\n\nLocation: {} (line unknown)", source_file));
+        }
+
+        for frame in error.call_frames() {
+            message.push_str(&format!(
+                "\ncalled from {}:{}:{}",
+                frame.file.as_deref().unwrap_or("<unknown>"),
+                frame.span.start_line,
+                frame.span.start_column
+            ));
         }
 
         message
@@ -10744,14 +10817,18 @@ impl Interpreter {
                             .get_route_source(route_index)
                             .and_then(|s| s.file_path.clone())
                             .unwrap_or_default();
-                        let loc = e
-                            .line()
-                            .map(|line| format!(":{} (approximate statement start)", line))
-                            .unwrap_or_default();
+                        let failure_file = e.source_file().unwrap_or(&handler_file).to_string();
+                        let loc = if let Some(span) = e.span() {
+                            format!(":{}:{}", span.start_line, span.start_column)
+                        } else {
+                            e.line()
+                                .map(|line| format!(":{} (approximate statement start)", line))
+                                .unwrap_or_default()
+                        };
                         let error_context = self.format_route_error_context(&e, &handler_file);
                         eprintln!(
-                            "[ERROR] {} {} | handler: {}{} | {}",
-                            method, path, handler_file, loc, e
+                            "[ERROR] {} {} | handler: {} | failure: {}{} | {}",
+                            method, path, handler_file, failure_file, loc, e
                         );
                         // Try on_error handler if registered
                         if let Some(error_handler) = self.server_state.get_error_handler().cloned()
@@ -10990,6 +11067,7 @@ impl Interpreter {
     /// variables are reported in `where:` diagnostics.
     fn collect_identifiers(expr: &Expression, out: &mut Vec<String>) {
         match expr {
+            Expression::Located { expr, .. } => Self::collect_identifiers(expr, out),
             Expression::Identifier(name) => {
                 if !out.iter().any(|n| n == name) {
                     out.push(name.clone());
@@ -11107,6 +11185,7 @@ impl Interpreter {
     /// Recursively find old() calls in an expression and capture their values
     fn extract_old_calls(&mut self, expr: &Expression, old_values: &mut OldValues) -> Result<()> {
         match expr {
+            Expression::Located { expr, .. } => self.extract_old_calls(expr, old_values)?,
             Expression::Call {
                 function,
                 arguments,
@@ -11232,6 +11311,7 @@ impl Interpreter {
 
     fn format_expression(expr: &Expression) -> String {
         match expr {
+            Expression::Located { expr, .. } => Self::format_expression(expr),
             Expression::Integer(n) => n.to_string(),
             Expression::Float(f) => f.to_string(),
             Expression::String(s) => format!("\"{}\"", s),
