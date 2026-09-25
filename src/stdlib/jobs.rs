@@ -1942,6 +1942,7 @@ fn reenqueue_and_backoff(
 }
 
 const WORKER_CONNECTION_ATTEMPTS: usize = 5;
+const WORKER_PRIVATE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn retry_worker_resource<T>(
     attempts: usize,
@@ -1966,7 +1967,8 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
     // Redis/Valkey workers own one bounded-lifetime connection per slot. The
     // control-plane handle remains shared, but no worker data-plane traffic is
     // serialized through it.
-    let owned_kv = if matches!(kv_info.backend.as_str(), "redis" | "valkey") {
+    let redis_worker = matches!(kv_info.backend.as_str(), "redis" | "valkey");
+    let mut owned_kv = if redis_worker {
         retry_worker_resource(
             WORKER_CONNECTION_ATTEMPTS,
             || kv::open_owned_kv(&kv_info.url),
@@ -1975,7 +1977,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
     } else {
         None
     };
-    if matches!(kv_info.backend.as_str(), "redis" | "valkey") && owned_kv.is_none() {
+    if redis_worker && owned_kv.is_none() {
         if is_current_task_cancelled() {
             return;
         }
@@ -1983,7 +1985,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             "[ntnt] worker using shared Redis connection after private connection retries exhausted"
         );
     }
-    let kv_handle = owned_kv
+    let mut kv_handle = owned_kv
         .as_ref()
         .map_or_else(|| kv_info.to_value(), |owned| owned.value().clone());
     let worker_kv_info = match extract_kv_handle_info(&kv_handle) {
@@ -2003,7 +2005,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         .lease_policy
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let keeper = match leases::Keeper::new(worker_kv_info) {
+    let mut keeper = match leases::Keeper::new(worker_kv_info) {
         Ok(keeper) => keeper,
         Err(error) => {
             eprintln!("[ntnt] {error}");
@@ -2011,10 +2013,34 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         }
     };
     let worker_id = format!("{}:{}", band.name, Uuid::new_v4());
+    let mut next_private_retry = std::time::Instant::now() + WORKER_PRIVATE_RETRY_INTERVAL;
 
     loop {
         if is_current_task_cancelled() {
             break;
+        }
+
+        if redis_worker && owned_kv.is_none() && std::time::Instant::now() >= next_private_retry {
+            match kv::open_owned_kv(&kv_info.url) {
+                Ok(candidate) => {
+                    let candidate_handle = candidate.value().clone();
+                    match extract_kv_handle_info(&candidate_handle).and_then(leases::Keeper::new) {
+                        Ok(candidate_keeper) => {
+                            keeper = candidate_keeper;
+                            kv_handle = candidate_handle;
+                            owned_kv = Some(candidate);
+                            eprintln!("[ntnt] worker restored private Redis connection");
+                        }
+                        Err(error) => {
+                            eprintln!("[ntnt] worker private Redis retry deferred: {error}");
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[ntnt] worker private Redis retry deferred: {error}");
+                }
+            }
+            next_private_retry = std::time::Instant::now() + WORKER_PRIVATE_RETRY_INTERVAL;
         }
 
         // Compute floor and ceiling for this band's priority range.
