@@ -1840,7 +1840,28 @@ impl TypeContext {
                             ),
                         );
                     }
-                    self.bind(name, expected);
+                    // A function-type annotation describes parameter and return
+                    // types but has no syntax for defaults. Keep the inferred
+                    // lambda's minimum arity so annotated callables retain their
+                    // runtime default-argument behavior through UFCS.
+                    let bound_type = match (&expected, &inferred) {
+                        (
+                            Type::Function {
+                                params,
+                                return_type,
+                                ..
+                            },
+                            Type::Function {
+                                required_params, ..
+                            },
+                        ) => Type::Function {
+                            params: params.clone(),
+                            required_params: *required_params,
+                            return_type: return_type.clone(),
+                        },
+                        _ => expected,
+                    };
+                    self.bind(name, bound_type);
                 } else if let Some(pattern) = pattern {
                     // Destructuring: bind pattern variables with inferred types
                     self.bind_pattern(pattern, &inferred);
@@ -6090,6 +6111,14 @@ mod tests {
             let add = fn(x: Int, y: Int = 1) -> Int { return x + y }
             let alias = add
             let result: Int = 2.alias()
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
+
+        let errs = check_errors(
+            r#"
+            let add: (Int, Int) -> Int = fn(x: Int, y: Int = 1) -> Int { return x + y }
+            let result: Int = 2.add()
             "#,
         );
         assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
