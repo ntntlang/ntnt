@@ -208,8 +208,11 @@ fn expired_child_stops_even_when_backend_cannot_renew() {
     // Local send-time deadline intentionally expires before the store deadline.
     let until = Instant::now() + Duration::from_secs(1);
     loop {
-        if kv::job_leases::recover(&h, 64).unwrap().unknown == 1 {
-            break;
+        match kv::job_leases::recover(&h, 64) {
+            Ok(counts) if counts.unknown == 1 => break,
+            Ok(_) => {}
+            Err(error) if kv::conditional::is_contention_error(&error) => {}
+            Err(error) => panic!("unexpected recovery failure: {error}"),
         }
         assert!(Instant::now() < until);
         std::thread::sleep(Duration::from_millis(20));
