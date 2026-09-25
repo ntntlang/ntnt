@@ -33,6 +33,40 @@ static REDIS_KV_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Arc<Mutex<Redis
 
 static KV_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// A registry-backed handle whose connection is removed when its owner exits.
+/// Public language handles remain process-lived for compatibility; workers use
+/// this guard for their bounded per-slot Redis connections.
+pub(crate) struct OwnedKvHandle {
+    handle: Value,
+    backend: KVBackend,
+    id: u64,
+}
+
+impl OwnedKvHandle {
+    pub(crate) fn value(&self) -> &Value {
+        &self.handle
+    }
+}
+
+impl Drop for OwnedKvHandle {
+    fn drop(&mut self) {
+        match self.backend {
+            KVBackend::SQLite => {
+                SQLITE_KV_REGISTRY
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .remove(&self.id);
+            }
+            KVBackend::Redis => {
+                REDIS_KV_REGISTRY
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .remove(&self.id);
+            }
+        }
+    }
+}
+
 const SQLITE_TTL_BATCH_SIZE: usize = 256;
 const SQLITE_TTL_INTERVAL: Duration = Duration::from_secs(1);
 static SQLITE_TTL_MAINTENANCE: OnceLock<std::result::Result<(), String>> = OnceLock::new();
@@ -2401,6 +2435,26 @@ pub fn open_kv(url: &str) -> Result<Value> {
     handle.insert("_url".to_string(), Value::String(url.to_string()));
     handle.insert("_kv_store_id".to_string(), Value::Int(id as i64));
     Ok(Value::Map(handle))
+}
+
+/// Open a connection with registry ownership tied to the returned guard.
+pub(crate) fn open_owned_kv(url: &str) -> Result<OwnedKvHandle> {
+    let handle = open_kv(url)?;
+    let backend = get_backend_type(&handle)?;
+    let id = match &handle {
+        Value::Map(map) => match map.get("_kv_store_id") {
+            Some(Value::Int(id)) => {
+                u64::try_from(*id).map_err(|_| IntentError::runtime_error("Invalid KV store ID"))?
+            }
+            _ => return Err(IntentError::runtime_error("Missing KV store ID")),
+        },
+        _ => return Err(IntentError::runtime_error("Invalid KV handle")),
+    };
+    Ok(OwnedKvHandle {
+        handle,
+        backend,
+        id,
+    })
 }
 
 /// Set a key-value pair in a KV store handle.

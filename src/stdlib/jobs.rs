@@ -301,6 +301,34 @@ pub struct JobRuntime {
     /// Timestamp of last pause cache refresh from KV. Refreshed lazily every 5 seconds
     /// to pick up pauses from other processes in multi-process deployments.
     paused_cache_updated_at: Mutex<std::time::Instant>,
+    /// Process-wide lease-recovery gate. Any live worker may win each interval.
+    recovery_gate: Mutex<RecoveryGate>,
+}
+
+struct RecoveryGate {
+    next_at: std::time::Instant,
+    in_flight: bool,
+}
+
+struct RecoveryPermit<'a> {
+    runtime: &'a JobRuntime,
+    finished: bool,
+}
+
+impl RecoveryPermit<'_> {
+    fn finish(mut self, now: std::time::Instant, success: bool, contention: bool) {
+        self.runtime.finish_recovery(now, success, contention);
+        self.finished = true;
+    }
+}
+
+impl Drop for RecoveryPermit<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.runtime
+                .finish_recovery(std::time::Instant::now(), false, true);
+        }
+    }
 }
 
 impl JobRuntime {
@@ -324,7 +352,39 @@ impl JobRuntime {
             paused_cache_updated_at: Mutex::new(
                 std::time::Instant::now() - std::time::Duration::from_secs(10),
             ),
+            recovery_gate: Mutex::new(RecoveryGate {
+                next_at: std::time::Instant::now(),
+                in_flight: false,
+            }),
         }
+    }
+
+    fn begin_recovery(&self, now: std::time::Instant) -> Option<RecoveryPermit<'_>> {
+        let Ok(mut gate) = self.recovery_gate.try_lock() else {
+            return None;
+        };
+        if gate.in_flight || now < gate.next_at {
+            return None;
+        }
+        gate.in_flight = true;
+        Some(RecoveryPermit {
+            runtime: self,
+            finished: false,
+        })
+    }
+
+    fn finish_recovery(&self, now: std::time::Instant, success: bool, contention: bool) {
+        let mut gate = self
+            .recovery_gate
+            .lock()
+            .expect("job recovery gate lock poisoned");
+        gate.in_flight = false;
+        gate.next_at = now
+            + if success || !contention {
+                std::time::Duration::from_secs(5)
+            } else {
+                std::time::Duration::from_millis(25)
+            };
     }
 
     /// Register a job definition. Idempotent — silently skips if a job with the
@@ -1882,7 +1942,30 @@ fn reenqueue_and_backoff(
 }
 
 fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<String>>) {
-    let kv_handle = kv_info.to_value();
+    // Redis/Valkey workers own one bounded-lifetime connection per slot. The
+    // control-plane handle remains shared, but no worker data-plane traffic is
+    // serialized through it.
+    let owned_kv = if matches!(kv_info.backend.as_str(), "redis" | "valkey") {
+        match kv::open_owned_kv(&kv_info.url) {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                eprintln!("[ntnt] worker Redis connection unavailable: {error}");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let kv_handle = owned_kv
+        .as_ref()
+        .map_or_else(|| kv_info.to_value(), |owned| owned.value().clone());
+    let worker_kv_info = match extract_kv_handle_info(&kv_handle) {
+        Ok(info) => info,
+        Err(error) => {
+            eprintln!("[ntnt] worker KV handle unavailable: {error}");
+            return;
+        }
+    };
     let poll_duration = std::time::Duration::from_millis(band.poll_interval_ms);
     let band_stats = JOB_RUNTIME.get_or_create_band_stats(&band.name);
 
@@ -1893,7 +1976,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         .lease_policy
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let keeper = match leases::Keeper::new(kv_info.clone()) {
+    let keeper = match leases::Keeper::new(worker_kv_info) {
         Ok(keeper) => keeper,
         Err(error) => {
             eprintln!("[ntnt] {error}");
@@ -1901,7 +1984,6 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         }
     };
     let worker_id = format!("{}:{}", band.name, Uuid::new_v4());
-    let mut recovery_at = std::time::Instant::now();
 
     loop {
         if is_current_task_cancelled() {
@@ -1913,16 +1995,23 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         let floor = band.floor_key();
         let ceiling = band.ceiling_key();
 
-        if std::time::Instant::now() >= recovery_at {
+        if let Some(recovery) = JOB_RUNTIME.begin_recovery(std::time::Instant::now()) {
             match kv::job_leases::recover(&kv_handle, 64) {
-                Ok(recovered) if recovered.requeued + recovered.unknown > 0 => eprintln!(
-                    "[ntnt] recovered {} unstarted jobs; {} need reconciliation",
-                    recovered.requeued, recovered.unknown
-                ),
-                Err(error) => eprintln!("[ntnt] job recovery deferred: {error}"),
-                _ => {}
+                Ok(recovered) => {
+                    recovery.finish(std::time::Instant::now(), true, false);
+                    if recovered.requeued + recovered.unknown > 0 {
+                        eprintln!(
+                            "[ntnt] recovered {} unstarted jobs; {} need reconciliation",
+                            recovered.requeued, recovered.unknown
+                        );
+                    }
+                }
+                Err(error) => {
+                    let contention = kv::conditional::is_contention_error(&error);
+                    recovery.finish(std::time::Instant::now(), false, contention);
+                    eprintln!("[ntnt] job recovery deferred: {error}");
+                }
             }
-            recovery_at = std::time::Instant::now() + std::time::Duration::from_secs(5);
         }
         let sent = std::time::Instant::now();
         let claim = match kv::job_leases::claim(
@@ -1933,8 +2022,21 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             policy.duration_ms,
         ) {
             Ok(Some(claim)) => claim,
-            Ok(None) | Err(_) => {
+            Ok(None) => {
                 if sleep_or_break(poll_duration.min(std::time::Duration::from_secs(5))) {
+                    break;
+                }
+                continue;
+            }
+            Err(error) => {
+                let contention = kv::conditional::is_contention_error(&error);
+                eprintln!("[ntnt] job claim deferred: {error}");
+                let delay = if contention {
+                    std::time::Duration::from_millis(25)
+                } else {
+                    poll_duration.min(std::time::Duration::from_secs(5))
+                };
+                if sleep_or_break(delay) {
                     break;
                 }
                 continue;
@@ -3733,6 +3835,10 @@ pub(crate) fn worker_status_impl() -> crate::error::Result<Value> {
     let mut result = HashMap::new();
     result.insert("bands".to_string(), Value::Array(band_entries));
     result.insert("pending".to_string(), Value::Int(pending_count));
+    result.insert(
+        "redis_transaction_conflicts".to_string(),
+        Value::Int(kv::conditional::redis_transaction_conflicts().min(i64::MAX as u64) as i64),
+    );
     result.insert(
         "paused_queues".to_string(),
         Value::Array(paused_queue_names),
@@ -5964,6 +6070,51 @@ pub(crate) mod tests {
         JOB_RUNTIME.reset();
         BATCH_RUNTIME.reset();
         f();
+    }
+
+    #[test]
+    fn recovery_gate_allows_one_process_worker_per_interval() {
+        let runtime = Arc::new(JobRuntime::new());
+        let now = std::time::Instant::now();
+        {
+            let mut gate = runtime.recovery_gate.lock().unwrap();
+            gate.next_at = now;
+            gate.in_flight = false;
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(33));
+        let winners = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        for _ in 0..32 {
+            let runtime = Arc::clone(&runtime);
+            let barrier = Arc::clone(&barrier);
+            let winners = Arc::clone(&winners);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                if let Some(permit) = runtime.begin_recovery(now) {
+                    winners.fetch_add(1, AtomicOrdering::Relaxed);
+                    permit.finish(now, true, false);
+                }
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(winners.load(AtomicOrdering::Relaxed), 1);
+        assert!(runtime
+            .begin_recovery(now + std::time::Duration::from_secs(4))
+            .is_none());
+        runtime
+            .begin_recovery(now + std::time::Duration::from_secs(5))
+            .unwrap()
+            .finish(now + std::time::Duration::from_secs(5), false, true);
+        assert!(runtime
+            .begin_recovery(now + std::time::Duration::from_millis(5_024))
+            .is_none());
+        runtime
+            .begin_recovery(now + std::time::Duration::from_millis(5_025))
+            .unwrap()
+            .finish(now + std::time::Duration::from_millis(5_025), true, false);
     }
 
     #[test]
@@ -8277,6 +8428,10 @@ pub(crate) mod tests {
                     assert!(
                         m.contains_key("pending"),
                         "worker_status should have 'pending'"
+                    );
+                    assert!(
+                        m.contains_key("redis_transaction_conflicts"),
+                        "worker_status should expose Redis conflict telemetry"
                     );
                 }
                 _ => panic!("worker_status should return a Map"),
