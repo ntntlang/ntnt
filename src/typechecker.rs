@@ -114,6 +114,9 @@ pub struct TypeContext {
     /// Whole-module aliases by lexical scope, parallel to `scopes`. Calls on
     /// these values dispatch to exported fields rather than through UFCS.
     module_aliases: Vec<HashSet<String>>,
+    /// Minimum arity for lexically bound lambdas, parallel to `scopes`.
+    /// `Type::Function` intentionally describes types, not default values.
+    callable_required_params: Vec<HashMap<String, usize>>,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -678,6 +681,7 @@ impl TypeContext {
             strict_lint: false,
             has_unresolved_import: false,
             module_aliases: vec![HashSet::new()],
+            callable_required_params: vec![HashMap::new()],
             current_file: None,
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
@@ -692,11 +696,13 @@ impl TypeContext {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.module_aliases.push(HashSet::new());
+        self.callable_required_params.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.module_aliases.pop();
+        self.callable_required_params.pop();
     }
 
     fn bind(&mut self, name: &str, typ: Type) {
@@ -705,6 +711,9 @@ impl TypeContext {
         }
         if let Some(aliases) = self.module_aliases.last_mut() {
             aliases.remove(name);
+        }
+        if let Some(required_params) = self.callable_required_params.last_mut() {
+            required_params.remove(name);
         }
     }
 
@@ -737,6 +746,16 @@ impl TypeContext {
             }
         }
         false
+    }
+
+    fn callable_required_params(&self, name: &str) -> Option<usize> {
+        for (scope, required_params) in self.scopes.iter().zip(&self.callable_required_params).rev()
+        {
+            if scope.contains_key(name) {
+                return required_params.get(name).copied();
+            }
+        }
+        None
     }
 
     // ── Diagnostics ───────────────────────────────────────────────────
@@ -934,12 +953,20 @@ impl TypeContext {
                 params,
                 return_type,
             }) => {
-                if arg_types.len() != params.len() {
+                let required_params = self
+                    .callable_required_params(method)
+                    .unwrap_or(params.len());
+                if arg_types.len() < required_params || arg_types.len() > params.len() {
+                    let expected = if required_params == params.len() {
+                        params.len().to_string()
+                    } else {
+                        format!("{} to {}", required_params, params.len())
+                    };
                     self.error(
                         format!(
                             "Function '{}' expects {} argument(s), got {}",
                             method,
-                            params.len(),
+                            expected,
                             arg_types.len()
                         ),
                         line,
@@ -1839,6 +1866,17 @@ impl TypeContext {
                     self.bind_pattern(pattern, &inferred);
                 } else {
                     self.bind(name, inferred);
+                }
+                if pattern.is_none() {
+                    if let Some(Expression::Lambda { params, .. }) = value {
+                        let required_params = params
+                            .iter()
+                            .filter(|param| param.default.is_none())
+                            .count();
+                        if let Some(callables) = self.callable_required_params.last_mut() {
+                            callables.insert(name.clone(), required_params);
+                        }
+                    }
                 }
             }
 
@@ -6061,6 +6099,17 @@ mod tests {
         assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
         assert!(errs[0].message.contains("declared as Int"));
         assert!(errs[0].message.contains("initialized with String"));
+    }
+
+    #[test]
+    fn test_dot_call_allows_defaulted_lambda_arguments() {
+        let errs = check_errors(
+            r#"
+            let add = fn(x: Int, y: Int = 1) -> Int { return x + y }
+            let result: Int = 2.add()
+            "#,
+        );
+        assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
     }
 
     #[test]
