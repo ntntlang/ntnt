@@ -1943,6 +1943,7 @@ fn reenqueue_and_backoff(
 
 const WORKER_CONNECTION_ATTEMPTS: usize = 5;
 const WORKER_PRIVATE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const WORKER_PRIVATE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn retry_worker_resource<T>(
     attempts: usize,
@@ -1971,7 +1972,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
     let mut owned_kv = if redis_worker {
         retry_worker_resource(
             WORKER_CONNECTION_ATTEMPTS,
-            || kv::open_owned_kv(&kv_info.url),
+            || kv::open_owned_kv(&kv_info.url, WORKER_PRIVATE_CONNECT_TIMEOUT),
             |delay| sleep_cancellable(delay),
         )
     } else {
@@ -2021,7 +2022,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         }
 
         if redis_worker && owned_kv.is_none() && std::time::Instant::now() >= next_private_retry {
-            match kv::open_owned_kv(&kv_info.url) {
+            match kv::open_owned_kv(&kv_info.url, WORKER_PRIVATE_CONNECT_TIMEOUT) {
                 Ok(candidate) => {
                     let candidate_handle = candidate.value().clone();
                     match extract_kv_handle_info(&candidate_handle).and_then(leases::Keeper::new) {

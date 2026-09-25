@@ -687,8 +687,17 @@ impl SQLiteKV {
 // ============================================================================
 
 impl RedisKV {
-    /// Create a new Redis/Valkey connection
+    /// Create a new Redis/Valkey connection.
     pub fn new(url: &str) -> Result<Self> {
+        Self::connect(url, None)
+    }
+
+    /// Create a connection with a bounded TCP connect attempt.
+    pub(crate) fn new_with_timeout(url: &str, timeout: std::time::Duration) -> Result<Self> {
+        Self::connect(url, Some(timeout))
+    }
+
+    fn connect(url: &str, timeout: Option<std::time::Duration>) -> Result<Self> {
         // Convert valkey:// to redis:// since the redis crate only recognizes redis://
         let normalized_url = if url.starts_with("valkey://") {
             url.replacen("valkey://", "redis://", 1)
@@ -700,9 +709,11 @@ impl RedisKV {
             IntentError::runtime_error(format!("Failed to create Redis client: {}", e))
         })?;
 
-        let conn = client.get_connection().map_err(|e| {
-            IntentError::runtime_error(format!("Failed to connect to Redis: {}", e))
-        })?;
+        let conn = match timeout {
+            Some(timeout) => client.get_connection_with_timeout(timeout),
+            None => client.get_connection(),
+        }
+        .map_err(|e| IntentError::runtime_error(format!("Failed to connect to Redis: {}", e)))?;
 
         Ok(RedisKV {
             conn,
@@ -2437,22 +2448,34 @@ pub fn open_kv(url: &str) -> Result<Value> {
     Ok(Value::Map(handle))
 }
 
-/// Open a connection with registry ownership tied to the returned guard.
-pub(crate) fn open_owned_kv(url: &str) -> Result<OwnedKvHandle> {
-    let handle = open_kv(url)?;
-    let backend = get_backend_type(&handle)?;
-    let id = match &handle {
-        Value::Map(map) => match map.get("_kv_store_id") {
-            Some(Value::Int(id)) => {
-                u64::try_from(*id).map_err(|_| IntentError::runtime_error("Invalid KV store ID"))?
-            }
-            _ => return Err(IntentError::runtime_error("Missing KV store ID")),
-        },
-        _ => return Err(IntentError::runtime_error("Invalid KV handle")),
+/// Open an owned Redis/Valkey connection without allowing connect to stall a worker.
+pub(crate) fn open_owned_kv(url: &str, timeout: std::time::Duration) -> Result<OwnedKvHandle> {
+    if !url.starts_with("redis://") && !url.starts_with("valkey://") {
+        return Err(IntentError::runtime_error(
+            "Bounded owned connections require Redis or Valkey",
+        ));
+    }
+    let id = KV_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let kv = RedisKV::new_with_timeout(url, timeout)?;
+    REDIS_KV_REGISTRY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(id, Arc::new(Mutex::new(kv)));
+    let backend_name = if url.starts_with("valkey://") {
+        "valkey"
+    } else {
+        "redis"
     };
+    let mut map = HashMap::new();
+    map.insert(
+        "_backend".to_string(),
+        Value::String(backend_name.to_string()),
+    );
+    map.insert("_url".to_string(), Value::String(url.to_string()));
+    map.insert("_kv_store_id".to_string(), Value::Int(id as i64));
     Ok(OwnedKvHandle {
-        handle,
-        backend,
+        handle: Value::Map(map),
+        backend: KVBackend::Redis,
         id,
     })
 }

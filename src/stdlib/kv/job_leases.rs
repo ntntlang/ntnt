@@ -1578,7 +1578,7 @@ mod tests {
     fn redis_owned_valkey_handle_unregisters_on_drop() {
         let (url, _) = redis_fixture();
         let valkey_url = url.replacen("redis://", "valkey://", 1);
-        let owned = open_owned_kv(&valkey_url).unwrap();
+        let owned = crate::stdlib::kv::open_owned_kv(&valkey_url, Duration::from_secs(1)).unwrap();
         let handle = owned.value().clone();
         assert!(matches!(
             &handle,
