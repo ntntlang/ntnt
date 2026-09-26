@@ -50,26 +50,32 @@ pub(super) fn check_ready_index_type(conn: &mut redis::Connection) -> R<()> {
 }
 
 fn ready_index_initialized(conn: &mut redis::Connection) -> R<bool> {
-    if !redis::cmd("EXISTS")
-        .arg(READY_INITIALIZED)
-        .query::<bool>(conn)?
-    {
+    // One round trip on the per-claim fast path. The script avoids ZSCORE's
+    // WRONGTYPE error so a wrong type reports as TypeError, as before.
+    let (exists, kind, sentinel): (bool, String, bool) = redis::Script::new(
+        r#"
+            local exists = redis.call('EXISTS', KEYS[1])
+            local kind = redis.call('TYPE', KEYS[2])
+            if type(kind) == 'table' then kind = kind['ok'] end
+            local sentinel = 0
+            if kind == 'zset' and redis.call('ZSCORE', KEYS[2], ARGV[1]) then sentinel = 1 end
+            return {exists, kind, sentinel}
+        "#,
+    )
+    .key(READY_INITIALIZED)
+    .key(READY)
+    .arg(READY_SENTINEL)
+    .invoke(conn)?;
+    if !exists {
         return Ok(false);
     }
-    let kind: String = redis::cmd("TYPE").arg(READY).query(conn)?;
     if kind != "none" && kind != "zset" {
         return Err(redis::RedisError::from((
             redis::ErrorKind::TypeError,
             "job ready index has the wrong Redis type",
         )));
     }
-    if kind == "zset"
-        && redis::cmd("ZSCORE")
-            .arg(READY)
-            .arg(READY_SENTINEL)
-            .query::<Option<f64>>(conn)?
-            .is_some()
-    {
+    if sentinel {
         return Ok(true);
     }
     redis::cmd("DEL").arg(READY_INITIALIZED).query::<()>(conn)?;
@@ -348,6 +354,11 @@ struct Store<'a> {
     writes: redis::Pipeline,
     index_checked: bool,
     ready_checked: bool,
+    /// TYPE of (due, ready), fetched together on first use of either.
+    index_kinds: Option<(String, String)>,
+    /// A WATCH was issued and no EXEC has run since. EXEC (committed or
+    /// aborted) clears every watch, so UNWATCH is only needed otherwise.
+    watching: bool,
 }
 impl<'a> Store<'a> {
     fn sql(conn: &'a Connection) -> Self {
@@ -357,6 +368,8 @@ impl<'a> Store<'a> {
             writes: redis::pipe(),
             index_checked: false,
             ready_checked: false,
+            index_kinds: None,
+            watching: false,
         }
     }
     fn redis(conn: &'a mut redis::Connection) -> Self {
@@ -368,6 +381,8 @@ impl<'a> Store<'a> {
             writes,
             index_checked: false,
             ready_checked: false,
+            index_kinds: None,
+            watching: false,
         }
     }
     fn now(&mut self) -> R<i64> {
@@ -401,14 +416,23 @@ impl<'a> Store<'a> {
             return conditional::sql_read(conn, key).map_err(err);
         }
         let conn = self.redis.as_deref_mut().unwrap();
-        redis::cmd("WATCH")
+        // One round trip. WATCH precedes the GETs on the same connection, so
+        // the watch still covers what is read. Two GETs, not MGET: MGET
+        // returns nil for a wrong-type key, which would make a corrupted
+        // lease or primary record read as absent; a GET error fails the
+        // whole pipeline.
+        let type_key = format!("{key}:__type");
+        self.watching = true;
+        let (raw, kind): (Option<String>, Option<String>) = redis::pipe()
+            .cmd("WATCH")
             .arg(key)
-            .arg(format!("{key}:__type"))
-            .query::<()>(conn)?;
-        // Two GETs, not MGET: MGET returns nil for a wrong-type key, which
-        // would make a corrupted lease or primary record read as absent.
-        let raw: Option<String> = redis::cmd("GET").arg(key).query(conn)?;
-        let kind: Option<String> = redis::cmd("GET").arg(format!("{key}:__type")).query(conn)?;
+            .arg(&type_key)
+            .ignore()
+            .cmd("GET")
+            .arg(key)
+            .cmd("GET")
+            .arg(&type_key)
+            .query(conn)?;
         Ok(raw.map(|raw| Snapshot {
             raw,
             kind,
@@ -459,20 +483,42 @@ impl<'a> Store<'a> {
             return Ok(true);
         };
         let key = auth_key(id);
-        redis::cmd("WATCH").arg(&key).query::<()>(conn)?;
-        let live: Option<String> = redis::cmd("GET").arg(&key).query(conn)?;
+        self.watching = true;
+        let (live,): (Option<String>,) = redis::pipe()
+            .cmd("WATCH")
+            .arg(&key)
+            .ignore()
+            .cmd("GET")
+            .arg(&key)
+            .query(conn)?;
         Ok(live.as_deref() == Some(token))
+    }
+    /// Fetch both shared index types in one round trip the first time a
+    /// transaction touches either; each check validates only its own index,
+    /// so a corrupt ready index cannot block renewal or recovery. Neither is
+    /// watched (see check_ready_index_type); recovery re-validates each due
+    /// member against the watched per-job lease before acting on it.
+    fn index_kinds(&mut self) -> R<(String, String)> {
+        if let Some(kinds) = &self.index_kinds {
+            return Ok(kinds.clone());
+        }
+        let conn = self.redis.as_deref_mut().unwrap();
+        let kinds: (String, String) = redis::pipe()
+            .cmd("TYPE")
+            .arg(DUE)
+            .cmd("TYPE")
+            .arg(READY)
+            .query(conn)?;
+        self.index_kinds = Some(kinds.clone());
+        Ok(kinds)
     }
     fn index(&mut self) -> R<()> {
         if self.index_checked {
             return Ok(());
         }
-        if let Some(conn) = self.redis.as_deref_mut() {
-            // Type-check only; see check_ready_index_type for why the shared
-            // due index is not watched. Recovery re-validates each member
-            // against the watched per-job lease before acting on it.
-            let kind: String = redis::cmd("TYPE").arg(DUE).query(conn)?;
-            if kind != "none" && kind != "zset" {
+        if self.redis.is_some() {
+            let (due, _) = self.index_kinds()?;
+            if due != "none" && due != "zset" {
                 return Err(err(()));
             }
         }
@@ -483,8 +529,14 @@ impl<'a> Store<'a> {
         if self.ready_checked {
             return Ok(());
         }
-        if let Some(conn) = self.redis.as_deref_mut() {
-            check_ready_index_type(conn)?;
+        if self.redis.is_some() {
+            let (_, ready) = self.index_kinds()?;
+            if ready != "none" && ready != "zset" {
+                return Err(redis::RedisError::from((
+                    redis::ErrorKind::TypeError,
+                    "job ready index has the wrong Redis type",
+                )));
+            }
         }
         self.ready_checked = true;
         Ok(())
@@ -572,7 +624,14 @@ impl<'a> Store<'a> {
     }
     fn commit(&mut self) -> R<()> {
         if let Some(conn) = self.redis.as_deref_mut() {
+            // An empty pipeline sends nothing, so no EXEC clears the watches
+            // of a read-only transaction; the caller must still UNWATCH.
+            let sends_exec = self.writes.cmd_iter().next().is_some();
             let committed: Option<()> = self.writes.query(conn)?;
+            if sends_exec {
+                // EXEC ran (committed or aborted by a watch): watches cleared.
+                self.watching = false;
+            }
             if committed.is_none() {
                 return Err(redis::RedisError::from((
                     redis::ErrorKind::ResponseError,
@@ -644,7 +703,11 @@ fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) 
                         store.commit()?;
                         Ok(value)
                     });
-                    let _ = redis::cmd("UNWATCH").query::<()>(store.redis.as_deref_mut().unwrap());
+                    // Error paths get DISCARD + UNWATCH from redis_call_raw.
+                    if result.is_ok() && store.watching {
+                        let _ =
+                            redis::cmd("UNWATCH").query::<()>(store.redis.as_deref_mut().unwrap());
+                    }
                     result
                 });
                 drop(transaction_guard);
@@ -1465,12 +1528,25 @@ mod tests {
                 }
                 client.write_all(&response).unwrap();
                 if is_exec {
-                    // Production cleanup still receives its normal UNWATCH ACK.
-                    let request = resp_frame(&mut requests).unwrap();
-                    upstream.write_all(&request).unwrap();
+                    // Forward only post-EXEC cleanup. A successful EXEC needs
+                    // none; error paths send DISCARD/UNWATCH. Anything else is
+                    // a retry, which must hit a closed connection as before.
                     client
-                        .write_all(&resp_frame(&mut responses).unwrap())
+                        .set_read_timeout(Some(Duration::from_millis(200)))
                         .unwrap();
+                    let cleanup = [
+                        redis::cmd("DISCARD").get_packed_command(),
+                        redis::cmd("UNWATCH").get_packed_command(),
+                    ];
+                    while let Ok(request) = resp_frame(&mut requests) {
+                        if !cleanup.contains(&request) {
+                            break;
+                        }
+                        upstream.write_all(&request).unwrap();
+                        client
+                            .write_all(&resp_frame(&mut responses).unwrap())
+                            .unwrap();
+                    }
                     return response;
                 }
             }
@@ -1528,6 +1604,51 @@ mod tests {
         .unwrap();
         assert_eq!(calls, 1, "shared index writes must not conflict");
         assert_eq!(conditional::redis_transaction_conflicts(), conflicts_before);
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_read_only_transaction_releases_watches() {
+        // get() WATCHes a lease but queues no writes, so no EXEC clears the
+        // watch. A leftover watch would abort the next transaction on the
+        // same connection when that unrelated key changes.
+        let (url, handle) = redis_fixture();
+        let other = open_kv(&url).unwrap();
+        fixture(&handle, "pending");
+        let claim = take(&handle);
+        assert!(get(&handle, &claim.id).unwrap().is_some());
+        kv_set(
+            &other,
+            &lease_key(&claim.id),
+            &Value::String("x".into()),
+            None,
+        )
+        .unwrap();
+        let conflicts_before = conditional::redis_transaction_conflicts();
+        let mut calls = 0;
+        transaction(&handle, |store| {
+            calls += 1;
+            let value = store.snapshot(&Value::String("ok".into()))?;
+            store.put("watch:leftover:result", &value)
+        })
+        .unwrap();
+        assert_eq!(calls, 1, "a read-only transaction left its WATCH behind");
+        assert_eq!(conditional::redis_transaction_conflicts(), conflicts_before);
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_corrupt_ready_index_does_not_block_lease_maintenance() {
+        let (_, handle) = redis_fixture();
+        let (id, _) = fixture(&handle, "pending");
+        let claim = take(&handle);
+        conditional::redis_call(&handle, |conn| {
+            redis::cmd("SET")
+                .arg(READY)
+                .arg("wrong-type")
+                .query::<()>(conn)
+        })
+        .unwrap();
+        assert!(renew(&handle, &id, &claim.token, 60_000).unwrap());
+        assert_eq!(recover(&handle, 64).unwrap().requeued, 0);
     }
     #[test]
     #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
