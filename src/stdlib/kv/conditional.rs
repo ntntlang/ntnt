@@ -37,6 +37,101 @@ impl Snapshot {
 pub(super) fn error<E>(_: E) -> IntentError {
     IntentError::runtime_error("job state storage operation failed")
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StorageFailure {
+    LocalBusy,
+    MigrationBusy,
+    Busy,
+    Conflict,
+    Connection,
+    Permission,
+    WrongType,
+    Command,
+    Other,
+}
+
+impl StorageFailure {
+    fn from_redis(error: &redis::RedisError) -> Self {
+        let message = error.to_string().to_ascii_uppercase();
+        if error.is_io_error() {
+            Self::Connection
+        } else if message.contains("READY_INDEX_BUSY") {
+            Self::MigrationBusy
+        } else if message.contains("TRANSACTION CONFLICTED") {
+            Self::Conflict
+        } else if message.contains("NOPERM") || message.contains("NOAUTH") {
+            Self::Permission
+        } else if message.contains("WRONGTYPE") || error.kind() == redis::ErrorKind::TypeError {
+            Self::WrongType
+        } else if message.contains("BUSY") || message.contains("TRYAGAIN") {
+            Self::Busy
+        } else if error.kind() == redis::ErrorKind::ResponseError {
+            Self::Command
+        } else {
+            Self::Other
+        }
+    }
+    pub(super) fn retryable(self) -> bool {
+        matches!(self, Self::Busy | Self::Conflict)
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::LocalBusy => "local_busy",
+            Self::MigrationBusy => "migration_busy",
+            Self::Busy => "busy",
+            Self::Conflict => "conflict",
+            Self::Connection => "connection",
+            Self::Permission => "permission",
+            Self::WrongType => "wrong_type",
+            Self::Command => "command",
+            Self::Other => "other",
+        }
+    }
+    pub(super) fn intent(self) -> IntentError {
+        IntentError::runtime_error(format!(
+            "job state storage operation failed ({})",
+            self.label()
+        ))
+    }
+}
+
+pub(crate) fn is_contention_error(error: &IntentError) -> bool {
+    let message = error.to_string();
+    message.contains("(local_busy)")
+        || message.contains("(migration_busy)")
+        || message.contains("(busy)")
+        || message.contains("(conflict)")
+}
+
+static REDIS_TRANSACTION_CONFLICTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub(super) fn record_redis_transaction_conflict() {
+    REDIS_TRANSACTION_CONFLICTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn redis_transaction_conflicts() -> u64 {
+    REDIS_TRANSACTION_CONFLICTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn lock_redis_store(
+    shared: &Arc<Mutex<RedisKV>>,
+) -> std::result::Result<std::sync::MutexGuard<'_, RedisKV>, StorageFailure> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    loop {
+        match shared.try_lock() {
+            Ok(store) => return Ok(store),
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err(StorageFailure::Other),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(StorageFailure::LocalBusy);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+}
 pub(super) fn sql_read(conn: &Connection, key: &str) -> Result<Option<Snapshot>> {
     conn.query_row(
         "SELECT value,type FROM _kv WHERE key=? AND (expires_at IS NULL OR expires_at>?)",
@@ -52,25 +147,25 @@ pub(super) fn sql_read(conn: &Connection, key: &str) -> Result<Option<Snapshot>>
     .optional()
     .map_err(error)
 }
-pub(super) fn redis_call<T>(
+pub(super) fn redis_call_raw<T>(
     handle: &Value,
     call: impl FnOnce(&mut redis::Connection) -> redis::RedisResult<T>,
-) -> Result<T> {
+) -> std::result::Result<T, StorageFailure> {
     let Value::Map(map) = handle else {
-        return Err(error(()));
+        return Err(StorageFailure::Other);
     };
     let Some(Value::Int(id)) = map.get("_kv_store_id") else {
-        return Err(error(()));
+        return Err(StorageFailure::Other);
     };
     let shared = REDIS_KV_REGISTRY
-        .try_lock()
-        .map_err(error)?
+        .lock()
+        .map_err(|_| StorageFailure::Other)?
         .get(&(*id as u64))
         .cloned()
-        .ok_or_else(|| error(()))?;
-    let mut store = shared.try_lock().map_err(error)?;
+        .ok_or(StorageFailure::Other)?;
+    let mut store = lock_redis_store(&shared)?;
     if store.reconnecting {
-        return Err(error(()));
+        return Err(StorageFailure::Connection);
     }
     let result = (|| {
         store.conn.set_read_timeout(Some(Duration::from_secs(1)))?;
@@ -114,7 +209,36 @@ pub(super) fn redis_call<T>(
             }
         }
     }
-    result.map_err(error)
+    result.map_err(|error| StorageFailure::from_redis(&error))
+}
+
+pub(super) fn redis_call<T>(
+    handle: &Value,
+    mut f: impl FnMut(&mut redis::Connection) -> redis::RedisResult<T>,
+) -> Result<T> {
+    const ATTEMPTS: usize = 32;
+    for attempt in 0..ATTEMPTS {
+        match redis_call_raw(handle, |conn| f(conn)) {
+            Ok(value) => return Ok(value),
+            Err(failure) if failure.retryable() && attempt + 1 < ATTEMPTS => {
+                if failure == StorageFailure::Conflict {
+                    record_redis_transaction_conflict();
+                }
+                let base = 1_u64 << attempt.min(3);
+                let jitter = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |time| u64::from(time.subsec_nanos()) % (base + 1));
+                std::thread::sleep(std::time::Duration::from_millis(base + jitter));
+            }
+            Err(failure) => {
+                if failure == StorageFailure::Conflict {
+                    record_redis_transaction_conflict();
+                }
+                return Err(failure.intent());
+            }
+        }
+    }
+    unreachable!()
 }
 pub(crate) fn read(handle: &Value, key: &str) -> Result<Option<Snapshot>> {
     match get_backend_type(handle)? {

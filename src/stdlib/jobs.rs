@@ -301,6 +301,34 @@ pub struct JobRuntime {
     /// Timestamp of last pause cache refresh from KV. Refreshed lazily every 5 seconds
     /// to pick up pauses from other processes in multi-process deployments.
     paused_cache_updated_at: Mutex<std::time::Instant>,
+    /// Process-wide lease-recovery gate. Any live worker may win each interval.
+    recovery_gate: Mutex<RecoveryGate>,
+}
+
+struct RecoveryGate {
+    next_at: std::time::Instant,
+    in_flight: bool,
+}
+
+struct RecoveryPermit<'a> {
+    runtime: &'a JobRuntime,
+    finished: bool,
+}
+
+impl RecoveryPermit<'_> {
+    fn finish(mut self, now: std::time::Instant, retry_soon: bool) {
+        self.runtime.finish_recovery(now, retry_soon);
+        self.finished = true;
+    }
+}
+
+impl Drop for RecoveryPermit<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.runtime
+                .finish_recovery(std::time::Instant::now(), true);
+        }
+    }
 }
 
 impl JobRuntime {
@@ -324,7 +352,39 @@ impl JobRuntime {
             paused_cache_updated_at: Mutex::new(
                 std::time::Instant::now() - std::time::Duration::from_secs(10),
             ),
+            recovery_gate: Mutex::new(RecoveryGate {
+                next_at: std::time::Instant::now(),
+                in_flight: false,
+            }),
         }
+    }
+
+    fn begin_recovery(&self, now: std::time::Instant) -> Option<RecoveryPermit<'_>> {
+        let Ok(mut gate) = self.recovery_gate.try_lock() else {
+            return None;
+        };
+        if gate.in_flight || now < gate.next_at {
+            return None;
+        }
+        gate.in_flight = true;
+        Some(RecoveryPermit {
+            runtime: self,
+            finished: false,
+        })
+    }
+
+    fn finish_recovery(&self, now: std::time::Instant, retry_soon: bool) {
+        let mut gate = self
+            .recovery_gate
+            .lock()
+            .expect("job recovery gate lock poisoned");
+        gate.in_flight = false;
+        gate.next_at = now
+            + if retry_soon {
+                std::time::Duration::from_millis(25)
+            } else {
+                std::time::Duration::from_secs(5)
+            };
     }
 
     /// Register a job definition. Idempotent — silently skips if a job with the
@@ -1881,8 +1941,116 @@ fn reenqueue_and_backoff(
     sleep_cancellable(dur)
 }
 
+/// Process-wide rate limit for repetitive worker diagnostics. Contention retries
+/// every 25 ms across many slots, so each message kind prints at most once per
+/// interval and reports how many repeats it suppressed.
+struct LogThrottle {
+    next_at: Option<std::time::Instant>,
+    suppressed: u64,
+}
+
+const WORKER_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+static CLAIM_DEFERRED_LOG: Mutex<LogThrottle> = Mutex::new(LogThrottle::new());
+static RECOVERY_DEFERRED_LOG: Mutex<LogThrottle> = Mutex::new(LogThrottle::new());
+
+impl LogThrottle {
+    const fn new() -> Self {
+        LogThrottle {
+            next_at: None,
+            suppressed: 0,
+        }
+    }
+
+    /// Returns `Some(suppressed_since_last)` when the caller should print.
+    fn admit(&mut self, now: std::time::Instant, interval: std::time::Duration) -> Option<u64> {
+        if self.next_at.is_some_and(|next_at| now < next_at) {
+            self.suppressed = self.suppressed.saturating_add(1);
+            return None;
+        }
+        self.next_at = Some(now + interval);
+        Some(std::mem::take(&mut self.suppressed))
+    }
+}
+
+fn log_throttled(throttle: &Mutex<LogThrottle>, message: std::fmt::Arguments<'_>) {
+    let admitted = throttle
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .admit(std::time::Instant::now(), WORKER_LOG_INTERVAL);
+    match admitted {
+        Some(0) => eprintln!("{message}"),
+        Some(suppressed) => eprintln!("{message} ({suppressed} similar suppressed)"),
+        None => {}
+    }
+}
+
+// Use a generous startup budget, then probe cheaply and occasionally allow a
+// longer fallback attempt for higher-latency deployments.
+const WORKER_CONNECTION_ATTEMPTS: usize = 2;
+const WORKER_PRIVATE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const WORKER_PRIVATE_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const WORKER_PRIVATE_FAST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+const WORKER_PRIVATE_LONG_RETRY_EVERY: u64 = 6;
+
+fn worker_private_retry_timeout(attempt: u64) -> std::time::Duration {
+    if attempt % WORKER_PRIVATE_LONG_RETRY_EVERY == 0 {
+        WORKER_PRIVATE_STARTUP_TIMEOUT
+    } else {
+        WORKER_PRIVATE_FAST_TIMEOUT
+    }
+}
+
+fn retry_worker_resource<T>(
+    attempts: usize,
+    mut open: impl FnMut() -> Result<T>,
+    mut wait_for_retry: impl FnMut(std::time::Duration) -> bool,
+) -> Option<T> {
+    for attempt in 0..attempts {
+        match open() {
+            Ok(resource) => return Some(resource),
+            Err(error) => {
+                eprintln!("[ntnt] worker Redis connection unavailable: {error}");
+                if attempt + 1 == attempts || wait_for_retry(std::time::Duration::from_secs(1)) {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
 fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<String>>) {
-    let kv_handle = kv_info.to_value();
+    // Redis/Valkey workers own one bounded-lifetime connection per slot. The
+    // control-plane handle remains shared, but no worker data-plane traffic is
+    // serialized through it.
+    let redis_worker = matches!(kv_info.backend.as_str(), "redis" | "valkey");
+    let mut owned_kv = if redis_worker {
+        retry_worker_resource(
+            WORKER_CONNECTION_ATTEMPTS,
+            || kv::open_owned_kv(&kv_info.url, WORKER_PRIVATE_STARTUP_TIMEOUT),
+            |delay| sleep_cancellable(delay),
+        )
+    } else {
+        None
+    };
+    if redis_worker && owned_kv.is_none() {
+        if is_current_task_cancelled() {
+            return;
+        }
+        eprintln!(
+            "[ntnt] worker using shared Redis connection after private connection retries exhausted"
+        );
+    }
+    let mut kv_handle = owned_kv
+        .as_ref()
+        .map_or_else(|| kv_info.to_value(), |owned| owned.value().clone());
+    let worker_kv_info = match extract_kv_handle_info(&kv_handle) {
+        Ok(info) => info,
+        Err(error) => {
+            eprintln!("[ntnt] worker KV handle unavailable: {error}");
+            return;
+        }
+    };
     let poll_duration = std::time::Duration::from_millis(band.poll_interval_ms);
     let band_stats = JOB_RUNTIME.get_or_create_band_stats(&band.name);
 
@@ -1893,7 +2061,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         .lease_policy
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let keeper = match leases::Keeper::new(kv_info.clone()) {
+    let mut keeper = match leases::Keeper::new(worker_kv_info) {
         Ok(keeper) => keeper,
         Err(error) => {
             eprintln!("[ntnt] {error}");
@@ -1901,11 +2069,37 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         }
     };
     let worker_id = format!("{}:{}", band.name, Uuid::new_v4());
-    let mut recovery_at = std::time::Instant::now();
+    let mut next_private_retry = std::time::Instant::now() + WORKER_PRIVATE_RETRY_INTERVAL;
+    let mut private_retry_attempt = 0_u64;
 
     loop {
         if is_current_task_cancelled() {
             break;
+        }
+
+        if redis_worker && owned_kv.is_none() && std::time::Instant::now() >= next_private_retry {
+            private_retry_attempt = private_retry_attempt.saturating_add(1);
+            let connect_timeout = worker_private_retry_timeout(private_retry_attempt);
+            match kv::open_owned_kv(&kv_info.url, connect_timeout) {
+                Ok(candidate) => {
+                    let candidate_handle = candidate.value().clone();
+                    match extract_kv_handle_info(&candidate_handle).and_then(leases::Keeper::new) {
+                        Ok(candidate_keeper) => {
+                            keeper = candidate_keeper;
+                            kv_handle = candidate_handle;
+                            owned_kv = Some(candidate);
+                            eprintln!("[ntnt] worker restored private Redis connection");
+                        }
+                        Err(error) => {
+                            eprintln!("[ntnt] worker private Redis retry deferred: {error}");
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[ntnt] worker private Redis retry deferred: {error}");
+                }
+            }
+            next_private_retry = std::time::Instant::now() + WORKER_PRIVATE_RETRY_INTERVAL;
         }
 
         // Compute floor and ceiling for this band's priority range.
@@ -1913,16 +2107,26 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         let floor = band.floor_key();
         let ceiling = band.ceiling_key();
 
-        if std::time::Instant::now() >= recovery_at {
+        if let Some(recovery) = JOB_RUNTIME.begin_recovery(std::time::Instant::now()) {
             match kv::job_leases::recover(&kv_handle, 64) {
-                Ok(recovered) if recovered.requeued + recovered.unknown > 0 => eprintln!(
-                    "[ntnt] recovered {} unstarted jobs; {} need reconciliation",
-                    recovered.requeued, recovered.unknown
-                ),
-                Err(error) => eprintln!("[ntnt] job recovery deferred: {error}"),
-                _ => {}
+                Ok(recovered) => {
+                    recovery.finish(std::time::Instant::now(), recovered.more_due);
+                    if recovered.requeued + recovered.unknown > 0 {
+                        eprintln!(
+                            "[ntnt] recovered {} unstarted jobs; {} need reconciliation",
+                            recovered.requeued, recovered.unknown
+                        );
+                    }
+                }
+                Err(error) => {
+                    let contention = kv::conditional::is_contention_error(&error);
+                    recovery.finish(std::time::Instant::now(), contention);
+                    log_throttled(
+                        &RECOVERY_DEFERRED_LOG,
+                        format_args!("[ntnt] job recovery deferred: {error}"),
+                    );
+                }
             }
-            recovery_at = std::time::Instant::now() + std::time::Duration::from_secs(5);
         }
         let sent = std::time::Instant::now();
         let claim = match kv::job_leases::claim(
@@ -1933,8 +2137,24 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             policy.duration_ms,
         ) {
             Ok(Some(claim)) => claim,
-            Ok(None) | Err(_) => {
+            Ok(None) => {
                 if sleep_or_break(poll_duration.min(std::time::Duration::from_secs(5))) {
+                    break;
+                }
+                continue;
+            }
+            Err(error) => {
+                let contention = kv::conditional::is_contention_error(&error);
+                log_throttled(
+                    &CLAIM_DEFERRED_LOG,
+                    format_args!("[ntnt] job claim deferred: {error}"),
+                );
+                let delay = if contention {
+                    std::time::Duration::from_millis(25)
+                } else {
+                    poll_duration.min(std::time::Duration::from_secs(5))
+                };
+                if sleep_or_break(delay) {
                     break;
                 }
                 continue;
@@ -3688,7 +3908,14 @@ pub(crate) fn worker_status_impl() -> crate::error::Result<Value> {
             Value::Int(band.poll_interval_ms as i64),
         );
 
-        let worker_count = task_ids.get(&band.name).map(|v| v.len()).unwrap_or(0);
+        let worker_count = task_ids
+            .get(&band.name)
+            .map(|ids| {
+                ids.iter()
+                    .filter(|id| RUNTIME.task_is_running(**id))
+                    .count()
+            })
+            .unwrap_or(0);
         entry.insert("workers".to_string(), Value::Int(worker_count as i64));
 
         if let Some(stats) = stats_map_guard.get(&band.name) {
@@ -3734,6 +3961,10 @@ pub(crate) fn worker_status_impl() -> crate::error::Result<Value> {
     result.insert("bands".to_string(), Value::Array(band_entries));
     result.insert("pending".to_string(), Value::Int(pending_count));
     result.insert(
+        "redis_transaction_conflicts".to_string(),
+        Value::Int(kv::conditional::redis_transaction_conflicts().min(i64::MAX as u64) as i64),
+    );
+    result.insert(
         "paused_queues".to_string(),
         Value::Array(paused_queue_names),
     );
@@ -3751,7 +3982,37 @@ pub(crate) fn scale_workers_impl(
     scale_workers_with_spawn(band_name, target_count, spawn_worker_task)
 }
 
+fn prune_finished_workers(
+    ids: &mut Vec<u64>,
+    arcs: &mut Vec<Arc<CancelToken>>,
+    is_running: &mut impl FnMut(u64) -> bool,
+) {
+    debug_assert_eq!(ids.len(), arcs.len());
+    let workers: Vec<_> = ids.drain(..).zip(arcs.drain(..)).collect();
+    for (id, arc) in workers {
+        if is_running(id) {
+            ids.push(id);
+            arcs.push(arc);
+        }
+    }
+}
+
 fn scale_workers_with_spawn(
+    band_name: &str,
+    target_count: usize,
+    spawn: impl FnMut(
+        Value,
+        BandConfig,
+        Option<Vec<String>>,
+        Option<std::sync::mpsc::Receiver<()>>,
+    ) -> Result<(Value, Arc<CancelToken>)>,
+) -> Result<Value> {
+    scale_workers_with_spawn_and_liveness(band_name, target_count, spawn, |id| {
+        RUNTIME.task_is_running(id)
+    })
+}
+
+fn scale_workers_with_spawn_and_liveness(
     band_name: &str,
     target_count: usize,
     mut spawn: impl FnMut(
@@ -3760,6 +4021,7 @@ fn scale_workers_with_spawn(
         Option<Vec<String>>,
         Option<std::sync::mpsc::Receiver<()>>,
     ) -> Result<(Value, Arc<CancelToken>)>,
+    mut is_running: impl FnMut(u64) -> bool,
 ) -> Result<Value> {
     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
     // Hold the publication locks from configuration lookup through map update.
@@ -3790,7 +4052,10 @@ fn scale_workers_with_spawn(
             ))
         })?;
 
-    let current_count = cancel_map.get(band_name).map_or(0, Vec::len);
+    let ids = task_ids_map.entry(band_name.to_string()).or_default();
+    let arcs = cancel_map.entry(band_name.to_string()).or_default();
+    prune_finished_workers(ids, arcs, &mut is_running);
+    let current_count = arcs.len();
     let mut activations = Vec::new();
     if target_count > current_count {
         // Reuse pool startup's activation protocol: no worker may bootstrap or
@@ -3815,23 +4080,13 @@ fn scale_workers_with_spawn(
             staged_arcs.push(cancel_arc);
             activations.push(activate);
         }
-        task_ids_map
-            .entry(band_name.to_string())
-            .or_default()
-            .extend(staged_ids);
-        cancel_map
-            .entry(band_name.to_string())
-            .or_default()
-            .extend(staged_arcs);
+        ids.extend(staged_ids);
+        arcs.extend(staged_arcs);
     } else if target_count < current_count {
-        let arcs = cancel_map.entry(band_name.to_string()).or_default();
-        let ids = task_ids_map.entry(band_name.to_string()).or_default();
         for arc in arcs.drain(target_count..) {
             arc.cancel();
         }
-        if ids.len() > target_count {
-            ids.drain(target_count..ids.len());
-        }
+        ids.drain(target_count..ids.len());
     }
 
     // Publish count, IDs and cancellation handles before allowing any new worker
@@ -5964,6 +6219,126 @@ pub(crate) mod tests {
         JOB_RUNTIME.reset();
         BATCH_RUNTIME.reset();
         f();
+    }
+
+    #[test]
+    fn worker_log_throttle_admits_once_per_interval_and_counts_suppressed() {
+        let mut throttle = LogThrottle::new();
+        let start = std::time::Instant::now();
+        let interval = std::time::Duration::from_secs(5);
+        assert_eq!(throttle.admit(start, interval), Some(0));
+        for step in 1..=40 {
+            let now = start + std::time::Duration::from_millis(step * 25);
+            assert_eq!(throttle.admit(now, interval), None);
+        }
+        assert_eq!(throttle.admit(start + interval, interval), Some(40));
+        assert_eq!(
+            throttle.admit(
+                start + interval + std::time::Duration::from_millis(1),
+                interval
+            ),
+            None
+        );
+        assert_eq!(throttle.admit(start + interval * 2, interval), Some(1));
+    }
+
+    #[test]
+    fn worker_private_retry_uses_fast_and_periodic_long_budgets() {
+        assert_eq!(worker_private_retry_timeout(1), WORKER_PRIVATE_FAST_TIMEOUT);
+        assert_eq!(
+            worker_private_retry_timeout(WORKER_PRIVATE_LONG_RETRY_EVERY),
+            WORKER_PRIVATE_STARTUP_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn worker_resource_retries_transient_startup_failure() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let resource = retry_worker_resource(
+            5,
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(IntentError::runtime_error("transient startup failure"))
+                } else {
+                    Ok("ready")
+                }
+            },
+            |delay| {
+                assert_eq!(delay, std::time::Duration::from_secs(1));
+                waits += 1;
+                false
+            },
+        );
+        assert_eq!(resource, Some("ready"));
+        assert_eq!(attempts, 3);
+        assert_eq!(waits, 2);
+    }
+
+    #[test]
+    fn worker_resource_falls_back_after_bounded_failures() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let resource = retry_worker_resource::<()>(
+            3,
+            || {
+                attempts += 1;
+                Err(IntentError::runtime_error("persistent startup failure"))
+            },
+            |_| {
+                waits += 1;
+                false
+            },
+        );
+        assert!(resource.is_none());
+        assert_eq!(attempts, 3);
+        assert_eq!(waits, 2);
+    }
+
+    #[test]
+    fn recovery_gate_allows_one_process_worker_per_interval() {
+        let runtime = Arc::new(JobRuntime::new());
+        let now = std::time::Instant::now();
+        {
+            let mut gate = runtime.recovery_gate.lock().unwrap();
+            gate.next_at = now;
+            gate.in_flight = false;
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(33));
+        let winners = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        for _ in 0..32 {
+            let runtime = Arc::clone(&runtime);
+            let barrier = Arc::clone(&barrier);
+            let winners = Arc::clone(&winners);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                if let Some(permit) = runtime.begin_recovery(now) {
+                    winners.fetch_add(1, AtomicOrdering::Relaxed);
+                    permit.finish(now, false);
+                }
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(winners.load(AtomicOrdering::Relaxed), 1);
+        assert!(runtime
+            .begin_recovery(now + std::time::Duration::from_secs(4))
+            .is_none());
+        runtime
+            .begin_recovery(now + std::time::Duration::from_secs(5))
+            .unwrap()
+            .finish(now + std::time::Duration::from_secs(5), true);
+        assert!(runtime
+            .begin_recovery(now + std::time::Duration::from_millis(5_024))
+            .is_none());
+        runtime
+            .begin_recovery(now + std::time::Duration::from_millis(5_025))
+            .unwrap()
+            .finish(now + std::time::Duration::from_millis(5_025), false);
     }
 
     #[test]
@@ -8278,6 +8653,10 @@ pub(crate) mod tests {
                         m.contains_key("pending"),
                         "worker_status should have 'pending'"
                     );
+                    assert!(
+                        m.contains_key("redis_transaction_conflicts"),
+                        "worker_status should expose Redis conflict telemetry"
+                    );
                 }
                 _ => panic!("worker_status should return a Map"),
             }
@@ -8333,23 +8712,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn scale_replaces_finished_workers_at_the_same_target() {
+        with_temp_kv("scale_replace_finished", |_| {
+            seed_scale_test_band();
+            let mut calls = 0;
+            scale_workers_with_spawn_and_liveness(
+                "scale_test",
+                1,
+                |_, _, _, activation| {
+                    calls += 1;
+                    drop(activation);
+                    Ok((Value::TaskHandle(888), Arc::new(CancelToken::new())))
+                },
+                |_| false,
+            )
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(
+                JOB_RUNTIME.band_worker_task_ids.lock().unwrap()["scale_test"],
+                vec![888]
+            );
+            assert_eq!(
+                JOB_RUNTIME.band_cancel_arcs.lock().unwrap()["scale_test"].len(),
+                1
+            );
+        });
+    }
+
+    #[test]
     fn scale_up_failure_preserves_old_pool_and_never_activates_partial_workers() {
         with_temp_kv("scale_failure", |_| {
             let original = seed_scale_test_band();
             let mut calls = 0;
             let mut worker = None;
-            let result = scale_workers_with_spawn("scale_test", 3, |_, _, _, activation| {
-                calls += 1;
-                if calls == 2 {
-                    return Err(IntentError::runtime_error(
-                        "injected thread creation failure",
-                    ));
-                }
-                worker = Some(std::thread::spawn(move || {
-                    activation.map_or(true, |gate| gate.recv().is_ok())
-                }));
-                Ok((Value::TaskHandle(888), Arc::new(CancelToken::new())))
-            });
+            let result = scale_workers_with_spawn_and_liveness(
+                "scale_test",
+                3,
+                |_, _, _, activation| {
+                    calls += 1;
+                    if calls == 2 {
+                        return Err(IntentError::runtime_error(
+                            "injected thread creation failure",
+                        ));
+                    }
+                    worker = Some(std::thread::spawn(move || {
+                        activation.map_or(true, |gate| gate.recv().is_ok())
+                    }));
+                    Ok((Value::TaskHandle(888), Arc::new(CancelToken::new())))
+                },
+                |_| true,
+            );
             assert!(result.is_err());
             let entered_consuming_loop = worker.unwrap().join().unwrap();
             assert_eq!(
@@ -8374,23 +8786,31 @@ pub(crate) mod tests {
             let original = seed_scale_test_band();
             let added = Arc::new(CancelToken::new());
             let mut worker = None;
-            scale_workers_with_spawn("scale_test", 2, |_, _, _, activation| {
-                let gate = activation.expect("new workers must be staged");
-                worker = Some(std::thread::spawn(move || {
-                    gate.recv().unwrap();
-                    assert_eq!(
-                        JOB_RUNTIME.band_worker_task_ids.lock().unwrap()["scale_test"],
-                        vec![777, 888]
-                    );
-                    assert_eq!(JOB_RUNTIME.active_bands.lock().unwrap()[0].concurrency, 2);
-                }));
-                Ok((Value::TaskHandle(888), added.clone()))
-            })
+            scale_workers_with_spawn_and_liveness(
+                "scale_test",
+                2,
+                |_, _, _, activation| {
+                    let gate = activation.expect("new workers must be staged");
+                    worker = Some(std::thread::spawn(move || {
+                        gate.recv().unwrap();
+                        assert_eq!(
+                            JOB_RUNTIME.band_worker_task_ids.lock().unwrap()["scale_test"],
+                            vec![777, 888]
+                        );
+                        assert_eq!(JOB_RUNTIME.active_bands.lock().unwrap()[0].concurrency, 2);
+                    }));
+                    Ok((Value::TaskHandle(888), added.clone()))
+                },
+                |_| true,
+            )
             .unwrap();
             worker.unwrap().join().unwrap();
-            scale_workers_with_spawn("scale_test", 1, |_, _, _, _| {
-                panic!("scale-down must not spawn")
-            })
+            scale_workers_with_spawn_and_liveness(
+                "scale_test",
+                1,
+                |_, _, _, _| panic!("scale-down must not spawn"),
+                |_| true,
+            )
             .unwrap();
             assert!(added.is_cancelled());
             assert!(!original.is_cancelled());

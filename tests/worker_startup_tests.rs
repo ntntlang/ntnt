@@ -243,7 +243,16 @@ fn scenario(method: &str, existing: bool) {
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            let counts = jobs::job_status_counts().unwrap();
+            let counts = match jobs::job_status_counts() {
+                Ok(counts) => counts,
+                Err(_) if Instant::now() < deadline => {
+                    // The live worker may briefly own the in-memory SQLite
+                    // handle while this startup-isolation probe reads status.
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("old pool status remained unavailable: {error}"),
+            };
             if counts.completed == 1 {
                 break;
             }

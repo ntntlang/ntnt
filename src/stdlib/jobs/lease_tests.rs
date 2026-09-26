@@ -181,7 +181,10 @@ fn expired_child_stops_even_when_backend_cannot_renew() {
     let path = dir.path().join("lease.db");
     let h = kv::open_kv(path.to_str().unwrap()).unwrap();
     let sent = Instant::now();
-    let c = seed(&h);
+    // Leave enough startup headroom for loaded Windows CI before exercising
+    // expiry while the backend is locked.
+    let duration_ms = 3_000;
+    let c = seed_status_with_lease(&h, "pending", duration_ms);
     let mut active = c.data.clone();
     active.insert("status".into(), Value::String("active".into()));
     assert!(history::Prepared::new(
@@ -194,19 +197,22 @@ fn expired_child_stops_even_when_backend_cannot_renew() {
     .apply_owned(&h)
     .unwrap());
     let keeper = leases::Keeper::new(extract_kv_handle_info(&h).unwrap()).unwrap();
-    let scope = keeper.attach(&c, sent, leases::Policy { duration_ms: 500 });
+    let scope = keeper.attach(&c, sent, leases::Policy { duration_ms });
     let locked = rusqlite::Connection::open(path).unwrap();
     locked.execute_batch("BEGIN IMMEDIATE").unwrap();
-    assert!(scope.cancel.wait_timeout(Duration::from_secs(2)));
-    assert!(sent.elapsed() < Duration::from_millis(1500));
+    assert!(scope.cancel.wait_timeout(Duration::from_secs(5)));
+    assert!(sent.elapsed() < Duration::from_millis(4_500));
     locked.execute_batch("ROLLBACK").unwrap();
     drop(scope);
     assert!(!is_current_task_cancelled());
     // Local send-time deadline intentionally expires before the store deadline.
     let until = Instant::now() + Duration::from_secs(1);
     loop {
-        if kv::job_leases::recover(&h, 64).unwrap().unknown == 1 {
-            break;
+        match kv::job_leases::recover(&h, 64) {
+            Ok(counts) if counts.unknown == 1 => break,
+            Ok(_) => {}
+            Err(error) if kv::conditional::is_contention_error(&error) => {}
+            Err(error) => panic!("unexpected recovery failure: {error}"),
         }
         assert!(Instant::now() < until);
         std::thread::sleep(Duration::from_millis(20));

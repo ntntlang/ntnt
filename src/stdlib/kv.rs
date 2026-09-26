@@ -33,6 +33,40 @@ static REDIS_KV_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Arc<Mutex<Redis
 
 static KV_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// A registry-backed handle whose connection is removed when its owner exits.
+/// Public language handles remain process-lived for compatibility; workers use
+/// this guard for their bounded per-slot Redis connections.
+pub(crate) struct OwnedKvHandle {
+    handle: Value,
+    backend: KVBackend,
+    id: u64,
+}
+
+impl OwnedKvHandle {
+    pub(crate) fn value(&self) -> &Value {
+        &self.handle
+    }
+}
+
+impl Drop for OwnedKvHandle {
+    fn drop(&mut self) {
+        match self.backend {
+            KVBackend::SQLite => {
+                SQLITE_KV_REGISTRY
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .remove(&self.id);
+            }
+            KVBackend::Redis => {
+                REDIS_KV_REGISTRY
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .remove(&self.id);
+            }
+        }
+    }
+}
+
 const SQLITE_TTL_BATCH_SIZE: usize = 256;
 const SQLITE_TTL_INTERVAL: Duration = Duration::from_secs(1);
 static SQLITE_TTL_MAINTENANCE: OnceLock<std::result::Result<(), String>> = OnceLock::new();
@@ -653,8 +687,17 @@ impl SQLiteKV {
 // ============================================================================
 
 impl RedisKV {
-    /// Create a new Redis/Valkey connection
+    /// Create a new Redis/Valkey connection.
     pub fn new(url: &str) -> Result<Self> {
+        Self::connect(url, None)
+    }
+
+    /// Create a connection with a bounded TCP connect attempt.
+    pub(crate) fn new_with_timeout(url: &str, timeout: std::time::Duration) -> Result<Self> {
+        Self::connect(url, Some(timeout))
+    }
+
+    fn connect(url: &str, timeout: Option<std::time::Duration>) -> Result<Self> {
         // Convert valkey:// to redis:// since the redis crate only recognizes redis://
         let normalized_url = if url.starts_with("valkey://") {
             url.replacen("valkey://", "redis://", 1)
@@ -666,9 +709,11 @@ impl RedisKV {
             IntentError::runtime_error(format!("Failed to create Redis client: {}", e))
         })?;
 
-        let conn = client.get_connection().map_err(|e| {
-            IntentError::runtime_error(format!("Failed to connect to Redis: {}", e))
-        })?;
+        let conn = match timeout {
+            Some(timeout) => client.get_connection_with_timeout(timeout),
+            None => client.get_connection(),
+        }
+        .map_err(|e| IntentError::runtime_error(format!("Failed to connect to Redis: {}", e)))?;
 
         Ok(RedisKV {
             conn,
@@ -2401,6 +2446,38 @@ pub fn open_kv(url: &str) -> Result<Value> {
     handle.insert("_url".to_string(), Value::String(url.to_string()));
     handle.insert("_kv_store_id".to_string(), Value::Int(id as i64));
     Ok(Value::Map(handle))
+}
+
+/// Open an owned Redis/Valkey connection without allowing connect to stall a worker.
+pub(crate) fn open_owned_kv(url: &str, timeout: std::time::Duration) -> Result<OwnedKvHandle> {
+    if !url.starts_with("redis://") && !url.starts_with("valkey://") {
+        return Err(IntentError::runtime_error(
+            "Bounded owned connections require Redis or Valkey",
+        ));
+    }
+    let id = KV_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let kv = RedisKV::new_with_timeout(url, timeout)?;
+    REDIS_KV_REGISTRY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(id, Arc::new(Mutex::new(kv)));
+    let backend_name = if url.starts_with("valkey://") {
+        "valkey"
+    } else {
+        "redis"
+    };
+    let mut map = HashMap::new();
+    map.insert(
+        "_backend".to_string(),
+        Value::String(backend_name.to_string()),
+    );
+    map.insert("_url".to_string(), Value::String(url.to_string()));
+    map.insert("_kv_store_id".to_string(), Value::Int(id as i64));
+    Ok(OwnedKvHandle {
+        handle: Value::Map(map),
+        backend: KVBackend::Redis,
+        id,
+    })
 }
 
 /// Set a key-value pair in a KV store handle.
