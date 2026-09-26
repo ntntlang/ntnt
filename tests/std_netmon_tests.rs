@@ -333,14 +333,19 @@ fn snmp_get_retries_within_one_global_deadline() {
 #[test]
 fn snmp_get_silent_agent_uses_exact_attempts_inside_one_budget() {
     let (port, agent) = start_mock_snmp_agent(AgentBehavior::Silent);
-    let source = snmp_source(port, 200, 3, r#"print("unexpected success")"#);
+    // 2 s split across 4 attempts gives each ~500 ms, far above coarse OS timer
+    // granularity (~15.6 ms on Windows), so every attempt starts before the
+    // shared deadline. Per-attempt budgets would instead take 4 x 2 s = 8 s.
+    let source = snmp_source(port, 2_000, 3, r#"print("unexpected success")"#);
     let started = Instant::now();
     let (stdout, stderr, code) = run_ntnt_code(&source, &enabled_env());
     let elapsed = started.elapsed();
     assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
     assert_eq!(agent.join().expect("silent agent thread"), 4);
     assert!(stdout.contains("failed after 4 bounded attempt(s)"));
-    assert!(elapsed < Duration::from_secs(3), "elapsed: {elapsed:?}");
+    // One shared budget plus generous process-startup slack, well below the
+    // 8 s that per-attempt budgets would take.
+    assert!(elapsed < Duration::from_secs(6), "elapsed: {elapsed:?}");
     assert!(!stdout.contains(SECRET_CANARY));
     assert!(!stderr.contains(SECRET_CANARY));
 }

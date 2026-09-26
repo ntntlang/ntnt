@@ -3966,8 +3966,13 @@ mod tests {
 
     #[test]
     fn safe_redirect_whole_chain_timeout() {
+        // Each hop fits a per-request budget (1.2 s < 2 s), but the chain does
+        // not (2.4 s > 2 s). The fixture records the second request before
+        // sleeping, so it only needs to arrive within 2 s; the 0.8 s margin
+        // absorbs a loaded CI host. Extra load only lengthens the chain, so it
+        // cannot hide a missing whole-chain deadline.
         let source = ChainFixture::new(|n, _| {
-            thread::sleep(Duration::from_millis(650));
+            thread::sleep(Duration::from_millis(1_200));
             if n == 0 {
                 redirect_response(302, "/final")
             } else {
@@ -3975,7 +3980,7 @@ mod tests {
             }
         });
         let mut opts = source.options();
-        opts.insert("timeout".into(), Value::Int(1));
+        opts.insert("timeout".into(), Value::Int(2));
         let result = http_fetch(&opts);
         assert!(!result_error(result.unwrap()).is_empty());
         assert_eq!(source.finish().len(), 2);
