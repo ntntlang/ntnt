@@ -340,21 +340,23 @@ pub(crate) fn write(
             if let Some(key) = pending {
                 watch.arg(key);
             }
-            watch.query::<()>(conn)?;
+            // WATCH, the ready-index type check and the state read share one
+            // round trip; WATCH is queued first, so it covers the read.
+            let mut front = redis::pipe();
+            front.add_command(watch).ignore();
+            front.cmd("TYPE").arg(job_leases::READY);
+            front.cmd("MGET").arg(key).arg(format!("{key}:__type"));
+            let front: redis::RedisResult<(String, (Option<String>, Option<String>))> =
+                front.query(conn);
+            let mut committed = false;
             let result = (|| {
-                if touches_ready {
-                    let kind: String = redis::cmd("TYPE").arg(job_leases::READY).query(conn)?;
-                    if kind != "none" && kind != "zset" {
-                        return Err(redis::RedisError::from((
-                            redis::ErrorKind::TypeError,
-                            "job ready index has the wrong Redis type",
-                        )));
-                    }
+                let (ready_kind, (raw, kind)) = front?;
+                if touches_ready && ready_kind != "none" && ready_kind != "zset" {
+                    return Err(redis::RedisError::from((
+                        redis::ErrorKind::TypeError,
+                        "job ready index has the wrong Redis type",
+                    )));
                 }
-                let (raw, kind): (Option<String>, Option<String>) = redis::cmd("MGET")
-                    .arg(key)
-                    .arg(format!("{key}:__type"))
-                    .query(conn)?;
                 let current = raw.map(|raw| Snapshot {
                     raw,
                     kind,
@@ -373,6 +375,7 @@ pub(crate) fn write(
                         // between validation and acknowledgement aborts the fence.
                         fence.clear();
                         fence.atomic().cmd("PING").ignore();
+                        committed = true;
                         return redis_commit(conn, &fence);
                     }
                     return Ok(true);
@@ -406,9 +409,14 @@ pub(crate) fn write(
                     tx.set(key, owner).ignore();
                     job_leases::add_ready(&mut tx, key);
                 }
+                committed = true;
                 redis_commit(conn, &tx)
             })();
-            let _ = redis::cmd("UNWATCH").query::<()>(conn);
+            // EXEC clears every watch; only paths that never reached it
+            // (or failed before replying) still need UNWATCH.
+            if !committed || result.is_err() {
+                let _ = redis::cmd("UNWATCH").query::<()>(conn);
+            }
             result
         }),
     }
