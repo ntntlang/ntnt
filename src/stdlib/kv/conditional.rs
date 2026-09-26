@@ -334,9 +334,6 @@ pub(crate) fn write(
             watch.arg(key).arg(format!("{key}:__type"));
             let touches_ready =
                 pending.is_some() || remove.iter().any(|key| job_leases::is_pending_key(key));
-            if touches_ready {
-                watch.arg(job_leases::READY);
-            }
             for key in remove {
                 watch.arg(key);
             }

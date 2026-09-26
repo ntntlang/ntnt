@@ -16,6 +16,10 @@
 //! Named priorities: critical=05, high=25, normal=50 (default), low=85.
 //! `list(kv, "jobs:pending:")` returns keys in lexicographic order.
 //! Zero-padded timestamps sort correctly for FIFO ordering within a band.
+//! Priority is strict. On Redis, when several workers are claiming at once,
+//! claims pick among the oldest jobs of the head priority band instead of all
+//! racing for the single oldest one, so start order within a band is
+//! approximately (not strictly) FIFO under contention.
 //!
 //! Example usage:
 //! ```ntnt
