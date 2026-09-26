@@ -754,7 +754,7 @@ impl RedisKV {
 
         let type_key = format!("{}:__type", key);
         if job_leases::is_pending_key(key) {
-            job_leases::watch_ready_index(&mut self.conn)
+            job_leases::check_ready_index_type(&mut self.conn)
                 .map_err(|e| IntentError::runtime_error(format!("Redis set error: {e}")))?;
             let mut tx = redis::pipe();
             tx.atomic().cmd("SET").arg(key).arg(&serialized);
@@ -845,7 +845,7 @@ impl RedisKV {
     pub fn del(&mut self, key: &str) -> Result<bool> {
         let type_key = format!("{}:__type", key);
         if job_leases::is_pending_key(key) {
-            job_leases::watch_ready_index(&mut self.conn)
+            job_leases::check_ready_index_type(&mut self.conn)
                 .map_err(|e| IntentError::runtime_error(format!("Redis del error: {e}")))?;
             let mut tx = redis::pipe();
             tx.atomic().del(key).del(&type_key);

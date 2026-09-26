@@ -33,11 +33,14 @@ pub(super) fn remove_ready(tx: &mut redis::Pipeline, key: &str) {
     }
 }
 
-pub(super) fn watch_ready_index(conn: &mut redis::Connection) -> R<()> {
-    redis::cmd("WATCH").arg(READY).query::<()>(conn)?;
+/// Reject a corrupted ready index before queueing writes. The index is NOT
+/// watched: every transaction only adds or removes its own member, claims
+/// prune stale members, and fencing on the shared key made every worker
+/// process conflict with every other one (#228). Ownership is fenced by the
+/// per-job keys each transaction watches instead.
+pub(super) fn check_ready_index_type(conn: &mut redis::Connection) -> R<()> {
     let kind: String = redis::cmd("TYPE").arg(READY).query(conn)?;
     if kind != "none" && kind != "zset" {
-        let _ = redis::cmd("UNWATCH").query::<()>(conn);
         return Err(redis::RedisError::from((
             redis::ErrorKind::TypeError,
             "job ready index has the wrong Redis type",
@@ -210,11 +213,44 @@ pub(super) fn ensure_ready_index(conn: &mut redis::Connection) -> R<()> {
     result
 }
 
-fn ready_candidate(conn: &mut redis::Connection, floor: &str, ceiling: &str) -> R<Option<String>> {
+/// Live ready jobs a contended claim chooses between. Uncontended claims take
+/// the oldest job (FIFO). After losing a race, every slot in every process
+/// would otherwise retarget the same next-oldest job and lose again (#228), so
+/// retries pick at random among the oldest few jobs of the head priority.
+/// Priority stays strict; only start order among already-contended jobs of
+/// one priority loosens, and those jobs run concurrently anyway.
+const CLAIM_SPREAD: usize = 32;
+/// While this process has lost a claim race recently, spread first attempts
+/// too; other processes are evidently claiming from the same head.
+const CLAIM_CONTENTION_WINDOW_MS: i64 = 1_000;
+static LAST_CLAIM_CONTENTION_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(i64::MIN / 2);
+
+fn ready_candidate(
+    conn: &mut redis::Connection,
+    floor: &str,
+    ceiling: &str,
+    spread: usize,
+) -> R<Option<String>> {
     const RETRY: &str = "__ntnt_ready_retry__";
     let script = redis::Script::new(
         r#"
             local candidates = redis.call('ZRANGEBYLEX', KEYS[1], ARGV[1], ARGV[2], 'LIMIT', 0, 256)
+            local spread = tonumber(ARGV[4])
+            if spread > 1 and #candidates > 1 then
+                -- Any indexed member of the first member's priority band is
+                -- priority-correct: nothing sorts ahead of that band. Probe one
+                -- random member instead of EXISTS-checking the whole window.
+                local band = string.match(candidates[1], '^jobs:pending:[^:]*:')
+                local width = 1
+                for i = 2, math.min(#candidates, spread) do
+                    if string.match(candidates[i], '^jobs:pending:[^:]*:') ~= band then break end
+                    width = i
+                end
+                local pick = candidates[(tonumber(ARGV[5]) % width) + 1]
+                if redis.call('EXISTS', pick) == 1 then return {pick} end
+                redis.call('ZREM', KEYS[1], pick)
+            end
             for _, key in ipairs(candidates) do
                 if redis.call('EXISTS', key) == 1 then return {key} end
                 redis.call('ZREM', KEYS[1], key)
@@ -229,6 +265,8 @@ fn ready_candidate(conn: &mut redis::Connection, floor: &str, ceiling: &str) -> 
             .arg(format!("[{floor}"))
             .arg(format!("[{ceiling}"))
             .arg(RETRY)
+            .arg(spread.max(1))
+            .arg(rand::random::<u32>())
             .invoke(conn)?;
         match result.first().map(String::as_str) {
             Some(RETRY) => continue,
@@ -301,8 +339,9 @@ fn deadline(now: i64, duration: i64) -> R<i64> {
     now.checked_add(duration).ok_or_else(|| err(()))
 }
 
-/// All Redis writes are buffered until validation completes. WATCH is allowed
-/// to grow during reads, including the shared index and pending-key ownership.
+/// All Redis writes are buffered until validation completes. WATCH grows
+/// during reads over per-job keys (primary, lease, authorization, pending);
+/// the shared ready/due indexes are type-checked but never watched.
 struct Store<'a> {
     sql: Option<&'a Connection>,
     redis: Option<&'a mut redis::Connection>,
@@ -366,6 +405,8 @@ impl<'a> Store<'a> {
             .arg(key)
             .arg(format!("{key}:__type"))
             .query::<()>(conn)?;
+        // Two GETs, not MGET: MGET returns nil for a wrong-type key, which
+        // would make a corrupted lease or primary record read as absent.
         let raw: Option<String> = redis::cmd("GET").arg(key).query(conn)?;
         let kind: Option<String> = redis::cmd("GET").arg(format!("{key}:__type")).query(conn)?;
         Ok(raw.map(|raw| Snapshot {
@@ -427,7 +468,9 @@ impl<'a> Store<'a> {
             return Ok(());
         }
         if let Some(conn) = self.redis.as_deref_mut() {
-            redis::cmd("WATCH").arg(DUE).query::<()>(conn)?;
+            // Type-check only; see check_ready_index_type for why the shared
+            // due index is not watched. Recovery re-validates each member
+            // against the watched per-job lease before acting on it.
             let kind: String = redis::cmd("TYPE").arg(DUE).query(conn)?;
             if kind != "none" && kind != "zset" {
                 return Err(err(()));
@@ -441,7 +484,7 @@ impl<'a> Store<'a> {
             return Ok(());
         }
         if let Some(conn) = self.redis.as_deref_mut() {
-            watch_ready_index(conn)?;
+            check_ready_index_type(conn)?;
         }
         self.ready_checked = true;
         Ok(())
@@ -584,13 +627,10 @@ fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) 
             result.map_err(conditional::error)
         }
         KVBackend::Redis => {
-            // Worker slots own separate connections, while lease transactions
-            // still mutate process-shared ready/due indexes. Serialize those
-            // short local transactions so same-process workers do not create a
-            // WATCH/EXEC conflict storm; retain retries for other processes.
-            // Other processes can still mutate those indexes concurrently. Give
-            // a full 32-slot external wave a bounded chance to serialize its
-            // WATCH/EXEC transactions. The gate covers one attempt only: backoff
+            // Worker slots own separate connections. Serialize short local
+            // transactions so same-process slots do not race each other for
+            // the same head-of-queue job; other processes still race, so keep
+            // bounded retries. The gate covers one attempt only: backoff
             // sleeps happen outside it so a retrying transaction never stalls
             // other slots' claims or lease renewals.
             const ATTEMPTS: usize = 32;
@@ -658,14 +698,23 @@ pub(crate) fn claim(
             conditional::redis_call(handle, ensure_ready_index)?;
         }
     }
+    let mut attempts = 0usize;
     transaction(handle, |store| {
+        attempts += 1;
         let now = store.now()?;
         let deadline_ms = deadline(now, duration_ms)?;
+        let contended = attempts > 1
+            || now - LAST_CLAIM_CONTENTION_MS.load(std::sync::atomic::Ordering::Relaxed)
+                < CLAIM_CONTENTION_WINDOW_MS;
+        if attempts > 1 {
+            LAST_CLAIM_CONTENTION_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+        }
         let candidate: Option<String> = if let Some(conn) = store.sql {
             conn.query_row("SELECT key FROM _kv WHERE key LIKE 'jobs:pending:%' AND key>=? AND key<=? AND (expires_at IS NULL OR expires_at>?) ORDER BY key LIMIT 1", params![floor, ceiling, now/1000], |r| r.get(0)).optional().map_err(err)?
         } else {
             let conn = store.redis.as_deref_mut().unwrap();
-            ready_candidate(conn, floor, ceiling)?
+            let spread = if contended { CLAIM_SPREAD } else { 1 };
+            ready_candidate(conn, floor, ceiling, spread)?
         };
         let Some(pending_key) = candidate else {
             return Ok(None);
@@ -1439,6 +1488,77 @@ mod tests {
         let handle = open_kv(&url).unwrap();
         conditional::redis_call(&handle, |conn| redis::cmd("FLUSHDB").query::<()>(conn)).unwrap();
         (url, handle)
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_shared_indexes_do_not_fence_unrelated_transactions() {
+        // #228: another process adding or removing a different job's ready or
+        // due member must not abort this job's transaction.
+        let (url, handle) = redis_fixture();
+        let other = open_kv(&url).unwrap();
+        let (id, _) = fixture(&handle, "pending");
+        let mut calls = 0;
+        let conflicts_before = conditional::redis_transaction_conflicts();
+        transaction(&handle, |store| {
+            calls += 1;
+            let lease = store.lease(&id)?;
+            assert!(lease.is_none());
+            store.index()?;
+            store.ready_index()?;
+            if calls == 1 {
+                conditional::redis_call(&other, |conn| {
+                    redis::pipe()
+                        .cmd("ZADD")
+                        .arg(READY)
+                        .arg(0)
+                        .arg("jobs:pending:05:0000000000:unrelated")
+                        .ignore()
+                        .cmd("ZADD")
+                        .arg(DUE)
+                        .arg(1)
+                        .arg("jobs:lease_due:unrelated")
+                        .ignore()
+                        .query::<()>(conn)
+                })
+                .map_err(err)?;
+            }
+            let value = store.snapshot(&Value::String("ok".into()))?;
+            store.put("index:unrelated:result", &value)
+        })
+        .unwrap();
+        assert_eq!(calls, 1, "shared index writes must not conflict");
+        assert_eq!(conditional::redis_transaction_conflicts(), conflicts_before);
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_claim_spread_stays_in_head_priority() {
+        let (_, handle) = redis_fixture();
+        let mut head = std::collections::HashSet::new();
+        for n in 0..5 {
+            let key = format!("jobs:pending:04:{n:010}:head-{n}");
+            kv_set(&handle, &key, &Value::String(format!("head-{n}")), None).unwrap();
+            head.insert(key);
+        }
+        for n in 0..5 {
+            let key = format!("jobs:pending:06:{n:010}:later-{n}");
+            kv_set(&handle, &key, &Value::String(format!("later-{n}")), None).unwrap();
+        }
+        let oldest = conditional::redis_call(&handle, |conn| {
+            ready_candidate(conn, "jobs:pending:00:", "jobs:pending:99:~", 1)
+        })
+        .unwrap();
+        assert_eq!(oldest.as_deref(), Some("jobs:pending:04:0000000000:head-0"));
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let pick = conditional::redis_call(&handle, |conn| {
+                ready_candidate(conn, "jobs:pending:00:", "jobs:pending:99:~", CLAIM_SPREAD)
+            })
+            .unwrap()
+            .unwrap();
+            assert!(head.contains(&pick), "spread crossed priority: {pick}");
+            seen.insert(pick);
+        }
+        assert!(seen.len() > 1, "contended claims must spread across jobs");
     }
     #[test]
     #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
