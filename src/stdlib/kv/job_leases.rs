@@ -588,14 +588,16 @@ fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) 
             // still mutate process-shared ready/due indexes. Serialize those
             // short local transactions so same-process workers do not create a
             // WATCH/EXEC conflict storm; retain retries for other processes.
-            let _transaction_guard = REDIS_TRANSACTION_GATE
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
             // Other processes can still mutate those indexes concurrently. Give
             // a full 32-slot external wave a bounded chance to serialize its
-            // WATCH/EXEC transactions.
+            // WATCH/EXEC transactions. The gate covers one attempt only: backoff
+            // sleeps happen outside it so a retrying transaction never stalls
+            // other slots' claims or lease renewals.
             const ATTEMPTS: usize = 32;
             for attempt in 0..ATTEMPTS {
+                let transaction_guard = REDIS_TRANSACTION_GATE
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 let result = conditional::redis_call_raw(handle, |conn| {
                     let mut store = Store::redis(conn);
                     let result = call(&mut store).and_then(|value| {
@@ -605,6 +607,7 @@ fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) 
                     let _ = redis::cmd("UNWATCH").query::<()>(store.redis.as_deref_mut().unwrap());
                     result
                 });
+                drop(transaction_guard);
                 match result {
                     Ok(value) => return Ok(value),
                     Err(failure) if failure.retryable() && attempt + 1 < ATTEMPTS => {
@@ -1789,6 +1792,48 @@ mod tests {
             thread.join().unwrap().unwrap();
         }
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+    #[test]
+    #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
+    fn redis_transaction_backoff_releases_local_gate() {
+        let (url, handle) = redis_fixture();
+        kv_set(&handle, "retry:gate", &Value::Int(0), None).unwrap();
+        let retrying_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (first_attempt_tx, first_attempt_rx) = std::sync::mpsc::channel();
+        let retrying = {
+            let url = url.clone();
+            let retrying_done = Arc::clone(&retrying_done);
+            std::thread::spawn(move || {
+                let handle = open_kv(&url).unwrap();
+                let other = open_kv(&url).unwrap();
+                let mut calls = 0;
+                transaction(&handle, |store| {
+                    calls += 1;
+                    let _ = store.read("retry:gate")?;
+                    if calls == 1 {
+                        first_attempt_tx.send(()).unwrap();
+                    }
+                    // Force ~24 conflicts; their backoff sleeps total well
+                    // over 100 ms, which must not be spent holding the gate.
+                    if calls < 24 {
+                        kv_set(&other, "retry:gate", &Value::Int(calls), None).map_err(err)?;
+                    }
+                    let value = store.snapshot(&Value::String("done".into()))?;
+                    store.put("retry:gate:result", &value)
+                })
+                .unwrap();
+                retrying_done.store(true, std::sync::atomic::Ordering::SeqCst);
+                calls
+            })
+        };
+        first_attempt_rx.recv().unwrap();
+        let bystander = open_kv(&url).unwrap();
+        assert!(transaction(&bystander, |store| store.now()).unwrap() > 0);
+        assert!(
+            !retrying_done.load(std::sync::atomic::Ordering::SeqCst),
+            "an unrelated transaction waited for another transaction's whole retry budget"
+        );
+        assert_eq!(retrying.join().unwrap(), 24);
     }
     #[test]
     #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]

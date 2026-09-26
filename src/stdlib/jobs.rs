@@ -1941,6 +1941,49 @@ fn reenqueue_and_backoff(
     sleep_cancellable(dur)
 }
 
+/// Process-wide rate limit for repetitive worker diagnostics. Contention retries
+/// every 25 ms across many slots, so each message kind prints at most once per
+/// interval and reports how many repeats it suppressed.
+struct LogThrottle {
+    next_at: Option<std::time::Instant>,
+    suppressed: u64,
+}
+
+const WORKER_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+static CLAIM_DEFERRED_LOG: Mutex<LogThrottle> = Mutex::new(LogThrottle::new());
+static RECOVERY_DEFERRED_LOG: Mutex<LogThrottle> = Mutex::new(LogThrottle::new());
+
+impl LogThrottle {
+    const fn new() -> Self {
+        LogThrottle {
+            next_at: None,
+            suppressed: 0,
+        }
+    }
+
+    /// Returns `Some(suppressed_since_last)` when the caller should print.
+    fn admit(&mut self, now: std::time::Instant, interval: std::time::Duration) -> Option<u64> {
+        if self.next_at.is_some_and(|next_at| now < next_at) {
+            self.suppressed = self.suppressed.saturating_add(1);
+            return None;
+        }
+        self.next_at = Some(now + interval);
+        Some(std::mem::take(&mut self.suppressed))
+    }
+}
+
+fn log_throttled(throttle: &Mutex<LogThrottle>, message: std::fmt::Arguments<'_>) {
+    let admitted = throttle
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .admit(std::time::Instant::now(), WORKER_LOG_INTERVAL);
+    match admitted {
+        Some(0) => eprintln!("{message}"),
+        Some(suppressed) => eprintln!("{message} ({suppressed} similar suppressed)"),
+        None => {}
+    }
+}
+
 // Use a generous startup budget, then probe cheaply and occasionally allow a
 // longer fallback attempt for higher-latency deployments.
 const WORKER_CONNECTION_ATTEMPTS: usize = 2;
@@ -2078,7 +2121,10 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 Err(error) => {
                     let contention = kv::conditional::is_contention_error(&error);
                     recovery.finish(std::time::Instant::now(), contention);
-                    eprintln!("[ntnt] job recovery deferred: {error}");
+                    log_throttled(
+                        &RECOVERY_DEFERRED_LOG,
+                        format_args!("[ntnt] job recovery deferred: {error}"),
+                    );
                 }
             }
         }
@@ -2099,7 +2145,10 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             }
             Err(error) => {
                 let contention = kv::conditional::is_contention_error(&error);
-                eprintln!("[ntnt] job claim deferred: {error}");
+                log_throttled(
+                    &CLAIM_DEFERRED_LOG,
+                    format_args!("[ntnt] job claim deferred: {error}"),
+                );
                 let delay = if contention {
                     std::time::Duration::from_millis(25)
                 } else {
@@ -6170,6 +6219,27 @@ pub(crate) mod tests {
         JOB_RUNTIME.reset();
         BATCH_RUNTIME.reset();
         f();
+    }
+
+    #[test]
+    fn worker_log_throttle_admits_once_per_interval_and_counts_suppressed() {
+        let mut throttle = LogThrottle::new();
+        let start = std::time::Instant::now();
+        let interval = std::time::Duration::from_secs(5);
+        assert_eq!(throttle.admit(start, interval), Some(0));
+        for step in 1..=40 {
+            let now = start + std::time::Duration::from_millis(step * 25);
+            assert_eq!(throttle.admit(now, interval), None);
+        }
+        assert_eq!(throttle.admit(start + interval, interval), Some(40));
+        assert_eq!(
+            throttle.admit(
+                start + interval + std::time::Duration::from_millis(1),
+                interval
+            ),
+            None
+        );
+        assert_eq!(throttle.admit(start + interval * 2, interval), Some(1));
     }
 
     #[test]
