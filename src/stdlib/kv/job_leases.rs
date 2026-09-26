@@ -405,10 +405,10 @@ impl<'a> Store<'a> {
             .arg(key)
             .arg(format!("{key}:__type"))
             .query::<()>(conn)?;
-        let (raw, kind): (Option<String>, Option<String>) = redis::cmd("MGET")
-            .arg(key)
-            .arg(format!("{key}:__type"))
-            .query(conn)?;
+        // Two GETs, not MGET: MGET returns nil for a wrong-type key, which
+        // would make a corrupted lease or primary record read as absent.
+        let raw: Option<String> = redis::cmd("GET").arg(key).query(conn)?;
+        let kind: Option<String> = redis::cmd("GET").arg(format!("{key}:__type")).query(conn)?;
         Ok(raw.map(|raw| Snapshot {
             raw,
             kind,
