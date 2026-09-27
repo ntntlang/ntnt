@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Several `ntnt worker` processes can now share one project and worker group on a machine. Each process takes its own numbered control endpoint, and `ntnt workers` commands reach every live process in the group. `scale` applies per process, and `status` prints one table per process. An explicit `--control-socket` path is still single-owner. See [worker control](docs/worker-control.md#several-processes-in-one-group).
+
 ## 0.5.4
 
 See the [complete release notes](docs/release-notes-v0.5.4.md) for compatibility changes, storage requirements, and coordinated worker-upgrade guidance.

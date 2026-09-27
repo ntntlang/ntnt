@@ -2976,7 +2976,8 @@ enqueue_at("SendEmail", future_nanos, map { "to": "eve@example.com", "subject": 
 ### Running Workers
 
 Unix workers use an owner-locked control socket outside the source tree. Use
-`--worker-group NAME` / `NTNT_WORKER_GROUP` for independent groups, or
+`--worker-group NAME` / `NTNT_WORKER_GROUP` for independent groups (several
+processes may share a group; `ntnt workers` commands reach each of them), or
 `--control-socket PATH` / `NTNT_CONTROL_SOCKET` for an explicit endpoint.
 Clients share the same resolver; `ntnt workers status --dir /path/to/project`
 selects a project from another directory. See [worker control sockets](worker-control.md)

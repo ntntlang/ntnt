@@ -207,7 +207,8 @@ services:
 ```
 
 Workers expose a Unix control socket in private runtime storage, outside the source
-checkout. Set `--worker-group` / `NTNT_WORKER_GROUP` for separate groups and use
+checkout. Set `--worker-group` / `NTNT_WORKER_GROUP` for separate groups (several
+processes may share one group) and use
 the same identity with `ntnt workers status --dir /path/to/project`. For an
 explicit deployment endpoint, set `--control-socket` / `NTNT_CONTROL_SOCKET` and
 reserve its parent directory with `0700`. See [worker control sockets](worker-control.md)

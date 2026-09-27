@@ -113,6 +113,77 @@ pub fn resolve(context: &Path, options: &ControlOptions) -> std::io::Result<Path
     }
 }
 
+/// Several worker processes may share one default group endpoint. Each takes
+/// the first free numbered slot: `<name>.sock`, then `<name>.1.sock`, ... Every
+/// slot has its own ownership lock. Explicit socket paths stay single-owner.
+pub const MAX_GROUP_INSTANCES: usize = 1000;
+/// Longest slot suffix, `.999`, reserved in default runtime path budgets.
+#[cfg(unix)]
+const SLOT_SUFFIX_MAX: usize = 4;
+
+fn explicit_path(options: &ControlOptions) -> bool {
+    options.control_socket.is_some() || std::env::var_os("NTNT_CONTROL_SOCKET").is_some()
+}
+
+/// Endpoint of one group slot; slot 0 is the base endpoint itself.
+pub fn instance_path(base: &Path, slot: usize) -> PathBuf {
+    if slot == 0 {
+        return base.to_path_buf();
+    }
+    let name = base.file_name().unwrap_or_default().to_string_lossy();
+    let stem = name.strip_suffix(".sock").unwrap_or(&name);
+    base.with_file_name(format!("{stem}.{slot}.sock"))
+}
+
+/// Every endpoint a client should address, in slot order: the explicit
+/// socket, or each existing slot of the default group endpoint. Stale slots
+/// are included; callers skip those that refuse connections.
+pub fn resolve_instances(
+    context: &Path,
+    options: &ControlOptions,
+) -> std::io::Result<Vec<PathBuf>> {
+    let base = resolve(context, options)?;
+    if explicit_path(options) {
+        return Ok(vec![base]);
+    }
+    let name = base
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let stem = name.strip_suffix(".sock").unwrap_or(&name).to_owned();
+    let mut slots = vec![];
+    let entries = match std::fs::read_dir(base.parent().unwrap_or(Path::new("/"))) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![base]),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let file = entry?.file_name().to_string_lossy().into_owned();
+        let slot = if file == name {
+            Some(0)
+        } else {
+            file.strip_prefix(&stem)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .and_then(|rest| rest.strip_suffix(".sock"))
+                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|n| (1..MAX_GROUP_INSTANCES).contains(n))
+        };
+        if let Some(slot) = slot {
+            slots.push(slot);
+        }
+    }
+    slots.sort_unstable();
+    if slots.is_empty() {
+        return Ok(vec![base]);
+    }
+    Ok(slots
+        .into_iter()
+        .map(|slot| instance_path(&base, slot))
+        .collect())
+}
+
 #[cfg(unix)]
 fn invalid(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
@@ -152,7 +223,7 @@ fn private_directory(path: &Path) -> std::io::Result<()> {
 fn runtime_directory() -> std::io::Result<PathBuf> {
     if let Some(base) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
         if base.is_absolute()
-            && base.as_os_str().len() + "/ntnt/".len() + 40 + ".sock".len() <= 103
+            && base.as_os_str().len() + "/ntnt/".len() + 40 + SLOT_SUFFIX_MAX + ".sock".len() <= 103
             && validate_directory(&base).is_ok()
         {
             let path = base.join("ntnt");
@@ -340,20 +411,45 @@ pub fn start_control_socket(options: &ControlOptions) -> std::io::Result<Startup
             .with(|s| s.borrow().clone())
             .map(Ok)
             .unwrap_or_else(std::env::current_dir)?;
-        let path = resolve(&context, options)?;
+        let base = resolve(&context, options)?;
         let guard = SOCKET_HANDLE
             .lock()
-            .map_err(|_| endpoint_error(&path, "listener mutex poisoned"))?;
+            .map_err(|_| endpoint_error(&base, "listener mutex poisoned"))?;
         if guard.as_ref().is_some_and(|h| {
-            h.path == path && h.owns_path() && !h.thread.as_ref().unwrap().is_finished()
+            h.endpoint == base && h.owns_path() && !h.thread.as_ref().unwrap().is_finished()
         }) {
             return Ok(Startup { guard, new: None });
         }
-        let new = SocketHandle::bind(&path).map_err(|e| endpoint_error(&path, e))?;
-        Ok(Startup {
-            guard,
-            new: Some(new),
-        })
+        let slots = if explicit_path(options) {
+            1
+        } else {
+            MAX_GROUP_INSTANCES
+        };
+        let mut last = None;
+        for slot in 0..slots {
+            let path = instance_path(&base, slot);
+            if std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()).len() > 103 {
+                return Err(endpoint_error(
+                    &path,
+                    "Unix socket path must be at most 103 bytes and contain no NUL",
+                ));
+            }
+            match SocketHandle::bind(&path) {
+                Ok(mut new) => {
+                    new.endpoint = base.clone();
+                    return Ok(Startup {
+                        guard,
+                        new: Some(new),
+                    });
+                }
+                // Another live process owns this slot: try the next one.
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && slots > 1 => {
+                    last = Some(endpoint_error(&path, e))
+                }
+                Err(e) => return Err(endpoint_error(&path, e)),
+            }
+        }
+        Err(last.unwrap_or_else(|| endpoint_error(&base, "no free worker group slot")))
     }
 }
 
@@ -370,6 +466,8 @@ struct SocketHandle {
     ready: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     path: PathBuf,
+    /// Resolved group endpoint (slot 0); equals `path` for explicit sockets.
+    endpoint: PathBuf,
     identity: (u64, u64),
     thread: Option<std::thread::JoinHandle<()>>,
     // Never unlink the sidecar: its stable inode is the cross-process lock identity.
@@ -406,10 +504,17 @@ impl SocketHandle {
             )));
         }
         lock.try_lock().map_err(|e| {
-            std::io::Error::other(format!(
-                "cannot acquire ownership lock {}: {e}",
-                Path::new(&lock_path).display()
-            ))
+            let kind = match e {
+                std::fs::TryLockError::WouldBlock => std::io::ErrorKind::AddrInUse,
+                std::fs::TryLockError::Error(_) => std::io::ErrorKind::Other,
+            };
+            std::io::Error::new(
+                kind,
+                format!(
+                    "cannot acquire ownership lock {}: {e}",
+                    Path::new(&lock_path).display()
+                ),
+            )
         })?;
         match std::fs::symlink_metadata(path) {
             Ok(m) => {
@@ -420,7 +525,12 @@ impl SocketHandle {
                 }
                 match probe_live_endpoint(path) {
                     Err(e) if e.raw_os_error() == Some(libc::ECONNREFUSED) => (),
-                    Ok(()) => return Err(invalid("existing endpoint is live")),
+                    Ok(()) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AddrInUse,
+                            "existing endpoint is live",
+                        ))
+                    }
                     Err(e) => {
                         return Err(std::io::Error::other(format!(
                             "existing endpoint is live or ambiguous: {e}"
@@ -442,6 +552,7 @@ impl SocketHandle {
             ready: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
             path: path.to_path_buf(),
+            endpoint: path.to_path_buf(),
             identity: (m.dev(), m.ino()),
             thread: None,
             _lock: lock,
@@ -846,6 +957,30 @@ mod ownership_tests {
             project_identity(&source).unwrap(),
             nested.canonicalize().unwrap()
         );
+    }
+    #[test]
+    fn group_slots_are_numbered_and_discovered_in_order() {
+        let d = directory();
+        let base = d.path().join("abc.sock");
+        assert_eq!(instance_path(&base, 0), base);
+        assert_eq!(instance_path(&base, 12), d.path().join("abc.12.sock"));
+        let explicit = ControlOptions {
+            control_socket: Some(base.clone()),
+            worker_group: None,
+        };
+        // Explicit sockets never fan out, even if numbered files exist.
+        std::fs::write(d.path().join("abc.1.sock"), "").unwrap();
+        assert_eq!(
+            resolve_instances(d.path(), &explicit).unwrap(),
+            vec![base.clone()]
+        );
+        let first = SocketHandle::bind(&base).unwrap();
+        // A live slot reports AddrInUse so startup moves to the next slot.
+        assert_eq!(
+            SocketHandle::bind(&base).err().unwrap().kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+        drop(first);
     }
     #[test]
     fn hard_linked_lock_is_rejected() {
