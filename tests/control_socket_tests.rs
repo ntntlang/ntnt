@@ -619,36 +619,47 @@ sleep_ms(60000)
             saturated && !pending.is_empty(),
             "fixture must fill the real listen backlog"
         );
-        let occupied = pending.len();
         listener.set_nonblocking(true).unwrap();
         let listener: std::os::unix::net::UnixListener = listener.into();
         let server = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(250));
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let mut drained = 0;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            // Keep every accepted connection open and serve whichever one
+            // sends a request. The backlog fixtures never write, so this does
+            // not depend on accept order (closing the first N accepted
+            // connections could close the real client on macOS).
+            let mut accepted: Vec<std::os::unix::net::UnixStream> = Vec::new();
             while Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if drained < occupied {
-                            drained += 1;
-                            continue;
+                loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            stream.set_nonblocking(true).unwrap();
+                            accepted.push(stream);
                         }
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(1)))
-                            .unwrap();
-                        stream
-                            .set_write_timeout(Some(Duration::from_secs(1)))
-                            .unwrap();
-                        let mut request = [0; 256];
-                        if stream.read(&mut request).is_ok_and(|n| n > 0) {
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(e) => panic!("accept failed: {e}"),
+                    }
+                }
+                let mut request = [0; 256];
+                let mut index = 0;
+                while index < accepted.len() {
+                    match accepted[index].read(&mut request) {
+                        Ok(n) if n > 0 => {
+                            let mut stream = accepted.swap_remove(index);
+                            stream.set_nonblocking(false).unwrap();
+                            stream
+                                .set_write_timeout(Some(Duration::from_secs(1)))
+                                .unwrap();
                             return stream.write_all(b"{\"bands\":[]}\n").is_ok();
                         }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => index += 1,
+                        // Peer closed without a request.
+                        _ => {
+                            accepted.swap_remove(index);
+                        }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(10))
-                    }
-                    Err(e) => panic!("accept failed: {e}"),
                 }
+                std::thread::sleep(Duration::from_millis(10));
             }
             false
         });
