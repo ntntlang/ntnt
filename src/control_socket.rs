@@ -961,17 +961,19 @@ mod ownership_tests {
     #[test]
     fn group_slots_are_numbered_and_discovered_in_order() {
         let d = directory();
-        let base = d.path().join("abc.sock");
+        // Canonical: resolve() canonicalizes, and macOS temp dirs are symlinked.
+        let dir = d.path().canonicalize().unwrap();
+        let base = dir.join("abc.sock");
         assert_eq!(instance_path(&base, 0), base);
-        assert_eq!(instance_path(&base, 12), d.path().join("abc.12.sock"));
+        assert_eq!(instance_path(&base, 12), dir.join("abc.12.sock"));
         let explicit = ControlOptions {
             control_socket: Some(base.clone()),
             worker_group: None,
         };
         // Explicit sockets never fan out, even if numbered files exist.
-        std::fs::write(d.path().join("abc.1.sock"), "").unwrap();
+        std::fs::write(dir.join("abc.1.sock"), "").unwrap();
         assert_eq!(
-            resolve_instances(d.path(), &explicit).unwrap(),
+            resolve_instances(&dir, &explicit).unwrap(),
             vec![base.clone()]
         );
         let first = SocketHandle::bind(&base).unwrap();

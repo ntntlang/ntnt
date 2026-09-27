@@ -1638,11 +1638,10 @@ fn workers_socket_call(
             }
         }
     }
+    // A live worker that failed to answer was not reached: fail the command
+    // rather than report success for part of the group.
     if let Some(e) = first_error {
-        if responses.is_empty() {
-            return Err(e);
-        }
-        eprintln!("warning: {e}");
+        return Err(e);
     }
     if responses.is_empty() {
         anyhow::bail!(
