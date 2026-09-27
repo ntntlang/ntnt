@@ -739,30 +739,26 @@ impl<'a> Store<'a> {
     }
 }
 
-/// Job state commits need `redis.acl_check_cmd` (Redis 7.0+, Valkey 7.2+,
-/// which reports a compatible `redis_version`). Fail when the job store opens,
-/// not with a script compile error on the first claim.
+/// Job state commits need `redis.acl_check_cmd` (Redis 7.0+, Valkey 7.2+).
+/// Fail when the job store opens, not with a script error on the first claim.
+/// The probe is itself a script, so it needs only the EVAL permission jobs
+/// already require (not INFO).
 pub(crate) fn require_supported_server(handle: &Value) -> Result<()> {
     if get_backend_type(handle)? != KVBackend::Redis {
         return Ok(());
     }
-    let info: String =
-        conditional::redis_call(handle, |conn| redis::cmd("INFO").arg("server").query(conn))?;
-    let version = info
-        .lines()
-        .find_map(|line| line.strip_prefix("redis_version:"))
-        .map(str::trim)
-        .unwrap_or("unknown");
-    let major = version
-        .split('.')
-        .next()
-        .and_then(|major| major.parse::<u32>().ok());
-    if major.is_some_and(|major| major >= 7) {
+    let supported: i64 = conditional::redis_call(handle, |conn| {
+        redis::cmd("EVAL")
+            .arg("return type(redis.acl_check_cmd) == 'function' and 1 or 0")
+            .arg(0)
+            .query(conn)
+    })?;
+    if supported == 1 {
         return Ok(());
     }
-    Err(IntentError::runtime_error(format!(
-        "std/jobs requires Redis 7.0+ or Valkey 7.2+ (server reports redis_version {version})"
-    )))
+    Err(IntentError::runtime_error(
+        "std/jobs requires Redis 7.0+ or Valkey 7.2+ (the server lacks redis.acl_check_cmd)",
+    ))
 }
 
 /// Redis handle ownership waits are bounded; SQLite restores the original
