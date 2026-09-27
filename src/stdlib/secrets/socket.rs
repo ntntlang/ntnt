@@ -827,14 +827,16 @@ mod tests {
 
         for (label, frame) in frames {
             let (path, _request_rx, server) = serve_response(label, frame);
-            // Oversized responses must transfer the full 64 KiB boundary before
-            // they can be classified. Keep this bounded, but allow hosted macOS
-            // runners enough scheduling headroom to exercise the protocol check.
+            // Every fixture answers immediately (or closes), so this deadline
+            // only bounds a stalled run. It must be generous: when a loaded
+            // hosted macOS runner delays the fixture thread past the deadline,
+            // the provider correctly reports Unavailable instead of the
+            // protocol error under test.
             let result = SocketSecretProvider::new(
                 path.clone(),
                 ProviderEndpointLabel::socket(1),
                 "deployment-a".to_string(),
-                Duration::from_secs(2),
+                Duration::from_secs(15),
             )
             .lookup("API_KEY");
             server.join().expect("fixture server");
