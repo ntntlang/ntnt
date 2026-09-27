@@ -2604,7 +2604,10 @@ mod tests {
             "descendant-held pipes must not defeat the timeout"
         );
         let (variant, value) = result_variant(result);
-        assert_eq!(variant, "Ok");
+        assert_eq!(
+            variant, "Ok",
+            "timed-out run must return a result: {value:?}"
+        );
         let Value::Map(result) = value else {
             panic!("expected process result map");
         };
