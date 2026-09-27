@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Breaking:** the Redis job backend now requires Redis 7.0+ or Valkey 7.2+. Job state changes commit through one Lua script that re-checks the values it read and the credential's permission for every write before writing anything. Workers refuse to start on an older server. Redis credentials need EVAL, EVALSHA and SCRIPT; WATCH, MULTI and EXEC are no longer used. Stop all workers and upgrade them together.
+- Redis job throughput: each state change is one read round trip plus one commit, and claims read 32 ready-index entries instead of 256.
+
 ## 0.5.4
 
 See the [complete release notes](docs/release-notes-v0.5.4.md) for compatibility changes, storage requirements, and coordinated worker-upgrade guidance.

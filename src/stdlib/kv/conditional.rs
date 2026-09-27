@@ -174,10 +174,8 @@ pub(super) fn redis_call_raw<T>(
     })();
     let broken = result.as_ref().is_err_and(|e| e.is_io_error());
     if !broken {
-        if result.is_err() {
-            let _ = redis::cmd("DISCARD").query::<()>(&mut store.conn);
-            let _ = redis::cmd("UNWATCH").query::<()>(&mut store.conn);
-        }
+        // Job state commits are single scripts: no MULTI or WATCH state can
+        // outlive a failed call on this connection.
         let _ = store.conn.set_read_timeout(None);
         let _ = store.conn.set_write_timeout(None);
     }
@@ -279,8 +277,8 @@ pub(crate) fn write(
     pending: Option<&str>,
     require_lease: bool,
 ) -> Result<bool> {
-    // Invalid EX arguments fail during EXEC, not queueing: reject them before
-    // any transaction can mutate related keys.
+    // An invalid EX argument would only fail when the commit script reaches
+    // that SET, after its earlier writes: reject it before any commit runs.
     if ttl.is_some_and(|t| {
         t <= 0
             || now_unix()
@@ -326,110 +324,20 @@ pub(crate) fn write(
             Ok(true)
         }
         KVBackend::Redis => redis_call(handle, |conn| {
-            // WATCH covers ownership as well as state. MULTI checks command/key
-            // permissions while queueing; EXECABORT leaves every key unchanged.
-            // Unlike a multi-write Lua script, denied commands cannot leave a
-            // committed write ID that falsely certifies missing queue work.
-            let mut watch = redis::cmd("WATCH");
-            watch.arg(key).arg(format!("{key}:__type"));
-            let touches_ready =
-                pending.is_some() || remove.iter().any(|key| job_leases::is_pending_key(key));
-            for key in remove {
-                watch.arg(key);
-            }
-            if let Some(key) = pending {
-                watch.arg(key);
-            }
-            // WATCH, the ready-index type check and the state read share one
-            // round trip; WATCH is queued first, so it covers the read.
-            let mut front = redis::pipe();
-            front.add_command(watch).ignore();
-            front.cmd("TYPE").arg(job_leases::READY);
-            front.cmd("MGET").arg(key).arg(format!("{key}:__type"));
-            let front: redis::RedisResult<(String, (Option<String>, Option<String>))> =
-                front.query(conn);
-            let mut committed = false;
-            let result = (|| {
-                let (ready_kind, (raw, kind)) = front?;
-                if touches_ready && ready_kind != "none" && ready_kind != "zset" {
-                    return Err(redis::RedisError::from((
-                        redis::ErrorKind::TypeError,
-                        "job ready index has the wrong Redis type",
-                    )));
-                }
-                let current = raw.map(|raw| Snapshot {
-                    raw,
-                    kind,
-                    redis: true,
-                });
-                if current.as_ref() == Some(next) {
-                    if require_lease && execution_receipt(next) {
-                        let mut fence = redis::pipe();
-                        if !job_leases::redis_transition(
-                            conn, &mut fence, key, expected, next, true,
-                        )? {
-                            return Ok(false);
-                        }
-                        // A receipt must not replay writes. Still EXEC a read-only
-                        // transaction so expiry or a changed watched snapshot
-                        // between validation and acknowledgement aborts the fence.
-                        fence.clear();
-                        fence.atomic().cmd("PING").ignore();
-                        committed = true;
-                        return redis_commit(conn, &fence);
-                    }
-                    return Ok(true);
-                }
-                if current.as_ref() != expected {
-                    return Ok(false);
-                }
-                let owners: Vec<Option<String>> = if remove.is_empty() {
-                    vec![]
-                } else {
-                    redis::cmd("MGET").arg(remove).query(conn)?
-                };
-                let mut tx = redis::pipe();
-                tx.atomic();
-                if !job_leases::redis_transition(conn, &mut tx, key, expected, next, require_lease)?
-                {
-                    return Ok(false);
-                }
-                tx.cmd("SET").arg(key).arg(&next.raw);
-                if let Some(ttl) = ttl {
-                    tx.arg("EX").arg(ttl);
-                }
-                tx.ignore().del(format!("{key}:__type")).ignore();
-                for (key, value) in remove.iter().zip(owners) {
-                    if value.as_deref() == Some(owner) {
-                        tx.cmd("DEL").arg(key).arg(format!("{key}:__type")).ignore();
-                        job_leases::remove_ready(&mut tx, key);
-                    }
-                }
-                if let Some(key) = pending {
-                    tx.set(key, owner).ignore();
-                    job_leases::add_ready(&mut tx, key);
-                }
-                committed = true;
-                redis_commit(conn, &tx)
-            })();
-            // EXEC clears every watch; only paths that never reached it
-            // (or failed before replying) still need UNWATCH.
-            if !committed || result.is_err() {
-                let _ = redis::cmd("UNWATCH").query::<()>(conn);
-            }
-            result
+            job_leases::redis_write(
+                conn,
+                key,
+                expected,
+                next,
+                ttl,
+                owner,
+                remove,
+                pending,
+                require_lease,
+                execution_receipt,
+            )
         }),
     }
-}
-
-fn redis_commit(conn: &mut redis::Connection, tx: &redis::Pipeline) -> redis::RedisResult<bool> {
-    let committed: Option<()> = tx.query(conn)?;
-    committed.map(|_| true).ok_or_else(|| {
-        redis::RedisError::from((
-            redis::ErrorKind::ResponseError,
-            "job state transaction conflicted; retry",
-        ))
-    })
 }
 
 #[cfg(test)]
@@ -510,7 +418,8 @@ pub(crate) fn check_redis_acl_abort(handle: &Value) {
     url.set_username(&name).unwrap();
     url.set_password(Some("fixture-only")).unwrap();
     let restricted = open_kv(url.as_str()).unwrap();
-    // Primary SET is allowed, pending SET denied. EXEC must abort all changes.
+    // Primary SET is allowed, pending SET denied: the commit's ACL preflight
+    // must reject it before writing anything.
     assert!(write(
         &restricted,
         key,
@@ -530,7 +439,8 @@ pub(crate) fn check_redis_acl_abort(handle: &Value) {
         .arg("SETUSER")
         .arg(&name)
         .arg("+set")
-        .arg("-exec")
+        .arg("-evalsha")
+        .arg("-eval")
         .query::<()>(&mut store.lock().unwrap().conn)
         .unwrap();
     assert!(write(
@@ -549,7 +459,8 @@ pub(crate) fn check_redis_acl_abort(handle: &Value) {
     redis::cmd("ACL")
         .arg("SETUSER")
         .arg(&name)
-        .arg("+exec")
+        .arg("+evalsha")
+        .arg("+eval")
         .arg("+type")
         .query::<()>(&mut store.lock().unwrap().conn)
         .unwrap();

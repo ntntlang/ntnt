@@ -484,6 +484,7 @@ impl JobRuntime {
         // Open KV connection (holds kv_handle_info lock during I/O —
         // acceptable because this only happens once per URL change)
         let kv_handle_value = kv::open_kv(&url)?;
+        kv::job_leases::require_supported_server(&kv_handle_value)?;
         let handle_info = extract_kv_handle_info(&kv_handle_value)?;
 
         // Store result (still under same lock — no race window)
@@ -4333,7 +4334,11 @@ pub fn init() -> HashMap<String, Value> {
                     .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
                 let next = match info.as_ref() {
                     Some(h) if h.url == store_url => h.clone(),
-                    _ => extract_kv_handle_info(&kv::open_kv(&store_url)?)?,
+                    _ => {
+                        let handle = kv::open_kv(&store_url)?;
+                        kv::job_leases::require_supported_server(&handle)?;
+                        extract_kv_handle_info(&handle)?
+                    }
                 };
                 *JOB_RUNTIME.kv_url.lock()
                     .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))? = store_url;

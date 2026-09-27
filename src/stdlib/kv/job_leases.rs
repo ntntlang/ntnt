@@ -13,7 +13,10 @@ const READY_INITIALIZED: &str = "jobs:ready:initialized";
 const READY_MIGRATION_LOCK: &str = "jobs:ready:migration_lock";
 const READY_MIGRATION_LOCK_MS: usize = 5_000;
 const READY_SENTINEL: &str = "__ntnt_ready_index__";
-const MAX_STALE_BATCHES_PER_CLAIM: usize = 4;
+/// Ready-index members read per claim attempt, and how many all-stale
+/// windows one claim may prune before giving up (bounds work per claim).
+const CLAIM_WINDOW: usize = 32;
+const MAX_STALE_BATCHES_PER_CLAIM: usize = 32;
 const MAX_RECOVERY: usize = 256;
 static REDIS_TRANSACTION_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -241,7 +244,10 @@ fn ready_candidate(
     const RETRY: &str = "__ntnt_ready_retry__";
     let script = redis::Script::new(
         r#"
-            local candidates = redis.call('ZRANGEBYLEX', KEYS[1], ARGV[1], ARGV[2], 'LIMIT', 0, 256)
+            -- Read only as many members as a claim can use. Stale members
+            -- are rare (claims remove their own), so a full window of them
+            -- returns RETRY and the caller reads the next window.
+            local candidates = redis.call('ZRANGEBYLEX', KEYS[1], ARGV[1], ARGV[2], 'LIMIT', 0, ARGV[6])
             local spread = tonumber(ARGV[4])
             if spread > 1 and #candidates > 1 then
                 -- Any indexed member of the first member's priority band is
@@ -261,7 +267,7 @@ fn ready_candidate(
                 if redis.call('EXISTS', key) == 1 then return {key} end
                 redis.call('ZREM', KEYS[1], key)
             end
-            if #candidates == 256 then return {ARGV[3]} end
+            if #candidates == tonumber(ARGV[6]) then return {ARGV[3]} end
             return {}
         "#,
     );
@@ -273,6 +279,7 @@ fn ready_candidate(
             .arg(RETRY)
             .arg(spread.max(1))
             .arg(rand::random::<u32>())
+            .arg(CLAIM_WINDOW)
             .invoke(conn)?;
         match result.first().map(String::as_str) {
             Some(RETRY) => continue,
@@ -320,6 +327,22 @@ fn auth_key(id: &str) -> String {
 fn data_key(id: &str) -> String {
     format!("jobs:data:{id}")
 }
+/// Per-job keys a transition may read, so they can be fetched together.
+fn job_keys(id: &str, pending: Option<&str>) -> Vec<String> {
+    let mut keys = Vec::with_capacity(7);
+    if let Some(pending) = pending {
+        keys.extend([pending.to_owned(), format!("{pending}:__type")]);
+    }
+    let (data, lease) = (data_key(id), lease_key(id));
+    keys.extend([
+        format!("{data}:__type"),
+        data,
+        format!("{lease}:__type"),
+        lease,
+        auth_key(id),
+    ]);
+    keys
+}
 fn due_key(id: &str, lease: &Lease) -> String {
     format!("{DUE_PREFIX}{:020}:{id}:{}", lease.deadline_ms, lease.token)
 }
@@ -345,52 +368,154 @@ fn deadline(now: i64, duration: i64) -> R<i64> {
     now.checked_add(duration).ok_or_else(|| err(()))
 }
 
-/// All Redis writes are buffered until validation completes. WATCH grows
-/// during reads over per-job keys (primary, lease, authorization, pending);
-/// the shared ready/due indexes are type-checked but never watched.
+/// Redis commit script. Reads happen before it without WATCH; the script
+/// then applies every buffered write only if (1) each guarded key still holds
+/// exactly the value that was read, (2) each shared index still has a usable
+/// type, and (3) the caller's ACL permits every write. All three checks finish
+/// before the first write, so a conflict, a corrupt index or a denied command
+/// leaves every key unchanged. The shebang makes Redis reject the whole script
+/// up front under OOM or on a read-only replica instead of partway through.
+/// Script time is frozen at start, so an authorization key that expired after
+/// it was read no longer matches its guard: expiry fences a delayed commit.
+/// Requires Redis 7.0+ or Valkey 7.2+ (`redis.acl_check_cmd`).
+///
+/// ARGV: guard count, then (key, present 0/1, value) per guard; index count,
+/// then index keys (must be none or zset); write count, then per write its
+/// argument count followed by the command and arguments.
+/// Returns 1 when committed and 0 when a guard no longer matches (retry).
+static COMMIT: std::sync::LazyLock<redis::Script> = std::sync::LazyLock::new(|| {
+    redis::Script::new(
+        r#"#!lua
+local a, i = ARGV, 1
+local function nxt() local v = a[i]; i = i + 1; return v end
+for _ = 1, tonumber(nxt()) do
+    local key, present, value = nxt(), nxt(), nxt()
+    local current = redis.call('GET', key)
+    if present == '1' then
+        if current ~= value then return 0 end
+    elseif current then
+        return 0
+    end
+end
+for _ = 1, tonumber(nxt()) do
+    local key = nxt()
+    local kind = redis.call('TYPE', key)
+    if type(kind) == 'table' then kind = kind['ok'] end
+    if kind ~= 'none' and kind ~= 'zset' then
+        return redis.error_reply('WRONGTYPE job index ' .. key .. ' has the wrong Redis type')
+    end
+end
+local writes = {}
+for w = 1, tonumber(nxt()) do
+    local n, command = tonumber(nxt()), {}
+    for j = 1, n do command[j] = nxt() end
+    writes[w] = command
+end
+for _, command in ipairs(writes) do
+    if not redis.acl_check_cmd(unpack(command)) then
+        return redis.error_reply('NOPERM job state write denied: ' .. command[1])
+    end
+end
+for _, command in ipairs(writes) do redis.call(unpack(command)) end
+return 1
+"#,
+    )
+});
+
+/// All Redis writes are buffered until validation completes. Every per-job
+/// key read (primary, lease, authorization, pending) becomes a guard that the
+/// commit script re-checks; the shared ready/due indexes are type-checked but
+/// never guarded, so unrelated jobs never conflict (#228).
 struct Store<'a> {
     sql: Option<&'a Connection>,
     redis: Option<&'a mut redis::Connection>,
     writes: redis::Pipeline,
     index_checked: bool,
     ready_checked: bool,
-    /// TYPE of (due, ready), fetched together on first use of either.
-    index_kinds: Option<(String, String)>,
-    /// A WATCH was issued and no EXEC has run since. EXEC (committed or
-    /// aborted) clears every watch, so UNWATCH is only needed otherwise.
-    watching: bool,
+    /// Raw values read this transaction (key -> value), and the order they
+    /// were first read in; each becomes a commit guard.
+    cache: HashMap<String, Option<String>>,
+    guards: Vec<String>,
+    /// Shared indexes whose type the commit must validate.
+    type_checks: Vec<&'static str>,
+    now_ms: Option<i64>,
+    /// Run the commit script even with no writes, so a receipt still
+    /// validates its guards (expiry, a changed snapshot) at commit time.
+    fence: bool,
 }
 impl<'a> Store<'a> {
-    fn sql(conn: &'a Connection) -> Self {
+    fn new(sql: Option<&'a Connection>, redis: Option<&'a mut redis::Connection>) -> Self {
         Self {
-            sql: Some(conn),
-            redis: None,
+            sql,
+            redis,
             writes: redis::pipe(),
             index_checked: false,
             ready_checked: false,
-            index_kinds: None,
-            watching: false,
+            cache: HashMap::new(),
+            guards: Vec::new(),
+            type_checks: Vec::new(),
+            now_ms: None,
+            fence: false,
         }
+    }
+    fn sql(conn: &'a Connection) -> Self {
+        Self::new(Some(conn), None)
     }
     fn redis(conn: &'a mut redis::Connection) -> Self {
-        let mut writes = redis::pipe();
-        writes.atomic();
-        Self {
-            sql: None,
-            redis: Some(conn),
-            writes,
-            index_checked: false,
-            ready_checked: false,
-            index_kinds: None,
-            watching: false,
-        }
+        Self::new(None, Some(conn))
     }
+    /// Read any uncached keys (and optionally the server clock, sampled after
+    /// them) in one round trip. GET, not MGET: MGET returns nil for a
+    /// wrong-type key, which would make a corrupted lease or primary record
+    /// read as absent; a GET error fails the whole pipeline.
+    fn prefetch(&mut self, keys: &[String], time: bool) -> R<()> {
+        let Some(conn) = self.redis.as_deref_mut() else {
+            return Ok(());
+        };
+        let mut missing: Vec<&String> = Vec::new();
+        for key in keys {
+            if !self.cache.contains_key(key) && !missing.contains(&key) {
+                missing.push(key);
+            }
+        }
+        let time = time && self.now_ms.is_none();
+        if missing.is_empty() && !time {
+            return Ok(());
+        }
+        let mut pipe = redis::pipe();
+        for key in &missing {
+            pipe.cmd("GET").arg(key.as_str());
+        }
+        if time {
+            pipe.cmd("TIME");
+        }
+        let mut values: Vec<redis::Value> = pipe.query(conn)?;
+        if time {
+            let (sec, micros): (i64, i64) =
+                redis::from_redis_value(&values.pop().ok_or_else(|| err(()))?)?;
+            self.now_ms = Some(
+                sec.checked_mul(1000)
+                    .and_then(|s| s.checked_add(micros / 1000))
+                    .ok_or_else(|| err(()))?,
+            );
+        }
+        for (key, value) in missing.into_iter().zip(values) {
+            let value: Option<String> = redis::from_redis_value(&value)?;
+            self.guards.push(key.clone());
+            self.cache.insert(key.clone(), value);
+        }
+        Ok(())
+    }
+    fn raw(&mut self, key: &str) -> R<Option<String>> {
+        self.prefetch(&[key.to_owned()], false)?;
+        Ok(self.cache.get(key).cloned().flatten())
+    }
+    /// Server time for Redis (cached per transaction: the commit's guards,
+    /// not this sample, fence expiry), local time for SQLite.
     fn now(&mut self) -> R<i64> {
-        if let Some(conn) = self.redis.as_deref_mut() {
-            let (sec, micros): (i64, i64) = redis::cmd("TIME").query(conn)?;
-            sec.checked_mul(1000)
-                .and_then(|s| s.checked_add(micros / 1000))
-                .ok_or_else(|| err(()))
+        if self.redis.is_some() {
+            self.prefetch(&[], true)?;
+            self.now_ms.ok_or_else(|| err(()))
         } else {
             Ok(millis())
         }
@@ -415,24 +540,10 @@ impl<'a> Store<'a> {
         if let Some(conn) = self.sql {
             return conditional::sql_read(conn, key).map_err(err);
         }
-        let conn = self.redis.as_deref_mut().unwrap();
-        // One round trip. WATCH precedes the GETs on the same connection, so
-        // the watch still covers what is read. Two GETs, not MGET: MGET
-        // returns nil for a wrong-type key, which would make a corrupted
-        // lease or primary record read as absent; a GET error fails the
-        // whole pipeline.
         let type_key = format!("{key}:__type");
-        self.watching = true;
-        let (raw, kind): (Option<String>, Option<String>) = redis::pipe()
-            .cmd("WATCH")
-            .arg(key)
-            .arg(&type_key)
-            .ignore()
-            .cmd("GET")
-            .arg(key)
-            .cmd("GET")
-            .arg(&type_key)
-            .query(conn)?;
+        self.prefetch(&[key.to_owned(), type_key.clone()], false)?;
+        let raw = self.cache.get(key).cloned().flatten();
+        let kind = self.cache.get(&type_key).cloned().flatten();
         Ok(raw.map(|raw| Snapshot {
             raw,
             kind,
@@ -478,65 +589,27 @@ impl<'a> Store<'a> {
             .transpose()
     }
     fn authorized(&mut self, id: &str, token: &str) -> R<bool> {
-        let Some(conn) = self.redis.as_deref_mut() else {
+        if self.sql.is_some() {
             // SQLite serializes deadline validation and writes in one transaction.
             return Ok(true);
-        };
-        let key = auth_key(id);
-        self.watching = true;
-        let (live,): (Option<String>,) = redis::pipe()
-            .cmd("WATCH")
-            .arg(&key)
-            .ignore()
-            .cmd("GET")
-            .arg(&key)
-            .query(conn)?;
-        Ok(live.as_deref() == Some(token))
-    }
-    /// Fetch both shared index types in one round trip the first time a
-    /// transaction touches either; each check validates only its own index,
-    /// so a corrupt ready index cannot block renewal or recovery. Neither is
-    /// watched (see check_ready_index_type); recovery re-validates each due
-    /// member against the watched per-job lease before acting on it.
-    fn index_kinds(&mut self) -> R<(String, String)> {
-        if let Some(kinds) = &self.index_kinds {
-            return Ok(kinds.clone());
         }
-        let conn = self.redis.as_deref_mut().unwrap();
-        let kinds: (String, String) = redis::pipe()
-            .cmd("TYPE")
-            .arg(DUE)
-            .cmd("TYPE")
-            .arg(READY)
-            .query(conn)?;
-        self.index_kinds = Some(kinds.clone());
-        Ok(kinds)
+        // The guard makes the commit fail if the key expires before it runs.
+        Ok(self.raw(&auth_key(id))?.as_deref() == Some(token))
     }
+    /// Each index is type-checked by the commit only when this transaction
+    /// writes it, so a corrupt ready index cannot block renewal or recovery.
+    /// Neither index is guarded (see check_ready_index_type); recovery
+    /// re-validates each due member against the guarded per-job lease.
     fn index(&mut self) -> R<()> {
-        if self.index_checked {
-            return Ok(());
-        }
-        if self.redis.is_some() {
-            let (due, _) = self.index_kinds()?;
-            if due != "none" && due != "zset" {
-                return Err(err(()));
-            }
+        if !self.index_checked && self.redis.is_some() {
+            self.type_checks.push(DUE);
         }
         self.index_checked = true;
         Ok(())
     }
     fn ready_index(&mut self) -> R<()> {
-        if self.ready_checked {
-            return Ok(());
-        }
-        if self.redis.is_some() {
-            let (_, ready) = self.index_kinds()?;
-            if ready != "none" && ready != "zset" {
-                return Err(redis::RedisError::from((
-                    redis::ErrorKind::TypeError,
-                    "job ready index has the wrong Redis type",
-                )));
-            }
+        if !self.ready_checked && self.redis.is_some() {
+            self.type_checks.push(READY);
         }
         self.ready_checked = true;
         Ok(())
@@ -566,7 +639,7 @@ impl<'a> Store<'a> {
                 .ignore();
             // No TTL on the index, even if an operator previously set one.
             self.writes.cmd("PERSIST").arg(DUE).ignore();
-            // Authorization alone expires. WATCH observes its expiry at EXEC,
+            // Authorization alone expires. Its commit guard observes expiry,
             // fencing network/queue delays after TIME without losing recovery.
             self.writes
                 .cmd("SET")
@@ -623,24 +696,73 @@ impl<'a> Store<'a> {
         }
     }
     fn commit(&mut self) -> R<()> {
-        if let Some(conn) = self.redis.as_deref_mut() {
-            // An empty pipeline sends nothing, so no EXEC clears the watches
-            // of a read-only transaction; the caller must still UNWATCH.
-            let sends_exec = self.writes.cmd_iter().next().is_some();
-            let committed: Option<()> = self.writes.query(conn)?;
-            if sends_exec {
-                // EXEC ran (committed or aborted by a watch): watches cleared.
-                self.watching = false;
+        let Some(conn) = self.redis.as_deref_mut() else {
+            return Ok(());
+        };
+        let writes: Vec<&redis::Cmd> = self.writes.cmd_iter().collect();
+        if writes.is_empty() && !self.fence {
+            return Ok(());
+        }
+        let mut commit = COMMIT.prepare_invoke();
+        commit.arg(self.guards.len());
+        for key in &self.guards {
+            match self.cache.get(key).cloned().flatten() {
+                Some(value) => commit.arg(key).arg(1).arg(value),
+                None => commit.arg(key).arg(0).arg(""),
+            };
+        }
+        commit.arg(self.type_checks.len());
+        for key in &self.type_checks {
+            commit.arg(*key);
+        }
+        commit.arg(writes.len());
+        for cmd in writes {
+            let args: Vec<&[u8]> = cmd
+                .args_iter()
+                .map(|arg| match arg {
+                    redis::Arg::Simple(bytes) => Ok(bytes),
+                    redis::Arg::Cursor => Err(err(())),
+                })
+                .collect::<R<_>>()?;
+            commit.arg(args.len());
+            for arg in args {
+                commit.arg(arg);
             }
-            if committed.is_none() {
-                return Err(redis::RedisError::from((
-                    redis::ErrorKind::ResponseError,
-                    "job state transaction conflicted; retry",
-                )));
-            }
+        }
+        if commit.invoke::<i64>(conn)? != 1 {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::ResponseError,
+                "job state transaction conflicted; retry",
+            )));
         }
         Ok(())
     }
+}
+
+/// Job state commits need `redis.acl_check_cmd` (Redis 7.0+, Valkey 7.2+,
+/// which reports a compatible `redis_version`). Fail when the job store opens,
+/// not with a script compile error on the first claim.
+pub(crate) fn require_supported_server(handle: &Value) -> Result<()> {
+    if get_backend_type(handle)? != KVBackend::Redis {
+        return Ok(());
+    }
+    let info: String =
+        conditional::redis_call(handle, |conn| redis::cmd("INFO").arg("server").query(conn))?;
+    let version = info
+        .lines()
+        .find_map(|line| line.strip_prefix("redis_version:"))
+        .map(str::trim)
+        .unwrap_or("unknown");
+    let major = version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u32>().ok());
+    if major.is_some_and(|major| major >= 7) {
+        return Ok(());
+    }
+    Err(IntentError::runtime_error(format!(
+        "std/jobs requires Redis 7.0+ or Valkey 7.2+ (server reports redis_version {version})"
+    )))
 }
 
 /// Redis handle ownership waits are bounded; SQLite restores the original
@@ -699,16 +821,10 @@ fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) 
                     .unwrap_or_else(|error| error.into_inner());
                 let result = conditional::redis_call_raw(handle, |conn| {
                     let mut store = Store::redis(conn);
-                    let result = call(&mut store).and_then(|value| {
+                    call(&mut store).and_then(|value| {
                         store.commit()?;
                         Ok(value)
-                    });
-                    // Error paths get DISCARD + UNWATCH from redis_call_raw.
-                    if result.is_ok() && store.watching {
-                        let _ =
-                            redis::cmd("UNWATCH").query::<()>(store.redis.as_deref_mut().unwrap());
-                    }
-                    result
+                    })
                 });
                 drop(transaction_guard);
                 match result {
@@ -764,16 +880,16 @@ pub(crate) fn claim(
     let mut attempts = 0usize;
     transaction(handle, |store| {
         attempts += 1;
-        let now = store.now()?;
-        let deadline_ms = deadline(now, duration_ms)?;
+        // Local clock: this only decides whether to spread, not ownership.
+        let local = millis();
         let contended = attempts > 1
-            || now - LAST_CLAIM_CONTENTION_MS.load(std::sync::atomic::Ordering::Relaxed)
+            || local - LAST_CLAIM_CONTENTION_MS.load(std::sync::atomic::Ordering::Relaxed)
                 < CLAIM_CONTENTION_WINDOW_MS;
         if attempts > 1 {
-            LAST_CLAIM_CONTENTION_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+            LAST_CLAIM_CONTENTION_MS.store(local, std::sync::atomic::Ordering::Relaxed);
         }
         let candidate: Option<String> = if let Some(conn) = store.sql {
-            conn.query_row("SELECT key FROM _kv WHERE key LIKE 'jobs:pending:%' AND key>=? AND key<=? AND (expires_at IS NULL OR expires_at>?) ORDER BY key LIMIT 1", params![floor, ceiling, now/1000], |r| r.get(0)).optional().map_err(err)?
+            conn.query_row("SELECT key FROM _kv WHERE key LIKE 'jobs:pending:%' AND key>=? AND key<=? AND (expires_at IS NULL OR expires_at>?) ORDER BY key LIMIT 1", params![floor, ceiling, millis()/1000], |r| r.get(0)).optional().map_err(err)?
         } else {
             let conn = store.redis.as_deref_mut().unwrap();
             let spread = if contended { CLAIM_SPREAD } else { 1 };
@@ -782,6 +898,13 @@ pub(crate) fn claim(
         let Some(pending_key) = candidate else {
             return Ok(None);
         };
+        // One round trip for everything the claim reads, plus server time.
+        // Pending keys end in the job ID; if a legacy key does not, the
+        // reads below simply fetch the right keys separately.
+        let guess = pending_key.rsplit(':').next().unwrap_or_default();
+        store.prefetch(&job_keys(guess, Some(&pending_key)), true)?;
+        let now = store.now()?;
+        let deadline_ms = deadline(now, duration_ms)?;
         let Some(ready) = store.read(&pending_key)? else {
             return Ok(None);
         };
@@ -838,11 +961,12 @@ pub(crate) fn claim(
 }
 pub(crate) fn renew(handle: &Value, id: &str, token: &str, duration_ms: i64) -> Result<bool> {
     transaction(handle, |store| {
+        // TIME is queued after the reads, so it is sampled after them: a slow
+        // read must not renew based on a timestamp from before expiry.
+        store.prefetch(&job_keys(id, None), true)?;
         let Some(mut lease) = store.lease(id)? else {
             return Ok(false);
         };
-        // Sample after the watched read: a slow read must not renew based on
-        // a timestamp captured before ownership expired.
         let now = store.now()?;
         let next_deadline = deadline(now, duration_ms)?;
         if lease.token != token || lease.deadline_ms <= now || !store.authorized(id, token)? {
@@ -1440,8 +1564,11 @@ mod tests {
         other.execute_batch("ROLLBACK").unwrap();
         assert!(renew(&handle, &id, &claim.token, 60_000).unwrap());
     }
-    // A real TCP proxy forwards every Redis reply unchanged except the chosen
-    // EXEC boundary. This catches delays AFTER TIME/WATCH/queue validation.
+    // A real TCP proxy forwards every Redis reply unchanged except at the
+    // commit script. This catches delays AFTER the reads and TIME sample.
+    // Commit replies: `:1` committed, `:0` a guard no longer matched.
+    const COMMITTED: &[u8] = b":1\r\n";
+    const REJECTED: &[u8] = b":0\r\n";
     enum ExecFault {
         ExpireAt(i64),
         Delay(Duration),
@@ -1484,6 +1611,13 @@ mod tests {
         proxy_url.set_host(Some("127.0.0.1")).unwrap();
         proxy_url.set_port(Some(address.port())).unwrap();
         let url_owned = url.to_owned();
+        // Load the script first so the proxy sees exactly one commit EVALSHA
+        // (no NOSCRIPT round trip) per transaction.
+        let mut direct = redis::Client::open(url).unwrap().get_connection().unwrap();
+        let hash = COMMIT.prepare_invoke().load(&mut direct).unwrap();
+        let commit_prefix = redis::cmd("EVALSHA").arg(&hash).get_packed_command();
+        let commit_prefix =
+            commit_prefix[commit_prefix.iter().position(|&b| b == b'\n').unwrap() + 1..].to_vec();
         let thread = std::thread::spawn(move || {
             let (mut client, _) = listener.accept().unwrap();
             client
@@ -1501,7 +1635,9 @@ mod tests {
             let mut responses = BufReader::new(upstream.try_clone().unwrap());
             loop {
                 let request = resp_frame(&mut requests).unwrap();
-                let is_exec = request == redis::cmd("EXEC").get_packed_command();
+                let is_exec = request
+                    .windows(commit_prefix.len())
+                    .any(|window| window == commit_prefix.as_slice());
                 if is_exec {
                     if let ExecFault::Delay(duration) = fault {
                         std::thread::sleep(duration);
@@ -1516,7 +1652,7 @@ mod tests {
                         let now = sec * 1000 + micros / 1000;
                         assert!(
                             now < deadline,
-                            "test must reach EXEC while still authorized"
+                            "test must reach the commit while still authorized"
                         );
                         std::thread::sleep(Duration::from_millis((deadline - now + 25) as u64));
                     }
@@ -1528,25 +1664,8 @@ mod tests {
                 }
                 client.write_all(&response).unwrap();
                 if is_exec {
-                    // Forward only post-EXEC cleanup. A successful EXEC needs
-                    // none; error paths send DISCARD/UNWATCH. Anything else is
-                    // a retry, which must hit a closed connection as before.
-                    client
-                        .set_read_timeout(Some(Duration::from_millis(200)))
-                        .unwrap();
-                    let cleanup = [
-                        redis::cmd("DISCARD").get_packed_command(),
-                        redis::cmd("UNWATCH").get_packed_command(),
-                    ];
-                    while let Ok(request) = resp_frame(&mut requests) {
-                        if !cleanup.contains(&request) {
-                            break;
-                        }
-                        upstream.write_all(&request).unwrap();
-                        client
-                            .write_all(&resp_frame(&mut responses).unwrap())
-                            .unwrap();
-                    }
+                    // A commit leaves no transaction state to clean up; any
+                    // retry must hit a closed connection.
                     return response;
                 }
             }
@@ -1607,10 +1726,10 @@ mod tests {
     }
     #[test]
     #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
-    fn redis_read_only_transaction_releases_watches() {
-        // get() WATCHes a lease but queues no writes, so no EXEC clears the
-        // watch. A leftover watch would abort the next transaction on the
-        // same connection when that unrelated key changes.
+    fn redis_read_only_transaction_leaves_no_fence() {
+        // get() reads a lease but writes nothing, so it must not run a
+        // commit, and a later change to that lease must not abort the next,
+        // unrelated transaction on the same connection.
         let (url, handle) = redis_fixture();
         let other = open_kv(&url).unwrap();
         fixture(&handle, "pending");
@@ -1631,7 +1750,7 @@ mod tests {
             store.put("watch:leftover:result", &value)
         })
         .unwrap();
-        assert_eq!(calls, 1, "a read-only transaction left its WATCH behind");
+        assert_eq!(calls, 1, "a read-only transaction left a fence behind");
         assert_eq!(conditional::redis_transaction_conflicts(), conflicts_before);
     }
     #[test]
@@ -1963,7 +2082,9 @@ mod tests {
             calls += 1;
             let _ = store.read("retry:watch")?;
             if calls < 32 {
-                kv_set(&other, "retry:watch", &Value::Int(calls), None).map_err(err)?;
+                // A different value each time: commit guards compare values,
+                // so rewriting the value that was read is not a conflict.
+                kv_set(&other, "retry:watch", &Value::Int(calls + 1), None).map_err(err)?;
             }
             let value = store.snapshot(&Value::String("committed".into()))?;
             store.put("retry:result", &value)
@@ -2181,7 +2302,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let response = thread.join().unwrap();
-        assert!(response.starts_with(b"*") && response != b"*-1\r\n");
+        assert_eq!(response, COMMITTED);
         assert_eq!(claim.id, id);
         assert!(matches!(
             kv_get(&handle, &auth_key(&id)).unwrap(),
@@ -2273,8 +2394,8 @@ mod tests {
         );
         let response = thread.join().unwrap();
         assert_eq!(
-            response, b"*-1\r\n",
-            "expiry must abort EXEC, not publish completion"
+            response, REJECTED,
+            "expiry must reject the commit, not publish completion"
         );
         assert!(result.is_err());
         assert_eq!(
@@ -2293,7 +2414,7 @@ mod tests {
         let (proxy, thread) = exec_proxy(&url, ExecFault::ExpireAt(claim.deadline_ms));
         let result = renew(&proxy, &claim.id, &claim.token, 60_000);
         let response = thread.join().unwrap();
-        assert_eq!(response, b"*-1\r\n", "expiry must abort renewal EXEC");
+        assert_eq!(response, REJECTED, "expiry must reject the renewal commit");
         assert!(result.is_err());
         assert_eq!(
             get(&handle, &claim.id).unwrap().unwrap().deadline_ms,
@@ -2304,7 +2425,7 @@ mod tests {
     }
     #[test]
     #[ignore = "requires a disposable Redis database via NTNT_RETENTION_TEST_REDIS"]
-    fn redis_execution_receipts_validate_watch_at_exec() {
+    fn redis_execution_receipts_validate_guards_at_commit() {
         let (url, handle) = redis_fixture();
         for status in ["active", "claimed"] {
             fixture(&handle, "pending");
@@ -2331,9 +2452,9 @@ mod tests {
             );
             assert!(
                 !matches!(result, Ok(true)),
-                "{status} receipt must EXEC its WATCH fence"
+                "{status} receipt must run its commit fence"
             );
-            assert_eq!(thread.join().unwrap(), b"*-1\r\n");
+            assert_eq!(thread.join().unwrap(), REJECTED);
             assert!(!write(&handle, &claim, &receipt, true));
             let counts = recover(&handle, 1).unwrap();
             assert_eq!(
@@ -2379,10 +2500,9 @@ mod tests {
                 "the first committed ACK must actually be lost"
             );
             let response = thread.join().unwrap();
-            assert!(response.starts_with(b"*") && response != b"*-1\r\n");
-            assert!(
-                !response.contains(&b'-'),
-                "EXEC must have succeeded before ACK loss"
+            assert_eq!(
+                response, COMMITTED,
+                "the commit must have succeeded before ACK loss"
             );
             assert_eq!(
                 conditional::read(&handle, &data_key(&id)).unwrap(),
@@ -2537,17 +2657,71 @@ pub(super) fn sql_transition(
     transition(&mut Store::sql(conn), key, expected, next, require_lease)
         .map_err(conditional::error)
 }
-pub(super) fn redis_transition(
+/// Redis side of `conditional::write`: one read round trip, then one commit
+/// script that re-checks every value read and applies all writes or none.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn redis_write(
     conn: &mut redis::Connection,
-    writes: &mut redis::Pipeline,
     key: &str,
     expected: Option<&Snapshot>,
     next: &Snapshot,
+    ttl: Option<i64>,
+    owner: &str,
+    remove: &[String],
+    pending: Option<&str>,
     require_lease: bool,
+    receipt: impl Fn(&Snapshot) -> bool,
 ) -> R<bool> {
     let mut store = Store::redis(conn);
-    std::mem::swap(&mut store.writes, writes);
-    let result = transition(&mut store, key, expected, next, require_lease);
-    std::mem::swap(&mut store.writes, writes);
-    result
+    let mut keys = vec![key.to_owned(), format!("{key}:__type")];
+    keys.extend(remove.iter().cloned());
+    keys.extend(pending.map(str::to_owned));
+    if let Some(id) = key.strip_prefix("jobs:data:") {
+        keys.extend(job_keys(id, None));
+    }
+    store.prefetch(&keys, key.starts_with("jobs:data:"))?;
+    if pending.is_some() || remove.iter().any(|key| is_pending_key(key)) {
+        store.ready_index()?;
+    }
+    let current = store.read(key)?;
+    if current.as_ref() == Some(next) {
+        if require_lease && receipt(next) {
+            if !transition(&mut store, key, expected, next, true)? {
+                return Ok(false);
+            }
+            // A receipt must not replay writes, but it still runs the commit
+            // so expiry or a changed snapshot since the reads rejects it.
+            store.writes.clear();
+            store.fence = true;
+            store.commit()?;
+        }
+        return Ok(true);
+    }
+    if current.as_ref() != expected {
+        return Ok(false);
+    }
+    if !transition(&mut store, key, expected, next, require_lease)? {
+        return Ok(false);
+    }
+    store.writes.cmd("SET").arg(key).arg(&next.raw);
+    if let Some(ttl) = ttl {
+        store.writes.arg("EX").arg(ttl);
+    }
+    store.writes.del(format!("{key}:__type"));
+    for key in remove {
+        if store.raw(key)?.as_deref() == Some(owner) {
+            store
+                .writes
+                .cmd("DEL")
+                .arg(key)
+                .arg(format!("{key}:__type"));
+            remove_ready(&mut store.writes, key);
+        }
+    }
+    if let Some(key) = pending {
+        store.writes.set(key, owner);
+        add_ready(&mut store.writes, key);
+    }
+    store.commit()?;
+    Ok(true)
 }
