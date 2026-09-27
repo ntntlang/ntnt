@@ -1884,21 +1884,33 @@ mod tests {
     }
 
     fn with_process_capability<T>(executable: &str, action: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let old_enable = std::env::var_os("NTNT_PROCESS_ENABLE");
-        let old_allow = std::env::var_os("NTNT_PROCESS_ALLOW");
+        /// Restores the process-capability variables on drop, including when
+        /// `action` panics, so one failing test cannot leak them to others.
+        struct RestoreEnv {
+            enable: Option<std::ffi::OsString>,
+            allow: Option<std::ffi::OsString>,
+        }
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in [
+                    ("NTNT_PROCESS_ENABLE", self.enable.take()),
+                    ("NTNT_PROCESS_ALLOW", self.allow.take()),
+                ] {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = RestoreEnv {
+            enable: std::env::var_os("NTNT_PROCESS_ENABLE"),
+            allow: std::env::var_os("NTNT_PROCESS_ALLOW"),
+        };
         std::env::set_var("NTNT_PROCESS_ENABLE", "1");
         std::env::set_var("NTNT_PROCESS_ALLOW", executable);
-        let result = action();
-        match old_enable {
-            Some(value) => std::env::set_var("NTNT_PROCESS_ENABLE", value),
-            None => std::env::remove_var("NTNT_PROCESS_ENABLE"),
-        }
-        match old_allow {
-            Some(value) => std::env::set_var("NTNT_PROCESS_ALLOW", value),
-            None => std::env::remove_var("NTNT_PROCESS_ALLOW"),
-        }
-        result
+        action()
     }
 
     fn result_variant(value: Value) -> (String, Value) {
@@ -1932,7 +1944,7 @@ mod tests {
 
     #[test]
     fn run_is_disabled_without_explicit_capability() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old_enable = std::env::var_os("NTNT_PROCESS_ENABLE");
         std::env::remove_var("NTNT_PROCESS_ENABLE");
         let (program, args) = current_test_command("fixture_print_args", &[]);
@@ -2218,7 +2230,7 @@ mod tests {
     #[test]
     fn run_rejects_executable_outside_allowlist() {
         let (program, args) = current_test_command("fixture_print_args", &[]);
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old_enable = std::env::var_os("NTNT_PROCESS_ENABLE");
         let old_allow = std::env::var_os("NTNT_PROCESS_ALLOW");
         std::env::set_var("NTNT_PROCESS_ENABLE", "1");
