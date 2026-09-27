@@ -45,7 +45,7 @@ fn inspection_refreshes_a_previous_attempt_snapshot() {
     let c = seed(&h);
     let mut previous = c.data;
     previous.insert("claim_token".into(), Value::String("old-attempt".into()));
-    leases::inspect(&h, &mut previous).unwrap();
+    retrying("inspection", || leases::inspect(&h, &mut previous));
     assert!(matches!(previous.get("claim_token"),Some(Value::String(s)) if s==&c.token));
     assert!(matches!(previous.get("status"),Some(Value::String(s)) if s=="claimed"));
 }
@@ -65,33 +65,38 @@ fn seed_status_with_lease(h: &Value, status: &str, duration_ms: i64) -> kv::job_
     ]);
     kv::kv_set(h, &format!("jobs:data:{id}"), &Value::Map(data), None).unwrap();
     kv::kv_set(h, pk, &Value::String(id.into()), None).unwrap();
-    kv::job_leases::claim(
-        h,
-        "jobs:pending:",
-        "jobs:pending:zzz",
-        "keeper",
-        duration_ms,
-    )
-    .unwrap()
-    .unwrap()
+    retrying("seed claim", || {
+        kv::job_leases::claim(
+            h,
+            "jobs:pending:",
+            "jobs:pending:zzz",
+            "keeper",
+            duration_ms,
+        )
+    })
+    .expect("seeded job was not claimable")
 }
-fn recover_fixture(h: &Value) -> kv::job_leases::RecoveryCounts {
-    // Lease operations intentionally fast-fail on handle/SQLite contention.
-    // The keeper uses this handle concurrently, so retry the observation rather
-    // than assuming every recovery poll succeeds. Persistent errors still fail.
+/// Lease operations intentionally fast-fail on contention: the SQLite path
+/// only try-locks the process-wide store registry, which parallel tests and
+/// keepers hold briefly. Retry for up to a second; persistent errors still
+/// fail the test.
+fn retrying<T>(what: &str, mut op: impl FnMut() -> crate::error::Result<T>) -> T {
     let until = Instant::now() + Duration::from_secs(1);
     loop {
-        match kv::job_leases::recover(h, 64) {
-            Ok(counts) => return counts,
+        match op() {
+            Ok(value) => return value,
             Err(error) => {
                 assert!(
                     Instant::now() < until,
-                    "recovery remained unavailable: {error}"
+                    "{what} remained unavailable: {error}"
                 );
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
     }
+}
+fn recover_fixture(h: &Value) -> kv::job_leases::RecoveryCounts {
+    retrying("recovery", || kv::job_leases::recover(h, 64))
 }
 #[test]
 #[should_panic(expected = "recovery remained unavailable")]
@@ -220,6 +225,11 @@ fn expired_child_stops_even_when_backend_cannot_renew() {
 }
 #[test]
 fn legacy_active_is_visible_as_unknown_and_not_retryable() {
+    // retry_job_by_id and job_status_counts read the global JOB_RUNTIME
+    // handle; hold the shared lock so parallel runtime tests cannot replace
+    // or reset it mid-test.
+    let _guard = tests::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    JOB_RUNTIME.reset();
     let h = kv::open_kv(":memory:").unwrap();
     *JOB_RUNTIME.kv_handle_info.lock().unwrap() = Some(extract_kv_handle_info(&h).unwrap());
     let mut data = HashMap::from([
@@ -227,12 +237,12 @@ fn legacy_active_is_visible_as_unknown_and_not_retryable() {
         ("status".into(), Value::String("active".into())),
     ]);
     kv::kv_set(&h, "jobs:data:legacy", &Value::Map(data.clone()), None).unwrap();
-    leases::inspect(&h, &mut data).unwrap();
+    retrying("inspection", || leases::inspect(&h, &mut data));
     assert!(matches!(data.get("status"),Some(Value::String(s)) if s=="outcome_unknown"));
     assert!(matches!(
         retry_job_by_id("legacy").unwrap(),
         RetryResult::NotRetryable(_)
     ));
     assert_eq!(job_status_counts().unwrap().outcome_unknown, 1);
-    assert_eq!(kv::job_leases::recover(&h, 64).unwrap().requeued, 0);
+    assert_eq!(recover_fixture(&h).requeued, 0);
 }
