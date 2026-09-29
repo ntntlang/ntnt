@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- SQLite job state changes (claim, renew, recovery) no longer fail with a generic `job state storage operation failed` when another worker slot or lease keeper briefly holds the store, or another connection holds the write lock. These are now reported as retryable contention (`local_busy` / `busy`), which job recovery already retries.
 - On macOS, a `std/process` run that timed out could fail with `failed to clean up process descendants: failed to inspect macOS process <pid>` instead of returning a timed-out result. A process that is partway through exiting can briefly be impossible to inspect; the check now retries for up to 250ms before failing.
 
 ## 0.5.4
