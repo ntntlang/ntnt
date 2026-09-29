@@ -891,8 +891,31 @@ fn signal_process_group(child: &Child, signal: libc::c_int) -> std::io::Result<(
     }
 }
 
+/// A process in the middle of exiting can be invisible to `proc_pidinfo` while
+/// `kill(pid, 0)` still succeeds. That state resolves within milliseconds, so
+/// retry an inconclusive inspection briefly before failing closed.
+#[cfg(target_os = "macos")]
+const MACOS_INSPECT_RETRY: Duration = Duration::from_millis(250);
+
 #[cfg(target_os = "macos")]
 fn macos_process_is_live(pid: libc::pid_t) -> std::io::Result<bool> {
+    let deadline = Instant::now() + MACOS_INSPECT_RETRY;
+    loop {
+        if let Some(live) = macos_process_liveness(pid) {
+            return Ok(live);
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::other(format!(
+                "failed to inspect macOS process {pid}"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// `Some(live)` when the process state is known, `None` when inconclusive.
+#[cfg(target_os = "macos")]
+fn macos_process_liveness(pid: libc::pid_t) -> Option<bool> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let bytes = unsafe {
         libc::proc_pidinfo(
@@ -904,16 +927,14 @@ fn macos_process_is_live(pid: libc::pid_t) -> std::io::Result<bool> {
         )
     };
     if bytes as usize == std::mem::size_of::<libc::proc_bsdinfo>() {
-        return Ok(info.pbi_status != libc::SZOMB);
+        return Some(info.pbi_status != libc::SZOMB);
     }
     if unsafe { libc::kill(pid, 0) } == -1
         && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
     {
-        return Ok(false);
+        return Some(false);
     }
-    Err(std::io::Error::other(format!(
-        "failed to inspect macOS process {pid}"
-    )))
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -1863,21 +1884,33 @@ mod tests {
     }
 
     fn with_process_capability<T>(executable: &str, action: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let old_enable = std::env::var_os("NTNT_PROCESS_ENABLE");
-        let old_allow = std::env::var_os("NTNT_PROCESS_ALLOW");
+        /// Restores the process-capability variables on drop, including when
+        /// `action` panics, so one failing test cannot leak them to others.
+        struct RestoreEnv {
+            enable: Option<std::ffi::OsString>,
+            allow: Option<std::ffi::OsString>,
+        }
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in [
+                    ("NTNT_PROCESS_ENABLE", self.enable.take()),
+                    ("NTNT_PROCESS_ALLOW", self.allow.take()),
+                ] {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = RestoreEnv {
+            enable: std::env::var_os("NTNT_PROCESS_ENABLE"),
+            allow: std::env::var_os("NTNT_PROCESS_ALLOW"),
+        };
         std::env::set_var("NTNT_PROCESS_ENABLE", "1");
         std::env::set_var("NTNT_PROCESS_ALLOW", executable);
-        let result = action();
-        match old_enable {
-            Some(value) => std::env::set_var("NTNT_PROCESS_ENABLE", value),
-            None => std::env::remove_var("NTNT_PROCESS_ENABLE"),
-        }
-        match old_allow {
-            Some(value) => std::env::set_var("NTNT_PROCESS_ALLOW", value),
-            None => std::env::remove_var("NTNT_PROCESS_ALLOW"),
-        }
-        result
+        action()
     }
 
     fn result_variant(value: Value) -> (String, Value) {
@@ -1911,7 +1944,7 @@ mod tests {
 
     #[test]
     fn run_is_disabled_without_explicit_capability() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old_enable = std::env::var_os("NTNT_PROCESS_ENABLE");
         std::env::remove_var("NTNT_PROCESS_ENABLE");
         let (program, args) = current_test_command("fixture_print_args", &[]);
@@ -1928,7 +1961,7 @@ mod tests {
 
     #[test]
     fn run_passes_metacharacters_as_literal_arguments() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (program, args) = current_test_command(
             "fixture_print_args",
             &["hello; echo injected", "$(touch nope)", "$HOME"],
@@ -1952,7 +1985,7 @@ mod tests {
 
     #[test]
     fn run_returns_nonzero_exit_as_ok_result() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (program, args) = current_test_command("fixture_nonzero", &[]);
         let result = with_process_capability(&program, || {
             run_from_args(&run_args(program.clone(), args)).expect("run result")
@@ -1971,7 +2004,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_capture_observes_eof_for_quiet_child() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let command = std::env::var_os("COMSPEC").expect("Windows command interpreter path");
         let arguments = ["/D", "/C", "exit", "0"].map(str::to_string);
         let process = spawn_process(
@@ -1994,7 +2027,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_capture_cancellation_completes_pending_read() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let program = std::env::var_os("COMSPEC").expect("Windows command interpreter path");
         let arguments = ["/D", "/Q", "/C", "ping -n 6 127.0.0.1 >nul"].map(str::to_string);
         let mut options = ProcessOptions::run_defaults();
@@ -2094,7 +2127,7 @@ mod tests {
 
     #[test]
     fn run_honors_timeout_and_reaps_child() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (program, args) = current_test_command("fixture_sleep", &[]);
         let options = HashMap::from([
             ("timeout_ms".to_string(), Value::Int(20)),
@@ -2117,7 +2150,7 @@ mod tests {
 
     #[test]
     fn run_stops_child_when_captured_output_exceeds_limit() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (program, args) = current_test_command("fixture_large_output", &[]);
         let options = HashMap::from([
             ("max_output_bytes".to_string(), Value::Int(64)),
@@ -2138,7 +2171,7 @@ mod tests {
 
     #[test]
     fn run_applies_cwd_environment_and_string_stdin() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (program, args) = current_test_command("fixture_context", &[]);
         let directory =
             std::env::temp_dir().join(format!("ntnt-process-context-{}", std::process::id()));
@@ -2197,7 +2230,7 @@ mod tests {
     #[test]
     fn run_rejects_executable_outside_allowlist() {
         let (program, args) = current_test_command("fixture_print_args", &[]);
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old_enable = std::env::var_os("NTNT_PROCESS_ENABLE");
         let old_allow = std::env::var_os("NTNT_PROCESS_ALLOW");
         std::env::set_var("NTNT_PROCESS_ENABLE", "1");
@@ -2255,7 +2288,7 @@ mod tests {
 
     #[test]
     fn lifecycle_signal_after_exit_preserves_result_for_wait() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         RUNTIME.shutdown();
         let (program, argument_values) = current_test_command("fixture_nonzero", &[]);
         let arguments = argument_values
@@ -2307,7 +2340,7 @@ mod tests {
 
     #[test]
     fn lifecycle_signal_during_finalization_is_a_noop() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         RUNTIME.shutdown();
         let (program, argument_values) = current_test_command("fixture_nonzero", &[]);
         let arguments = argument_values
@@ -2350,7 +2383,7 @@ mod tests {
 
     #[test]
     fn lifecycle_start_try_wait_and_cached_wait() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (program, handle) = start_supervised_fixture("fixture_sleep_short");
         assert!(matches!(handle, Value::ProcessHandle(_)));
         let first = with_process_capability(&program, || {
@@ -2393,7 +2426,7 @@ mod tests {
 
     #[test]
     fn completed_process_registry_is_bounded() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         RUNTIME.shutdown();
         let mut handles = Vec::new();
         for _ in 0..(MAX_RETAINED_TERMINAL_PROCESSES + 4) {
@@ -2441,7 +2474,7 @@ mod tests {
 
     #[test]
     fn lifecycle_terminate_and_kill_active_processes() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (program, terminate_handle) = start_supervised_fixture("fixture_sleep");
         let terminated = with_process_capability(&program, || {
             terminate_from_args(std::slice::from_ref(&terminate_handle)).unwrap()
@@ -2471,7 +2504,7 @@ mod tests {
 
     #[test]
     fn lifecycle_runtime_shutdown_reaps_children() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (program, handle) = start_supervised_fixture("fixture_sleep");
         RUNTIME.shutdown();
         let waited = with_process_capability(&program, || {
@@ -2484,7 +2517,7 @@ mod tests {
 
     #[test]
     fn lifecycle_terminate_remains_responsive_while_waiting() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_, handle) = start_supervised_fixture("fixture_sleep");
         let Value::ProcessHandle(id) = handle else {
             panic!("expected process handle");
@@ -2504,7 +2537,7 @@ mod tests {
 
     #[test]
     fn lifecycle_timeout_is_enforced_without_polling() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (program, args) = current_test_command("fixture_sleep", &[]);
         let options = HashMap::from([
             ("timeout_ms".to_string(), Value::Int(20)),
@@ -2540,7 +2573,7 @@ mod tests {
 
     #[test]
     fn lifecycle_output_limit_is_enforced_without_polling() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (program, args) = current_test_command("fixture_large_output", &[]);
         let options = HashMap::from([
             (
@@ -2587,7 +2620,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_timeout_terminates_descendants_that_inherit_capture_pipes() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (program, args) = current_test_command("fixture_spawn_descendant", &[]);
         let options = HashMap::from([
             ("timeout_ms".to_string(), Value::Int(20)),
@@ -2604,7 +2637,10 @@ mod tests {
             "descendant-held pipes must not defeat the timeout"
         );
         let (variant, value) = result_variant(result);
-        assert_eq!(variant, "Ok");
+        assert_eq!(
+            variant, "Ok",
+            "timed-out run must return a result: {value:?}"
+        );
         let Value::Map(result) = value else {
             panic!("expected process result map");
         };
@@ -2614,7 +2650,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn detached_descendant_cannot_block_autonomous_finalization() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let marker =
             std::env::temp_dir().join(format!("ntnt-process-detached-{}", std::process::id()));
         std::fs::remove_file(&marker).ok();
@@ -2694,7 +2730,7 @@ mod tests {
 
     #[test]
     fn runtime_shutdown_interrupts_blocking_run_processes() {
-        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let _runtime_guard = RUNTIME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         RUNTIME.shutdown();
         let runner = std::thread::spawn(|| {
             let (program, args) = current_test_command("fixture_sleep", &[]);
