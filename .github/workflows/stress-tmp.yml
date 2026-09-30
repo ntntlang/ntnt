@@ -1,0 +1,31 @@
+name: TEMP macOS secrets lookup mutation proof
+on:
+  push:
+    branches: [fix/secrets-socket-root-cause]
+jobs:
+  proof:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Lookup regression fails without NotConnected handling
+        run: |
+          cp src/stdlib/secrets/socket.rs saved.rs
+          python3 -c 'from pathlib import Path; p=Path("src/stdlib/secrets/socket.rs"); s=p.read_text(); old="            Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {}\n"; assert old in s; p.write_text(s.replace(old,"",1))'
+          if cargo test --locked --lib socket_provider_lookup_succeeds_when_agent_closed_before_half_close -- --nocapture > mutant.log 2>&1; then
+            cat mutant.log
+            echo 'Mutant unexpectedly passed'
+            exit 1
+          fi
+          cat mutant.log
+          grep -q 'panicked at' mutant.log
+          mv saved.rs src/stdlib/secrets/socket.rs
+      - name: Lookup regression passes with the fix (60 runs)
+        run: |
+          fails=0
+          for i in $(seq 1 60); do
+            cargo test -q --locked --lib socket_provider_lookup_succeeds_when_agent_closed_before_half_close > out.txt 2>&1 || { fails=$((fails+1)); cat out.txt; }
+          done
+          echo "fix: $fails/60 failed"
+          test "$fails" = 0

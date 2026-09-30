@@ -430,15 +430,28 @@ impl SecretProvider for SocketSecretProvider {
     fn lookup(&self, name: &str) -> std::result::Result<ProviderLookup, ProviderError> {
         let deadline = Instant::now() + self.timeout;
         let mut stream = self.connect(deadline)?;
+        let request_id = self.send_request(&mut stream, deadline, name)?;
+        self.finish_lookup(&mut stream, deadline, request_id)
+    }
+}
 
-        let request_id = self.write_request(
-            &mut DeadlineWriter {
-                stream: &mut stream,
-                deadline,
-            },
-            name,
-        )?;
+impl SocketSecretProvider {
+    fn send_request(
+        &self,
+        stream: &mut UnixStream,
+        deadline: Instant,
+        name: &str,
+    ) -> std::result::Result<u64, ProviderError> {
+        self.write_request(&mut DeadlineWriter { stream, deadline }, name)
+    }
 
+    /// Half-close, then read and decode the single response frame.
+    fn finish_lookup(
+        &self,
+        stream: &mut UnixStream,
+        deadline: Instant,
+        request_id: u64,
+    ) -> std::result::Result<ProviderLookup, ProviderError> {
         // A peer that already answered and closed leaves the socket
         // unconnected (ENOTCONN on macOS); its buffered response is still read.
         match stream.shutdown(Shutdown::Write) {
@@ -447,7 +460,7 @@ impl SecretProvider for SocketSecretProvider {
             Err(_) => return Err(self.error(ProviderErrorKind::Unavailable)),
         }
 
-        let response = self.read_response_frame(&mut stream, deadline)?;
+        let response = self.read_response_frame(stream, deadline)?;
         self.decode_response(&response[..response.len() - 1], request_id)
     }
 }
@@ -861,6 +874,43 @@ mod tests {
         assert!(
             shutdown.is_ok() || shutdown.unwrap_err().kind() == std::io::ErrorKind::NotConnected
         );
+    }
+
+    #[test]
+    fn socket_provider_lookup_succeeds_when_agent_closed_before_half_close() {
+        // Deterministic ordering for the lookup path: the agent reads the
+        // request, answers, and closes before the provider half-closes.
+        // macOS then reports ENOTCONN from shutdown(Write); the complete
+        // buffered response must still be decoded.
+        let (mut client, agent) = std::os::unix::net::UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        let provider = provider(socket_path("closed-before-half-close"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let request_id = provider
+            .send_request(&mut client, deadline, "API_KEY")
+            .expect("send request");
+
+        let mut request = String::new();
+        let mut reader = BufReader::new(&agent);
+        reader.read_line(&mut request).expect("agent reads request");
+        drop(reader);
+        let parsed: JsonValue = serde_json::from_str(&request).unwrap();
+        assert_eq!(parsed["request_id"].as_u64(), Some(request_id));
+        let mut agent = agent;
+        agent
+            .write_all(
+                format!(
+                    "{{\"protocol\":1,\"request_id\":{request_id},\"status\":\"found\",\"scope\":\"deployment-a\",\"value\":\"{SECRET_CANARY}\"}}\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        drop(agent);
+
+        let lookup = provider
+            .finish_lookup(&mut client, deadline, request_id)
+            .expect("buffered response from a closed agent must be decoded");
+        assert!(matches!(lookup, ProviderLookup::Found(_)));
     }
 
     #[test]
