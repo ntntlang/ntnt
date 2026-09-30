@@ -334,12 +334,52 @@ mod tests {
         stop: Arc<AtomicBool>,
         threads: Vec<thread::JoinHandle<()>>,
     }
+    // TCP and UDP have distinct Windows exclusion lists. A TCP-assigned port
+    // is not necessarily legal for UDP, so reserve a pair, dropping any partial
+    // reservation before choosing another port. Never change the DNS address
+    // after publishing it to the client.
+    fn bind_fixture_sockets(
+        bind_udp: impl Fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
+    ) -> io::Result<(std::net::TcpListener, std::net::UdpSocket)> {
+        for _ in 0..32 {
+            let tcp = std::net::TcpListener::bind("127.0.0.1:0")?;
+            match bind_udp(tcp.local_addr()?) {
+                Ok(udp) => return Ok((tcp, udp)),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse
+                    ) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "could not reserve a shared TCP/UDP fixture port",
+        ))
+    }
+
+    #[test]
+    fn fixture_reserves_a_port_usable_by_both_protocols() {
+        let attempts = std::cell::Cell::new(0);
+        let (tcp, udp) = bind_fixture_sockets(|addr| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            std::net::UdpSocket::bind(addr)
+        })
+        .unwrap();
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(tcp.local_addr().unwrap(), udp.local_addr().unwrap());
+    }
+
     impl Fixture {
         fn new(truncated: bool, delay_ms: u64, drop_first: bool) -> Self {
-            let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let (tcp_listener, udp_socket) =
+                bind_fixture_sockets(std::net::UdpSocket::bind).unwrap();
             let addr = tcp_listener.local_addr().unwrap();
             tcp_listener.set_nonblocking(true).unwrap();
-            let udp_socket = std::net::UdpSocket::bind(addr).unwrap();
             udp_socket
                 .set_read_timeout(Some(Duration::from_millis(20)))
                 .unwrap();
@@ -555,6 +595,45 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AddrNotAvailable);
+    }
+
+    #[test]
+    fn denied_udp_fallback_does_not_mask_os_assignment_failure() {
+        let attempts = std::cell::Cell::new(0);
+        let error = bind_udp_socket("127.0.0.1:55000".parse().unwrap(), |_| {
+            attempts.set(attempts.get() + 1);
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn udp_bind_errors_other_than_reserved_port_denial_are_not_hidden() {
+        for kind in [io::ErrorKind::AddrInUse, io::ErrorKind::AddrNotAvailable] {
+            let attempts = std::cell::Cell::new(0);
+            let error = bind_udp_socket("127.0.0.1:55000".parse().unwrap(), |_| {
+                attempts.set(attempts.get() + 1);
+                Err(io::Error::from(kind))
+            })
+            .unwrap_err();
+            assert_eq!(error.kind(), kind);
+            assert_eq!(attempts.get(), 1);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn udp_bind_uses_os_assignment_for_real_windows_exclusion() {
+        let Ok(port) = std::env::var("NTNT_TEST_EXCLUDED_UDP_PORT") else {
+            return;
+        };
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let denied = std::net::UdpSocket::bind(addr).unwrap_err();
+        assert_eq!(denied.raw_os_error(), Some(10013));
+        let socket = bind_udp_socket(addr, std::net::UdpSocket::bind).unwrap();
+        assert_ne!(socket.local_addr().unwrap().port(), addr.port());
     }
 
     #[test]

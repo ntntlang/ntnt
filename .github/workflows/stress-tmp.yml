@@ -8,29 +8,39 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      NTNT_TEST_EXCLUDED_UDP_PORT: '55000'
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Excluded UDP port ranges on this runner
-        run: netsh int ipv4 show excludedportrange protocol=udp
-      - name: Baseline on main (fixture test, 60 runs)
+      - name: Reserve a real UDP port through Windows
         run: |
-          git worktree add ../base origin/main
-          cd ../base
-          cargo test --locked --lib --no-run -q
+          netsh int ipv4 add excludedportrange protocol=udp startport=55000 numberofports=1
+          netsh int ipv4 show excludedportrange protocol=udp
+      - name: Regression must fail with old bind behavior
+        run: |
+          cp src/stdlib/net/dns_deadline.rs saved.rs
+          python -c 'from pathlib import Path; p=Path("src/stdlib/net/dns_deadline.rs"); s=p.read_text(); start=s.index("    match bind(local)"); end=s.index("\n}\n",start); p.write_text(s[:start]+"    bind(local)"+s[end:])'
+          if cargo test --locked --lib udp_bind_uses_os_assignment_for_real_windows_exclusion -- --nocapture > regression.log 2>&1; then
+            cat regression.log
+            echo 'Old bind behavior unexpectedly passed excluded-port regression'
+            exit 1
+          fi
+          cat regression.log
+          grep -q '10013' regression.log
+          grep -q 'panicked at' regression.log
+          mv saved.rs src/stdlib/net/dns_deadline.rs
+      - name: Fixed resolver and fixture regression
+        run: |
+          cargo test --locked --lib stdlib::net::dns_deadline:: -- --nocapture
+      - name: Full DNS module stress
+        run: |
           fails=0
           for i in $(seq 1 60); do
-            cargo test -q --locked --lib stdlib::net::dns_deadline:: > out.txt 2>&1 || { fails=$((fails+1)); grep -E "panicked|10013|FAILED" out.txt | head -4; }
-          done
-          echo "main: $fails/60 failed"
-      - name: With fix (fixture test, 60 runs)
-        run: |
-          cargo test --locked --lib --no-run -q
-          fails=0
-          for i in $(seq 1 60); do
-            cargo test -q --locked --lib stdlib::net::dns_deadline:: > out.txt 2>&1 || { fails=$((fails+1)); grep -E "panicked|10013|FAILED" out.txt | head -4; }
+            cargo test -q --locked --lib stdlib::net::dns_deadline:: > out.txt 2>&1 || { fails=$((fails+1)); cat out.txt; }
           done
           echo "fix: $fails/60 failed"
+          test "$fails" = 0
