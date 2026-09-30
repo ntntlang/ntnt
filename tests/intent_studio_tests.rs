@@ -814,6 +814,34 @@ fn intent_lint_clean_file_exits_zero() {
     assert!(stdout.contains("No issues found"), "{stdout}");
 }
 
+/// Regression for #224: documented header primitives must resolve.
+#[test]
+fn intent_lint_resolves_header_exists_and_equals_terms() {
+    let content = r#"## Glossary
+
+| Term | Means |
+|------|-------|
+| a visitor opens {path} | GET {path} |
+
+---
+
+Feature: Redirect header
+  id: feature.redirect_header
+
+  Scenario: The redirect identifies its destination
+    When a visitor opens /
+    → status: 302
+    → header location exists
+    → header location equals /login
+    → header "location" equals "/login"
+    → header "Content-Type" contains "text/html"
+"#;
+    let (stdout, _stderr, exit_code) = run_intent_lint(content, &[]);
+    assert_eq!(exit_code, 0, "header terms should resolve: {stdout}");
+    assert!(!stdout.contains("unresolved_term"), "{stdout}");
+    assert!(stdout.contains("No issues found"), "{stdout}");
+}
+
 #[test]
 fn intent_lint_unknown_term_exits_one_with_suggestion() {
     let content = CLEAN_INTENT.replace("→ success response", "→ succes response");

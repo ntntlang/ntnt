@@ -482,3 +482,97 @@ fn native_library_value_call_needs_no_server() {
         }
     }
 }
+
+/// Regression for #224: `header {name} exists|equals` must execute against a
+/// real response, pass on the right value and fail on a wrong/missing one.
+#[test]
+fn http_header_exists_and_equals_execute_against_redirect() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("redirect.tnt"),
+        "import { redirect } from \"std/http/server\"\n\n// @implements: feature.redirect_header\nfn home(req) {\n    return redirect(\"/login\")\n}\n\nget(\"/\", home)\nlisten(8080)\n",
+    )
+    .unwrap();
+    let write_intent = |outcomes: &[&str]| {
+        let body: String = outcomes.iter().map(|o| format!("    → {o}\n")).collect();
+        let path = root.path().join("redirect.intent");
+        std::fs::write(
+            &path,
+            format!("## Glossary\n\n| Term | Means |\n|------|-------|\n| a visitor opens {{path}} | GET {{path}} |\n\n---\n\nFeature: Redirect header\n  id: feature.redirect_header\n\n  Scenario: The redirect identifies its destination\n    When a visitor opens /\n{body}"),
+        )
+        .unwrap();
+        path
+    };
+    let run = |path: &std::path::Path| {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        drop(listener);
+        let output = run_suite(path, &["--port", port.as_str(), "--json"]);
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+                panic!(
+                    "{e}: stdout={}\nstderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+        let assertions = report["features"][0]["scenarios"][0]["test_result"]["assertions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let results: Vec<(String, bool)> = assertions
+            .iter()
+            .map(|a| {
+                (
+                    a["assertion_text"].as_str().unwrap().to_string(),
+                    a["passed"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        (output.status.success(), report, results)
+    };
+
+    let passing = write_intent(&[
+        "status: 302",
+        "header location exists",
+        "header Location equals /login",
+        "header \"location\" equals \"/login\"",
+    ]);
+    let (ok, report, results) = run(&passing);
+    assert!(ok, "{report:#}");
+    assert_eq!(report["total_assertions"], 4, "{report:#}");
+    assert_eq!(report["passed_assertions"], 4, "{report:#}");
+    assert_eq!(
+        results,
+        vec![
+            ("status: 302".to_string(), true),
+            ("header \"location\" exists".to_string(), true),
+            ("header \"Location\" equals \"/login\"".to_string(), true),
+            ("header \"location\" equals \"/login\"".to_string(), true),
+        ]
+    );
+
+    // Equals is exact (a prefix is not a match) and a missing header fails.
+    let failing = write_intent(&[
+        "status: 302",
+        "header x-not-present exists",
+        "header location equals /log",
+        "header \"location\" equals \"/login/extra\"",
+    ]);
+    let (ok, report, results) = run(&failing);
+    assert!(!ok, "{report:#}");
+    assert_eq!(report["total_assertions"], 4, "{report:#}");
+    assert_eq!(report["failed_assertions"], 3, "{report:#}");
+    assert_eq!(
+        results,
+        vec![
+            ("status: 302".to_string(), true),
+            ("header \"x-not-present\" exists".to_string(), false),
+            ("header \"location\" equals \"/log\"".to_string(), false),
+            (
+                "header \"location\" equals \"/login/extra\"".to_string(),
+                false
+            ),
+        ]
+    );
+}

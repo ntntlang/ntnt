@@ -167,7 +167,7 @@ pub fn standard_vocabulary() -> Vocabulary {
         "header {name} exists",
         Primitive::Check {
             op: CheckOp::Exists,
-            path: "response.headers".to_string(), // Will be suffixed with .{name}
+            path: "response.headers.{name}".to_string(),
             expected: Value::Null,
         },
     );
