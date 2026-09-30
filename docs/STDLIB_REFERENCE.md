@@ -1877,7 +1877,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`current_auth_challenge`](#currentauthchallenge) | Get the current staged auth challenge from the request. |
 | [`current_session`](#currentsession) | Get the current session from the request. |
 | [`current_user`](#currentuser) | Get the current authenticated user from the request. |
-| [`enable_auth`](#enableauth) | Initialize the authentication system with OAuth providers. |
+| [`enable_auth`](#enableauth) | Initialize the authentication system with OAuth providers. Pass an empty provider array for local-only auth (passwords, magic links, sessions) without OAuth. Every call form accepts the same option keys. |
 | [`get_session`](#getsession) | Get the current session from the request. |
 | [`get_user`](#getuser) | Get the current authenticated user from the request. |
 | [`has_group`](#hasgroup) | Check app-owned group IDs from authenticated session data. |
@@ -2544,7 +2544,7 @@ current_user(req) otherwise return redirect("/login")  // Require a current user
 enable_auth(providers: [Provider], preset_or_options?: String | Map, overrides?: Map) -> Unit
 ```
 
-Initialize the authentication system with OAuth providers.
+Initialize the authentication system with OAuth providers. Pass an empty provider array for local-only auth (passwords, magic links, sessions) without OAuth. Every call form accepts the same option keys.
 
 Stores provider configurations for use by auth handlers. After calling this, you can use auth_start, auth_callback, and auth_logout with routes to enable OAuth login.
 

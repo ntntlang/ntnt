@@ -3329,6 +3329,8 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/auth
     // @signature enable_auth(providers: [Provider], preset_or_options?: String | Map, overrides?: Map) -> Unit
     // Initialize the authentication system with OAuth providers.
+    // Pass an empty provider array for local-only auth (passwords, magic links,
+    // sessions) without OAuth. Every call form accepts the same option keys.
     //
     // Stores provider configurations for use by auth handlers. After calling this,
     // you can use auth_start, auth_callback, and auth_logout
@@ -3359,488 +3361,15 @@ pub fn init() -> HashMap<String, Value> {
         "enable_auth".to_string(),
         Value::NativeFunction {
             name: "enable_auth".to_string(),
-            arity: 0, // Variadic: 1-2 args (providers, options?)
+            arity: 0, // Variadic: 1-3 args (providers, preset_or_options?, overrides?)
             max_arity: 0,
             requires: Some(RuntimeCapability::HttpConfig),
             func: |args| {
-                if args.is_empty() || args.len() > 3 {
-                    return Err(IntentError::type_error(
-                        "[auth] enable_auth() requires 1 to 3 arguments (providers, optional preset/options, optional overrides)"
-                            .to_string(),
-                    ));
-                }
-
-                // Parse providers array
-                let providers_arr = match &args[0] {
-                    Value::Array(arr) => arr.clone(),
-                    _ => {
-                        return Err(IntentError::type_error(
-                            "[auth] enable_auth() first argument must be an array of providers"
-                                .to_string(),
-                        ))
-                    }
-                };
-
-                let mut preset_name: Option<String> = None;
-                let mut options: Option<HashMap<String, Value>> = None;
-
-                match args.get(1) {
-                    Some(Value::Map(m)) => options = Some(m.clone()),
-                    Some(Value::String(s)) => preset_name = Some(s.clone()),
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() second argument must be a preset string or options map, got {}",
-                            other.type_name()
-                        )))
-                    }
-                    None => {}
-                }
-
-                if let Some(arg3) = args.get(2) {
-                    match arg3 {
-                        Value::Map(m) => {
-                            if options.is_some() {
-                                return Err(IntentError::type_error(
-                                    "[auth] enable_auth() accepts at most one options/overrides map"
-                                        .to_string(),
-                                ));
-                            }
-                            options = Some(m.clone());
-                        }
-                        other => {
-                            return Err(IntentError::type_error(format!(
-                                "[auth] enable_auth() third argument must be an overrides map, got {}",
-                                other.type_name()
-                            )))
-                        }
-                    }
-                }
-
-                // Parse providers
-                let mut providers = Vec::new();
-                for (idx, pval) in providers_arr.iter().enumerate() {
-                    match pval {
-                        Value::Map(pmap) => {
-                            let provider = value_map_to_provider(pmap).map_err(|e| {
-                                IntentError::type_error(format!(
-                                    "[auth] Invalid provider at index {}: {}",
-                                    idx, e
-                                ))
-                            })?;
-                            providers.push(provider);
-                        }
-                        _ => {
-                            return Err(IntentError::type_error(format!(
-                                "[auth] Provider at index {} must be a map (use oauth() to create)",
-                                idx
-                            )));
-                        }
-                    }
-                }
-
-                if let Some(opts) = &options {
-                    for key in opts.keys() {
-                        let known = matches!(
-                            key.as_str(),
-                            "session_secret"
-                                | "session_ttl"
-                                | "refresh_ttl"
-                                | "sliding_sessions"
-                                | "refresh_throttle"
-                                | "max_session_ttl"
-                                | "success_url"
-                                | "after_login"
-                                | "failure_url"
-                                | "after_failure"
-                                | "logout_url"
-                                | "after_logout"
-                                | "route_prefix"
-                                | "login_page"
-                                | "login_page_title"
-                                | "login_page_logo_url"
-                                | "login_page_heading"
-                                | "login_page_copy"
-                                | "cookie_name"
-                                | "cookie_secure"
-                                | "cookie_same_site"
-                                | "cookie_http_only"
-                                | "session_store"
-                                | "store_tokens"
-                                | "health_endpoint"
-                                | "protected_paths"
-                        );
-                        if !known {
-                            let suggestion = auth_option_suggestion(key)
-                                .map(|s| format!(" Did you mean \"{}\"?", s))
-                                .unwrap_or_default();
-                            return Err(IntentError::type_error(format!(
-                                "[auth] enable_auth() unknown option \"{}\".{}",
-                                key, suggestion
-                            )));
-                        }
-                    }
-                }
-
-                let mut base_config = match preset_name.as_ref() {
-                    Some(name) => auth_preset_config(name).map_err(IntentError::type_error)?,
-                    None => AuthConfig::default(),
-                };
-
-                let get_option = |keys: &[&str]| {
-                    options
-                        .as_ref()
-                        .and_then(|opts| keys.iter().find_map(|key| opts.get(*key)))
-                };
-
-                let session_secret = match get_option(&["session_secret"]) {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"session_secret\" must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.session_secret.clone(),
-                };
-
-                let session_ttl = match get_option(&["session_ttl"]) {
-                    Some(Value::Int(n)) if *n > 0 => *n,
-                    Some(Value::Int(_)) => {
-                        return Err(IntentError::type_error(
-                            "[auth] enable_auth() option \"session_ttl\" must be > 0".to_string(),
-                        ));
-                    }
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"session_ttl\" must be an int, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.session_ttl,
-                };
-
-                let success_url = match get_option(&["success_url", "after_login"]) {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"success_url\"/\"after_login\" must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.success_url.clone(),
-                };
-
-                let failure_url = match get_option(&["failure_url", "after_failure"]) {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"failure_url\"/\"after_failure\" must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.failure_url.clone(),
-                };
-
-                let logout_url = match get_option(&["logout_url", "after_logout"]) {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"logout_url\"/\"after_logout\" must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.logout_url.clone(),
-                };
-
-                let protected_paths = match get_option(&["protected_paths"]) {
-                    Some(Value::String(s)) => vec![s.clone()],
-                    Some(Value::Array(arr)) => {
-                        let mut paths = Vec::new();
-                        for value in arr {
-                            match value {
-                                Value::String(path) => paths.push(path.clone()),
-                                other => {
-                                    return Err(IntentError::type_error(format!(
-                                        "[auth] enable_auth() option \"protected_paths\" entries must be strings, got {}",
-                                        other.type_name()
-                                    )));
-                                }
-                            }
-                        }
-                        paths
-                    }
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"protected_paths\" must be a string or array of strings, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.protected_paths.clone(),
-                };
-
-                let route_prefix = match get_option(&["route_prefix"]) {
-                    Some(Value::String(s)) => routes::normalize_auth_route_prefix_option(s)
-                        .map_err(IntentError::type_error)?,
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"route_prefix\" must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.route_prefix.clone(),
-                };
-
-                let login_page_enabled = match get_option(&["login_page"]) {
-                    Some(Value::Bool(b)) => *b,
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"login_page\" must be a bool, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.login_page_enabled,
-                };
-
-                let login_page_title = match get_option(&["login_page_title"]) {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"login_page_title\" must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.login_page_title.clone(),
-                };
-
-                let login_page_logo_url = match get_option(&["login_page_logo_url"]) {
-                    Some(Value::String(s)) => {
-                        let trimmed = s.trim();
-                        if trimmed.is_empty() {
-                            None
-                        } else {
-                            Some(trimmed.to_string())
-                        }
-                    }
-                    Some(Value::EnumValue {
-                        enum_name,
-                        variant,
-                        ..
-                    }) if enum_name == "Option" && variant == "None" => None,
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"login_page_logo_url\" must be a string or None, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.login_page_logo_url.clone(),
-                };
-
-                let login_page_heading = match get_option(&["login_page_heading"]) {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"login_page_heading\" must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.login_page_heading.clone(),
-                };
-
-                let login_page_copy = match get_option(&["login_page_copy"]) {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"login_page_copy\" must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.login_page_copy.clone(),
-                };
-
-                let cookie_name = match get_option(&["cookie_name"]) {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"cookie_name\" must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.cookie_name.clone(),
-                };
-
-                let cookie_secure = match get_option(&["cookie_secure"]) {
-                    Some(Value::Bool(b)) => *b,
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"cookie_secure\" must be a bool, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => default_auth_cookie_secure_env()
-                };
-
-                let cookie_same_site = match get_option(&["cookie_same_site"]) {
-                    Some(Value::String(s)) => normalize_cookie_same_site(s)
-                        .map_err(IntentError::type_error)?,
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"cookie_same_site\" must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.cookie_same_site.clone(),
-                };
-
-                let cookie_http_only = match get_option(&["cookie_http_only"]) {
-                    Some(Value::Bool(b)) => *b,
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"cookie_http_only\" must be a bool, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.cookie_http_only,
-                };
-
-                let session_store = match get_option(&["session_store"]) {
-                    Some(Value::String(s)) => {
-                        parse_auth_session_store(s).map_err(IntentError::type_error)?
-                    }
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"session_store\" must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.session_store.clone(),
-                };
-
-                // Initialize database/cache if needed
-                if let Err(e) = initialize_session_store(&session_store) {
+                let config = parse_enable_auth_args(args)?;
+                initialize_session_store(&config.session_store).map_err(|e| {
                     eprintln!("[auth] Failed to initialize session store: {}", e);
-                    return Err(IntentError::runtime_error(format!(
-                        "Failed to initialize session store: {}",
-                        e
-                    )));
-                }
-
-                let health_endpoint = match get_option(&["health_endpoint"]) {
-                    Some(Value::Bool(b)) => *b,
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"health_endpoint\" must be a bool, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.health_endpoint,
-                };
-
-                let store_tokens = match get_option(&["store_tokens"]) {
-                    Some(Value::Bool(b)) => *b,
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"store_tokens\" must be a bool, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.store_tokens,
-                };
-
-                let refresh_ttl = match get_option(&["refresh_ttl"]) {
-                    Some(Value::Int(n)) if *n > 0 => *n,
-                    Some(Value::Int(_)) => {
-                        return Err(IntentError::type_error(
-                            "[auth] enable_auth() option \"refresh_ttl\" must be > 0".to_string(),
-                        ));
-                    }
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"refresh_ttl\" must be an int, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.refresh_ttl,
-                };
-
-                let sliding_sessions = match get_option(&["sliding_sessions"]) {
-                    Some(Value::Bool(b)) => *b,
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"sliding_sessions\" must be a bool, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.sliding_sessions,
-                };
-
-                let refresh_throttle = match get_option(&["refresh_throttle"]) {
-                    Some(Value::Int(n)) => *n,
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"refresh_throttle\" must be an int, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.refresh_throttle,
-                };
-
-                if refresh_throttle < 0 {
-                    return Err(IntentError::type_error(
-                        "[auth] enable_auth() option \"refresh_throttle\" must be >= 0"
-                            .to_string(),
-                    ));
-                }
-
-                let max_session_ttl = match get_option(&["max_session_ttl"]) {
-                    Some(Value::Int(n)) => Some(*n),
-                    Some(Value::EnumValue {
-                        enum_name,
-                        variant,
-                        ..
-                    }) if enum_name == "Option" && variant == "None" => None,
-                    Some(other) => {
-                        return Err(IntentError::type_error(format!(
-                            "[auth] enable_auth() option \"max_session_ttl\" must be an int or None, got {}",
-                            other.type_name()
-                        )));
-                    }
-                    None => base_config.max_session_ttl,
-                };
-
-                if let Some(max_session_ttl) = max_session_ttl {
-                    if max_session_ttl <= 0 {
-                        return Err(IntentError::type_error(
-                            "[auth] enable_auth() option \"max_session_ttl\" must be > 0"
-                                .to_string(),
-                        ));
-                    }
-                }
-
-                base_config.providers = providers;
-                base_config.success_url = success_url;
-                base_config.failure_url = failure_url;
-                base_config.logout_url = logout_url;
-                base_config.protected_paths = protected_paths;
-                base_config.route_prefix = route_prefix;
-                base_config.login_page_enabled = login_page_enabled;
-                base_config.login_page_title = login_page_title;
-                base_config.login_page_logo_url = login_page_logo_url;
-                base_config.login_page_heading = login_page_heading;
-                base_config.login_page_copy = login_page_copy;
-                base_config.cookie_name = cookie_name;
-                base_config.cookie_secure = cookie_secure;
-                base_config.cookie_same_site = cookie_same_site;
-                base_config.cookie_http_only = cookie_http_only;
-                base_config.session_ttl = session_ttl;
-                base_config.refresh_ttl = refresh_ttl;
-                base_config.sliding_sessions = sliding_sessions;
-                base_config.refresh_throttle = refresh_throttle;
-                base_config.max_session_ttl = max_session_ttl;
-                base_config.store_tokens = store_tokens;
-                base_config.health_endpoint = health_endpoint;
-                base_config.session_secret = session_secret;
-                base_config.session_store = session_store;
-                let config = base_config;
+                    IntentError::runtime_error(format!("Failed to initialize session store: {}", e))
+                })?;
 
                 // Initialize auth
                 init_auth(config.clone());
@@ -5728,6 +5257,476 @@ pub fn init() -> HashMap<String, Value> {
     );
 
     module
+}
+
+/// Parse every `enable_auth` call form into one `AuthConfig` without side
+/// effects. Both the `std/auth` native function and the interpreter's
+/// server action use this, so every form accepts the same option keys.
+///
+/// Forms: `(providers)`, `(providers, options)`, `(providers, preset)`,
+/// `(providers, preset, overrides)`. An empty provider array configures
+/// local-only auth (password/magic-link/session helpers without OAuth).
+pub fn parse_enable_auth_args(args: &[Value]) -> Result<AuthConfig> {
+    if args.is_empty() || args.len() > 3 {
+        return Err(IntentError::type_error(
+                "[auth] enable_auth() requires 1 to 3 arguments (providers, optional preset/options, optional overrides)"
+                    .to_string(),
+            ));
+    }
+
+    // Parse providers array
+    let providers_arr = match &args[0] {
+        Value::Array(arr) => arr.clone(),
+        _ => {
+            return Err(IntentError::type_error(
+                "[auth] enable_auth() first argument must be an array of providers".to_string(),
+            ))
+        }
+    };
+
+    let mut preset_name: Option<String> = None;
+    let mut options: Option<HashMap<String, Value>> = None;
+
+    match args.get(1) {
+        Some(Value::Map(m)) => options = Some(m.clone()),
+        Some(Value::String(s)) => preset_name = Some(s.clone()),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+            "[auth] enable_auth() second argument must be a preset string or options map, got {}",
+            other.type_name()
+        )))
+        }
+        None => {}
+    }
+
+    if let Some(arg3) = args.get(2) {
+        match arg3 {
+            Value::Map(m) => {
+                if options.is_some() {
+                    return Err(IntentError::type_error(
+                        "[auth] enable_auth() accepts at most one options/overrides map"
+                            .to_string(),
+                    ));
+                }
+                options = Some(m.clone());
+            }
+            other => {
+                return Err(IntentError::type_error(format!(
+                    "[auth] enable_auth() third argument must be an overrides map, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    // Parse providers
+    let mut providers = Vec::new();
+    for (idx, pval) in providers_arr.iter().enumerate() {
+        match pval {
+            Value::Map(pmap) => {
+                let provider = value_map_to_provider(pmap).map_err(|e| {
+                    IntentError::type_error(format!(
+                        "[auth] Invalid provider at index {}: {}",
+                        idx, e
+                    ))
+                })?;
+                providers.push(provider);
+            }
+            _ => {
+                return Err(IntentError::type_error(format!(
+                    "[auth] Provider at index {} must be a map (use oauth() to create)",
+                    idx
+                )));
+            }
+        }
+    }
+
+    if let Some(opts) = &options {
+        for key in opts.keys() {
+            let known = matches!(
+                key.as_str(),
+                "session_secret"
+                    | "session_ttl"
+                    | "refresh_ttl"
+                    | "sliding_sessions"
+                    | "refresh_throttle"
+                    | "max_session_ttl"
+                    | "success_url"
+                    | "after_login"
+                    | "failure_url"
+                    | "after_failure"
+                    | "logout_url"
+                    | "after_logout"
+                    | "route_prefix"
+                    | "login_page"
+                    | "login_page_title"
+                    | "login_page_logo_url"
+                    | "login_page_heading"
+                    | "login_page_copy"
+                    | "cookie_name"
+                    | "cookie_secure"
+                    | "cookie_same_site"
+                    | "cookie_http_only"
+                    | "session_store"
+                    | "store_tokens"
+                    | "health_endpoint"
+                    | "protected_paths"
+            );
+            if !known {
+                let suggestion = auth_option_suggestion(key)
+                    .map(|s| format!(" Did you mean \"{}\"?", s))
+                    .unwrap_or_default();
+                return Err(IntentError::type_error(format!(
+                    "[auth] enable_auth() unknown option \"{}\".{}",
+                    key, suggestion
+                )));
+            }
+        }
+    }
+
+    let mut base_config = match preset_name.as_ref() {
+        Some(name) => auth_preset_config(name).map_err(IntentError::type_error)?,
+        None => AuthConfig::default(),
+    };
+
+    let get_option = |keys: &[&str]| {
+        options
+            .as_ref()
+            .and_then(|opts| keys.iter().find_map(|key| opts.get(*key)))
+    };
+
+    let session_secret = match get_option(&["session_secret"]) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"session_secret\" must be a string, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.session_secret.clone(),
+    };
+
+    let session_ttl = match get_option(&["session_ttl"]) {
+        Some(Value::Int(n)) if *n > 0 => *n,
+        Some(Value::Int(_)) => {
+            return Err(IntentError::type_error(
+                "[auth] enable_auth() option \"session_ttl\" must be > 0".to_string(),
+            ));
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"session_ttl\" must be an int, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.session_ttl,
+    };
+
+    let success_url = match get_option(&["success_url", "after_login"]) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                    "[auth] enable_auth() option \"success_url\"/\"after_login\" must be a string, got {}",
+                    other.type_name()
+                )));
+        }
+        None => base_config.success_url.clone(),
+    };
+
+    let failure_url = match get_option(&["failure_url", "after_failure"]) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                    "[auth] enable_auth() option \"failure_url\"/\"after_failure\" must be a string, got {}",
+                    other.type_name()
+                )));
+        }
+        None => base_config.failure_url.clone(),
+    };
+
+    let logout_url = match get_option(&["logout_url", "after_logout"]) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                    "[auth] enable_auth() option \"logout_url\"/\"after_logout\" must be a string, got {}",
+                    other.type_name()
+                )));
+        }
+        None => base_config.logout_url.clone(),
+    };
+
+    let protected_paths = match get_option(&["protected_paths"]) {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(arr)) => {
+            let mut paths = Vec::new();
+            for value in arr {
+                match value {
+                    Value::String(path) => paths.push(path.clone()),
+                    other => {
+                        return Err(IntentError::type_error(format!(
+                                "[auth] enable_auth() option \"protected_paths\" entries must be strings, got {}",
+                                other.type_name()
+                            )));
+                    }
+                }
+            }
+            paths
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                    "[auth] enable_auth() option \"protected_paths\" must be a string or array of strings, got {}",
+                    other.type_name()
+                )));
+        }
+        None => base_config.protected_paths.clone(),
+    };
+
+    let route_prefix = match get_option(&["route_prefix"]) {
+        Some(Value::String(s)) => {
+            routes::normalize_auth_route_prefix_option(s).map_err(IntentError::type_error)?
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"route_prefix\" must be a string, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.route_prefix.clone(),
+    };
+
+    let login_page_enabled = match get_option(&["login_page"]) {
+        Some(Value::Bool(b)) => *b,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"login_page\" must be a bool, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.login_page_enabled,
+    };
+
+    let login_page_title = match get_option(&["login_page_title"]) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"login_page_title\" must be a string, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.login_page_title.clone(),
+    };
+
+    let login_page_logo_url = match get_option(&["login_page_logo_url"]) {
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Some(Value::EnumValue {
+            enum_name, variant, ..
+        }) if enum_name == "Option" && variant == "None" => None,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                    "[auth] enable_auth() option \"login_page_logo_url\" must be a string or None, got {}",
+                    other.type_name()
+                )));
+        }
+        None => base_config.login_page_logo_url.clone(),
+    };
+
+    let login_page_heading = match get_option(&["login_page_heading"]) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"login_page_heading\" must be a string, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.login_page_heading.clone(),
+    };
+
+    let login_page_copy = match get_option(&["login_page_copy"]) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"login_page_copy\" must be a string, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.login_page_copy.clone(),
+    };
+
+    let cookie_name = match get_option(&["cookie_name"]) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"cookie_name\" must be a string, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.cookie_name.clone(),
+    };
+
+    let cookie_secure = match get_option(&["cookie_secure"]) {
+        Some(Value::Bool(b)) => *b,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"cookie_secure\" must be a bool, got {}",
+                other.type_name()
+            )));
+        }
+        None => default_auth_cookie_secure_env(),
+    };
+
+    let cookie_same_site = match get_option(&["cookie_same_site"]) {
+        Some(Value::String(s)) => normalize_cookie_same_site(s).map_err(IntentError::type_error)?,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"cookie_same_site\" must be a string, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.cookie_same_site.clone(),
+    };
+
+    let cookie_http_only = match get_option(&["cookie_http_only"]) {
+        Some(Value::Bool(b)) => *b,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"cookie_http_only\" must be a bool, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.cookie_http_only,
+    };
+
+    let session_store = match get_option(&["session_store"]) {
+        Some(Value::String(s)) => parse_auth_session_store(s).map_err(IntentError::type_error)?,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"session_store\" must be a string, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.session_store.clone(),
+    };
+
+    let health_endpoint = match get_option(&["health_endpoint"]) {
+        Some(Value::Bool(b)) => *b,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"health_endpoint\" must be a bool, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.health_endpoint,
+    };
+
+    let store_tokens = match get_option(&["store_tokens"]) {
+        Some(Value::Bool(b)) => *b,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"store_tokens\" must be a bool, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.store_tokens,
+    };
+
+    let refresh_ttl = match get_option(&["refresh_ttl"]) {
+        Some(Value::Int(n)) if *n > 0 => *n,
+        Some(Value::Int(_)) => {
+            return Err(IntentError::type_error(
+                "[auth] enable_auth() option \"refresh_ttl\" must be > 0".to_string(),
+            ));
+        }
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"refresh_ttl\" must be an int, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.refresh_ttl,
+    };
+
+    let sliding_sessions = match get_option(&["sliding_sessions"]) {
+        Some(Value::Bool(b)) => *b,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"sliding_sessions\" must be a bool, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.sliding_sessions,
+    };
+
+    let refresh_throttle = match get_option(&["refresh_throttle"]) {
+        Some(Value::Int(n)) => *n,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"refresh_throttle\" must be an int, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.refresh_throttle,
+    };
+
+    if refresh_throttle < 0 {
+        return Err(IntentError::type_error(
+            "[auth] enable_auth() option \"refresh_throttle\" must be >= 0".to_string(),
+        ));
+    }
+
+    let max_session_ttl = match get_option(&["max_session_ttl"]) {
+        Some(Value::Int(n)) => Some(*n),
+        Some(Value::EnumValue {
+            enum_name, variant, ..
+        }) if enum_name == "Option" && variant == "None" => None,
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "[auth] enable_auth() option \"max_session_ttl\" must be an int or None, got {}",
+                other.type_name()
+            )));
+        }
+        None => base_config.max_session_ttl,
+    };
+
+    if let Some(max_session_ttl) = max_session_ttl {
+        if max_session_ttl <= 0 {
+            return Err(IntentError::type_error(
+                "[auth] enable_auth() option \"max_session_ttl\" must be > 0".to_string(),
+            ));
+        }
+    }
+
+    base_config.providers = providers;
+    base_config.success_url = success_url;
+    base_config.failure_url = failure_url;
+    base_config.logout_url = logout_url;
+    base_config.protected_paths = protected_paths;
+    base_config.route_prefix = route_prefix;
+    base_config.login_page_enabled = login_page_enabled;
+    base_config.login_page_title = login_page_title;
+    base_config.login_page_logo_url = login_page_logo_url;
+    base_config.login_page_heading = login_page_heading;
+    base_config.login_page_copy = login_page_copy;
+    base_config.cookie_name = cookie_name;
+    base_config.cookie_secure = cookie_secure;
+    base_config.cookie_same_site = cookie_same_site;
+    base_config.cookie_http_only = cookie_http_only;
+    base_config.session_ttl = session_ttl;
+    base_config.refresh_ttl = refresh_ttl;
+    base_config.sliding_sessions = sliding_sessions;
+    base_config.refresh_throttle = refresh_throttle;
+    base_config.max_session_ttl = max_session_ttl;
+    base_config.store_tokens = store_tokens;
+    base_config.health_endpoint = health_endpoint;
+    base_config.session_secret = session_secret;
+    base_config.session_store = session_store;
+    Ok(base_config)
 }
 
 #[cfg(test)]

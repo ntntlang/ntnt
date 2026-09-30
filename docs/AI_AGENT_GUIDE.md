@@ -2160,7 +2160,6 @@ import { json, parse_form, redirect } from "std/http/server"
 enable_auth([], map {
     "session_secret": get_env("SESSION_SECRET"),
     "session_store": get_env("AUTH_STORE") ?? "sqlite:./auth.db",
-    "login_url": "/login",
     "logout_url": "/"
 })
 
@@ -2510,9 +2509,7 @@ enable_auth([google], map {
     "session_secret": get_env("SESSION_SECRET"),
     "session_store": "redis://localhost:6379",     // or "sqlite:./sessions.db"
     "session_ttl": 86400 * 7,                      // 7 days
-    "login_url": "/auth/login",
-    "logout_url": "/",
-    "callback_url": "/auth/callback"
+    "logout_url": "/"
 })
 ```
 
@@ -2522,12 +2519,12 @@ enable_auth([google], map {
 import { get_user, validate_csrf } from "std/auth"
 
 fn dashboard(req) {
-    let user = get_user(req) otherwise return redirect("/auth/login")
+    let user = get_user(req) otherwise return redirect("/auth")
     return html(template("dashboard.html", map { "user": user }))
 }
 
 fn update_settings(req) {
-    let user = get_user(req) otherwise return redirect("/auth/login")
+    let user = get_user(req) otherwise return redirect("/auth")
     let csrf_ok = validate_csrf(req)
     if typeof(csrf_ok) == "Map" { return csrf_ok }  // Returns 403 if invalid
     // ... handle form
@@ -2571,10 +2568,12 @@ let claims = unwrap(jwt_verify(token, "secret"))
 ### Built-in Auth Routes
 
 `enable_auth()` automatically registers these routes:
-- `GET /auth/login` — Redirect to OAuth provider
-- `GET /auth/callback` — Handle OAuth callback
-- `GET /auth/logout` — Clear session and redirect
-- `GET /auth/me` — JSON user info (for SPAs)
+- `GET /auth` — Built-in sign-in page (provider chooser)
+- `GET /auth/{provider}` — Start the OAuth flow for one provider
+- `GET /auth/callback` — Handle the OAuth callback
+- `POST /auth/logout` — Clear the session and redirect to `logout_url`
+
+There is no `login_url` option. Local-only apps pass an empty provider array and mount their own login form (see the Local Auth Quickstart). Every call form (`enable_auth(providers)`, `enable_auth(providers, options)`, `enable_auth(providers, "preset")`, `enable_auth(providers, "preset", overrides)`) accepts the same option keys.
 
 ---
 
