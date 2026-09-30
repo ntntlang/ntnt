@@ -28,6 +28,27 @@ import { work_async } from "std/jobs"
 let workers = work_async(map { "worker_group": "emails", "concurrency": 4 })
 ```
 
+## Several processes in one group
+
+Several `ntnt worker` processes can run with the same project and group on
+one machine. Each takes the first free numbered endpoint in the runtime
+directory: the group endpoint `<hash>.sock`, then `<hash>.1.sock`,
+`<hash>.2.sock`, and so on (up to 1000 per group). Every slot has its own
+`.lock` sidecar and follows the ownership rules below, so a crashed process's
+slot is reclaimed by the next process that starts.
+
+`ntnt workers` commands for a group reach every live process in it. Commands
+apply **per process**: `ntnt workers scale normal 4` gives each process four
+normal-band workers. `status` prints one table per process when there is more
+than one. `pause` and `resume` change shared queue state, so the result is the
+same whichever process receives them. Slots whose process has exited are
+skipped. If any live process returns an error, the command fails and names that
+endpoint.
+
+An explicit `--control-socket` path (or `NTNT_CONTROL_SOCKET`) still selects
+exactly one endpoint with one owner. A second process using the same explicit
+path fails at startup, as before.
+
 ## Project identity and discovery
 
 The server canonicalizes the main source file's directory, then uses the nearest
@@ -50,8 +71,8 @@ pathname bytes for portability; failures identify the exact endpoint.
 The default filename is the first 20 bytes of SHA-256 over canonical project
 path bytes, a NUL separator, and the group name, encoded as hexadecimal plus
 `.sock`. It is stored in `$XDG_RUNTIME_DIR/ntnt` when XDG_RUNTIME_DIR is an
-absolute, caller-owned private directory and the resulting endpoint fits the
-pathname limit. Otherwise it uses `/tmp/ntnt-<effective-uid>`. Runtime directories
+absolute, caller-owned private directory and the resulting endpoint, including
+the longest slot suffix, fits the pathname limit. Otherwise it uses `/tmp/ntnt-<effective-uid>`. Runtime directories
 are created with `0700`; existing directories are validated, never repaired by
 chmod. A hostile `ntnt` child directory is an error. Clients can discover an
 endpoint before any server has run: they reserve/validate the runtime directory
@@ -62,7 +83,7 @@ update custom socket clients to use the new endpoint or an explicit path.
 ## Ownership and shutdown
 
 A `0600` regular sidecar file, `<socket>.lock`, holds a nonblocking OS advisory
-exclusive lock. Ownership is acquired before probing or binding and remains
+exclusive lock (one per group slot). Ownership is acquired before probing or binding and remains
 held until the accept thread has stopped and cleanup has finished. A second
 process gets an error without disturbing the first. The lock file is deliberately
 never unlinked: deleting it could allow two processes to lock different inodes.

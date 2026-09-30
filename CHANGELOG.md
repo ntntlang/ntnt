@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Several `ntnt worker` processes can now share one project and worker group on a machine. Each process takes its own numbered control endpoint, and `ntnt workers` commands reach every live process in the group. `scale` applies per process, and `status` prints one table per process. An explicit `--control-socket` path is still single-owner. See [worker control](docs/worker-control.md#several-processes-in-one-group).
+
 ### Changed
 
 - **Breaking:** the Redis job backend now requires Redis 7.0+ or Valkey 7.2+. Job state changes commit through one Lua script that re-checks the values it read and the credential's permission for every write before writing anything. Workers refuse to start on an older server. Redis credentials need EVAL, EVALSHA and SCRIPT; WATCH, MULTI and EXEC are no longer used. Stop all workers and upgrade them together.

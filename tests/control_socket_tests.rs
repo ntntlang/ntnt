@@ -146,6 +146,67 @@ mod unix {
         b.stop();
     }
     #[test]
+    fn group_processes_share_endpoint_and_commands_reach_each() {
+        let d = project();
+        let args = ["--worker-group", "shared"];
+        let mut a = Worker::start(d.path(), &args);
+        wait_for(|| status(d.path(), &args));
+        let mut b = Worker::start(d.path(), &args);
+        let mut c = Worker::start(d.path(), &args);
+        let sockets = || {
+            fs::read_dir(d.path().join("ntnt"))
+                .unwrap()
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".sock")
+                })
+                .count()
+        };
+        wait_for(|| sockets() == 3);
+        let output = |cmd: &[&str]| {
+            let out = command(d.path())
+                .args(["workers"])
+                .args(cmd)
+                .args(args)
+                .bounded_output();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        wait_for(|| output(&["status"]).contains("Process 3 of 3"));
+        let scaled = output(&["scale", "normal", "3"]);
+        assert!(scaled.contains("in each of 3 processes"), "{scaled}");
+        // Per-process semantics: every process now runs 3 normal workers.
+        let table = output(&["status"]);
+        let normal_rows = table
+            .lines()
+            .filter(|l| l.split_whitespace().next() == Some("normal"))
+            .collect::<Vec<_>>();
+        assert_eq!(normal_rows.len(), 3, "{table}");
+        for row in normal_rows {
+            assert_eq!(row.split_whitespace().nth(1), Some("3"), "{table}");
+        }
+        // A crashed process leaves a stale slot; clients skip it and a new
+        // process reclaims a free slot instead of failing.
+        b.0.kill().unwrap();
+        b.0.wait().unwrap();
+        assert!(output(&["status"]).contains("Process 2 of 2"));
+        let mut d2 = Worker::start(d.path(), &args);
+        wait_for(|| output(&["status"]).contains("Process 3 of 3"));
+        assert_eq!(sockets(), 3);
+        for w in [&mut a, &mut c, &mut d2] {
+            w.stop();
+        }
+        assert_eq!(sockets(), 0);
+        assert!(!status(d.path(), &args));
+    }
+    #[test]
     fn replacement_file_survives_shutdown() {
         let d = project();
         let path = d.path().join("control.sock");

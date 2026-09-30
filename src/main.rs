@@ -16,7 +16,7 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "ntnt")]
@@ -1606,30 +1606,67 @@ fn run_workers_command(cmd: WorkersCommands) -> anyhow::Result<()> {
     }
 }
 
-/// Connect to the resolved endpoint, send a JSON command, return the parsed response.
+/// Send a JSON command to every live worker process of the resolved group
+/// (or to the one explicit socket) and return each endpoint's response, in
+/// slot order. Stale slots left by crashed processes are skipped.
 fn workers_socket_call(
     dir: Option<PathBuf>,
     control: ControlArgs,
     payload: &str,
-) -> anyhow::Result<serde_json::Value> {
+) -> anyhow::Result<Vec<(PathBuf, serde_json::Value)>> {
     let base_dir = match dir {
         Some(d) => d,
         None => std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?,
     };
-    let sock_path = ntnt::control_socket::resolve(&base_dir, &control.into())?;
+    let endpoints = ntnt::control_socket::resolve_instances(&base_dir, &control.into())?;
+    let mut responses = Vec::new();
+    let mut first_error = None;
+    for endpoint in &endpoints {
+        match workers_endpoint_call(endpoint, payload) {
+            Ok(response) => responses.push((endpoint.clone(), response)),
+            Err(e) => {
+                let stale = e.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                    )
+                });
+                if !stale || endpoints.len() == 1 {
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+    }
+    // A live worker that failed to answer was not reached: fail the command
+    // rather than report success for part of the group.
+    if let Some(e) = first_error {
+        return Err(e);
+    }
+    if responses.is_empty() {
+        anyhow::bail!(
+            "Cannot connect to {}: no live worker (is `ntnt worker` running?)",
+            endpoints[0].display()
+        );
+    }
+    Ok(responses)
+}
 
+/// Connect to one endpoint, send a JSON command, return the parsed response.
+/// Connection failures carry their `std::io::Error` so stale slots are detectable.
+fn workers_endpoint_call(sock_path: &Path, payload: &str) -> anyhow::Result<serde_json::Value> {
     #[cfg(unix)]
     {
         use std::io::{Read, Write};
         let stream =
-            ntnt::control_socket::connect_client(&sock_path, std::time::Duration::from_secs(10))
+            ntnt::control_socket::connect_client(sock_path, std::time::Duration::from_secs(10))
                 .map_err(|e| {
-                    anyhow::anyhow!(
+                    let context = format!(
                         "Cannot connect to {}: {} (is `ntnt worker` running?)",
                         sock_path.display(),
                         e
-                    )
+                    );
+                    anyhow::Error::new(e).context(context)
                 })?;
 
         // Set read/write timeouts to avoid indefinite hang if worker is stuck
@@ -1691,17 +1728,47 @@ fn workers_socket_call(
 
     #[cfg(not(unix))]
     {
+        let _ = (sock_path, payload);
         anyhow::bail!("ntnt workers is not available on Windows");
     }
 }
 
-fn run_workers_status(dir: Option<PathBuf>, control: ControlArgs) -> anyhow::Result<()> {
-    let resp = workers_socket_call(dir, control, r#"{"cmd":"status"}"#)?;
-
-    if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
-        anyhow::bail!("{}", err);
+/// Fail on the first error response; otherwise return the responses.
+fn workers_ok(
+    responses: Vec<(PathBuf, serde_json::Value)>,
+) -> anyhow::Result<Vec<(PathBuf, serde_json::Value)>> {
+    for (endpoint, resp) in &responses {
+        if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+            if responses.len() == 1 {
+                anyhow::bail!("{}", err);
+            }
+            anyhow::bail!("{}: {}", endpoint.display(), err);
+        }
     }
+    Ok(responses)
+}
 
+fn run_workers_status(dir: Option<PathBuf>, control: ControlArgs) -> anyhow::Result<()> {
+    let responses = workers_ok(workers_socket_call(dir, control, r#"{"cmd":"status"}"#)?)?;
+    let count = responses.len();
+    for (index, (endpoint, resp)) in responses.iter().enumerate() {
+        if count > 1 {
+            if index > 0 {
+                println!();
+            }
+            println!(
+                "Process {} of {} ({})",
+                index + 1,
+                count,
+                endpoint.display()
+            );
+        }
+        print_worker_status(resp);
+    }
+    Ok(())
+}
+
+fn print_worker_status(resp: &serde_json::Value) {
     let bands = resp
         .get("bands")
         .and_then(|v| v.as_array())
@@ -1762,8 +1829,6 @@ fn run_workers_status(dir: Option<PathBuf>, control: ControlArgs) -> anyhow::Res
         let names: Vec<&str> = paused.iter().filter_map(|v| v.as_str()).collect();
         println!("Paused queues: {}", names.join(", "));
     }
-
-    Ok(())
 }
 
 fn run_workers_scale(
@@ -1779,13 +1844,15 @@ fn run_workers_scale(
     })
     .to_string();
 
-    let resp = workers_socket_call(dir, control, &payload)?;
-
-    if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
-        anyhow::bail!("{}", err);
+    let processes = workers_ok(workers_socket_call(dir, control, &payload)?)?.len();
+    if processes > 1 {
+        println!(
+            "✓ {}: scaled to {} workers in each of {} processes",
+            band, count, processes
+        );
+    } else {
+        println!("✓ {}: scaled to {} workers", band, count);
     }
-
-    println!("✓ {}: scaled to {} workers", band, count);
     Ok(())
 }
 
@@ -1798,11 +1865,7 @@ fn run_workers_set_paused(
     let cmd = if paused { "pause" } else { "resume" };
     let payload = serde_json::json!({ "cmd": cmd, "queue": &queue }).to_string();
 
-    let resp = workers_socket_call(dir, control, &payload)?;
-
-    if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
-        anyhow::bail!("{}", err);
-    }
+    workers_ok(workers_socket_call(dir, control, &payload)?)?;
 
     let state = if paused { "paused" } else { "resumed" };
     println!("✓ queue '{}': {}", queue, state);
