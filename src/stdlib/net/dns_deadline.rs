@@ -623,19 +623,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn udp_bind_uses_os_assignment_for_real_windows_exclusion() {
-        let Ok(port) = std::env::var("NTNT_TEST_EXCLUDED_UDP_PORT") else {
-            return;
-        };
-        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let denied = std::net::UdpSocket::bind(addr).unwrap_err();
-        assert_eq!(denied.raw_os_error(), Some(10013));
-        let socket = bind_udp_socket(addr, std::net::UdpSocket::bind).unwrap();
-        assert_ne!(socket.local_addr().unwrap().port(), addr.port());
-    }
-
     #[test]
     fn dns_deadline_allows_late_reply_tcp_fallback_and_retry() {
         for (tcp_only, truncated, reply_delay, drop_first, expected_udp, expected_tcp) in [

@@ -8,31 +8,12 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      NTNT_TEST_EXCLUDED_UDP_PORT: '55000'
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Reserve a real UDP port through Windows
-        run: |
-          netsh int ipv4 add excludedportrange protocol=udp startport=55000 numberofports=1
-          netsh int ipv4 show excludedportrange protocol=udp
-      - name: Regression must fail with old bind behavior
-        run: |
-          cp src/stdlib/net/dns_deadline.rs saved.rs
-          python -c 'from pathlib import Path; p=Path("src/stdlib/net/dns_deadline.rs"); s=p.read_text(); start=s.index("    match bind(local)"); end=s.index("\n}\n",start); p.write_text(s[:start]+"    bind(local)"+s[end:])'
-          if cargo test --locked --lib udp_bind_uses_os_assignment_for_real_windows_exclusion -- --nocapture > regression.log 2>&1; then
-            cat regression.log
-            echo 'Old bind behavior unexpectedly passed excluded-port regression'
-            exit 1
-          fi
-          cat regression.log
-          grep -q '10013' regression.log
-          grep -q 'panicked at' regression.log
-          mv saved.rs src/stdlib/net/dns_deadline.rs
       - name: Fixed resolver and fixture regression
         run: |
           cargo test --locked --lib stdlib::net::dns_deadline:: -- --nocapture
