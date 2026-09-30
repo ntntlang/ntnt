@@ -31,6 +31,9 @@ impl Policy {
     }
 }
 
+/// Delay before retrying a renewal that hit transient store contention.
+const CONTENTION_RETRY: Duration = Duration::from_millis(25);
+
 #[derive(Clone)]
 struct Assignment {
     id: String,
@@ -85,7 +88,7 @@ impl Keeper {
                     }
                     drop(current);
                     let sent = Instant::now();
-                    match kv::job_leases::renew(
+                    let retry_after = match kv::job_leases::renew(
                         &handle,
                         &assignment.id,
                         &assignment.token,
@@ -95,11 +98,22 @@ impl Keeper {
                             assignment.cancel.renew_deadline(
                                 sent + Duration::from_millis(assignment.policy.duration_ms as u64),
                             );
+                            assignment.policy.renewal_interval()
                         }
-                        Ok(false) => assignment.cancel.cancel(),
-                        Err(_) => { /* The independent monotonic deadline still expires. */ }
-                    }
-                    next = Instant::now() + assignment.policy.renewal_interval();
+                        Ok(false) => {
+                            assignment.cancel.cancel();
+                            assignment.policy.renewal_interval()
+                        }
+                        // Contention is momentary: retry soon instead of losing a
+                        // whole renewal interval (three misses expire the lease).
+                        Err(error) if kv::conditional::is_contention_error(&error) => {
+                            CONTENTION_RETRY
+                        }
+                        // Other failures: the independent monotonic deadline
+                        // still expires the attempt.
+                        Err(_) => assignment.policy.renewal_interval(),
+                    };
+                    next = Instant::now() + retry_after;
                 }
             })
             .map_err(|e| {

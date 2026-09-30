@@ -1,0 +1,19 @@
+name: TEMP macOS lease stress
+on:
+  push:
+    branches: [fix/keeper-renew-flake]
+jobs:
+  stress:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --lib --no-run
+      - name: Stress lease tests with the whole jobs module in parallel
+        run: |
+          fails=0
+          for i in $(seq 1 60); do
+            cargo test -q --locked --lib stdlib::jobs:: > out.txt 2>&1 || { fails=$((fails+1)); grep -E "FAILED|panicked|remained|did not" out.txt | head -8; }
+          done
+          echo "jobs-module: $fails/60 failed"
