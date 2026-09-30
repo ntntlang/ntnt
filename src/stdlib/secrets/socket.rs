@@ -962,9 +962,8 @@ mod tests {
 
         for (label, frame) in frames {
             let (path, _request_rx, server) = serve_response(label, frame);
-            // Oversized responses must transfer the full 64 KiB boundary before
-            // they can be classified. Keep this bounded, but allow hosted macOS
-            // runners enough scheduling headroom to exercise the protocol check.
+            // Use the original budget: classification depends on consuming a
+            // buffered closed-peer response, not on waiting longer for the agent.
             let result = SocketSecretProvider::new(
                 path.clone(),
                 ProviderEndpointLabel::socket(1),
