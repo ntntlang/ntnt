@@ -2148,6 +2148,49 @@ fn test_runtime_errors_preserve_imported_helper_and_call_site() {
 }
 
 #[test]
+fn test_template_from_imported_module_resolves_from_entry_directory() {
+    // #247: calling an imported function must not move relative template
+    // paths to that module's directory; only error spans follow the module.
+    let project = unique_test_dir("template_import_base");
+    fs::create_dir_all(project.join("views")).unwrap();
+    fs::create_dir_all(project.join("lib")).unwrap();
+    write_test_file(&project.join("views/hi.html"), "hello {{name}}");
+    write_test_file(
+        &project.join("lib/r.tnt"),
+        "export fn render() -> String {\n    return template(\"views/hi.html\", map { \"name\": \"x\" })\n}\nexport fn explode() -> Int {\n    return 100 + 1 / 0\n}",
+    );
+    let main = project.join("main.tnt");
+    write_test_file(
+        &main,
+        "import { render } from \"./lib/r.tnt\"\nprint(render())",
+    );
+
+    let (stdout, stderr, exit_code) = run_ntnt_file(&main, &[]);
+    assert_eq!(
+        exit_code, 0,
+        "template from imported module failed: {stderr}"
+    );
+    assert!(
+        stdout.contains("hello x"),
+        "unexpected output: {stdout}{stderr}"
+    );
+
+    // Error attribution from #218 is unchanged.
+    let failing = project.join("failing.tnt");
+    write_test_file(
+        &failing,
+        "import { explode } from \"./lib/r.tnt\"\nexplode()",
+    );
+    let (_stdout, stderr, exit_code) = run_ntnt_file(&failing, &[]);
+    assert_ne!(exit_code, 0);
+    assert!(
+        stderr.contains("r.tnt:5:18") && stderr.contains("failing.tnt:2:1"),
+        "imported helper error attribution changed: {stderr}"
+    );
+    fs::remove_dir_all(project).ok();
+}
+
+#[test]
 fn test_runtime_errors_highlight_interpolated_expression() {
     let code = r#"
 let x = "value: #{1 / 0}"

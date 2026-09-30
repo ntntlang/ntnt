@@ -786,6 +786,11 @@ pub struct Interpreter {
     loaded_modules: HashMap<String, HashMap<String, Value>>,
     /// Current file path (for relative imports)
     current_file: Option<String>,
+    /// Source file of the user function currently executing, used only to
+    /// attribute error spans. Path resolution (templates, partials, routes,
+    /// env files) keeps using `current_file`, so calling an imported function
+    /// never changes where relative paths resolve.
+    diagnostic_file: Option<String>,
     /// HTTP server state for routing
     server_state: crate::stdlib::http_server::ServerState,
     /// Test mode: if Some, contains (port, max_requests, shutdown_flag)
@@ -1026,7 +1031,7 @@ impl Interpreter {
                 &self.environment,
             ))))
         };
-        if let Some(source) = &self.current_file {
+        if let Some(source) = self.diagnostic_file.as_ref().or(self.current_file.as_ref()) {
             self.native_function_sources.insert(
                 (Rc::as_ptr(&closure) as usize, name.to_string()),
                 source.clone(),
@@ -1086,6 +1091,7 @@ impl Interpreter {
             current_result: None,
             loaded_modules: HashMap::new(),
             current_file: None,
+            diagnostic_file: None,
             server_state: crate::stdlib::http_server::ServerState::new(),
             test_mode: None,
             main_source_file: None,
@@ -4634,6 +4640,7 @@ impl Interpreter {
 
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(source_key.clone());
+        let previous_diagnostic_file = self.diagnostic_file.take();
 
         // Define builtins and types in the module environment
         self.define_builtins();
@@ -4646,6 +4653,7 @@ impl Interpreter {
             // Restore environment on error
             self.environment = previous_env;
             self.current_file = previous_file;
+            self.diagnostic_file = previous_diagnostic_file.clone();
             return Err(e);
         }
 
@@ -4663,6 +4671,7 @@ impl Interpreter {
         // Restore environment
         self.environment = previous_env;
         self.current_file = previous_file;
+        self.diagnostic_file = previous_diagnostic_file.clone();
 
         // Cache the module
         self.loaded_modules
@@ -4890,6 +4899,7 @@ impl Interpreter {
 
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(canonical_path.to_string_lossy().to_string());
+        let previous_diagnostic_file = self.diagnostic_file.take();
 
         // Re-define builtins, types, and stdlib in the new environment
         // (lib modules should have the same execution context as route handlers)
@@ -4904,6 +4914,7 @@ impl Interpreter {
             // Restore environment on error
             self.environment = previous_env;
             self.current_file = previous_file;
+            self.diagnostic_file = previous_diagnostic_file.clone();
             return Err(e);
         }
 
@@ -4922,6 +4933,7 @@ impl Interpreter {
         // Restore environment
         self.environment = previous_env;
         self.current_file = previous_file;
+        self.diagnostic_file = previous_diagnostic_file.clone();
 
         Ok(exports)
     }
@@ -5023,6 +5035,7 @@ impl Interpreter {
 
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
+        let previous_diagnostic_file = self.diagnostic_file.take();
 
         // Re-define builtins, types, and stdlib modules
         self.define_builtins();
@@ -5075,6 +5088,7 @@ impl Interpreter {
         // Restore environment and imports
         self.environment = previous_env;
         self.current_file = previous_file;
+        self.diagnostic_file = previous_diagnostic_file.clone();
         self.imported_files = previous_imports;
 
         Ok(routes)
@@ -5110,6 +5124,7 @@ impl Interpreter {
 
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string());
+        let previous_diagnostic_file = self.diagnostic_file.take();
 
         // Re-define builtins, types, and stdlib modules
         self.define_builtins();
@@ -5146,6 +5161,7 @@ impl Interpreter {
         // Restore environment and imports
         self.environment = previous_env;
         self.current_file = previous_file;
+        self.diagnostic_file = previous_diagnostic_file.clone();
         self.imported_files = previous_imports;
 
         let handler = handler.ok_or_else(|| {
@@ -5934,24 +5950,26 @@ impl Interpreter {
     }
 
     fn try_eval_array_self_append_statement(&mut self, expr: &Expression) -> Result<bool> {
-        let Expression::Assign { target, value } = expr else {
+        // Parsed expressions carry Located span wrappers; the fast path
+        // matches on the underlying shape.
+        let Expression::Assign { target, value } = expr.unlocated() else {
             return Ok(false);
         };
-        let Expression::Identifier(target_name) = target.as_ref() else {
+        let Expression::Identifier(target_name) = target.unlocated() else {
             return Ok(false);
         };
         let Expression::Binary {
             left,
             operator: BinaryOp::Add,
             right,
-        } = value.as_ref()
+        } = value.unlocated()
         else {
             return Ok(false);
         };
-        let Expression::Identifier(left_name) = left.as_ref() else {
+        let Expression::Identifier(left_name) = left.unlocated() else {
             return Ok(false);
         };
-        let Expression::Array(elements) = right.as_ref() else {
+        let Expression::Array(elements) = right.unlocated() else {
             return Ok(false);
         };
 
@@ -5980,10 +5998,10 @@ impl Interpreter {
     }
 
     fn try_eval_string_self_concat_statement(&mut self, expr: &Expression) -> Result<bool> {
-        let Expression::Assign { target, value } = expr else {
+        let Expression::Assign { target, value } = expr.unlocated() else {
             return Ok(false);
         };
-        let Expression::Identifier(target_name) = target.as_ref() else {
+        let Expression::Identifier(target_name) = target.unlocated() else {
             return Ok(false);
         };
 
@@ -6031,12 +6049,12 @@ impl Interpreter {
             left,
             operator: BinaryOp::Add,
             right,
-        } = expr
+        } = expr.unlocated()
         else {
             return false;
         };
 
-        if let Expression::Identifier(left_name) = left.as_ref() {
+        if let Expression::Identifier(left_name) = left.unlocated() {
             if left_name == target_name {
                 terms.push(right);
                 return true;
@@ -6341,7 +6359,10 @@ impl Interpreter {
 
     fn eval_expression(&mut self, expr: &Expression) -> Result<Value> {
         if let Expression::Located { span, expr } = expr {
-            let source_file = self.current_file.clone();
+            let source_file = self
+                .diagnostic_file
+                .clone()
+                .or_else(|| self.current_file.clone());
             let is_call = matches!(
                 expr.unlocated(),
                 Expression::Call { .. } | Expression::MethodCall { .. }
@@ -9585,14 +9606,16 @@ impl Interpreter {
                     self.current_line = previous_line;
                     result
                 } else {
-                    let previous_file = self.current_file.clone();
+                    // Attribute error spans to the function's own file without
+                    // moving relative path resolution away from current_file.
+                    let previous_file = self.diagnostic_file.clone();
                     let previous_line = self.current_line;
                     if let Some(source) = &function_source {
-                        self.current_file = Some(source.clone());
+                        self.diagnostic_file = Some(source.clone());
                     }
                     let result =
                         self.call_user_function(name, params, body, closure, contract, args);
-                    self.current_file = previous_file;
+                    self.diagnostic_file = previous_file;
                     self.current_line = previous_line;
                     result
                 };
@@ -12020,6 +12043,34 @@ mod tests {
     use super::*;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+
+    #[test]
+    fn self_append_fast_paths_match_parsed_located_statements() {
+        // #218 wraps parsed expressions in Located spans. The O(1) append
+        // fast paths must still recognize `s = s + ...` and `a = a + [...]`
+        // from real parser output, not only hand-built AST.
+        let parse = |source: &str| {
+            let tokens: Vec<_> = crate::lexer::Lexer::new(source).collect();
+            let program = crate::parser::Parser::new(tokens).parse().unwrap();
+            let mut statement = program.statements.last().unwrap().clone();
+            while let Statement::Located { stmt, .. } = statement {
+                statement = *stmt;
+            }
+            let Statement::Expression(expr) = statement else {
+                panic!("expected an expression statement");
+            };
+            expr
+        };
+        let mut interp = Interpreter::new();
+        let setup: Vec<_> = Lexer::new("let mut s = \"\"\nlet mut a = []").collect();
+        interp.eval(&Parser::new(setup).parse().unwrap()).unwrap();
+        assert!(interp
+            .try_eval_string_self_concat_statement(&parse("s = s + \"x\""))
+            .unwrap());
+        assert!(interp
+            .try_eval_array_self_append_statement(&parse("a = a + [1]"))
+            .unwrap());
+    }
 
     fn eval(source: &str) -> Result<Value> {
         let lexer = Lexer::new(source);

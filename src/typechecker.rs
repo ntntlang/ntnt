@@ -629,7 +629,7 @@ fn condition_type_hint(cond_type: &Type) -> String {
 fn comparison_type_hint(left_type: &Type, right_type: &Type, left_expr: &Expression) -> String {
     // Check if the left side is a map value access (likely untyped)
     let is_map_access = matches!(
-        left_expr,
+        left_expr.unlocated(),
         Expression::Index { .. } | Expression::FieldAccess { .. }
     );
 
@@ -814,7 +814,7 @@ impl TypeContext {
                 // ("divide(10, 0") to disambiguate between multiple calls
                 let mut args_prefix: Vec<String> = Vec::new();
                 for arg in arguments {
-                    let rendered = match arg {
+                    let rendered = match arg.unlocated() {
                         Expression::Integer(n) => Some(n.to_string()),
                         Expression::Bool(b) => Some(b.to_string()),
                         Expression::String(text) if !text.contains("#{") => {
@@ -823,7 +823,7 @@ impl TypeContext {
                         Expression::Unary {
                             operator: crate::ast::UnaryOp::Neg,
                             operand,
-                        } => match operand.as_ref() {
+                        } => match operand.unlocated() {
                             Expression::Integer(n) => Some(format!("-{}", n)),
                             _ => None,
                         },
