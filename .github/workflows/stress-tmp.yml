@@ -42,8 +42,8 @@ jobs:
       - name: Frame and deadline regression under module load
         run: |
           fails=0
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             cargo test -q --locked --lib stdlib::secrets:: > out.txt 2>&1 || { fails=$((fails+1)); cat out.txt; }
           done
-          echo "unit-load: $fails/30 failed"
+          echo "unit-load: $fails/60 failed"
           test "$fails" = 0

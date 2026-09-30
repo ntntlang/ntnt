@@ -526,9 +526,14 @@ mod tests {
                 stream
                     .write_all(&response)
                     .expect("write provider response");
-                stream
-                    .shutdown(std::net::Shutdown::Write)
-                    .expect("close fixture response");
+                // The provider may consume the whole response and close before
+                // this half-close; macOS then reports ENOTCONN. The response
+                // was delivered, and there is no request EOF left to drain.
+                match stream.shutdown(std::net::Shutdown::Write) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotConnected => continue,
+                    Err(error) => panic!("close fixture response: {error:?}"),
+                }
 
                 // Drain the provider's request half-close only after sending the
                 // response. On macOS, closing with that EOF unread can reset the
