@@ -1092,10 +1092,20 @@ fn enable_auth_call_forms_start_a_server_through_dispatch() {
             ),
         )
         .unwrap();
+        // A fresh OS-assigned port per run: parallel `ntnt test` runs from
+        // other tests must not collide on the default port.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+            .to_string();
         let out = std::process::Command::new(&binary)
             .args([
                 "test",
                 server.to_str().unwrap(),
+                "--port",
+                &port,
                 "--get",
                 "/",
                 "--get",
