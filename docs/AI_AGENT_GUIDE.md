@@ -3061,10 +3061,12 @@ continues independently in the Redis server.
 
 Job-state persistence retries retain one prepared mutation; they do not rerun
 `perform` or `on_failure`. State, TTL and queue publication commit together
-(SQLite transaction / Redis WATCH + MULTI/EXEC). Retrying a write after a lost acknowledgement
+(SQLite transaction / one Redis Lua commit script). Retrying a write after a lost acknowledgement
 does not republish claimed work or refresh its TTL. A concurrent state
-change wins over a stale writer. Redis credentials need WATCH, UNWATCH, MULTI, EXEC
-and DISCARD permissions in addition to the usual KV commands. Upgrade all writers
+change wins over a stale writer. The Redis commit script checks every value it
+read and the credential's permission for every write before writing anything, so
+a conflict or a denied command leaves all keys unchanged. Redis credentials need
+EVAL, EVALSHA and SCRIPT in addition to the usual KV commands. Upgrade all writers
 together; direct KV mutations bypass these job-state safeguards.
 
 Death/cancellation/expiration retain their existing early-release semantics for
@@ -3123,9 +3125,10 @@ backfill. Inspection does not start workers or perform recovery.
 
 **Durability:** use file-backed SQLite (not `:memory:`) or Redis/Valkey with
 persistence and a `noeviction` policy appropriate to the required loss window.
-Recovery cannot restore evicted/lost backend data. Redis **6.2+** (or Valkey) is
-required for absolute authorization expiry (`SET PXAT`). Redis also needs TIME, TYPE,
-ZADD, ZREM, ZRANGEBYSCORE and PERSIST, plus existing KV/transaction permissions.
+Recovery cannot restore evicted/lost backend data. Redis **7.0+** (or Valkey 7.2+) is
+required: job commits use `redis.acl_check_cmd`, and workers refuse to start on an
+older server. Redis also needs TIME, TYPE, ZADD, ZREM, ZRANGEBYSCORE and PERSIST,
+plus existing KV and scripting permissions.
 Ready-key discovery retains the existing Redis SCAN behavior; the new recovery
 pass uses its due index. This provides recoverable ownership, **not exactly-once
 external effects**.
