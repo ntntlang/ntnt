@@ -945,6 +945,7 @@ print(token)
             // stall. 250ms was too short for a loaded macOS runner, where the
             // provider then correctly reported the fixture as unavailable.
             ("NTNT_SECRETS_TIMEOUT_MS", "10000"),
+            ("NTNT_TMP_SOCKET_DIAG", "1"),
         ],
     );
 

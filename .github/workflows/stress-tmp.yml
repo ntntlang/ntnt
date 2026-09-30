@@ -1,0 +1,35 @@
+name: TEMP macOS secrets socket stress
+on:
+  push:
+    branches: [fix/secrets-socket-root-cause]
+jobs:
+  stress:
+    runs-on: macos-latest
+    env:
+      NTNT_TMP_SOCKET_DIAG: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked && cargo test --locked --no-run
+      - name: e2e alone
+        run: |
+          fails=0
+          for i in $(seq 1 150); do
+            cargo test -q --locked --test language_features_tests test_unix_socket_secret_provider_end_to_end > out.txt 2>&1 || { fails=$((fails+1)); grep -E "socket-diag|Runtime error|panicked" out.txt | head -8; }
+          done
+          echo "e2e-alone: $fails/150 failed"
+      - name: e2e under full language_features_tests parallel load
+        run: |
+          fails=0
+          for i in $(seq 1 15); do
+            cargo test -q --locked --test language_features_tests > out.txt 2>&1 || { fails=$((fails+1)); grep -E "socket-diag|Runtime error|panicked|FAILED" out.txt | head -10; }
+          done
+          echo "e2e-load: $fails/15 failed"
+      - name: frame unit test under module load
+        run: |
+          fails=0
+          for i in $(seq 1 60); do
+            cargo test -q --locked --lib stdlib::secrets:: > out.txt 2>&1 || { fails=$((fails+1)); grep -E "socket-diag|panicked|left:|right:|FAILED" out.txt | head -10; }
+          done
+          echo "unit-load: $fails/60 failed"

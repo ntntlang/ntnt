@@ -132,22 +132,32 @@ impl SocketSecretProvider {
             }
             Err(_) => return Err(self.error(ProviderErrorKind::InvalidConfiguration)),
         }
-        let socket = Socket::new(Domain::UNIX, Type::STREAM, None)
-            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
-        let address = SockAddr::unix(&self.path)
-            .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
-        let connect_timeout =
-            remaining_until(deadline).map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+        let socket = Socket::new(Domain::UNIX, Type::STREAM, None).map_err(|e| {
+            diag(1, &e);
+            self.error(ProviderErrorKind::Unavailable)
+        })?;
+        let address = SockAddr::unix(&self.path).map_err(|e| {
+            diag(2, &e);
+            self.error(ProviderErrorKind::InvalidConfiguration)
+        })?;
+        let connect_timeout = remaining_until(deadline).map_err(|e| {
+            diag(3, &e);
+            self.error(ProviderErrorKind::Unavailable)
+        })?;
         socket
             .connect_timeout(&address, connect_timeout)
-            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+            .map_err(|e| {
+                diag(4, &e);
+                self.error(ProviderErrorKind::Unavailable)
+            })?;
 
         // SAFETY: ownership of the live stream descriptor moves from socket2 to
         // UnixStream exactly once; `socket` cannot close it after `into_raw_fd`.
         let stream = unsafe { UnixStream::from_raw_fd(socket.into_raw_fd()) };
-        stream
-            .set_nonblocking(false)
-            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+        stream.set_nonblocking(false).map_err(|e| {
+            diag(5, &e);
+            self.error(ProviderErrorKind::Unavailable)
+        })?;
         Ok(stream)
     }
 
@@ -180,12 +190,17 @@ impl SocketSecretProvider {
             name,
             scope: &self.authorization_scope,
         };
-        serde_json::to_writer(&mut *writer, &request)
-            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+        serde_json::to_writer(&mut *writer, &request).map_err(|e| {
+            diag(6, &e);
+            self.error(ProviderErrorKind::Unavailable)
+        })?;
         writer
             .write_all(b"\n")
             .and_then(|_| writer.flush())
-            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+            .map_err(|e| {
+                diag(7, &e);
+                self.error(ProviderErrorKind::Unavailable)
+            })?;
         Ok(request_id)
     }
 
@@ -198,18 +213,24 @@ impl SocketSecretProvider {
         let mut chunk = Zeroizing::new([0_u8; 4096]);
 
         loop {
-            let read_timeout = remaining_until(deadline)
-                .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
-            stream
-                .set_read_timeout(Some(read_timeout))
-                .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+            let read_timeout = remaining_until(deadline).map_err(|e| {
+                diag(8, &e);
+                self.error(ProviderErrorKind::Unavailable)
+            })?;
+            stream.set_read_timeout(Some(read_timeout)).map_err(|e| {
+                diag(9, &e);
+                self.error(ProviderErrorKind::Unavailable)
+            })?;
             let remaining = MAX_RESPONSE_SIZE + 1 - response.len();
             let read_size = remaining.min(chunk.len());
             match stream.read(&mut chunk[..read_size]) {
                 Ok(0) if response.len() >= MAX_RESPONSE_SIZE => {
                     return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                 }
-                Ok(0) => return Err(self.error(ProviderErrorKind::Unavailable)),
+                Ok(0) => {
+                    diag(900, &"eof before newline");
+                    return Err(self.error(ProviderErrorKind::Unavailable));
+                }
                 Ok(bytes_read) => {
                     let bytes = &chunk[..bytes_read];
                     if bytes.contains(&b'\r') {
@@ -222,9 +243,10 @@ impl SocketSecretProvider {
                         }
 
                         let mut trailing = Zeroizing::new([0_u8; 1]);
-                        stream
-                            .set_nonblocking(true)
-                            .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
+                        stream.set_nonblocking(true).map_err(|e| {
+                            diag(10, &e);
+                            self.error(ProviderErrorKind::InvalidConfiguration)
+                        })?;
                         match stream.read(&mut trailing[..]) {
                             Ok(0) => return Ok(response),
                             Err(error)
@@ -258,7 +280,10 @@ impl SocketSecretProvider {
                 {
                     return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                 }
-                Err(_) => return Err(self.error(ProviderErrorKind::Unavailable)),
+                Err(e) => {
+                    diag(901, &e);
+                    return Err(self.error(ProviderErrorKind::Unavailable));
+                }
             }
         }
     }
@@ -268,8 +293,10 @@ impl SocketSecretProvider {
         body: &[u8],
         request_id: u64,
     ) -> std::result::Result<ProviderLookup, ProviderError> {
-        let parsed: SocketResponse = serde_json::from_slice(body)
-            .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
+        let parsed: SocketResponse = serde_json::from_slice(body).map_err(|e| {
+            diag(11, &e);
+            self.error(ProviderErrorKind::InvalidConfiguration)
+        })?;
 
         match parsed {
             SocketResponse::Found {
@@ -394,15 +421,22 @@ impl SecretProvider for SocketSecretProvider {
             name,
         )?;
 
-        stream
-            .shutdown(Shutdown::Write)
-            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+        stream.shutdown(Shutdown::Write).map_err(|e| {
+            diag(12, &e);
+            self.error(ProviderErrorKind::Unavailable)
+        })?;
 
         let response = self.read_response_frame(&mut stream, deadline)?;
         self.decode_response(&response[..response.len() - 1], request_id)
     }
 }
 
+// TEMP diagnostics (removed before PR).
+fn diag(site: u32, error: &dyn std::fmt::Debug) {
+    if std::env::var_os("NTNT_TMP_SOCKET_DIAG").is_some() {
+        eprintln!("[socket-diag] site={site} error={error:?}");
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::super::{
