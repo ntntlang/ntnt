@@ -17,7 +17,6 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::error::{ResolveError, ResolveErrorKind};
 use hickory_resolver::proto::rr::RecordType;
-use hickory_resolver::Resolver;
 use policy::classify_ip;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
@@ -1477,12 +1476,9 @@ fn dns_lookup_fn(args: &[Value]) -> Result<Value, IntentError> {
     Ok(result_value((|| {
         let record_type = DnsRecordType::parse(record_type)?;
         let deadline = crate::stdlib::send_deadline::SendDeadline::parse(opts)?;
-        let answers = if deadline.is_configured() {
-            dns_deadline::lookup(name, record_type, opts, deadline)?
-        } else {
-            let resolver = dns_resolver(opts)?;
-            dns_lookup_records(&resolver, name, record_type)?
-        };
+        // One resolver path for every lookup. Without a configured deadline
+        // the contact guard never denies, so behaviour matches a plain lookup.
+        let answers = dns_deadline::lookup(name, record_type, opts, deadline)?;
         Ok(dns_answers_to_value(answers))
     })()))
 }
@@ -1498,8 +1494,7 @@ fn dns_reverse_fn(args: &[Value]) -> Result<Value, IntentError> {
                 ip
             )
         })?;
-        let resolver = dns_resolver(opts)?;
-        let names = dns_reverse_names(&resolver, ip)?;
+        let names = dns_deadline::reverse(ip, opts)?;
         Ok(Value::Array(names.into_iter().map(Value::String).collect()))
     })()))
 }
@@ -1840,12 +1835,6 @@ fn dns_lookup_args(args: &[Value]) -> Result<(&str, Option<&HashMap<String, Valu
     Ok((record_type, opts))
 }
 
-fn dns_resolver(opts: Option<&HashMap<String, Value>>) -> Result<Resolver, String> {
-    let (config, resolver_opts) = dns_resolver_options(opts)?;
-    Resolver::new(config, resolver_opts)
-        .map_err(|e| format!("failed to initialize DNS resolver: {}", e))
-}
-
 fn dns_resolver_options(
     opts: Option<&HashMap<String, Value>>,
 ) -> Result<(ResolverConfig, ResolverOpts), String> {
@@ -1872,18 +1861,6 @@ fn system_resolver_config() -> Result<(ResolverConfig, ResolverOpts), String> {
     {
         Ok((ResolverConfig::default(), ResolverOpts::default()))
     }
-}
-
-fn dns_lookup_records(
-    resolver: &Resolver,
-    name: &str,
-    record_type: DnsRecordType,
-) -> Result<Vec<DnsAnswer>, String> {
-    dns_lookup_result(
-        resolver.lookup(name, record_type.hickory_type()),
-        name,
-        record_type,
-    )
 }
 
 fn dns_lookup_result(
@@ -1923,8 +1900,11 @@ fn dns_lookup_result(
     Ok(answers)
 }
 
-fn dns_reverse_names(resolver: &Resolver, ip: IpAddr) -> Result<Vec<String>, String> {
-    match resolver.reverse_lookup(ip) {
+fn dns_reverse_result(
+    result: Result<hickory_resolver::lookup::ReverseLookup, ResolveError>,
+    ip: IpAddr,
+) -> Result<Vec<String>, String> {
+    match result {
         Ok(lookup) => Ok(lookup.iter().map(|name| name.to_utf8()).collect()),
         Err(err) if is_dns_no_records(&err) => Ok(vec![]),
         Err(err) => Err(format!("reverse DNS lookup failed for {}: {}", ip, err)),

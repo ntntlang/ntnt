@@ -126,6 +126,25 @@ impl DnsUdpSocket for GuardedUdp {
     }
 }
 
+/// Bind the resolver's UDP socket. Hickory picks a random port in 49152-65535
+/// and retries only `AddrInUse`. Windows reserves port blocks in that range
+/// (Hyper-V/WinNAT exclusions) and refuses them with WSAEACCES
+/// (`PermissionDenied`), which Hickory treats as fatal for the whole lookup.
+/// Fall back to an OS-assigned port, which never lands in an excluded range.
+/// ntnt never configures an explicit resolver bind port, so any nonzero port
+/// here is Hickory's random choice.
+fn bind_udp_socket(
+    local: SocketAddr,
+    bind: impl Fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
+) -> io::Result<std::net::UdpSocket> {
+    match bind(local) {
+        Err(error) if local.port() != 0 && error.kind() == io::ErrorKind::PermissionDenied => {
+            bind(SocketAddr::new(local.ip(), 0))
+        }
+        result => result,
+    }
+}
+
 #[derive(Clone)]
 struct Provider {
     handle: TokioHandle,
@@ -153,7 +172,9 @@ impl RuntimeProvider for Provider {
         Box::pin(async move {
             // Preserve Hickory's randomized local address/port and unconnected
             // socket; its normal source/ID validation remains untouched.
-            let socket = tokio::net::UdpSocket::bind(local).await?;
+            let socket = bind_udp_socket(local, std::net::UdpSocket::bind)?;
+            socket.set_nonblocking(true)?;
+            let socket = tokio::net::UdpSocket::from_std(socket)?;
             #[cfg(test)]
             std::thread::sleep(provider.pauses.bind);
             Ok(GuardedUdp {
@@ -246,6 +267,27 @@ fn lookup_with_config(
     super::dns_lookup_result(result, name, kind)
 }
 
+/// Reverse lookup through the same runtime provider as forward lookups, so it
+/// gets the same socket handling (including the Windows excluded-port fallback).
+pub(super) fn reverse(
+    ip: IpAddr,
+    opts: Option<&HashMap<String, Value>>,
+) -> Result<Vec<String>, String> {
+    let (config, resolver_opts) = super::dns_resolver_options(opts)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("failed to initialize DNS resolver: {}", e))?;
+    let provider = Provider {
+        handle: TokioHandle::default(),
+        guard: Guard::new(SendDeadline::parse(None)?),
+        #[cfg(test)]
+        pauses: Pauses::default(),
+    };
+    let resolver = AsyncResolver::new(config, resolver_opts, GenericConnector::new(provider));
+    super::dns_reverse_result(runtime.block_on(resolver.reverse_lookup(ip)), ip)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,8 +325,12 @@ mod tests {
         }
         r.to_vec().unwrap()
     }
+    // UDP and TCP listen on independent OS-assigned ports. Windows keeps
+    // separate per-protocol exclusion ranges, so a port assigned for TCP may
+    // be forbidden for UDP; the resolver config names each address anyway.
     struct Fixture {
-        addr: SocketAddr,
+        udp_addr: SocketAddr,
+        tcp_addr: SocketAddr,
         udp: Arc<AtomicUsize>,
         tcp: Arc<AtomicUsize>,
         tcp_bytes: Arc<AtomicUsize>,
@@ -295,9 +341,10 @@ mod tests {
     impl Fixture {
         fn new(truncated: bool, delay_ms: u64, drop_first: bool) -> Self {
             let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = tcp_listener.local_addr().unwrap();
+            let udp_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let tcp_addr = tcp_listener.local_addr().unwrap();
+            let udp_addr = udp_socket.local_addr().unwrap();
             tcp_listener.set_nonblocking(true).unwrap();
-            let udp_socket = std::net::UdpSocket::bind(addr).unwrap();
             udp_socket
                 .set_read_timeout(Some(Duration::from_millis(20)))
                 .unwrap();
@@ -371,7 +418,8 @@ mod tests {
                 }
             });
             Self {
-                addr,
+                udp_addr,
+                tcp_addr,
                 udp,
                 tcp,
                 tcp_bytes,
@@ -397,9 +445,9 @@ mod tests {
     ) -> (ResolverConfig, ResolverOpts) {
         let mut config = ResolverConfig::new();
         if !tcp_only {
-            config.add_name_server(NameServerConfig::new(fixture.addr, Protocol::Udp));
+            config.add_name_server(NameServerConfig::new(fixture.udp_addr, Protocol::Udp));
         }
-        config.add_name_server(NameServerConfig::new(fixture.addr, Protocol::Tcp));
+        config.add_name_server(NameServerConfig::new(fixture.tcp_addr, Protocol::Tcp));
         let mut opts = ResolverOpts::default();
         opts.timeout = Duration::from_millis(if retry { 150 } else { 800 });
         opts.attempts = 1;
@@ -493,6 +541,55 @@ mod tests {
     }
 
     #[test]
+    fn udp_bind_falls_back_from_windows_excluded_port() {
+        // Simulate a Windows excluded port range: every explicit port is
+        // refused with WSAEACCES; only an OS-assigned port binds.
+        let attempts = std::cell::RefCell::new(Vec::new());
+        let socket = bind_udp_socket("127.0.0.1:50123".parse().unwrap(), |addr| {
+            attempts.borrow_mut().push(addr.port());
+            if addr.port() != 0 {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            std::net::UdpSocket::bind(addr)
+        })
+        .expect("falls back to an OS-assigned port");
+        assert_eq!(*attempts.borrow(), vec![50123, 0]);
+        assert_ne!(socket.local_addr().unwrap().port(), 0);
+        // Other failures are not masked.
+        let error = bind_udp_socket("127.0.0.1:50124".parse().unwrap(), |_| {
+            Err(io::Error::from(io::ErrorKind::AddrNotAvailable))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AddrNotAvailable);
+    }
+
+    #[test]
+    fn denied_udp_fallback_does_not_mask_os_assignment_failure() {
+        let attempts = std::cell::Cell::new(0);
+        let error = bind_udp_socket("127.0.0.1:55000".parse().unwrap(), |_| {
+            attempts.set(attempts.get() + 1);
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn udp_bind_errors_other_than_reserved_port_denial_are_not_hidden() {
+        for kind in [io::ErrorKind::AddrInUse, io::ErrorKind::AddrNotAvailable] {
+            let attempts = std::cell::Cell::new(0);
+            let error = bind_udp_socket("127.0.0.1:55000".parse().unwrap(), |_| {
+                attempts.set(attempts.get() + 1);
+                Err(io::Error::from(kind))
+            })
+            .unwrap_err();
+            assert_eq!(error.kind(), kind);
+            assert_eq!(attempts.get(), 1);
+        }
+    }
+
+    #[test]
     fn dns_deadline_allows_late_reply_tcp_fallback_and_retry() {
         for (tcp_only, truncated, reply_delay, drop_first, expected_udp, expected_tcp) in [
             (false, false, 180, false, 1, 0),
@@ -544,12 +641,12 @@ mod tests {
         let waker = Waker::from(Arc::new(Noop));
         let mut cx = Context::from_waker(&waker);
         assert!(socket
-            .poll_send_to(&mut cx, b"query", fixture.addr)
+            .poll_send_to(&mut cx, b"query", fixture.udp_addr)
             .is_pending());
         assert!(!guard.state.lock().unwrap().started);
         thread::sleep(Duration::from_millis(100));
         let result = runtime.block_on(std::future::poll_fn(|cx| {
-            socket.poll_send_to(cx, b"query", fixture.addr)
+            socket.poll_send_to(cx, b"query", fixture.udp_addr)
         }));
         assert_eq!(result.unwrap_err().to_string(), "start_deadline_expired");
         assert_eq!(fixture.udp.load(Ordering::SeqCst), 0);
@@ -599,7 +696,7 @@ mod tests {
             pauses: Pauses::default(),
         };
         let stream = runtime
-            .block_on(provider.connect_tcp(fixture.addr))
+            .block_on(provider.connect_tcp(fixture.tcp_addr))
             .unwrap();
         thread::sleep(Duration::from_millis(150));
         assert!(guard.state.lock().unwrap().started);
