@@ -28,6 +28,7 @@ impl SendDeadline {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn is_configured(&self) -> bool {
         self.wall.is_some() || self.monotonic.is_some()
     }

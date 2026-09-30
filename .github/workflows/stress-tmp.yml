@@ -1,0 +1,36 @@
+name: TEMP Windows DNS stress
+on:
+  push:
+    branches: [fix/dns-windows-excluded-ports]
+jobs:
+  stress:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Excluded UDP port ranges on this runner
+        run: netsh int ipv4 show excludedportrange protocol=udp
+      - name: Baseline on main (fixture test, 60 runs)
+        run: |
+          git worktree add ../base origin/main
+          cd ../base
+          cargo test --locked --lib --no-run -q
+          fails=0
+          for i in $(seq 1 60); do
+            cargo test -q --locked --lib stdlib::net::dns_deadline:: > out.txt 2>&1 || { fails=$((fails+1)); grep -E "panicked|10013|FAILED" out.txt | head -4; }
+          done
+          echo "main: $fails/60 failed"
+      - name: With fix (fixture test, 60 runs)
+        run: |
+          cargo test --locked --lib --no-run -q
+          fails=0
+          for i in $(seq 1 60); do
+            cargo test -q --locked --lib stdlib::net::dns_deadline:: > out.txt 2>&1 || { fails=$((fails+1)); grep -E "panicked|10013|FAILED" out.txt | head -4; }
+          done
+          echo "fix: $fails/60 failed"

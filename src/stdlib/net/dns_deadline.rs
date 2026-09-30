@@ -126,6 +126,25 @@ impl DnsUdpSocket for GuardedUdp {
     }
 }
 
+/// Bind the resolver's UDP socket. Hickory picks a random port in 49152-65535
+/// and retries only `AddrInUse`. Windows reserves port blocks in that range
+/// (Hyper-V/WinNAT exclusions) and refuses them with WSAEACCES
+/// (`PermissionDenied`), which Hickory treats as fatal for the whole lookup.
+/// Fall back to an OS-assigned port, which never lands in an excluded range.
+/// ntnt never configures an explicit resolver bind port, so any nonzero port
+/// here is Hickory's random choice.
+fn bind_udp_socket(
+    local: SocketAddr,
+    bind: impl Fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
+) -> io::Result<std::net::UdpSocket> {
+    match bind(local) {
+        Err(error) if local.port() != 0 && error.kind() == io::ErrorKind::PermissionDenied => {
+            bind(SocketAddr::new(local.ip(), 0))
+        }
+        result => result,
+    }
+}
+
 #[derive(Clone)]
 struct Provider {
     handle: TokioHandle,
@@ -153,7 +172,9 @@ impl RuntimeProvider for Provider {
         Box::pin(async move {
             // Preserve Hickory's randomized local address/port and unconnected
             // socket; its normal source/ID validation remains untouched.
-            let socket = tokio::net::UdpSocket::bind(local).await?;
+            let socket = bind_udp_socket(local, std::net::UdpSocket::bind)?;
+            socket.set_nonblocking(true)?;
+            let socket = tokio::net::UdpSocket::from_std(socket)?;
             #[cfg(test)]
             std::thread::sleep(provider.pauses.bind);
             Ok(GuardedUdp {
@@ -244,6 +265,27 @@ fn lookup_with_config(
         return Err("start_deadline_expired".into());
     }
     super::dns_lookup_result(result, name, kind)
+}
+
+/// Reverse lookup through the same runtime provider as forward lookups, so it
+/// gets the same socket handling (including the Windows excluded-port fallback).
+pub(super) fn reverse(
+    ip: IpAddr,
+    opts: Option<&HashMap<String, Value>>,
+) -> Result<Vec<String>, String> {
+    let (config, resolver_opts) = super::dns_resolver_options(opts)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("failed to initialize DNS resolver: {}", e))?;
+    let provider = Provider {
+        handle: TokioHandle::default(),
+        guard: Guard::new(SendDeadline::parse(None)?),
+        #[cfg(test)]
+        pauses: Pauses::default(),
+    };
+    let resolver = AsyncResolver::new(config, resolver_opts, GenericConnector::new(provider));
+    super::dns_reverse_result(runtime.block_on(resolver.reverse_lookup(ip)), ip)
 }
 
 #[cfg(test)]
@@ -490,6 +532,29 @@ mod tests {
             assert_eq!(fixture.tcp_bytes.load(Ordering::SeqCst), 0);
             assert_eq!(result.unwrap_err(), "start_deadline_expired");
         }
+    }
+
+    #[test]
+    fn udp_bind_falls_back_from_windows_excluded_port() {
+        // Simulate a Windows excluded port range: every explicit port is
+        // refused with WSAEACCES; only an OS-assigned port binds.
+        let attempts = std::cell::RefCell::new(Vec::new());
+        let socket = bind_udp_socket("127.0.0.1:50123".parse().unwrap(), |addr| {
+            attempts.borrow_mut().push(addr.port());
+            if addr.port() != 0 {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            std::net::UdpSocket::bind(addr)
+        })
+        .expect("falls back to an OS-assigned port");
+        assert_eq!(*attempts.borrow(), vec![50123, 0]);
+        assert_ne!(socket.local_addr().unwrap().port(), 0);
+        // Other failures are not masked.
+        let error = bind_udp_socket("127.0.0.1:50124".parse().unwrap(), |_| {
+            Err(io::Error::from(io::ErrorKind::AddrNotAvailable))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AddrNotAvailable);
     }
 
     #[test]
