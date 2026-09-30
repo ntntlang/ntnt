@@ -2191,6 +2191,45 @@ fn test_template_from_imported_module_resolves_from_entry_directory() {
 }
 
 #[test]
+fn test_diagnostics_from_imported_function_name_the_right_file() {
+    // #248 review: warnings raised inside an imported function name that
+    // function's file, and a job file loaded by an imported function reports
+    // its own file, not the caller's.
+    let project = unique_test_dir("diagnostic_file_attribution");
+    fs::create_dir_all(project.join("lib")).unwrap();
+    fs::create_dir_all(project.join("jobs")).unwrap();
+    write_test_file(
+        &project.join("lib/helper.tnt"),
+        "export fn greet(name) {\n    return \"hi ${name}\"\n}\nexport fn load_jobs() {\n    jobs(\"jobs/\")\n}",
+    );
+    write_test_file(&project.join("jobs/bad.tnt"), "let x = 1\nlet y = 1 / 0\n");
+
+    let warn = project.join("warn.tnt");
+    write_test_file(
+        &warn,
+        "import { greet } from \"./lib/helper.tnt\"\nprint(greet(\"x\"))",
+    );
+    let (_stdout, stderr, _code) = run_ntnt_file(&warn, &[]);
+    assert!(
+        stderr.contains("helper.tnt, line 2"),
+        "interpolation warning should name the imported file: {stderr}"
+    );
+
+    let job = project.join("job.tnt");
+    write_test_file(
+        &job,
+        "import { load_jobs } from \"./lib/helper.tnt\"\nload_jobs()",
+    );
+    let (_stdout, stderr, code) = run_ntnt_file(&job, &[]);
+    assert_ne!(code, 0, "failing job file should fail: {stderr}");
+    assert!(
+        stderr.contains("bad.tnt:2:"),
+        "job file error should name the job file: {stderr}"
+    );
+    fs::remove_dir_all(project).ok();
+}
+
+#[test]
 fn test_runtime_errors_highlight_interpolated_expression() {
     let code = r#"
 let x = "value: #{1 / 0}"

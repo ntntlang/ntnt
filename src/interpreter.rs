@@ -1031,7 +1031,7 @@ impl Interpreter {
                 &self.environment,
             ))))
         };
-        if let Some(source) = self.diagnostic_file.as_ref().or(self.current_file.as_ref()) {
+        if let Some(source) = self.diagnostic_source() {
             self.native_function_sources.insert(
                 (Rc::as_ptr(&closure) as usize, name.to_string()),
                 source.clone(),
@@ -1530,6 +1530,8 @@ impl Interpreter {
         // Save current file context so we can restore it after evaluating job files.
         // Must be restored on BOTH success AND error paths (early `?` would leak).
         let previous_file = self.current_file.clone();
+        // Job files attribute their own errors, not the calling function's.
+        let previous_diagnostic_file = self.diagnostic_file.take();
 
         let mut file_count = 0;
         let mut eval_error: Option<IntentError> = None;
@@ -1580,6 +1582,7 @@ impl Interpreter {
         } else {
             self.current_file = None;
         }
+        self.diagnostic_file = previous_diagnostic_file;
 
         // Propagate any error that occurred during file processing
         if let Some(e) = eval_error {
@@ -1801,6 +1804,12 @@ impl Interpreter {
         self.libs_flat_directories
             .iter()
             .any(|dir| canonical.starts_with(dir))
+    }
+
+    /// File used to attribute diagnostics: the executing user function's
+    /// source when one is running, otherwise the file being evaluated.
+    fn diagnostic_source(&self) -> Option<&String> {
+        self.diagnostic_file.as_ref().or(self.current_file.as_ref())
     }
 
     /// Set the current file path for relative imports
@@ -2058,6 +2067,7 @@ impl Interpreter {
 
         // Re-set the current file for imports
         self.current_file = Some(file_path.clone());
+        self.diagnostic_file = None;
 
         // Set hot-reload mode so listen() knows to skip re-binding
         self.execution_mode = ExecutionMode::HotReload;
@@ -6340,7 +6350,7 @@ impl Interpreter {
         }
         for (ident, snippet) in crate::typechecker::find_js_interpolation_idents(s) {
             if self.environment.borrow().has_data_binding(&ident) {
-                let file = self.current_file.as_deref().unwrap_or("");
+                let file = self.diagnostic_source().map(String::as_str).unwrap_or("");
                 let location = if file.is_empty() {
                     format!("line {}", self.current_line)
                 } else {
@@ -6359,10 +6369,7 @@ impl Interpreter {
 
     fn eval_expression(&mut self, expr: &Expression) -> Result<Value> {
         if let Expression::Located { span, expr } = expr {
-            let source_file = self
-                .diagnostic_file
-                .clone()
-                .or_else(|| self.current_file.clone());
+            let source_file = self.diagnostic_source().cloned();
             let is_call = matches!(
                 expr.unlocated(),
                 Expression::Call { .. } | Expression::MethodCall { .. }
