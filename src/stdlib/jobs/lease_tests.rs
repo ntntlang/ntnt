@@ -180,6 +180,94 @@ fn keeper_renews_claim_without_changing_primary_snapshot() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+/// Hold a real SQLite writer until the keeper reports a failed renewal, then
+/// release it. No sleep is used to guess whether the keeper tried to renew.
+fn keeper_after_contention(lost: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keeper-contention.db");
+    let h = kv::open_kv(path.to_str().unwrap()).unwrap();
+    let duration_ms = 10_000;
+    let normal_interval = Duration::from_millis((duration_ms / 3) as u64);
+    let sent = Instant::now();
+    let c = seed_status_with_lease(&h, "pending", duration_ms);
+    let keeper = leases::Keeper::new(extract_kv_handle_info(&h).unwrap()).unwrap();
+    let renewals = keeper.observe_renewals();
+    let locked = rusqlite::Connection::open(path).unwrap();
+    locked.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let scope = keeper.attach(&c, sent, leases::Policy { duration_ms });
+    let (failed_at, result) = renewals
+        .recv_timeout(Duration::from_secs(8))
+        .expect("keeper never attempted renewal while the store was locked");
+    let error = result.expect_err("locked store unexpectedly allowed renewal");
+    assert!(kv::conditional::is_contention_error(&error), "{error}");
+    assert!(!scope.cancel.is_cancelled());
+    if lost {
+        // Simulate ownership disappearing before the retry, using the same
+        // held transaction so the keeper cannot race this fixture change.
+        assert_eq!(
+            locked
+                .execute(
+                    "DELETE FROM _kv WHERE key = ?",
+                    [format!("jobs:lease:{}", c.id)]
+                )
+                .unwrap(),
+            1
+        );
+    }
+    locked.execute_batch("COMMIT").unwrap();
+
+    // Half the normal interval leaves scheduling headroom for the 25 ms
+    // retry but cannot admit the pre-#239 full-interval retry. Use the failed
+    // attempt's timestamp, not when this test thread happened to receive it.
+    let retry_deadline = failed_at + normal_interval / 2;
+    let renewed_at = loop {
+        let (at, result) = renewals
+            .recv_timeout(retry_deadline.saturating_duration_since(Instant::now()))
+            .expect("keeper did not retry contention before the next normal interval");
+        match result {
+            Ok(renewed) => {
+                assert_eq!(renewed, !lost);
+                break at;
+            }
+            // Parallel tests can briefly hold the process-wide store registry.
+            Err(error) => assert!(kv::conditional::is_contention_error(&error), "{error}"),
+        }
+    };
+    assert!(renewed_at < retry_deadline);
+    assert!(renewed_at < failed_at + normal_interval);
+    assert_eq!(scope.cancel.is_cancelled(), lost);
+    let lease = retrying("lease after contention", || kv::job_leases::get(&h, &c.id));
+    if lost {
+        assert!(lease.is_none(), "retry resurrected a lost lease");
+    } else {
+        let lease = lease.expect("renewed lease disappeared");
+        assert_eq!(lease.token, c.token);
+        assert!(lease.deadline_ms > c.deadline_ms);
+        let counts = recover_fixture(&h);
+        assert_eq!((counts.requeued, counts.unknown), (0, 0));
+    }
+    assert_eq!(
+        retrying("primary after contention", || kv::conditional::read(
+            &h,
+            "jobs:data:lease-fixture"
+        ))
+        .unwrap(),
+        c.snapshot
+    );
+    drop(scope);
+    assert!(!is_current_task_cancelled());
+}
+
+#[test]
+fn keeper_retries_contention_before_next_normal_interval() {
+    keeper_after_contention(false);
+}
+
+#[test]
+fn keeper_contention_retry_cancels_a_lost_lease() {
+    keeper_after_contention(true);
+}
+
 #[test]
 fn expired_child_stops_even_when_backend_cannot_renew() {
     let dir = tempfile::tempdir().unwrap();
@@ -202,14 +290,38 @@ fn expired_child_stops_even_when_backend_cannot_renew() {
     .apply_owned(&h)
     .unwrap());
     let keeper = leases::Keeper::new(extract_kv_handle_info(&h).unwrap()).unwrap();
-    let scope = keeper.attach(&c, sent, leases::Policy { duration_ms });
+    let renewals = keeper.observe_renewals();
     let locked = rusqlite::Connection::open(path).unwrap();
     locked.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let scope = keeper.attach(&c, sent, leases::Policy { duration_ms });
+    let (_, result) = renewals
+        .recv_timeout(Duration::from_secs(2))
+        .expect("keeper never attempted renewal before expiry");
+    let error = result.expect_err("locked store unexpectedly allowed renewal");
+    assert!(kv::conditional::is_contention_error(&error), "{error}");
     assert!(scope.cancel.wait_timeout(Duration::from_secs(5)));
     assert!(sent.elapsed() < Duration::from_millis(4_500));
-    locked.execute_batch("ROLLBACK").unwrap();
+    assert!(scope.cancel.is_cancelled());
     drop(scope);
     assert!(!is_current_task_cancelled());
+    // A renewal may have passed its cancellation check just before expiry.
+    // Keep the writer locked until the supervisor exits: the observer channel
+    // disconnects only once no renewal can still be in flight. Every attempt
+    // made under the lock must have failed.
+    drop(keeper);
+    loop {
+        match renewals.recv_timeout(Duration::from_secs(10)) {
+            Ok((_, Ok(renewed))) => panic!("expired lease renewed under lock: {renewed}"),
+            Ok((_, Err(_))) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("lease supervisor did not exit")
+            }
+        }
+    }
+    locked.execute_batch("ROLLBACK").unwrap();
+    let lease = retrying("expired lease", || kv::job_leases::get(&h, &c.id)).unwrap();
+    assert_eq!(lease.deadline_ms, c.deadline_ms);
     // Local send-time deadline intentionally expires before the store deadline.
     let until = Instant::now() + Duration::from_secs(1);
     loop {
