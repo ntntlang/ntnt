@@ -45,6 +45,8 @@ struct Assignment {
 struct State {
     stopped: bool,
     assignment: Option<Assignment>,
+    #[cfg(test)]
+    renewals: Option<std::sync::mpsc::Sender<(Instant, Result<bool>)>>,
 }
 
 pub(super) struct Keeper {
@@ -86,14 +88,17 @@ impl Keeper {
                         current.assignment = None;
                         continue;
                     }
+                    #[cfg(test)]
+                    let renewals = current.renewals.clone();
                     drop(current);
                     let sent = Instant::now();
-                    let retry_after = match kv::job_leases::renew(
+                    let result = kv::job_leases::renew(
                         &handle,
                         &assignment.id,
                         &assignment.token,
                         assignment.policy.duration_ms,
-                    ) {
+                    );
+                    let retry_after = match &result {
                         Ok(true) => {
                             assignment.cancel.renew_deadline(
                                 sent + Duration::from_millis(assignment.policy.duration_ms as u64),
@@ -114,12 +119,26 @@ impl Keeper {
                         Err(_) => assignment.policy.renewal_interval(),
                     };
                     next = Instant::now() + retry_after;
+                    // Observe completed real attempts after their next wake is
+                    // scheduled; tests never drive the supervisor's clock.
+                    #[cfg(test)]
+                    if let Some(renewals) = renewals {
+                        let _ = renewals.send((Instant::now(), result));
+                    }
                 }
             })
             .map_err(|e| {
                 IntentError::runtime_error(format!("cannot start job lease supervisor: {e}"))
             })?;
         Ok(Self { shared })
+    }
+
+    #[cfg(test)]
+    pub fn observe_renewals(&self) -> std::sync::mpsc::Receiver<(Instant, Result<bool>)> {
+        let (send, receive) = std::sync::mpsc::channel();
+        let (lock, _) = &*self.shared;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).renewals = Some(send);
+        receive
     }
 
     pub fn attach(&self, claim: &kv::job_leases::Claim, sent: Instant, policy: Policy) -> Scope {
