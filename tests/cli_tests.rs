@@ -1111,6 +1111,9 @@ fn enable_auth_call_forms_start_a_server_through_dispatch() {
                 "--get",
                 "/auth",
             ])
+            // A controlled environment: an inherited NTNT_ENV=production
+            // rejects the preset's default session secret.
+            .env("NTNT_ENV", "development")
             .output()
             .expect("run ntnt test");
         format!(
@@ -1144,7 +1147,23 @@ fn enable_auth_call_forms_start_a_server_through_dispatch() {
         );
     }
 
-    // Undocumented keys still fail before any server starts.
+    // Undocumented keys still fail before any server starts...
     let output = run("login_url", r#"[], map { "login_url": "/login" }"#);
     assert!(output.contains("0 passed, 2 failed"), "login_url: {output}");
+    // ...and for the right reason. `ntnt test` does not surface startup
+    // diagnostics, so run the same file directly to see the error.
+    let rejected = std::process::Command::new(&binary)
+        .args(["run", dir.path().join("login_url.tnt").to_str().unwrap()])
+        .env("NTNT_ENV", "development")
+        .output()
+        .expect("run ntnt run");
+    let rejected = format!(
+        "{}{}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        rejected.contains("unknown option \"login_url\""),
+        "login_url: {rejected}"
+    );
 }
