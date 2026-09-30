@@ -325,8 +325,12 @@ mod tests {
         }
         r.to_vec().unwrap()
     }
+    // UDP and TCP listen on independent OS-assigned ports. Windows keeps
+    // separate per-protocol exclusion ranges, so a port assigned for TCP may
+    // be forbidden for UDP; the resolver config names each address anyway.
     struct Fixture {
-        addr: SocketAddr,
+        udp_addr: SocketAddr,
+        tcp_addr: SocketAddr,
         udp: Arc<AtomicUsize>,
         tcp: Arc<AtomicUsize>,
         tcp_bytes: Arc<AtomicUsize>,
@@ -334,51 +338,12 @@ mod tests {
         stop: Arc<AtomicBool>,
         threads: Vec<thread::JoinHandle<()>>,
     }
-    // TCP and UDP have distinct Windows exclusion lists. A TCP-assigned port
-    // is not necessarily legal for UDP, so reserve a pair, dropping any partial
-    // reservation before choosing another port. Never change the DNS address
-    // after publishing it to the client.
-    fn bind_fixture_sockets(
-        bind_udp: impl Fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
-    ) -> io::Result<(std::net::TcpListener, std::net::UdpSocket)> {
-        for _ in 0..32 {
-            let tcp = std::net::TcpListener::bind("127.0.0.1:0")?;
-            match bind_udp(tcp.local_addr()?) {
-                Ok(udp) => return Ok((tcp, udp)),
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::PermissionDenied | io::ErrorKind::AddrInUse
-                    ) => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::AddrNotAvailable,
-            "could not reserve a shared TCP/UDP fixture port",
-        ))
-    }
-
-    #[test]
-    fn fixture_reserves_a_port_usable_by_both_protocols() {
-        let attempts = std::cell::Cell::new(0);
-        let (tcp, udp) = bind_fixture_sockets(|addr| {
-            attempts.set(attempts.get() + 1);
-            if attempts.get() == 1 {
-                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
-            }
-            std::net::UdpSocket::bind(addr)
-        })
-        .unwrap();
-        assert_eq!(attempts.get(), 2);
-        assert_eq!(tcp.local_addr().unwrap(), udp.local_addr().unwrap());
-    }
-
     impl Fixture {
         fn new(truncated: bool, delay_ms: u64, drop_first: bool) -> Self {
-            let (tcp_listener, udp_socket) =
-                bind_fixture_sockets(std::net::UdpSocket::bind).unwrap();
-            let addr = tcp_listener.local_addr().unwrap();
+            let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let udp_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let tcp_addr = tcp_listener.local_addr().unwrap();
+            let udp_addr = udp_socket.local_addr().unwrap();
             tcp_listener.set_nonblocking(true).unwrap();
             udp_socket
                 .set_read_timeout(Some(Duration::from_millis(20)))
@@ -453,7 +418,8 @@ mod tests {
                 }
             });
             Self {
-                addr,
+                udp_addr,
+                tcp_addr,
                 udp,
                 tcp,
                 tcp_bytes,
@@ -479,9 +445,9 @@ mod tests {
     ) -> (ResolverConfig, ResolverOpts) {
         let mut config = ResolverConfig::new();
         if !tcp_only {
-            config.add_name_server(NameServerConfig::new(fixture.addr, Protocol::Udp));
+            config.add_name_server(NameServerConfig::new(fixture.udp_addr, Protocol::Udp));
         }
-        config.add_name_server(NameServerConfig::new(fixture.addr, Protocol::Tcp));
+        config.add_name_server(NameServerConfig::new(fixture.tcp_addr, Protocol::Tcp));
         let mut opts = ResolverOpts::default();
         opts.timeout = Duration::from_millis(if retry { 150 } else { 800 });
         opts.attempts = 1;
@@ -675,12 +641,12 @@ mod tests {
         let waker = Waker::from(Arc::new(Noop));
         let mut cx = Context::from_waker(&waker);
         assert!(socket
-            .poll_send_to(&mut cx, b"query", fixture.addr)
+            .poll_send_to(&mut cx, b"query", fixture.udp_addr)
             .is_pending());
         assert!(!guard.state.lock().unwrap().started);
         thread::sleep(Duration::from_millis(100));
         let result = runtime.block_on(std::future::poll_fn(|cx| {
-            socket.poll_send_to(cx, b"query", fixture.addr)
+            socket.poll_send_to(cx, b"query", fixture.udp_addr)
         }));
         assert_eq!(result.unwrap_err().to_string(), "start_deadline_expired");
         assert_eq!(fixture.udp.load(Ordering::SeqCst), 0);
@@ -730,7 +696,7 @@ mod tests {
             pauses: Pauses::default(),
         };
         let stream = runtime
-            .block_on(provider.connect_tcp(fixture.addr))
+            .block_on(provider.connect_tcp(fixture.tcp_addr))
             .unwrap();
         thread::sleep(Duration::from_millis(150));
         assert!(guard.state.lock().unwrap().started);
