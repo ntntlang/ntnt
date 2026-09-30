@@ -1451,16 +1451,37 @@ mod tests {
         let shared = get_sqlite_kv(&handle).unwrap();
         let guard = shared.lock().unwrap();
         let start = std::time::Instant::now();
-        assert!(renew(&handle, &id, &claim.token, 60_000).is_err());
-        assert!(recover(&handle, 1).is_err());
+        // A held store lock is labelled retryable contention, not a generic
+        // storage failure.
+        let expect = |result: Result<()>, label: &str| {
+            let error = result
+                .expect_err("contended operation must fail")
+                .to_string();
+            assert!(
+                error.contains(&format!("({label})")),
+                "expected {label} contention, got: {error}"
+            );
+            assert!(conditional::is_contention_error(
+                &IntentError::runtime_error(error)
+            ));
+        };
+        expect(
+            renew(&handle, &id, &claim.token, 60_000).map(|_| ()),
+            "local_busy",
+        );
+        expect(recover(&handle, 1).map(|_| ()), "local_busy");
         assert!(start.elapsed() < Duration::from_millis(100));
         guard.conn.busy_timeout(Duration::from_millis(987)).unwrap();
         drop(guard);
         let other = Connection::open(path).unwrap();
         other.execute_batch("BEGIN IMMEDIATE").unwrap();
         let start = std::time::Instant::now();
-        assert!(renew(&handle, &id, &claim.token, 60_000).is_err());
-        assert!(recover(&handle, 1).is_err());
+        // Another connection's write lock (SQLITE_BUSY) is labelled `busy`.
+        expect(
+            renew(&handle, &id, &claim.token, 60_000).map(|_| ()),
+            "busy",
+        );
+        expect(recover(&handle, 1).map(|_| ()), "busy");
         assert!(start.elapsed() < Duration::from_millis(100));
         let timeout: i64 = shared
             .lock()
