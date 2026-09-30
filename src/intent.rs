@@ -1161,6 +1161,16 @@ impl Glossary {
                     result
                 };
 
+                // Header existence has no expected value; the name lives in the path.
+                if let (ial::CheckOp::Exists, Some(header_name)) =
+                    (op, substituted_path.strip_prefix("response.headers."))
+                {
+                    if !header_name.is_empty() && !header_name.contains('{') {
+                        return Some(Assertion::HeaderExists(header_name.to_string()));
+                    }
+                    return None;
+                }
+
                 // Substitute params in expected value for HTTP assertions
                 let expected_str = match expected {
                     ial::Value::String(s) => {
@@ -1198,6 +1208,13 @@ impl Glossary {
                     (ial::CheckOp::Contains, p) if p.starts_with("response.headers.") => {
                         let header_name = p.trim_start_matches("response.headers.");
                         return Some(Assertion::HeaderContains(
+                            header_name.to_string(),
+                            expected_str,
+                        ));
+                    }
+                    (ial::CheckOp::Equals, p) if p.starts_with("response.headers.") => {
+                        let header_name = p.trim_start_matches("response.headers.");
+                        return Some(Assertion::HeaderEquals(
                             header_name.to_string(),
                             expected_str,
                         ));
@@ -1296,6 +1313,9 @@ impl Glossary {
         }
 
         // Header assertions
+        if let Some(assertion) = parse_header_assertion_text(text) {
+            return Some(assertion);
+        }
         if text_lower.contains("header") && text_lower.contains("contains") {
             // Pattern: header "X" contains "Y" or header X contains "Y"
             let re = regex::Regex::new(r#"header\s+"?([^"]+)"?\s+contains\s+"([^"]+)""#).ok()?;
@@ -1539,6 +1559,9 @@ impl Glossary {
         }
 
         // Direct header pattern
+        if let Some(assertion) = parse_header_assertion_text(outcome) {
+            return Some(assertion);
+        }
         if outcome_lower.contains("header") && outcome_lower.contains("contains") {
             let re = regex::Regex::new(r#"header\s+"([^"]+)"\s+contains\s+"([^"]+)""#).ok()?;
             if let Some(caps) = re.captures(outcome) {
@@ -1880,6 +1903,13 @@ impl Glossary {
                 Assertion::BodyMatches(self.substitute_row_values(pattern, row))
             }
             Assertion::HeaderContains(header, value) => Assertion::HeaderContains(
+                self.substitute_row_values(header, row),
+                self.substitute_row_values(value, row),
+            ),
+            Assertion::HeaderExists(header) => {
+                Assertion::HeaderExists(self.substitute_row_values(header, row))
+            }
+            Assertion::HeaderEquals(header, value) => Assertion::HeaderEquals(
                 self.substitute_row_values(header, row),
                 self.substitute_row_values(value, row),
             ),
@@ -2290,6 +2320,38 @@ pub struct Scenario {
 // ASSERTIONS
 // ============================================================================
 
+/// Parse a built-in header assertion line:
+/// `header NAME exists`, `header NAME equals VALUE`, `header NAME contains VALUE`.
+/// NAME and VALUE may be double-quoted, single-quoted, or bare; quotes are stripped.
+fn parse_header_assertion_text(text: &str) -> Option<Assertion> {
+    let re = regex::Regex::new(
+        r#"(?i)^header\s+(?:"([^"]*)"|'([^']*)'|([^\s"']+))\s+(exists|equals|contains)(?:\s+(?:"([^"]*)"|'([^']*)'|(.+?)))?\s*$"#,
+    )
+    .ok()?;
+    let caps = re.captures(text.trim())?;
+    let name = caps
+        .get(1)
+        .or_else(|| caps.get(2))
+        .or_else(|| caps.get(3))?
+        .as_str()
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let value = caps
+        .get(5)
+        .or_else(|| caps.get(6))
+        .or_else(|| caps.get(7))
+        .map(|m| m.as_str().to_string());
+    match (caps.get(4)?.as_str().to_ascii_lowercase().as_str(), value) {
+        ("exists", None) => Some(Assertion::HeaderExists(name)),
+        ("equals", Some(value)) => Some(Assertion::HeaderEquals(name, value)),
+        ("contains", Some(value)) => Some(Assertion::HeaderContains(name, value)),
+        _ => None,
+    }
+}
+
 /// A single assertion within a test
 #[derive(Debug, Clone, Serialize)]
 pub enum Assertion {
@@ -2303,6 +2365,10 @@ pub enum Assertion {
     BodyNotContains(String),
     /// Check header value: `header "Content-Type" contains "text/html"`
     HeaderContains(String, String),
+    /// Check header is present (case-insensitive name): `header "Location" exists`
+    HeaderExists(String),
+    /// Check header value is exactly equal: `header "Location" equals "/login"`
+    HeaderEquals(String, String),
     /// Check JSON path exists: `json path "token" exists`
     JsonPathExists(String),
     /// Check JSON path equals value: `json path "status" == "ok"`
@@ -2404,6 +2470,10 @@ impl Assertion {
             Assertion::BodyNotContains(text) => format!("body not contains \"{}\"", text),
             Assertion::HeaderContains(name, value) => {
                 format!("header \"{}\" contains \"{}\"", name, value)
+            }
+            Assertion::HeaderExists(name) => format!("header \"{}\" exists", name),
+            Assertion::HeaderEquals(name, value) => {
+                format!("header \"{}\" equals \"{}\"", name, value)
             }
             Assertion::JsonPathExists(path) => format!("json path \"{}\" exists", path),
             Assertion::JsonPathEquals(path, value) => {
@@ -2584,6 +2654,37 @@ fn run_assertion_legacy(
                     None
                 } else {
                     Some(format!("Body does not match pattern \"{}\"", pattern))
+                },
+            }
+        }
+        Assertion::HeaderExists(header_name) => {
+            let actual = headers.get(&header_name.to_lowercase());
+            let passed = actual.is_some();
+            AssertionResult {
+                assertion: assertion.clone(),
+                passed,
+                actual: actual.cloned(),
+                message: if passed {
+                    None
+                } else {
+                    Some(format!("Header \"{}\" is missing", header_name))
+                },
+            }
+        }
+        Assertion::HeaderEquals(header_name, expected_value) => {
+            let actual = headers.get(&header_name.to_lowercase());
+            let passed = actual.map(|v| v == expected_value).unwrap_or(false);
+            AssertionResult {
+                assertion: assertion.clone(),
+                passed,
+                actual: actual.cloned(),
+                message: if passed {
+                    None
+                } else {
+                    Some(format!(
+                        "Header \"{}\" expected \"{}\", got {:?}",
+                        header_name, expected_value, actual
+                    ))
                 },
             }
         }
@@ -3819,7 +3920,10 @@ impl IntentFile {
             return Some(Assertion::BodyMatches(pattern.to_string()));
         }
 
-        // header "Name" contains "value"
+        // header "Name" exists / equals "value" / contains "value"
+        if let Some(assertion) = parse_header_assertion_text(line) {
+            return Some(assertion);
+        }
         if line.starts_with("header") {
             // header "Content-Type" contains "text/html"
             let rest = line.trim_start_matches("header").trim();
@@ -4835,6 +4939,37 @@ fn run_assertions(
                         None
                     } else {
                         Some(format!("Body does not match pattern \"{}\"", pattern))
+                    },
+                }
+            }
+            Assertion::HeaderExists(header_name) => {
+                let actual = headers.get(&header_name.to_lowercase());
+                let passed = actual.is_some();
+                AssertionResult {
+                    assertion: assertion.clone(),
+                    passed,
+                    actual: actual.cloned(),
+                    message: if passed {
+                        None
+                    } else {
+                        Some(format!("Header \"{}\" is missing", header_name))
+                    },
+                }
+            }
+            Assertion::HeaderEquals(header_name, expected_value) => {
+                let actual = headers.get(&header_name.to_lowercase());
+                let passed = actual.map(|v| v == expected_value).unwrap_or(false);
+                AssertionResult {
+                    assertion: assertion.clone(),
+                    passed,
+                    actual: actual.cloned(),
+                    message: if passed {
+                        None
+                    } else {
+                        Some(format!(
+                            "Header \"{}\" expected \"{}\", got {:?}",
+                            header_name, expected_value, actual
+                        ))
                     },
                 }
             }
@@ -5912,6 +6047,10 @@ fn format_assertion(assertion: &Assertion) -> String {
         Assertion::HeaderContains(name, value) => {
             format!("header \"{}\" contains \"{}\"", name, value)
         }
+        Assertion::HeaderExists(name) => format!("header \"{}\" exists", name),
+        Assertion::HeaderEquals(name, value) => {
+            format!("header \"{}\" equals \"{}\"", name, value)
+        }
         Assertion::JsonPathExists(path) => format!("json path \"{}\" exists", path),
         Assertion::JsonPathEquals(path, value) => {
             format!("json path \"{}\" == \"{}\"", path, value)
@@ -6642,6 +6781,15 @@ pub fn generate_scaffolding(intent: &IntentFile) -> String {
                             name, value
                         ));
                     }
+                    Assertion::HeaderExists(name) => {
+                        output.push_str(&format!("    //   - Header \"{}\" should exist\n", name));
+                    }
+                    Assertion::HeaderEquals(name, value) => {
+                        output.push_str(&format!(
+                            "    //   - Header \"{}\" should equal: \"{}\"\n",
+                            name, value
+                        ));
+                    }
                     Assertion::JsonPathExists(path) => {
                         output.push_str(&format!(
                             "    //   - JSON response should have \"{}\" field\n",
@@ -6936,6 +7084,87 @@ Feature: API
         assert_eq!(intent.features.len(), 2);
         assert_eq!(intent.features[0].name, "Home Page");
         assert_eq!(intent.features[1].name, "API");
+    }
+
+    #[test]
+    fn test_header_exists_and_equals_resolve_via_glossary_and_direct_forms() {
+        let content = r#"## Glossary
+
+| Term | Means |
+|------|-------|
+| a visitor opens {path} | GET {path} |
+
+---
+
+Feature: Redirect
+  id: feature.redirect
+
+  Scenario: Redirect
+    When a visitor opens /
+    → header location exists
+"#;
+        let intent = IntentFile::parse_content(content, "test.intent".to_string()).unwrap();
+        let glossary = intent.glossary.clone().unwrap();
+        let resolve = |text: &str| {
+            glossary.resolve_outcomes_with_context(text, &intent.components, &intent.invariants)
+        };
+        let exists = Assertion::HeaderExists("location".to_string());
+        let equals = Assertion::HeaderEquals("location".to_string(), "/login".to_string());
+        for (text, expected) in [
+            ("header location exists", &exists),
+            ("header \"location\" exists", &exists),
+            ("header location equals /login", &equals),
+            ("header \"location\" equals \"/login\"", &equals),
+        ] {
+            let got = resolve(text);
+            assert_eq!(got.len(), 1, "{text}: {got:?}");
+            assert_eq!(format!("{:?}", got[0]), format!("{:?}", expected), "{text}");
+        }
+        assert_eq!(
+            format!(
+                "{:?}",
+                IntentFile::parse_assertion("header \"Location\" equals \"/login\"")
+            ),
+            format!(
+                "{:?}",
+                Some(Assertion::HeaderEquals(
+                    "Location".to_string(),
+                    "/login".to_string()
+                ))
+            )
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                IntentFile::parse_assertion("header 'Location' exists")
+            ),
+            format!(
+                "{:?}",
+                Some(Assertion::HeaderExists("Location".to_string()))
+            )
+        );
+        // The standard-vocabulary primitive path must itself produce the
+        // assertion (not only the direct-text fallback).
+        let vocab = glossary.to_ial_vocabulary_full(&intent.components, &intent.invariants);
+        for (text, expected) in [
+            ("header location exists", &exists),
+            ("header \"location\" exists", &exists),
+            ("header location equals /login", &equals),
+            ("header \"location\" equals \"/login\"", &equals),
+        ] {
+            let (params, definition) = vocab.lookup(text).expect(text);
+            let ial::Definition::Primitive(primitive) = definition else {
+                panic!("{text} should resolve to a primitive");
+            };
+            let got = glossary.primitive_to_assertion(primitive, &params);
+            assert_eq!(
+                format!("{got:?}"),
+                format!("{:?}", Some(expected)),
+                "{text}"
+            );
+        }
+        assert!(parse_header_assertion_text("header location equals").is_none());
+        assert!(parse_header_assertion_text("header location exists now").is_none());
     }
 
     #[test]

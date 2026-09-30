@@ -404,11 +404,22 @@ fn substitute_primitive(primitive: &Primitive, params: &HashMap<String, Value>) 
             path: substitute_string(path, params),
         },
 
-        Primitive::Check { op, path, expected } => Primitive::Check {
-            op: op.clone(),
-            path: substitute_string(path, params),
-            expected: substitute_value(expected, params),
-        },
+        Primitive::Check { op, path, expected } => {
+            let path = substitute_string(path, params);
+            // Header values are always strings; never coerce "42" or "007"
+            // to a number, or equality against the raw header fails.
+            let expected = match expected {
+                Value::String(text) if path.starts_with("response.headers.") => {
+                    Value::String(substitute_string(text, params))
+                }
+                _ => substitute_value(expected, params),
+            };
+            Primitive::Check {
+                op: op.clone(),
+                path,
+                expected,
+            }
+        }
 
         Primitive::CodeQuality {
             file,

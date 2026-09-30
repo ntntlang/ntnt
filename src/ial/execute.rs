@@ -52,6 +52,10 @@ impl Context {
             let parent_path = parts[..parts.len() - 1].join(".");
             if let Some(Value::Map(map)) = self.values.get(&parent_path) {
                 let key = parts.last().unwrap();
+                // HTTP header names are case-insensitive and stored lowercase.
+                if parent_path == "response.headers" {
+                    return map.get(&key.to_ascii_lowercase());
+                }
                 return map.get(*key);
             }
         }
@@ -956,6 +960,43 @@ pub fn execute_all(primitives: &[Primitive], ctx: &mut Context, port: u16) -> Ve
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    #[test]
+    fn ial_header_checks_match_names_case_insensitively_and_keep_values_as_strings() {
+        use crate::ial::{resolve, standard_vocabulary, Term};
+        let vocab = standard_vocabulary();
+        let mut ctx = Context::new();
+        ctx.set(
+            "response.headers",
+            Value::Map(HashMap::from([
+                ("location".to_string(), Value::String("/login".to_string())),
+                (
+                    "content-length".to_string(),
+                    Value::String("42".to_string()),
+                ),
+                ("x-code".to_string(), Value::String("007".to_string())),
+            ])),
+        );
+        let run = |text: &str| {
+            let primitives = resolve(&Term::new(text), &vocab).unwrap();
+            assert!(!primitives.is_empty(), "{text} resolved to nothing");
+            primitives
+                .iter()
+                .all(|primitive| execute_check(primitive, &ctx).passed)
+        };
+        // Mixed-case names find lowercase-stored headers.
+        assert!(run("header \"Location\" exists"));
+        assert!(run("header \"Location\" equals \"/login\""));
+        // Numeric-looking values compare as the raw header string.
+        assert!(run("header \"Content-Length\" equals \"42\""));
+        assert!(run("header \"X-Code\" equals \"007\""));
+        // Still exact: wrong values and missing headers fail.
+        assert!(!run("header \"X-Code\" equals \"7\""));
+        assert!(!run("header \"Location\" equals \"/log\""));
+        assert!(!run("header \"Set-Cookie\" exists"));
+    }
+
     #[test]
     fn native_ial_results_keep_int_and_float_distinct() {
         let root = tempfile::tempdir().unwrap();
