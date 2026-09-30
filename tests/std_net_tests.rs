@@ -83,25 +83,7 @@ fn configure_tls_fixture_stream(stream: &std::net::TcpStream) {
         .expect("TLS fixture write timeout");
 }
 
-#[test]
-fn tls_fixture_accepts_delayed_bytes_on_nonblocking_stream() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut server, _) = listener.accept().unwrap();
-    server.set_nonblocking(true).unwrap();
-    configure_tls_fixture_stream(&server);
-    let writer = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        client.write_all(b"x").unwrap();
-    });
-    let mut byte = [0];
-    let result = server.read_exact(&mut byte);
-    writer.join().unwrap();
-    assert!(result.is_ok(), "delayed fixture read failed: {result:?}");
-    assert_eq!(byte, [b'x']);
-}
-
-fn start_local_tls_server(expected_connections: usize) -> (u16, std::thread::JoinHandle<usize>) {
+fn local_tls_server_config() -> (Arc<ServerConfig>, CertificateDer<'static>) {
     let certified = generate_simple_self_signed(vec!["localhost".to_string()])
         .expect("generate local TLS certificate");
     let cert = CertificateDer::from(certified.cert.der().to_vec());
@@ -109,9 +91,66 @@ fn start_local_tls_server(expected_connections: usize) -> (u16, std::thread::Joi
     let config = Arc::new(
         ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(vec![cert], key)
+            .with_single_cert(vec![cert.clone()], key)
             .expect("build local TLS server config"),
     );
+    (config, cert)
+}
+
+#[test]
+fn tls_fixture_recovers_from_would_block_before_client_hello() {
+    let (config, cert) = local_tls_server_config();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client_stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut server_stream, _) = listener.accept().unwrap();
+    // Force Windows' inherited listener mode on every platform. No client
+    // TLS bytes exist yet, so the old fixture's Err => break is deterministic.
+    server_stream.set_nonblocking(true).unwrap();
+    let mut server = ServerConnection::new(config).unwrap();
+    let error = server.complete_io(&mut server_stream).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(server.is_handshaking());
+
+    // WouldBlock is a socket-mode issue, not a failed certificate handshake.
+    // The existing fix must allow this same connection to finish real TLS IO.
+    configure_tls_fixture_stream(&server_stream);
+    configure_tls_fixture_stream(&client_stream);
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert.clone()).unwrap();
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let client = std::thread::spawn(move || {
+        let mut client =
+            rustls::ClientConnection::new(Arc::new(client_config), "localhost".try_into().unwrap())
+                .unwrap();
+        client.complete_io(&mut client_stream).unwrap();
+        assert!(!client.is_handshaking());
+        assert_eq!(client.peer_certificates().unwrap(), &[cert]);
+        // Retain the connection until the server has consumed our Finished.
+        let mut byte = [0];
+        loop {
+            match client.reader().read(&mut byte) {
+                Ok(0) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    client.complete_io(&mut client_stream).unwrap();
+                }
+                result => panic!("expected TLS close_notify, got {result:?}"),
+            }
+        }
+    });
+    let result = server.complete_io(&mut server_stream);
+    assert!(result.is_ok(), "normalized TLS fixture failed: {result:?}");
+    assert!(!server.is_handshaking());
+    server.send_close_notify();
+    while server.wants_write() {
+        server.write_tls(&mut server_stream).unwrap();
+    }
+    client.join().unwrap();
+}
+
+fn start_local_tls_server(expected_connections: usize) -> (u16, std::thread::JoinHandle<usize>) {
+    let (config, _) = local_tls_server_config();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local TLS listener");
     listener
         .set_nonblocking(true)
