@@ -643,6 +643,24 @@ impl<'a> Store<'a> {
     }
 }
 
+/// Bounded wait for a briefly held process-global lock (never blocks forever,
+/// so a re-entrant caller cannot deadlock); times out as `local_busy`.
+fn wait_for_lock<T>(lock: &std::sync::Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(error)) => return Err(conditional::error(error)),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(conditional::StorageFailure::LocalBusy.intent());
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+}
+
 /// Redis handle ownership waits are bounded; SQLite restores the original
 /// connection busy timeout on every normal/error exit after the transaction.
 fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) -> Result<T> {
@@ -654,13 +672,21 @@ fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) 
             let Some(Value::Int(id)) = map.get("_kv_store_id") else {
                 return Err(conditional::error(()));
             };
-            let shared = SQLITE_KV_REGISTRY
-                .try_lock()
-                .map_err(conditional::error)?
+            // The registry map is process-global and held only for lookups,
+            // so wait briefly for it. The store lock stays fail-fast (a held
+            // connection must not stall workers) but reports labelled
+            // contention that callers retry, not a generic storage failure.
+            let shared = wait_for_lock(&SQLITE_KV_REGISTRY)?
                 .get(&(*id as u64))
                 .cloned()
                 .ok_or_else(|| conditional::error(()))?;
-            let mut guard = shared.try_lock().map_err(conditional::error)?;
+            let mut guard = match shared.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(conditional::StorageFailure::LocalBusy.intent())
+                }
+                Err(error) => return Err(conditional::error(error)),
+            };
             let timeout: u64 = guard
                 .conn
                 .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
@@ -669,13 +695,19 @@ fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) 
                 .conn
                 .busy_timeout(Duration::ZERO)
                 .map_err(conditional::error)?;
-            let result: R<T> = (|| {
+            let sqlite_failure = |error: rusqlite::Error| match error.sqlite_error_code() {
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+                    conditional::StorageFailure::Busy.intent()
+                }
+                _ => conditional::error(error),
+            };
+            let result: Result<T> = (|| {
                 let tx = guard
                     .conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                    .map_err(err)?;
-                let result = call(&mut Store::sql(&tx))?;
-                tx.commit().map_err(err)?;
+                    .map_err(sqlite_failure)?;
+                let result = call(&mut Store::sql(&tx)).map_err(conditional::error)?;
+                tx.commit().map_err(sqlite_failure)?;
                 Ok(result)
             })();
             let restored = guard
@@ -683,7 +715,7 @@ fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) 
                 .busy_timeout(Duration::from_millis(timeout))
                 .map_err(conditional::error);
             restored?;
-            result.map_err(conditional::error)
+            result
         }
         KVBackend::Redis => {
             // Worker slots own separate connections. Serialize short local
@@ -1419,16 +1451,37 @@ mod tests {
         let shared = get_sqlite_kv(&handle).unwrap();
         let guard = shared.lock().unwrap();
         let start = std::time::Instant::now();
-        assert!(renew(&handle, &id, &claim.token, 60_000).is_err());
-        assert!(recover(&handle, 1).is_err());
+        // A held store lock is labelled retryable contention, not a generic
+        // storage failure.
+        let expect = |result: Result<()>, label: &str| {
+            let error = result
+                .expect_err("contended operation must fail")
+                .to_string();
+            assert!(
+                error.contains(&format!("({label})")),
+                "expected {label} contention, got: {error}"
+            );
+            assert!(conditional::is_contention_error(
+                &IntentError::runtime_error(error)
+            ));
+        };
+        expect(
+            renew(&handle, &id, &claim.token, 60_000).map(|_| ()),
+            "local_busy",
+        );
+        expect(recover(&handle, 1).map(|_| ()), "local_busy");
         assert!(start.elapsed() < Duration::from_millis(100));
         guard.conn.busy_timeout(Duration::from_millis(987)).unwrap();
         drop(guard);
         let other = Connection::open(path).unwrap();
         other.execute_batch("BEGIN IMMEDIATE").unwrap();
         let start = std::time::Instant::now();
-        assert!(renew(&handle, &id, &claim.token, 60_000).is_err());
-        assert!(recover(&handle, 1).is_err());
+        // Another connection's write lock (SQLITE_BUSY) is labelled `busy`.
+        expect(
+            renew(&handle, &id, &claim.token, 60_000).map(|_| ()),
+            "busy",
+        );
+        expect(recover(&handle, 1).map(|_| ()), "busy");
         assert!(start.elapsed() < Duration::from_millis(100));
         let timeout: i64 = shared
             .lock()
