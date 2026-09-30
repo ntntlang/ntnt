@@ -1074,3 +1074,67 @@ fn ntnt_test_defaults_to_strict_type_mode() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ===========================================================================
+// enable_auth call forms through the real server-action dispatch (#223)
+// ===========================================================================
+
+#[test]
+fn enable_auth_call_forms_start_a_server_through_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = find_ntnt_binary();
+    let run = |label: &str, args: &str| {
+        let server = dir.path().join(format!("{label}.tnt"));
+        std::fs::write(
+            &server,
+            format!(
+                "import {{ enable_auth }} from \"std/auth\"\nimport {{ text }} from \"std/http/server\"\nenable_auth({args})\nget(\"/\", fn(req) {{ return text(\"home\") }})\nlisten(8080)\n"
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new(&binary)
+            .args([
+                "test",
+                server.to_str().unwrap(),
+                "--get",
+                "/",
+                "--get",
+                "/auth",
+            ])
+            .output()
+            .expect("run ntnt test");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+
+    // Each form must reach the server action, initialize the session store,
+    // and register the built-in /auth route alongside the app route.
+    for (label, args) in [
+        (
+            "local_options",
+            r#"[], map { "session_secret": "s", "session_store": "memory", "cookie_same_site": "strict" }"#,
+        ),
+        ("preset", r#"[], "admin""#),
+        (
+            "preset_overrides",
+            r#"[], "admin", map { "session_secret": "s", "session_store": "memory", "cookie_http_only": true }"#,
+        ),
+        (
+            "providers_map",
+            r#"map { "providers": [], "session_secret": "s", "session_store": "memory" }"#,
+        ),
+    ] {
+        let output = run(label, args);
+        assert!(
+            output.contains("2 requests, 2 passed, 0 failed"),
+            "{label}: {output}"
+        );
+    }
+
+    // Undocumented keys still fail before any server starts.
+    let output = run("login_url", r#"[], map { "login_url": "/login" }"#);
+    assert!(output.contains("0 passed, 2 failed"), "login_url: {output}");
+}
