@@ -94,6 +94,7 @@ struct DeadlineWriter<'a> {
 impl Write for DeadlineWriter<'_> {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         loop {
+            remaining_until(self.deadline)?;
             match self.stream.write(buffer) {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     wait_ready(self.stream, libc::POLLOUT, self.deadline)?
@@ -242,6 +243,7 @@ impl SocketSecretProvider {
         let mut chunk = Zeroizing::new([0_u8; 4096]);
 
         loop {
+            remaining_until(deadline).map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
             let remaining = MAX_RESPONSE_SIZE + 1 - response.len();
             let read_size = remaining.min(chunk.len());
             match stream.read(&mut chunk[..read_size]) {
@@ -850,21 +852,50 @@ mod tests {
             .expect("buffered response from a closed agent must be read");
         assert_eq!(&frame[..], b"{\"ok\":1}\n");
         // A half-closed write side after the peer closed is not an error.
-        assert!(client
-            .shutdown(std::net::Shutdown::Write)
-            .is_ok_or_not_connected());
+        let shutdown = client.shutdown(std::net::Shutdown::Write);
+        assert!(
+            shutdown.is_ok() || shutdown.unwrap_err().kind() == std::io::ErrorKind::NotConnected
+        );
     }
 
-    trait ShutdownResult {
-        fn is_ok_or_not_connected(&self) -> bool;
+    #[test]
+    fn socket_provider_rejects_buffered_extra_frame_after_agent_closed() {
+        let (mut client, mut agent) = std::os::unix::net::UnixStream::pair().unwrap();
+        agent.write_all(b"{\"ok\":1}\n\n").unwrap();
+        drop(agent);
+        client.set_nonblocking(true).unwrap();
+        let provider = provider(socket_path("closed-bad-agent"));
+        let error = provider
+            .read_response_frame(
+                &mut client,
+                std::time::Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidConfiguration);
     }
-    impl ShutdownResult for std::io::Result<()> {
-        fn is_ok_or_not_connected(&self) -> bool {
-            match self {
-                Ok(()) => true,
-                Err(error) => error.kind() == std::io::ErrorKind::NotConnected,
-            }
-        }
+
+    #[test]
+    fn socket_provider_read_and_write_do_not_ignore_expired_deadlines() {
+        let (mut client, mut agent) = std::os::unix::net::UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        agent.write_all(b"{}\n").unwrap();
+        let expired = std::time::Instant::now() - Duration::from_secs(1);
+        let provider = provider(socket_path("expired-io"));
+        assert_eq!(
+            provider
+                .read_response_frame(&mut client, expired)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::Unavailable
+        );
+        let mut writer = super::DeadlineWriter {
+            stream: &mut client,
+            deadline: expired,
+        };
+        assert_eq!(
+            writer.write(b"request\n").unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
     }
 
     #[test]
