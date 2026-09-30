@@ -11941,6 +11941,37 @@ mod tests {
     use crate::lexer::Lexer;
     use crate::parser::Parser;
 
+    #[test]
+    fn self_append_fast_paths_match_parsed_statements() {
+        // The O(1) append fast paths must recognize `s = s + ...` and
+        // `a = a + [...]` as produced by the real parser, not only
+        // hand-built AST. Any wrapper added to parsed expressions must keep
+        // this passing.
+        let parse = |source: &str| {
+            let tokens: Vec<_> = crate::lexer::Lexer::new(source).collect();
+            let program = crate::parser::Parser::new(tokens).parse().unwrap();
+            let mut statement = program.statements.last().unwrap().clone();
+            while let Statement::Located { stmt, .. } = statement {
+                statement = *stmt;
+            }
+            let Statement::Expression(expr) = statement else {
+                panic!("expected an expression statement");
+            };
+            expr
+        };
+        let mut interp = Interpreter::new();
+        let setup: Vec<_> = crate::lexer::Lexer::new("let mut s = \"\"\nlet mut a = []").collect();
+        interp
+            .eval(&crate::parser::Parser::new(setup).parse().unwrap())
+            .unwrap();
+        assert!(interp
+            .try_eval_string_self_concat_statement(&parse("s = s + \"x\""))
+            .unwrap());
+        assert!(interp
+            .try_eval_array_self_append_statement(&parse("a = a + [1]"))
+            .unwrap());
+    }
+
     fn eval(source: &str) -> Result<Value> {
         let lexer = Lexer::new(source);
         let tokens: Vec<_> = lexer.collect();

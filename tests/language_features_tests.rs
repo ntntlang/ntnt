@@ -7217,3 +7217,33 @@ print(p)
     assert_ne!(exit_code, 0);
     assert!(stderr.contains("per_page must be at least 1"), "{stderr}");
 }
+
+#[test]
+fn test_template_from_imported_module_resolves_from_entry_directory() {
+    // #247: calling an imported function must not move relative template
+    // paths to that module's directory.
+    let project = unique_test_dir("template_import_base");
+    fs::create_dir_all(project.join("views")).unwrap();
+    fs::create_dir_all(project.join("lib")).unwrap();
+    write_test_file(&project.join("views/hi.html"), "hello {{name}}");
+    write_test_file(
+        &project.join("lib/r.tnt"),
+        "export fn render() -> String {\n    return template(\"views/hi.html\", map { \"name\": \"x\" })\n}",
+    );
+    let main = project.join("main.tnt");
+    write_test_file(
+        &main,
+        "import { render } from \"./lib/r.tnt\"\nprint(render())",
+    );
+
+    let (stdout, stderr, exit_code) = run_ntnt_file(&main, &[]);
+    assert_eq!(
+        exit_code, 0,
+        "template from imported module failed: {stderr}"
+    );
+    assert!(
+        stdout.contains("hello x"),
+        "unexpected output: {stdout}{stderr}"
+    );
+    fs::remove_dir_all(project).ok();
+}
