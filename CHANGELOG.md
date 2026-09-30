@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- **Breaking:** the Redis job backend now requires Redis 7.0+ or Valkey 7.2+. Job state changes commit through one Lua script that re-checks the values it read and the credential's permission for every write before writing anything. Workers refuse to start on an older server. Redis credentials need EVAL, EVALSHA and SCRIPT; WATCH, MULTI and EXEC are no longer used. Stop all workers and upgrade them together.
+- Redis job throughput: each state change is one read round trip plus one commit, and claims read 32 ready-index entries instead of 256.
+
 ### Fixed
 
 - SQLite job state changes (claim, renew, recovery) no longer fail with a generic `job state storage operation failed` when another worker slot or lease keeper briefly holds the store, or another connection holds the write lock. These are now reported as retryable contention (`local_busy` / `busy`), which job recovery already retries.
