@@ -48,6 +48,44 @@ fn remaining_until(deadline: Instant) -> std::io::Result<Duration> {
         })
 }
 
+/// Wait until `stream` is ready for `events` or the attempt deadline passes.
+///
+/// The stream stays nonblocking and deadlines are enforced with `poll`, not
+/// SO_RCVTIMEO/SO_SNDTIMEO: macOS rejects setting those options with EINVAL
+/// once the peer has closed, even when its complete response is still
+/// buffered. An agent that answers and closes immediately is valid.
+fn wait_ready(
+    stream: &UnixStream,
+    events: libc::c_short,
+    deadline: Instant,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    loop {
+        let remaining = remaining_until(deadline)?;
+        // Round up so a sub-millisecond remainder still waits.
+        let timeout_ms = remaining
+            .as_millis()
+            .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+            .min(libc::c_int::MAX as u128) as libc::c_int;
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd for a descriptor owned by `stream`.
+        match unsafe { libc::poll(&mut descriptor, 1, timeout_ms) } {
+            0 => continue, // re-checks the deadline
+            n if n > 0 => return Ok(()),
+            _ => {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
 struct DeadlineWriter<'a> {
     stream: &'a mut UnixStream,
     deadline: Instant,
@@ -55,15 +93,21 @@ struct DeadlineWriter<'a> {
 
 impl Write for DeadlineWriter<'_> {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.stream
-            .set_write_timeout(Some(remaining_until(self.deadline)?))?;
-        self.stream.write(buffer)
+        loop {
+            remaining_until(self.deadline)?;
+            match self.stream.write(buffer) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_ready(self.stream, libc::POLLOUT, self.deadline)?
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                result => return result,
+            }
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.stream
-            .set_write_timeout(Some(remaining_until(self.deadline)?))?;
-        self.stream.flush()
+        // Unix streams are unbuffered; every byte was handed to `write`.
+        Ok(())
     }
 }
 
@@ -145,8 +189,9 @@ impl SocketSecretProvider {
         // SAFETY: ownership of the live stream descriptor moves from socket2 to
         // UnixStream exactly once; `socket` cannot close it after `into_raw_fd`.
         let stream = unsafe { UnixStream::from_raw_fd(socket.into_raw_fd()) };
+        // Stays nonblocking: every read and write waits with `wait_ready`.
         stream
-            .set_nonblocking(false)
+            .set_nonblocking(true)
             .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
         Ok(stream)
     }
@@ -198,11 +243,7 @@ impl SocketSecretProvider {
         let mut chunk = Zeroizing::new([0_u8; 4096]);
 
         loop {
-            let read_timeout = remaining_until(deadline)
-                .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
-            stream
-                .set_read_timeout(Some(read_timeout))
-                .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+            remaining_until(deadline).map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
             let remaining = MAX_RESPONSE_SIZE + 1 - response.len();
             let read_size = remaining.min(chunk.len());
             match stream.read(&mut chunk[..read_size]) {
@@ -221,10 +262,9 @@ impl SocketSecretProvider {
                             return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                         }
 
+                        // The stream is nonblocking, so this is the immediate
+                        // trailing-byte check.
                         let mut trailing = Zeroizing::new([0_u8; 1]);
-                        stream
-                            .set_nonblocking(true)
-                            .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
                         match stream.read(&mut trailing[..]) {
                             Ok(0) => return Ok(response),
                             Err(error)
@@ -248,6 +288,11 @@ impl SocketSecretProvider {
                         return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                     }
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_ready(stream, libc::POLLIN, deadline)
+                        .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error)
                     if response.len() >= MAX_RESPONSE_SIZE
                         && matches!(
@@ -385,20 +430,37 @@ impl SecretProvider for SocketSecretProvider {
     fn lookup(&self, name: &str) -> std::result::Result<ProviderLookup, ProviderError> {
         let deadline = Instant::now() + self.timeout;
         let mut stream = self.connect(deadline)?;
+        let request_id = self.send_request(&mut stream, deadline, name)?;
+        self.finish_lookup(&mut stream, deadline, request_id)
+    }
+}
 
-        let request_id = self.write_request(
-            &mut DeadlineWriter {
-                stream: &mut stream,
-                deadline,
-            },
-            name,
-        )?;
+impl SocketSecretProvider {
+    fn send_request(
+        &self,
+        stream: &mut UnixStream,
+        deadline: Instant,
+        name: &str,
+    ) -> std::result::Result<u64, ProviderError> {
+        self.write_request(&mut DeadlineWriter { stream, deadline }, name)
+    }
 
-        stream
-            .shutdown(Shutdown::Write)
-            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+    /// Half-close, then read and decode the single response frame.
+    fn finish_lookup(
+        &self,
+        stream: &mut UnixStream,
+        deadline: Instant,
+        request_id: u64,
+    ) -> std::result::Result<ProviderLookup, ProviderError> {
+        // A peer that already answered and closed leaves the socket
+        // unconnected (ENOTCONN on macOS); its buffered response is still read.
+        match stream.shutdown(Shutdown::Write) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {}
+            Err(_) => return Err(self.error(ProviderErrorKind::Unavailable)),
+        }
 
-        let response = self.read_response_frame(&mut stream, deadline)?;
+        let response = self.read_response_frame(stream, deadline)?;
         self.decode_response(&response[..response.len() - 1], request_id)
     }
 }
@@ -477,9 +539,14 @@ mod tests {
                 stream
                     .write_all(&response)
                     .expect("write provider response");
-                stream
-                    .shutdown(std::net::Shutdown::Write)
-                    .expect("close fixture response");
+                // The provider may consume the whole response and close before
+                // this half-close; macOS then reports ENOTCONN. The response
+                // was delivered, and there is no request EOF left to drain.
+                match stream.shutdown(std::net::Shutdown::Write) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotConnected => continue,
+                    Err(error) => panic!("close fixture response: {error:?}"),
+                }
 
                 // Drain the provider's request half-close only after sending the
                 // response. On macOS, closing with that EOF unread can reset the
@@ -788,6 +855,129 @@ mod tests {
     }
 
     #[test]
+    fn socket_provider_reads_response_from_agent_that_already_closed() {
+        // A valid agent may write its whole response and close before the
+        // client reads. macOS then rejects SO_RCVTIMEO with EINVAL, which
+        // used to discard the buffered response as Unavailable.
+        let (mut client, mut agent) = std::os::unix::net::UnixStream::pair().unwrap();
+        agent.write_all(b"{\"ok\":1}\n").unwrap();
+        drop(agent);
+        client.set_nonblocking(true).unwrap();
+        let provider = provider(socket_path("closed-agent"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let frame = provider
+            .read_response_frame(&mut client, deadline)
+            .expect("buffered response from a closed agent must be read");
+        assert_eq!(&frame[..], b"{\"ok\":1}\n");
+        // A half-closed write side after the peer closed is not an error.
+        let shutdown = client.shutdown(std::net::Shutdown::Write);
+        assert!(
+            shutdown.is_ok() || shutdown.unwrap_err().kind() == std::io::ErrorKind::NotConnected
+        );
+    }
+
+    #[test]
+    fn socket_provider_lookup_succeeds_when_agent_closed_before_half_close() {
+        // Deterministic ordering for the lookup path: the agent reads the
+        // request, answers, and closes before the provider half-closes.
+        // macOS then reports ENOTCONN from shutdown(Write); the complete
+        // buffered response must still be decoded.
+        let (mut client, agent) = std::os::unix::net::UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        let provider = provider(socket_path("closed-before-half-close"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let request_id = provider
+            .send_request(&mut client, deadline, "API_KEY")
+            .expect("send request");
+
+        let mut request = String::new();
+        let mut reader = BufReader::new(&agent);
+        reader.read_line(&mut request).expect("agent reads request");
+        drop(reader);
+        let parsed: JsonValue = serde_json::from_str(&request).unwrap();
+        assert_eq!(parsed["request_id"].as_u64(), Some(request_id));
+        let mut agent = agent;
+        agent
+            .write_all(
+                format!(
+                    "{{\"protocol\":1,\"request_id\":{request_id},\"status\":\"found\",\"scope\":\"deployment-a\",\"value\":\"{SECRET_CANARY}\"}}\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        drop(agent);
+
+        let lookup = provider
+            .finish_lookup(&mut client, deadline, request_id)
+            .expect("buffered response from a closed agent must be decoded");
+        assert!(matches!(lookup, ProviderLookup::Found(_)));
+    }
+
+    #[test]
+    fn socket_provider_rejects_buffered_extra_frame_after_agent_closed() {
+        let (mut client, mut agent) = std::os::unix::net::UnixStream::pair().unwrap();
+        agent.write_all(b"{\"ok\":1}\n\n").unwrap();
+        drop(agent);
+        client.set_nonblocking(true).unwrap();
+        let provider = provider(socket_path("closed-bad-agent"));
+        let error = provider
+            .read_response_frame(
+                &mut client,
+                std::time::Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::InvalidConfiguration);
+    }
+
+    #[test]
+    fn socket_provider_read_and_write_do_not_ignore_expired_deadlines() {
+        let (mut client, mut agent) = std::os::unix::net::UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        agent.write_all(b"{}\n").unwrap();
+        let expired = std::time::Instant::now() - Duration::from_secs(1);
+        let provider = provider(socket_path("expired-io"));
+        assert_eq!(
+            provider
+                .read_response_frame(&mut client, expired)
+                .unwrap_err()
+                .kind,
+            ProviderErrorKind::Unavailable
+        );
+        let mut writer = super::DeadlineWriter {
+            stream: &mut client,
+            deadline: expired,
+        };
+        assert_eq!(
+            writer.write(b"request\n").unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+
+    #[test]
+    fn socket_provider_read_waits_for_a_slow_agent_within_the_deadline() {
+        let (mut client, mut agent) = std::os::unix::net::UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            agent.write_all(b"{\"ok\":2}\n").unwrap();
+        });
+        let provider = provider(socket_path("slow-agent"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let frame = provider.read_response_frame(&mut client, deadline).unwrap();
+        writer.join().unwrap();
+        assert_eq!(&frame[..], b"{\"ok\":2}\n");
+        // And an agent that never answers is bounded by the deadline.
+        let (mut silent, _held) = std::os::unix::net::UnixStream::pair().unwrap();
+        silent.set_nonblocking(true).unwrap();
+        let started = std::time::Instant::now();
+        let error = provider
+            .read_response_frame(&mut silent, started + Duration::from_millis(100))
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Unavailable);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
     fn socket_provider_rejects_malformed_or_ambiguous_frames() {
         let valid = format!(
             "{}",
@@ -827,16 +1017,13 @@ mod tests {
 
         for (label, frame) in frames {
             let (path, _request_rx, server) = serve_response(label, frame);
-            // Every fixture answers immediately (or closes), so this deadline
-            // only bounds a stalled run. It must be generous: when a loaded
-            // hosted macOS runner delays the fixture thread past the deadline,
-            // the provider correctly reports Unavailable instead of the
-            // protocol error under test.
+            // Use the original budget: classification depends on consuming a
+            // buffered closed-peer response, not on waiting longer for the agent.
             let result = SocketSecretProvider::new(
                 path.clone(),
                 ProviderEndpointLabel::socket(1),
                 "deployment-a".to_string(),
-                Duration::from_secs(15),
+                Duration::from_secs(2),
             )
             .lookup("API_KEY");
             server.join().expect("fixture server");
