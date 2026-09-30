@@ -301,12 +301,27 @@ fn expired_child_stops_even_when_backend_cannot_renew() {
     assert!(kv::conditional::is_contention_error(&error), "{error}");
     assert!(scope.cancel.wait_timeout(Duration::from_secs(5)));
     assert!(sent.elapsed() < Duration::from_millis(4_500));
-    locked.execute_batch("ROLLBACK").unwrap();
-    let lease = retrying("expired lease", || kv::job_leases::get(&h, &c.id)).unwrap();
-    assert_eq!(lease.deadline_ms, c.deadline_ms);
     assert!(scope.cancel.is_cancelled());
     drop(scope);
     assert!(!is_current_task_cancelled());
+    // A renewal may have passed its cancellation check just before expiry.
+    // Keep the writer locked until the supervisor exits: the observer channel
+    // disconnects only once no renewal can still be in flight. Every attempt
+    // made under the lock must have failed.
+    drop(keeper);
+    loop {
+        match renewals.recv_timeout(Duration::from_secs(10)) {
+            Ok((_, Ok(renewed))) => panic!("expired lease renewed under lock: {renewed}"),
+            Ok((_, Err(_))) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("lease supervisor did not exit")
+            }
+        }
+    }
+    locked.execute_batch("ROLLBACK").unwrap();
+    let lease = retrying("expired lease", || kv::job_leases::get(&h, &c.id)).unwrap();
+    assert_eq!(lease.deadline_ms, c.deadline_ms);
     // Local send-time deadline intentionally expires before the store deadline.
     let until = Instant::now() + Duration::from_secs(1);
     loop {
