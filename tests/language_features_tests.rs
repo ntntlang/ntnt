@@ -941,11 +941,7 @@ print(token)
             ("NTNT_SECRETS_PROVIDER", "unix-socket"),
             ("NTNT_SECRETS_SOCKET_ENDPOINTS", &socket_path_text),
             ("NTNT_SECRETS_AUTHORIZATION_SCOPE", "deployment-a"),
-            // The fixture answers immediately; the deadline only bounds a
-            // stall. 250ms was too short for a loaded macOS runner, where the
-            // provider then correctly reported the fixture as unavailable.
-            ("NTNT_SECRETS_TIMEOUT_MS", "10000"),
-            ("NTNT_TMP_SOCKET_DIAG", "1"),
+            ("NTNT_SECRETS_TIMEOUT_MS", "250"),
         ],
     );
 

@@ -48,6 +48,44 @@ fn remaining_until(deadline: Instant) -> std::io::Result<Duration> {
         })
 }
 
+/// Wait until `stream` is ready for `events` or the attempt deadline passes.
+///
+/// The stream stays nonblocking and deadlines are enforced with `poll`, not
+/// SO_RCVTIMEO/SO_SNDTIMEO: macOS rejects setting those options with EINVAL
+/// once the peer has closed, even when its complete response is still
+/// buffered. An agent that answers and closes immediately is valid.
+fn wait_ready(
+    stream: &UnixStream,
+    events: libc::c_short,
+    deadline: Instant,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    loop {
+        let remaining = remaining_until(deadline)?;
+        // Round up so a sub-millisecond remainder still waits.
+        let timeout_ms = remaining
+            .as_millis()
+            .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+            .min(libc::c_int::MAX as u128) as libc::c_int;
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd for a descriptor owned by `stream`.
+        match unsafe { libc::poll(&mut descriptor, 1, timeout_ms) } {
+            0 => continue, // re-checks the deadline
+            n if n > 0 => return Ok(()),
+            _ => {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
 struct DeadlineWriter<'a> {
     stream: &'a mut UnixStream,
     deadline: Instant,
@@ -55,15 +93,20 @@ struct DeadlineWriter<'a> {
 
 impl Write for DeadlineWriter<'_> {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.stream
-            .set_write_timeout(Some(remaining_until(self.deadline)?))?;
-        self.stream.write(buffer)
+        loop {
+            match self.stream.write(buffer) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_ready(self.stream, libc::POLLOUT, self.deadline)?
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                result => return result,
+            }
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.stream
-            .set_write_timeout(Some(remaining_until(self.deadline)?))?;
-        self.stream.flush()
+        // Unix streams are unbuffered; every byte was handed to `write`.
+        Ok(())
     }
 }
 
@@ -132,32 +175,23 @@ impl SocketSecretProvider {
             }
             Err(_) => return Err(self.error(ProviderErrorKind::InvalidConfiguration)),
         }
-        let socket = Socket::new(Domain::UNIX, Type::STREAM, None).map_err(|e| {
-            diag(1, &e);
-            self.error(ProviderErrorKind::Unavailable)
-        })?;
-        let address = SockAddr::unix(&self.path).map_err(|e| {
-            diag(2, &e);
-            self.error(ProviderErrorKind::InvalidConfiguration)
-        })?;
-        let connect_timeout = remaining_until(deadline).map_err(|e| {
-            diag(3, &e);
-            self.error(ProviderErrorKind::Unavailable)
-        })?;
+        let socket = Socket::new(Domain::UNIX, Type::STREAM, None)
+            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+        let address = SockAddr::unix(&self.path)
+            .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
+        let connect_timeout =
+            remaining_until(deadline).map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
         socket
             .connect_timeout(&address, connect_timeout)
-            .map_err(|e| {
-                diag(4, &e);
-                self.error(ProviderErrorKind::Unavailable)
-            })?;
+            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
 
         // SAFETY: ownership of the live stream descriptor moves from socket2 to
         // UnixStream exactly once; `socket` cannot close it after `into_raw_fd`.
         let stream = unsafe { UnixStream::from_raw_fd(socket.into_raw_fd()) };
-        stream.set_nonblocking(false).map_err(|e| {
-            diag(5, &e);
-            self.error(ProviderErrorKind::Unavailable)
-        })?;
+        // Stays nonblocking: every read and write waits with `wait_ready`.
+        stream
+            .set_nonblocking(true)
+            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
         Ok(stream)
     }
 
@@ -190,17 +224,12 @@ impl SocketSecretProvider {
             name,
             scope: &self.authorization_scope,
         };
-        serde_json::to_writer(&mut *writer, &request).map_err(|e| {
-            diag(6, &e);
-            self.error(ProviderErrorKind::Unavailable)
-        })?;
+        serde_json::to_writer(&mut *writer, &request)
+            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
         writer
             .write_all(b"\n")
             .and_then(|_| writer.flush())
-            .map_err(|e| {
-                diag(7, &e);
-                self.error(ProviderErrorKind::Unavailable)
-            })?;
+            .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
         Ok(request_id)
     }
 
@@ -213,24 +242,13 @@ impl SocketSecretProvider {
         let mut chunk = Zeroizing::new([0_u8; 4096]);
 
         loop {
-            let read_timeout = remaining_until(deadline).map_err(|e| {
-                diag(8, &e);
-                self.error(ProviderErrorKind::Unavailable)
-            })?;
-            stream.set_read_timeout(Some(read_timeout)).map_err(|e| {
-                diag(9, &e);
-                self.error(ProviderErrorKind::Unavailable)
-            })?;
             let remaining = MAX_RESPONSE_SIZE + 1 - response.len();
             let read_size = remaining.min(chunk.len());
             match stream.read(&mut chunk[..read_size]) {
                 Ok(0) if response.len() >= MAX_RESPONSE_SIZE => {
                     return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                 }
-                Ok(0) => {
-                    diag(900, &"eof before newline");
-                    return Err(self.error(ProviderErrorKind::Unavailable));
-                }
+                Ok(0) => return Err(self.error(ProviderErrorKind::Unavailable)),
                 Ok(bytes_read) => {
                     let bytes = &chunk[..bytes_read];
                     if bytes.contains(&b'\r') {
@@ -242,11 +260,9 @@ impl SocketSecretProvider {
                             return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                         }
 
+                        // The stream is nonblocking, so this is the immediate
+                        // trailing-byte check.
                         let mut trailing = Zeroizing::new([0_u8; 1]);
-                        stream.set_nonblocking(true).map_err(|e| {
-                            diag(10, &e);
-                            self.error(ProviderErrorKind::InvalidConfiguration)
-                        })?;
                         match stream.read(&mut trailing[..]) {
                             Ok(0) => return Ok(response),
                             Err(error)
@@ -270,6 +286,11 @@ impl SocketSecretProvider {
                         return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                     }
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_ready(stream, libc::POLLIN, deadline)
+                        .map_err(|_| self.error(ProviderErrorKind::Unavailable))?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error)
                     if response.len() >= MAX_RESPONSE_SIZE
                         && matches!(
@@ -280,10 +301,7 @@ impl SocketSecretProvider {
                 {
                     return Err(self.error(ProviderErrorKind::InvalidConfiguration));
                 }
-                Err(e) => {
-                    diag(901, &e);
-                    return Err(self.error(ProviderErrorKind::Unavailable));
-                }
+                Err(_) => return Err(self.error(ProviderErrorKind::Unavailable)),
             }
         }
     }
@@ -293,10 +311,8 @@ impl SocketSecretProvider {
         body: &[u8],
         request_id: u64,
     ) -> std::result::Result<ProviderLookup, ProviderError> {
-        let parsed: SocketResponse = serde_json::from_slice(body).map_err(|e| {
-            diag(11, &e);
-            self.error(ProviderErrorKind::InvalidConfiguration)
-        })?;
+        let parsed: SocketResponse = serde_json::from_slice(body)
+            .map_err(|_| self.error(ProviderErrorKind::InvalidConfiguration))?;
 
         match parsed {
             SocketResponse::Found {
@@ -421,22 +437,19 @@ impl SecretProvider for SocketSecretProvider {
             name,
         )?;
 
-        stream.shutdown(Shutdown::Write).map_err(|e| {
-            diag(12, &e);
-            self.error(ProviderErrorKind::Unavailable)
-        })?;
+        // A peer that already answered and closed leaves the socket
+        // unconnected (ENOTCONN on macOS); its buffered response is still read.
+        match stream.shutdown(Shutdown::Write) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {}
+            Err(_) => return Err(self.error(ProviderErrorKind::Unavailable)),
+        }
 
         let response = self.read_response_frame(&mut stream, deadline)?;
         self.decode_response(&response[..response.len() - 1], request_id)
     }
 }
 
-// TEMP diagnostics (removed before PR).
-fn diag(site: u32, error: &dyn std::fmt::Debug) {
-    if std::env::var_os("NTNT_TMP_SOCKET_DIAG").is_some() {
-        eprintln!("[socket-diag] site={site} error={error:?}");
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::super::{
@@ -822,6 +835,63 @@ mod tests {
     }
 
     #[test]
+    fn socket_provider_reads_response_from_agent_that_already_closed() {
+        // A valid agent may write its whole response and close before the
+        // client reads. macOS then rejects SO_RCVTIMEO with EINVAL, which
+        // used to discard the buffered response as Unavailable.
+        let (mut client, mut agent) = std::os::unix::net::UnixStream::pair().unwrap();
+        agent.write_all(b"{\"ok\":1}\n").unwrap();
+        drop(agent);
+        client.set_nonblocking(true).unwrap();
+        let provider = provider(socket_path("closed-agent"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let frame = provider
+            .read_response_frame(&mut client, deadline)
+            .expect("buffered response from a closed agent must be read");
+        assert_eq!(&frame[..], b"{\"ok\":1}\n");
+        // A half-closed write side after the peer closed is not an error.
+        assert!(client
+            .shutdown(std::net::Shutdown::Write)
+            .is_ok_or_not_connected());
+    }
+
+    trait ShutdownResult {
+        fn is_ok_or_not_connected(&self) -> bool;
+    }
+    impl ShutdownResult for std::io::Result<()> {
+        fn is_ok_or_not_connected(&self) -> bool {
+            match self {
+                Ok(()) => true,
+                Err(error) => error.kind() == std::io::ErrorKind::NotConnected,
+            }
+        }
+    }
+
+    #[test]
+    fn socket_provider_read_waits_for_a_slow_agent_within_the_deadline() {
+        let (mut client, mut agent) = std::os::unix::net::UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            agent.write_all(b"{\"ok\":2}\n").unwrap();
+        });
+        let provider = provider(socket_path("slow-agent"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let frame = provider.read_response_frame(&mut client, deadline).unwrap();
+        writer.join().unwrap();
+        assert_eq!(&frame[..], b"{\"ok\":2}\n");
+        // And an agent that never answers is bounded by the deadline.
+        let (mut silent, _held) = std::os::unix::net::UnixStream::pair().unwrap();
+        silent.set_nonblocking(true).unwrap();
+        let started = std::time::Instant::now();
+        let error = provider
+            .read_response_frame(&mut silent, started + Duration::from_millis(100))
+            .unwrap_err();
+        assert_eq!(error.kind, ProviderErrorKind::Unavailable);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
     fn socket_provider_rejects_malformed_or_ambiguous_frames() {
         let valid = format!(
             "{}",
@@ -861,16 +931,14 @@ mod tests {
 
         for (label, frame) in frames {
             let (path, _request_rx, server) = serve_response(label, frame);
-            // Every fixture answers immediately (or closes), so this deadline
-            // only bounds a stalled run. It must be generous: when a loaded
-            // hosted macOS runner delays the fixture thread past the deadline,
-            // the provider correctly reports Unavailable instead of the
-            // protocol error under test.
+            // Oversized responses must transfer the full 64 KiB boundary before
+            // they can be classified. Keep this bounded, but allow hosted macOS
+            // runners enough scheduling headroom to exercise the protocol check.
             let result = SocketSecretProvider::new(
                 path.clone(),
                 ProviderEndpointLabel::socket(1),
                 "deployment-a".to_string(),
-                Duration::from_secs(15),
+                Duration::from_secs(2),
             )
             .lookup("API_KEY");
             server.join().expect("fixture server");
