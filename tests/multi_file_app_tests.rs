@@ -56,10 +56,13 @@ fn run_with_deadline(dir: &Path, app: &Path, paths: &[&str]) -> String {
     }
     let stdout_path = dir.join("stdout");
     let stderr_path = dir.join("stderr");
-    // Run from a different working directory: resolution must follow the
-    // entry file, not the process cwd.
+    // Run from a private working directory outside the app: resolution must
+    // follow the entry file, not the process cwd, and parallel runs must not
+    // share any files the child creates in its cwd.
+    let cwd = dir.join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ntnt"))
-        .current_dir(std::env::temp_dir())
+        .current_dir(&cwd)
         .args(&args)
         .env("NTNT_ENV", "development")
         .env_remove("NTNT_TYPE_MODE")
@@ -90,6 +93,14 @@ fn run_with_deadline(dir: &Path, app: &Path, paths: &[&str]) -> String {
         .read_to_string(&mut stderr)
         .unwrap();
     assert!(!timed_out, "ntnt test exceeded 60s: {output}{stderr}");
+    // The fixture uses an in-memory job queue; no job store may be written.
+    for place in [&cwd, app] {
+        assert!(
+            !place.join("jobs.db").exists(),
+            "fixture wrote jobs.db in {}",
+            place.display()
+        );
+    }
     output
 }
 

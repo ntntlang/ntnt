@@ -3,7 +3,11 @@
 // an imported function. Relative paths must resolve from this directory.
 import { render_home, render_compiled, render_items } from "./lib/pages.tnt"
 import { load_jobs } from "./lib/setup.tnt"
-import { enqueue } from "std/jobs"
+import { enqueue, configure_queue } from "std/jobs"
+
+// In-memory test queue: enqueue still requires a registered job, but nothing
+// is written to a shared ./jobs.db.
+configure_queue(map { "mode": "testing" })
 
 load_jobs()
 
