@@ -1245,27 +1245,33 @@ fn server_mode_auth_routes_follow_manifest_and_route_prefix() {
 }
 
 #[test]
-fn enable_auth_rejects_provider_named_like_a_fixed_auth_route() {
+fn provider_named_health_starts_oauth_instead_of_health_route() {
     let dir = tempfile::tempdir().unwrap();
-    let server = dir.path().join("reserved.tnt");
+    let server = dir.path().join("health_provider.tnt");
     std::fs::write(
         &server,
-        "import { enable_auth, oauth } from \"std/auth\"\nlet p = oauth(\"health\", map { \"client_id\": \"c\", \"client_secret\": \"s\", \"authorize_url\": \"https://example.com/a\", \"token_url\": \"https://example.com/t\" })\nenable_auth([p], map { \"session_secret\": \"s\", \"session_store\": \"memory\" })\n",
+        "import { enable_auth, oauth } from \"std/auth\"\nimport { text } from \"std/http/server\"\nlet p = oauth(\"health\", map { \"client_id\": \"c\", \"client_secret\": \"s\", \"authorize_url\": \"https://example.com/a\", \"token_url\": \"https://example.com/t\" })\nenable_auth([p], map { \"session_secret\": \"s\", \"session_store\": \"memory\" })\nget(\"/\", fn(req) { return text(\"home\") })\nlisten(8080)\n",
     )
     .unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+        .to_string();
     let out = std::process::Command::new(find_ntnt_binary())
-        .args(["run", server.to_str().unwrap()])
+        .args([
+            "test",
+            server.to_str().unwrap(),
+            "--port",
+            &port,
+            "--get",
+            "/auth/health",
+        ])
         .env("NTNT_ENV", "development")
         .output()
-        .expect("run ntnt");
-    let output = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(!out.status.success(), "{output}");
-    assert!(
-        output.contains("is reserved for a built-in auth route"),
-        "{output}"
-    );
+        .expect("run ntnt test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // OAuth start redirects to the provider (302); the health route would be 200.
+    assert!(stdout.contains("[RESPONSE] 302"), "{stdout}");
 }

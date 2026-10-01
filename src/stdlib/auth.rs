@@ -5330,15 +5330,6 @@ pub fn parse_enable_auth_args(args: &[Value]) -> Result<AuthConfig> {
                         idx, e
                     ))
                 })?;
-                // GET {prefix}/health is a fixed built-in route registered
-                // before {provider}; a provider with that name could never
-                // start its OAuth flow.
-                if routes::RESERVED_PROVIDER_NAMES.contains(&provider.name.as_str()) {
-                    return Err(IntentError::type_error(format!(
-                        "[auth] Provider name \"{}\" is reserved for a built-in auth route; choose another name",
-                        provider.name
-                    )));
-                }
                 providers.push(provider);
             }
             _ => {

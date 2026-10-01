@@ -74,9 +74,6 @@ pub(super) fn auth_route_path(config: &AuthConfig, suffix: &str) -> String {
     }
 }
 
-/// Provider names that would collide with a fixed GET route under the prefix.
-pub(super) const RESERVED_PROVIDER_NAMES: &[&str] = &["health"];
-
 /// A built-in auth route registered by the HTTP server.
 pub struct AuthServerRoute {
     pub method: &'static str,
@@ -95,7 +92,7 @@ pub fn auth_server_routes(config: &AuthConfig) -> Vec<AuthServerRoute> {
         name,
         handler,
     };
-    vec![
+    let mut routes = vec![
         route(
             "GET",
             "",
@@ -111,7 +108,26 @@ pub fn auth_server_routes(config: &AuthConfig) -> Vec<AuthServerRoute> {
             "_auth_callback",
             handle_auth_callback,
         ),
-    ]
+    ];
+    // A configured provider wins over a fixed GET route of the same name, so
+    // `{prefix}/{name}` still starts that provider's OAuth flow.
+    routes.retain(|route| !shadows_provider(config, route));
+    routes
+}
+
+/// True when a fixed one-segment GET route would hide a configured provider.
+fn shadows_provider(config: &AuthConfig, route: &AuthServerRoute) -> bool {
+    let prefix = auth_route_prefix(config);
+    let Some(name) = route.path.strip_prefix(&format!("{prefix}/")) else {
+        return false;
+    };
+    route.method == "GET"
+        && !name.contains('/')
+        && !name.starts_with('{')
+        && config
+            .providers
+            .iter()
+            .any(|provider| provider.name == name)
 }
 
 pub(super) fn auth_route_manifest(config: &AuthConfig) -> Vec<String> {
@@ -124,6 +140,17 @@ pub(super) fn auth_route_manifest(config: &AuthConfig) -> Vec<String> {
 pub(super) fn auth_route_collision_warnings(config: &AuthConfig) -> Vec<String> {
     let mut warnings = Vec::new();
     let prefix = auth_route_prefix(config);
+
+    if config
+        .providers
+        .iter()
+        .any(|provider| provider.name == "health")
+    {
+        warnings.push(format!(
+            "Provider 'health' uses {}; the built-in auth health route is not registered.",
+            auth_route_path(config, "health")
+        ));
+    }
 
     for protected in get_protected_paths() {
         let normalized = protected.trim();
@@ -868,21 +895,22 @@ mod tests {
     }
 
     #[test]
-    fn reserved_provider_names_cover_every_fixed_get_route() {
-        // Any fixed GET route with one segment under the prefix shadows a
-        // provider of the same name, so its name must be reserved.
-        let config = AuthConfig::default();
-        let prefix = auth_route_prefix(&config);
-        for route in auth_server_routes(&config) {
-            let Some(rest) = route.path.strip_prefix(&format!("{prefix}/")) else {
-                continue;
-            };
-            if route.method == "GET" && !rest.contains('/') && !rest.starts_with('{') {
-                assert!(
-                    RESERVED_PROVIDER_NAMES.contains(&rest),
-                    "{rest} not reserved"
-                );
-            }
-        }
+    fn provider_named_like_a_fixed_route_wins_over_it() {
+        let config = AuthConfig {
+            providers: vec![ProviderConfig {
+                name: "health".to_string(),
+                ..ProviderConfig::default()
+            }],
+            ..AuthConfig::default()
+        };
+        let paths: Vec<_> = auth_server_routes(&config)
+            .into_iter()
+            .map(|route| route.path)
+            .collect();
+        assert!(!paths.contains(&"/auth/health".to_string()), "{paths:?}");
+        assert!(paths.contains(&"/auth/{provider}".to_string()));
+        assert!(auth_route_collision_warnings(&config)
+            .iter()
+            .any(|w| w.contains("Provider 'health'")));
     }
 }
