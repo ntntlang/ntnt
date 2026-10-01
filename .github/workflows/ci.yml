@@ -41,6 +41,8 @@ jobs:
               - '.config/nextest.toml'
             examples:
               - 'examples/**'
+              - 'tests/performance_guard.rs'
+              - '.github/workflows/ci.yml'
               - 'src/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -221,6 +223,12 @@ jobs:
 
       - name: Build release
         run: cargo build --release --locked
+
+      # Coarse timing alarms run only here, in release mode on Linux. Debug
+      # and cross-platform correctness tests assert the optimized paths directly.
+      - name: Interpreter and template timing guard
+        timeout-minutes: 5
+        run: cargo test --release --locked --test performance_guard -- --ignored --nocapture --test-threads=1
 
       - name: Lint examples
         run: ./target/release/ntnt lint examples/

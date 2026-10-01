@@ -122,3 +122,58 @@ pub fn init() -> HashMap<String, Value> {
 
     exports
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{interpreter::Interpreter, lexer::Lexer, parser::Parser};
+
+    #[test]
+    fn compiled_template_dispatch_reuses_source_and_reloads_newer_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.html");
+        fs::write(&path, "Old {{name}}").unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.set_current_file(dir.path().join("app.tnt").to_str().unwrap());
+        let setup = Parser::new(Lexer::new("let tpl = compile(\"page.html\")\ntpl").collect())
+            .parse()
+            .unwrap();
+        let Value::Map(compiled) = interpreter.eval(&setup).unwrap() else {
+            panic!("expected compiled template handle");
+        };
+        let Value::Int(id) = compiled["_template_id"] else {
+            panic!("expected template id");
+        };
+        let id = id as u64;
+        let render = Parser::new(Lexer::new(r#"render(tpl, map { "name": "A" })"#).collect())
+            .parse()
+            .unwrap();
+        let original_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+        // Invalid source would fail if unchanged files were reread. Restore
+        // the actual file mtime, rather than relying on filesystem resolution.
+        fs::write(&path, "{{#if broken}}").unwrap();
+        let file = fs::File::options().write(true).open(&path).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+        for _ in 0..2 {
+            let value = interpreter.eval(&render).unwrap();
+            assert!(matches!(value, Value::String(ref s) if s == "Old A"));
+        }
+
+        fs::write(&path, "New {{name}}").unwrap();
+        file.set_times(
+            fs::FileTimes::new().set_modified(original_mtime + std::time::Duration::from_secs(60)),
+        )
+        .unwrap();
+        let value = interpreter.eval(&render).unwrap();
+        assert!(matches!(value, Value::String(ref s) if s == "New A"));
+        let reloaded_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, "{{#if broken}}").unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(reloaded_mtime))
+            .unwrap();
+        let value = interpreter.eval(&render).unwrap();
+        assert!(matches!(value, Value::String(ref s) if s == "New A"));
+        TEMPLATE_CACHE.lock().unwrap().remove(&id);
+    }
+}

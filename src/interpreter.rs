@@ -751,8 +751,22 @@ fn convert_to_int(value: &Value) -> std::result::Result<Value, String> {
     }
 }
 
+// Count completed optimized operations, not recognizer attempts. These fields
+// and increments do not exist in production builds.
+#[cfg(test)]
+#[derive(Default)]
+struct FastPathHits {
+    array_append: usize,
+    string_concat: usize,
+    len_binding: usize,
+    import_exact: usize,
+    import_canonical: usize,
+}
+
 /// The Intent interpreter
 pub struct Interpreter {
+    #[cfg(test)]
+    fast_path_hits: FastPathHits,
     pub(crate) probe_scope: crate::stdlib::net::persistent::Scope,
     /// Actual builtin calls, enabled only for the selected native test invocation.
     native_assertions: Option<Vec<crate::native_test::NativeAssertion>>,
@@ -1064,6 +1078,8 @@ impl Interpreter {
     pub fn new() -> Self {
         let env = Rc::new(RefCell::new(Environment::new()));
         let mut interpreter = Interpreter {
+            #[cfg(test)]
+            fast_path_hits: FastPathHits::default(),
             native_assertions: None,
             native_test_entry: None,
             native_test_scope: None,
@@ -4497,12 +4513,20 @@ impl Interpreter {
 
         // Check if it's already loaded
         if let Some(module) = self.loaded_modules.get(source).cloned() {
+            #[cfg(test)]
+            {
+                self.fast_path_hits.import_exact += 1;
+            }
             return self.bind_imports(items, &module, source, alias, wildcard);
         }
 
         // Check canonicalized file path cache (prevents double evaluation)
         let canonical_source = self.canonical_module_key(source);
         if let Some(module) = self.loaded_modules.get(&canonical_source).cloned() {
+            #[cfg(test)]
+            {
+                self.fast_path_hits.import_canonical += 1;
+            }
             return self.bind_imports(items, &module, &canonical_source, alias, wildcard);
         }
 
@@ -5975,6 +5999,10 @@ impl Interpreter {
                 "array self-append fast path invariant failed: target binding is no longer an array",
             ));
         }
+        #[cfg(test)]
+        {
+            self.fast_path_hits.array_append += 1;
+        }
         Ok(true)
     }
 
@@ -6014,6 +6042,10 @@ impl Interpreter {
             return Err(IntentError::runtime_error(
                 "string self-concat fast path invariant failed: target binding is no longer a string",
             ));
+        }
+        #[cfg(test)]
+        {
+            self.fast_path_hits.string_concat += 1;
         }
         Ok(true)
     }
@@ -6566,6 +6598,10 @@ impl Interpreter {
                             if len_is_builtin {
                                 let len_result = self.environment.borrow().len_of_binding(arg_name);
                                 if let Some(result) = len_result {
+                                    #[cfg(test)]
+                                    {
+                                        self.fast_path_hits.len_binding += 1;
+                                    }
                                     return result;
                                 }
                             }
@@ -11744,6 +11780,9 @@ impl Default for Interpreter {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod fast_path_tests;
 
 #[cfg(test)]
 mod tests {
