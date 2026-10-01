@@ -1243,3 +1243,29 @@ fn server_mode_auth_routes_follow_manifest_and_route_prefix() {
     );
     assert_eq!(statuses, ["302", "200", "302", "404", "404"]);
 }
+
+#[test]
+fn enable_auth_rejects_provider_named_like_a_fixed_auth_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = dir.path().join("reserved.tnt");
+    std::fs::write(
+        &server,
+        "import { enable_auth, oauth } from \"std/auth\"\nlet p = oauth(\"health\", map { \"client_id\": \"c\", \"client_secret\": \"s\", \"authorize_url\": \"https://example.com/a\", \"token_url\": \"https://example.com/t\" })\nenable_auth([p], map { \"session_secret\": \"s\", \"session_store\": \"memory\" })\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(find_ntnt_binary())
+        .args(["run", server.to_str().unwrap()])
+        .env("NTNT_ENV", "development")
+        .output()
+        .expect("run ntnt");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{output}");
+    assert!(
+        output.contains("is reserved for a built-in auth route"),
+        "{output}"
+    );
+}

@@ -74,6 +74,9 @@ pub(super) fn auth_route_path(config: &AuthConfig, suffix: &str) -> String {
     }
 }
 
+/// Provider names that would collide with a fixed GET route under the prefix.
+pub(super) const RESERVED_PROVIDER_NAMES: &[&str] = &["health"];
+
 /// A built-in auth route registered by the HTTP server.
 pub struct AuthServerRoute {
     pub method: &'static str,
@@ -862,5 +865,24 @@ mod tests {
             auth_route_manifest(&config),
             routes.iter().map(|r| r.path.clone()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn reserved_provider_names_cover_every_fixed_get_route() {
+        // Any fixed GET route with one segment under the prefix shadows a
+        // provider of the same name, so its name must be reserved.
+        let config = AuthConfig::default();
+        let prefix = auth_route_prefix(&config);
+        for route in auth_server_routes(&config) {
+            let Some(rest) = route.path.strip_prefix(&format!("{prefix}/")) else {
+                continue;
+            };
+            if route.method == "GET" && !rest.contains('/') && !rest.starts_with('{') {
+                assert!(
+                    RESERVED_PROVIDER_NAMES.contains(&rest),
+                    "{rest} not reserved"
+                );
+            }
+        }
     }
 }
