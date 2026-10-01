@@ -1,0 +1,24 @@
+// Called from main.tnt and from routes/: every template path is relative to
+// the entry directory, not to lib/.
+export fn render_home(name) {
+    return template("views/home.html", map { "name": name })
+}
+
+export fn render_compiled(name) {
+    let tpl = compile("views/home.html")
+    return render(tpl, map { "name": name })
+}
+
+export fn render_about() {
+    return template("views/about.html", map {})
+}
+
+// Builds output with the string self-append fast path.
+export fn render_items(count) {
+    let mut out = ""
+    for i in 0..count {
+        out = out + "<li>item #{i}</li>"
+    }
+    return template("views/items.html", map { "items": out })
+}
+

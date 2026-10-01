@@ -1,0 +1,14 @@
+// Multi-file fixture app (#260): entry file in the project root, helpers in
+// lib/, templates in views/, file routes in routes/, jobs in jobs/ loaded from
+// an imported function. Relative paths must resolve from this directory.
+import { render_home, render_compiled, render_items } from "./lib/pages.tnt"
+import { load_jobs } from "./lib/setup.tnt"
+
+load_jobs()
+
+get("/", fn(req) { return html(render_home("Ada")) })
+get("/compiled", fn(req) { return html(render_compiled("Bob")) })
+get("/items", fn(req) { return html(render_items(3)) })
+
+routes("routes")
+listen(8080)

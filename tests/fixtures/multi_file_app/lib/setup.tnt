@@ -1,0 +1,4 @@
+// jobs() called from an imported module still resolves from the entry directory.
+export fn load_jobs() {
+    jobs("jobs/")
+}
