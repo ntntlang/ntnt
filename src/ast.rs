@@ -4,8 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::SourceSpan;
-
 /// A complete Intent program
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Program {
@@ -250,12 +248,6 @@ pub enum Statement {
 /// Expression nodes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Expression {
-    /// Parsed source span. Runtime errors retain the innermost failing span.
-    Located {
-        span: SourceSpan,
-        expr: Box<Expression>,
-    },
-
     /// Integer literal
     Integer(i64),
 
@@ -377,16 +369,6 @@ pub enum Expression {
 
     /// Try-catch expression: try { block } catches runtime errors as Result
     TryCatch { body: Block },
-}
-
-impl Expression {
-    /// Return the semantic node beneath any source-location wrappers.
-    pub fn unlocated(&self) -> &Expression {
-        match self {
-            Expression::Located { expr, .. } => expr.unlocated(),
-            expr => expr,
-        }
-    }
 }
 
 /// Binary operators
