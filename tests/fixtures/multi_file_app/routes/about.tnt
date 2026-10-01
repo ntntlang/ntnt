@@ -1,0 +1,5 @@
+import { render_about } from "../lib/pages.tnt"
+
+export fn get(req) {
+    return html(render_about())
+}

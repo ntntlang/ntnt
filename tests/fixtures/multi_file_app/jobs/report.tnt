@@ -1,0 +1,5 @@
+job FixtureReport on fixture_reports {
+    perform(name) {
+        print("report #{name}")
+    }
+}
