@@ -109,8 +109,8 @@ use request_helpers::{
     request_user_agent_hash,
 };
 pub use routes::{
-    handle_auth_callback, handle_auth_health, handle_auth_index, handle_auth_logout,
-    handle_auth_protect, handle_auth_start,
+    auth_server_routes, handle_auth_callback, handle_auth_health, handle_auth_index,
+    handle_auth_logout, handle_auth_protect, handle_auth_start, AuthServerRoute,
 };
 use sessions::{
     build_rotated_session, get_session_by_id, migrate_session, update_session_data,

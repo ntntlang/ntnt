@@ -1167,3 +1167,111 @@ fn enable_auth_call_forms_start_a_server_through_dispatch() {
         "login_url: {rejected}"
     );
 }
+
+// ===========================================================================
+// Built-in auth routes in server mode follow std/auth's manifest (#258)
+// ===========================================================================
+
+#[test]
+fn server_mode_auth_routes_follow_manifest_and_route_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = find_ntnt_binary();
+    let run = |label: &str, options: &str, paths: &[&str]| -> Vec<String> {
+        let server = dir.path().join(format!("{label}.tnt"));
+        std::fs::write(
+            &server,
+            format!(
+                "import {{ enable_auth, oauth }} from \"std/auth\"\nimport {{ text }} from \"std/http/server\"\nlet gh = oauth(\"github\", \"client-id\", \"client-secret\")\nenable_auth([gh], map {{ \"session_secret\": \"s\", \"session_store\": \"memory\"{options} }})\nget(\"/\", fn(req) {{ return text(\"home\") }})\nlisten(8080)\n"
+            ),
+        )
+        .unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+            .to_string();
+        let mut args = vec!["test", server.to_str().unwrap(), "--port", &port];
+        for path in paths {
+            args.push("--get");
+            args.push(path);
+        }
+        let out = std::process::Command::new(&binary)
+            .args(&args)
+            .env("NTNT_ENV", "development")
+            .output()
+            .expect("run ntnt test");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let statuses: Vec<String> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("[RESPONSE] "))
+            .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(statuses.len(), paths.len(), "{label}: {stdout}");
+        statuses
+    };
+
+    // Default prefix: health is a fixed route, not a provider, and the OAuth
+    // callback path that auth_start sends to the provider reaches the callback
+    // handler (an invalid state redirects to failure_url instead of 404).
+    let statuses = run(
+        "default_prefix",
+        "",
+        &[
+            "/auth",
+            "/auth/health",
+            "/auth/github/callback?code=c&state=bogus",
+            "/auth/logout",
+            "/auth/nosuchprovider",
+        ],
+    );
+    // With a single provider, the index redirects straight to it (302).
+    // GET logout and unknown providers are missing pages (404), not 500s.
+    assert_eq!(statuses, ["302", "200", "302", "404", "404"]);
+
+    // Custom prefix: routes move; the old /auth paths are not registered.
+    let statuses = run(
+        "custom_prefix",
+        r#", "route_prefix": "/account""#,
+        &[
+            "/account",
+            "/account/health",
+            "/account/github/callback?code=c&state=bogus",
+            "/auth",
+            "/auth/health",
+        ],
+    );
+    assert_eq!(statuses, ["302", "200", "302", "404", "404"]);
+}
+
+#[test]
+fn provider_named_health_starts_oauth_instead_of_health_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = dir.path().join("health_provider.tnt");
+    std::fs::write(
+        &server,
+        "import { enable_auth, oauth } from \"std/auth\"\nimport { text } from \"std/http/server\"\nlet p = oauth(\"health\", map { \"client_id\": \"c\", \"client_secret\": \"s\", \"authorize_url\": \"https://example.com/a\", \"token_url\": \"https://example.com/t\" })\nenable_auth([p], map { \"session_secret\": \"s\", \"session_store\": \"memory\" })\nget(\"/\", fn(req) { return text(\"home\") })\nlisten(8080)\n",
+    )
+    .unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+        .to_string();
+    let out = std::process::Command::new(find_ntnt_binary())
+        .args([
+            "test",
+            server.to_str().unwrap(),
+            "--port",
+            &port,
+            "--get",
+            "/auth/health",
+        ])
+        .env("NTNT_ENV", "development")
+        .output()
+        .expect("run ntnt test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // OAuth start redirects to the provider (302); the health route would be 200.
+    assert!(stdout.contains("[RESPONSE] 302"), "{stdout}");
+}

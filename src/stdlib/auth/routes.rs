@@ -74,19 +74,83 @@ pub(super) fn auth_route_path(config: &AuthConfig, suffix: &str) -> String {
     }
 }
 
+/// A built-in auth route registered by the HTTP server.
+pub struct AuthServerRoute {
+    pub method: &'static str,
+    pub path: String,
+    pub name: &'static str,
+    pub handler: fn(&[Value]) -> Result<Value>,
+}
+
+/// The single source of truth for built-in auth routes under `route_prefix`.
+/// Ordered so fixed routes register before `{provider}`: routes match in
+/// registration order, and `{prefix}/health` must not be read as a provider.
+pub fn auth_server_routes(config: &AuthConfig) -> Vec<AuthServerRoute> {
+    let route = |method, suffix: &str, name, handler| AuthServerRoute {
+        method,
+        path: auth_route_path(config, suffix),
+        name,
+        handler,
+    };
+    let mut routes = vec![
+        route(
+            "GET",
+            "",
+            "_auth_index",
+            handle_auth_index as fn(&[Value]) -> Result<Value>,
+        ),
+        route("GET", "health", "_auth_health", handle_auth_health),
+        route("POST", "logout", "_auth_logout", handle_auth_logout),
+        route("GET", "{provider}", "_auth_start", handle_auth_start),
+        route(
+            "GET",
+            "{provider}/callback",
+            "_auth_callback",
+            handle_auth_callback,
+        ),
+    ];
+    // A configured provider wins over a fixed GET route of the same name, so
+    // `{prefix}/{name}` still starts that provider's OAuth flow.
+    routes.retain(|route| !shadows_provider(config, route));
+    routes
+}
+
+/// True when a fixed one-segment GET route would hide a configured provider.
+fn shadows_provider(config: &AuthConfig, route: &AuthServerRoute) -> bool {
+    let prefix = auth_route_prefix(config);
+    let Some(name) = route.path.strip_prefix(&format!("{prefix}/")) else {
+        return false;
+    };
+    route.method == "GET"
+        && !name.contains('/')
+        && !name.starts_with('{')
+        && config
+            .providers
+            .iter()
+            .any(|provider| provider.name == name)
+}
+
 pub(super) fn auth_route_manifest(config: &AuthConfig) -> Vec<String> {
-    vec![
-        auth_route_path(config, ""),
-        auth_route_path(config, "{provider}"),
-        auth_route_path(config, "{provider}/callback"),
-        auth_route_path(config, "logout"),
-        auth_route_path(config, "health"),
-    ]
+    auth_server_routes(config)
+        .into_iter()
+        .map(|route| route.path)
+        .collect()
 }
 
 pub(super) fn auth_route_collision_warnings(config: &AuthConfig) -> Vec<String> {
     let mut warnings = Vec::new();
     let prefix = auth_route_prefix(config);
+
+    if config
+        .providers
+        .iter()
+        .any(|provider| provider.name == "health")
+    {
+        warnings.push(format!(
+            "Provider 'health' uses {}; the built-in auth health route is not registered.",
+            auth_route_path(config, "health")
+        ));
+    }
 
     for protected in get_protected_paths() {
         let normalized = protected.trim();
@@ -155,27 +219,36 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
         )
     })?;
 
-    let provider = config
+    // An unknown provider segment is a missing page, not a server error:
+    // GET {prefix}/logout or a typo must not surface as a 500.
+    let Some(provider) = config
         .providers
         .iter()
         .find(|provider| provider.name == provider_name)
-        .ok_or_else(|| {
-            let msg = if let Some(suggestion) = suggest_provider(&provider_name) {
-                format!(
-                    "[auth] Unknown provider \"{}\"\n       Did you mean \"{}\"?\n       Available providers: {}",
-                    provider_name,
-                    suggestion,
-                    available_providers()
-                )
-            } else {
-                format!(
-                    "[auth] Unknown provider \"{}\"\n       Available providers: {}",
-                    provider_name,
-                    available_providers()
-                )
-            };
-            IntentError::runtime_error(msg)
-        })?;
+    else {
+        let msg = if let Some(suggestion) = suggest_provider(&provider_name) {
+            format!(
+                "[auth] Unknown provider \"{}\"\n       Did you mean \"{}\"?\n       Available providers: {}",
+                provider_name,
+                suggestion,
+                available_providers()
+            )
+        } else {
+            format!(
+                "[auth] Unknown provider \"{}\"\n       Available providers: {}",
+                provider_name,
+                available_providers()
+            )
+        };
+        eprintln!("{}", msg);
+        return Ok(json_response(
+            Value::Map(HashMap::from([(
+                "error".to_string(),
+                Value::String("unknown_auth_provider".to_string()),
+            )])),
+            404,
+        ));
+    };
 
     let state = generate_oauth_state();
     let nonce = if provider.supports_oidc {
@@ -791,4 +864,53 @@ pub fn handle_auth_logout(args: &[Value]) -> Result<Value> {
     let cookie = build_cleared_session_cookie(&config, None).map_err(IntentError::runtime_error)?;
 
     Ok(redirect_response(&config.logout_url, Some(&cookie)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_server_routes_use_prefix_and_register_fixed_routes_first() {
+        let config = AuthConfig {
+            route_prefix: "/account".to_string(),
+            ..AuthConfig::default()
+        };
+        let routes = auth_server_routes(&config);
+        let paths: Vec<_> = routes.iter().map(|r| (r.method, r.path.as_str())).collect();
+        assert_eq!(
+            paths,
+            [
+                ("GET", "/account"),
+                ("GET", "/account/health"),
+                ("POST", "/account/logout"),
+                ("GET", "/account/{provider}"),
+                ("GET", "/account/{provider}/callback"),
+            ]
+        );
+        assert_eq!(
+            auth_route_manifest(&config),
+            routes.iter().map(|r| r.path.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn provider_named_like_a_fixed_route_wins_over_it() {
+        let config = AuthConfig {
+            providers: vec![ProviderConfig {
+                name: "health".to_string(),
+                ..ProviderConfig::default()
+            }],
+            ..AuthConfig::default()
+        };
+        let paths: Vec<_> = auth_server_routes(&config)
+            .into_iter()
+            .map(|route| route.path)
+            .collect();
+        assert!(!paths.contains(&"/auth/health".to_string()), "{paths:?}");
+        assert!(paths.contains(&"/auth/{provider}".to_string()));
+        assert!(auth_route_collision_warnings(&config)
+            .iter()
+            .any(|w| w.contains("Provider 'health'")));
+    }
 }
