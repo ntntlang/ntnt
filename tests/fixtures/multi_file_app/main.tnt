@@ -3,12 +3,23 @@
 // an imported function. Relative paths must resolve from this directory.
 import { render_home, render_compiled, render_items } from "./lib/pages.tnt"
 import { load_jobs } from "./lib/setup.tnt"
+import { enqueue } from "std/jobs"
 
 load_jobs()
 
 get("/", fn(req) { return html(render_home("Ada")) })
 get("/compiled", fn(req) { return html(render_compiled("Bob")) })
 get("/items", fn(req) { return html(render_items(3)) })
+
+// Proves jobs("jobs/") in lib/setup.tnt registered the fixture job: enqueue
+// by name fails for an unregistered job.
+get("/jobs", fn(req) {
+    let queued = enqueue("FixtureReport", map { "name": "fixture" })
+    return match queued {
+        Ok(_) => text("job registered"),
+        Err(e) => status(500, "job missing: #{e}")
+    }
+})
 
 routes("routes")
 listen(8080)

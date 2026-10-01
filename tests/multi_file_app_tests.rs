@@ -3,8 +3,10 @@
 //! from an imported function. Guards path resolution that only differs when
 //! code runs from a module outside the entry directory (see #247).
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
@@ -38,49 +40,126 @@ fn free_port() -> String {
         .to_string()
 }
 
-#[test]
-fn multi_file_app_renders_from_lib_routes_and_jobs() {
-    let (_dir, app) = fixture_copy();
+/// Run `ntnt test` with a hard deadline so a stuck handler fails the test
+/// instead of hanging CI. Output goes to files so a full pipe cannot block.
+fn run_with_deadline(dir: &Path, app: &Path, paths: &[&str]) -> String {
     let port = free_port();
+    let mut args = vec![
+        "test".to_string(),
+        app.join("main.tnt").to_string_lossy().to_string(),
+        "--port".to_string(),
+        port,
+    ];
+    for path in paths {
+        args.push("--get".to_string());
+        args.push(path.to_string());
+    }
+    let stdout_path = dir.join("stdout");
+    let stderr_path = dir.join("stderr");
     // Run from a different working directory: resolution must follow the
     // entry file, not the process cwd.
-    let out = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ntnt"))
         .current_dir(std::env::temp_dir())
-        .args([
-            "test",
-            app.join("main.tnt").to_str().unwrap(),
-            "--port",
-            &port,
-            "--get",
-            "/",
-            "--get",
-            "/compiled",
-            "--get",
-            "/items",
-            "--get",
-            "/about",
-        ])
+        .args(&args)
         .env("NTNT_ENV", "development")
         .env_remove("NTNT_TYPE_MODE")
-        .output()
-        .expect("run ntnt test");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let all = format!("{stdout}{stderr}");
+        .stdout(Stdio::from(std::fs::File::create(&stdout_path).unwrap()))
+        .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()))
+        .spawn()
+        .expect("spawn ntnt test");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let timed_out = loop {
+        if child.try_wait().unwrap().is_some() {
+            break false;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut output = String::new();
+    std::fs::File::open(&stdout_path)
+        .unwrap()
+        .read_to_string(&mut output)
+        .unwrap();
+    let mut stderr = String::new();
+    std::fs::File::open(&stderr_path)
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(!timed_out, "ntnt test exceeded 60s: {output}{stderr}");
+    output
+}
 
-    assert!(all.contains("4 requests, 4 passed, 0 failed"), "{all}");
-    // template() + partial, called from lib/
-    assert!(all.contains("<p>Hello Ada</p>"), "{all}");
-    // compile() + render() from lib/
-    assert!(all.contains("<p>Hello Bob</p>"), "{all}");
-    // string append loop in lib/ feeding a template
+/// Split `ntnt test` stdout into one block per request, keyed by path.
+fn responses(stdout: &str, paths: &[&str]) -> Vec<String> {
+    let blocks: Vec<&str> = stdout.split("[REQUEST ").skip(1).collect();
+    assert_eq!(blocks.len(), paths.len(), "{stdout}");
+    blocks
+        .iter()
+        .zip(paths)
+        .map(|(block, path)| {
+            let header = block.lines().next().unwrap_or("");
+            assert!(
+                header.ends_with(&format!("GET {path}")),
+                "request order: expected {path}, got {header}"
+            );
+            block.to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn multi_file_app_renders_from_lib_routes_and_jobs() {
+    let (dir, app) = fixture_copy();
+    let paths = ["/", "/compiled", "/items", "/about", "/jobs"];
+    let stdout = run_with_deadline(dir.path(), &app, &paths);
     assert!(
-        all.contains("<li>item 0</li><li>item 1</li><li>item 2</li>"),
-        "{all}"
+        stdout.contains("5 requests, 5 passed, 0 failed"),
+        "{stdout}"
     );
-    // file route importing ../lib/ and rendering a template
-    assert!(all.contains("<p>About this fixture</p>"), "{all}");
-    // every page includes the partial from views/partials/
-    assert_eq!(all.matches("<h1>Fixture Site</h1>").count(), 4, "{all}");
-    assert!(!all.contains("Failed to load template"), "{all}");
+    let blocks = responses(&stdout, &paths);
+
+    // Each route must serve its own content: (path, expected, must not contain).
+    let expectations: [(&str, &str, &[&str]); 5] = [
+        // template() + partial, called from lib/
+        (
+            "/",
+            "<p>Hello Ada</p>",
+            &["Hello Bob", "About this fixture", "<li>"],
+        ),
+        // compile() + render() from lib/
+        (
+            "/compiled",
+            "<p>Hello Bob</p>",
+            &["Hello Ada", "About this fixture", "<li>"],
+        ),
+        // string append loop in lib/ feeding a template
+        (
+            "/items",
+            "<ul><li>item 0</li><li>item 1</li><li>item 2</li></ul>",
+            &["Hello", "About this fixture"],
+        ),
+        // file route importing ../lib/ and rendering a template
+        ("/about", "<p>About this fixture</p>", &["Hello", "<li>"]),
+        // jobs("jobs/") called from lib/setup.tnt registered the fixture job
+        ("/jobs", "job registered", &["job missing"]),
+    ];
+    for ((path, expected, absent), block) in expectations.iter().zip(&blocks) {
+        assert!(block.contains("[RESPONSE] 200"), "{path}: {block}");
+        assert!(block.contains(expected), "{path}: {block}");
+        for other in *absent {
+            assert!(!block.contains(other), "{path} served {other}: {block}");
+        }
+        if *path != "/jobs" {
+            // partial from views/partials/ on every page
+            assert!(block.contains("<h1>Fixture Site</h1>"), "{path}: {block}");
+        }
+        assert!(
+            !block.contains("Failed to load template"),
+            "{path}: {block}"
+        );
+    }
 }
