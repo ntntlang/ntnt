@@ -92,7 +92,7 @@ A redesign is tracked in #257.
 
 ## Verification
 
-- CI on Linux, macOS and Windows for every merged change.
+- Release CI on Linux, macOS and Windows for the tagged commit.
 - New in CI: a multi-file fixture app (templates, partials, `compile()`, file
   routes and `jobs()` called from `lib/`), assertions that interpreter fast
   paths actually execute, and a Linux release-profile timing guard.
