@@ -311,11 +311,10 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn scan_string(&mut self, quote: char) -> Token {
-        let start_line = self.line;
-        let start_column = self.column;
-        self.current_lexeme.clear();
-
+    /// `start_line`/`start_column` are the opening quote's position. The
+    /// lexeme accumulated since `next_token` began (opening quote included)
+    /// is kept, so it is the exact source slice.
+    fn scan_string(&mut self, quote: char, start_line: usize, start_column: usize) -> Token {
         let mut value = String::new();
         let mut has_interpolation = false;
         let mut parts: Vec<StringPart> = Vec::new();
@@ -399,10 +398,10 @@ impl<'a> Lexer<'a> {
             )
         } else {
             Token::new(
-                TokenKind::String(value.clone()),
+                TokenKind::String(value),
                 start_line,
                 start_column,
-                format!("{}{}{}", quote, value, quote),
+                self.current_lexeme.clone(),
             )
         }
     }
@@ -416,11 +415,12 @@ impl<'a> Lexer<'a> {
     ///
     /// This is a pragmatic extension over Rust's raw string behavior, designed for a
     /// language where HTML/CSS content in raw strings is the common case.
-    fn scan_raw_string(&mut self, hash_count: usize) -> Token {
-        let start_line = self.line;
-        let start_column = self.column;
-        self.current_lexeme.clear();
-
+    fn scan_raw_string(
+        &mut self,
+        hash_count: usize,
+        start_line: usize,
+        start_column: usize,
+    ) -> Token {
         let mut value = String::new();
 
         // Look for closing quote followed by the same number of #
@@ -489,11 +489,7 @@ impl<'a> Lexer<'a> {
     /// Scan a template string literal: """..."""
     /// Uses {{expr}} for interpolation (double braces, CSS-safe)
     /// Supports {{#for x in items}}...{{/for}} and {{#if cond}}...{{#else}}...{{/if}}
-    fn scan_template_string(&mut self) -> Token {
-        let start_line = self.line;
-        let start_column = self.column;
-        self.current_lexeme.clear();
-
+    fn scan_template_string(&mut self, start_line: usize, start_column: usize) -> Token {
         let mut content = String::new();
 
         // Read until closing """
@@ -1269,7 +1265,7 @@ impl<'a> Lexer<'a> {
             if self.peek_is('"') {
                 // r"..." - raw string with no hashes
                 self.advance(); // consume the opening "
-                return self.scan_raw_string(0);
+                return self.scan_raw_string(0, start_line, start_column);
             } else if self.peek_is('#') {
                 // Count hashes and check for quote
                 let mut hash_count = 0;
@@ -1288,7 +1284,7 @@ impl<'a> Lexer<'a> {
                         self.advance(); // consume #
                     }
                     self.advance(); // consume "
-                    return self.scan_raw_string(hash_count);
+                    return self.scan_raw_string(hash_count, start_line, start_column);
                 }
                 // Not a raw string, fall through to normal identifier
             }
@@ -1389,7 +1385,7 @@ impl<'a> Lexer<'a> {
                     self.advance(); // consume second "
                     if self.peek() == Some(&'"') {
                         self.advance(); // consume third "
-                        self.scan_template_string()
+                        self.scan_template_string(start_line, start_column)
                     } else {
                         // Empty string ""
                         Token::new(
@@ -1400,7 +1396,7 @@ impl<'a> Lexer<'a> {
                         )
                     }
                 } else {
-                    self.scan_string(ch)
+                    self.scan_string(ch, start_line, start_column)
                 }
             }
 
@@ -1587,6 +1583,33 @@ impl Iterator for Lexer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #261: every string token starts at its opening delimiter and its
+    /// lexeme is the exact source slice, escapes and delimiters included.
+    #[test]
+    fn string_tokens_report_opening_column_and_exact_source_lexeme() {
+        let cases: &[(&str, &str)] = &[
+            ("\"abc\"", "plain double"),
+            ("'abc'", "plain single"),
+            ("\"a\\nb\\\"c\"", "escaped"),
+            ("\"\"", "empty"),
+            ("\"hi #{name}!\"", "interpolated"),
+            ("\"\"\"<p>{{x}}</p>\"\"\"", "template"),
+            ("r\"raw \\n\"", "raw"),
+            ("r#\"has \"quotes\"\"#", "raw hashed"),
+        ];
+        for (literal, label) in cases {
+            // Put the literal at column 9 after a prefix, on line 2.
+            let source = format!("let a = 1\nlet b = {literal}\n");
+            let tokens: Vec<_> = Lexer::new(&source).collect();
+            let token = tokens
+                .iter()
+                .find(|t| t.line == 2 && t.lexeme != "let" && t.lexeme != "b" && t.lexeme != "=")
+                .unwrap_or_else(|| panic!("{label}: no literal token in {tokens:?}"));
+            assert_eq!(token.column, 9, "{label}: column of {literal}");
+            assert_eq!(&token.lexeme, literal, "{label}: lexeme");
+        }
+    }
 
     #[test]
     fn test_unicode_template_string() {
