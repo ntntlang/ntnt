@@ -1,9 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.5.5
+
+See the [complete release notes](docs/release-notes-v0.5.5.md) for upgrade guidance. The Redis job backend now requires Redis 7.0+ or Valkey 7.2+, and workers sharing a queue must be upgraded together.
 
 ### Added
 
+- `int_or(value, fallback)`: integer conversion that returns a fallback instead of a `Result`.
+- Optional start deadlines for `ping`, `snmp_get` and `dns_lookup`, and a bounded monitoring `std/http.probe_fetch`. See [probe start deadlines](docs/probe-start-deadlines.md).
+- Linux ARMv7 hard-float release archives; the Unix installer accepts `--version` / `NTNT_VERSION`.
+- IAL `header {name} exists` and `header {name} equals {value}` resolve and execute in intent checks.
 - Several `ntnt worker` processes can now share one project and worker group on a machine. Each process takes its own numbered control endpoint, and `ntnt workers` commands reach every live process in the group. `scale` applies per process, and `status` prints one table per process. An explicit `--control-socket` path is still single-owner. See [worker control](docs/worker-control.md#several-processes-in-one-group).
 
 ### Changed
@@ -13,6 +19,12 @@
 
 ### Fixed
 
+- OAuth logins through the built-in auth routes in server mode no longer return 404 on the provider callback. Server mode registers the routes `std/auth` lists, under `route_prefix`; `/auth/health` works, and unknown providers return 404 instead of 500.
+- Every `enable_auth` call form accepts the same options. Local-only auth (no OAuth provider), the preset form, and keys such as `cookie_same_site` and `route_prefix` work with one or two arguments.
+- Windows DNS lookups retry once on an OS-assigned UDP port when Windows refuses the resolver's random port.
+- The Unix-socket secrets provider reads a complete response from an agent that already closed the connection (macOS).
+- Parse errors at string literals report the opening quote's column and show the literal as written.
+- Redis workers no longer scan every pending key per claim, and scale across processes instead of slowing down.
 - A job's lease keeper now retries a renewal that hit momentary store contention after 25ms instead of waiting a full renewal interval (a third of the lease). Before, a few unlucky collisions in a row could let a running job's lease expire.
 - SQLite job state changes (claim, renew, recovery) no longer fail with a generic `job state storage operation failed` when another worker slot or lease keeper briefly holds the store, or another connection holds the write lock. These are now reported as retryable contention (`local_busy` / `busy`), which job recovery already retries.
 - On macOS, a `std/process` run that timed out could fail with `failed to clean up process descendants: failed to inspect macOS process <pid>` instead of returning a timed-out result. A process that is partway through exiting can briefly be impossible to inspect; the check now retries for up to 250ms before failing.
