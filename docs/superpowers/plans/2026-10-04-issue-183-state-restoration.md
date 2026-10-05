@@ -222,26 +222,25 @@ Implement spec §6.2 exactly:
 - [ ] `CHANGELOG.md`: an `## Unreleased` section with Fixed entries and the spec §8 list, including the escaping-error defer change and the job panic change.
 - [ ] `docs/AI_AGENT_GUIDE.md`: one paragraph on when a failing function's defers run, and that `old()` is per call.
 - [ ] Open follow-up issues: module top-level `defer` (D6, with the `module_defer*.tnt` fixtures); an HTTP worker panic-recovery audit.
-- [ ] Commits, in order:
-  1. `chore: bump 0.5.6` (existing)
-  2. `refactor: with_environment helper`
-  3. `test: frame restoration controls`
-  4. `fix: function call frames`, with its tests
-  5. `fix: otherwise handler runs as a block`, with its tests
-  6. `fix: match and invariant scopes`, with its tests
-  7. `fix: route load restoration`, with its tests
-  8. `fix: job panic recovery restores file, imports and index flag`, with its tests
-  9. `docs: …`
-- [ ] Retitle #269: "chore: bump to 0.5.6; fix interpreter frame restoration (#183 part 1)". The description covers the defects, behaviour changes, the before/after failure table, the mutation table, the benchmark table with the noise floor, and "part 2 stays open in #183".
+- [ ] Commits on the integration branch, in order (the version bump and these documents land separately in #269):
+  1. `refactor: with_environment helper`
+  2. `test: frame restoration controls`
+  3. `fix: function call frames`, with its tests
+  4. `fix: otherwise handler runs as a block`, with its tests
+  5. `fix: match and invariant scopes`, with its tests
+  6. `fix: route load restoration`, with its tests
+  7. `fix: job panic recovery restores file, imports and index flag`, with its tests
+  8. `docs: …`
+- [ ] Each chunk PR into the integration branch carries its own commits and tests from the list above. The **final integration PR into `main`** ("fix: interpreter frame restoration (#183 part 1)") has a description that covers the defects, behaviour changes, the before/after failure table, the mutation table, the benchmark table with the noise floor, and "part 2 stays open in #183".
 - [ ] The spec's status changes to Implemented only after Task 10 passes.
 
 ## Task 10 — Review and CI
 
-- [ ] One independent review of the final diff against the spec (Astra high; Sol xhigh if blocked).
+- [ ] One independent review of the integration branch's full diff against the spec (Astra high; Sol xhigh if blocked), before the final PR into `main`.
 - [ ] Fix real defects and rerun the affected tests; another review only for something materially new.
 - [ ] Greptile: no unresolved threads, score read after the last push.
-- [ ] CI green on Linux, macOS and Windows at the final commit.
-- [ ] Comment on #183: part 1 done in #269, part 2 open.
+- [ ] CI green on Linux, macOS and Windows on every chunk PR and on the final integration PR at its final commit.
+- [ ] Comment on #183: part 1 done in the final integration PR (link), part 2 open.
 
 ## 3. Risks
 
@@ -259,10 +258,10 @@ Implement spec §6.2 exactly:
 
 ## 4. Rollback
 
-Rollback is by commit, not by task (Task 8 is proof, not a commit). The fix commits are 4–8 in the Task 9 list.
+Rollback is by commit, not by task (Task 8 is proof, not a commit). The fix commits are 3–7 in the Task 9 list.
 
-- **Reverting commit 4** (function call frames) means also reverting commits 5–8 with their tests, because later composition tests assume function calls no longer leak.
-- **Reverting one of commits 5–8** means reverting that owner's fix together with its tests, then checking later commits for tests that depend on it (for example the block composition tests in commits 5 and 6).
+- **Reverting commit 3** (function call frames) means also reverting commits 4–7 with their tests, because later composition tests assume function calls no longer leak.
+- **Reverting one of commits 4–7** means reverting that owner's fix together with its tests, then checking later commits for tests that depend on it (for example the block composition tests in commits 4 and 5).
 - Every rollback ends with a full test-suite run, and the changelog, spec status and PR proof tables are updated to match.
 
 ## 5. Questions answered by the second review
