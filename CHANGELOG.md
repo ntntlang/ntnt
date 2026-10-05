@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A function call that fails now restores its caller's state on every path (#183, part 1). Previously an error in a function body, default argument, destructured parameter, `requires`, `old()` capture or `ensures` left the interpreter in the callee's scope. A caller's `otherwise` handler could then lose its own variables (`Undefined variable`) and see the callee's.
+- Each function call has its own `old()` context. Nested calls no longer wipe the caller's snapshot, so a correct `ensures result == old(x) + 1` no longer fails after a nested call. Callees no longer see the caller's snapshot.
+
+### Changed
+
+- A failing function's `defer` statements run when that function exits, in its own scope, before the caller's `otherwise` handler. Previously they ran later, in the wrong scope, or not at all. This includes errors that escape to the top level.
+- `old()` read in a callee's defaults or `requires` now refers to the callee's own values, not the caller's snapshot. A caller reading `old(x)` in its body after a nested call now sees its real starting value.
+
 ## 0.5.5
 
 See the [complete release notes](docs/release-notes-v0.5.5.md) for upgrade guidance. The Redis job backend now requires Redis 7.0+ or Valkey 7.2+, and workers sharing a queue must be upgraded together.
