@@ -1933,3 +1933,29 @@ print(await_task(spawn(fn() { inc(1) })))
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout.trim(), "2");
 }
+
+#[test]
+fn test_task_invariant_dependency_resolves_like_outside_under_shadowing() {
+    // The caller shadows the invariant's helper name with a local; the
+    // invariant must still resolve the helper where it is defined.
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let MIN = 0
+fn ok(v) { return v >= MIN }
+struct Counter { value: Int }
+impl Counter { invariant ok(value) }
+fn make(n) { return Counter { value: n } }
+fn run() {
+    let ok = 5
+    print(await_task(spawn(fn() { make(1) })))
+    return await_task(spawn(fn() { make(-1) }))
+}
+print(run())
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines[0].contains("value: 1"), "{stdout}");
+    assert!(lines[1].contains("Invariant violated"), "{stdout}");
+}

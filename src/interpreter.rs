@@ -9548,6 +9548,7 @@ impl Interpreter {
                     // them this interpreter's struct invariants.
                     crate::stdlib::concurrent::with_struct_invariants(
                         &self.struct_invariants,
+                        &self.structs,
                         || func(&args),
                     )
                 } else {

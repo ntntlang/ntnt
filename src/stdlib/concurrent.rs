@@ -418,12 +418,20 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Struct invariants of the calling interpreter, plus the outside names they
+/// read (helpers, constants), with each struct's own field names and `self`
+/// excluded.
+#[derive(Clone, Default)]
+struct InvariantContext {
+    invariants: HashMap<String, Vec<crate::ast::Expression>>,
+    outside_names: HashSet<String>,
+}
+
 thread_local! {
-    /// Struct invariants of the interpreter that is currently calling a task
-    /// entry point (spawn, after, schedule, parallel, race). Set only for the
-    /// duration of that native call, so it can never outlive the interpreter.
-    static STRUCT_INVARIANTS: std::cell::RefCell<HashMap<String, Vec<crate::ast::Expression>>> =
-        std::cell::RefCell::new(HashMap::new());
+    /// Set only while the calling interpreter runs a task entry point
+    /// (spawn, after, schedule, parallel, race), so it can never outlive it.
+    static INVARIANT_CONTEXT: std::cell::RefCell<InvariantContext> =
+        std::cell::RefCell::new(InvariantContext::default());
 }
 
 /// Native functions that start tasks and therefore need the caller's
@@ -440,23 +448,47 @@ pub(crate) fn starts_tasks(fn_name: &str) -> bool {
 /// afterwards, including on unwind.
 pub(crate) fn with_struct_invariants<T>(
     invariants: &HashMap<String, Vec<crate::ast::Expression>>,
+    structs: &HashMap<String, Vec<crate::ast::Field>>,
     f: impl FnOnce() -> T,
 ) -> T {
-    struct Restore(Option<HashMap<String, Vec<crate::ast::Expression>>>);
+    struct Restore(Option<InvariantContext>);
     impl Drop for Restore {
         fn drop(&mut self) {
             if let Some(previous) = self.0.take() {
-                STRUCT_INVARIANTS.with(|cell| *cell.borrow_mut() = previous);
+                INVARIANT_CONTEXT.with(|cell| *cell.borrow_mut() = previous);
             }
         }
     }
-    let previous = STRUCT_INVARIANTS.with(|cell| cell.replace(invariants.clone()));
+    let context = InvariantContext {
+        invariants: invariants.clone(),
+        outside_names: invariant_outside_names(invariants, structs),
+    };
+    let previous = INVARIANT_CONTEXT.with(|cell| cell.replace(context));
     let _restore = Restore(Some(previous));
     f()
 }
 
-fn current_struct_invariants() -> HashMap<String, Vec<crate::ast::Expression>> {
-    STRUCT_INVARIANTS.with(|cell| cell.borrow().clone())
+/// Names invariants read from outside the struct being checked. A struct's
+/// own field names and `self` are bound while its invariants run.
+fn invariant_outside_names(
+    invariants: &HashMap<String, Vec<crate::ast::Expression>>,
+    structs: &HashMap<String, Vec<crate::ast::Field>>,
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for (struct_name, exprs) in invariants {
+        let mut bound: HashSet<String> = HashSet::from(["self".to_string()]);
+        if let Some(fields) = structs.get(struct_name) {
+            bound.extend(fields.iter().map(|f| f.name.clone()));
+        }
+        for expr in exprs {
+            collect_free_vars_expr(expr, &mut names, &bound);
+        }
+    }
+    names
+}
+
+fn current_invariant_context() -> InvariantContext {
+    INVARIANT_CONTEXT.with(|cell| cell.borrow().clone())
 }
 
 /// Check if the current thread's task has been cancelled.
@@ -2052,11 +2084,13 @@ fn validate_and_capture(caller: &str, handler: &Value) -> Result<(TaskCapture, c
                     caller
                 )));
             }
-            let mut builder = CaptureBuilder::default();
+            let context = current_invariant_context();
+            let mut builder = CaptureBuilder {
+                invariant_names: context.outside_names,
+                ..CaptureBuilder::default()
+            };
             let body_scope = builder.scope_index(closure);
             builder.capture_names(closure, &free_variables(body), &["task".to_string()]);
-            let struct_invariants = current_struct_invariants();
-            builder.capture_invariant_dependencies(closure, &struct_invariants);
             if !builder.failures.is_empty() {
                 return Err(IntentError::runtime_error(format!(
                     "Cannot capture runtime-local resources across task boundaries: {}. \
@@ -2070,7 +2104,7 @@ fn validate_and_capture(caller: &str, handler: &Value) -> Result<(TaskCapture, c
                 TaskCapture {
                     scopes: builder.scopes,
                     body_scope,
-                    struct_invariants,
+                    struct_invariants: context.invariants,
                 },
                 body.clone(),
             ))
@@ -2093,6 +2127,10 @@ struct CaptureBuilder {
     seen: HashSet<(usize, String)>,
     /// Dependency paths that cannot cross a task boundary.
     failures: Vec<String>,
+    /// Outside names struct invariants read. A struct can be built in any
+    /// scope where task code runs, and its invariants resolve names from
+    /// there, so these are captured from each such scope.
+    invariant_names: HashSet<String>,
 }
 
 type EnvRc = std::rc::Rc<std::cell::RefCell<crate::interpreter::Environment>>;
@@ -2135,9 +2173,22 @@ impl CaptureBuilder {
     /// overflow the caller's stack. `path` is the chain of helpers that led
     /// to each name, for diagnostics.
     fn capture_names(&mut self, env: &EnvRc, names: &HashSet<String>, path: &[String]) {
-        let mut pending: Vec<(EnvRc, HashSet<String>, Vec<String>)> =
-            vec![(std::rc::Rc::clone(env), names.clone(), path.to_vec())];
-        while let Some((env, names, path)) = pending.pop() {
+        // (scope, names, path, tolerant). Tolerant entries are invariant
+        // dependencies: the struct may never be built in this task, so a
+        // dependency that cannot cross threads is skipped rather than
+        // reported; building that struct in the task then fails with an
+        // undefined name instead of skipping the check.
+        let mut pending: Vec<(EnvRc, HashSet<String>, Vec<String>, bool)> =
+            vec![(std::rc::Rc::clone(env), names.clone(), path.to_vec(), false)];
+        if !self.invariant_names.is_empty() {
+            pending.push((
+                std::rc::Rc::clone(env),
+                self.invariant_names.clone(),
+                vec!["invariant".to_string()],
+                true,
+            ));
+        }
+        while let Some((env, names, path, tolerant)) = pending.pop() {
             let mut sorted: Vec<&String> = names.iter().collect();
             sorted.sort();
             for name in sorted {
@@ -2150,9 +2201,6 @@ impl CaptureBuilder {
                 let scope = self.scope_index(&owner);
                 if !self.seen.insert((scope, name.clone())) {
                     continue;
-                }
-                if mutable {
-                    self.scopes[scope].mutable.insert(name.clone());
                 }
                 let mut here = path.clone();
                 here.push(name.clone());
@@ -2193,7 +2241,17 @@ impl CaptureBuilder {
                             type_params,
                             closure_scope,
                         });
-                        pending.push((closure, needed, here));
+                        if !self.invariant_names.is_empty() {
+                            // The helper may build structs: their invariants
+                            // resolve names from the helper's own scope.
+                            pending.push((
+                                std::rc::Rc::clone(&closure),
+                                self.invariant_names.clone(),
+                                vec!["invariant".to_string()],
+                                true,
+                            ));
+                        }
+                        pending.push((closure, needed, here, tolerant));
                     }
                     other => match SerializedValue::from_value(&other) {
                         Ok(serialized) => {
@@ -2202,40 +2260,20 @@ impl CaptureBuilder {
                                 .values
                                 .insert(name.clone(), serialized);
                         }
+                        Err(_) if tolerant => {
+                            // Leave it uncaptured, and let a later
+                            // non-tolerant use of the same name report it.
+                            self.seen.remove(&(scope, name.clone()));
+                            continue;
+                        }
                         Err(_) => self.failures.push(here.join(" -> ")),
                     },
                 }
+                if mutable {
+                    self.scopes[scope].mutable.insert(name.clone());
+                }
             }
         }
-    }
-}
-
-impl CaptureBuilder {
-    /// Copy what struct invariants use (helper functions, constants), so a
-    /// struct built inside the task is checked as it would be outside it.
-    /// Invariants are resolved from the task's scope, like any name it uses.
-    ///
-    /// A struct may never be built in this task, so a dependency that cannot
-    /// cross the boundary is not an error here; building that struct in the
-    /// task then fails with an undefined name instead of skipping the check.
-    fn capture_invariant_dependencies(
-        &mut self,
-        env: &EnvRc,
-        invariants: &HashMap<String, Vec<crate::ast::Expression>>,
-    ) {
-        let mut names = HashSet::new();
-        let bound = HashSet::from(["self".to_string()]);
-        for exprs in invariants.values() {
-            for expr in exprs {
-                collect_free_vars_expr(expr, &mut names, &bound);
-            }
-        }
-        if names.is_empty() {
-            return;
-        }
-        let failures_before = self.failures.len();
-        self.capture_names(env, &names, &["invariant".to_string()]);
-        self.failures.truncate(failures_before);
     }
 }
 
@@ -4325,7 +4363,71 @@ mod tests {
             matches!(result, Value::String(ref s) if s.contains("value: -1")),
             "{result:?}"
         );
-        assert!(current_struct_invariants().is_empty());
+        assert!(current_invariant_context().invariants.is_empty());
+    }
+
+    #[test]
+    fn invariant_field_names_are_not_captured_from_outer_scope() {
+        // `invariant tx >= 0` reads the struct's own field. An unrelated task
+        // must not capture an outer binding that happens to be named `tx`
+        // (e.g. a channel sender, which would keep the channel open).
+        let root = Rc::new(RefCell::new(crate::interpreter::Environment::new()));
+        root.borrow_mut().define("tx".to_string(), Value::Int(1));
+        root.borrow_mut().define("LIMIT".to_string(), Value::Int(0));
+        let invariants = HashMap::from([(
+            "Meter".to_string(),
+            vec![Expression::Binary {
+                left: Box::new(Expression::Identifier("tx".to_string())),
+                operator: BinaryOp::Ge,
+                right: Box::new(Expression::Identifier("LIMIT".to_string())),
+            }],
+        )]);
+        let structs = HashMap::from([(
+            "Meter".to_string(),
+            vec![crate::ast::Field {
+                name: "tx".to_string(),
+                type_annotation: crate::ast::TypeExpr::Named("Int".to_string()),
+                public: true,
+            }],
+        )]);
+        let handler = no_param_function(Block {
+            statements: vec![Statement::Expression(Expression::Integer(1))],
+        });
+        let handler = match handler {
+            Value::Function {
+                name,
+                params,
+                body,
+                contract,
+                type_params,
+                ..
+            } => Value::Function {
+                name,
+                params,
+                body,
+                closure: Rc::clone(&root),
+                contract,
+                type_params,
+            },
+            other => other,
+        };
+        let (captured, _) = with_struct_invariants(&invariants, &structs, || {
+            validate_and_capture("schedule", &handler)
+        })
+        .expect("capture");
+        let names: HashSet<&String> = captured
+            .scopes
+            .iter()
+            .flat_map(|s| s.bindings.values.keys())
+            .collect();
+        assert!(
+            !names.contains(&"tx".to_string()),
+            "field name captured: {names:?}"
+        );
+        assert!(
+            names.contains(&"LIMIT".to_string()),
+            "invariant constant missing: {names:?}"
+        );
     }
 
     #[test]
