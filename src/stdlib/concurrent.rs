@@ -418,6 +418,23 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+thread_local! {
+    /// Struct invariants of the interpreter running on this thread, mirrored
+    /// whenever it registers one. `spawn()` and friends are native functions
+    /// with no interpreter access, so this is how a task inherits them.
+    static STRUCT_INVARIANTS: std::cell::RefCell<HashMap<String, Vec<crate::ast::Expression>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Record the struct invariants of the interpreter on this thread.
+pub(crate) fn publish_struct_invariants(invariants: &HashMap<String, Vec<crate::ast::Expression>>) {
+    STRUCT_INVARIANTS.with(|cell| *cell.borrow_mut() = invariants.clone());
+}
+
+fn current_struct_invariants() -> HashMap<String, Vec<crate::ast::Expression>> {
+    STRUCT_INVARIANTS.with(|cell| cell.borrow().clone())
+}
+
 /// Check if the current thread's task has been cancelled.
 /// Called at yield points: recv, recv_timeout, sleep_ms, http_fetch, http_get.
 pub fn is_current_task_cancelled() -> bool {
@@ -1456,6 +1473,9 @@ struct CapturedBindings {
 struct TaskCapture {
     scopes: Vec<CapturedScope>,
     body_scope: usize,
+    /// Struct invariants, so values built in the task are checked as they
+    /// would be outside it.
+    struct_invariants: HashMap<String, Vec<crate::ast::Expression>>,
 }
 
 /// One source scope, copied. `parent` indexes `TaskCapture::scopes`; the
@@ -2024,6 +2044,7 @@ fn validate_and_capture(caller: &str, handler: &Value) -> Result<(TaskCapture, c
                 TaskCapture {
                     scopes: builder.scopes,
                     body_scope,
+                    struct_invariants: current_struct_invariants(),
                 },
                 body.clone(),
             ))
@@ -2052,90 +2073,112 @@ type EnvRc = std::rc::Rc<std::cell::RefCell<crate::interpreter::Environment>>;
 
 impl CaptureBuilder {
     /// Index of the copy of `env`, creating it (and its ancestors) if needed.
+    /// Iterative, so a deep scope chain cannot overflow the caller's stack.
     fn scope_index(&mut self, env: &EnvRc) -> usize {
-        let key = std::rc::Rc::as_ptr(env) as usize;
-        if let Some(&index) = self.scope_ids.get(&key) {
-            return index;
+        // Collect the not-yet-copied scopes from `env` outward.
+        let mut chain: Vec<EnvRc> = Vec::new();
+        let mut current = Some(std::rc::Rc::clone(env));
+        let mut parent_index = None;
+        while let Some(scope) = current {
+            let key = std::rc::Rc::as_ptr(&scope) as usize;
+            if let Some(&index) = self.scope_ids.get(&key) {
+                parent_index = Some(index);
+                break;
+            }
+            current = scope.borrow().parent_env();
+            chain.push(scope);
         }
-        let parent = env.borrow().parent_env().map(|p| self.scope_index(&p));
-        let index = self.scopes.len();
-        self.scopes.push(CapturedScope {
-            parent,
-            ..CapturedScope::default()
-        });
-        self.scope_ids.insert(key, index);
-        index
+        // Copy them outermost first, so each one's parent already exists.
+        let mut index = parent_index;
+        for scope in chain.into_iter().rev() {
+            let new_index = self.scopes.len();
+            self.scopes.push(CapturedScope {
+                parent: index,
+                ..CapturedScope::default()
+            });
+            self.scope_ids
+                .insert(std::rc::Rc::as_ptr(&scope) as usize, new_index);
+            index = Some(new_index);
+        }
+        index.expect("scope chain has at least one scope")
     }
 
-    /// Capture every name in `names` as resolved from `env`. `path` is the
-    /// chain of helpers that led here, for diagnostics.
+    /// Capture every name in `names` as resolved from `env`, then everything
+    /// the helper functions it reaches use, transitively. Uses an explicit
+    /// work list rather than recursion, so a long chain of helpers cannot
+    /// overflow the caller's stack. `path` is the chain of helpers that led
+    /// to each name, for diagnostics.
     fn capture_names(&mut self, env: &EnvRc, names: &HashSet<String>, path: &[String]) {
-        let mut sorted: Vec<&String> = names.iter().collect();
-        sorted.sort();
-        for name in sorted {
-            let Some((owner, value, mutable)) =
-                crate::interpreter::Environment::resolve_owned(env, name)
-            else {
-                // Unresolved here; the task reports it at runtime as before.
-                continue;
-            };
-            let scope = self.scope_index(&owner);
-            if !self.seen.insert((scope, name.clone())) {
-                continue;
-            }
-            if mutable {
-                self.scopes[scope].mutable.insert(name.clone());
-            }
-            let mut here = path.to_vec();
-            here.push(name.clone());
-            match value {
-                Value::NativeFunction {
-                    name: fn_name,
-                    arity,
-                    max_arity,
-                    func,
-                    requires,
-                } => self.scopes[scope]
-                    .bindings
-                    .native_fns
-                    .push(CapturedNativeFn {
-                        binding_name: name.clone(),
-                        fn_name,
+        let mut pending: Vec<(EnvRc, HashSet<String>, Vec<String>)> =
+            vec![(std::rc::Rc::clone(env), names.clone(), path.to_vec())];
+        while let Some((env, names, path)) = pending.pop() {
+            let mut sorted: Vec<&String> = names.iter().collect();
+            sorted.sort();
+            for name in sorted {
+                let Some((owner, value, mutable)) =
+                    crate::interpreter::Environment::resolve_owned(&env, name)
+                else {
+                    // Unresolved here; the task reports it at runtime as before.
+                    continue;
+                };
+                let scope = self.scope_index(&owner);
+                if !self.seen.insert((scope, name.clone())) {
+                    continue;
+                }
+                if mutable {
+                    self.scopes[scope].mutable.insert(name.clone());
+                }
+                let mut here = path.clone();
+                here.push(name.clone());
+                match value {
+                    Value::NativeFunction {
+                        name: fn_name,
                         arity,
                         max_arity,
-                        requires,
                         func,
-                    }),
-                Value::Function {
-                    name: fn_name,
-                    params,
-                    body,
-                    closure,
-                    contract,
-                    type_params,
-                } => {
-                    let closure_scope = self.scope_index(&closure);
-                    let needed = function_free_variables(&params, &body, contract.as_ref());
-                    self.scopes[scope].functions.push(CapturedFunction {
-                        binding_name: name.clone(),
+                        requires,
+                    } => self.scopes[scope]
+                        .bindings
+                        .native_fns
+                        .push(CapturedNativeFn {
+                            binding_name: name.clone(),
+                            fn_name,
+                            arity,
+                            max_arity,
+                            requires,
+                            func,
+                        }),
+                    Value::Function {
                         name: fn_name,
                         params,
                         body,
+                        closure,
                         contract,
                         type_params,
-                        closure_scope,
-                    });
-                    self.capture_names(&closure, &needed, &here);
-                }
-                other => match SerializedValue::from_value(&other) {
-                    Ok(serialized) => {
-                        self.scopes[scope]
-                            .bindings
-                            .values
-                            .insert(name.clone(), serialized);
+                    } => {
+                        let closure_scope = self.scope_index(&closure);
+                        let needed = function_free_variables(&params, &body, contract.as_ref());
+                        self.scopes[scope].functions.push(CapturedFunction {
+                            binding_name: name.clone(),
+                            name: fn_name,
+                            params,
+                            body,
+                            contract,
+                            type_params,
+                            closure_scope,
+                        });
+                        pending.push((closure, needed, here));
                     }
-                    Err(_) => self.failures.push(here.join(" -> ")),
-                },
+                    other => match SerializedValue::from_value(&other) {
+                        Ok(serialized) => {
+                            self.scopes[scope]
+                                .bindings
+                                .values
+                                .insert(name.clone(), serialized);
+                        }
+                        Err(_) => self.failures.push(here.join(" -> ")),
+                    },
+                }
             }
         }
     }
@@ -2251,6 +2294,7 @@ fn run_task_body(
     Vec<std::rc::Weak<std::cell::RefCell<crate::interpreter::Environment>>>,
 ) {
     let mut interp = crate::interpreter::Interpreter::new();
+    interp.set_struct_invariants(capture.struct_invariants.clone());
     let envs = rebuild_scopes(&mut interp, capture);
     let global = interp.snapshot_env();
     interp.restore_env(std::rc::Rc::clone(&envs[capture.body_scope]));

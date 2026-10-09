@@ -1834,3 +1834,45 @@ print(await_task(spawn(fn() { outer() })))
         "missing dependency path: {all}"
     );
 }
+
+#[test]
+fn test_task_helper_enforces_struct_invariants() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+struct Counter { value: Int }
+impl Counter { invariant value >= 0 }
+fn make(n) { return Counter { value: n } }
+print(await_task(spawn(fn() { make(1) })))
+print(await_task(spawn(fn() { make(-1) })))
+print(await_task(spawn(fn() { Counter { value: -1 } })))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines[0].contains("value: 1"), "{stdout}");
+    assert!(lines[1].contains("Invariant violated"), "{stdout}");
+    assert!(lines[2].contains("Invariant violated"), "{stdout}");
+}
+
+#[test]
+fn test_long_helper_chain_captures_without_overflow() {
+    // Capturing walks helper -> helper chains; it must not recurse on the
+    // caller's stack once per helper.
+    let mut code = String::from("import { spawn, await_task } from \"std/concurrent\"\n");
+    let n = 20000;
+    for i in 0..n {
+        let next = if i + 1 < n {
+            format!("f{}()", i + 1)
+        } else {
+            "0".to_string()
+        };
+        code.push_str(&format!(
+            "fn f{i}() {{ if false {{ return {next} }}\n return 0 }}\n"
+        ));
+    }
+    code.push_str("print(await_task(spawn(fn() { f0() })))\n");
+    let (stdout, stderr, status) = run_ntnt_code(&code);
+    assert_eq!(status, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "0");
+}

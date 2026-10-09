@@ -1860,6 +1860,12 @@ impl Interpreter {
         self.environment.borrow_mut().define(name, value);
     }
 
+    /// Install struct invariants (used for task interpreters).
+    pub(crate) fn set_struct_invariants(&mut self, invariants: HashMap<String, Vec<Expression>>) {
+        crate::stdlib::concurrent::publish_struct_invariants(&invariants);
+        self.struct_invariants = invariants;
+    }
+
     /// Look up a variable in the global environment (for builtins like len, print, str).
     pub fn get_global(&self, name: &str) -> Option<Value> {
         self.environment.borrow().get(name)
@@ -5726,6 +5732,7 @@ impl Interpreter {
                 if !invariants.is_empty() {
                     self.struct_invariants
                         .insert(type_name.clone(), invariants.clone());
+                    crate::stdlib::concurrent::publish_struct_invariants(&self.struct_invariants);
                 }
 
                 for method in methods {
