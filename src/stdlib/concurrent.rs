@@ -1327,6 +1327,19 @@ fn task_removal_ttl() -> Duration {
 
 /// Maximum number of concurrent active tasks.
 /// Configurable via NTNT_MAX_TASKS env var. Default: 1024.
+/// Stack for task threads, in bytes. NTNT_TASK_STACK overrides it (testing aid).
+fn task_stack_size() -> usize {
+    std::env::var("NTNT_TASK_STACK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(TASK_STACK_SIZE)
+}
+
+/// Default stack for task threads. Large enough that a task reaches the
+/// interpreter's recursion limit and gets a normal error, instead of
+/// overflowing the thread stack and aborting the whole process.
+const TASK_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 fn max_tasks() -> u64 {
     std::env::var("NTNT_MAX_TASKS")
         .ok()
@@ -1428,12 +1441,44 @@ fn parse_interval(s: &str) -> Result<Duration> {
 // =============================================================================
 
 /// Captured bindings for cross-thread transfer.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct CapturedBindings {
     /// Serializable values (Int, Float, Bool, String, Array, Map, Struct, Enum)
     values: HashMap<String, SerializedValue>,
     /// Full NativeFunction identities — reconstructed directly in the child interpreter.
     native_fns: Vec<CapturedNativeFn>,
+}
+
+/// Everything a task needs, as plain data that can cross threads: the
+/// scopes the task body and its helper functions resolve names in, holding
+/// only the bindings actually referenced, and the scope the body runs in.
+#[derive(Clone)]
+struct TaskCapture {
+    scopes: Vec<CapturedScope>,
+    body_scope: usize,
+}
+
+/// One source scope, copied. `parent` indexes `TaskCapture::scopes`; the
+/// outermost copied scope hangs off the child interpreter's global scope.
+#[derive(Clone, Default)]
+struct CapturedScope {
+    parent: Option<usize>,
+    bindings: CapturedBindings,
+    /// Names declared `let mut` in the source scope.
+    mutable: HashSet<String>,
+    functions: Vec<CapturedFunction>,
+}
+
+/// A user-defined function, as its AST plus the copied scope it closes over.
+#[derive(Clone)]
+struct CapturedFunction {
+    binding_name: String,
+    name: String,
+    params: Vec<crate::ast::Parameter>,
+    body: crate::ast::Block,
+    contract: Option<crate::interpreter::FunctionContract>,
+    type_params: Vec<crate::ast::TypeParam>,
+    closure_scope: usize,
 }
 
 /// Snapshot of a NativeFunction — enough to reconstruct Value::NativeFunction
@@ -1446,74 +1491,6 @@ struct CapturedNativeFn {
     max_arity: usize,
     requires: Option<crate::interpreter::RuntimeCapability>,
     func: fn(&[Value]) -> Result<Value>,
-}
-
-/// Capture all bindings from an environment for cross-thread use.
-/// Returns Err for captured closures or nested runtime-local resource authority.
-fn capture_bindings(
-    bindings: &HashMap<String, Value>,
-) -> std::result::Result<CapturedBindings, Vec<String>> {
-    let mut values = HashMap::new();
-    let mut native_fns = Vec::new();
-    let mut non_serializable_captures = Vec::new();
-
-    for (key, value) in bindings {
-        match value {
-            Value::NativeFunction {
-                name,
-                arity,
-                max_arity,
-                func,
-                requires,
-            } => {
-                native_fns.push(CapturedNativeFn {
-                    binding_name: key.clone(),
-                    fn_name: name.clone(),
-                    arity: *arity,
-                    max_arity: *max_arity,
-                    requires: *requires,
-                    func: *func,
-                });
-            }
-            _ => match SerializedValue::from_value(value) {
-                Ok(serialized) => {
-                    values.insert(key.clone(), serialized);
-                }
-                Err(_) => {
-                    // Never start a task with a selected binding silently omitted.
-                    // Native functions are handled above; all other values must
-                    // satisfy the same recursive task-serialization contract.
-                    non_serializable_captures.push(key.clone());
-                }
-            },
-        }
-    }
-
-    if !non_serializable_captures.is_empty() {
-        return Err(non_serializable_captures);
-    }
-
-    Ok(CapturedBindings { values, native_fns })
-}
-
-/// Inject captured bindings into a fresh interpreter.
-fn inject_captured(interp: &mut crate::interpreter::Interpreter, captured: &CapturedBindings) {
-    for (key, val) in &captured.values {
-        interp.define_global(key.clone(), val.to_value());
-    }
-
-    for cap in &captured.native_fns {
-        interp.define_global(
-            cap.binding_name.clone(),
-            Value::NativeFunction {
-                name: cap.fn_name.clone(),
-                arity: cap.arity,
-                max_arity: cap.max_arity,
-                requires: cap.requires,
-                func: cap.func,
-            },
-        );
-    }
 }
 
 // =============================================================================
@@ -2014,12 +1991,10 @@ fn names_bound_by_pattern(pattern: &crate::ast::Pattern) -> HashSet<String> {
     }
 }
 
-/// Validate a handler is a zero-parameter Function, capture its bindings, and return
-/// the captured bindings + cloned body. Used by spawn(), after(), and schedule().
-fn validate_and_capture(
-    caller: &str,
-    handler: &Value,
-) -> Result<(CapturedBindings, crate::ast::Block)> {
+/// Validate a handler is a zero-parameter Function and capture everything it
+/// needs as thread-safe data. Used by spawn(), after(), schedule(), and (through
+/// spawn) parallel() and race().
+fn validate_and_capture(caller: &str, handler: &Value) -> Result<(TaskCapture, crate::ast::Block)> {
     match handler {
         Value::Function {
             params,
@@ -2033,28 +2008,219 @@ fn validate_and_capture(
                     caller
                 )));
             }
-            let free_vars = free_variables(body);
-            let needed: HashMap<String, Value> = closure
-                .borrow()
-                .all_bindings()
-                .into_iter()
-                .filter(|(name, _)| free_vars.contains(name))
-                .collect();
-            let captured = capture_bindings(&needed).map_err(|names| {
-                IntentError::runtime_error(format!(
-                    "Cannot capture user-defined functions or runtime-local resources across task boundaries: {}. \
-                     Captured values must support task serialization. \
-                     Inline the function body into the closure, or call a native function instead.",
-                    names.join(", ")
-                ))
-            })?;
-            Ok((captured, body.clone()))
+            let mut builder = CaptureBuilder::default();
+            let body_scope = builder.scope_index(closure);
+            builder.capture_names(closure, &free_variables(body), &["task".to_string()]);
+            if !builder.failures.is_empty() {
+                return Err(IntentError::runtime_error(format!(
+                    "Cannot capture runtime-local resources across task boundaries: {}. \
+                     Captured values, and values used by helper functions the task calls, \
+                     must support task serialization (Int, Float, Bool, String, Array, Map, \
+                     Struct, Enum, or a function).",
+                    builder.failures.join(", ")
+                )));
+            }
+            Ok((
+                TaskCapture {
+                    scopes: builder.scopes,
+                    body_scope,
+                },
+                body.clone(),
+            ))
         }
         _ => Err(IntentError::type_error(format!(
             "{}() requires a function",
             caller
         ))),
     }
+}
+
+/// Walks the names a task body uses, following user functions into the
+/// scopes they close over, and copies only what is reached.
+#[derive(Default)]
+struct CaptureBuilder {
+    scopes: Vec<CapturedScope>,
+    /// Source scope pointer -> index in `scopes`.
+    scope_ids: HashMap<usize, usize>,
+    /// (scope index, name) pairs already captured or in progress.
+    seen: HashSet<(usize, String)>,
+    /// Dependency paths that cannot cross a task boundary.
+    failures: Vec<String>,
+}
+
+type EnvRc = std::rc::Rc<std::cell::RefCell<crate::interpreter::Environment>>;
+
+impl CaptureBuilder {
+    /// Index of the copy of `env`, creating it (and its ancestors) if needed.
+    fn scope_index(&mut self, env: &EnvRc) -> usize {
+        let key = std::rc::Rc::as_ptr(env) as usize;
+        if let Some(&index) = self.scope_ids.get(&key) {
+            return index;
+        }
+        let parent = env.borrow().parent_env().map(|p| self.scope_index(&p));
+        let index = self.scopes.len();
+        self.scopes.push(CapturedScope {
+            parent,
+            ..CapturedScope::default()
+        });
+        self.scope_ids.insert(key, index);
+        index
+    }
+
+    /// Capture every name in `names` as resolved from `env`. `path` is the
+    /// chain of helpers that led here, for diagnostics.
+    fn capture_names(&mut self, env: &EnvRc, names: &HashSet<String>, path: &[String]) {
+        let mut sorted: Vec<&String> = names.iter().collect();
+        sorted.sort();
+        for name in sorted {
+            let Some((owner, value, mutable)) =
+                crate::interpreter::Environment::resolve_owned(env, name)
+            else {
+                // Unresolved here; the task reports it at runtime as before.
+                continue;
+            };
+            let scope = self.scope_index(&owner);
+            if !self.seen.insert((scope, name.clone())) {
+                continue;
+            }
+            if mutable {
+                self.scopes[scope].mutable.insert(name.clone());
+            }
+            let mut here = path.to_vec();
+            here.push(name.clone());
+            match value {
+                Value::NativeFunction {
+                    name: fn_name,
+                    arity,
+                    max_arity,
+                    func,
+                    requires,
+                } => self.scopes[scope]
+                    .bindings
+                    .native_fns
+                    .push(CapturedNativeFn {
+                        binding_name: name.clone(),
+                        fn_name,
+                        arity,
+                        max_arity,
+                        requires,
+                        func,
+                    }),
+                Value::Function {
+                    name: fn_name,
+                    params,
+                    body,
+                    closure,
+                    contract,
+                    type_params,
+                } => {
+                    let closure_scope = self.scope_index(&closure);
+                    let needed = function_free_variables(&params, &body, contract.as_ref());
+                    self.scopes[scope].functions.push(CapturedFunction {
+                        binding_name: name.clone(),
+                        name: fn_name,
+                        params,
+                        body,
+                        contract,
+                        type_params,
+                        closure_scope,
+                    });
+                    self.capture_names(&closure, &needed, &here);
+                }
+                other => match SerializedValue::from_value(&other) {
+                    Ok(serialized) => {
+                        self.scopes[scope]
+                            .bindings
+                            .values
+                            .insert(name.clone(), serialized);
+                    }
+                    Err(_) => self.failures.push(here.join(" -> ")),
+                },
+            }
+        }
+    }
+}
+
+/// Names a function reads from outside itself: free variables of its
+/// parameter defaults, contract clauses and body.
+fn function_free_variables(
+    params: &[crate::ast::Parameter],
+    body: &crate::ast::Block,
+    contract: Option<&crate::interpreter::FunctionContract>,
+) -> HashSet<String> {
+    let mut referenced = HashSet::new();
+    let mut bound = HashSet::new();
+    bind_parameter_defaults_and_names(params, &mut referenced, &mut bound);
+    if let Some(contract) = contract {
+        let mut clause_bound = bound.clone();
+        clause_bound.insert("result".to_string());
+        for clause in contract.requires.iter().chain(&contract.ensures) {
+            collect_free_vars_expr(&clause.expression, &mut referenced, &clause_bound);
+        }
+    }
+    collect_free_vars(&body.statements, &mut referenced, &mut bound);
+    referenced
+}
+
+/// Rebuild a captured task's scopes in `interp`, returning them in capture
+/// order. The outermost copied scope hangs off the interpreter's own global
+/// scope, so builtins stay reachable.
+fn rebuild_scopes(
+    interp: &mut crate::interpreter::Interpreter,
+    capture: &TaskCapture,
+) -> Vec<EnvRc> {
+    use crate::interpreter::Environment;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let global = interp.snapshot_env();
+    let mut envs: Vec<EnvRc> = Vec::with_capacity(capture.scopes.len());
+    for scope in &capture.scopes {
+        let parent = scope
+            .parent
+            .map(|i| Rc::clone(&envs[i]))
+            .unwrap_or_else(|| Rc::clone(&global));
+        envs.push(Rc::new(RefCell::new(Environment::with_parent(parent))));
+    }
+    for (scope, env) in capture.scopes.iter().zip(&envs) {
+        let mut env = env.borrow_mut();
+        let mut define = |name: &String, value: Value| {
+            if scope.mutable.contains(name) {
+                env.define_mutable(name.clone(), value);
+            } else {
+                env.define(name.clone(), value);
+            }
+        };
+        for (name, value) in &scope.bindings.values {
+            define(name, value.to_value());
+        }
+        for cap in &scope.bindings.native_fns {
+            define(
+                &cap.binding_name,
+                Value::NativeFunction {
+                    name: cap.fn_name.clone(),
+                    arity: cap.arity,
+                    max_arity: cap.max_arity,
+                    requires: cap.requires,
+                    func: cap.func,
+                },
+            );
+        }
+        for f in &scope.functions {
+            define(
+                &f.binding_name,
+                Value::Function {
+                    name: f.name.clone(),
+                    params: f.params.clone(),
+                    body: f.body.clone(),
+                    closure: Rc::clone(&envs[f.closure_scope]),
+                    contract: f.contract.clone(),
+                    type_params: f.type_params.clone(),
+                },
+            );
+        }
+    }
+    envs
 }
 
 /// Publish completion with registry accounting, then release thread-local cancellation ownership.
@@ -2070,14 +2236,33 @@ pub(crate) fn finalize_task(
     });
 }
 
-/// Run captured bindings in a fresh interpreter. Used inside catch_unwind in task threads.
-fn run_in_fresh_interpreter(
-    captured: &CapturedBindings,
+/// Run a captured task in a fresh interpreter. Used inside catch_unwind in task threads.
+fn run_in_fresh_interpreter(capture: &TaskCapture, body: &crate::ast::Block) -> Result<Value> {
+    run_task_body(capture, body).0
+}
+
+/// Runs the task and also returns weak handles to its rebuilt scopes, so
+/// tests can check they are freed once the task finishes.
+fn run_task_body(
+    capture: &TaskCapture,
     body: &crate::ast::Block,
-) -> Result<Value> {
+) -> (
+    Result<Value>,
+    Vec<std::rc::Weak<std::cell::RefCell<crate::interpreter::Environment>>>,
+) {
     let mut interp = crate::interpreter::Interpreter::new();
-    inject_captured(&mut interp, captured);
-    interp.eval_block(body)
+    let envs = rebuild_scopes(&mut interp, capture);
+    let global = interp.snapshot_env();
+    interp.restore_env(std::rc::Rc::clone(&envs[capture.body_scope]));
+    let result = interp.eval_block(body);
+    interp.restore_env(global);
+    // Rebuilt helpers close over the scopes that hold them. Results are
+    // serializable, so nothing escapes: break the cycles so they are freed.
+    for env in &envs {
+        env.borrow_mut().tear_down();
+    }
+    let weak = envs.iter().map(std::rc::Rc::downgrade).collect();
+    (result, weak)
 }
 
 // =============================================================================
@@ -2192,6 +2377,7 @@ fn concurrent_spawn_kind(handler: &Value, kind: TaskKind) -> Result<Value> {
         .expect("task just registered must exist");
 
     thread::Builder::new()
+        .stack_size(task_stack_size())
         .spawn(move || {
             CURRENT_CANCEL_TOKEN.with(|cell| {
                 *cell.borrow_mut() = Some(cancelled);
@@ -2453,6 +2639,7 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
         .expect("task just registered must exist");
 
     thread::Builder::new()
+        .stack_size(task_stack_size())
         .spawn(move || {
             CURRENT_CANCEL_TOKEN.with(|cell| {
                 *cell.borrow_mut() = Some(Arc::clone(&cancelled));
@@ -2513,6 +2700,7 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
     let start_guard = ScheduleStartGuard::new(&RUNTIME, schedule_id);
 
     thread::Builder::new()
+        .stack_size(task_stack_size())
         .spawn(move || {
             // Set cancel token so sleep_cancellable() works in this thread.
             CURRENT_CANCEL_TOKEN.with(|cell| {
@@ -3536,35 +3724,6 @@ mod tests {
     }
 
     #[test]
-    fn test_capture_bindings_separates_native_fns() {
-        let mut bindings = HashMap::new();
-        bindings.insert("x".to_string(), Value::Int(42));
-        bindings.insert(
-            "native_fn".to_string(),
-            Value::NativeFunction {
-                name: "test".to_string(),
-                arity: 0,
-                max_arity: 0,
-                requires: None,
-                func: |_| Ok(Value::Unit),
-            },
-        );
-
-        let captured = capture_bindings(&bindings).expect("should succeed with no closures");
-        // Serializable values captured
-        assert!(captured.values.contains_key("x"));
-        assert!(!captured.values.contains_key("native_fn"));
-        // Native function recorded with full identity for direct reconstruction
-        assert!(captured
-            .native_fns
-            .iter()
-            .any(|cap| cap.binding_name == "native_fn"
-                && cap.fn_name == "test"
-                && cap.arity == 0
-                && cap.max_arity == 0));
-    }
-
-    #[test]
     fn test_free_variables_handles_expression_variants() {
         let body = Block {
             statements: vec![
@@ -3947,6 +4106,143 @@ mod tests {
     }
 
     #[test]
+    fn helper_dependencies_reject_secrets_and_handles_with_path() {
+        let canary = "task-helper-secret-canary";
+        let root = Rc::new(RefCell::new(crate::interpreter::Environment::new()));
+        root.borrow_mut().define(
+            "TOKEN".to_string(),
+            Value::Secret(
+                crate::interpreter::SecretValue::new("TASK_SECRET", canary).expect("valid secret"),
+            ),
+        );
+        root.borrow_mut()
+            .define("PROC".to_string(), Value::ProcessHandle(9));
+        let helper = |name: &str, uses: &str| Value::Function {
+            name: name.to_string(),
+            params: vec![],
+            body: Block {
+                statements: vec![Statement::Expression(Expression::Identifier(
+                    uses.to_string(),
+                ))],
+            },
+            closure: Rc::clone(&root),
+            contract: None,
+            type_params: vec![],
+        };
+        root.borrow_mut()
+            .define("leaf".to_string(), helper("leaf", "TOKEN"));
+        root.borrow_mut()
+            .define("mid".to_string(), helper("mid", "leaf"));
+        root.borrow_mut()
+            .define("proc_user".to_string(), helper("proc_user", "PROC"));
+
+        for (entry, path) in [
+            ("mid", "task -> mid -> leaf -> TOKEN"),
+            ("proc_user", "task -> proc_user -> PROC"),
+        ] {
+            let handler = Value::Function {
+                name: "handler".to_string(),
+                params: vec![],
+                body: Block {
+                    statements: vec![Statement::Expression(Expression::Call {
+                        function: Box::new(Expression::Identifier(entry.to_string())),
+                        arguments: vec![],
+                    })],
+                },
+                closure: Rc::clone(&root),
+                contract: None,
+                type_params: vec![],
+            };
+            let err = match validate_and_capture("spawn", &handler) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("{entry}: capture should fail"),
+            };
+            assert!(err.contains(path), "{entry}: {err}");
+            assert!(!err.contains(canary), "secret leaked: {err}");
+        }
+    }
+
+    #[test]
+    fn task_scopes_are_freed_after_helpers_run() {
+        // Rebuilt helpers close over the scope that holds them (a cycle).
+        // Without the teardown each task would leak its scopes.
+        let root = Rc::new(RefCell::new(crate::interpreter::Environment::new()));
+        root.borrow_mut().define("BASE".to_string(), Value::Int(1));
+        root.borrow_mut().define(
+            "inc".to_string(),
+            Value::Function {
+                name: "inc".to_string(),
+                params: vec![],
+                body: Block {
+                    statements: vec![Statement::Expression(Expression::Identifier(
+                        "BASE".to_string(),
+                    ))],
+                },
+                closure: Rc::clone(&root),
+                contract: None,
+                type_params: vec![],
+            },
+        );
+        let handler = Value::Function {
+            name: "handler".to_string(),
+            params: vec![],
+            body: Block {
+                statements: vec![Statement::Expression(Expression::Call {
+                    function: Box::new(Expression::Identifier("inc".to_string())),
+                    arguments: vec![],
+                })],
+            },
+            closure: Rc::clone(&root),
+            contract: None,
+            type_params: vec![],
+        };
+        let (capture, body) = validate_and_capture("spawn", &handler).expect("capture");
+        let (result, scopes) = run_task_body(&capture, &body);
+        assert!(matches!(result, Ok(Value::Int(1))), "{result:?}");
+        assert!(!scopes.is_empty());
+        assert!(
+            scopes.iter().all(|w| w.upgrade().is_none()),
+            "task scopes still alive after the task finished"
+        );
+    }
+
+    #[test]
+    fn helper_closure_cycle_is_captured_once() {
+        // A helper that refers to itself through its own closure scope must
+        // not loop while capturing.
+        let root = Rc::new(RefCell::new(crate::interpreter::Environment::new()));
+        let rec = Value::Function {
+            name: "rec".to_string(),
+            params: vec![],
+            body: Block {
+                statements: vec![Statement::Expression(Expression::Call {
+                    function: Box::new(Expression::Identifier("rec".to_string())),
+                    arguments: vec![],
+                })],
+            },
+            closure: Rc::clone(&root),
+            contract: None,
+            type_params: vec![],
+        };
+        root.borrow_mut().define("rec".to_string(), rec.clone());
+        let handler = Value::Function {
+            name: "handler".to_string(),
+            params: vec![],
+            body: Block {
+                statements: vec![Statement::Expression(Expression::Identifier(
+                    "rec".to_string(),
+                ))],
+            },
+            closure: Rc::clone(&root),
+            contract: None,
+            type_params: vec![],
+        };
+        let (captured, _) = validate_and_capture("spawn", &handler).expect("capture");
+        let functions: usize = captured.scopes.iter().map(|s| s.functions.len()).sum();
+        assert_eq!(functions, 1);
+    }
+
+    #[test]
     fn test_validate_and_capture_filters_unused_user_functions() {
         let mut env = crate::interpreter::Environment::new();
         env.define("used_data".to_string(), Value::Int(7));
@@ -3972,8 +4268,10 @@ mod tests {
         };
 
         let (captured, _) = validate_and_capture("spawn", &handler).expect("capture should work");
-        assert!(captured.values.contains_key("used_data"));
-        assert!(!captured.values.contains_key("unused_data"));
-        assert!(captured.native_fns.is_empty());
+        let scope = &captured.scopes[captured.body_scope];
+        assert!(scope.bindings.values.contains_key("used_data"));
+        assert!(!scope.bindings.values.contains_key("unused_data"));
+        assert!(scope.functions.is_empty());
+        assert!(scope.bindings.native_fns.is_empty());
     }
 }

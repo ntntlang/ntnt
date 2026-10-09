@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Task closures passed to `spawn`, `after`, `schedule`, `parallel` and `race` can call your own NTNT functions, from the same file or imported, including helpers those functions call, recursion and mutual recursion (#186). Each function is copied into the task with the values it uses, so changes stay inside the task. Values that can't be copied still fail before the task starts, and the error now names the dependency path, e.g. `task -> outer -> call_a -> handlers`.
+
+### Fixed
+
+- Task threads now have a 16 MiB stack. With the default 2 MiB, a debug build overflowed a few dozen calls deep and the stack overflow aborted the whole process; deep recursion in a task now reaches the normal "Maximum recursion depth" error instead.
+
 ## 0.5.5
 
 See the [complete release notes](docs/release-notes-v0.5.5.md) for upgrade guidance. The Redis job backend now requires Redis 7.0+ or Valkey 7.2+, and workers sharing a queue must be upgraded together.

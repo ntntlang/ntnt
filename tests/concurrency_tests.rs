@@ -851,28 +851,25 @@ match result {
 }
 
 #[test]
-fn test_schedule_reports_only_referenced_user_defined_function() {
-    let (_stdout, stderr, code) = run_ntnt_code(
+fn test_schedule_calls_user_defined_helper() {
+    // Before #186 this was rejected at schedule() time.
+    let (stdout, stderr, code) = run_ntnt_code(
         r#"
-import { schedule } from "std/concurrent"
+import { schedule, cancel_schedule, channel, send, recv_timeout } from "std/concurrent"
 
-fn unused_helper() { 1 }
 fn used_helper() { 2 }
-
-let sched = schedule(50, fn() { used_helper() })
+let [tx, rx] = channel()
+let sched = schedule(50, fn() { send(tx, used_helper()) })
+let result = recv_timeout(rx, 1000)
+cancel_schedule(sched)
+match result {
+    Some(v) => print("ok: " + str(v)),
+    None => print("missing")
+}
 "#,
     );
-    assert_ne!(code, 0, "schedule should fail");
-    assert!(
-        stderr.contains("used_helper"),
-        "stderr should mention the referenced function: {}",
-        stderr
-    );
-    assert!(
-        !stderr.contains("unused_helper"),
-        "stderr should not mention unused functions: {}",
-        stderr
-    );
+    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("ok: 2"), "stdout: {}", stdout);
 }
 
 // =============================================================================
@@ -1663,5 +1660,177 @@ match result {
         stdout.contains("ok: slow but ok"),
         "should skip Err and pick Ok winner: {}",
         stdout
+    );
+}
+
+// =============================================================================
+// Helper functions across task boundaries (#186)
+// =============================================================================
+
+#[test]
+fn test_task_calls_top_level_helper() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let OFFSET = 1
+fn normalize(value) { return value + OFFSET }
+print(await_task(spawn(fn() { normalize(41) })))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn test_task_calls_imported_helper_with_module_state() {
+    let dir = std::env::temp_dir().join(format!(
+        "ntnt_task_helpers_{}_{}",
+        std::process::id(),
+        TEST_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    fs::create_dir_all(dir.join("lib")).unwrap();
+    fs::write(
+        dir.join("lib/util.tnt"),
+        "let FACTOR = 10\nfn scale(v) { return v * FACTOR }\nexport { scale }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("main.tnt"),
+        r#"import { spawn, await_task } from "std/concurrent"
+import { scale } from "./lib/util.tnt"
+print(await_task(spawn(fn() { scale(4) })))
+"#,
+    )
+    .unwrap();
+    let exe = std::env::consts::EXE_SUFFIX;
+    let binary =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/debug/ntnt{exe}"));
+    let output = Command::new(binary)
+        .args(["run", dir.join("main.tnt").to_str().unwrap()])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "40");
+}
+
+#[test]
+fn test_task_helpers_transitive_recursive_and_contracted() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+fn inc(v) { return v + 1 }
+fn twice(v) { return inc(inc(v)) }
+fn fact(n) { if n <= 1 { return 1 }
+ return n * fact(n - 1) }
+fn even(n) { if n == 0 { return true }
+ return odd(n - 1) }
+fn odd(n) { if n == 0 { return false }
+ return even(n - 1) }
+fn checked(x) requires x > 0 ensures result > x { return x + 1 }
+print(await_task(spawn(fn() { twice(40) })))
+print(await_task(spawn(fn() { fact(5) })))
+print(await_task(spawn(fn() { even(10) })))
+print(await_task(spawn(fn() { checked(1) })))
+print(await_task(spawn(fn() { checked(0) })))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(&lines[..4], ["42", "120", "true", "2"], "{stdout}");
+    assert!(lines[4].contains("Precondition failed"), "{stdout}");
+}
+
+#[test]
+fn test_task_recursion_hits_limit_not_stack_overflow() {
+    // Task threads used to get Rust's default 2 MiB stack, which a debug
+    // build overflows a few interpreter calls deep, aborting the whole
+    // process. With the recursion limit set low, a task must reach the
+    // interpreter's own limit and get an ordinary error instead.
+    let path = unique_test_file("task_recursion");
+    fs::write(
+        &path,
+        r#"import { spawn, await_task } from "std/concurrent"
+fn depth(n) { if n <= 0 { return 0 }
+ return 1 + depth(n - 1) }
+print(await_task(spawn(fn() { depth(10) })))
+print(await_task(spawn(fn() { depth(100000) })))
+print("still running")
+"#,
+    )
+    .unwrap();
+    let exe = std::env::consts::EXE_SUFFIX;
+    let binary =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/debug/ntnt{exe}"));
+    let output = Command::new(binary)
+        .args(["run", &path])
+        .env("NTNT_MAX_RECURSION", "24")
+        .output()
+        .unwrap();
+    let _ = fs::remove_file(&path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "10", "{stdout}");
+    assert!(lines[1].contains("Maximum recursion depth"), "{stdout}");
+    assert_eq!(lines[2], "still running", "{stdout}");
+}
+
+#[test]
+fn test_parallel_race_after_share_helper_rule() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { parallel, race, after, await_task } from "std/concurrent"
+fn inc(v) { return v + 1 }
+print(parallel([fn() { inc(1) }, fn() { inc(2) }]))
+print(race([fn() { inc(10) }]))
+print(await_task(after(1, fn() { inc(20) })))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "[2, 3]\n11\n21");
+}
+
+#[test]
+fn test_task_helper_mutation_stays_in_task_copy() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let mut counter = 5
+fn bump() { counter = counter + 1
+ return counter }
+print(await_task(spawn(fn() { bump() })))
+print(await_task(spawn(fn() { bump() })))
+print(counter)
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "6\n6\n5");
+}
+
+#[test]
+fn test_task_helper_unsupported_dependency_reports_path() {
+    let (stdout, stderr, _code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let handlers = map { "a": fn(x) { x + 1 } }
+fn call_a(x) { let f = handlers["a"]
+ return f(x) }
+fn outer() { return call_a(1) }
+print(await_task(spawn(fn() { outer() })))
+"#,
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        all.contains("task -> outer -> call_a -> handlers"),
+        "missing dependency path: {all}"
     );
 }

@@ -429,6 +429,43 @@ impl Environment {
         self.mutable_vars.remove(name);
     }
 
+    /// Resolve `name` through the scope chain starting at `env`, returning the
+    /// scope that owns the binding, its value, and whether it was declared
+    /// `let mut`. Used to copy helper functions across task boundaries.
+    pub(crate) fn resolve_owned(
+        env: &Rc<RefCell<Environment>>,
+        name: &str,
+    ) -> Option<(Rc<RefCell<Environment>>, Value, bool)> {
+        let mut current = Some(Rc::clone(env));
+        while let Some(scope) = current {
+            let borrowed = scope.borrow();
+            if let Some(value) = borrowed.values.get(name) {
+                let value = value.clone();
+                let mutable = borrowed.mutable_vars.contains(name);
+                drop(borrowed);
+                return Some((scope, value, mutable));
+            }
+            let next = borrowed.parent.clone();
+            drop(borrowed);
+            current = next;
+        }
+        None
+    }
+
+    /// The enclosing scope, if any.
+    pub(crate) fn parent_env(&self) -> Option<Rc<RefCell<Environment>>> {
+        self.parent.clone()
+    }
+
+    /// Drop every binding and the parent link. Used when a task finishes, to
+    /// break the scope -> function -> closure -> scope cycles that rebuilt
+    /// helper functions form, so the task's scopes are freed.
+    pub(crate) fn tear_down(&mut self) {
+        self.values.clear();
+        self.mutable_vars.clear();
+        self.parent = None;
+    }
+
     pub fn define_mutable(&mut self, name: String, value: Value) {
         self.values.insert(name.clone(), value);
         self.mutable_vars.insert(name);
