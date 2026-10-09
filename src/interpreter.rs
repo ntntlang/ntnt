@@ -1860,6 +1860,23 @@ impl Interpreter {
         self.environment.borrow_mut().define(name, value);
     }
 
+    /// Run a task-starting native function with this interpreter's struct
+    /// invariants visible to task capture. Kept out of line and cold so the
+    /// ordinary native-call path in `call_function` stays small.
+    #[cold]
+    #[inline(never)]
+    fn call_task_native(
+        &self,
+        func: fn(&[Value]) -> Result<Value>,
+        args: &[Value],
+    ) -> Result<Value> {
+        crate::stdlib::concurrent::with_struct_invariants(
+            &self.struct_invariants,
+            &self.structs,
+            || func(args),
+        )
+    }
+
     /// Install struct invariants (used for task interpreters).
     pub(crate) fn set_struct_invariants(&mut self, invariants: HashMap<String, Vec<Expression>>) {
         self.struct_invariants = invariants;
@@ -9543,14 +9560,14 @@ impl Interpreter {
                             .map(std::path::Path::new),
                         || func(&args),
                     )
-                } else if crate::stdlib::concurrent::starts_tasks(&fn_name) {
+                } else if !self.struct_invariants.is_empty()
+                    && crate::stdlib::concurrent::starts_tasks(&fn_name)
+                {
                     // Tasks rebuild helpers in a fresh interpreter; give
-                    // them this interpreter's struct invariants.
-                    crate::stdlib::concurrent::with_struct_invariants(
-                        &self.struct_invariants,
-                        &self.structs,
-                        || func(&args),
-                    )
+                    // them this interpreter's struct invariants. Checked
+                    // only when invariants exist, so ordinary native calls
+                    // pay a single length test.
+                    self.call_task_native(func, &args)
                 } else {
                     func(&args)
                 };

@@ -1959,3 +1959,25 @@ print(run())
     assert!(lines[0].contains("value: 1"), "{stdout}");
     assert!(lines[1].contains("Invariant violated"), "{stdout}");
 }
+
+#[test]
+fn test_helper_shared_with_invariant_still_rejects_uncapturable_dependency() {
+    // `check` is used by both an invariant and the task. Its unsupported
+    // dependency must still be reported before the task starts.
+    let (stdout, stderr, _code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let rules = map { "min": fn(v) { v >= 0 } }
+fn check(v) { let f = rules["min"]
+ return f(v) }
+struct Counter { value: Int }
+impl Counter { invariant check(value) }
+print("started")
+print(await_task(spawn(fn() { print("side effect")
+ check(1) })))
+"#,
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(all.contains("task -> check -> rules"), "{all}");
+    assert!(!stdout.contains("side effect"), "task ran: {stdout}");
+}
