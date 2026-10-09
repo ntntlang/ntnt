@@ -1876,3 +1876,18 @@ fn test_long_helper_chain_captures_without_overflow() {
     assert_eq!(status, 0, "stderr: {stderr}");
     assert_eq!(stdout.trim(), "0");
 }
+
+#[test]
+fn test_task_invariants_come_from_the_calling_interpreter() {
+    // A later interpreter on the same thread must not inherit invariants
+    // registered by an earlier one (e.g. after a REPL :clear).
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+struct Counter { value: Int }
+print(await_task(spawn(fn() { Counter { value: -1 } })))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("value: -1"), "{stdout}");
+}

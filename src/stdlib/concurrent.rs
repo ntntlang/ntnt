@@ -419,16 +419,40 @@ thread_local! {
 }
 
 thread_local! {
-    /// Struct invariants of the interpreter running on this thread, mirrored
-    /// whenever it registers one. `spawn()` and friends are native functions
-    /// with no interpreter access, so this is how a task inherits them.
+    /// Struct invariants of the interpreter that is currently calling a task
+    /// entry point (spawn, after, schedule, parallel, race). Set only for the
+    /// duration of that native call, so it can never outlive the interpreter.
     static STRUCT_INVARIANTS: std::cell::RefCell<HashMap<String, Vec<crate::ast::Expression>>> =
         std::cell::RefCell::new(HashMap::new());
 }
 
-/// Record the struct invariants of the interpreter on this thread.
-pub(crate) fn publish_struct_invariants(invariants: &HashMap<String, Vec<crate::ast::Expression>>) {
-    STRUCT_INVARIANTS.with(|cell| *cell.borrow_mut() = invariants.clone());
+/// Native functions that start tasks and therefore need the caller's
+/// struct invariants.
+pub(crate) fn starts_tasks(fn_name: &str) -> bool {
+    matches!(
+        fn_name,
+        "spawn" | "after" | "schedule" | "parallel" | "race"
+    )
+}
+
+/// Run `f` (a task-starting native call) with the calling interpreter's
+/// struct invariants visible to task capture, restoring the previous value
+/// afterwards, including on unwind.
+pub(crate) fn with_struct_invariants<T>(
+    invariants: &HashMap<String, Vec<crate::ast::Expression>>,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<HashMap<String, Vec<crate::ast::Expression>>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                STRUCT_INVARIANTS.with(|cell| *cell.borrow_mut() = previous);
+            }
+        }
+    }
+    let previous = STRUCT_INVARIANTS.with(|cell| cell.replace(invariants.clone()));
+    let _restore = Restore(Some(previous));
+    f()
 }
 
 fn current_struct_invariants() -> HashMap<String, Vec<crate::ast::Expression>> {
@@ -4248,6 +4272,29 @@ mod tests {
             scopes.iter().all(|w| w.upgrade().is_none()),
             "task scopes still alive after the task finished"
         );
+    }
+
+    #[test]
+    fn struct_invariants_do_not_outlive_the_calling_interpreter() {
+        // Interpreter A registers an invariant; interpreter B on the same
+        // thread has none. B's task must not apply A's rule.
+        let run = |src: &str| {
+            let mut interp = crate::interpreter::Interpreter::new();
+            let program = crate::parser::Parser::new(crate::lexer::Lexer::new(src).collect())
+                .parse()
+                .unwrap();
+            interp.eval(&program)
+        };
+        run("struct Counter { value: Int }\nimpl Counter { invariant value >= 0 }").unwrap();
+        let result = run(
+            "import { spawn, await_task } from \"std/concurrent\"\nstruct Counter { value: Int }\nlet r = await_task(spawn(fn() { Counter { value: -1 } }))\nstr(r)",
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::String(ref s) if s.contains("value: -1")),
+            "{result:?}"
+        );
+        assert!(current_struct_invariants().is_empty());
     }
 
     #[test]

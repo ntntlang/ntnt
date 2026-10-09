@@ -1862,7 +1862,6 @@ impl Interpreter {
 
     /// Install struct invariants (used for task interpreters).
     pub(crate) fn set_struct_invariants(&mut self, invariants: HashMap<String, Vec<Expression>>) {
-        crate::stdlib::concurrent::publish_struct_invariants(&invariants);
         self.struct_invariants = invariants;
     }
 
@@ -5732,7 +5731,6 @@ impl Interpreter {
                 if !invariants.is_empty() {
                     self.struct_invariants
                         .insert(type_name.clone(), invariants.clone());
-                    crate::stdlib::concurrent::publish_struct_invariants(&self.struct_invariants);
                 }
 
                 for method in methods {
@@ -9543,6 +9541,13 @@ impl Interpreter {
                             .as_deref()
                             .or(self.current_file.as_deref())
                             .map(std::path::Path::new),
+                        || func(&args),
+                    )
+                } else if crate::stdlib::concurrent::starts_tasks(&fn_name) {
+                    // Tasks rebuild helpers in a fresh interpreter; give
+                    // them this interpreter's struct invariants.
+                    crate::stdlib::concurrent::with_struct_invariants(
+                        &self.struct_invariants,
                         || func(&args),
                     )
                 } else {
