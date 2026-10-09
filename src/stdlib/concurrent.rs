@@ -2055,6 +2055,8 @@ fn validate_and_capture(caller: &str, handler: &Value) -> Result<(TaskCapture, c
             let mut builder = CaptureBuilder::default();
             let body_scope = builder.scope_index(closure);
             builder.capture_names(closure, &free_variables(body), &["task".to_string()]);
+            let struct_invariants = current_struct_invariants();
+            builder.capture_invariant_dependencies(closure, &struct_invariants);
             if !builder.failures.is_empty() {
                 return Err(IntentError::runtime_error(format!(
                     "Cannot capture runtime-local resources across task boundaries: {}. \
@@ -2068,7 +2070,7 @@ fn validate_and_capture(caller: &str, handler: &Value) -> Result<(TaskCapture, c
                 TaskCapture {
                     scopes: builder.scopes,
                     body_scope,
-                    struct_invariants: current_struct_invariants(),
+                    struct_invariants,
                 },
                 body.clone(),
             ))
@@ -2205,6 +2207,35 @@ impl CaptureBuilder {
                 }
             }
         }
+    }
+}
+
+impl CaptureBuilder {
+    /// Copy what struct invariants use (helper functions, constants), so a
+    /// struct built inside the task is checked as it would be outside it.
+    /// Invariants are resolved from the task's scope, like any name it uses.
+    ///
+    /// A struct may never be built in this task, so a dependency that cannot
+    /// cross the boundary is not an error here; building that struct in the
+    /// task then fails with an undefined name instead of skipping the check.
+    fn capture_invariant_dependencies(
+        &mut self,
+        env: &EnvRc,
+        invariants: &HashMap<String, Vec<crate::ast::Expression>>,
+    ) {
+        let mut names = HashSet::new();
+        let bound = HashSet::from(["self".to_string()]);
+        for exprs in invariants.values() {
+            for expr in exprs {
+                collect_free_vars_expr(expr, &mut names, &bound);
+            }
+        }
+        if names.is_empty() {
+            return;
+        }
+        let failures_before = self.failures.len();
+        self.capture_names(env, &names, &["invariant".to_string()]);
+        self.failures.truncate(failures_before);
     }
 }
 
