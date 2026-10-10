@@ -8,7 +8,14 @@
 
 ### Fixed
 
+- A function call that fails now restores its caller's state on every path (#183, part 1). Previously an error in a function body, default argument, destructured parameter, `requires`, `old()` capture or `ensures` left the interpreter in the callee's scope. A caller's `otherwise` handler could then lose its own variables (`Undefined variable`) and see the callee's.
+- Each function call has its own `old()` context. Nested calls no longer wipe the caller's snapshot, so a correct `ensures result == old(x) + 1` no longer fails after a nested call. Callees no longer see the caller's snapshot.
 - Task threads now have a 16 MiB stack instead of Rust's 2 MiB default. In release builds a task overflowed its stack in fewer than 200 nested calls, below the default recursion limit of 256, and the overflow aborted the whole process. Tasks now have about 950 calls of headroom, so they reach the normal "Maximum recursion depth" error. Debug builds overflow much earlier on every thread, including the main one.
+
+### Changed
+
+- A failing function's `defer` statements run when that function exits, in its own scope, before the caller's `otherwise` handler. Previously they ran later, in the wrong scope, or not at all. This includes errors that escape to the top level.
+- `old()` read in a callee's defaults or `requires` now refers to the callee's own values, not the caller's snapshot. A caller reading `old(x)` in its body after a nested call now sees its real starting value.
 
 ## 0.5.5
 

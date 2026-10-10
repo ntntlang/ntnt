@@ -8442,9 +8442,20 @@ impl Interpreter {
     where
         F: FnOnce(&mut Self) -> Result<Value>,
     {
-        let previous = Rc::clone(&self.environment);
-        self.environment = environment;
-        let result = render(self);
+        self.with_environment(environment, render)
+    }
+
+    /// Run `f` with `env` installed as the current scope, restoring the
+    /// previous scope on every ordinary exit (Ok or Err).
+    ///
+    /// Only swaps the environment: it does not run deferred statements,
+    /// restore diagnostics, or handle panics (job workers recover those).
+    fn with_environment<T, F>(&mut self, env: Rc<RefCell<Environment>>, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        let previous = std::mem::replace(&mut self.environment, env);
+        let result = f(self);
         self.environment = previous;
         result
     }
@@ -9644,17 +9655,54 @@ impl Interpreter {
             });
         }
 
-        // Create new environment with closure as parent
+        // This call owns a frame: the callee scope, every deferred statement
+        // registered above `deferred_base`, and its own old()/result contract
+        // context. The caller's frame is moved out here, before anything can
+        // fail, and moved back on every exit path below (#183).
         let func_env = Rc::new(RefCell::new(Environment::with_parent(closure)));
+        let caller_env = std::mem::replace(&mut self.environment, func_env);
+        let deferred_base = self.deferred_statements.len();
+        let caller_old = self.current_old_values.take();
+        let caller_result = self.current_result.take();
 
-        // Bind parameters: provided args first, then evaluate defaults
-        // We need to evaluate defaults in func_env so they can reference earlier params
-        let previous = Rc::clone(&self.environment);
-        self.environment = Rc::clone(&func_env);
+        let outcome = self.run_callee(
+            &name,
+            &params,
+            &body,
+            contract.as_ref(),
+            args,
+            deferred_base,
+        );
 
+        // Final cleanup: anything registered after the body cleanup (for
+        // example by a failing ensures clause), still in the callee frame.
+        self.run_deferred_above(deferred_base);
+
+        self.environment = caller_env;
+        self.current_old_values = caller_old;
+        self.current_result = caller_result;
+        outcome
+    }
+
+    /// Body of a user-function call, run inside the frame installed by
+    /// `call_user_function`. Never restores caller state itself: errors
+    /// return straight away and the caller-side wrapper restores.
+    fn run_callee(
+        &mut self,
+        name: &str,
+        params: &[Parameter],
+        body: &Block,
+        contract: Option<&FunctionContract>,
+        args: Vec<Value>,
+        deferred_base: usize,
+    ) -> Result<Value> {
+        // Bind parameters: provided args first, then defaults, which are
+        // evaluated in the callee scope so they can reference earlier params.
+        let arg_count = args.len();
+        let mut args = args.into_iter();
         for (i, param) in params.iter().enumerate() {
-            let value = if i < args.len() {
-                args[i].clone()
+            let value = if i < arg_count {
+                args.next().unwrap_or(Value::Unit)
             } else if let Some(ref default_expr) = param.default {
                 self.eval_expression(default_expr)?
             } else {
@@ -9665,31 +9713,26 @@ impl Interpreter {
                 // Destructured param: only bind pattern variables, not the synthetic name
                 self.bind_pattern(pat, &value)?;
             } else {
-                func_env.borrow_mut().define(param.name.clone(), value);
+                self.environment
+                    .borrow_mut()
+                    .define(param.name.clone(), value);
             }
         }
-
-        // Environment is already set to func_env for contract checking and body execution
 
         // The caller's Located statement line — current_line still points at
         // the call site here; after the body runs it points at the last body
         // statement, so capture it before execution.
         let call_site_line = self.current_line;
 
-        // Track deferred statements for this function call
-        let deferred_count_before = self.deferred_statements.len();
-
         // Check preconditions BEFORE execution
-        if let Some(ref func_contract) = contract {
+        if let Some(func_contract) = contract {
             for clause in &func_contract.requires {
                 let condition_str = Self::format_expression(&clause.expression);
                 let result = self.eval_expression(&clause.expression)?;
                 if !result.is_truthy() {
-                    // Read parameter values while func_env is still active —
-                    // after the restore below, lookups would hit the caller's
-                    // scope and silently produce wrong or missing values.
+                    // Read parameter values while the callee scope is still
+                    // installed; the caller's scope comes back afterwards.
                     let values = self.collect_clause_values(&clause.expression);
-                    self.environment = previous;
                     return Err(IntentError::ContractViolation {
                         message: format!("Precondition failed in '{}': {}", name, condition_str),
                         line: clause.line,
@@ -9705,26 +9748,24 @@ impl Interpreter {
             self.current_old_values = Some(self.capture_old_values(&func_contract.ensures)?);
         }
 
-        // Execute function body
-        let mut result = Value::Unit;
-        for stmt in &body.statements {
-            result = self.eval_statement(stmt)?;
-            if let Value::Return(v) = result {
-                result = *v;
-                break;
+        // Execute function body, keeping its outcome so the deferred
+        // statements below run on success, early return and error alike.
+        let body_outcome = (|| {
+            let mut result = Value::Unit;
+            for stmt in &body.statements {
+                result = self.eval_statement(stmt)?;
+                if let Value::Return(v) = result {
+                    return Ok(*v);
+                }
             }
-        }
+            Ok(result)
+        })();
 
-        // Execute deferred statements in reverse order (LIFO) before returning
-        let deferred_to_run: Vec<Expression> = self
-            .deferred_statements
-            .drain(deferred_count_before..)
-            .collect();
+        // Body cleanup: run this call's deferred statements (LIFO) in the
+        // callee scope, before result binding and postconditions.
+        self.run_deferred_above(deferred_base);
 
-        for deferred_expr in deferred_to_run.into_iter().rev() {
-            // Deferred expressions execute even if there was a return
-            let _ = self.eval_expression(&deferred_expr);
-        }
+        let result = body_outcome?;
 
         // Store result for postcondition evaluation
         self.current_result = Some(result.clone());
@@ -9735,18 +9776,14 @@ impl Interpreter {
             .define("result".to_string(), result.clone());
 
         // Check postconditions AFTER execution
-        if let Some(ref func_contract) = contract {
+        if let Some(func_contract) = contract {
             for clause in &func_contract.ensures {
                 let condition_str = Self::format_expression(&clause.expression);
                 let postcond_result = self.eval_expression(&clause.expression)?;
                 if !postcond_result.is_truthy() {
-                    // Values first: `result` and the parameters live in
-                    // func_env, which the restore below replaces.
+                    // `result` and the parameters live in the callee scope,
+                    // which is still installed here.
                     let values = self.collect_clause_values(&clause.expression);
-                    // Clear state before returning error
-                    self.current_old_values = None;
-                    self.current_result = None;
-                    self.environment = previous;
                     return Err(IntentError::ContractViolation {
                         message: format!("Postcondition failed in '{}': {}", name, condition_str),
                         line: clause.line,
@@ -9759,14 +9796,22 @@ impl Interpreter {
             }
         }
 
-        // Clear contract evaluation state
-        self.current_old_values = None;
-        self.current_result = None;
-
-        // Restore environment
-        self.environment = previous;
-
         Ok(result)
+    }
+
+    /// Run every deferred statement registered above `base`, newest first,
+    /// in the current scope. The entries are moved out in one step, so
+    /// statements registered while these run are not picked up by this
+    /// pass and nothing runs twice. Errors and control-flow values from
+    /// deferred statements are ignored, as they always have been.
+    fn run_deferred_above(&mut self, base: usize) {
+        if self.deferred_statements.len() <= base {
+            return;
+        }
+        let pending = self.deferred_statements.split_off(base);
+        for deferred_expr in pending.into_iter().rev() {
+            let _ = self.eval_expression(&deferred_expr);
+        }
     }
 
     /// Run the HTTP server on the specified port
@@ -11861,6 +11906,9 @@ impl Default for Interpreter {
 
 #[cfg(test)]
 mod fast_path_tests;
+
+#[cfg(test)]
+mod frame_restore_tests;
 
 #[cfg(test)]
 mod tests {
