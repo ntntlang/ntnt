@@ -823,6 +823,9 @@ pub struct Interpreter {
     type_aliases: HashMap<String, TypeExpr>,
     /// Struct invariants
     struct_invariants: HashMap<String, Vec<Expression>>,
+    /// True in an interpreter rebuilt for a task. Struct invariants there
+    /// can only read the struct's own fields (see #186 follow-up).
+    task_interpreter: bool,
     /// Trait implementations: type_name -> list of trait names
     trait_implementations: HashMap<String, Vec<String>>,
     /// Trait definitions: trait_name -> trait info
@@ -1130,6 +1133,7 @@ impl Interpreter {
             enums: HashMap::new(),
             type_aliases: HashMap::new(),
             struct_invariants: HashMap::new(),
+            task_interpreter: false,
             trait_implementations: HashMap::new(),
             trait_definitions: HashMap::new(),
             deferred_statements: Vec::new(),
@@ -1861,7 +1865,7 @@ impl Interpreter {
     }
 
     /// Run a task-starting native function with this interpreter's struct
-    /// invariants visible to task capture. Kept out of line and cold so the
+    /// invariants visible to the task. Kept out of line and cold so the
     /// ordinary native-call path in `call_function` stays small.
     #[cold]
     #[inline(never)]
@@ -1870,15 +1874,12 @@ impl Interpreter {
         func: fn(&[Value]) -> Result<Value>,
         args: &[Value],
     ) -> Result<Value> {
-        crate::stdlib::concurrent::with_struct_invariants(
-            &self.struct_invariants,
-            &self.structs,
-            || func(args),
-        )
+        crate::stdlib::concurrent::with_struct_invariants(&self.struct_invariants, || func(args))
     }
 
     /// Install struct invariants (used for task interpreters).
     pub(crate) fn set_struct_invariants(&mut self, invariants: HashMap<String, Vec<Expression>>) {
+        self.task_interpreter = true;
         self.struct_invariants = invariants;
     }
 
@@ -11250,7 +11251,17 @@ impl Interpreter {
         // Check each invariant
         for inv_expr in &invariants {
             let condition_str = Self::format_expression(inv_expr);
-            let result = self.eval_expression(inv_expr)?;
+            let result = match self.eval_expression(inv_expr) {
+                Err(IntentError::UndefinedVariable { name, .. }) if self.task_interpreter => {
+                    self.environment = previous;
+                    return Err(IntentError::runtime_error(format!(
+                        "Invariant for '{struct_name}' uses '{name}', which isn't available inside a task: \
+                         struct rules that call helpers or read constants aren't supported in tasks yet. \
+                         Build this struct outside the task, or make the rule use only the struct's own fields."
+                    )));
+                }
+                other => other?,
+            };
 
             if !result.is_truthy() {
                 // Field values are read from inv_env before the restore

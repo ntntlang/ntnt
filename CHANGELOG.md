@@ -4,7 +4,7 @@
 
 ### Added
 
-- Task closures passed to `spawn`, `after`, `schedule`, `parallel` and `race` can call your own NTNT functions, from the same file or imported, including helpers those functions call, recursion and mutual recursion (#186). Each function is copied into the task with the values it uses, so changes stay inside the task. Values that can't be copied still fail before the task starts, and the error now names the dependency path, e.g. `task -> outer -> call_a -> handlers`.
+- Task closures passed to `spawn`, `after`, `schedule`, `parallel` and `race` can call your own NTNT functions, from the same file or imported, including helpers those functions call, recursion and mutual recursion (#186). Each function is copied into the task with the values it uses, so changes stay inside the task. Values that can't be copied still fail before the task starts, and the error now names the dependency path, e.g. `task -> outer -> call_a -> handlers`. Struct invariants are now enforced inside tasks when they read only the struct's own fields; a rule that calls a helper or reads a constant fails with a clear error when that struct is built in a task (previously tasks skipped invariants entirely).
 
 ### Fixed
 

@@ -1893,91 +1893,31 @@ print(await_task(spawn(fn() { Counter { value: -1 } })))
 }
 
 #[test]
-fn test_task_invariant_dependencies_are_captured() {
-    // Invariants that call helpers or read constants must work in a task.
+fn test_task_invariant_using_helper_fails_clearly_not_silently() {
+    // Rules that call helpers or read constants aren't supported in tasks
+    // yet. Building such a struct in a task must fail with a clear error,
+    // never skip the rule; field-only rules keep working.
     let (stdout, stderr, code) = run_ntnt_code(
         r#"
 import { spawn, await_task } from "std/concurrent"
 let MIN = 0
-fn at_least(v, floor) { return v >= floor }
-fn ok_value(v) { return at_least(v, MIN) }
+fn ok_value(v) { return v >= MIN }
 struct Counter { value: Int }
 impl Counter { invariant ok_value(value) }
+struct Plain { n: Int }
+impl Plain { invariant n >= 0 }
 fn make(n) { return Counter { value: n } }
 print(await_task(spawn(fn() { make(1) })))
-print(await_task(spawn(fn() { make(-1) })))
-print(await_task(spawn(fn() { Counter { value: -2 } })))
+print(await_task(spawn(fn() { Plain { n: -1 } })))
+print(await_task(spawn(fn() { Plain { n: 1 } })))
 "#,
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
-    assert!(lines[0].contains("value: 1"), "{stdout}");
+    assert!(
+        lines[0].contains("isn't available inside a task"),
+        "{stdout}"
+    );
     assert!(lines[1].contains("Invariant violated"), "{stdout}");
-    assert!(lines[2].contains("Invariant violated"), "{stdout}");
-}
-
-#[test]
-fn test_uncapturable_invariant_dependency_does_not_block_unrelated_tasks() {
-    // An invariant depending on something that can't cross threads must not
-    // stop tasks that never build that struct.
-    let (stdout, stderr, code) = run_ntnt_code(
-        r#"
-import { spawn, await_task } from "std/concurrent"
-let rules = map { "min": fn(v) { v >= 0 } }
-struct Guarded { value: Int }
-impl Guarded { invariant rules["min"](value) }
-fn inc(v) { return v + 1 }
-print(await_task(spawn(fn() { inc(1) })))
-"#,
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    assert_eq!(stdout.trim(), "2");
-}
-
-#[test]
-fn test_task_invariant_dependency_resolves_like_outside_under_shadowing() {
-    // The caller shadows the invariant's helper name with a local; the
-    // invariant must still resolve the helper where it is defined.
-    let (stdout, stderr, code) = run_ntnt_code(
-        r#"
-import { spawn, await_task } from "std/concurrent"
-let MIN = 0
-fn ok(v) { return v >= MIN }
-struct Counter { value: Int }
-impl Counter { invariant ok(value) }
-fn make(n) { return Counter { value: n } }
-fn run() {
-    let ok = 5
-    print(await_task(spawn(fn() { make(1) })))
-    return await_task(spawn(fn() { make(-1) }))
-}
-print(run())
-"#,
-    );
-    assert_eq!(code, 0, "stderr: {stderr}");
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert!(lines[0].contains("value: 1"), "{stdout}");
-    assert!(lines[1].contains("Invariant violated"), "{stdout}");
-}
-
-#[test]
-fn test_helper_shared_with_invariant_still_rejects_uncapturable_dependency() {
-    // `check` is used by both an invariant and the task. Its unsupported
-    // dependency must still be reported before the task starts.
-    let (stdout, stderr, _code) = run_ntnt_code(
-        r#"
-import { spawn, await_task } from "std/concurrent"
-let rules = map { "min": fn(v) { v >= 0 } }
-fn check(v) { let f = rules["min"]
- return f(v) }
-struct Counter { value: Int }
-impl Counter { invariant check(value) }
-print("started")
-print(await_task(spawn(fn() { print("side effect")
- check(1) })))
-"#,
-    );
-    let all = format!("{stdout}{stderr}");
-    assert!(all.contains("task -> check -> rules"), "{all}");
-    assert!(!stdout.contains("side effect"), "task ran: {stdout}");
+    assert!(lines[2].contains("n: 1"), "{stdout}");
 }

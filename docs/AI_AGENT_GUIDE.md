@@ -2738,6 +2738,8 @@ cancel_task(task)  // Task exits at next recv/recv_timeout/sleep_ms/fetch call
 
 Changes a task makes to those copies (for example `counter = counter + 1` inside a helper) stay inside the task; send results back with the return value or a channel. If anything reachable from the task can't be copied (secrets, process or TCP handles, closures stored in maps), `spawn()` fails before the task starts and names the path, e.g. `task -> outer -> call_a -> handlers`. The same rule applies to `spawn`, `after`, `schedule`, `parallel` and `race`.
 
+Struct invariants are enforced inside tasks. A rule that reads only the struct's own fields (`invariant value >= 0`) works as it does outside a task. A rule that calls a helper or reads a constant isn't supported in tasks yet: building that struct in a task fails with a clear error (it is never skipped), so build it outside the task.
+
 ```ntnt
 fn normalize(value) { return value + 1 }
 let task = spawn(fn() { normalize(41) })   // Ok(42)
