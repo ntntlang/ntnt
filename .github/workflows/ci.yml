@@ -224,6 +224,9 @@ jobs:
       - name: Build release
         run: cargo build --release --locked
 
+      - name: Scheduled callback release stack regression
+        run: cargo test --release --locked --test concurrency_tests test_schedule_recursion_hits_limit_not_stack_overflow -- --exact --nocapture
+
       # Coarse timing alarms run only here, in release mode on Linux. Debug
       # and cross-platform correctness tests assert the optimized paths directly.
       - name: Interpreter and template timing guard

@@ -2845,7 +2845,6 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
     let start_guard = ScheduleStartGuard::new(&RUNTIME, schedule_id);
 
     thread::Builder::new()
-        .stack_size(task_stack_size())
         .spawn(move || {
             // Set cancel token so sleep_cancellable() works in this thread.
             CURRENT_CANCEL_TOKEN.with(|cell| {
@@ -2871,20 +2870,24 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
                 let tick_running_clone = Arc::clone(&tick_running);
                 let tick_cancelled = Arc::clone(&cancelled);
 
-                thread::spawn(move || {
-                    // Install cancel token so yield points (fetch, sleep_ms, recv)
-                    // in tick bodies respect schedule cancellation.
-                    CURRENT_CANCEL_TOKEN.with(|cell| {
-                        *cell.borrow_mut() = Some(tick_cancelled);
-                    });
-                    let _result = catch_unwind(AssertUnwindSafe(|| {
-                        let _ = run_in_fresh_interpreter(&tick_captured, &tick_body);
-                    }));
-                    CURRENT_CANCEL_TOKEN.with(|cell| {
-                        *cell.borrow_mut() = None;
-                    });
-                    tick_running_clone.store(false, AtomicOrdering::Release);
-                });
+                // The callback, not the timer loop, evaluates NTNT helpers.
+                thread::Builder::new()
+                    .stack_size(task_stack_size())
+                    .spawn(move || {
+                        // Install cancel token so yield points (fetch, sleep_ms, recv)
+                        // in tick bodies respect schedule cancellation.
+                        CURRENT_CANCEL_TOKEN.with(|cell| {
+                            *cell.borrow_mut() = Some(tick_cancelled);
+                        });
+                        let _result = catch_unwind(AssertUnwindSafe(|| {
+                            let _ = run_in_fresh_interpreter(&tick_captured, &tick_body);
+                        }));
+                        CURRENT_CANCEL_TOKEN.with(|cell| {
+                            *cell.borrow_mut() = None;
+                        });
+                        tick_running_clone.store(false, AtomicOrdering::Release);
+                    })
+                    .expect("Failed to spawn schedule tick thread");
             }
         })
         .map_err(|e| IntentError::runtime_error(format!("Failed to spawn schedule thread: {e}")))?;

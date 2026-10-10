@@ -1754,6 +1754,59 @@ print("still running")
 }
 
 #[test]
+fn test_schedule_recursion_hits_limit_not_stack_overflow() {
+    // The schedule's timer thread and callback worker are separate threads.
+    // Protect the worker that actually evaluates helpers, not only the timer.
+    // Channels synchronize completion; no sleep is used to wait for a tick.
+    // Debug has a larger stack footprint; release exercises the 200-call
+    // crash and the default recursion limit of 256.
+    let (successful_depth, limit) = if cfg!(debug_assertions) {
+        ("10", "24")
+    } else {
+        ("200", "256")
+    };
+    let path = unique_test_file("schedule_recursion");
+    fs::write(
+        &path,
+        r#"import { schedule, cancel_schedule, channel, send, recv } from "std/concurrent"
+fn depth(n) { if n <= 0 { return 0 }
+ return 1 + depth(n - 1) }
+let [tx, rx] = channel()
+let timer = schedule(1, fn() {
+ send(tx, depth(SUCCESSFUL_DEPTH))
+ send(tx, try { depth(100000) })
+ send(tx, depth(SUCCESSFUL_DEPTH))
+})
+print(recv(rx))
+print(recv(rx))
+print(recv(rx))
+cancel_schedule(timer)
+print("still running")
+"#
+        .replace("SUCCESSFUL_DEPTH", successful_depth),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args(["run", &path])
+        .env("NTNT_MAX_RECURSION", limit)
+        .output()
+        .unwrap();
+    let _ = fs::remove_file(&path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 4, "{stdout}");
+    assert_eq!(lines[0], successful_depth, "{stdout}");
+    assert!(lines[1].contains("Maximum recursion depth"), "{stdout}");
+    assert_eq!(lines[2], successful_depth, "{stdout}");
+    assert_eq!(lines[3], "still running", "{stdout}");
+}
+
+#[test]
 fn test_parallel_race_after_share_helper_rule() {
     let (stdout, stderr, code) = run_ntnt_code(
         r#"
