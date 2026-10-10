@@ -2,10 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- Task closures passed to `spawn`, `after`, `schedule`, `parallel` and `race` can call your own NTNT functions, from the same file or imported, including helpers those functions call, recursion and mutual recursion (#186). Each function is copied into the task with the values it uses, so changes stay inside the task. Values that can't be copied still fail before the task starts, and the error now names the dependency path, e.g. `task -> outer -> call_a -> handlers`. Struct invariants are now enforced inside tasks when they read only the struct's own fields; a rule that calls a helper or reads a constant fails with a clear error when that struct is built in a task (previously tasks skipped invariants entirely).
+
 ### Fixed
 
 - A function call that fails now restores its caller's state on every path (#183, part 1). Previously an error in a function body, default argument, destructured parameter, `requires`, `old()` capture or `ensures` left the interpreter in the callee's scope. A caller's `otherwise` handler could then lose its own variables (`Undefined variable`) and see the callee's.
 - Each function call has its own `old()` context. Nested calls no longer wipe the caller's snapshot, so a correct `ensures result == old(x) + 1` no longer fails after a nested call. Callees no longer see the caller's snapshot.
+- Task threads now have a 16 MiB stack instead of Rust's 2 MiB default. In release builds a task overflowed its stack in fewer than 200 nested calls, below the default recursion limit of 256, and the overflow aborted the whole process. Tasks now have about 950 calls of headroom, so they reach the normal "Maximum recursion depth" error. Debug builds overflow much earlier on every thread, including the main one.
+- Copied task scopes are released even when evaluation panics, so a failed helper task cannot keep channel senders alive through its copied closure cycles. Dependency-path storage is linear in the captured names; full paths are formatted only for rejected captures.
 
 ### Changed
 

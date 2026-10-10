@@ -36,23 +36,14 @@ fn run_ntnt_code(code: &str) -> (String, String, i32) {
     writeln!(file, "{}", code).expect("Failed to write test file");
     drop(file);
 
-    let exe = std::env::consts::EXE_SUFFIX;
-    let debug_path = format!("./target/debug/ntnt{}", exe);
-    let release_path = format!("./target/release/ntnt{}", exe);
-
-    let binary = if std::path::Path::new(&debug_path).exists() {
-        debug_path
-    } else if std::path::Path::new(&release_path).exists() {
-        release_path
-    } else {
-        panic!("No ntnt binary found. Run 'cargo build' first.");
-    };
+    // Cargo selects the current profile, target directory and OS suffix.
+    let binary = env!("CARGO_BIN_EXE_ntnt");
 
     // Run ntnt directly. The two-handle channel design (TxChannel/RxChannel) ensures
     // recv() unblocks automatically when all sender clones drop — no external timeout
     // wrapper needed to prevent zombie processes. This also makes tests portable
     // across Linux, macOS, and Windows (no dependency on `timeout` from GNU coreutils).
-    let output = Command::new(&binary)
+    let output = Command::new(binary)
         .args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
@@ -851,28 +842,25 @@ match result {
 }
 
 #[test]
-fn test_schedule_reports_only_referenced_user_defined_function() {
-    let (_stdout, stderr, code) = run_ntnt_code(
+fn test_schedule_calls_user_defined_helper() {
+    // Before #186 this was rejected at schedule() time.
+    let (stdout, stderr, code) = run_ntnt_code(
         r#"
-import { schedule } from "std/concurrent"
+import { schedule, cancel_schedule, channel, send, recv_timeout } from "std/concurrent"
 
-fn unused_helper() { 1 }
 fn used_helper() { 2 }
-
-let sched = schedule(50, fn() { used_helper() })
+let [tx, rx] = channel()
+let sched = schedule(50, fn() { send(tx, used_helper()) })
+let result = recv_timeout(rx, 1000)
+cancel_schedule(sched)
+match result {
+    Some(v) => print("ok: " + str(v)),
+    None => print("missing")
+}
 "#,
     );
-    assert_ne!(code, 0, "schedule should fail");
-    assert!(
-        stderr.contains("used_helper"),
-        "stderr should mention the referenced function: {}",
-        stderr
-    );
-    assert!(
-        !stderr.contains("unused_helper"),
-        "stderr should not mention unused functions: {}",
-        stderr
-    );
+    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("ok: 2"), "stdout: {}", stdout);
 }
 
 // =============================================================================
@@ -1456,18 +1444,9 @@ print("status: " + status["status"])
     std::io::Write::write_all(&mut file, code_str.as_bytes()).expect("Failed to write test file");
     drop(file);
 
-    let exe = std::env::consts::EXE_SUFFIX;
-    let debug_path = format!("./target/debug/ntnt{}", exe);
-    let release_path = format!("./target/release/ntnt{}", exe);
-    let binary = if std::path::Path::new(&debug_path).exists() {
-        debug_path
-    } else if std::path::Path::new(&release_path).exists() {
-        release_path
-    } else {
-        panic!("No ntnt binary found. Run 'cargo build' first.");
-    };
+    let binary = env!("CARGO_BIN_EXE_ntnt");
 
-    let output = std::process::Command::new(&binary)
+    let output = std::process::Command::new(binary)
         .args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
@@ -1514,18 +1493,9 @@ print("no_limit")
     std::io::Write::write_all(&mut file, code_str.as_bytes()).expect("Failed to write test file");
     drop(file);
 
-    let exe = std::env::consts::EXE_SUFFIX;
-    let debug_path = format!("./target/debug/ntnt{}", exe);
-    let release_path = format!("./target/release/ntnt{}", exe);
-    let binary = if std::path::Path::new(&debug_path).exists() {
-        debug_path
-    } else if std::path::Path::new(&release_path).exists() {
-        release_path
-    } else {
-        panic!("No ntnt binary found. Run 'cargo build' first.");
-    };
+    let binary = env!("CARGO_BIN_EXE_ntnt");
 
-    let output = std::process::Command::new(&binary)
+    let output = std::process::Command::new(binary)
         .args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
@@ -1664,4 +1634,333 @@ match result {
         "should skip Err and pick Ok winner: {}",
         stdout
     );
+}
+
+// =============================================================================
+// Helper functions across task boundaries (#186)
+// =============================================================================
+
+#[test]
+fn test_task_calls_top_level_helper() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let OFFSET = 1
+fn normalize(value) { return value + OFFSET }
+print(await_task(spawn(fn() { normalize(41) })))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn test_task_calls_imported_helper_with_module_state() {
+    let dir = std::env::temp_dir().join(format!(
+        "ntnt_task_helpers_{}_{}",
+        std::process::id(),
+        TEST_COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    fs::create_dir_all(dir.join("lib")).unwrap();
+    fs::write(
+        dir.join("lib/util.tnt"),
+        "let FACTOR = 10\nfn scale(v) { return v * FACTOR }\nexport { scale }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("main.tnt"),
+        r#"import { spawn, await_task } from "std/concurrent"
+import { scale } from "./lib/util.tnt"
+print(await_task(spawn(fn() { scale(4) })))
+"#,
+    )
+    .unwrap();
+    let binary = env!("CARGO_BIN_EXE_ntnt");
+    let output = Command::new(binary)
+        .args(["run", dir.join("main.tnt").to_str().unwrap()])
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "40");
+}
+
+#[test]
+fn test_task_helpers_transitive_recursive_and_contracted() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+fn inc(v) { return v + 1 }
+fn twice(v) { return inc(inc(v)) }
+fn fact(n) { if n <= 1 { return 1 }
+ return n * fact(n - 1) }
+fn even(n) { if n == 0 { return true }
+ return odd(n - 1) }
+fn odd(n) { if n == 0 { return false }
+ return even(n - 1) }
+fn checked(x) requires x > 0 ensures result > x { return x + 1 }
+print(await_task(spawn(fn() { twice(40) })))
+print(await_task(spawn(fn() { fact(5) })))
+print(await_task(spawn(fn() { even(10) })))
+print(await_task(spawn(fn() { checked(1) })))
+print(await_task(spawn(fn() { checked(0) })))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(&lines[..4], ["42", "120", "true", "2"], "{stdout}");
+    assert!(lines[4].contains("Precondition failed"), "{stdout}");
+}
+
+#[test]
+fn test_task_recursion_hits_limit_not_stack_overflow() {
+    // Task threads used to get Rust's default 2 MiB stack, which a debug
+    // build overflows a few interpreter calls deep, aborting the whole
+    // process. With the recursion limit set low, a task must reach the
+    // interpreter's own limit and get an ordinary error instead.
+    let path = unique_test_file("task_recursion");
+    fs::write(
+        &path,
+        r#"import { spawn, await_task } from "std/concurrent"
+fn depth(n) { if n <= 0 { return 0 }
+ return 1 + depth(n - 1) }
+print(await_task(spawn(fn() { depth(10) })))
+print(await_task(spawn(fn() { depth(100000) })))
+print("still running")
+"#,
+    )
+    .unwrap();
+    let binary = env!("CARGO_BIN_EXE_ntnt");
+    let output = Command::new(binary)
+        .args(["run", &path])
+        .env("NTNT_MAX_RECURSION", "24")
+        .output()
+        .unwrap();
+    let _ = fs::remove_file(&path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "10", "{stdout}");
+    assert!(lines[1].contains("Maximum recursion depth"), "{stdout}");
+    assert_eq!(lines[2], "still running", "{stdout}");
+}
+
+#[test]
+fn test_schedule_recursion_hits_limit_not_stack_overflow() {
+    // The schedule's timer thread and callback worker are separate threads.
+    // Protect the worker that actually evaluates helpers, not only the timer.
+    // Channels synchronize completion; no sleep is used to wait for a tick.
+    // Debug has a larger stack footprint; release exercises the 200-call
+    // crash and the default recursion limit of 256.
+    let (successful_depth, limit) = if cfg!(debug_assertions) {
+        ("10", "24")
+    } else {
+        ("200", "256")
+    };
+    let path = unique_test_file("schedule_recursion");
+    fs::write(
+        &path,
+        r#"import { schedule, cancel_schedule, channel, send, recv } from "std/concurrent"
+fn depth(n) { if n <= 0 { return 0 }
+ return 1 + depth(n - 1) }
+let [tx, rx] = channel()
+let timer = schedule(1, fn() {
+ send(tx, depth(SUCCESSFUL_DEPTH))
+ send(tx, try { depth(100000) })
+ send(tx, depth(SUCCESSFUL_DEPTH))
+})
+print(recv(rx))
+print(recv(rx))
+print(recv(rx))
+cancel_schedule(timer)
+print("still running")
+"#
+        .replace("SUCCESSFUL_DEPTH", successful_depth),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args(["run", &path])
+        .env("NTNT_MAX_RECURSION", limit)
+        .output()
+        .unwrap();
+    let _ = fs::remove_file(&path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 4, "{stdout}");
+    assert_eq!(lines[0], successful_depth, "{stdout}");
+    assert!(lines[1].contains("Maximum recursion depth"), "{stdout}");
+    assert_eq!(lines[2], successful_depth, "{stdout}");
+    assert_eq!(lines[3], "still running", "{stdout}");
+}
+
+#[test]
+fn test_parallel_race_after_share_helper_rule() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { parallel, race, after, await_task } from "std/concurrent"
+fn inc(v) { return v + 1 }
+print(parallel([fn() { inc(1) }, fn() { inc(2) }]))
+print(race([fn() { inc(10) }]))
+print(await_task(after(1, fn() { inc(20) })))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "[2, 3]\n11\n21");
+}
+
+#[test]
+fn test_task_helpers_capture_enum_constructors_and_aliases() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, after, parallel, race, await_task } from "std/concurrent"
+enum Message { Item(Int) }
+let alias = Item
+fn make(n) { return Item(n) }
+fn via_alias(n) { return alias(n) }
+fn outer(n) { return make(n) }
+print(await_task(spawn(fn() { outer(1) })))
+print(await_task(after(1, fn() { via_alias(2) })))
+print(parallel([fn() { make(3) }, fn() { via_alias(4) }]))
+print(race([fn() { make(5) }]))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(),
+        "Message::Item(1)\nMessage::Item(2)\n[Message::Item(3), Message::Item(4)]\nMessage::Item(5)");
+}
+
+#[test]
+fn test_task_helper_mutation_stays_in_task_copy() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let mut counter = 5
+fn bump() { counter = counter + 1
+ return counter }
+print(await_task(spawn(fn() { bump() })))
+print(await_task(spawn(fn() { bump() })))
+print(counter)
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "6\n6\n5");
+}
+
+#[test]
+fn test_task_helper_unsupported_dependency_reports_path() {
+    let (stdout, stderr, _code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let handlers = map { "a": fn(x) { x + 1 } }
+fn call_a(x) { let f = handlers["a"]
+ return f(x) }
+fn outer() { return call_a(1) }
+print(await_task(spawn(fn() { outer() })))
+"#,
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        all.contains("task -> outer -> call_a -> handlers"),
+        "missing dependency path: {all}"
+    );
+}
+
+#[test]
+fn test_task_helper_enforces_struct_invariants() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+struct Counter { value: Int }
+impl Counter { invariant value >= 0 }
+fn make(n) { return Counter { value: n } }
+print(await_task(spawn(fn() { make(1) })))
+print(await_task(spawn(fn() { make(-1) })))
+print(await_task(spawn(fn() { Counter { value: -1 } })))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines[0].contains("value: 1"), "{stdout}");
+    assert!(lines[1].contains("Invariant violated"), "{stdout}");
+    assert!(lines[2].contains("Invariant violated"), "{stdout}");
+}
+
+#[test]
+fn test_long_helper_chain_captures_without_overflow() {
+    // Capturing walks helper -> helper chains; it must not recurse on the
+    // caller's stack once per helper.
+    let mut code = String::from("import { spawn, await_task } from \"std/concurrent\"\n");
+    let n = 20000;
+    for i in 0..n {
+        let next = if i + 1 < n {
+            format!("f{}()", i + 1)
+        } else {
+            "0".to_string()
+        };
+        code.push_str(&format!(
+            "fn f{i}() {{ if false {{ return {next} }}\n return 0 }}\n"
+        ));
+    }
+    code.push_str("print(await_task(spawn(fn() { f0() })))\n");
+    let (stdout, stderr, status) = run_ntnt_code(&code);
+    assert_eq!(status, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "0");
+}
+
+#[test]
+fn test_task_invariants_come_from_the_calling_interpreter() {
+    // A later interpreter on the same thread must not inherit invariants
+    // registered by an earlier one (e.g. after a REPL :clear).
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+struct Counter { value: Int }
+print(await_task(spawn(fn() { Counter { value: -1 } })))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("value: -1"), "{stdout}");
+}
+
+#[test]
+fn test_task_invariant_using_helper_fails_clearly_not_silently() {
+    // Rules that call helpers or read constants aren't supported in tasks
+    // yet. Building such a struct in a task must fail with a clear error,
+    // never skip the rule; field-only rules keep working.
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let MIN = 0
+fn ok_value(v) { return v >= MIN }
+struct Counter { value: Int }
+impl Counter { invariant ok_value(value) }
+struct Plain { n: Int }
+impl Plain { invariant n >= 0 }
+fn make(n) { return Counter { value: n } }
+print(await_task(spawn(fn() { make(1) })))
+print(await_task(spawn(fn() { Plain { n: -1 } })))
+print(await_task(spawn(fn() { Plain { n: 1 } })))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines[0].contains("isn't available inside a task"),
+        "{stdout}"
+    );
+    assert!(lines[1].contains("Invariant violated"), "{stdout}");
+    assert!(lines[2].contains("n: 1"), "{stdout}");
 }
