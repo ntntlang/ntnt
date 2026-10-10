@@ -2733,7 +2733,7 @@ cancel_task(task)  // Task exits at next recv/recv_timeout/sleep_ms/fetch call
 
 **What a task can use.** A task runs in its own interpreter on its own thread. It gets a *copy* of everything its body uses:
 
-- serializable values (Int, Float, Bool, String, Array, Map, Struct, Enum) and native functions;
+- serializable values (Int, Float, Bool, String, Array, Map, Struct, Enum), native functions and enum constructors (including aliases);
 - your own NTNT functions, from the same file or imported, including the helpers *they* call, recursion and mutual recursion. Each function is copied along with the values it uses.
 
 Changes a task makes to those copies (for example `counter = counter + 1` inside a helper) stay inside the task; send results back with the return value or a channel. If anything reachable from the task can't be copied (secrets, process or TCP handles, closures stored in maps), `spawn()` fails before the task starts and names the path, e.g. `task -> outer -> call_a -> handlers`. The same rule applies to `spawn`, `after`, `schedule`, `parallel` and `race`.

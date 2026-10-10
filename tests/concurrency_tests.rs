@@ -36,23 +36,14 @@ fn run_ntnt_code(code: &str) -> (String, String, i32) {
     writeln!(file, "{}", code).expect("Failed to write test file");
     drop(file);
 
-    let exe = std::env::consts::EXE_SUFFIX;
-    let debug_path = format!("./target/debug/ntnt{}", exe);
-    let release_path = format!("./target/release/ntnt{}", exe);
-
-    let binary = if std::path::Path::new(&debug_path).exists() {
-        debug_path
-    } else if std::path::Path::new(&release_path).exists() {
-        release_path
-    } else {
-        panic!("No ntnt binary found. Run 'cargo build' first.");
-    };
+    // Cargo selects the current profile, target directory and OS suffix.
+    let binary = env!("CARGO_BIN_EXE_ntnt");
 
     // Run ntnt directly. The two-handle channel design (TxChannel/RxChannel) ensures
     // recv() unblocks automatically when all sender clones drop — no external timeout
     // wrapper needed to prevent zombie processes. This also makes tests portable
     // across Linux, macOS, and Windows (no dependency on `timeout` from GNU coreutils).
-    let output = Command::new(&binary)
+    let output = Command::new(binary)
         .args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
@@ -1453,18 +1444,9 @@ print("status: " + status["status"])
     std::io::Write::write_all(&mut file, code_str.as_bytes()).expect("Failed to write test file");
     drop(file);
 
-    let exe = std::env::consts::EXE_SUFFIX;
-    let debug_path = format!("./target/debug/ntnt{}", exe);
-    let release_path = format!("./target/release/ntnt{}", exe);
-    let binary = if std::path::Path::new(&debug_path).exists() {
-        debug_path
-    } else if std::path::Path::new(&release_path).exists() {
-        release_path
-    } else {
-        panic!("No ntnt binary found. Run 'cargo build' first.");
-    };
+    let binary = env!("CARGO_BIN_EXE_ntnt");
 
-    let output = std::process::Command::new(&binary)
+    let output = std::process::Command::new(binary)
         .args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
@@ -1511,18 +1493,9 @@ print("no_limit")
     std::io::Write::write_all(&mut file, code_str.as_bytes()).expect("Failed to write test file");
     drop(file);
 
-    let exe = std::env::consts::EXE_SUFFIX;
-    let debug_path = format!("./target/debug/ntnt{}", exe);
-    let release_path = format!("./target/release/ntnt{}", exe);
-    let binary = if std::path::Path::new(&debug_path).exists() {
-        debug_path
-    } else if std::path::Path::new(&release_path).exists() {
-        release_path
-    } else {
-        panic!("No ntnt binary found. Run 'cargo build' first.");
-    };
+    let binary = env!("CARGO_BIN_EXE_ntnt");
 
-    let output = std::process::Command::new(&binary)
+    let output = std::process::Command::new(binary)
         .args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
@@ -1702,9 +1675,7 @@ print(await_task(spawn(fn() { scale(4) })))
 "#,
     )
     .unwrap();
-    let exe = std::env::consts::EXE_SUFFIX;
-    let binary =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/debug/ntnt{exe}"));
+    let binary = env!("CARGO_BIN_EXE_ntnt");
     let output = Command::new(binary)
         .args(["run", dir.join("main.tnt").to_str().unwrap()])
         .output()
@@ -1763,9 +1734,7 @@ print("still running")
 "#,
     )
     .unwrap();
-    let exe = std::env::consts::EXE_SUFFIX;
-    let binary =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/debug/ntnt{exe}"));
+    let binary = env!("CARGO_BIN_EXE_ntnt");
     let output = Command::new(binary)
         .args(["run", &path])
         .env("NTNT_MAX_RECURSION", "24")
@@ -1797,6 +1766,27 @@ print(await_task(after(1, fn() { inc(20) })))
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout.trim(), "[2, 3]\n11\n21");
+}
+
+#[test]
+fn test_task_helpers_capture_enum_constructors_and_aliases() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, after, parallel, race, await_task } from "std/concurrent"
+enum Message { Item(Int) }
+let alias = Item
+fn make(n) { return Item(n) }
+fn via_alias(n) { return alias(n) }
+fn outer(n) { return make(n) }
+print(await_task(spawn(fn() { outer(1) })))
+print(await_task(after(1, fn() { via_alias(2) })))
+print(parallel([fn() { make(3) }, fn() { via_alias(4) }]))
+print(race([fn() { make(5) }]))
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout.trim(),
+        "Message::Item(1)\nMessage::Item(2)\n[Message::Item(3), Message::Item(4)]\nMessage::Item(5)");
 }
 
 #[test]

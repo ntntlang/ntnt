@@ -1488,6 +1488,8 @@ struct CapturedBindings {
     values: HashMap<String, SerializedValue>,
     /// Full NativeFunction identities — reconstructed directly in the child interpreter.
     native_fns: Vec<CapturedNativeFn>,
+    /// Enum constructors are immutable metadata, not runtime-local closures.
+    enum_constructors: Vec<CapturedEnumConstructor>,
 }
 
 /// Everything a task needs, as plain data that can cross threads: the
@@ -1535,6 +1537,14 @@ struct CapturedNativeFn {
     max_arity: usize,
     requires: Option<crate::interpreter::RuntimeCapability>,
     func: fn(&[Value]) -> Result<Value>,
+}
+
+#[derive(Clone)]
+struct CapturedEnumConstructor {
+    binding_name: String,
+    enum_name: String,
+    variant: String,
+    arity: usize,
 }
 
 // =============================================================================
@@ -2091,11 +2101,43 @@ struct CaptureBuilder {
     seen: HashSet<(usize, String)>,
     /// Dependency paths that cannot cross a task boundary.
     failures: Vec<String>,
+    /// One name and a parent index per dependency, not cloned path prefixes.
+    paths: Vec<CapturePath>,
+}
+
+struct CapturePath {
+    parent: Option<usize>,
+    name: String,
 }
 
 type EnvRc = std::rc::Rc<std::cell::RefCell<crate::interpreter::Environment>>;
 
 impl CaptureBuilder {
+    fn push_path(&mut self, parent: Option<usize>, name: &str) -> usize {
+        let index = self.paths.len();
+        self.paths.push(CapturePath {
+            parent,
+            name: name.to_string(),
+        });
+        index
+    }
+
+    /// Materialize a path only for a rejected value. Walk iteratively so the
+    /// diagnostic for a deep chain also stays within the caller's stack.
+    fn format_path(&self, mut index: usize) -> String {
+        let mut names = Vec::new();
+        loop {
+            let node = &self.paths[index];
+            names.push(node.name.as_str());
+            match node.parent {
+                Some(parent) => index = parent,
+                None => break,
+            }
+        }
+        names.reverse();
+        names.join(" -> ")
+    }
+
     /// Index of the copy of `env`, creating it (and its ancestors) if needed.
     /// Iterative, so a deep scope chain cannot overflow the caller's stack.
     fn scope_index(&mut self, env: &EnvRc) -> usize {
@@ -2133,8 +2175,12 @@ impl CaptureBuilder {
     /// overflow the caller's stack. `path` is the chain of helpers that led
     /// to each name, for diagnostics.
     fn capture_names(&mut self, env: &EnvRc, names: &HashSet<String>, path: &[String]) {
-        let mut pending: Vec<(EnvRc, HashSet<String>, Vec<String>)> =
-            vec![(std::rc::Rc::clone(env), names.clone(), path.to_vec())];
+        let mut root_path = None;
+        for name in path {
+            root_path = Some(self.push_path(root_path, name));
+        }
+        let mut pending: Vec<(EnvRc, HashSet<String>, Option<usize>)> =
+            vec![(std::rc::Rc::clone(env), names.clone(), root_path)];
         while let Some((env, names, path)) = pending.pop() {
             let mut sorted: Vec<&String> = names.iter().collect();
             sorted.sort();
@@ -2152,9 +2198,22 @@ impl CaptureBuilder {
                 if mutable {
                     self.scopes[scope].mutable.insert(name.clone());
                 }
-                let mut here = path.clone();
-                here.push(name.clone());
+                let here = self.push_path(path, name);
                 match value {
+                    Value::EnumConstructor {
+                        enum_name,
+                        variant,
+                        arity,
+                    } => {
+                        self.scopes[scope].bindings.enum_constructors.push(
+                            CapturedEnumConstructor {
+                                binding_name: name.clone(),
+                                enum_name,
+                                variant,
+                                arity,
+                            },
+                        );
+                    }
                     Value::NativeFunction {
                         name: fn_name,
                         arity,
@@ -2191,7 +2250,7 @@ impl CaptureBuilder {
                             type_params,
                             closure_scope,
                         });
-                        pending.push((closure, needed, here));
+                        pending.push((closure, needed, Some(here)));
                     }
                     other => match SerializedValue::from_value(&other) {
                         Ok(serialized) => {
@@ -2200,7 +2259,7 @@ impl CaptureBuilder {
                                 .values
                                 .insert(name.clone(), serialized);
                         }
-                        Err(_) => self.failures.push(here.join(" -> ")),
+                        Err(_) => self.failures.push(self.format_path(here)),
                     },
                 }
             }
@@ -2273,6 +2332,16 @@ fn rebuild_scopes(
                 },
             );
         }
+        for cap in &scope.bindings.enum_constructors {
+            define(
+                &cap.binding_name,
+                Value::EnumConstructor {
+                    enum_name: cap.enum_name.clone(),
+                    variant: cap.variant.clone(),
+                    arity: cap.arity,
+                },
+            );
+        }
         for f in &scope.functions {
             define(
                 &f.binding_name,
@@ -2308,6 +2377,18 @@ fn run_in_fresh_interpreter(capture: &TaskCapture, body: &crate::ast::Block) -> 
     run_task_body(capture, body).0
 }
 
+/// Own rebuilt scopes until normal return or panic unwind. Clearing bindings
+/// breaks their helper/function cycles, including captured channel senders.
+struct TaskScopeCleanup(Vec<EnvRc>);
+
+impl Drop for TaskScopeCleanup {
+    fn drop(&mut self) {
+        for env in &self.0 {
+            env.borrow_mut().tear_down();
+        }
+    }
+}
+
 /// Runs the task and also returns weak handles to its rebuilt scopes, so
 /// tests can check they are freed once the task finishes.
 fn run_task_body(
@@ -2319,17 +2400,13 @@ fn run_task_body(
 ) {
     let mut interp = crate::interpreter::Interpreter::new();
     interp.set_struct_invariants(capture.struct_invariants.clone());
-    let envs = rebuild_scopes(&mut interp, capture);
+    let scopes = TaskScopeCleanup(rebuild_scopes(&mut interp, capture));
     let global = interp.snapshot_env();
-    interp.restore_env(std::rc::Rc::clone(&envs[capture.body_scope]));
+    interp.restore_env(std::rc::Rc::clone(&scopes.0[capture.body_scope]));
     let result = interp.eval_block(body);
     interp.restore_env(global);
-    // Rebuilt helpers close over the scopes that hold them. Results are
-    // serializable, so nothing escapes: break the cycles so they are freed.
-    for env in &envs {
-        env.borrow_mut().tear_down();
-    }
-    let weak = envs.iter().map(std::rc::Rc::downgrade).collect();
+    // The guard runs here and on unwind, before the outer task panic handler.
+    let weak = scopes.0.iter().map(std::rc::Rc::downgrade).collect();
     (result, weak)
 }
 
@@ -4231,6 +4308,56 @@ mod tests {
     }
 
     #[test]
+    fn panicking_task_releases_captured_channel_sender() {
+        let (sender, receiver) = crossbeam::unbounded::<SerializedValue>();
+        let root = Rc::new(RefCell::new(crate::interpreter::Environment::new()));
+        root.borrow_mut().define(
+            "tx".to_string(),
+            Value::TxChannelHandle(0, crate::interpreter::ChannelSender(Arc::new(sender))),
+        );
+        let panic_binding = "boom".to_string();
+        root.borrow_mut().define(
+            panic_binding,
+            Value::NativeFunction {
+                name: "trigger_panic".to_string(),
+                arity: 0,
+                max_arity: 0,
+                requires: None,
+                func: |_| panic!("captured-sender regression panic"),
+            },
+        );
+        let source = "fn helper() { tx\n boom() }\nlet handler = fn() { helper() }";
+        let program = crate::parser::Parser::new(crate::lexer::Lexer::new(source).collect())
+            .parse()
+            .unwrap();
+        let mut interpreter = crate::interpreter::Interpreter::new();
+        interpreter.restore_env(Rc::clone(&root));
+        interpreter.eval(&program).unwrap();
+        let handler = root.borrow().get("handler").unwrap();
+        let (capture, body) = validate_and_capture("spawn", &handler).unwrap();
+        drop(handler);
+        root.borrow_mut().tear_down(); // release the caller's sender and closure cycles
+        drop(interpreter);
+        drop(root);
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            run_in_fresh_interpreter(&capture, &body)
+        }))
+        .expect_err("native panic must propagate to the task catch boundary");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"captured-sender regression panic")
+        );
+        drop(capture); // release the durable capture's sender
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(crossbeam::TryRecvError::Disconnected)
+            ),
+            "a panicking task retained a sender in its copied scope cycle"
+        );
+    }
+
+    #[test]
     fn task_scopes_are_freed_after_helpers_run() {
         // Rebuilt helpers close over the scope that holds them (a cycle).
         // Without the teardown each task would leak its scopes.
@@ -4295,6 +4422,101 @@ mod tests {
             "{result:?}"
         );
         assert!(current_struct_invariants().is_empty());
+    }
+
+    #[test]
+    fn enum_constructor_capture_preserves_alias_and_arity() {
+        let root = Rc::new(RefCell::new(crate::interpreter::Environment::new()));
+        root.borrow_mut().define(
+            "alias".to_string(),
+            Value::EnumConstructor {
+                enum_name: "Message".to_string(),
+                variant: "Item".to_string(),
+                arity: 1,
+            },
+        );
+        let handler = Value::Function {
+            name: "handler".to_string(),
+            params: vec![],
+            body: Block {
+                statements: vec![Statement::Expression(Expression::Call {
+                    function: Box::new(Expression::Identifier("alias".to_string())),
+                    arguments: vec![Expression::Integer(42)],
+                })],
+            },
+            closure: Rc::clone(&root),
+            contract: None,
+            type_params: vec![],
+        };
+        let (capture, body) = validate_and_capture("spawn", &handler)
+            .unwrap_or_else(|e| panic!("constructor is plain metadata: {e}"));
+        let result = run_in_fresh_interpreter(&capture, &body).unwrap();
+        assert!(
+            matches!(result, Value::EnumValue { ref enum_name, ref variant, ref values }
+            if enum_name == "Message" && variant == "Item"
+                && matches!(values.as_slice(), [Value::Int(42)]))
+        );
+        let mut interp = crate::interpreter::Interpreter::new();
+        let envs = rebuild_scopes(&mut interp, &capture);
+        assert!(matches!(
+            envs[capture.body_scope].borrow().get("alias"),
+            Some(Value::EnumConstructor { arity: 1, .. })
+        ));
+        for env in &envs {
+            env.borrow_mut().tear_down();
+        }
+    }
+
+    #[test]
+    fn helper_chain_diagnostic_storage_is_linear() {
+        const LENGTH: usize = 256;
+        let root = Rc::new(RefCell::new(crate::interpreter::Environment::new()));
+        for index in 0..LENGTH {
+            let next = if index + 1 < LENGTH {
+                Expression::Identifier(format!("helper{}", index + 1))
+            } else {
+                Expression::Integer(42)
+            };
+            root.borrow_mut().define(
+                format!("helper{index}"),
+                Value::Function {
+                    name: format!("helper{index}"),
+                    params: vec![],
+                    body: Block {
+                        statements: vec![Statement::Expression(next)],
+                    },
+                    closure: Rc::clone(&root),
+                    contract: None,
+                    type_params: vec![],
+                },
+            );
+        }
+        let mut builder = CaptureBuilder::default();
+        builder.capture_names(
+            &root,
+            &HashSet::from(["helper0".to_string()]),
+            &["task".to_string()],
+        );
+        root.borrow_mut().tear_down();
+        assert!(builder.failures.is_empty());
+        assert_eq!(
+            builder
+                .scopes
+                .iter()
+                .map(|s| s.functions.len())
+                .sum::<usize>(),
+            LENGTH
+        );
+        assert_eq!(
+            builder.paths.len(),
+            LENGTH + 1,
+            "diagnostics should copy each name once, not every path prefix"
+        );
+        let expected_path = std::iter::once("task".to_string())
+            .chain((0..LENGTH).map(|i| format!("helper{i}")))
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        assert_eq!(builder.format_path(LENGTH), expected_path);
     }
 
     #[test]
