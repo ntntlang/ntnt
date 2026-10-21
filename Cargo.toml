@@ -34,7 +34,7 @@ sha2 = "0.10"
 hmac = "0.12"
 bcrypt = "0.15"
 uuid = { version = "1.6", features = ["v4"] }
-rand = "0.8"
+rand = "0.9"
 hex = "0.4"
 base64 = "0.21"
 aes-gcm = "0.10"
@@ -103,9 +103,9 @@ chrono-tz = "0.10.4"
 redis = "0.27"
 
 # JWT for auth
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 pulldown-cmark = "0.13.0"
-hickory-resolver = "0.24.4"
+hickory-resolver = "0.26.2"
 socket2 = "0.6"
 zeroize = { version = "1.8.2", features = ["serde"] }
 tempfile = "3.24"
