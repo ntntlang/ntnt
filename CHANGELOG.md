@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security
+
+- Updated the bundled TLS certificate verifier and root stores to distrust the compromised eMudhra intermediate keys. Rebuild NTNT binaries to obtain the fix for `std/net.tls_info`, `std/http.probe_fetch`, and SMTP TLS. Ordinary `fetch`/`download` and other reqwest clients still use native/system TLS: update the operating-system trust store (including container images) separately. See the [incident advisory](https://emudhra.we-have-a-problem.com/) for platform-specific patched versions and test hosts.
+
 ### Fixed
 
 - A function call that fails now restores its caller's state on every path (#183, part 1). Previously an error in a function body, default argument, destructured parameter, `requires`, `old()` capture or `ensures` left the interpreter in the callee's scope. A caller's `otherwise` handler could then lose its own variables (`Undefined variable`) and see the callee's.
