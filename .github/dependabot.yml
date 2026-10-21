@@ -1,0 +1,12 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: daily
+    # Disable routine version-update PRs, not security-update PRs.
+    # An admin must also enable Dependabot alerts and security updates.
+    open-pull-requests-limit: 0
+    commit-message:
+      prefix: fix
+      include: scope
