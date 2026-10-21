@@ -105,7 +105,7 @@ redis = "0.27"
 # JWT for auth
 jsonwebtoken = "9"
 pulldown-cmark = "0.13.0"
-hickory-resolver = "0.24.4"
+hickory-resolver = "0.26.2"
 socket2 = "0.6"
 zeroize = { version = "1.8.2", features = ["serde"] }
 tempfile = "3.24"
