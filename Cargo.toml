@@ -105,7 +105,7 @@ redis = "0.27"
 # JWT for auth
 # jsonwebtoken 10 requires an explicit signing/verification provider.
 # AWS-LC preserves the supported JWT algorithms without adding the vulnerable rsa crate.
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
 pulldown-cmark = "0.13.0"
 hickory-resolver = "0.26.2"
 socket2 = "0.6"
