@@ -4,6 +4,8 @@
 
 ### Security
 
+- Updated Rust dependencies to resolve the currently reported RustSec advisories, including the older HTTP/2 and IDNA dependencies pulled in by reqwest 0.11. Migrated the DNS, JWT, and randomness adapters while retaining their NTNT APIs. JWT uses an explicit AWS-LC crypto provider; HTTP clients retain native/system TLS and the monitoring/SMTP clients retain ring-based Rust TLS. Rebuild NTNT binaries to obtain these dependency fixes.
+
 - Updated the bundled TLS certificate verifier and root stores to distrust the compromised eMudhra intermediate keys. Rebuild NTNT binaries to obtain the fix for `std/net.tls_info`, `std/http.probe_fetch`, and SMTP TLS. Ordinary `fetch`/`download` and other reqwest clients still use native/system TLS: update the operating-system trust store (including container images) separately. See the [incident advisory](https://emudhra.we-have-a-problem.com/) for platform-specific patched versions and test hosts.
 
 ### Fixed

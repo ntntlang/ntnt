@@ -15,8 +15,8 @@ use crate::error::IntentError;
 use crate::interpreter::Value;
 use chrono::{DateTime, SecondsFormat, Utc};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::error::{ResolveError, ResolveErrorKind};
-use hickory_resolver::proto::rr::RecordType;
+use hickory_resolver::net::NetError;
+use hickory_resolver::proto::rr::{RData, RecordType};
 use policy::classify_ip;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
@@ -1864,7 +1864,7 @@ fn system_resolver_config() -> Result<(ResolverConfig, ResolverOpts), String> {
 }
 
 fn dns_lookup_result(
-    result: Result<hickory_resolver::lookup::Lookup, ResolveError>,
+    result: Result<hickory_resolver::lookup::Lookup, NetError>,
     name: &str,
     record_type: DnsRecordType,
 ) -> Result<Vec<DnsAnswer>, String> {
@@ -1881,38 +1881,63 @@ fn dns_lookup_result(
         }
     };
 
+    // Hickory 0.26 separates sections that 0.24 flattened. Preserve NS/SRV
+    // address records, but do not expose unrelated additional/authority data.
+    let targets: Vec<_> = lookup
+        .answers()
+        .iter()
+        .filter_map(|record| match (&record.data, record_type.hickory_type()) {
+            (RData::NS(name), RecordType::NS) => Some(&name.0),
+            (RData::SRV(srv), RecordType::SRV) => Some(&srv.target),
+            _ => None,
+        })
+        .collect();
+    let related = lookup
+        .additionals()
+        .iter()
+        .chain(lookup.authorities())
+        .filter(|record| {
+            record.dns_class == lookup.query().query_class()
+                && record.data.ip_addr().is_some()
+                && targets.contains(&&record.name)
+        });
     let mut answers = Vec::new();
-    for record in lookup.record_iter() {
-        let Some(data) = record.data() else {
-            continue;
-        };
+    for record in lookup.answers().iter().chain(related) {
+        let data = &record.data;
         let value = data
             .ip_addr()
             .map(|ip| ip.to_string())
             .unwrap_or_else(|| data.to_string());
         answers.push(DnsAnswer {
             record_type: record.record_type().to_string(),
-            name: record.name().to_utf8(),
+            name: record.name.to_utf8(),
             value,
-            ttl: record.ttl(),
+            ttl: record.ttl,
         });
     }
     Ok(answers)
 }
 
 fn dns_reverse_result(
-    result: Result<hickory_resolver::lookup::ReverseLookup, ResolveError>,
+    result: Result<hickory_resolver::lookup::Lookup, NetError>,
     ip: IpAddr,
 ) -> Result<Vec<String>, String> {
     match result {
-        Ok(lookup) => Ok(lookup.iter().map(|name| name.to_utf8()).collect()),
+        Ok(lookup) => Ok(lookup
+            .answers()
+            .iter()
+            .filter_map(|record| match &record.data {
+                RData::PTR(name) => Some(name.to_utf8()),
+                _ => None,
+            })
+            .collect()),
         Err(err) if is_dns_no_records(&err) => Ok(vec![]),
         Err(err) => Err(format!("reverse DNS lookup failed for {}: {}", ip, err)),
     }
 }
 
-fn is_dns_no_records(err: &ResolveError) -> bool {
-    matches!(err.kind(), ResolveErrorKind::NoRecordsFound { .. })
+fn is_dns_no_records(err: &NetError) -> bool {
+    err.is_no_records_found()
 }
 
 fn dns_answers_to_value(answers: Vec<DnsAnswer>) -> Value {
@@ -3156,6 +3181,78 @@ mod tests {
                 .unwrap_err()
                 .contains("record_type must be one of"));
         }
+    }
+
+    #[test]
+    fn dns_no_records_are_empty_but_transport_and_server_errors_are_not() {
+        use hickory_resolver::{
+            net::DnsError,
+            proto::{
+                op::{DnsResponse, Message, OpCode, Query, ResponseCode},
+                rr::Name,
+            },
+        };
+        let ip = "192.0.2.7".parse().unwrap();
+        for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+            let mut response = Message::error_msg(0, OpCode::Query, code);
+            response.add_query(Query::query(
+                Name::from_ascii("empty.example.").unwrap(),
+                RecordType::A,
+            ));
+            let error = NetError::from(
+                DnsError::from_response(DnsResponse::from_message(response).unwrap()).unwrap_err(),
+            );
+            assert!(dns_lookup_result(
+                Err(error.clone()),
+                "empty.example.",
+                DnsRecordType::parse("A").unwrap(),
+            )
+            .unwrap()
+            .is_empty());
+            assert!(dns_reverse_result(Err(error), ip).unwrap().is_empty());
+        }
+        for error in [
+            NetError::Timeout,
+            io::Error::from(io::ErrorKind::PermissionDenied).into(),
+            DnsError::ResponseCode(ResponseCode::ServFail).into(),
+        ] {
+            assert!(dns_lookup_result(
+                Err(error.clone()),
+                "empty.example.",
+                DnsRecordType::parse("A").unwrap(),
+            )
+            .is_err());
+            assert!(dns_reverse_result(Err(error), ip).is_err());
+        }
+    }
+
+    #[test]
+    fn dns_reverse_result_filters_ptr_records_from_generic_lookup() {
+        use hickory_resolver::{
+            lookup::Lookup,
+            proto::{
+                op::Query,
+                rr::{
+                    rdata::{CNAME, PTR},
+                    Name, RData, Record,
+                },
+            },
+        };
+        let ip: IpAddr = "192.0.2.7".parse().unwrap();
+        let reverse_name = Name::from(ip);
+        let alias = Name::from_ascii("alias.example.").unwrap();
+        let host = Name::from_ascii("host.example.").unwrap();
+        let lookup = Lookup::new_with_max_ttl(
+            Query::query(reverse_name.clone(), RecordType::PTR),
+            [
+                Record::from_rdata(reverse_name, 60, RData::CNAME(CNAME(alias.clone()))),
+                Record::from_rdata(alias, 60, RData::PTR(PTR(host))),
+            ],
+        );
+        assert_eq!(
+            dns_reverse_result(Ok(lookup), ip).unwrap(),
+            ["host.example."]
+        );
     }
 
     #[test]

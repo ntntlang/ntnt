@@ -10,7 +10,7 @@ repository = "https://github.com/ntntlang/ntnt"
 [dependencies]
 # Core utilities
 thiserror = "1.0"
-anyhow = "1.0"
+anyhow = "1.0.103"
 
 # CLI
 clap = { version = "4.4", features = ["derive", "env"] }
@@ -34,7 +34,7 @@ sha2 = "0.10"
 hmac = "0.12"
 bcrypt = "0.15"
 uuid = { version = "1.6", features = ["v4"] }
-rand = "0.9"
+rand = "0.9.5"
 hex = "0.4"
 base64 = "0.21"
 aes-gcm = "0.10"
@@ -51,12 +51,12 @@ lazy_static = "1.4"
 urlencoding = "2.1"
 
 # HTTP Client
-reqwest = { version = "0.11", features = ["blocking", "json", "multipart", "cookies"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "multipart", "cookies"] }
 encoding_rs = "0.8"
 mime = "0.3"
 
 # TLS certificate inspection
-rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pki-types = "1"
 # Security floors: retain eMudhra key distrust and updated roots even when resolving a new lockfile.
 rustls-webpki = { version = "0.103.16", default-features = false }
@@ -95,7 +95,7 @@ deadpool-postgres = "0.14"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
-rust_decimal = { version = "1.36", features = ["db-postgres", "db-tokio-postgres"] }
+rust_decimal = { version = "1.43", features = ["db-postgres", "db-tokio-postgres"] }
 chrono = "0.4"
 chrono-tz = "0.10.4"
 
@@ -103,7 +103,9 @@ chrono-tz = "0.10.4"
 redis = "0.27"
 
 # JWT for auth
-jsonwebtoken = "10"
+# jsonwebtoken 10 requires an explicit signing/verification provider.
+# AWS-LC preserves the supported JWT algorithms without adding the vulnerable rsa crate.
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 pulldown-cmark = "0.13.0"
 hickory-resolver = "0.26.2"
 socket2 = "0.6"
@@ -111,6 +113,8 @@ zeroize = { version = "1.8.2", features = ["serde"] }
 tempfile = "3.24"
 
 [target.'cfg(windows)'.dependencies]
+# Let JWT's AWS-LC provider build without a separately installed NASM assembler.
+aws-lc-rs = { version = "1.18", features = ["prebuilt-nasm"] }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -124,7 +128,7 @@ serde_json = "1.0"
 [dev-dependencies]
 pretty_assertions = "1.4"
 serde_json = "1.0"
-reqwest = { version = "0.11", features = ["blocking"] }
+reqwest = { version = "0.12", features = ["blocking"] }
 libc = "0.2"
 rcgen = "0.13"
 
