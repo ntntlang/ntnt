@@ -4,12 +4,12 @@ use crate::error::IntentError;
 use crate::interpreter::Value;
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit as AesKeyInit, Nonce};
+use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use hmac::{Hmac, Mac};
-use rand::rngs::OsRng;
 use rand::RngCore;
 use regex::Regex;
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -409,7 +409,7 @@ pub fn init() -> HashMap<String, Value> {
                         ));
                     }
                     let mut bytes = vec![0u8; *n as usize];
-                    rand::thread_rng().fill_bytes(&mut bytes);
+                    rand::rng().fill_bytes(&mut bytes);
                     let values: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
                     Ok(Value::Array(values))
                 }
@@ -443,7 +443,7 @@ pub fn init() -> HashMap<String, Value> {
                         ));
                     }
                     let mut bytes = vec![0u8; *n as usize];
-                    rand::thread_rng().fill_bytes(&mut bytes);
+                    rand::rng().fill_bytes(&mut bytes);
                     Ok(Value::String(hex::encode(bytes)))
                 }
                 _ => Err(IntentError::type_error(
@@ -834,7 +834,7 @@ pub fn init() -> HashMap<String, Value> {
             requires: None,
             func: |_args| {
                 let mut key = [0u8; 32];
-                rand::thread_rng().fill_bytes(&mut key);
+                rand::rng().fill_bytes(&mut key);
                 Ok(Value::String(hex::encode(key)))
             },
         },
@@ -893,7 +893,7 @@ pub fn init() -> HashMap<String, Value> {
 
                 let cipher = Aes256Gcm::new_from_slice(&key_bytes).unwrap();
                 let mut nonce_bytes = [0u8; 12];
-                rand::thread_rng().fill_bytes(&mut nonce_bytes);
+                rand::rng().fill_bytes(&mut nonce_bytes);
                 let nonce = Nonce::from_slice(&nonce_bytes);
 
                 match cipher.encrypt(nonce, plaintext.as_bytes().as_ref()) {

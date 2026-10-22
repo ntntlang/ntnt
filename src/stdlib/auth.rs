@@ -426,10 +426,12 @@ const DEFAULT_SESSION_SECRET_SENTINEL: &str = "ntnt-dev-secret-change-in-product
 /// Auto-generated random session secret for dev mode.
 /// Generated once at startup; sessions won't persist across restarts.
 fn dev_session_secret() -> &'static str {
-    use rand::RngCore;
+    use rand::TryRngCore;
     static SECRET: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let mut bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        rand::rngs::OsRng
+            .try_fill_bytes(&mut bytes)
+            .expect("OS randomness unavailable for development session secret");
         hex::encode(bytes)
     });
     &SECRET
