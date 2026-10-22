@@ -6,6 +6,12 @@
 
 - Task closures passed to `spawn`, `after`, `schedule`, `parallel` and `race` can call your own NTNT functions, from the same file or imported, including helpers those functions call, recursion and mutual recursion (#186). Each function is copied into the task with the values it uses, so changes stay inside the task. Values that can't be copied still fail before the task starts, and the error now names the dependency path, e.g. `task -> outer -> call_a -> handlers`. Struct invariants are now enforced inside tasks when they read only the struct's own fields; a rule that calls a helper or reads a constant fails with a clear error when that struct is built in a task (previously tasks skipped invariants entirely).
 
+### Security
+
+- Updated Rust dependencies to resolve the currently reported RustSec advisories, including the older HTTP/2 and IDNA dependencies pulled in by reqwest 0.11. Migrated the DNS, JWT, and randomness adapters while retaining their NTNT APIs. JWT uses an explicit AWS-LC crypto provider; HTTP clients retain native/system TLS and the monitoring/SMTP clients retain ring-based Rust TLS. Rebuild NTNT binaries to obtain these dependency fixes.
+
+- Updated the bundled TLS certificate verifier and root stores to distrust the compromised eMudhra intermediate keys. Rebuild NTNT binaries to obtain the fix for `std/net.tls_info`, `std/http.probe_fetch`, and SMTP TLS. Ordinary `fetch`/`download` and other reqwest clients still use native/system TLS: update the operating-system trust store (including container images) separately. See the [incident advisory](https://emudhra.we-have-a-problem.com/) for platform-specific patched versions and test hosts.
+
 ### Fixed
 
 - A function call that fails now restores its caller's state on every path (#183, part 1). Previously an error in a function body, default argument, destructured parameter, `requires`, `old()` capture or `ensures` left the interpreter in the callee's scope. A caller's `otherwise` handler could then lose its own variables (`Undefined variable`) and see the callee's.

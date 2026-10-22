@@ -125,7 +125,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres:16
+        image: mirror.gcr.io/library/postgres:16
         env:
           POSTGRES_DB: ntnt_auth_test
           POSTGRES_USER: postgres
@@ -138,7 +138,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       redis:
-        image: public.ecr.aws/docker/library/redis:7.0
+        image: mirror.gcr.io/library/redis:7.0
         ports:
           - 6379:6379
         options: >-
@@ -185,6 +185,27 @@ jobs:
           NTNT_AUTH_TEST_REDIS_URL: redis://127.0.0.1:6379/0
           NTNT_RETENTION_TEST_REDIS: redis://127.0.0.1:6379/15
           NTNT_CLAIMS_TEST_REDIS: redis://127.0.0.1:6379/14
+
+  dependency-audit:
+    name: RustSec audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-audit@0.22.2
+          checksum: true
+          fallback: none
+      - name: Check the committed lockfile against RustSec
+        # Stay outside the checkout so Cargo cannot read project-local config.
+        working-directory: ${{ runner.temp }}
+        run: cargo audit --file "$GITHUB_WORKSPACE/Cargo.lock"
 
   lint:
     name: Lint
@@ -259,12 +280,12 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [test, auth-backends, lint, docs-and-examples, macos-release-socket]
+    needs: [test, auth-backends, dependency-audit, lint, docs-and-examples, macos-release-socket]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI results
         run: |
-          results=("${{ needs.test.result }}" "${{ needs['auth-backends'].result }}" "${{ needs.lint.result }}" "${{ needs['docs-and-examples'].result }}" "${{ needs['macos-release-socket'].result }}")
+          results=("${{ needs.test.result }}" "${{ needs['auth-backends'].result }}" "${{ needs['dependency-audit'].result }}" "${{ needs.lint.result }}" "${{ needs['docs-and-examples'].result }}" "${{ needs['macos-release-socket'].result }}")
           for result in "${results[@]}"; do
             if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
               echo "::error::CI job failed or was cancelled: $result"
