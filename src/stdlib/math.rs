@@ -782,8 +782,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             requires: None,
             func: |_args| {
-                let mut rng = rand::thread_rng();
-                Ok(Value::Float(rng.gen::<f64>()))
+                let mut rng = rand::rng();
+                Ok(Value::Float(rng.random::<f64>()))
             },
         },
     );
@@ -833,8 +833,8 @@ pub fn init() -> HashMap<String, Value> {
                         "random_int() min must be <= max".to_string(),
                     ));
                 }
-                let mut rng = rand::thread_rng();
-                Ok(Value::Int(rng.gen_range(min..=max)))
+                let mut rng = rand::rng();
+                Ok(Value::Int(rng.random_range(min..=max)))
             },
         },
     );
@@ -887,8 +887,8 @@ pub fn init() -> HashMap<String, Value> {
                         "random_range() min must be <= max".to_string(),
                     ));
                 }
-                let mut rng = rand::thread_rng();
-                Ok(Value::Float(rng.gen_range(min..max)))
+                let mut rng = rand::rng();
+                Ok(Value::Float(rng.random_range(min..max)))
             },
         },
     );

@@ -5302,6 +5302,30 @@ match encrypted {
 }
 
 #[test]
+fn test_auth_jwt_backend_roundtrip_rejects_wrong_secret_and_expiration() {
+    let code = r#"
+import { jwt_sign, jwt_verify } from "std/auth"
+
+let secret = "test-only-jwt-signing-secret"
+let token = unwrap(jwt_sign(map { "sub": "user-1", "exp": 4102444800 }, secret))
+let claims = unwrap(jwt_verify(token, secret))
+print(claims.sub)
+print(match jwt_verify(token, "wrong-secret") {
+    Ok(_) => false
+    Err(_) => true
+})
+let expired = unwrap(jwt_sign(map { "sub": "user-1", "exp": 1 }, secret))
+print(match jwt_verify(expired, secret) {
+    Ok(_) => false
+    Err(_) => true
+})
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "JWT backend failed: stderr={}", stderr);
+    assert_eq!(stdout.trim(), "user-1\ntrue\ntrue");
+}
+
+#[test]
 fn test_crypto_argon2_hash_verify() {
     let code = r#"
 import { argon2_hash, argon2_verify } from "std/crypto"

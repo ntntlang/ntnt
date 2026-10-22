@@ -4,9 +4,12 @@
 use super::*;
 use crate::stdlib::send_deadline::SendDeadline;
 use hickory_resolver::{
-    name_server::{GenericConnector, RuntimeProvider},
-    proto::{iocompat::AsyncIoTokioAsStd, udp::DnsUdpSocket, TokioTime},
-    AsyncResolver, TokioHandle,
+    config::{ConnectionConfig, ProtocolConfig},
+    net::runtime::{
+        iocompat::AsyncIoTokioAsStd, DnsUdpSocket, RuntimeProvider, TokioHandle, TokioTime,
+    },
+    net::udp::UdpClientStream,
+    ConnectionProvider, PoolContext, Resolver,
 };
 use std::{
     future::Future,
@@ -189,15 +192,21 @@ impl RuntimeProvider for Provider {
     fn connect_tcp(
         &self,
         server: SocketAddr,
+        bind_addr: Option<SocketAddr>,
+        timeout: Option<Duration>,
     ) -> Pin<Box<dyn Send + Future<Output = io::Result<Self::Tcp>>>> {
         let provider = self.clone();
-        Box::pin(async move {
+        let connect = async move {
             let socket = socket2::Socket::new(
                 socket2::Domain::for_address(server),
                 socket2::Type::STREAM,
                 Some(socket2::Protocol::TCP),
             )?;
             socket.set_nonblocking(true)?;
+            if let Some(bind_addr) = bind_addr {
+                socket.bind(&bind_addr.into())?;
+            }
+            socket.set_tcp_nodelay(true)?;
             let addr = server.into();
             #[cfg(test)]
             std::thread::sleep(provider.pauses.connect);
@@ -215,7 +224,54 @@ impl RuntimeProvider for Provider {
                 return Err(error);
             }
             Ok(AsyncIoTokioAsStd(stream))
+        };
+        Box::pin(async move {
+            // Match Hickory's default connect timeout when none was supplied.
+            tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(5)), connect)
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TCP connect timed out"))?
         })
+    }
+}
+
+// Hickory 0.26 adds a second UDP retry layer. Keep one send per outer
+// attempt so NTNT's retries option remains the sole retry budget.
+#[derive(Clone)]
+struct Connector(Provider);
+
+impl ConnectionProvider for Connector {
+    type Conn = <Provider as ConnectionProvider>::Conn;
+    type FutureConn = <Provider as ConnectionProvider>::FutureConn;
+    type RuntimeProvider = Provider;
+
+    fn new_connection(
+        &self,
+        ip: IpAddr,
+        config: &ConnectionConfig,
+        cx: &PoolContext,
+    ) -> Result<Self::FutureConn, NetError> {
+        if !matches!(&config.protocol, ProtocolConfig::Udp) {
+            return self.0.new_connection(ip, config, cx);
+        }
+        let server = SocketAddr::new(ip, config.port);
+        let timeout = cx.options.timeout;
+        let os_port_selection = cx.options.os_port_selection;
+        let avoid_local_ports = cx.options.avoid_local_udp_ports.clone();
+        let bind_addr = config.bind_addr;
+        let provider = self.0.clone();
+        Ok(Box::pin(async move {
+            Ok(UdpClientStream::builder(server, provider)
+                .with_timeout(Some(timeout))
+                .with_os_port_selection(os_port_selection)
+                .avoid_local_ports(avoid_local_ports)
+                .with_bind_addr(bind_addr)
+                .with_max_retries(1)
+                .exchange())
+        }))
+    }
+
+    fn runtime_provider(&self) -> &Provider {
+        &self.0
     }
 }
 
@@ -255,7 +311,10 @@ fn lookup_with_config(
         #[cfg(test)]
         pauses: _pauses.clone(),
     };
-    let resolver = AsyncResolver::new(config, opts, GenericConnector::new(provider));
+    let resolver = Resolver::builder_with_config(config, Connector(provider))
+        .with_options(opts)
+        .build()
+        .map_err(|e| format!("failed to initialize DNS resolver: {}", e))?;
     #[cfg(test)]
     std::thread::sleep(_pauses.setup);
     let result = runtime.block_on(resolver.lookup(name, kind.hickory_type()));
@@ -284,7 +343,10 @@ pub(super) fn reverse(
         #[cfg(test)]
         pauses: Pauses::default(),
     };
-    let resolver = AsyncResolver::new(config, resolver_opts, GenericConnector::new(provider));
+    let resolver = Resolver::builder_with_config(config, Connector(provider))
+        .with_options(resolver_opts)
+        .build()
+        .map_err(|e| format!("failed to initialize DNS resolver: {}", e))?;
     super::dns_reverse_result(runtime.block_on(resolver.reverse_lookup(ip)), ip)
 }
 
@@ -292,10 +354,13 @@ pub(super) fn reverse(
 mod tests {
     use super::*;
     use hickory_resolver::{
-        config::{NameServerConfig, Protocol},
+        config::{ConnectionConfig, NameServerConfig, ResolveHosts},
         proto::{
-            op::{Message, MessageType},
-            rr::{rdata::A, RData, Record},
+            op::Message,
+            rr::{
+                rdata::{A, AAAA, NS, SRV},
+                Name, RData, Record,
+            },
         },
     };
     use std::{
@@ -307,20 +372,37 @@ mod tests {
     };
     fn answer(query: &[u8], truncated: bool) -> Vec<u8> {
         let q = Message::from_vec(query).unwrap();
-        let mut r = Message::new();
-        r.set_id(q.id())
-            .set_message_type(MessageType::Response)
-            .set_recursion_desired(true)
-            .set_recursion_available(true)
-            .set_truncated(truncated);
-        for query in q.queries() {
+        let mut r = Message::response(q.metadata.id, q.metadata.op_code);
+        r.metadata.recursion_desired = true;
+        r.metadata.recursion_available = true;
+        r.metadata.truncation = truncated;
+        for query in &q.queries {
             r.add_query(query.clone());
             if !truncated {
-                r.add_answer(Record::from_rdata(
-                    query.name().clone(),
-                    60,
-                    RData::A(A::new(192, 0, 2, 7)),
-                ));
+                let target = Name::from_ascii("target.fixture.example.").unwrap();
+                let data = match query.query_type() {
+                    RecordType::NS => RData::NS(NS(target.clone())),
+                    RecordType::SRV => RData::SRV(SRV::new(0, 0, 443, target.clone())),
+                    _ => RData::A(A::new(192, 0, 2, 7)),
+                };
+                r.add_answer(Record::from_rdata(query.name().clone(), 60, data));
+                if matches!(query.query_type(), RecordType::NS | RecordType::SRV) {
+                    r.add_additional(Record::from_rdata(
+                        target.clone(),
+                        60,
+                        RData::A(A::new(192, 0, 2, 7)),
+                    ));
+                    r.add_authority(Record::from_rdata(
+                        target,
+                        60,
+                        RData::AAAA(AAAA("2001:db8::7".parse().unwrap())),
+                    ));
+                    r.add_additional(Record::from_rdata(
+                        Name::from_ascii("unrelated.example.").unwrap(),
+                        60,
+                        RData::A(A::new(203, 0, 113, 99)),
+                    ));
+                }
             }
         }
         r.to_vec().unwrap()
@@ -443,16 +525,27 @@ mod tests {
         tcp_only: bool,
         retry: bool,
     ) -> (ResolverConfig, ResolverOpts) {
-        let mut config = ResolverConfig::new();
+        let mut config = ResolverConfig::default();
+        let mut connections = Vec::new();
         if !tcp_only {
-            config.add_name_server(NameServerConfig::new(fixture.udp_addr, Protocol::Udp));
+            let mut udp = ConnectionConfig::udp();
+            udp.port = fixture.udp_addr.port();
+            connections.push(udp);
         }
-        config.add_name_server(NameServerConfig::new(fixture.tcp_addr, Protocol::Tcp));
+        let mut tcp = ConnectionConfig::tcp();
+        tcp.port = fixture.tcp_addr.port();
+        connections.push(tcp);
+        // UDP and TCP are transports of the same server, including fallback.
+        config.add_name_server(NameServerConfig::new(
+            fixture.udp_addr.ip(),
+            true,
+            connections,
+        ));
         let mut opts = ResolverOpts::default();
         opts.timeout = Duration::from_millis(if retry { 150 } else { 800 });
         opts.attempts = 1;
         opts.num_concurrent_reqs = 1;
-        opts.use_hosts_file = false;
+        opts.use_hosts_file = ResolveHosts::Never;
         (config, opts)
     }
 
@@ -683,6 +776,31 @@ mod tests {
     }
 
     #[test]
+    fn dns_deadline_tcp_bind_failure_has_no_contact() {
+        let fixture = Fixture::new(false, 0, false);
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let guard = Guard::new(SendDeadline::parse(None).unwrap());
+        let provider = Provider {
+            handle: TokioHandle::default(),
+            guard: guard.clone(),
+            pauses: Pauses::default(),
+        };
+        let result = runtime.block_on(provider.connect_tcp(
+            fixture.tcp_addr,
+            Some(occupied.local_addr().unwrap()),
+            Some(Duration::from_millis(800)),
+        ));
+        assert!(result.is_err(), "the requested local bind must be honored");
+        assert!(!guard.state.lock().unwrap().started);
+        assert!(!guard.denied_without_contact());
+        assert_eq!(fixture.connections.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn dns_deadline_tcp_initiation_commits_before_dns_write() {
         let fixture = Fixture::new(false, 0, false);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -696,7 +814,7 @@ mod tests {
             pauses: Pauses::default(),
         };
         let stream = runtime
-            .block_on(provider.connect_tcp(fixture.tcp_addr))
+            .block_on(provider.connect_tcp(fixture.tcp_addr, None, None))
             .unwrap();
         thread::sleep(Duration::from_millis(150));
         assert!(guard.state.lock().unwrap().started);
@@ -754,7 +872,10 @@ mod tests {
             guard: guard.clone(),
             pauses: Pauses::default(),
         };
-        let resolver = AsyncResolver::new(config, opts, GenericConnector::new(provider));
+        let resolver = Resolver::builder_with_config(config, Connector(provider))
+            .with_options(opts)
+            .build()
+            .unwrap();
         let first = runtime
             .block_on(resolver.lookup("cached.example.", RecordType::A))
             .unwrap();
@@ -764,7 +885,7 @@ mod tests {
         let cached = runtime
             .block_on(resolver.lookup("cached.example.", RecordType::A))
             .unwrap();
-        assert_eq!(first.iter().next(), cached.iter().next());
+        assert_eq!(first.answers(), cached.answers());
         assert_eq!(fixture.udp.load(Ordering::SeqCst), 1);
         assert!(!guard.state.lock().unwrap().started);
         assert!(!guard.denied_without_contact());
@@ -816,9 +937,48 @@ mod tests {
     }
 
     #[test]
+    fn dns_compat_preserves_referenced_ns_and_srv_addresses() {
+        for kind in ["NS", "SRV"] {
+            let fixture = Fixture::new(false, 0, false);
+            let (config, opts) = fixture_options(&fixture, false, false);
+            let answers = lookup_with_config(
+                config,
+                opts,
+                SendDeadline::parse(None).unwrap(),
+                "fixture.example.",
+                DnsRecordType::parse(kind).unwrap(),
+                Pauses::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                answers.len(),
+                3,
+                "missing {kind} related records: {answers:?}"
+            );
+            assert_eq!(answers[0].record_type, kind);
+            for (record_type, value) in [("A", "192.0.2.7"), ("AAAA", "2001:db8::7")] {
+                assert!(
+                    answers
+                        .iter()
+                        .any(|answer| answer.record_type == record_type
+                            && answer.value == value
+                            && answer.name == "target.fixture.example."
+                            && answer.ttl == 60),
+                    "missing {record_type} glue for {kind}: {answers:?}"
+                );
+            }
+            assert!(answers
+                .iter()
+                .all(|answer| answer.name != "unrelated.example."));
+        }
+    }
+
+    #[test]
     fn dns_deadline_retries_zero_sends_once_on_loss() {
         let fixture = Fixture::new(false, 0, true);
         let (config, mut opts) = fixture_options(&fixture, false, true);
+        // Exceed Hickory 0.26's 333ms internal retransmission floor.
+        opts.timeout = Duration::from_millis(1000);
         opts.attempts =
             dns_resolver_options(Some(&HashMap::from([("retries".into(), Value::Int(0))])))
                 .unwrap()

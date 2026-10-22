@@ -2,7 +2,7 @@ use crate::interpreter::Value;
 use argon2::password_hash::Error as PasswordHashError;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use base64::Engine;
-use rand::RngCore;
+use rand::TryRngCore;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -795,7 +795,9 @@ fn is_urlsafe_token_component(value: &str, expected_len: usize) -> bool {
 
 fn random_urlsafe_token(byte_count: usize) -> String {
     let mut bytes = vec![0_u8; byte_count];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut bytes)
+        .expect("OS randomness unavailable for authentication token");
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
