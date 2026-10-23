@@ -1599,20 +1599,12 @@ fn collect_free_vars(
             } => {
                 bound.insert(name.clone());
 
-                let mut fn_bound = bound.clone();
-                bind_parameter_defaults_and_names(params, referenced, &mut fn_bound);
-
-                if let Some(contract) = contract {
-                    for clause in &contract.requires {
-                        collect_free_vars_expr(&clause.expression, referenced, &fn_bound);
-                    }
-                    for clause in &contract.ensures {
-                        collect_free_vars_expr(&clause.expression, referenced, &fn_bound);
-                    }
-                }
-
-                let mut body_bound = fn_bound.clone();
-                collect_free_vars(&body.statements, referenced, &mut body_bound);
+                let (requires, ensures) = contract
+                    .as_ref()
+                    .map(|c| (c.requires.as_slice(), c.ensures.as_slice()))
+                    .unwrap_or_default();
+                let needed = function_free_variables(params, body, requires, ensures);
+                referenced.extend(needed.into_iter().filter(|name| !bound.contains(name)));
             }
             Statement::Expression(expr) => collect_free_vars_expr(expr, referenced, bound),
             Statement::Return {
@@ -2240,7 +2232,11 @@ impl CaptureBuilder {
                         type_params,
                     } => {
                         let closure_scope = self.scope_index(&closure);
-                        let needed = function_free_variables(&params, &body, contract.as_ref());
+                        let (requires, ensures) = contract
+                            .as_ref()
+                            .map(|c| (c.requires.as_slice(), c.ensures.as_slice()))
+                            .unwrap_or_default();
+                        let needed = function_free_variables(&params, &body, requires, ensures);
                         self.scopes[scope].functions.push(CapturedFunction {
                             binding_name: name.clone(),
                             name: fn_name,
@@ -2272,20 +2268,151 @@ impl CaptureBuilder {
 fn function_free_variables(
     params: &[crate::ast::Parameter],
     body: &crate::ast::Block,
-    contract: Option<&crate::interpreter::FunctionContract>,
+    requires: &[crate::ast::ContractCondition],
+    ensures: &[crate::ast::ContractCondition],
 ) -> HashSet<String> {
     let mut referenced = HashSet::new();
     let mut bound = HashSet::new();
     bind_parameter_defaults_and_names(params, &mut referenced, &mut bound);
-    if let Some(contract) = contract {
-        let mut clause_bound = bound.clone();
-        clause_bound.insert("result".to_string());
-        for clause in contract.requires.iter().chain(&contract.ensures) {
-            collect_free_vars_expr(&clause.expression, &mut referenced, &clause_bound);
+    for clause in requires {
+        collect_free_vars_expr(&clause.expression, &mut referenced, &bound);
+    }
+    for clause in ensures {
+        collect_old_free_vars(&clause.expression, &mut referenced, &bound);
+    }
+    let mut body_bound = bound.clone();
+    collect_free_vars(&body.statements, &mut referenced, &mut body_bound);
+    bind_postcondition_prefix(&body.statements, &mut bound);
+    bound.insert("result".to_string());
+    for clause in ensures {
+        collect_free_vars_expr(&clause.expression, &mut referenced, &bound);
+    }
+    referenced
+}
+
+// Only bindings established before every possible early exit can hide an
+// outer postcondition dependency. Branch/block locals do not survive into
+// the callee scope where ensures runs. Keep this a conservative prefix,
+// not a second full-body scan (which would also revisit nested functions).
+fn bind_postcondition_prefix(statements: &[crate::ast::Statement], bound: &mut HashSet<String>) {
+    use crate::ast::Statement;
+
+    for statement in statements {
+        let mut statement = statement;
+        while let Statement::Located { stmt, .. } = statement {
+            statement = stmt;
+        }
+        match statement {
+            Statement::Let {
+                name,
+                value,
+                pattern,
+                otherwise,
+                ..
+            } if otherwise.is_none() && !value.as_ref().is_some_and(expression_may_return) => {
+                if let Some(pattern) = pattern {
+                    bound.extend(names_bound_by_pattern(pattern));
+                } else {
+                    bound.insert(name.clone());
+                }
+            }
+            Statement::Function { name, .. } => {
+                bound.insert(name.clone());
+            }
+            Statement::Enum { name, variants, .. } => {
+                bound.insert(name.clone());
+                bound.extend(variants.iter().map(|variant| variant.name.clone()));
+            }
+            Statement::Expression(expr) if !expression_may_return(expr) => {}
+            Statement::Defer(_) => {}
+            _ => break,
         }
     }
-    collect_free_vars(&body.statements, &mut referenced, &mut bound);
-    referenced
+}
+
+// Calls consume their own function returns; control-flow expressions and
+// ? can instead return from this callee before its let binding exists.
+fn expression_may_return(expr: &crate::ast::Expression) -> bool {
+    use crate::ast::{Expression, StringPart};
+
+    match expr {
+        Expression::Integer(_)
+        | Expression::Float(_)
+        | Expression::String(_)
+        | Expression::Bool(_)
+        | Expression::Unit
+        | Expression::Identifier(_)
+        | Expression::Lambda { .. } => false,
+        Expression::Binary { left, right, .. } => {
+            expression_may_return(left) || expression_may_return(right)
+        }
+        Expression::Unary { operand, .. } => expression_may_return(operand),
+        Expression::Call {
+            function,
+            arguments,
+        } => expression_may_return(function) || arguments.iter().any(expression_may_return),
+        Expression::MethodCall {
+            object, arguments, ..
+        } => expression_may_return(object) || arguments.iter().any(expression_may_return),
+        Expression::FieldAccess { object, .. } => expression_may_return(object),
+        Expression::Index { object, index } => {
+            expression_may_return(object) || expression_may_return(index)
+        }
+        Expression::Array(items)
+        | Expression::EnumVariant {
+            arguments: items, ..
+        } => items.iter().any(expression_may_return),
+        Expression::MapLiteral(pairs) => pairs
+            .iter()
+            .any(|(key, value)| expression_may_return(key) || expression_may_return(value)),
+        Expression::StructLiteral { fields, .. } => {
+            fields.iter().any(|(_, value)| expression_may_return(value))
+        }
+        Expression::Range { start, end, .. } => {
+            expression_may_return(start) || expression_may_return(end)
+        }
+        Expression::InterpolatedString(parts) => parts
+            .iter()
+            .any(|part| matches!(part, StringPart::Expr(expr) if expression_may_return(expr))),
+        Expression::Assign { target, value } => {
+            expression_may_return(target) || expression_may_return(value)
+        }
+        _ => true,
+    }
+}
+
+// Match Interpreter::extract_old_calls: old() arguments read the entry
+// scope, even when a body-local declaration shadows the same name later.
+fn collect_old_free_vars(
+    expr: &crate::ast::Expression,
+    referenced: &mut HashSet<String>,
+    bound: &HashSet<String>,
+) {
+    use crate::ast::Expression;
+
+    match expr {
+        Expression::Call {
+            function,
+            arguments,
+        } => {
+            if matches!(function.as_ref(), Expression::Identifier(name) if name == "old")
+                && arguments.len() == 1
+            {
+                collect_free_vars_expr(&arguments[0], referenced, bound);
+            }
+            for argument in arguments {
+                collect_old_free_vars(argument, referenced, bound);
+            }
+        }
+        Expression::Binary { left, right, .. } => {
+            collect_old_free_vars(left, referenced, bound);
+            collect_old_free_vars(right, referenced, bound);
+        }
+        Expression::Unary { operand, .. } => {
+            collect_old_free_vars(operand, referenced, bound);
+        }
+        _ => {}
+    }
 }
 
 /// Rebuild a captured task's scopes in `interp`, returning them in capture

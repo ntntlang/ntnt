@@ -1717,6 +1717,100 @@ print(await_task(spawn(fn() { checked(0) })))
 }
 
 #[test]
+fn test_task_helper_postcondition_reads_body_local() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let expected = map { "callback": fn() { 1 } }
+fn helper(x) ensures result == expected {
+    let expected = x + 1
+    return expected
+}
+print(helper(1))
+print(await_task(spawn(fn() { helper(1) })))
+"#,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout.trim(), "2\n2");
+}
+
+#[test]
+fn test_task_helper_contract_captures_pre_body_bindings() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let expected = 40
+let result = 1
+fn helper() requires result == 1 ensures result == old(expected) + expected {
+    let expected = 2
+    return 42
+}
+print(helper())
+print(await_task(spawn(fn() { helper() })))
+"#,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout.trim(), "42\n42");
+}
+
+#[test]
+fn test_task_nested_helper_postcondition_reads_body_local() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let expected = map { "callback": fn() { 1 } }
+fn outer() {
+    fn helper(x) ensures result == expected {
+        let expected = x + 1
+        return expected
+    }
+    return helper(1)
+}
+print(outer())
+print(await_task(spawn(fn() { outer() })))
+"#,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout.trim(), "2\n2");
+}
+
+#[test]
+fn test_task_helper_postcondition_preserves_early_exit_scope() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+let expected = 40
+fn direct() ensures result == expected {
+    return 40
+    let expected = 2
+}
+fn conditional(early) ensures result == expected {
+    if early {
+        let expected = 999
+        return 40
+    }
+    let expected = 2
+    return expected
+}
+fn guarded() ensures result == expected {
+    let expected = Err("stop") otherwise { return 40 }
+    return expected
+}
+print(direct())
+print(conditional(true))
+print(conditional(false))
+print(guarded())
+print(await_task(spawn(fn() { direct() })))
+print(await_task(spawn(fn() { conditional(true) })))
+print(await_task(spawn(fn() { conditional(false) })))
+print(await_task(spawn(fn() { guarded() })))
+"#,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(stdout.trim(), "40\n40\n2\n40\n40\n40\n2\n40");
+}
+
+#[test]
 fn test_task_recursion_hits_limit_not_stack_overflow() {
     // Task threads used to get Rust's default 2 MiB stack, which a debug
     // build overflows a few interpreter calls deep, aborting the whole
