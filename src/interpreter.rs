@@ -429,6 +429,43 @@ impl Environment {
         self.mutable_vars.remove(name);
     }
 
+    /// Resolve `name` through the scope chain starting at `env`, returning the
+    /// scope that owns the binding, its value, and whether it was declared
+    /// `let mut`. Used to copy helper functions across task boundaries.
+    pub(crate) fn resolve_owned(
+        env: &Rc<RefCell<Environment>>,
+        name: &str,
+    ) -> Option<(Rc<RefCell<Environment>>, Value, bool)> {
+        let mut current = Some(Rc::clone(env));
+        while let Some(scope) = current {
+            let borrowed = scope.borrow();
+            if let Some(value) = borrowed.values.get(name) {
+                let value = value.clone();
+                let mutable = borrowed.mutable_vars.contains(name);
+                drop(borrowed);
+                return Some((scope, value, mutable));
+            }
+            let next = borrowed.parent.clone();
+            drop(borrowed);
+            current = next;
+        }
+        None
+    }
+
+    /// The enclosing scope, if any.
+    pub(crate) fn parent_env(&self) -> Option<Rc<RefCell<Environment>>> {
+        self.parent.clone()
+    }
+
+    /// Drop every binding and the parent link. Used when a task finishes, to
+    /// break the scope -> function -> closure -> scope cycles that rebuilt
+    /// helper functions form, so the task's scopes are freed.
+    pub(crate) fn tear_down(&mut self) {
+        self.values.clear();
+        self.mutable_vars.clear();
+        self.parent = None;
+    }
+
     pub fn define_mutable(&mut self, name: String, value: Value) {
         self.values.insert(name.clone(), value);
         self.mutable_vars.insert(name);
@@ -786,6 +823,9 @@ pub struct Interpreter {
     type_aliases: HashMap<String, TypeExpr>,
     /// Struct invariants
     struct_invariants: HashMap<String, Vec<Expression>>,
+    /// True in an interpreter rebuilt for a task. Struct invariants there
+    /// can only read the struct's own fields (see #186 follow-up).
+    task_interpreter: bool,
     /// Trait implementations: type_name -> list of trait names
     trait_implementations: HashMap<String, Vec<String>>,
     /// Trait definitions: trait_name -> trait info
@@ -1093,6 +1133,7 @@ impl Interpreter {
             enums: HashMap::new(),
             type_aliases: HashMap::new(),
             struct_invariants: HashMap::new(),
+            task_interpreter: false,
             trait_implementations: HashMap::new(),
             trait_definitions: HashMap::new(),
             deferred_statements: Vec::new(),
@@ -1821,6 +1862,25 @@ impl Interpreter {
     /// Used by the concurrency runtime to inject captured bindings into a fresh interpreter.
     pub fn define_global(&mut self, name: String, value: Value) {
         self.environment.borrow_mut().define(name, value);
+    }
+
+    /// Run a task-starting native function with this interpreter's struct
+    /// invariants visible to the task. Kept out of line and cold so the
+    /// ordinary native-call path in `call_function` stays small.
+    #[cold]
+    #[inline(never)]
+    fn call_task_native(
+        &self,
+        func: fn(&[Value]) -> Result<Value>,
+        args: &[Value],
+    ) -> Result<Value> {
+        crate::stdlib::concurrent::with_struct_invariants(&self.struct_invariants, || func(args))
+    }
+
+    /// Install struct invariants (used for task interpreters).
+    pub(crate) fn set_struct_invariants(&mut self, invariants: HashMap<String, Vec<Expression>>) {
+        self.task_interpreter = true;
+        self.struct_invariants = invariants;
     }
 
     /// Look up a variable in the global environment (for builtins like len, print, str).
@@ -9512,6 +9572,14 @@ impl Interpreter {
                             .map(std::path::Path::new),
                         || func(&args),
                     )
+                } else if !self.struct_invariants.is_empty()
+                    && crate::stdlib::concurrent::starts_tasks(&fn_name)
+                {
+                    // Tasks rebuild helpers in a fresh interpreter; give
+                    // them this interpreter's struct invariants. Checked
+                    // only when invariants exist, so ordinary native calls
+                    // pay a single length test.
+                    self.call_task_native(func, &args)
                 } else {
                     func(&args)
                 };
@@ -11228,7 +11296,17 @@ impl Interpreter {
         // Check each invariant
         for inv_expr in &invariants {
             let condition_str = Self::format_expression(inv_expr);
-            let result = self.eval_expression(inv_expr)?;
+            let result = match self.eval_expression(inv_expr) {
+                Err(IntentError::UndefinedVariable { name, .. }) if self.task_interpreter => {
+                    self.environment = previous;
+                    return Err(IntentError::runtime_error(format!(
+                        "Invariant for '{struct_name}' uses '{name}', which isn't available inside a task: \
+                         struct rules that call helpers or read constants aren't supported in tasks yet. \
+                         Build this struct outside the task, or make the rule use only the struct's own fields."
+                    )));
+                }
+                other => other?,
+            };
 
             if !result.is_truthy() {
                 // Field values are read from inv_env before the restore
