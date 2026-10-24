@@ -355,6 +355,7 @@ IAL is a term rewriting system that translates natural language assertions into 
 - **Providers:** Google, GitHub, or any custom OIDC provider (auto-discovery from issuer URL)
 - **Features:** ID token validation, nonce replay protection, JWT encode/decode, CSRF, request-aware sessions, staged auth challenges, local credentials, password reset, TOTP, route/API protection, and app-owned claims/group handoff
 - **Boundary:** Generic crypto helpers such as `hash_password`, `verify_password`, UUIDs, HMAC, and AES-GCM live in `std/crypto`; `std/auth` owns auth lifecycle primitives that compose through shared session/challenge storage.
+- **Local enrollment QR:** `totp_qr_svg(uri)` renders validated TOTP enrollment URIs as bounded SVG geometry inside `auth/primitives.rs`, without auth initialization, network or filesystem access. Its output remains secret-bearing and belongs only in the enrollment response.
 
 ```ntnt
 import { oauth, enable_auth, get_user } from "std/auth"

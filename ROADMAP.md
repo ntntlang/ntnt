@@ -1323,6 +1323,8 @@ let claims = oauth_validate_token(req.headers["authorization"], map {
 - [x] `get_session(req)` — get full session with tokens and data
 - [x] `logout_user(req)` — clear session and redirect
 
+- [x] `totp_qr_svg(uri)` — native, no-network enrollment QR SVG with bounded input and a four-module quiet zone
+
 **JWT Support:**
 - [x] `jwt_sign(payload, secret, options?)` — create signed JWT (HS256)
 - [x] `jwt_verify(token, secret, options?)` — verify and decode JWT

@@ -96,6 +96,61 @@ pub fn get_totp_uri(
     Ok(totp.get_url())
 }
 
+/// Render a TOTP enrollment URI as local QR geometry, never as XML content.
+pub(super) fn render_totp_qr_svg(uri: &str) -> std::result::Result<String, String> {
+    use qrcode::{Color, EcLevel, QrCode};
+    use std::fmt::Write;
+
+    const INVALID_URI: &str = "Invalid TOTP enrollment URI";
+    if uri.len() > 2048 {
+        return Err("TOTP URI must be at most 2048 UTF-8 bytes".to_string());
+    }
+    // The URL parser accepts whitespace and malformed percent escapes, and
+    // totp-rs 5.7 can panic on a hostless URL. Reject these before its parser.
+    let bytes = uri.as_bytes();
+    if uri.chars().any(|c| c.is_whitespace() || c.is_control())
+        || bytes.iter().enumerate().any(|(i, byte)| {
+            *byte == b'%'
+                && (bytes.get(i + 1).is_none_or(|b| !b.is_ascii_hexdigit())
+                    || bytes.get(i + 2).is_none_or(|b| !b.is_ascii_hexdigit()))
+        })
+    {
+        return Err(INVALID_URI.to_string());
+    }
+    let url = reqwest::Url::parse(uri).map_err(|_| INVALID_URI.to_string())?;
+    if url.scheme() != "otpauth"
+        || url.host_str() != Some("totp")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(INVALID_URI.to_string());
+    }
+    let totp = TOTP::from_url(uri).map_err(|_| INVALID_URI.to_string())?;
+    if totp.account_name.is_empty() || totp.step == 0 {
+        return Err(INVALID_URI.to_string());
+    }
+
+    let code = QrCode::with_error_correction_level(uri.as_bytes(), EcLevel::Q)
+        .map_err(|_| "TOTP URI exceeds QR code capacity".to_string())?;
+    let side = code.width() + 8; // Four light modules on every edge.
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {side} {side}\" width=\"{}\" height=\"{}\" shape-rendering=\"crispEdges\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><path fill=\"black\" d=\"",
+        side * 4, side * 4,
+    );
+    for y in 0..code.width() {
+        for x in 0..code.width() {
+            if code[(x, y)] == Color::Dark {
+                // Writing to a String is infallible. Only integer geometry is emitted.
+                write!(svg, "M{} {}h1v1h-1z", x + 4, y + 4).unwrap();
+            }
+        }
+    }
+    svg.push_str("\"/></svg>");
+    Ok(svg)
+}
+
 /// Verify a TOTP code
 pub fn verify_totp_code(secret: &str, code: &str, email: &str, issuer: &str) -> bool {
     match create_totp(secret, email, issuer) {

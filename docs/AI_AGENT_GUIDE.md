@@ -2378,6 +2378,8 @@ Use the local TOTP helpers when an app needs MFA without maintaining its own TOT
 
 The setup URI is secret-bearing because authenticator apps need it to enroll. Render it only in the setup response; do not log it, persist it in app metadata, cache it, or expose it through API responses unrelated to setup.
 
+Use `totp_qr_svg(setup["uri"])?` to create the QR image locally—never send enrollment URIs to a third-party QR service. `totp_qr_svg(uri: String) -> Result<String, String>` also accepts `totp_uri(...)` output and needs no auth initialization. It encodes the original URI bytes as black-on-white SVG geometry with Q-level error correction and a four-module quiet zone; no label, URI or seed is interpolated into XML. Inputs must be valid TOTP `otpauth://totp/` URIs of at most 2048 UTF-8 bytes; invalid input or QR capacity overflow returns a secret-free `Err`. Preserve the white border when resizing, and treat the SVG itself as secret-bearing too. In an NTNT template, render only this helper's returned SVG with `{{{qr_svg}}}` (ordinary interpolation escapes XML); never raw-render the input URI or arbitrary user SVG. See `examples/totp_qr.tnt` for a standalone, no-network example.
+
 For login, keep password-verified users in a staged auth challenge until TOTP verification succeeds. Do not call `sign_in_session(...)` for a TOTP-required account until the second factor is complete. Pair TOTP routes with the app's normal rate limiting/backoff; `verify_local_totp(...)` verifies the code but does not own account lockout policy.
 
 Staged auth challenges are not authenticated sessions, so session CSRF helpers (`csrf_field`, `verify_csrf`) are intentionally not enough for pre-session forms. `begin_auth_challenge(...)` creates a challenge-bound CSRF nonce automatically. Render it with `auth_challenge_csrf_field(req, kind)` and verify submissions with `verify_auth_challenge_csrf(req, form["_csrf"], kind)` before mutating credentials, MFA state, or sessions.
@@ -2392,6 +2394,7 @@ import {
     current_auth_challenge,
     current_user,
     sign_in_session,
+    totp_qr_svg,
     totp_status,
     verify_auth_challenge_csrf,
     verify_local_password,
@@ -2402,7 +2405,8 @@ import { html, parse_form, redirect } from "std/http/server"
 fn start_totp_setup(req) {
     let user = current_user(req) otherwise return redirect("/login")
     let setup = begin_totp_enrollment(user["email"], map { "issuer": "Admin" })?
-    return html(template("totp_setup.html", map { "uri": setup["uri"] }))
+    let qr_svg = totp_qr_svg(setup["uri"])?
+    return html(template("totp_setup.html", map { "qr_svg": qr_svg }))
 }
 
 fn finish_totp_setup(req) {
