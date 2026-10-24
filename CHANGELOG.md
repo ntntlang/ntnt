@@ -1,9 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.5.6
+
+See the [complete release notes](docs/release-notes-v0.5.6.md) for upgrade guidance. TLS inspection, monitoring HTTPS probes and SMTP TLS now require a usable host/container CA store; update the NTNT binary for the security fixes, and restart after subsequent CA-only updates.
 
 ### Added
 
+- `std/auth.totp_qr_svg(uri)` renders a validated TOTP enrollment URI as a local, deterministic QR SVG without sending enrollment secrets to an external service. The SVG remains secret-bearing; show it only during enrollment, never log or cache it (#283).
 - `std/concurrent.task_stats()` returns bounded process-local task counts and estimated retained result/history bytes without exposing task contents or changing retention. Includes typed integer fields for lint and no new configuration (#267).
 - Task closures passed to `spawn`, `after`, `schedule`, `parallel` and `race` can call your own NTNT functions, from the same file or imported, including helpers those functions call, recursion and mutual recursion (#186). Each function is copied into the task with the values it uses, so changes stay inside the task. Values that can't be copied still fail before the task starts, and the error now names the dependency path, e.g. `task -> outer -> call_a -> handlers`. Struct invariants are now enforced inside tasks when they read only the struct's own fields; a rule that calls a helper or reads a constant fails with a clear error when that struct is built in a task (previously tasks skipped invariants entirely).
 
