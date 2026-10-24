@@ -108,6 +108,27 @@ fn validate_code(code: &str) -> (String, String, i32) {
 // ============================================================================
 
 #[test]
+fn test_lint_task_stats_exposes_integer_fields() {
+    let (stdout, stderr, code) = lint_code(
+        r#"import { task_stats } from "std/concurrent"
+let retained: Int = task_stats().retained_results
+print(retained)
+"#,
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let (stdout, stderr, code) = lint_code(
+        r#"import { task_stats } from "std/concurrent"
+let retained: String = task_stats().retained_results
+print(retained)
+"#,
+    );
+    assert_ne!(
+        code, 0,
+        "Int statistics must reject a String binding: {stdout}\n{stderr}"
+    );
+}
+
+#[test]
 fn test_lint_allows_function_local_postgres_connect() {
     let code = r#"import { connect as pg_connect } from "std/db/postgres"
 

@@ -67,6 +67,8 @@ mod retention;
 #[cfg(test)]
 mod retention_tests;
 #[cfg(test)]
+mod stats_tests;
+#[cfg(test)]
 mod structured_tests;
 pub(crate) use retention::TaskStartGuard;
 use retention::*;
@@ -3418,6 +3420,47 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             requires: Some(RuntimeCapability::TaskSpawning),
             func: |args| concurrent_spawn(&args[0]),
+        },
+    );
+
+    // @ntnt task_stats
+    // @module std/concurrent
+    // @signature task_stats() -> Map
+    // Returns six process-local, nonnegative Int accounting fields in constant
+    // time: active_tasks, tracked_tasks, retained_results, retained_result_bytes,
+    // history_records, history_bytes. No IDs, payloads, errors or captures.
+    // active_tasks samples the existing capacity counter, including delayed work,
+    // workers and forgotten structured children until finalization. It can briefly
+    // straddle registry updates; do not derive it from the other counts.
+    // tracked_tasks includes running and completed heavy entries (also structured
+    // children), excluding compact history. retained_results counts unconsumed
+    // public outcomes, including failures/panics, not structured child results.
+    // Byte fields use existing estimated serialized/error and compact-history
+    // accounting, not process RSS, captures, channels or caller-owned results.
+    // Reads do not consume results, refresh inactivity, or trigger eviction;
+    // policy cleanup remains the existing reaper/completion/observation behavior.
+    // @returns Fixed six-key map of Int counts and estimated retained bytes
+    // @see_also try_await, await_task
+    // @since v0.5.6
+    // @example len(task_stats()) => 6 ~ "Bounded accounting without task contents"
+    module.insert(
+        "task_stats".to_string(),
+        Value::NativeFunction {
+            name: "task_stats".to_string(),
+            arity: 0,
+            max_arity: 0,
+            requires: None,
+            func: |args| {
+                if !args.is_empty() {
+                    return Err(IntentError::ArityMismatch {
+                        name: "task_stats".to_string(),
+                        expected: "0".to_string(),
+                        got: args.len(),
+                        line: 0,
+                    });
+                }
+                RUNTIME.task_stats()
+            },
         },
     );
 

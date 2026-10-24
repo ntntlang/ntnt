@@ -30,6 +30,10 @@ fn unique_test_file(prefix: &str) -> String {
 
 /// Helper to run ntnt with a code string
 fn run_ntnt_code(code: &str) -> (String, String, i32) {
+    run_ntnt_code_with_env(code, &[])
+}
+
+fn run_ntnt_code_with_env(code: &str, env: &[(&str, &str)]) -> (String, String, i32) {
     let test_file = unique_test_file("test");
 
     let mut file = fs::File::create(&test_file).expect("Failed to create test file");
@@ -47,6 +51,7 @@ fn run_ntnt_code(code: &str) -> (String, String, i32) {
         .args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
+        .envs(env.iter().copied())
         .output()
         .expect("Failed to execute ntnt");
 
@@ -57,6 +62,59 @@ fn run_ntnt_code(code: &str) -> (String, String, i32) {
         String::from_utf8_lossy(&output.stderr).to_string(),
         output.status.code().unwrap_or(-1),
     )
+}
+
+// =============================================================================
+// Process-local task statistics
+// =============================================================================
+
+#[test]
+fn test_task_stats_rejects_extra_arguments_at_runtime() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"import { task_stats } from "std/concurrent"
+task_stats(123)
+"#,
+    );
+    assert_ne!(code, 0, "extra arguments must fail: {stdout}\n{stderr}");
+    assert!(stderr.contains("task_stats"), "{stderr}");
+}
+
+#[test]
+fn test_task_stats_reports_lifecycle_without_consuming_results() {
+    let (stdout, stderr, code) = run_ntnt_code_with_env(
+        r#"
+import { task_stats, spawn, await_task, channel, send, recv } from "std/concurrent"
+let empty = task_stats()
+print(len(empty))
+print(empty.active_tasks == 0 && empty.tracked_tasks == 0)
+print(empty.retained_results == 0 && empty.retained_result_bytes == 0)
+print(empty.history_records == 0 && empty.history_bytes == 0)
+let [ready_tx, ready_rx] = channel()
+let [release_tx, release_rx] = channel()
+let task = spawn(fn() {
+    send(ready_tx, true)
+    recv(release_rx)
+    42
+})
+recv(ready_rx)
+let running = task_stats()
+print(running.active_tasks == 1 && running.tracked_tasks == 1)
+print(running.retained_results == 0 && running.history_records == 0)
+send(release_tx, true)
+print(await_task(task))
+let consumed = task_stats()
+print(consumed.tracked_tasks == 0 && consumed.retained_results == 0)
+print(consumed.retained_result_bytes == 0)
+print(consumed.history_records == 1 && consumed.history_bytes > 0)
+print(len(consumed))
+"#,
+        &[("NTNT_TASK_REMOVAL_TTL", "60")],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        ["6", "true", "true", "true", "true", "true", "42", "true", "true", "true", "6"]
+    );
 }
 
 // =============================================================================

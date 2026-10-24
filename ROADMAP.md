@@ -2322,6 +2322,7 @@ The HTTP server now uses Axum + Tokio for async request handling:
 
 ### Concurrency Primitives
 
+- [x] Bounded process-local `task_stats()` inspection of task counts and retained result/history byte accounting, without payloads or retention tuning (#267).
 - Channels for message passing
 - Structured concurrency (task scopes)
 - Parallel iterators

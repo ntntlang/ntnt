@@ -4945,6 +4945,14 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("close", ["rx" => Type::Named("RxChannel".to_string())], Type::Bool);
             sig!("select", ["channels" => Type::Array(Box::new(Type::Named("RxChannel".to_string()))), "timeout_ms" => Type::Union(vec![Type::Int, Type::String])], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, required(1));
             // Task operations
+            sig!(
+                "task_stats",
+                [],
+                Type::Map {
+                    key_type: Box::new(Type::String),
+                    value_type: Box::new(Type::Int)
+                }
+            );
             sig!("spawn", ["handler" => Type::Any], Type::Named("Task".to_string()));
             sig!("await_task", ["task" => Type::Named("Task".to_string())], Type::Generic { name: "Result".to_string(), args: vec![Type::Any, Type::String] });
             sig!("try_await", ["task" => Type::Named("Task".to_string())], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) });
