@@ -9,6 +9,8 @@
 
 ### Security
 
+- Updated `ctutils` to 0.4.4 and Tokio to 1.53.3 for RUSTSEC-2026-0385 (non-constant-time masks/comparisons) and RUSTSEC-2026-0386 (Unix `AsyncFd` I/O safety). Tokio's minimum is now 1.53.3 to avoid affected version lines in future resolutions. Rebuild NTNT binaries to obtain the fixes; TLS backends and trust-store selections are unchanged.
+
 - Updated Rust dependencies to resolve the currently reported RustSec advisories, including the older HTTP/2 and IDNA dependencies pulled in by reqwest 0.11. Migrated the DNS, JWT, and randomness adapters while retaining their NTNT APIs. JWT uses an explicit AWS-LC crypto provider; HTTP clients retain native/system TLS and the monitoring/SMTP clients retain ring-based Rust TLS. Rebuild NTNT binaries to obtain these dependency fixes.
 
 - Updated the bundled TLS certificate verifier and root stores to distrust the compromised eMudhra intermediate keys. Rebuild NTNT binaries to obtain the fix for `std/net.tls_info`, `std/http.probe_fetch`, and SMTP TLS. Ordinary `fetch`/`download` and other reqwest clients still use native/system TLS: update the operating-system trust store (including container images) separately. See the [incident advisory](https://emudhra.we-have-a-problem.com/) for platform-specific patched versions and test hosts.
