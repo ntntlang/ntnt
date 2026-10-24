@@ -30,6 +30,10 @@ fn unique_test_file(prefix: &str) -> String {
 
 /// Helper to run ntnt with a code string
 fn run_ntnt_code(code: &str) -> (String, String, i32) {
+    run_ntnt_code_with_env(code, &[])
+}
+
+fn run_ntnt_code_with_env(code: &str, env: &[(&str, &str)]) -> (String, String, i32) {
     let test_file = unique_test_file("test");
 
     let mut file = fs::File::create(&test_file).expect("Failed to create test file");
@@ -47,6 +51,7 @@ fn run_ntnt_code(code: &str) -> (String, String, i32) {
         .args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
+        .envs(env.iter().copied())
         .output()
         .expect("Failed to execute ntnt");
 
@@ -76,7 +81,7 @@ task_stats(123)
 
 #[test]
 fn test_task_stats_reports_lifecycle_without_consuming_results() {
-    let (stdout, stderr, code) = run_ntnt_code(
+    let (stdout, stderr, code) = run_ntnt_code_with_env(
         r#"
 import { task_stats, spawn, await_task, channel, send, recv } from "std/concurrent"
 let empty = task_stats()
@@ -103,6 +108,7 @@ print(consumed.retained_result_bytes == 0)
 print(consumed.history_records == 1 && consumed.history_bytes > 0)
 print(len(consumed))
 "#,
+        &[("NTNT_TASK_REMOVAL_TTL", "60")],
     );
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(
