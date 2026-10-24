@@ -1751,7 +1751,11 @@ pub fn init() -> HashMap<String, Value> {
     // may complete after the start deadline, subject to the independent timeout budget.
     // sample_started_at_ms records the first connect attempt, sample_finished_at_ms
     // the completed response; these UTC timestamps are not admission/queue timestamps.
-    // TLS verifies public trust roots and hostname. Existing HTTP SSRF policy applies;
+    // TLS verifies against host CA roots and the hostname, without bundled roots.
+    // SSL_CERT_FILE / SSL_CERT_DIR override host discovery. Trust is cached at first
+    // TLS use; restart NTNT after updates. Initial local OS/filesystem trust discovery
+    // is synchronous and cannot be interrupted by the network timeout budget.
+    // Existing HTTP SSRF policy applies;
     // disabling SSRF protection rejects this probe API rather than bypassing validation.
     // GET is the only method; redirect:manual/follow_redirects:false are optional.
     // All other fetch options, credentials, headers, and Secret values are rejected.

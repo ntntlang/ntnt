@@ -58,12 +58,11 @@ mime = "0.3"
 # TLS certificate inspection
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pki-types = "1"
-# Security floors: retain eMudhra key distrust and updated roots even when resolving a new lockfile.
+rustls-native-certs = "0.8.5"
+# Security floor: retain compromised-intermediate-key distrust in new lockfiles.
 rustls-webpki = { version = "0.103.16", default-features = false }
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "pool", "rustls-tls"] }
-webpki-root-certs = "1.0.10"
-# Also constrain the bundled trust anchors used transitively by lettre's SMTP TLS.
-webpki-roots = "1.0.10"
+# Keep Rustls/ring, but do not enable lettre's bundled-root rustls-tls feature.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "pool", "rustls", "ring", "rustls-native-certs"] }
 x509-parser = "0.18"
 
 # HTTP Server (Axum + Tokio for high-concurrency in production)

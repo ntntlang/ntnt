@@ -35,6 +35,7 @@ pub mod sqlite;
 pub mod string;
 pub mod template;
 pub mod time;
+mod tls_trust;
 pub mod url;
 pub mod validate;
 

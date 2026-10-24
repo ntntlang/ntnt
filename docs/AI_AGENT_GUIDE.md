@@ -19,6 +19,15 @@ source "$HOME/.cargo/env"
 ntnt --version  # Verify: should print ntnt 0.4.6 or later
 ```
 
+### TLS Trust and Host Certificates
+
+`std/net.tls_info`, HTTPS `std/http.probe_fetch`, and SMTP TLS use the host's CA certificates instead of a root bundle compiled into NTNT. Ordinary `fetch`/`download` already use native/system TLS. TLS transports, hostname checking, and the patched verifier's compromised-key protection remain enabled; importing host roots does not reproduce every OS/browser revocation or distrust policy.
+
+- Maintain the operating system's CA store. Linux runtime/container images need a CA package such as `ca-certificates`; a container does not automatically inherit its physical host's certificates. Windows/macOS use their platform certificate stores.
+- The Rustls paths above honor `SSL_CERT_FILE` and `SSL_CERT_DIR`. Set them before first TLS use if you need a specific PEM file/directory; explicit paths replace native discovery rather than silently supplement it with bundled public roots.
+- Trust discovery (including a failure) is cached at first TLS use. **Restart NTNT after updating the CA store or overrides; CA-only updates do not require rebuilding the binary.** Initial local OS/filesystem discovery is synchronous and is not interruptible by network timeouts.
+- Missing/unusable trust returns a clear local setup error, with no bundled fallback. HTTP without TLS, email log transport, and explicitly plaintext SMTP do not require a CA store. TLS-library security fixes can still require an NTNT update.
+
 ### Your First App (60 seconds)
 
 Create `hello.tnt`:
