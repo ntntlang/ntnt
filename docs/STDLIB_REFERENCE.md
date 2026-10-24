@@ -4535,6 +4535,7 @@ import { channel, send, recv } from "std/concurrent"
 | [`send`](#send) | Sends a value through a channel using the sender handle (first element of channel()). Returns false if the receiver has been closed (crossbeam Disconnected). Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum. |
 | [`sleep_ms`](#sleepms) | Pauses execution for specified milliseconds. This is a cancellation yield point: a cancelled task will exit during sleep_ms(). Uses 50ms slices internally. Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks. |
 | [`spawn`](#spawn) | Spawns a zero-parameter function as a background task. Returns a Task handle. The handler's closure environment is serialized for cross-thread use. Serializable capture types: Int, Float, Bool, String, Array, Map, Struct, Enum. The handler must have zero parameters (including no defaults). |
+| [`task_stats`](#taskstats) | Returns six process-local, nonnegative Int accounting fields in constant time: active_tasks, tracked_tasks, retained_results, retained_result_bytes, history_records, history_bytes. No IDs, payloads, errors or captures. active_tasks samples the existing capacity counter, including delayed work, workers and forgotten structured children until finalization. It can briefly straddle registry updates; do not derive it from the other counts. tracked_tasks includes running and completed heavy entries (also structured children), excluding compact history. retained_results counts unconsumed public outcomes, including failures/panics, not structured child results. Byte fields use existing estimated serialized/error and compact-history accounting, not process RSS, captures, channels or caller-owned results. Reads do not consume results, refresh inactivity, or trigger eviction; policy cleanup remains the existing reaper/completion/observation behavior. |
 | [`thread_count`](#threadcount) | Returns the number of available CPU threads. Useful for sizing parallel work. |
 | [`try_await`](#tryawait) | Non-blocking peek; does not consume an available result. Enforces retention first, then refreshes available-result inactivity recency. Public results have a one-hour inactivity, 100000-result and 128 MiB estimated-storage budget. Consumed/expired records contain no payload and remain for at most 24 hours after retirement, 100000 records or 64 MiB estimated metadata. NTNT_TASK_REMOVAL_TTL overrides only history age. Pruned handles are unknown; this process-local history disappears on restart. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired). |
 | [`try_recv`](#tryrecv) | Non-blocking receive. Returns None if no value is available or all senders disconnected. |
@@ -4932,6 +4933,28 @@ spawn(fn() { 42 })  // Spawn a background task
 **See also:** `await_task`, `try_await`, `cancel_task`
 
 *Since v0.4.6*
+
+---
+
+#### `task_stats`
+
+```ntnt
+task_stats() -> Map
+```
+
+Returns six process-local, nonnegative Int accounting fields in constant time: active_tasks, tracked_tasks, retained_results, retained_result_bytes, history_records, history_bytes. No IDs, payloads, errors or captures. active_tasks samples the existing capacity counter, including delayed work, workers and forgotten structured children until finalization. It can briefly straddle registry updates; do not derive it from the other counts. tracked_tasks includes running and completed heavy entries (also structured children), excluding compact history. retained_results counts unconsumed public outcomes, including failures/panics, not structured child results. Byte fields use existing estimated serialized/error and compact-history accounting, not process RSS, captures, channels or caller-owned results. Reads do not consume results, refresh inactivity, or trigger eviction; policy cleanup remains the existing reaper/completion/observation behavior.
+
+**Returns:** Fixed six-key map of Int counts and estimated retained bytes
+
+**Examples:**
+
+```ntnt
+len(task_stats())  // => 6  // Bounded accounting without task contents
+```
+
+**See also:** `try_await`, `await_task`
+
+*Since v0.5.6*
 
 ---
 

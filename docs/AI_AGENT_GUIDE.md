@@ -2762,6 +2762,30 @@ These budgets cover runtime-retained task state, not all process RSS: active exe
 
 **Advanced compatibility setting:** `NTNT_TASK_REMOVAL_TTL` now controls only compact-history age, in seconds from consumption/expiration; the default is **86400**, not the former seven-day heavy-entry lifetime. Set it before the concurrency runtime initializes (normally before starting the process). Zero disables compact-history retention; an unparseable value falls back to the default. Count/byte bounds still apply, so a longer TTL does not guarantee a handle remains available. Result and count/byte defaults are fixed in this slice; no additional tuning knobs are required or introduced.
 
+### Process-local task inspection
+
+```ntnt
+import { task_stats } from "std/concurrent"
+
+let stats = task_stats()
+print(stats.active_tasks)
+print(stats.retained_results)
+print(stats.retained_result_bytes)
+```
+
+`task_stats()` returns a fixed six-key map of nonnegative `Int` values:
+
+- `active_tasks`: the existing active-capacity counter, including delayed tasks, worker tasks, and forgotten structured children until they finish.
+- `tracked_tasks`: heavy task-registry entries, including running tasks and unconsumed completions (also structured children); excludes compact history.
+- `retained_results`: unconsumed public task outcomes, including failures and panics; excludes structured-operation child results.
+- `retained_result_bytes`: the existing estimated serialized-result and error-string storage charge for those public outcomes.
+- `history_records`: retained compact consumed/expired records.
+- `history_bytes`: the existing conservative compact-record/index storage charge; zero when history is empty.
+
+The registry fields are read together under one lock; `active_tasks` samples a separate counter whose updates can straddle registration/finalization. Do not expect it to equal `tracked_tasks - retained_results`: forgotten work may still be running, and structured children have separate result ownership. These are current gauges, not lifetime totals.
+
+Inspection is constant-time, contains no task IDs, payloads, error text or captured values, and does not consume results, refresh their inactivity clocks, or trigger eviction. Normal reaping/completion/observation still enforces retention. Byte counts are **not total process memory**: they exclude active captures, structured child results, separately owned channels, caller-owned values and allocator scratch. Statistics cover the whole process, not just the calling interpreter or HTTP request; they reset when that process restarts. There are no new retention settings or task-list API.
+
 ### Delayed Execution
 
 ```ntnt

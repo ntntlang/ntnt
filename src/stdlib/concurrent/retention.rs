@@ -289,6 +289,41 @@ impl SerializedValue {
 }
 
 impl ConcurrencyRuntime {
+    /// Fixed-size, read-only accounting. Never lock an entry or touch result
+    /// recency. The active capacity counter is sampled separately from the
+    /// coherent registry fields; starts/finalization can briefly straddle it.
+    pub(super) fn task_stats(&self) -> Result<Value> {
+        let counts = {
+            let tasks = self
+                .tasks
+                .lock()
+                .map_err(|_| IntentError::runtime_error("Task registry poisoned".to_string()))?;
+            [
+                (
+                    "active_tasks",
+                    self.active_tasks.load(AtomicOrdering::Acquire),
+                ),
+                ("tracked_tasks", tasks.entries.len() as u64),
+                ("retained_results", tasks.results.len() as u64),
+                ("retained_result_bytes", tasks.result_bytes as u64),
+                ("history_records", tasks.history.len() as u64),
+                ("history_bytes", tasks.history_bytes() as u64),
+            ]
+        };
+        let values = counts
+            .into_iter()
+            .map(|(name, count)| {
+                let count = i64::try_from(count).map_err(|_| {
+                    IntentError::runtime_error(format!(
+                        "Task statistic '{name}' exceeds NTNT Int range"
+                    ))
+                })?;
+                Ok((name.to_string(), Value::Int(count)))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        Ok(Value::Map(values))
+    }
+
     pub(super) fn forget_task(&self, id: u64) {
         let cancelled = {
             let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
