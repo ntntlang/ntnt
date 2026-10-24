@@ -127,14 +127,29 @@ fn parse_config(map: &HashMap<String, Value>) -> Result<EmailConfig> {
 }
 
 fn build_transport(config: &EmailConfig) -> Result<SmtpTransport> {
-    let builder = match config.tls.as_str() {
-        "implicit" => SmtpTransport::relay(&config.host),
-        "starttls" => SmtpTransport::starttls_relay(&config.host),
-        _ => Ok(SmtpTransport::builder_dangerous(&config.host)),
+    let mut builder = SmtpTransport::builder_dangerous(&config.host).port(config.port);
+    if config.tls != "none" {
+        use lettre::transport::smtp::client::{Certificate, CertificateStore, Tls, TlsParameters};
+        let trust = crate::stdlib::tls_trust::host_trust().map_err(IntentError::runtime_error)?;
+        // Do not let lettre select a separate trust source or a bundled fallback.
+        let mut parameters =
+            TlsParameters::builder(config.host.clone()).certificate_store(CertificateStore::None);
+        for certificate in &trust.certificates {
+            let certificate =
+                Certificate::from_der(certificate.as_ref().to_vec()).map_err(|e| {
+                    IntentError::runtime_error(format!("Email host CA setup failed: {}", e))
+                })?;
+            parameters = parameters.add_root_certificate(certificate);
+        }
+        let parameters = parameters
+            .build_rustls()
+            .map_err(|e| IntentError::runtime_error(format!("Email TLS setup failed: {}", e)))?;
+        builder = builder.tls(if config.tls == "implicit" {
+            Tls::Wrapper(parameters)
+        } else {
+            Tls::Required(parameters)
+        });
     }
-    .map_err(|e| IntentError::runtime_error(format!("Email transport setup failed: {}", e)))?;
-
-    let mut builder = builder.port(config.port);
     if let (Some(user), Some(pass)) = (&config.username, &config.password) {
         builder = builder.credentials(Credentials::new(user.clone(), pass.clone()));
     }
@@ -373,6 +388,10 @@ pub fn init() -> HashMap<String, Value> {
     // "transport" ("smtp" | "log"). The log transport prints emails to stderr and
     // reports them as sent — use it in development and tests. The NTNT_EMAIL_MODE
     // env var ("log" or "smtp") overrides the configured transport.
+    // SMTP TLS uses host CA roots (or SSL_CERT_FILE / SSL_CERT_DIR), never bundled
+    // roots. No usable host roots is a transport setup error before TCP contact.
+    // Trust is cached at first TLS use; restart NTNT after updating host trust.
+    // Log transport and explicit tls:"none" do not require a CA store.
     // @param config SMTP configuration map.
     // @returns Unit
     // @see_also send_email, send_email_batch, get_env

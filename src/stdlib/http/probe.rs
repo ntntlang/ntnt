@@ -110,12 +110,15 @@ pub(super) fn fetch(opts: &HashMap<String, Value>) -> ProbeResult<Value> {
         .body(Body::empty())
         .map_err(|_| "Invalid probe request")?;
     let tls = if url.scheme() == "https" {
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add_parsable_certificates(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned());
+        let roots = crate::stdlib::tls_trust::host_trust()?.roots.clone();
         #[cfg(test)]
-        TLS_ROOTS.with(|extra| {
-            roots.add_parsable_certificates(std::mem::take(&mut *extra.borrow_mut()))
-        });
+        let roots = {
+            let mut roots = (*roots).clone();
+            TLS_ROOTS.with(|extra| {
+                roots.add_parsable_certificates(std::mem::take(&mut *extra.borrow_mut()))
+            });
+            std::sync::Arc::new(roots)
+        };
         let mut config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
             rustls::crypto::ring::default_provider(),
         ))

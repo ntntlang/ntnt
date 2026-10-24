@@ -997,6 +997,9 @@ pub fn init() -> HashMap<String, Value> {
     // @signature tls_info(host: String, opts?: Map) -> Result<Map, String>
     // Opens a bounded TLS connection and returns certificate metadata. Validation
     // failures still return Ok(map { "valid": false, ... }) when a certificate is available.
+    // Trust uses the host CA store (or SSL_CERT_FILE / SSL_CERT_DIR), with no bundled
+    // fallback. Missing usable host roots return Err before target contact. Roots are
+    // cached at first TLS use; restart NTNT after updating the store or overrides.
     // @param host Hostname or IP address to connect to
     // @param opts Optional map with port, timeout_ms, server_name, and allow_private
     // @returns Result containing certificate subject, issuer, validity window, SANs, serial, protocol, and validation status
@@ -1584,6 +1587,8 @@ fn tls_info_for_addr(
     addr: SocketAddr,
     timeout: Duration,
 ) -> Result<HashMap<String, Value>, String> {
+    // Missing local trust is a setup failure, not a certificate failure at the target.
+    let _ = tls_root_store()?;
     let metadata_config = ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(MetadataVerifier))
@@ -1635,14 +1640,8 @@ struct TlsConnectionMetadata {
     certificates: Vec<CertificateDer<'static>>,
 }
 
-fn tls_root_store() -> Result<RootCertStore, String> {
-    let mut roots = RootCertStore::empty();
-    let (added, _) =
-        roots.add_parsable_certificates(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned());
-    if added == 0 {
-        return Err("no TLS trust roots available".to_string());
-    }
-    Ok(roots)
+fn tls_root_store() -> Result<Arc<RootCertStore>, String> {
+    Ok(crate::stdlib::tls_trust::host_trust()?.roots.clone())
 }
 
 fn verify_certificate_chain(
@@ -1660,7 +1659,7 @@ fn verify_certificate_chain(
             server_name
         )
     })?;
-    let verifier = WebPkiServerVerifier::builder(Arc::new(tls_root_store()?))
+    let verifier = WebPkiServerVerifier::builder(tls_root_store()?)
         .build()
         .map_err(|e| format!("certificate validation unavailable: {}", e))?;
     Ok(verifier

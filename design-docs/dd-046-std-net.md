@@ -81,7 +81,7 @@ As of the PR #127 release-readiness baseline:
 - `docs/STDLIB_REFERENCE.md` is generated from the `// @ntnt` docs, and `docs/AI_AGENT_GUIDE.md` includes practical `std/net` examples.
 - `examples/std_net_ipam.tnt`, `examples/std_net_ping.tnt`, `examples/std_net_dns.tnt`, `examples/std_net_scan.tnt`, `examples/std_net_tls.tnt`, and traceroute/probe docs cover the shipped slices.
 - `std/net` uses a dedicated outbound safety posture: public targets are easy, private/internal targets require process-level `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true`.
-- TLS inspection deliberately added `rustls`, `rustls-pki-types`, `webpki-roots`, and `x509-parser`; it does not depend on `reqwest`'s TLS stack.
+- TLS inspection uses `rustls`, `rustls-pki-types`, `rustls-native-certs`, and `x509-parser`; host CA roots replace the originally bundled roots. It does not depend on `reqwest`'s TLS stack.
 
 ---
 
@@ -1160,7 +1160,7 @@ For network-specific PRs:
 
 4. `port_scan` accepts explicit integer arrays in stdlib. Range parsing remains an app-layer/UI concern unless a future language-level range contract is designed.
 
-5. `tls_info` uses Rustls for the TLS connection and validation, x509-parser for metadata extraction, and webpki-roots for root trust.
+5. `tls_info` uses Rustls for the TLS connection and validation, x509-parser for metadata extraction, and host CA roots loaded with rustls-native-certs. Trust is cached at first TLS use, without bundled fallback; update the host/container CA store and restart NTNT to apply root changes.
 
 6. `ping()` is strict/protocol-honest ICMP by default. It does not fall back to TCP automatically. Developers use `tcp_connect(host, port, opts?)` for explicit TCP checks or `reachable(host, map { "tcp_ports": [...] })` for high-level reachability with explicit TCP fallback.
 

@@ -63,22 +63,15 @@ fn verify(
 }
 
 #[test]
-fn bundled_certificate_roots_reject_all_emudhra_test_chains() {
-    // Same DER root bundle used by tls_info() and probe_fetch().
+fn host_certificate_roots_reject_all_emudhra_test_chains() {
+    // All Rustls clients now share host roots, not separate compiled bundles.
     let mut roots = RootCertStore::empty();
-    let (added, ignored) =
-        roots.add_parsable_certificates(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned());
-    assert!(added > 0);
-    assert_eq!(ignored, 0);
-    assert_all_chains_rejected(&verifier(roots));
-}
-
-#[test]
-fn bundled_smtp_trust_anchors_reject_all_emudhra_test_chains() {
-    // Same trust-anchor bundle used transitively by lettre's SMTP TLS.
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    assert!(!roots.is_empty());
+    let (added, _) =
+        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    assert!(
+        added > 0,
+        "the test runner must provide a usable host CA store"
+    );
     assert_all_chains_rejected(&verifier(roots));
 }
 

@@ -9,11 +9,11 @@
 
 ### Security
 
-- Updated `ctutils` to 0.4.4 and Tokio to 1.53.3 for RUSTSEC-2026-0385 (non-constant-time masks/comparisons) and RUSTSEC-2026-0386 (Unix `AsyncFd` I/O safety). Tokio's minimum is now 1.53.3 to avoid affected version lines in future resolutions. Rebuild NTNT binaries to obtain the fixes; TLS backends and trust-store selections are unchanged.
+- Updated `ctutils` to 0.4.4 and Tokio to 1.53.3 for RUSTSEC-2026-0385 (non-constant-time masks/comparisons) and RUSTSEC-2026-0386 (Unix `AsyncFd` I/O safety). Tokio's minimum is now 1.53.3 to avoid affected version lines in future resolutions. Rebuild NTNT binaries to obtain the fixes; TLS backends are unchanged.
 
 - Updated Rust dependencies to resolve the currently reported RustSec advisories, including the older HTTP/2 and IDNA dependencies pulled in by reqwest 0.11. Migrated the DNS, JWT, and randomness adapters while retaining their NTNT APIs. JWT uses an explicit AWS-LC crypto provider; HTTP clients retain native/system TLS and the monitoring/SMTP clients retain ring-based Rust TLS. Rebuild NTNT binaries to obtain these dependency fixes.
 
-- Updated the bundled TLS certificate verifier and root stores to distrust the compromised eMudhra intermediate keys. Rebuild NTNT binaries to obtain the fix for `std/net.tls_info`, `std/http.probe_fetch`, and SMTP TLS. Ordinary `fetch`/`download` and other reqwest clients still use native/system TLS: update the operating-system trust store (including container images) separately. See the [incident advisory](https://emudhra.we-have-a-problem.com/) for platform-specific patched versions and test hosts.
+- Updated the TLS certificate verifier to distrust compromised eMudhra intermediate keys, even when a host still trusts the issuing roots. Rebuild NTNT binaries to obtain the verifier fix for `std/net.tls_info`, `std/http.probe_fetch`, and SMTP TLS. Maintain the operating-system trust store (including container images) separately; root-only changes need a process restart, not a new binary. See the [incident advisory](https://emudhra.we-have-a-problem.com/) for platform-specific patched versions and test hosts.
 
 ### Fixed
 
@@ -24,6 +24,7 @@
 
 ### Changed
 
+- `tls_info`, HTTPS `probe_fetch`, and SMTP TLS now use host CA roots instead of roots compiled into NTNT. No bundled fallback remains. Install/maintain the host or container CA store and restart NTNT after CA updates; root-only changes no longer require a new NTNT binary. Rustls/ring, hostname checking, and compromised-key protection are retained. Explicit `SSL_CERT_FILE` / `SSL_CERT_DIR` overrides are supported for these Rustls clients.
 - A failing function's `defer` statements run when that function exits, in its own scope, before the caller's `otherwise` handler. Previously they ran later, in the wrong scope, or not at all. This includes errors that escape to the top level.
 - `old()` read in a callee's defaults or `requires` now refers to the callee's own values, not the caller's snapshot. A caller reading `old(x)` in its body after a nested call now sees its real starting value.
 
