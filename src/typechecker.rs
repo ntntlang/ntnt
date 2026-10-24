@@ -5078,6 +5078,14 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
         }
         "std/auth" => {
             sig!(
+                "totp_qr_svg",
+                ["uri" => Type::String],
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![Type::String, Type::String],
+                }
+            );
+            sig!(
                 "local_user",
                 [
                     "identifier" => Type::String,
@@ -6233,6 +6241,28 @@ mod tests {
             "#,
         );
         assert!(errs.is_empty(), "unexpected diagnostics: {errs:?}");
+    }
+
+    #[test]
+    fn test_std_auth_totp_qr_svg_signature() {
+        let valid = check_errors(
+            r#"
+            import { totp_qr_svg } from "std/auth"
+            let qr: Result<String, String> = totp_qr_svg("otpauth://totp/user?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+            "#,
+        );
+        assert!(valid.is_empty(), "unexpected diagnostics: {valid:?}");
+        for source in [
+            "totp_qr_svg(42)",
+            "totp_qr_svg()",
+            "totp_qr_svg(\"uri\", \"extra\")",
+            "let wrong: Int = totp_qr_svg(\"uri\")",
+        ] {
+            let errors = check_errors(&format!(
+                "import {{ totp_qr_svg }} from \"std/auth\"\n{source}",
+            ));
+            assert!(!errors.is_empty(), "missed type error: {source}");
+        }
     }
 
     #[test]

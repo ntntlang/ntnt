@@ -1,0 +1,7 @@
+// Public RFC 6238 test secret: demonstration only, never use for real accounts.
+// This example needs no enable_auth() and makes no network requests.
+import { totp_uri, totp_qr_svg } from "std/auth"
+
+let uri = totp_uri("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "Zoë <&\"'>@example.com", "研究 & <Admin>")?
+let svg = totp_qr_svg(uri)?
+print(svg)

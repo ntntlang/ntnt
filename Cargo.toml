@@ -112,6 +112,7 @@ hickory-resolver = "0.26.2"
 socket2 = "0.6"
 zeroize = { version = "1.8.2", features = ["serde"] }
 tempfile = "3.24"
+qrcode = { version = "0.14.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # Let JWT's AWS-LC provider build without a separately installed NASM assembler.

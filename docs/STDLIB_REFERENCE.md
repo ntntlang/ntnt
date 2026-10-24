@@ -1907,6 +1907,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`set_session`](#setsession) | Store custom data in the current session. |
 | [`sign_in_session`](#signinsession) | Persist a request-aware session and attach the auth cookie to an existing response. |
 | [`sign_out_session`](#signoutsession) | Revoke the current session and attach a clearing auth cookie to a response. |
+| [`totp_qr_svg`](#totpqrsvg) | Render a TOTP enrollment URI as a local, deterministic QR SVG. |
 | [`totp_secret`](#totpsecret) | Generate a new TOTP secret for MFA setup. |
 | [`totp_status`](#totpstatus) | Read a local user's safe TOTP enrollment status. |
 | [`totp_uri`](#totpuri) | Generate an otpauth:// URI for QR codes. |
@@ -3456,6 +3457,32 @@ sign_out_session(redirect("/login"), req)  // Sign out and redirect
 
 ---
 
+#### `totp_qr_svg`
+
+```ntnt
+totp_qr_svg(uri: String) -> Result<String, String>
+```
+
+Render a TOTP enrollment URI as a local, deterministic QR SVG.
+
+No auth initialization, network, or files are required. Uses black on white, Q-level error correction and a four-module quiet zone. Encodes the original URI bytes, with no URI, label or secret in XML text or metadata. The QR is still secret-bearing: show only during enrollment; never log, cache or send it to a third-party QR service. Keep the quiet zone when resizing the SVG.
+
+**Parameters:**
+
+- `uri` — Valid otpauth://totp/ URI from begin_totp_enrollment or totp_uri; at most 2048 UTF-8 bytes
+
+**Returns:** Ok(svg), or a secret-free Err for invalid input, length or QR capacity
+
+**Examples:**
+
+```ntnt
+totp_qr_svg("otpauth://totp/Admin:user?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Admin")  // => Ok("<svg ...")  // Create enrollment QR locally
+```
+
+**See also:** `begin_totp_enrollment`, `totp_uri`, `confirm_totp_enrollment`
+
+---
+
 #### `totp_secret`
 
 ```ntnt
@@ -3517,7 +3544,7 @@ totp_uri(secret: String, email: String, issuer: String) -> Result<String, String
 
 Generate an otpauth:// URI for QR codes.
 
-Creates a URI that can be encoded as a QR code for authenticator apps like Google Authenticator or Authy.
+Creates a URI that can be encoded as a QR code for authenticator apps like Google Authenticator or Authy. Render it locally with totp_qr_svg().
 
 **Parameters:**
 

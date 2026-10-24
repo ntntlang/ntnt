@@ -5149,7 +5149,7 @@ pub fn init() -> HashMap<String, Value> {
     // Generate an otpauth:// URI for QR codes.
     //
     // Creates a URI that can be encoded as a QR code for authenticator apps
-    // like Google Authenticator or Authy.
+    // like Google Authenticator or Authy. Render it locally with totp_qr_svg().
     // @param secret TOTP secret (base32 encoded)
     // @param email User's email for the account label
     // @param issuer App name shown in authenticator
@@ -5203,6 +5203,47 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(uri) => Ok(make_ok(Value::String(uri))),
                     Err(e) => Ok(make_err(Value::String(e))),
                 }
+            },
+        },
+    );
+
+    // @ntnt totp_qr_svg
+    // @module std/auth
+    // @signature totp_qr_svg(uri: String) -> Result<String, String>
+    // Render a TOTP enrollment URI as a local, deterministic QR SVG.
+    //
+    // No auth initialization, network, or files are required. Uses black on white,
+    // Q-level error correction and a four-module quiet zone. Encodes the original
+    // URI bytes, with no URI, label or secret in XML text or metadata. The QR is
+    // still secret-bearing: show only during enrollment; never log, cache or send
+    // it to a third-party QR service. Keep the quiet zone when resizing the SVG.
+    // @param uri Valid otpauth://totp/ URI from begin_totp_enrollment or totp_uri; at most 2048 UTF-8 bytes
+    // @returns Ok(svg), or a secret-free Err for invalid input, length or QR capacity
+    // @example totp_qr_svg("otpauth://totp/Admin:user?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Admin") => Ok("<svg ...") ~ "Create enrollment QR locally"
+    // @see_also begin_totp_enrollment, totp_uri, confirm_totp_enrollment
+    // @tags #auth, #mfa, #totp
+    module.insert(
+        "totp_qr_svg".to_string(),
+        Value::NativeFunction {
+            name: "totp_qr_svg".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(IntentError::type_error(
+                        "[auth] totp_qr_svg() requires (uri)".to_string(),
+                    ));
+                }
+                let Value::String(uri) = &args[0] else {
+                    return Err(IntentError::type_error(
+                        "[auth] totp_qr_svg() uri must be a string".to_string(),
+                    ));
+                };
+                Ok(match primitives::render_totp_qr_svg(uri) {
+                    Ok(svg) => make_ok(Value::String(svg)),
+                    Err(error) => make_err(Value::String(error)),
+                })
             },
         },
     );
@@ -10105,7 +10146,14 @@ mod tests {
                 "begin_totp_enrollment must not expose the raw secret field"
             );
             match enrollment.get("uri") {
-                Some(Value::String(uri)) => assert!(uri.starts_with("otpauth://totp/")),
+                Some(Value::String(uri)) => {
+                    assert!(uri.starts_with("otpauth://totp/"));
+                    let render = module_fn(&module, "totp_qr_svg");
+                    let rendered = render(&[Value::String(uri.clone())]).unwrap();
+                    assert!(
+                        matches!(rendered, Value::EnumValue { ref variant, .. } if variant == "Ok")
+                    );
+                }
                 other => panic!("expected setup uri, got {other:?}"),
             }
 
