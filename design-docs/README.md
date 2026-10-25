@@ -13,6 +13,7 @@ This folder contains planning and design documents for NTNT features.
 | [ial_unit_testing.md](ial_unit_testing.md) | ✅ Complete | Unit testing framework design |
 | [high_concurrency_http_server.md](high_concurrency_http_server.md) | ✅ Complete | Async Axum server (v0.4.0) |
 | [dd-040-fetch-stdlib-friction.md](dd-040-fetch-stdlib-friction.md) | 🔶 Partial | 4/6 issues resolved in v0.4.4; 2 remain |
+| [dd-041-sse-streaming.md](dd-041-sse-streaming.md) | 📋 Design accepted; not implemented | Native SSE first, WebSockets second; shared bounded async transport ownership and explicit worker callbacks |
 | [dd-043-auth-excellence.md](dd-043-auth-excellence.md) | ✅ Shipped in v0.4.9 | `std/auth` local auth, reset, TOTP, session, API/page protection baseline; WebAuthn remains future planning |
 | [dd-046-std-net.md](dd-046-std-net.md) | ✅ Complete | Safe `std/net` primitives shipped in v0.4.10 track: IPAM-grade IPv4/IPv6 CIDR math, protocol-honest ping, TCP probes, DNS, bounded scans, TLS inspection |
 | [dd-047-std-netmon.md](dd-047-std-netmon.md) | 🔶 In Progress | Bundled `std/netmon`; Slice 1 adds gated, bounded SNMPv2c GET with strict BER, opaque credentials, and stable telemetry |

@@ -1594,7 +1594,7 @@ Feature: User Authentication
 
 ## Phase 10: Background Jobs, WebSockets & Real-Time
 
-**Status:** Jobs Complete ✅ (DD-037, DD-051, DD-052) · WebSockets Not Started
+**Status:** Jobs Complete ✅ (DD-037, DD-051, DD-052) · SSE/WebSockets Not Started (DD-041 design direction accepted)
 
 **Goal:** Production-ready background job system with a declarative Job DSL, pluggable backends, and deep IDD integration — plus WebSocket and SSE support for pushing data to clients. Jobs are first-class language constructs — the `Job` keyword is syntax, not a library import — with the runtime and queue management provided by `std/jobs`.
 
@@ -1689,59 +1689,18 @@ ProcessPayment.enqueue_in(3600, map { "order_id": "456", "amount": 29.99 })
 - [ ] `Workflow` declaration syntax (DAG dependencies with fan-out/fan-in)
 - [ ] Workflow status tracking
 
-### 10.5 WebSocket Support
+### 10.5 Native SSE and WebSockets
 
-**Priority:** High — essential for modern web apps. Live dashboards, chat, notifications, and real-time job status updates all require pushing data to clients.
+**Status:** Design direction accepted; implementation not started. [DD-041](design-docs/dd-041-sse-streaming.md) is the canonical design and replaces the earlier WebSocket API sketch here.
 
-The assessment identified this as a key missing feature: "there's no way to push data to clients. This limits NTNT to traditional page-based web apps."
+**Scope:** Support both protocols through the existing Axum/Tokio server, with SSE first and WebSockets second. Ordinary routes and middleware return typed streaming/upgrade responses; idle connections do not retain an interpreter or OS thread.
 
-```ntnt
-import { broadcast, send_to } from "std/ws"
+- [ ] Verify native response/upgrade ownership, streamed-body cleanup/shutdown, and multi-worker callback identity through narrow feasibility probes.
+- [ ] Slice A: bounded native broadcast/publish, ordinary `sse()` response builder, auth/header handling, enforced connection/byte limits, lag handling and lifecycle cleanup.
+- [ ] Slice B: setup-registered WebSocket endpoints, `websocket()` response builder, text/binary send/close, explicit connection state, bounded fair worker callbacks and exact-Origin policy.
+- [ ] Prove multi-worker fan-out, slow-client bounds, cancellation/reload/shutdown behavior, and ordinary HTTP performance with real protocol clients.
 
-// WebSocket route — handler called per connection
-ws("/chat", fn(conn) {
-    // Called when a message arrives
-    conn.on_message(fn(msg) {
-        // Broadcast to all connected clients
-        broadcast("/chat", msg)
-    })
-
-    conn.on_close(fn() {
-        print("Client disconnected")
-    })
-})
-
-// Send to specific client from anywhere (e.g., from a job)
-ws("/jobs/status", fn(conn) {
-    // Client subscribes to job updates
-    let job_id = conn.params["job_id"]
-    conn.on_open(fn() {
-        send_to(conn, json(Queue.status(job_id)))
-    })
-})
-
-// Push from background jobs
-Job ProcessPayment on payments {
-    perform(order_id: String) {
-        // ... process payment ...
-        broadcast("/orders/{order_id}", json(map { "status": "paid" }))
-    }
-}
-
-listen(8080)
-```
-
-**Implementation plan:**
-
-- [ ] `ws(pattern, handler)` global builtin for WebSocket routes (mirrors `get`/`post` pattern)
-- [ ] Connection object: `conn.on_message()`, `conn.on_open()`, `conn.on_close()`
-- [ ] `send_to(conn, msg)` — send to a specific connection
-- [ ] `broadcast(channel, msg)` — send to all connections on a channel
-- [ ] `std/ws` module for additional utilities (rooms, connection tracking)
-- [ ] Integration with background jobs — push job status updates to clients
-- [ ] Server-Sent Events (SSE) as a simpler alternative: `sse(pattern, handler)`
-- [ ] Connection state management (track connected clients, rooms/channels)
-- [ ] Graceful connection cleanup on server shutdown
+The API names above are proposed, not shipped. The first scope is process-local live delivery, not durable replay or cross-process job push. No room DSL, separate realtime framework, per-connection generator/scheduler, client SDK, or interpreter-wide async refactor; see DD-041 for the full contract, non-goals and acceptance checks.
 
 ### 10.6 IDD Integration & CLI
 
@@ -1791,7 +1750,7 @@ Feature: Welcome Email Job
 - In-memory, PostgreSQL, and Redis/Valkey backends
 - Resilience: heartbeats, retries, dead letter queue, rate limiting, graceful shutdown
 - Job composition: chains (sequential), workflows (DAG), batches (parallel)
-- WebSocket and SSE support (`ws()` builtin, `broadcast()`, `send_to()`)
+- Native SSE and WebSocket support in two slices, with bounded process-local fan-out and worker callbacks (DD-041; design accepted, implementation not started)
 - IDD integration for testing jobs in `.intent` files
 - `ntnt jobs` CLI commands for monitoring and management
 - Simulation mode for dry-run execution

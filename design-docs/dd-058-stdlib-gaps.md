@@ -221,31 +221,13 @@ configure_uploads(map {
 
 ### Priority 2: Medium Impact (Many Apps Need These)
 
-#### 5. WebSocket Support (`std/ws`)
+#### 5. Native SSE and WebSocket Support (DD-041)
 
-**The gap:** Real-time features — chat, live notifications, collaborative editing, live dashboards. HTTP polling works but is inefficient and laggy.
+**The gap:** Server-to-browser updates and bidirectional messages are not yet implemented. SSE plus ordinary HTTP commands covers dashboards, notifications and many chat interfaces; WebSockets add frequent two-way interaction and binary messages.
 
-**What developers install instead:** ws, socket.io (npm); websockets (PyPI)
+**Canonical design:** [DD-041: Native SSE and WebSockets](dd-041-sse-streaming.md) supersedes this section's former `std/ws` API sketch. The accepted direction is SSE first, then WebSockets on shared bounded native transport ownership, with ordinary response builders and explicit-state callbacks on existing interpreter workers. No interpreter/OS thread is reserved per idle connection.
 
-**Proposed API:**
-```ntnt
-import { websocket } from "std/ws"
-
-websocket("/ws/chat", fn(ws) {
-    ws.on("message", fn(msg) {
-        // Broadcast to all connected clients
-        ws.broadcast("chat", msg)
-    })
-
-    ws.on("close", fn() {
-        log("Client disconnected")
-    })
-
-    ws.send("Welcome!")
-})
-```
-
-**Scope:** Larger effort (~1000+ lines). Axum has built-in WebSocket support via `axum::extract::ws`, so the plumbing exists. Main work is the ntnt API design and managing connection state.
+**Scope:** Medium server/runtime feature; first prove bridge/upgrade cleanup and multi-worker callback identity. Process-local live fan-out only initially; no broker, rooms framework, durable replay, client SDK or interpreter-wide async refactor. See DD-041 for the proposed API, feasibility gates and acceptance checks; none of these APIs is shipped by this design update.
 
 #### 6. XML Parsing (`std/xml`)
 
@@ -456,7 +438,7 @@ if get_env("NTNT_ENV") == "development" {
 - Schema defined in ntnt (not SDL strings) — type-checked, autocomplete-friendly
 - Automatic resolver generation from models (stretch goal)
 - Batching / DataLoader pattern for N+1 query prevention
-- Subscriptions via WebSocket (ties into `std/ws`)
+- Subscriptions via WebSocket (future integration; native server transport design is in DD-041)
 - Introspection + GraphiQL playground in dev mode
 
 **Scope:** Large (~2000-3000 LOC). Needs `async-graphql` crate (mature, Axum integration exists). Could start with query/mutation only, add subscriptions later.
@@ -492,7 +474,7 @@ Based on impact, effort, and dependencies:
 | 6 | HTML sanitization | Small (300-400 LOC) | Medium | `ammonia` crate. UGC apps. |
 | 7 | Cron expressions | Small (200-300 LOC) | Medium | `cron` crate. Extend `std/time`. |
 | 8 | `std/xml` | Medium (400-600 LOC) | Medium | `quick-xml` crate. Integrations. |
-| 9 | `std/ws` (WebSocket) | Large (1000+ LOC) | Medium | Axum has WS support. Real-time apps. |
+| 9 | Native SSE + WebSockets (DD-041) | Medium; feasibility-gated | Medium | SSE first; shared bounded async transport and explicit worker callbacks. Not implemented. |
 | 10 | `std/db/model` (ORM) | Large (2000-3000 LOC) | Very High | Model syntax, query builder, migrations. Needs own DD. |
 | 11 | `std/graphql` | Large (2000-3000 LOC) | High | `async-graphql` crate. API-first apps. Needs own DD. |
 | 12 | QR codes | Small (200 LOC) | Low | `qrcode` crate. 2FA UX. |
@@ -513,7 +495,7 @@ Based on impact, effort, and dependencies:
 | Validation errors format? | Map of field→message vs structured error objects | Map of field→message (simple, matches how forms render errors) |
 | Email: SMTP only or also API? | SMTP only vs SMTP + provider APIs (Resend, SendGrid) | SMTP only in stdlib. Provider APIs are just `fetch()` calls. |
 | File upload storage? | Return bytes vs stream to disk | Return bytes for small files (<10MB), stream option for large |
-| WebSocket: full duplex or SSE first? | WebSocket vs Server-Sent Events | SSE first (DD-041 exists). WebSocket after. |
+| WebSocket: full duplex or SSE first? | Shared two-slice design | Accepted direction in DD-041: SSE first, WebSockets second; both unimplemented. |
 | Should validation integrate with contracts? | Separate systems vs unified | Separate — contracts are for function invariants, validation is for external input |
 
 ---

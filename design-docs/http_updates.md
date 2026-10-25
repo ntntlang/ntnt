@@ -238,7 +238,9 @@ use_middleware(log_requests)
 get("/admin", admin_handler, map { "middleware": [auth_required] })
 ```
 
-### WebSocket (New)
+### WebSocket (Historical sketch — superseded by DD-041)
+
+The API, room model, implementation steps and WebSocket-specific tests elsewhere in this historical document are not the current plan. [DD-041: Native SSE and WebSockets](dd-041-sse-streaming.md) is authoritative: SSE first, WebSockets second, ordinary response builders and explicit-state worker callbacks; no rooms framework. The example below is retained only as historical context, not an available API.
 
 ```ntnt
 fn chat_handler(ws) {
