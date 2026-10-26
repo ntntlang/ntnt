@@ -278,3 +278,47 @@ fn sync_test_port_precedes_environment_override() {
     assert_eq!(value["port"], port);
     assert_eq!(value["host"], "127.0.0.1");
 }
+
+#[cfg(unix)]
+#[test]
+fn async_sigterm_drain_is_bounded_by_request_timeout_when_client_stops_reading() {
+    // A client that never reads a large response used to keep graceful
+    // shutdown waiting forever after SIGTERM.
+    let source = r#"
+import { text } from "std/http/server"
+import { repeat } from "std/string"
+let big = repeat("x", 16 * 1024 * 1024)
+get("/big", fn(req) { text(big) })
+listen(0, map { "readiness": "json" })
+"#;
+    let mut server = fixture::Fixture::start(
+        source,
+        &["run", "--timeout", "1"],
+        &[("NTNT_ENV", "production"), ("NTNT_WORKERS", "1")],
+    );
+    let addr = server.ready();
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    socket.connect(&addr.into()).unwrap();
+    let mut stalled: TcpStream = socket.into();
+    write!(stalled, "GET /big HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut first = [0u8; 64];
+    stalled.read_exact(&mut first).unwrap();
+    assert!(first.starts_with(b"HTTP/1.1 200"));
+    std::thread::sleep(Duration::from_millis(300));
+
+    let signalled = std::time::Instant::now();
+    unsafe {
+        libc::kill(server.child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let status = server.wait();
+    let elapsed = signalled.elapsed();
+    assert!(status.success(), "{status:?} {}", server.stderr());
+    assert!(elapsed < Duration::from_secs(8), "drain took {elapsed:?}");
+    assert!(
+        server.stderr().contains("shutdown drain exceeded 1s"),
+        "{}",
+        server.stderr()
+    );
+    drop(stalled);
+}
