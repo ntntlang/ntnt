@@ -959,6 +959,11 @@ fn cors_layer_from_config(config: &CorsConfig) -> CorsLayer {
 /// Start the async HTTP server with interpreter bridge
 ///
 /// This is the main entry point for production async servers.
+///
+/// After a shutdown signal, this returns once connections drain or the
+/// request-timeout drain limit expires. Connections still open at the limit
+/// are spawned tasks on the caller's runtime: the caller must shut that
+/// runtime down after this returns to close them.
 pub async fn start_server_with_bridge(
     config: AsyncServerConfig,
     interpreter_handle: SharedHandle,
@@ -1058,14 +1063,47 @@ pub async fn start_server_with_bridge(
     println!();
     println!("Press Ctrl+C to stop");
 
-    // Run the server with graceful shutdown
-    axum::serve(
+    // Run the server with graceful shutdown. Graceful shutdown waits for every
+    // open connection, so a client that stops reading a large/slow response
+    // would otherwise keep the process alive forever after SIGTERM. Bound the
+    // drain by the request timeout. Axum spawns each connection as its own
+    // task, so returning here does not cancel stalled connections by itself;
+    // the caller owns the runtime and must shut it down (see
+    // `run_async_http_server`), which cancels those tasks and closes sockets.
+    let (signalled_tx, mut signalled_rx) = tokio::sync::watch::channel(false);
+    let signal = async move {
+        shutdown_signal().await;
+        let _ = signalled_tx.send(true);
+    };
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .map_err(|e| IntentError::runtime_error(format!("Server error: {}", e)))
+    .with_graceful_shutdown(signal);
+    let drain = shutdown_drain_limit(config.request_timeout_secs);
+    let drain_deadline = async move {
+        if signalled_rx.wait_for(|signalled| *signalled).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        tokio::time::sleep(drain).await;
+    };
+    tokio::select! {
+        result = serve => {
+            result.map_err(|e| IntentError::runtime_error(format!("Server error: {}", e)))
+        }
+        _ = drain_deadline => {
+            eprintln!(
+                "[WARN] shutdown drain exceeded {}s; closing remaining connections",
+                drain.as_secs()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Maximum time graceful shutdown waits for in-flight connections.
+fn shutdown_drain_limit(request_timeout_secs: u64) -> Duration {
+    Duration::from_secs(request_timeout_secs.max(1))
 }
 
 /// Signal handler for graceful shutdown
