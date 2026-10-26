@@ -16139,6 +16139,13 @@ c")
     fn test_http_worker_request_tasks_preserve_bootstrap_suppression() {
         use crate::stdlib::http_bridge::{BridgeRequest, HandlerRequest};
 
+        // The worker registers and enqueues into the process-global job
+        // runtime: serialize with other job tests and start from a clean one.
+        let _jobs_guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
+
         let dir = tempfile::tempdir().unwrap();
         let source_file = dir.path().join("worker.tnt");
         let marker = dir.path().join("bootstrap-task-ran");
@@ -16150,7 +16157,9 @@ c")
 import {{ spawn, await_task, parallel, schedule, after, cancel_schedule }} from "std/concurrent"
 import {{ json }} from "std/http/server"
 import {{ write_file }} from "std/fs"
-import {{ enqueue }} from "std/jobs"
+import {{ enqueue, configure_queue }} from "std/jobs"
+// In-memory queue: request-time enqueues must not touch ./jobs.db.
+configure_queue(map {{ "mode": "testing" }})
 job WorkerProbe on worker_probe {{
     perform(n: Int) {{
         return n
@@ -16246,6 +16255,7 @@ listen(0)
         worker.join().unwrap();
         assert_eq!(exit, WorkerExit::Shutdown);
         assert!(!marker.exists(), "bootstrap tasks must not execute");
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
         for (path, reply_rx) in replies {
             let response = reply_rx.blocking_recv().expect("worker must reply");
             assert_eq!(response.status, 200, "{path}: {}", response.body);
