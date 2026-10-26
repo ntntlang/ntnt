@@ -289,6 +289,7 @@ import { text } from "std/http/server"
 import { repeat } from "std/string"
 let big = repeat("x", 16 * 1024 * 1024)
 get("/big", fn(req) { text(big) })
+on_shutdown(fn() { print("SHUTDOWN_HANDLER_RAN") })
 listen(0, map { "readiness": "json" })
 "#;
     let mut server = fixture::Fixture::start(
@@ -319,6 +320,11 @@ listen(0, map { "readiness": "json" })
         server.stderr().contains("shutdown drain exceeded 1s"),
         "{}",
         server.stderr()
+    );
+    assert!(
+        server.stdout().contains("SHUTDOWN_HANDLER_RAN"),
+        "{}",
+        server.stdout()
     );
     drop(stalled);
 }
