@@ -9,6 +9,8 @@
 
 Approval accepts the two-slice design direction, not a claim of shipped APIs or authorization to implement/deploy. API details and numerical defaults remain subject to the feasibility and measurement gates below.
 
+The [proposed implementation plan](dd-041-implementation-plan.md) details ownership contracts, dependency-ordered slices and the runtime experiments required before implementation. It remains subject to review; the feasibility gates have not been executed.
+
 ## 1. Decision
 
 Support **both protocols**, delivered in two independently useful slices: SSE first, WebSockets second. Share connection ownership, resource accounting, native fan-out, response handoff, and shutdown—not protocol semantics or a new application framework.
