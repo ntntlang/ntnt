@@ -854,8 +854,9 @@ pub struct Interpreter {
     request_timeout_secs: u64,
     /// Execution mode controls how server-related functions behave
     execution_mode: ExecutionMode,
-    /// Secondary HTTP request phase adds only task/scheduling capabilities;
-    /// Worker mode continues to suppress server lifecycle actions.
+    /// Secondary HTTP request phase adds only task/scheduling/job-enqueue
+    /// capabilities (worker 0 already has them in Normal mode); Worker mode
+    /// continues to suppress server lifecycle actions and bootstrap effects.
     http_worker_request_tasks: bool,
     /// Lib modules for file-based routing (stored for hot-reload)
     lib_modules: HashMap<String, HashMap<String, Value>>,
@@ -1221,7 +1222,9 @@ impl Interpreter {
                 && self.http_worker_request_tasks
                 && matches!(
                     cap,
-                    RuntimeCapability::TaskSpawning | RuntimeCapability::Scheduling
+                    RuntimeCapability::TaskSpawning
+                        | RuntimeCapability::Scheduling
+                        | RuntimeCapability::JobEnqueue
                 ))
     }
 
@@ -16107,7 +16110,9 @@ c")
                 ExecutionMode::Worker.has(*cap)
                     || matches!(
                         cap,
-                        RuntimeCapability::TaskSpawning | RuntimeCapability::Scheduling
+                        RuntimeCapability::TaskSpawning
+                            | RuntimeCapability::Scheduling
+                            | RuntimeCapability::JobEnqueue
                     ),
                 "unexpected request-worker authority: {cap:?}"
             );
@@ -16115,6 +16120,7 @@ c")
         interpreter.set_execution_mode(ExecutionMode::Worker);
         assert!(!interpreter.http_worker_request_tasks);
         assert!(!interpreter.has_runtime_capability(RuntimeCapability::TaskSpawning));
+        assert!(!interpreter.has_runtime_capability(RuntimeCapability::JobEnqueue));
         for mode in [
             ExecutionMode::Normal,
             ExecutionMode::Job,
@@ -16144,13 +16150,24 @@ c")
 import {{ spawn, await_task, parallel, schedule, after, cancel_schedule }} from "std/concurrent"
 import {{ json }} from "std/http/server"
 import {{ write_file }} from "std/fs"
+import {{ enqueue }} from "std/jobs"
+job WorkerProbe on worker_probe {{
+    perform(n: Int) {{
+        return n
+    }}
+}}
 let marker = {marker_literal}
+let boot_enqueue = enqueue("WorkerProbe", map {{ "n": 0 }})
 let boot_spawn = spawn(fn() {{ write_file(marker, "spawn") }})
 let boot_parallel = parallel([fn() {{ write_file(marker, "parallel") }}])
 let boot_schedule = schedule(60000, fn() {{ write_file(marker, "schedule") }})
 let boot_after = after(60000, fn() {{ write_file(marker, "after") }})
 get("/bootstrap", fn(req) {{
-    json([boot_spawn, boot_parallel, boot_schedule, boot_after])
+    json([boot_spawn, boot_parallel, boot_schedule, boot_after, boot_enqueue])
+}})
+get("/enqueue", fn(req) {{
+    let id = unwrap(enqueue("WorkerProbe", map {{ "n": 1 }}))
+    json(len(str(id)) > 0)
 }})
 get("/spawn", fn(req) {{
     let task = spawn(fn() {{ 42 }})
@@ -16191,6 +16208,7 @@ listen(0)
             "/parallel",
             "/scheduled",
             "/lifecycle",
+            "/enqueue",
             "/spawn",
             "/bootstrap",
         ] {
@@ -16232,7 +16250,8 @@ listen(0)
             let response = reply_rx.blocking_recv().expect("worker must reply");
             assert_eq!(response.status, 200, "{path}: {}", response.body);
             let expected = match path {
-                "/bootstrap" => serde_json::json!([null, null, null, null]),
+                "/bootstrap" => serde_json::json!([null, null, null, null, null]),
+                "/enqueue" => serde_json::json!(true),
                 "/spawn" => serde_json::json!(42),
                 "/parallel" => serde_json::json!([21, 42]),
                 "/scheduled" => serde_json::json!([84, true]),
