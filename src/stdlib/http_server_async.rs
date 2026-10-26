@@ -959,6 +959,11 @@ fn cors_layer_from_config(config: &CorsConfig) -> CorsLayer {
 /// Start the async HTTP server with interpreter bridge
 ///
 /// This is the main entry point for production async servers.
+///
+/// After a shutdown signal, this returns once connections drain or the
+/// request-timeout drain limit expires. Connections still open at the limit
+/// are spawned tasks on the caller's runtime: the caller must shut that
+/// runtime down after this returns to close them.
 pub async fn start_server_with_bridge(
     config: AsyncServerConfig,
     interpreter_handle: SharedHandle,
@@ -1061,8 +1066,10 @@ pub async fn start_server_with_bridge(
     // Run the server with graceful shutdown. Graceful shutdown waits for every
     // open connection, so a client that stops reading a large/slow response
     // would otherwise keep the process alive forever after SIGTERM. Bound the
-    // drain by the request timeout; leaving this function drops the runtime,
-    // which closes the remaining connections.
+    // drain by the request timeout. Axum spawns each connection as its own
+    // task, so returning here does not cancel stalled connections by itself;
+    // the caller owns the runtime and must shut it down (see
+    // `run_async_http_server`), which cancels those tasks and closes sockets.
     let (signalled_tx, mut signalled_rx) = tokio::sync::watch::channel(false);
     let signal = async move {
         shutdown_signal().await;

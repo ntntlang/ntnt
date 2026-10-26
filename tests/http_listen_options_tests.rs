@@ -302,6 +302,12 @@ listen(0, map { "readiness": "json" })
     socket.set_recv_buffer_size(4096).unwrap();
     socket.connect(&addr.into()).unwrap();
     let mut stalled: TcpStream = socket.into();
+    stalled
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    stalled
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
     write!(stalled, "GET /big HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
     let mut first = [0u8; 64];
     stalled.read_exact(&mut first).unwrap();
