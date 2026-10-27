@@ -1,0 +1,29 @@
+// Live counter over Server-Sent Events. Run: ntnt run examples/sse_dashboard.tnt
+import { html, json, sse } from "std/http/server"
+import { broadcast, publish, schedule } from "std/concurrent"
+
+let ticks = broadcast("ticks")
+
+get("/", fn(req) {
+    return html("""<!doctype html>
+<p>Server time: <span id="t">waiting…</span></p>
+<script>
+new EventSource("/events").addEventListener("tick", e => {
+  document.getElementById("t").textContent = JSON.parse(e.data).at
+})
+</script>""")
+})
+
+get("/events", fn(req) {
+    return sse(ticks)
+})
+
+get("/health", fn(req) {
+    return json(map { "ok": true })
+})
+
+schedule(1000, fn() {
+    publish(ticks, map { "at": str(now()) }, map { "event": "tick" })
+})
+
+listen(8080)
