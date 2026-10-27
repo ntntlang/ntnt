@@ -1139,42 +1139,77 @@ pub async fn start_server_with_bridge(
     println!();
     println!("Press Ctrl+C to stop");
 
-    // Run the server with graceful shutdown. Graceful shutdown waits for every
-    // open connection, so a client that stops reading a large/slow response
-    // would otherwise keep the process alive forever after SIGTERM. Bound the
-    // drain by the request timeout. Axum spawns each connection as its own
-    // task, so returning here does not cancel stalled connections by itself;
-    // the caller owns the runtime and must shut it down (see
-    // `run_async_http_server`), which cancels those tasks and closes sockets.
-    let (signalled_tx, mut signalled_rx) = tokio::sync::watch::channel(false);
-    let signal = async move {
-        shutdown_signal().await;
-        let _ = signalled_tx.send(true);
-    };
-    let serve = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(signal);
-    let drain = shutdown_drain_limit(config.request_timeout_secs);
-    let drain_deadline = async move {
-        if signalled_rx.wait_for(|signalled| *signalled).await.is_err() {
-            std::future::pending::<()>().await;
-        }
-        tokio::time::sleep(drain).await;
-    };
+    // Serve connections with our own accept loop (instead of axum::serve) so
+    // HTTP/2 buffering can be bounded explicitly: a stalled SSE client must not
+    // let hyper buffer megabytes per stream. Graceful shutdown waits for open
+    // connections, bounded by the request timeout; connections still open at
+    // the deadline are spawned tasks that the caller cancels by shutting the
+    // runtime down (see `run_async_http_server`).
+    serve_connections(listener, app, config.request_timeout_secs).await
+}
+
+/// HTTP/2 concurrent streams allowed per connection.
+const H2_MAX_CONCURRENT_STREAMS: u32 = 128;
+/// HTTP/2 bytes hyper may buffer per stream before applying backpressure.
+const H2_MAX_SEND_BUF: usize = 64 * 1024;
+
+async fn serve_connections(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    request_timeout_secs: u64,
+) -> Result<()> {
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder;
+
+    let mut builder = Builder::new(TokioExecutor::new());
+    builder
+        .http2()
+        .max_concurrent_streams(H2_MAX_CONCURRENT_STREAMS)
+        .max_send_buf_size(H2_MAX_SEND_BUF);
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let signal = shutdown_signal();
+    tokio::pin!(signal);
+    loop {
+        let (stream, remote) = tokio::select! {
+            _ = &mut signal => break,
+            accepted = listener.accept() => match accepted {
+                Ok(pair) => pair,
+                Err(_) => {
+                    // Transient accept errors (e.g. EMFILE): back off briefly.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+            },
+        };
+        let app = app.clone();
+        let service = hyper::service::service_fn(move |mut req: Request<hyper::body::Incoming>| {
+            req.extensions_mut().insert(ConnectInfo(remote));
+            let mut app = app.clone();
+            async move {
+                use tower::Service as _;
+                app.call(req.map(Body::new)).await
+            }
+        });
+        let connection = builder
+            .serve_connection_with_upgrades(TokioIo::new(stream), service)
+            .into_owned();
+        let connection = graceful.watch(connection);
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+    }
+    drop(listener);
+    let drain = shutdown_drain_limit(request_timeout_secs);
     tokio::select! {
-        result = serve => {
-            result.map_err(|e| IntentError::runtime_error(format!("Server error: {}", e)))
-        }
-        _ = drain_deadline => {
+        _ = graceful.shutdown() => {}
+        _ = tokio::time::sleep(drain) => {
             eprintln!(
                 "[WARN] shutdown drain exceeded {}s; closing remaining connections",
                 drain.as_secs()
             );
-            Ok(())
         }
     }
+    Ok(())
 }
 
 /// Maximum time graceful shutdown waits for in-flight connections.
