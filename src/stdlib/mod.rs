@@ -30,6 +30,7 @@ pub mod netmon;
 pub mod path;
 pub mod postgres;
 pub mod process;
+pub mod rate_limit;
 pub mod realtime;
 pub mod secrets;
 pub(crate) mod send_deadline;

@@ -680,6 +680,114 @@ fn guess_mime_type(path: &str) -> &'static str {
 }
 
 /// Main request handler - catches all requests and forwards to interpreter
+/// Dynamic-route dispatch: bridge conversion, interpreter call, HEAD stripping.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_dynamic(
+    state: &AppState,
+    req: Request<Body>,
+    params: HashMap<String, String>,
+    peer_addr: SocketAddr,
+    method: &axum::http::Method,
+    path: &str,
+    handler_name: &str,
+    csp_ref: Option<(&str, &str)>,
+) -> Response<Body> {
+    // Convert request and send to interpreter
+    let mut response = match axum_to_bridge_request(req, params, peer_addr).await {
+        Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
+            Ok(response) => {
+                bridge_to_axum_response(response, csp_ref, *method == axum::http::Method::HEAD)
+            }
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                // Structured error log — always printed regardless of mode
+                eprintln!(
+                    "[ERROR] {} {} | handler: {} | {}",
+                    method, path, handler_name, error_msg
+                );
+                error_response(
+                    500,
+                    &error_msg,
+                    &method.to_string(),
+                    path,
+                    handler_name,
+                    state.is_production,
+                    csp_ref,
+                )
+            }
+        },
+        Err(e) => {
+            let error_msg = format!("{}", e);
+            eprintln!(
+                "[ERROR] {} {} | request parse | {}",
+                method, path, error_msg
+            );
+            error_response(
+                400,
+                &error_msg,
+                &method.to_string(),
+                path,
+                "",
+                state.is_production,
+                csp_ref,
+            )
+        }
+    };
+
+    // HEAD responses: preserve status + headers, strip body (RFC 9110 §9.3.2)
+    if *method == axum::http::Method::HEAD {
+        *response.body_mut() = Body::empty();
+    }
+
+    response
+}
+
+fn add_rate_headers(response: &mut Response<Body>, d: &crate::stdlib::rate_limit::Decision) {
+    let h = response.headers_mut();
+    for (name, value) in [
+        ("ratelimit-limit", d.limit),
+        ("ratelimit-remaining", d.remaining),
+        ("ratelimit-reset", d.reset_secs),
+    ] {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&value.to_string()) {
+            h.insert(name, v);
+        }
+    }
+}
+
+/// 429 with Retry-After and IETF RateLimit-* headers; text or JSON by Accept.
+fn too_many_requests_response(
+    d: &crate::stdlib::rate_limit::Decision,
+    json: bool,
+    csp: Option<(&str, &str)>,
+) -> Response<Body> {
+    let (ctype, body) = if json {
+        (
+            "application/json",
+            format!(
+                "{{\"error\":\"rate_limited\",\"retry_after\":{}}}",
+                d.retry_after_secs
+            ),
+        )
+    } else {
+        (
+            "text/plain; charset=utf-8",
+            "Too Many Requests\n".to_string(),
+        )
+    };
+    let mut response = Response::builder()
+        .status(429)
+        .header("content-type", ctype)
+        .header("retry-after", d.retry_after_secs.to_string())
+        .header("cache-control", "no-store")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| Response::new(Body::empty()));
+    add_rate_headers(&mut response, d);
+    // Same protection headers (CSP, HSTS in production, ...) as other responses.
+    apply_async_security_headers(&mut response, csp);
+    response
+}
+
 async fn handle_request(
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
@@ -706,56 +814,65 @@ async fn handle_request(
 
     match route_match {
         Some((handler_name, params)) => {
-            // Convert request and send to interpreter
-            let mut response = match axum_to_bridge_request(req, params, peer_addr).await {
-                Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
-                    Ok(response) => bridge_to_axum_response(
-                        response,
-                        csp_ref,
-                        method == axum::http::Method::HEAD,
-                    ),
-                    Err(e) => {
-                        let error_msg = format!("{}", e);
-                        // Structured error log — always printed regardless of mode
-                        eprintln!(
-                            "[ERROR] {} {} | handler: {} | {}",
-                            method, path, handler_name, error_msg
-                        );
-                        error_response(
-                            500,
-                            &error_msg,
-                            &method.to_string(),
+            // Built-in rate limit (#294): off unless NTNT_RATE_LIMIT=on. Runs
+            // before the body is read or the interpreter is involved.
+            if let Some(limiter) = crate::stdlib::rate_limit::limiter() {
+                let client = crate::stdlib::client_ip::config().resolve(peer_addr.ip(), |name| {
+                    req.headers()
+                        .get_all(name)
+                        .iter()
+                        .filter_map(|v| v.to_str().ok())
+                        .collect()
+                });
+                if let Some(decision) = limiter.check_request(method.as_str(), &path, client) {
+                    if !decision.allowed {
+                        if decision.first_trip {
+                            eprintln!(
+                                "[WARN] rate_limit: {} {} limited for client {} (retry after {}s)",
+                                method, path, client, decision.retry_after_secs
+                            );
+                        }
+                        let accept_json = req
+                            .headers()
+                            .get("accept")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|v| v.contains("application/json"))
+                            .unwrap_or(false);
+                        let mut response =
+                            too_many_requests_response(&decision, accept_json, csp_ref);
+                        if method == axum::http::Method::HEAD {
+                            *response.body_mut() = Body::empty();
+                        }
+                        return response;
+                    }
+                    if limiter.config.headers_on_allowed {
+                        let mut response = dispatch_dynamic(
+                            &state,
+                            req,
+                            params,
+                            peer_addr,
+                            &method,
                             &path,
                             &handler_name,
-                            state.is_production,
                             csp_ref,
                         )
+                        .await;
+                        add_rate_headers(&mut response, &decision);
+                        return response;
                     }
-                },
-                Err(e) => {
-                    let error_msg = format!("{}", e);
-                    eprintln!(
-                        "[ERROR] {} {} | request parse | {}",
-                        method, path, error_msg
-                    );
-                    error_response(
-                        400,
-                        &error_msg,
-                        &method.to_string(),
-                        &path,
-                        "",
-                        state.is_production,
-                        csp_ref,
-                    )
                 }
-            };
-
-            // HEAD responses: preserve status + headers, strip body (RFC 9110 §9.3.2)
-            if method == axum::http::Method::HEAD {
-                *response.body_mut() = Body::empty();
             }
-
-            response
+            dispatch_dynamic(
+                &state,
+                req,
+                params,
+                peer_addr,
+                &method,
+                &path,
+                &handler_name,
+                csp_ref,
+            )
+            .await
         }
         None => {
             // No dynamic route - check static files (GET and HEAD)
