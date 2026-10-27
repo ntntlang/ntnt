@@ -1,6 +1,6 @@
 # DD-041 implementation plan: native SSE, then WebSockets
 
-**Status:** Independently reviewed draft; three acceptance gaps addressed below. Gate 0 remains unexecuted. Planning and disposable dependency probes only; feature implementation is not authorized by this plan.
+**Status:** Independently reviewed plan. Gate 0 executed on 2026-10-26 (outcome recorded under §4); no stop condition was hit. Slice A (SSE) may proceed; Slice B remains gated on its own acceptance checks.
 **Target baseline:** `58710b9b9b9468575257ccc141dcbaed639d468b` (DD-041 merged); runtime/Cargo remain identical to v0.5.6.
 **Design:** [DD-041](dd-041-sse-streaming.md).
 **Publication:** Proposed implementation plan for review. This document does not change DD-041's accepted status or implement its APIs. Keep the plan PR unmerged pending review; Gate 0 must establish feasibility before committing to public API/behavior or beginning the implementation slices.
@@ -115,6 +115,27 @@ These are coherent implementation boundaries, not a requirement for one micro-PR
 
 **Gate outcome:** a short recorded result in the plan/DD, viable signatures/ownership decisions and a small regression seed. Delete discarded scratch code. No public stub API, temporary global registry or parallel transport implementation lands. Stop and ask if satisfying lifecycle bounds needs a new connection driver, whole-interpreter refactor, unrestricted closure transport or significant authority change. A blocked gate is not permission to skip an invariant or to promise a smaller feature still meets it.
 
+### Gate 0 outcome (executed 2026-10-26)
+
+Probes ran against the real `ntnt run` server and real Worker-mode interpreters, using disposable scratch patches that have since been deleted. No public API, stub or registry landed. Pre-existing defects that Gate 0 surfaced are tracked separately so this feature does not carry them: #289 and #290 are merged; the builtin-shadowing defect is open as #293 (#291 was a superseded stopgap).
+
+**Ownership/transport (real bridge + Axum server, HTTP/1.1 and HTTP/2):**
+
+- A streaming body's native owner is dropped as soon as the client disconnects (0 ms observed). A stalled client does not block other requests.
+- Graceful shutdown waited forever for any open stream or slow response. This was a pre-existing defect: a throttled static download also hung SIGTERM. Fixed in #289: drain bounded by the request timeout, then explicit runtime shutdown. Streams additionally need to observe a process shutdown signal and end cooperatively. A scratch implementation of that ended an active stream at ~0 s and a stalled one at the drain bound, with the owner dropped in both cases.
+- HTTP/2 prior knowledge is accepted by the listener, so h2 is a reachable path and must be tested and bounded. Stalled-client buffering measured outside the kernel send queue: HTTP/1.1 ≈115 KB; one h2 stream ≈0.5 MB; 8 h2 streams on one connection ≈8 MB (≈1 MB per stream inside hyper/h2). Slice A must therefore (a) produce frames only when the body is polled, from the bounded broadcast receiver, never pre-buffering per subscriber, and (b) set explicit h2 per-stream send-buffer and concurrent-stream limits on the server builder. This is configuration of the existing stack, not a new connection driver.
+
+**Callbacks and worker semantics (real `Interpreter`, Worker mode):**
+
+- A callback invoked through ordinary `call_function` with explicit state in/out behaves as §3 requires. Plain value and `Ok(state)` commit; returned `Err` and runtime errors (e.g. a failed `assert`) are failures and do not commit. Task spawning inside a callback works. `call_depth`, the environment frame and the deferred list are restored after every call, including failures. Transitive helper imports resolve.
+- Canonical identity: an interpreter-aware native keyed on the resolved `NativeFunction` (the `sort_by` path) agrees across named import, alias and module-qualified calls. The spelling-keyed fast paths in call evaluation, and server-action dispatch by raw identifier, do **not** let user definitions shadow builtins. This is pre-existing and unfixed; the replacement design is tracked in #293. The realtime registration hook must use the value-based (resolved callee) path only and must not rely on spelling-keyed dispatch.
+- Capability parity: secondary workers silently dropped `enqueue` (capability gate returned Unit): with 4 workers, 30 of 40 request-time enqueues were lost. Pre-existing; fixed in #290. Callback execution must reuse the request-phase capability set, and tests must assert real return values, because missing capabilities become silent Unit.
+- Two work queues: `flume::Selector` over the HTTP and callback receivers blocks without busy-waiting and wakes on either. HTTP preference after a callback is a `try_recv` policy in the shared worker service, with no second interpreter pool.
+- Source identity: a worker's tracked imports include nested imports, so a fingerprint over main + tracked import bytes changes when only a transitive helper changes. This establishes only the source-bytes input to §1.D's generation identity. Resolved import identities, runtime build identity and frozen endpoint configuration, plus the generation barrier and respawn quarantine themselves, were not exercised and remain Slice B acceptance checks.
+- Readiness ordering: confirmed by source that the async server binds and emits readiness before secondary workers start, and workers retry startup indefinitely. The realtime readiness barrier (§1.D) must gate the existing startup handshake on worker setup/compatibility and bound startup retries. This is ordering work in `run_async_http_server`, not a loader rewrite.
+
+**Not yet exercised:** WebSocket upgrade with a held `OnUpgrade` (needs Axum's `ws` feature; Slice B), respawned-worker quarantine end-to-end, and fairness under worker loss with saturated callbacks. These remain Slice B acceptance checks, not assumed results.
+
 ### Slice A — useful SSE, complete lifecycle and caps
 
 Likely files: `src/stdlib/realtime.rs` (new private core), `src/stdlib/http_bridge.rs`, `src/stdlib/http_server_async.rs`, `src/stdlib/http_server.rs`, narrow interpreter/context/capture hooks, `src/stdlib/concurrent.rs`, `src/stdlib/mod.rs`, `src/typechecker.rs`, serializers/boundary consumers, and tests.
@@ -187,8 +208,10 @@ For ordinary HTTP/CLI/template baseline comparison, reuse `scripts/bench/run-ben
 
 ## 7. Evidence and remaining uncertainty
 
-**Actually observed:** source/locked-dependency inspection at the stated baseline; exact Tokio 1.53.3 channel probe from the design pass; exact bytes 1.12.1 ownership probe in this pass. The latter verified shared backing across Bytes clones/slices and that a budget-owner Drop happens once only after the final byte reference. Benchmark runner help and local nextest version were queried. No streaming server, WS callback dispatcher, native cross-worker prototype, performance benchmark, or feature regression suite has been executed yet; none is claimed passing.
+**Actually observed (pre-Gate-0 design pass):** source/locked-dependency inspection at the stated baseline; exact Tokio 1.53.3 channel probe from the design pass; exact bytes 1.12.1 ownership probe in this pass. The latter verified shared backing across Bytes clones/slices and that a budget-owner Drop happens once only after the final byte reference. Benchmark runner help and local nextest version were queried. At that point no streaming server, WS callback dispatcher, native cross-worker prototype, performance benchmark, or feature regression suite had been executed.
 
-**Still to prove:** actual bridge request-lease teardown, active Hyper stream/socket cancellation and shutdown, aggregate HTTP/WS codec-buffer allowance, imported native registration plumbing, generation/readiness barrier and quarantined respawn, callback capability policy, and HTTP fairness/RSS under live load and worker loss. Gate 0 owns these. Suggested DD defaults, the tentative implementation estimate and a documentation bot's confidence do not settle them.
+**Actually observed (Gate 0):** disposable probes against the real `ntnt run` server and Worker-mode interpreters, recorded under §4 "Gate 0 outcome". These were feasibility probes, not the feature implementation or its regression suite.
+
+**Still to prove after Gate 0:** request-lease teardown through the final-response path (Slice A), WS codec-buffer allowance and upgrade ownership, generation/readiness barrier implementation and quarantined respawn, and HTTP fairness/RSS under live load and worker loss (Slice B). See the Gate 0 outcome under §4 for what was measured. Suggested DD defaults, the tentative implementation estimate and a documentation bot's confidence do not settle them.
 
 **Independent review disposition:** the reviewer found no blocker to proceeding with Gate 0 and three medium-severity acceptance gaps, not proof that the final feature is feasible. Source inspection confirmed the startup-before-workers ordering, supervised workers rereading source, and the downstream HTTP codec copy paths. This revision addresses them with (1) explicit readiness/generation/quarantine steps and delay/conflict/helper-change cases, (2) a separate HTTP/SSE as well as WS transport-buffer allowance and stalled-writer cases, and (3) live-eligibility admission plus a truthful degraded-capacity contract and combined failure/load test. These are plan corrections, not executed feature regressions or a second reviewer verdict. Numeric limits, final lease policy and any requirement for immediate authorization revocation remain decisions to settle before public API/behavior freeze. No additional design merge or feature implementation has occurred.
