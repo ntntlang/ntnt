@@ -118,8 +118,9 @@ pub struct TypeContext {
     /// Whole-module aliases by lexical scope, parallel to `scopes`. Calls on
     /// these values dispatch to exported fields rather than through UFCS.
     module_aliases: Vec<HashSet<String>>,
-    /// Route builtin names bound by an import: local name -> module source
-    imported_route_names: HashMap<String, String>,
+    /// Route builtin names bound by a top-level import:
+    /// local name -> (module source, exported name)
+    imported_route_names: HashMap<String, (String, String)>,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -1712,6 +1713,13 @@ impl TypeContext {
                 }
             }
             Statement::Located { stmt, .. } => self.collect_declaration(stmt),
+            Statement::Import {
+                items,
+                source,
+                alias: None,
+                wildcard,
+                ..
+            } => self.record_route_name_imports(items, source, *wildcard),
             _ => {}
         }
     }
@@ -2200,13 +2208,6 @@ impl TypeContext {
                 wildcard,
                 ..
             } => {
-                for item in items {
-                    let local = item.alias.as_ref().unwrap_or(&item.name);
-                    if matches!(local.as_str(), "get" | "post" | "put" | "delete" | "patch") {
-                        self.imported_route_names
-                            .insert(local.clone(), source.clone());
-                    }
-                }
                 self.register_import(items, source, alias.as_deref(), *wildcard);
             }
 
@@ -3451,27 +3452,94 @@ impl TypeContext {
     }
 
     /// Infer the return type of a function call
+    /// Record route builtin names bound by a top-level import. Runs in the
+    /// declaration pass so functions declared above the import are covered.
+    fn record_route_name_imports(&mut self, items: &[ImportItem], source: &str, wildcard: bool) {
+        const ROUTES: [&str; 5] = ["get", "post", "put", "delete", "patch"];
+        if wildcard {
+            let mut exported: Vec<String> = std_module_export_names(source);
+            if exported.is_empty() {
+                if let Some(path) = self.resolve_import_path(source).filter(|p| p.exists()) {
+                    exported = self
+                        .extract_file_exports(&path)
+                        .functions
+                        .into_keys()
+                        .collect();
+                }
+            }
+            for name in exported
+                .into_iter()
+                .filter(|n| ROUTES.contains(&n.as_str()))
+            {
+                self.imported_route_names
+                    .insert(name.clone(), (source.to_string(), name));
+            }
+            return;
+        }
+        for item in items {
+            let local = item.alias.as_ref().unwrap_or(&item.name);
+            if ROUTES.contains(&local.as_str()) {
+                self.imported_route_names
+                    .insert(local.clone(), (source.to_string(), item.name.clone()));
+            }
+        }
+    }
+
     /// `import { get } from "std/kv"` then `get("/health", h)`: the import
     /// shadows the route builtin, so the call no longer registers a route.
+    /// Only the route-registration shape is reported: two arguments, a string
+    /// literal starting with `/`, and a non-string handler, called where the
+    /// name still resolves to the top-level import.
     fn check_import_shadows_route(&mut self, function: &Expression, arguments: &[Expression]) {
         let Expression::Identifier(name) = function else {
             return;
         };
-        let Some(source) = self.imported_route_names.get(name).cloned() else {
+        let Some((source, exported)) = self.imported_route_names.get(name).cloned() else {
             return;
         };
-        let pattern = match arguments.first() {
-            Some(Expression::String(s)) => s.clone(),
-            Some(Expression::InterpolatedString(parts)) => match parts.first() {
+        // A parameter or local binding in an enclosing scope shadows the import.
+        if self
+            .scopes
+            .iter()
+            .skip(1)
+            .any(|scope| scope.contains_key(name))
+        {
+            return;
+        }
+        let [pattern, handler] = arguments else {
+            return;
+        };
+        let pattern = match pattern {
+            Expression::String(s) => s.clone(),
+            Expression::InterpolatedString(parts) => match parts.first() {
                 Some(crate::ast::StringPart::Literal(s)) => s.clone(),
                 _ => return,
             },
             _ => return,
         };
-        if !pattern.starts_with('/') {
+        if !pattern.starts_with('/')
+            || matches!(
+                handler,
+                Expression::String(_) | Expression::InterpolatedString(_)
+            )
+        {
             return;
         }
+        let prefix = source
+            .rsplit('/')
+            .next()
+            .unwrap_or("mod")
+            .trim_end_matches(".tnt")
+            .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
         let line = self.find_line_near_call(name, Some(&format!("\"{pattern}")));
+        // Function bodies can be inferred more than once; report each call once.
+        if self
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, DiagnosticKind::ImportShadowsRoute) && d.line == line)
+        {
+            return;
+        }
         self.emit_with_kind(
             Severity::Error,
             DiagnosticKind::ImportShadowsRoute,
@@ -3480,7 +3548,7 @@ impl TypeContext {
             ),
             line,
             Some(format!(
-                "Rename the import, e.g. `import {{ {name} as kv_{name} }} from \"{source}\"`, to keep {name}() as the route builtin"
+                "Rename the import, e.g. `import {{ {exported} as {prefix}_{exported} }} from \"{source}\"`, to keep {name}() as the route builtin"
             )),
         );
     }
@@ -4468,6 +4536,23 @@ impl TypeContext {
 }
 
 // ── Stdlib module signature registry ──────────────────────────────────
+
+/// Names a std module actually exports at runtime (the typechecker's
+/// signature table is incomplete, e.g. it omits std/kv `get`).
+fn std_module_export_names(module: &str) -> Vec<String> {
+    use std::sync::OnceLock;
+    static EXPORTS: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
+    EXPORTS
+        .get_or_init(|| {
+            crate::stdlib::init_all_modules()
+                .into_iter()
+                .map(|(name, exports)| (name, exports.into_keys().collect()))
+                .collect()
+        })
+        .get(module)
+        .cloned()
+        .unwrap_or_default()
+}
 
 fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
     let mut sigs = HashMap::new();

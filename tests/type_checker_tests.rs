@@ -1738,3 +1738,39 @@ get("/health", h)
     let (stdout, _stderr, _) = lint_code(&renamed);
     assert!(!stdout.contains("import_shadows_route"), "{stdout}");
 }
+
+#[test]
+fn test_import_shadows_route_respects_scope_shape_and_import_position() {
+    let count = |src: &str| {
+        let (stdout, _stderr, _) = lint_code(src);
+        stdout.matches("\"rule\": \"import_shadows_route\"").count()
+    };
+    // A parameter named like the import is the binding the call uses.
+    assert_eq!(
+        count(
+            "import { get } from \"std/kv\"\nfn register(get) {\n    return get(\"/health\", fn(req) { req })\n}\n"
+        ),
+        0
+    );
+    // Wildcard imports bind route names too.
+    assert_eq!(
+        count("import * from \"std/kv\"\nget(\"/health\", fn(req) { req })\n"),
+        1
+    );
+    // A function declared above the import still sees it when called.
+    assert_eq!(
+        count(
+            "fn setup() {\n    get(\"/health\", fn(req) { req })\n}\nimport { get } from \"std/kv\"\nsetup()\n"
+        ),
+        1
+    );
+    // A one-argument absolute-path call is not route registration.
+    assert_eq!(
+        count("import { read_file as get } from \"std/fs\"\nlet c = get(\"/tmp/config\")\n"),
+        0
+    );
+    // The hint uses the original export name.
+    let (stdout, _stderr, _) =
+        lint_code("import { read_file as get } from \"std/fs\"\nget(\"/x\", fn(req) { req })\n");
+    assert!(stdout.contains("read_file as fs_read_file"), "{stdout}");
+}
