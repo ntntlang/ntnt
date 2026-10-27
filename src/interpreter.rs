@@ -2420,6 +2420,8 @@ impl Interpreter {
         // (middleware is re-loaded during load_file_based_routes)
         if let Some(dir_path) = self.routes_dir.clone() {
             let previous_server_state = self.server_state.clone();
+            let previous_middleware_files = self.middleware_files.clone();
+            let previous_lib_modules = self.lib_modules.clone();
             self.server_state.clear_routes_and_middleware();
             self.middleware_files.clear();
 
@@ -2429,8 +2431,11 @@ impl Interpreter {
                     return true;
                 }
                 Err(e) => {
-                    // Keep serving the previous routes rather than none.
+                    // Keep serving the previous routes rather than none, and
+                    // keep the old timestamps so the edit is retried.
                     self.server_state = previous_server_state;
+                    self.middleware_files = previous_middleware_files;
+                    self.lib_modules = previous_lib_modules;
                     eprintln!("[hot-reload] Error reloading: {}", e);
                 }
             }
@@ -2534,6 +2539,8 @@ impl Interpreter {
         // fails, routes is empty but route_index would still have stale indices, causing an
         // index-out-of-bounds panic on the next request (ntnt-findings #64).
         let previous_server_state = self.server_state.clone();
+        let previous_middleware_files = self.middleware_files.clone();
+        let previous_lib_modules = self.lib_modules.clone();
         self.server_state.clear_routes_and_middleware();
 
         // Re-discover routes from the directory
@@ -2553,6 +2560,8 @@ impl Interpreter {
                 // Restore the complete previous state (routes, route_index and
                 // rates together), so the index stays consistent with routes.
                 self.server_state = previous_server_state;
+                self.middleware_files = previous_middleware_files;
+                self.lib_modules = previous_lib_modules;
                 false
             }
         }
@@ -4995,7 +5004,26 @@ impl Interpreter {
         let routes = self.discover_routes(&base_dir, &base_dir, &lib_modules)?;
 
         // Register all discovered routes with source info for hot-reload
-        for (method, pattern, handler, file, imports) in &routes {
+        for (method, pattern, handler, file, imports, rate) in &routes {
+            // The first registration of a (method, pattern) serves requests,
+            // so only its rate applies; a duplicate file's rate is ignored.
+            let first = !self
+                .server_state
+                .routes
+                .iter()
+                .any(|(r, _, _)| r.method == *method && r.pattern == *pattern);
+            if first {
+                if let Some(r) = rate {
+                    self.server_state
+                        .route_rates
+                        .insert((method.clone(), pattern.clone()), *r);
+                }
+            } else {
+                eprintln!(
+                    "[WARN] {} {} is defined more than once; {} is ignored",
+                    method, pattern, file
+                );
+            }
             self.server_state.add_route_with_source(
                 method,
                 pattern,
@@ -5089,15 +5117,7 @@ impl Interpreter {
         dir: &std::path::Path,
         base_dir: &std::path::Path,
         lib_modules: &HashMap<String, HashMap<String, Value>>,
-    ) -> Result<
-        Vec<(
-            String,
-            String,
-            Value,
-            String,
-            HashMap<String, std::time::SystemTime>,
-        )>,
-    > {
+    ) -> Result<Vec<DiscoveredRoute>> {
         use std::fs;
 
         let mut routes = Vec::new();
@@ -5141,15 +5161,7 @@ impl Interpreter {
         file_path: &std::path::Path,
         base_dir: &std::path::Path,
         lib_modules: &HashMap<String, HashMap<String, Value>>,
-    ) -> Result<
-        Vec<(
-            String,
-            String,
-            Value,
-            String,
-            HashMap<String, std::time::SystemTime>,
-        )>,
-    > {
+    ) -> Result<Vec<DiscoveredRoute>> {
         use crate::lexer::Lexer;
         use crate::parser::Parser;
         use std::fs;
@@ -5227,21 +5239,19 @@ impl Interpreter {
         };
 
         let env = self.environment.borrow();
-        let mut route_rates: Vec<(String, crate::stdlib::rate_limit::RouteRate)> = Vec::new();
         if let Ok((file_rate, method_rates)) = &rates {
             for method in http_methods {
                 if let Some(handler) = env.values.get(method) {
                     if matches!(handler, Value::Function { .. }) {
                         let http_method = method.to_uppercase();
-                        if let Some(r) = method_rates.get(method).or(file_rate.as_ref()) {
-                            route_rates.push((http_method.clone(), *r));
-                        }
+                        let rate = method_rates.get(method).or(file_rate.as_ref()).copied();
                         routes.push((
                             http_method,
                             url_pattern.clone(),
                             handler.clone(),
                             file_path.to_string_lossy().to_string(),
                             route_imports.clone(),
+                            rate,
                         ));
                     }
                 }
@@ -5255,10 +5265,6 @@ impl Interpreter {
         self.imported_files = previous_imports;
 
         rates?;
-        for (method, rate) in route_rates {
-            self.server_state
-                .set_parsed_route_rate(&method, &url_pattern, rate);
-        }
 
         Ok(routes)
     }
@@ -11560,6 +11566,16 @@ mod context_builtins_tests;
 #[cfg(test)]
 mod frame_restore_tests;
 
+/// (method, pattern, handler, file, imports, per-route rate) from discovery.
+type DiscoveredRoute = (
+    String,
+    String,
+    Value,
+    String,
+    HashMap<String, std::time::SystemTime>,
+    Option<crate::stdlib::rate_limit::RouteRate>,
+);
+
 /// Names of explicitly exported route rate declarations in a route file:
 /// `export let rate = ...`, `export let rate_<method> = ...`, or `export { rate }`.
 fn exported_route_rate_names(ast: &Program) -> std::collections::HashSet<String> {
@@ -11579,15 +11595,51 @@ fn exported_route_rate_names(ast: &Program) -> std::collections::HashSet<String>
                 }
             }
             if let Some(inner) = statement {
-                if let Statement::Let { name, .. } = unwrap(inner) {
-                    if is_rate(name) {
-                        names.insert(name.clone());
+                if let Statement::Let { name, pattern, .. } = unwrap(inner) {
+                    let mut bound = Vec::new();
+                    match pattern {
+                        Some(p) => pattern_binding_names(p, &mut bound),
+                        None => bound.push(name.clone()),
+                    }
+                    for n in bound {
+                        if is_rate(&n) {
+                            names.insert(n);
+                        }
                     }
                 }
             }
         }
     }
     names
+}
+
+/// Every name a destructuring pattern binds (e.g. `export let { rate } = ...`).
+fn pattern_binding_names(pattern: &Pattern, out: &mut Vec<String>) {
+    match pattern {
+        Pattern::Variable(n) => out.push(n.clone()),
+        Pattern::Struct { fields, .. } | Pattern::Map { fields, .. } => {
+            for (_, p) in fields {
+                pattern_binding_names(p, out);
+            }
+        }
+        Pattern::Variant {
+            fields: Some(ps), ..
+        }
+        | Pattern::Tuple(ps) => {
+            for p in ps {
+                pattern_binding_names(p, out);
+            }
+        }
+        Pattern::Array { elements, .. } => {
+            for p in elements {
+                pattern_binding_names(p, out);
+            }
+        }
+        _ => {}
+    }
+    if let Pattern::Map { rest: Some(r), .. } | Pattern::Array { rest: Some(r), .. } = pattern {
+        out.push(r.clone());
+    }
 }
 
 /// Parse every declared route rate (file-wide and per method), so an invalid
@@ -11676,6 +11728,14 @@ mod route_rate_export_tests {
         .unwrap();
         assert!(file.is_none());
         assert!(per.contains_key("post"));
+    }
+
+    #[test]
+    fn destructured_exports_are_rate_declarations() {
+        let ast = parse("export let { rate } = map { \"rate\": \"2/minute\" }\n");
+        assert!(exported_route_rate_names(&ast).contains("rate"));
+        let ast = parse("export let [rate_get, other] = [\"1/minute\", 2]\n");
+        assert!(exported_route_rate_names(&ast).contains("rate_get"));
     }
 
     #[test]
