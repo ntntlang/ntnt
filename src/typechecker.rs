@@ -4552,11 +4552,11 @@ impl TypeContext {
         sig!("assert", ["condition" => Type::Bool], Type::Unit, variadic);
 
         // HTTP server builtins (global)
-        sig!("get", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(2));
-        sig!("post", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(2));
-        sig!("put", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(2));
-        sig!("patch", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(2));
-        sig!("delete", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(2));
+        sig!("get", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Union(vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::Unit])], Type::Unit, required(2));
+        sig!("post", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Union(vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::Unit])], Type::Unit, required(2));
+        sig!("put", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Union(vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::Unit])], Type::Unit, required(2));
+        sig!("patch", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Union(vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::Unit])], Type::Unit, required(2));
+        sig!("delete", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Union(vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::Unit])], Type::Unit, required(2));
         sig!("listen", ["port" => Type::Int, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(1));
         sig!("serve_static", ["prefix" => Type::String, "dir" => Type::String], Type::Unit);
         sig!("use_middleware", ["handler" => Type::Any], Type::Unit);
@@ -4914,9 +4914,15 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             });
             sig!(
                 "too_many_requests",
-                [],
+                ["result" => Type::Union(vec![
+                    Type::Map {
+                        key_type: Box::new(Type::String),
+                        value_type: Box::new(Type::Any),
+                    },
+                    Type::Unit,
+                ])],
                 Type::Named("Response".to_string()),
-                variadic
+                required(0)
             );
             sig!("parse_json", ["req" => Type::Any], Type::Generic {
                 name: "Result".to_string(),

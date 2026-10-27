@@ -2419,6 +2419,9 @@ impl Interpreter {
         // Middleware change requires full route re-discovery
         // (middleware is re-loaded during load_file_based_routes)
         if let Some(dir_path) = self.routes_dir.clone() {
+            let previous_server_state = self.server_state.clone();
+            let previous_middleware_files = self.middleware_files.clone();
+            let previous_lib_modules = self.lib_modules.clone();
             self.server_state.clear_routes_and_middleware();
             self.middleware_files.clear();
 
@@ -2428,6 +2431,11 @@ impl Interpreter {
                     return true;
                 }
                 Err(e) => {
+                    // Keep serving the previous routes rather than none, and
+                    // keep the old timestamps so the edit is retried.
+                    self.server_state = previous_server_state;
+                    self.middleware_files = previous_middleware_files;
+                    self.lib_modules = previous_lib_modules;
                     eprintln!("[hot-reload] Error reloading: {}", e);
                 }
             }
@@ -2530,6 +2538,9 @@ impl Interpreter {
         // IMPORTANT: route_index MUST be cleared alongside routes — if load_file_based_routes
         // fails, routes is empty but route_index would still have stale indices, causing an
         // index-out-of-bounds panic on the next request (ntnt-findings #64).
+        let previous_server_state = self.server_state.clone();
+        let previous_middleware_files = self.middleware_files.clone();
+        let previous_lib_modules = self.lib_modules.clone();
         self.server_state.clear_routes_and_middleware();
 
         // Re-discover routes from the directory
@@ -2546,9 +2557,11 @@ impl Interpreter {
             }
             Err(e) => {
                 eprintln!("[hot-reload] Error re-discovering routes: {}", e);
-                // Routes and route_index are already cleared above — server will return 404
-                // for all routes until the next successful reload. This is safer than serving
-                // requests with a stale/corrupt route_index pointing into an empty routes vec.
+                // Restore the complete previous state (routes, route_index and
+                // rates together), so the index stays consistent with routes.
+                self.server_state = previous_server_state;
+                self.middleware_files = previous_middleware_files;
+                self.lib_modules = previous_lib_modules;
                 false
             }
         }
@@ -4991,7 +5004,26 @@ impl Interpreter {
         let routes = self.discover_routes(&base_dir, &base_dir, &lib_modules)?;
 
         // Register all discovered routes with source info for hot-reload
-        for (method, pattern, handler, file, imports) in &routes {
+        for (method, pattern, handler, file, imports, rate) in &routes {
+            // The first registration of a (method, pattern) serves requests,
+            // so only its rate applies; a duplicate file's rate is ignored.
+            let first = !self
+                .server_state
+                .routes
+                .iter()
+                .any(|(r, _, _)| r.method == *method && r.pattern == *pattern);
+            if first {
+                if let Some(r) = rate {
+                    self.server_state
+                        .route_rates
+                        .insert((method.clone(), pattern.clone()), *r);
+                }
+            } else {
+                eprintln!(
+                    "[WARN] {} {} is defined more than once; {} is ignored",
+                    method, pattern, file
+                );
+            }
             self.server_state.add_route_with_source(
                 method,
                 pattern,
@@ -5085,15 +5117,7 @@ impl Interpreter {
         dir: &std::path::Path,
         base_dir: &std::path::Path,
         lib_modules: &HashMap<String, HashMap<String, Value>>,
-    ) -> Result<
-        Vec<(
-            String,
-            String,
-            Value,
-            String,
-            HashMap<String, std::time::SystemTime>,
-        )>,
-    > {
+    ) -> Result<Vec<DiscoveredRoute>> {
         use std::fs;
 
         let mut routes = Vec::new();
@@ -5130,22 +5154,17 @@ impl Interpreter {
         Ok(routes)
     }
 
-    /// Process a single route file and extract HTTP method handlers
-    /// Returns: Vec<(method, pattern, handler, file_path, imported_files)>
+    /// Process a single route file and extract HTTP method handlers.
+    /// Returns one `DiscoveredRoute` per handler: (method, pattern, handler,
+    /// file_path, imported_files, parsed per-route rate).
+    /// Fails when an exported `rate` or `rate_<method>` is invalid, not a
+    /// string, or names an unknown method; interpreter state is restored first.
     fn process_route_file(
         &mut self,
         file_path: &std::path::Path,
         base_dir: &std::path::Path,
         lib_modules: &HashMap<String, HashMap<String, Value>>,
-    ) -> Result<
-        Vec<(
-            String,
-            String,
-            Value,
-            String,
-            HashMap<String, std::time::SystemTime>,
-        )>,
-    > {
+    ) -> Result<Vec<DiscoveredRoute>> {
         use crate::lexer::Lexer;
         use crate::parser::Parser;
         use std::fs;
@@ -5198,8 +5217,13 @@ impl Interpreter {
             );
         }
 
-        // Evaluate the module
-        self.eval(&ast)?;
+        // Evaluate the module; restore interpreter state on every error path.
+        if let Err(e) = self.eval(&ast) {
+            self.environment = previous_env;
+            self.current_file = previous_file;
+            self.imported_files = previous_imports;
+            return Err(e);
+        }
 
         // Capture imports made by this route file
         let route_imports = std::mem::take(&mut self.imported_files);
@@ -5207,45 +5231,32 @@ impl Interpreter {
         // Find exported HTTP method handlers
         let http_methods = ["get", "post", "put", "delete", "patch", "head", "options"];
 
-        let env = self.environment.borrow();
         // `export let rate = "5/minute"` applies to every method in the file;
         // `export let rate_post = ...` overrides one method; "off" exempts (#294).
-        let file_rate = match env.values.get("rate") {
-            None => None,
-            Some(Value::String(r)) => Some(r.clone()),
-            Some(_) => {
-                return Err(IntentError::runtime_error(format!(
-                    "{}: `rate` must be a string like \"5/minute\" or \"off\"",
-                    file_path.display()
-                )))
-            }
+        // Only explicitly exported names count, so a lib module or ordinary
+        // binding called `rate` is not mistaken for a declaration.
+        let declared = exported_route_rate_names(&ast);
+        let rates = {
+            let env = self.environment.borrow();
+            route_rate_exports(&env.values, &declared, &file_path.display().to_string())
         };
-        let mut route_rates: Vec<(String, String)> = Vec::new();
-        for method in http_methods {
-            if let Some(handler) = env.values.get(method) {
-                // Check if it's a function
-                if matches!(handler, Value::Function { .. }) {
-                    let http_method = method.to_uppercase();
-                    let method_rate = match env.values.get(&format!("rate_{method}")) {
-                        None => file_rate.clone(),
-                        Some(Value::String(r)) => Some(r.clone()),
-                        Some(_) => {
-                            return Err(IntentError::runtime_error(format!(
-                                "{}: `rate_{method}` must be a string like \"5/minute\" or \"off\"",
-                                file_path.display()
-                            )))
-                        }
-                    };
-                    if let Some(r) = method_rate {
-                        route_rates.push((http_method.clone(), r));
+
+        let env = self.environment.borrow();
+        if let Ok((file_rate, method_rates)) = &rates {
+            for method in http_methods {
+                if let Some(handler) = env.values.get(method) {
+                    if matches!(handler, Value::Function { .. }) {
+                        let http_method = method.to_uppercase();
+                        let rate = method_rates.get(method).or(file_rate.as_ref()).copied();
+                        routes.push((
+                            http_method,
+                            url_pattern.clone(),
+                            handler.clone(),
+                            file_path.to_string_lossy().to_string(),
+                            route_imports.clone(),
+                            rate,
+                        ));
                     }
-                    routes.push((
-                        http_method,
-                        url_pattern.clone(),
-                        handler.clone(),
-                        file_path.to_string_lossy().to_string(),
-                        route_imports.clone(),
-                    ));
                 }
             }
         }
@@ -5256,10 +5267,7 @@ impl Interpreter {
         self.current_file = previous_file;
         self.imported_files = previous_imports;
 
-        for (method, rate) in route_rates {
-            self.server_state
-                .set_route_rate(&method, &url_pattern, &rate)?;
-        }
+        rates?;
 
         Ok(routes)
     }
@@ -5316,7 +5324,12 @@ impl Interpreter {
         }
 
         // Evaluate the module
-        self.eval(&ast)?;
+        if let Err(e) = self.eval(&ast) {
+            self.environment = previous_env;
+            self.current_file = previous_file;
+            self.imported_files = previous_imports;
+            return Err(e);
+        }
 
         // Capture imports made by this route file
         let route_imports = std::mem::take(&mut self.imported_files);
@@ -5326,45 +5339,42 @@ impl Interpreter {
         let env = self.environment.borrow();
         let handler = env.values.get(&method_name).cloned();
         // Rate exports are applied at discovery; a changed rate needs a restart.
-        let reloaded_rate = match env.values.get(&format!("rate_{method_name}")) {
-            Some(Value::String(r)) => Some(r.clone()),
-            _ => match env.values.get("rate") {
-                Some(Value::String(r)) => Some(r.clone()),
-                _ => None,
-            },
-        };
+        let declared = exported_route_rate_names(&ast);
+        let rates = route_rate_exports(&env.values, &declared, file_path);
         drop(env);
-        let pattern_rates: Vec<_> = self
-            .server_state
-            .routes
-            .iter()
-            .filter(|(r, _, src)| {
-                r.method == method.to_uppercase() && src.file_path.as_deref() == Some(file_path)
-            })
-            .map(|(r, _, _)| r.pattern.clone())
-            .collect();
-        for pattern in pattern_rates {
-            let current = self
-                .server_state
-                .route_rates
-                .get(&(method.to_uppercase(), pattern.clone()))
-                .copied();
-            let reloaded = reloaded_rate
-                .as_deref()
-                .and_then(|r| crate::stdlib::rate_limit::RouteRate::parse(r).ok());
-            if current != reloaded {
-                eprintln!(
-                    "[hot-reload] {} {}: rate limit change takes effect after restart",
-                    method.to_uppercase(),
-                    pattern
-                );
-            }
-        }
 
         // Restore environment and imports
         self.environment = previous_env;
         self.current_file = previous_file;
         self.imported_files = previous_imports;
+
+        // An invalid or non-string rate is reported, not silently treated as absent.
+        let (file_rate, method_rates) = rates?;
+        let reloaded = method_rates
+            .get(&method_name)
+            .or(file_rate.as_ref())
+            .copied();
+        let upper = method.to_uppercase();
+        let patterns: Vec<_> = self
+            .server_state
+            .routes
+            .iter()
+            .filter(|(r, _, src)| r.method == upper && src.file_path.as_deref() == Some(file_path))
+            .map(|(r, _, _)| r.pattern.clone())
+            .collect();
+        for pattern in patterns {
+            let current = self
+                .server_state
+                .route_rates
+                .get(&(upper.clone(), pattern.clone()))
+                .copied();
+            if current != reloaded {
+                eprintln!(
+                    "[hot-reload] {} {}: rate limit change takes effect after restart",
+                    upper, pattern
+                );
+            }
+        }
 
         let handler = handler.ok_or_else(|| {
             IntentError::runtime_error(format!(
@@ -11558,6 +11568,224 @@ mod context_builtins_tests;
 
 #[cfg(test)]
 mod frame_restore_tests;
+
+/// (method, pattern, handler, file, imports, per-route rate) from discovery.
+type DiscoveredRoute = (
+    String,
+    String,
+    Value,
+    String,
+    HashMap<String, std::time::SystemTime>,
+    Option<crate::stdlib::rate_limit::RouteRate>,
+);
+
+/// Names of explicitly exported route rate declarations in a route file:
+/// `export let rate = ...`, `export let rate_<method> = ...`, or `export { rate }`.
+fn exported_route_rate_names(ast: &Program) -> std::collections::HashSet<String> {
+    let is_rate = |n: &str| n == "rate" || n.starts_with("rate_");
+    fn unwrap(stmt: &Statement) -> &Statement {
+        match stmt {
+            Statement::Located { stmt, .. } => unwrap(stmt),
+            other => other,
+        }
+    }
+    let mut names = std::collections::HashSet::new();
+    for stmt in &ast.statements {
+        if let Statement::Export { items, statement } = unwrap(stmt) {
+            for item in items {
+                if is_rate(item) {
+                    names.insert(item.clone());
+                }
+            }
+            if let Some(inner) = statement {
+                if let Statement::Let { name, pattern, .. } = unwrap(inner) {
+                    let mut bound = Vec::new();
+                    match pattern {
+                        Some(p) => pattern_binding_names(p, &mut bound),
+                        None => bound.push(name.clone()),
+                    }
+                    for n in bound {
+                        if is_rate(&n) {
+                            names.insert(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Every name a destructuring pattern binds (e.g. `export let { rate } = ...`).
+fn pattern_binding_names(pattern: &Pattern, out: &mut Vec<String>) {
+    match pattern {
+        Pattern::Variable(n) => out.push(n.clone()),
+        Pattern::Struct { fields, .. } | Pattern::Map { fields, .. } => {
+            for (_, p) in fields {
+                pattern_binding_names(p, out);
+            }
+        }
+        Pattern::Variant {
+            fields: Some(ps), ..
+        }
+        | Pattern::Tuple(ps) => {
+            for p in ps {
+                pattern_binding_names(p, out);
+            }
+        }
+        Pattern::Array { elements, .. } => {
+            for p in elements {
+                pattern_binding_names(p, out);
+            }
+        }
+        _ => {}
+    }
+    if let Pattern::Map { rest: Some(r), .. } | Pattern::Array { rest: Some(r), .. } = pattern {
+        out.push(r.clone());
+    }
+}
+
+/// Parse every declared route rate (file-wide and per method), so an invalid
+/// file-wide rate fails even when each method overrides it.
+#[allow(clippy::type_complexity)]
+fn route_rate_exports(
+    values: &HashMap<String, Value>,
+    declared: &std::collections::HashSet<String>,
+    file: &str,
+) -> Result<(
+    Option<crate::stdlib::rate_limit::RouteRate>,
+    HashMap<String, crate::stdlib::rate_limit::RouteRate>,
+)> {
+    use crate::stdlib::rate_limit::RouteRate;
+    let parse = |name: &str| -> Result<Option<RouteRate>> {
+        if !declared.contains(name) {
+            return Ok(None);
+        }
+        match values.get(name) {
+            Some(Value::String(r)) => RouteRate::parse(r).map(Some).map_err(|e| {
+                IntentError::runtime_error(format!("{file}: `{name}`: {e} (or \"off\")"))
+            }),
+            _ => Err(IntentError::runtime_error(format!(
+                "{file}: `{name}` must be a string like \"5/minute\" or \"off\""
+            ))),
+        }
+    };
+    let file_rate = parse("rate")?;
+    let mut per_method = HashMap::new();
+    let mut names: Vec<&String> = declared.iter().filter(|n| n.as_str() != "rate").collect();
+    names.sort();
+    for name in names {
+        let method = &name["rate_".len()..];
+        if !["get", "post", "put", "delete", "patch", "head", "options"].contains(&method) {
+            return Err(IntentError::runtime_error(format!(
+                "{file}: `{name}` is not a route rate (use rate or rate_<method>)"
+            )));
+        }
+        if let Some(r) = parse(name)? {
+            per_method.insert(method.to_string(), r);
+        }
+    }
+    Ok((file_rate, per_method))
+}
+
+#[cfg(test)]
+mod route_rate_export_tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn parse(src: &str) -> Program {
+        let tokens: Vec<_> = Lexer::new(src).collect();
+        Parser::new(tokens).parse().unwrap()
+    }
+
+    fn vals(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn only_explicit_exports_are_rate_declarations() {
+        let ast = parse(
+            "let rate = 5\nexport let rate_post = \"2/minute\"\nexport fn post(req) { return 1 }\n",
+        );
+        let names = exported_route_rate_names(&ast);
+        assert!(names.contains("rate_post"));
+        assert!(
+            !names.contains("rate"),
+            "non-exported binding (or a lib module) is not a declaration"
+        );
+        let s = |t: &str| Value::String(t.to_string());
+        // A lib module named `rate` is a Struct value: ignored because not exported.
+        let lib = Value::Struct {
+            name: "lib:rate".into(),
+            fields: HashMap::new(),
+        };
+        let (file, per) = route_rate_exports(
+            &vals(&[("rate", lib), ("rate_post", s("2/minute"))]),
+            &names,
+            "f",
+        )
+        .unwrap();
+        assert!(file.is_none());
+        assert!(per.contains_key("post"));
+    }
+
+    #[test]
+    fn destructured_exports_are_rate_declarations() {
+        let ast = parse("export let { rate } = map { \"rate\": \"2/minute\" }\n");
+        assert!(exported_route_rate_names(&ast).contains("rate"));
+        let ast = parse("export let [rate_get, other] = [\"1/minute\", 2]\n");
+        assert!(exported_route_rate_names(&ast).contains("rate_get"));
+    }
+
+    #[test]
+    fn invalid_file_rate_fails_even_when_overridden() {
+        let ast = parse("export let rate = \"lots\"\nexport let rate_post = \"2/minute\"\n");
+        let names = exported_route_rate_names(&ast);
+        let s = |t: &str| Value::String(t.to_string());
+        let err = route_rate_exports(
+            &vals(&[("rate", s("lots")), ("rate_post", s("2/minute"))]),
+            &names,
+            "f",
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn non_string_and_unknown_rate_exports_fail() {
+        let ast = parse("export let rate = 5\n");
+        let names = exported_route_rate_names(&ast);
+        assert!(route_rate_exports(&vals(&[("rate", Value::Int(5))]), &names, "f").is_err());
+        let ast = parse("export let rate_fetch = \"1/minute\"\n");
+        let names = exported_route_rate_names(&ast);
+        assert!(route_rate_exports(
+            &vals(&[("rate_fetch", Value::String("1/minute".into()))]),
+            &names,
+            "f"
+        )
+        .is_err());
+        let ast = parse("let rate = \"x\"\nexport { rate }\n");
+        assert!(exported_route_rate_names(&ast).contains("rate"));
+    }
+
+    #[test]
+    fn duplicate_route_registration_cannot_change_first_rate() {
+        use crate::stdlib::rate_limit::RouteRate;
+        let mut state = crate::stdlib::http_server::ServerState::new();
+        state.set_route_rate("POST", "/c", "2/minute").unwrap();
+        state.add_route_with_source("POST", "/c", Value::Unit, None, HashMap::new());
+        state.set_route_rate("POST", "/c", "off").unwrap();
+        assert_eq!(
+            state
+                .route_rates
+                .get(&("POST".to_string(), "/c".to_string())),
+            Some(&RouteRate::parse("2/minute").unwrap())
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

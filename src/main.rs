@@ -6372,7 +6372,7 @@ fn github_anchor(heading: &str) -> String {
         .to_lowercase()
         .replace('/', "")
         .replace(' ', "-")
-        .replace(|c: char| !c.is_alphanumeric() && c != '-', "")
+        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "")
 }
 
 /// Write a detailed doc section for a single function into `md`.

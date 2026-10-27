@@ -70,14 +70,14 @@ example = "NTNT_RATE_LIMIT=on NTNT_TRUSTED_PROXIES=172.18.0.0/16 NTNT_CLIENT_IP_
 affects = ["http-server", "security"]
 
 [env_vars.NTNT_RATE_LIMIT_WRITE]
-values = ["N/second|minute|hour|day"]
+values = ["N/second", "N/minute", "N/hour", "N/day"]
 default = "30/minute"
 description = "Per-client budget for POST/PUT/PATCH/DELETE (and other non-GET methods) when `NTNT_RATE_LIMIT=on`. GCRA: smooth, no window-edge doubling."
 example = "NTNT_RATE_LIMIT_WRITE=10/minute"
 affects = ["http-server"]
 
 [env_vars.NTNT_RATE_LIMIT_READ]
-values = ["N/second|minute|hour|day"]
+values = ["N/second", "N/minute", "N/hour", "N/day"]
 default = "600/minute"
 description = "Per-client budget for GET/HEAD on dynamic routes when `NTNT_RATE_LIMIT=on`. Reads and writes are counted separately."
 example = "NTNT_RATE_LIMIT_READ=1200/minute"
