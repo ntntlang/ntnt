@@ -23,9 +23,25 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 const SHARDS: usize = 64;
-/// Reserved keys for the shared overflow budgets, one per request class.
-const OVERFLOW_WRITE: u64 = u64::MAX;
-const OVERFLOW_READ: u64 = u64::MAX - 1;
+/// Overflow budgets live in a reserved key range at the top of u64. Each
+/// (class, rate, burst) gets its own slot, so a full shard never makes one
+/// limit read another limit's saved time.
+const OVERFLOW_SLOTS: u64 = 4096;
+const OVERFLOW_BASE: u64 = u64::MAX - OVERFLOW_SLOTS + 1;
+const OVERFLOW_WRITE: u64 = 0;
+const OVERFLOW_READ: u64 = 1;
+
+fn overflow_slot(class_tag: u64, rate: RateSpec, burst: u64) -> u64 {
+    // Deterministic mix (not keyed: rates are configuration, not attacker input).
+    let mut x = class_tag
+        ^ rate.count.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ rate.period_ns.rotate_left(17)
+        ^ burst.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    x ^= x >> 33;
+    OVERFLOW_BASE + (x % OVERFLOW_SLOTS)
+}
 /// A full shard is swept at most this often (bounds scan cost under key churn).
 const SWEEP_INTERVAL_NS: u64 = 1_000_000_000;
 const LOGGED_BIT: u64 = 1;
@@ -172,11 +188,11 @@ impl Store {
     pub fn key<K: Hash>(&self, key: K) -> u64 {
         let mut h = self.hasher.build_hasher();
         key.hash(&mut h);
-        h.finish().min(OVERFLOW_READ - 1)
+        h.finish().min(OVERFLOW_BASE - 1)
     }
 
-    /// Check `key` at `now`. `overflow` is the shared slot used when the shard
-    /// is full (one per request class, so classes keep separate budgets).
+    /// Check `key` at `now`. `overflow` is the class tag of the shared budget
+    /// used when the shard is full; the slot is per (class, rate, burst).
     pub fn check(&self, key: u64, overflow: u64, rate: RateSpec, burst: u64, now: u64) -> Decision {
         let shard = &self.shards[(key as usize) & (SHARDS - 1)];
         let mut guard = match shard.lock() {
@@ -203,7 +219,7 @@ impl Store {
             if shard.map.len() >= self.per_shard {
                 // Still full: new keys share the class's overflow budget; live
                 // keys are never evicted.
-                slot = overflow;
+                slot = overflow_slot(overflow, rate, burst);
             }
         }
         let stored = shard.map.get(&slot).copied();
@@ -642,6 +658,24 @@ mod tests {
     }
 
     #[test]
+    fn overflow_budgets_are_separate_per_rate() {
+        let store = Store::new(SHARDS);
+        let slow = RateSpec::parse("1/day").unwrap();
+        let fast = RateSpec::parse("100/minute").unwrap();
+        let now = 100 * S;
+        let keys = shard0_keys(&store, "r", 3);
+        assert!(store.check(keys[0], OVERFLOW_WRITE, slow, 1, now).allowed);
+        // keys[1] lands on the 1/day overflow and spends it.
+        assert!(store.check(keys[1], OVERFLOW_WRITE, slow, 1, now).allowed);
+        // A different rate in the same full shard has its own overflow budget.
+        assert!(store.check(keys[2], OVERFLOW_WRITE, fast, 100, now).allowed);
+        assert_ne!(
+            overflow_slot(OVERFLOW_WRITE, slow, 1),
+            overflow_slot(OVERFLOW_WRITE, fast, 100)
+        );
+    }
+
+    #[test]
     fn full_shard_sweeps_at_most_once_per_interval() {
         let store = Store::new(SHARDS); // one slot per shard
         let fast = RateSpec::parse("1000000/second").unwrap(); // 1 µs interval
@@ -664,7 +698,9 @@ mod tests {
         {
             let shard = store.shards[0].lock().unwrap();
             assert!(
-                shard.map.contains_key(&OVERFLOW_WRITE),
+                shard
+                    .map
+                    .contains_key(&overflow_slot(OVERFLOW_WRITE, fast, 1)),
                 "no sweep within the interval"
             );
             assert!(
@@ -680,7 +716,9 @@ mod tests {
         );
         let shard = store.shards[0].lock().unwrap();
         assert!(shard.map.contains_key(&keys[2]));
-        assert!(!shard.map.contains_key(&OVERFLOW_WRITE));
+        assert!(!shard
+            .map
+            .contains_key(&overflow_slot(OVERFLOW_WRITE, fast, 1)));
     }
 
     #[test]

@@ -4356,11 +4356,11 @@ impl TypeContext {
         sig!("assert", ["condition" => Type::Bool], Type::Unit, variadic);
 
         // HTTP server builtins (global)
-        sig!("get", ["pattern" => Type::String, "handler" => Type::Any], Type::Unit);
-        sig!("post", ["pattern" => Type::String, "handler" => Type::Any], Type::Unit);
-        sig!("put", ["pattern" => Type::String, "handler" => Type::Any], Type::Unit);
-        sig!("patch", ["pattern" => Type::String, "handler" => Type::Any], Type::Unit);
-        sig!("delete", ["pattern" => Type::String, "handler" => Type::Any], Type::Unit);
+        sig!("get", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(2));
+        sig!("post", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(2));
+        sig!("put", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(2));
+        sig!("patch", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(2));
+        sig!("delete", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(2));
         sig!("listen", ["port" => Type::Int, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(1));
         sig!("serve_static", ["prefix" => Type::String, "dir" => Type::String], Type::Unit);
         sig!("use_middleware", ["handler" => Type::Any], Type::Unit);

@@ -117,6 +117,8 @@ pub struct RouteInfo {
     pub handler_name: String,
     /// Per-route rate override (#294).
     pub rate: Option<crate::stdlib::rate_limit::RouteRate>,
+    /// "METHOD /pattern", built once at registration.
+    pub route_id: Arc<str>,
 }
 
 /// A matched dynamic route.
@@ -124,8 +126,8 @@ pub struct RouteInfo {
 pub struct RouteMatch {
     pub handler_name: String,
     pub params: HashMap<String, String>,
-    /// "METHOD /pattern": the per-route limiter key.
-    pub route_id: String,
+    /// "METHOD /pattern": the per-route limiter key (shared, not copied).
+    pub route_id: Arc<str>,
     pub rate: Option<crate::stdlib::rate_limit::RouteRate>,
 }
 
@@ -171,10 +173,12 @@ impl AsyncServerState {
             pattern: pattern.to_string(),
             segments: parse_route_pattern(pattern),
         };
+        let route_id: Arc<str> = Arc::from(format!("{method} {pattern}"));
         let info = RouteInfo {
             route,
             handler_name: handler_name.to_string(),
             rate,
+            route_id,
         };
         let mut routes = self.routes.write().await;
         routes.push(info);
@@ -207,7 +211,7 @@ impl AsyncServerState {
             match_route(path, &info.route).map(|params| RouteMatch {
                 handler_name: info.handler_name.clone(),
                 params,
-                route_id: format!("{} {}", info.route.method, info.route.pattern),
+                route_id: Arc::clone(&info.route_id),
                 rate: info.rate,
             })
         };
@@ -884,7 +888,7 @@ async fn handle_request(
                         .filter_map(|v| v.to_str().ok())
                         .collect()
                 });
-                let route = rate.map(|r| (route_id.as_str(), r));
+                let route = rate.map(|r| (&*route_id, r));
                 if let Some(decision) = limiter.check_route(method.as_str(), &path, client, route) {
                     if !decision.allowed {
                         if decision.first_trip {
