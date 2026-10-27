@@ -1,0 +1,9 @@
+// Rate limiting demo (#294).
+// Run:   ntnt intent check server.tnt
+// Live:  NTNT_RATE_LIMIT=on ntnt run server.tnt
+import { text } from "std/http/server"
+
+get("/", fn(req) { return text("Rate limit demo. POST JSON {\"email\": ...} to /contact.") })
+get("/health", fn(req) { return text("ok") })
+routes("routes")
+listen(8080)

@@ -215,6 +215,31 @@ impl ClientIpConfig {
 }
 
 static WARNED: AtomicBool = AtomicBool::new(false);
+static WARNED_PRIVATE_PEER: AtomicBool = AtomicBool::new(false);
+
+/// True when no proxy is trusted (client_ip is always the TCP peer).
+pub fn no_trusted_proxies() -> bool {
+    config().trusted.is_empty()
+}
+
+/// Private, loopback or unique-local address: what a tunnel or Docker proxy looks like.
+pub fn is_private_peer(ip: IpAddr) -> bool {
+    match canonical(ip) {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
+
+/// Rate limiting is on and no proxy is trusted, but a request arrived from a
+/// private peer: every visitor behind that proxy shares one budget. Warn once.
+pub fn warn_private_peer_once(peer: IpAddr) {
+    if !WARNED_PRIVATE_PEER.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "[WARN] rate_limit: request from private address {} with NTNT_TRUSTED_PROXIES unset. If this server is behind a tunnel, proxy or Docker network, every visitor shares that address and one rate-limit budget. Set NTNT_TRUSTED_PROXIES to the proxy network (logged once)",
+            canonical(peer)
+        );
+    }
+}
 
 fn warn_once() {
     if !WARNED.swap(true, Ordering::Relaxed) {
@@ -421,6 +446,25 @@ mod tests {
             .is_trusted(ip("192.0.2.1")));
         assert!(ClientIpConfig::new("", Some("X.Client+IP")).is_ok());
         assert!(ClientIpConfig::new("", Some("X Client")).is_err());
+    }
+
+    #[test]
+    fn private_peer_detection() {
+        for p in [
+            "10.0.0.1",
+            "172.18.0.5",
+            "192.168.1.1",
+            "127.0.0.1",
+            "::1",
+            "fd00::1",
+            "::ffff:10.1.1.1",
+            "169.254.1.1",
+        ] {
+            assert!(is_private_peer(ip(p)), "{p}");
+        }
+        for p in ["198.51.100.7", "2001:db8::1", "8.8.8.8"] {
+            assert!(!is_private_peer(ip(p)), "{p}");
+        }
     }
 
     #[test]

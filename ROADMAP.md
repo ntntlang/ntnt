@@ -2550,6 +2550,9 @@ See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) and [PERFORMANCE_AUDIT.md](PERFORMANC
 - [x] PostgreSQL connection error sanitization (prevent credential leakage)
 
 ### Security Hardening (Proposed)
+- [x] Trusted client IP (`req.client_ip`, `NTNT_TRUSTED_PROXIES`) (#294, v0.5.7)
+- [x] Built-in HTTP rate limiting, off by default; per-route `rate`; `check_limit` (#294, v0.5.7)
+- [ ] Built-in rate limiting on the single-threaded test server (planned: remove that server and run tests on the async server)
 - [x] Interpreter recursion depth limit (default: 256)
 - [ ] Per-request timeout for sync HTTP server
 - [ ] Optional filesystem sandboxing (`NTNT_FS_ROOT`)

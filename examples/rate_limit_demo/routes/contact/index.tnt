@@ -1,0 +1,13 @@
+import { text, status, parse_json, check_limit, too_many_requests } from "std/http/server"
+
+// Built-in route budget (enforced only when NTNT_RATE_LIMIT=on).
+export let rate_post = "5/minute"
+
+// check_limit always works: here, one message per email per hour.
+export fn post(req) {
+    let data = parse_json(req) otherwise { return status(400, "Send JSON: {\"email\": \"...\"}") }
+    let email = data["email"] ?? ""
+    let r = check_limit("contact-email:" + email, "1/hour")
+    if !r["allowed"] { return too_many_requests(r) }
+    return text("Thanks, " + email)
+}

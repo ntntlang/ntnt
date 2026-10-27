@@ -1,0 +1,40 @@
+# Rate Limiting Demo
+# Run: ntnt intent check server.tnt
+
+## Overview
+Per-key limits with check_limit: one contact message per email per hour.
+The second message from the same email gets 429 with Retry-After.
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| someone sends a message as {body} | POST /contact body {body} |
+| it is accepted | status 200 |
+| it is rate limited | status 429 |
+| they are told when to retry | header "retry-after" exists |
+| the limit is reported | header "ratelimit-limit" equals "1" |
+
+---
+
+Feature: Contact rate limit
+  id: feature.contact_rate_limit
+  description: "One message per email per hour"
+
+  # Scenarios run in order against one server process, so the second
+  # scenario sees the budget the first one spent (one request per scenario).
+
+  Scenario: First message from an email is accepted
+    When someone sends a message as {"email": "visitor@example.test"}
+    → it is accepted
+    → body contains "Thanks"
+
+  Scenario: Second message from the same email is limited
+    When someone sends a message as {"email": "visitor@example.test"}
+    → it is rate limited
+    → they are told when to retry
+    → the limit is reported
+
+  Scenario: A different email has its own budget
+    When someone sends a message as {"email": "other@example.test"}
+    → it is accepted
