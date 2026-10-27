@@ -478,9 +478,10 @@ fn bridge_to_axum_response(
 }
 
 /// Protocol-fixed SSE headers that application headers may not override.
-const SSE_FIXED_HEADERS: [&str; 5] = [
+const SSE_FIXED_HEADERS: [&str; 6] = [
     "content-type",
     "content-length",
+    "content-encoding",
     "cache-control",
     "x-accel-buffering",
     "transfer-encoding",

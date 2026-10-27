@@ -19,6 +19,7 @@ get("/events", fn(req) {
     let mut r = sse(bus, map { "retry_ms": 1000 })
     r["headers"]["set-cookie"] = "seen=1; Path=/"
     r["headers"]["content-length"] = "5"
+    r["headers"]["content-encoding"] = "gzip"
     return r
 })
 get("/private", fn(req) { sse(bus) })
