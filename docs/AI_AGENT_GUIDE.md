@@ -3943,6 +3943,12 @@ import { get_or } from "std/collections"  // Required even if lib/data.tnt also 
 
 This is intentional — explicit imports make dependencies clear and prevent hidden coupling between files.
 
+**File paths:** `./` and `../` imports resolve relative to the file containing the import, including imports inside functions, callbacks, jobs, and concurrent tasks. Running from another working directory or invoking a helper from another module does not change that base. Imports remain lazy: an import inside a function or branch runs only when execution reaches it.
+
+Bare file paths such as `"lib/helper.tnt"` remain relative to the process working directory; absolute paths and `std/*` imports are unchanged. These import rules do not change the path semantics of `template()`, filesystem functions, or resource discovery.
+
+**Compatibility (#296):** older runtimes used the caller's file for deferred imports in ordinary functions, and CWD inside concurrent tasks. Code relying on that behavior must use an intentional path before upgrading. A deliberate CWD lookup like `"./lib/helper.tnt"` can use `"lib/helper.tnt"`; caller-relative imports and `../` paths need an explicit migration rather than an automatic rewrite.
+
 ### Shared State Across Files (Singleton Pattern)
 
 Module-level variables are not accessible across files. Use the function-wrapper pattern for shared resources like database connections:

@@ -119,6 +119,10 @@ pub enum Statement {
         items: Vec<ImportItem>,
         /// Module path (relative or from std)
         source: String,
+        /// Declaring file for explicit ./ and ../ imports. Runtime-only metadata:
+        /// AST JSON stays portable and source-less embedders keep their fallback.
+        #[serde(skip)]
+        source_file: Option<std::path::PathBuf>,
         /// Optional alias for entire module: `import http as web`
         alias: Option<String>,
         /// Wildcard import: `import * from "module"`

@@ -50,6 +50,8 @@ mod history;
 #[cfg(test)]
 mod history_tests;
 #[cfg(test)]
+mod import_origin_tests;
+#[cfg(test)]
 mod lease_tests;
 mod leases;
 #[cfg(test)]
@@ -1399,6 +1401,7 @@ fn create_job_interpreter() -> crate::interpreter::Interpreter {
     use crate::parser::Parser;
     let tokens: Vec<_> = Lexer::new(&source).collect();
     let ast = Parser::new(tokens)
+        .with_source_file(&source_path)
         .parse()
         .unwrap_or_else(|e| panic!("failed to parse '{}' for worker: {}", source_path, e));
 

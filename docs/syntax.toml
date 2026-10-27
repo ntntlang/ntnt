@@ -417,7 +417,7 @@ example = "import \"std/math\" as math"
 
 [imports.local]
 syntax = "import { name } from \"./relative/path\""
-description = "Import from local files"
+description = "Import from local files: ./ and ../ are relative to the declaring file, including in functions and tasks; bare file paths remain CWD-relative"
 example = "import { helper } from \"./lib/utils\""
 
 # =============================================================================

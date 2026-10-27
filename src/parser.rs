@@ -17,6 +17,8 @@ const MIN_ERROR_TOKEN_GAP: usize = 2;
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
+    /// Declaring file, copied only onto import statements.
+    source_file: Option<std::path::PathBuf>,
     /// Track if we're inside a map literal context (for nested map inference)
     in_map_context: bool,
     /// When true, statement-level errors are recorded and parsing resumes at
@@ -35,12 +37,34 @@ impl Parser {
         Parser {
             tokens,
             current: 0,
+            source_file: None,
             in_map_context: false,
             recover: false,
             errors: Vec::new(),
             last_error_line: 0,
             last_error_pos: 0,
         }
+    }
+
+    /// Associate file-backed code with its declaring file. This anchors explicit
+    /// relative imports without loading their targets or changing resource paths.
+    pub fn with_source_file(mut self, path: impl AsRef<std::path::Path>) -> Self {
+        let path = path.as_ref();
+        self.source_file = Some(path.canonicalize().unwrap_or_else(|_| {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(path)
+            }
+        }));
+        self
+    }
+
+    /// Interpolation/template expressions may themselves contain function bodies.
+    fn child_parser(&self, tokens: Vec<Token>) -> Self {
+        let mut parser = Self::new(tokens);
+        parser.source_file = self.source_file.clone();
+        parser
     }
 
     /// Parse a complete program
@@ -814,6 +838,7 @@ impl Parser {
             Ok(Statement::Import {
                 items,
                 source,
+                source_file: self.source_file.clone(),
                 alias,
                 wildcard: false,
             })
@@ -827,6 +852,7 @@ impl Parser {
                 return Ok(Statement::Import {
                     items: vec![],
                     source,
+                    source_file: self.source_file.clone(),
                     alias: None,
                     wildcard: true,
                 });
@@ -846,6 +872,7 @@ impl Parser {
                 return Ok(Statement::Import {
                     items: vec![],
                     source,
+                    source_file: self.source_file.clone(),
                     alias,
                     wildcard: false,
                 });
@@ -863,6 +890,7 @@ impl Parser {
                         return Ok(Statement::Import {
                             items: vec![],
                             source,
+                            source_file: self.source_file.clone(),
                             alias: Some(alias_name),
                             wildcard: false,
                         });
@@ -882,6 +910,7 @@ impl Parser {
                 return Ok(Statement::Import {
                     items: vec![],
                     source: name,
+                    source_file: self.source_file.clone(),
                     alias,
                     wildcard: false,
                 });
@@ -903,6 +932,7 @@ impl Parser {
             Ok(Statement::Import {
                 items,
                 source,
+                source_file: self.source_file.clone(),
                 alias: None,
                 wildcard: false,
             })
@@ -2293,7 +2323,7 @@ impl Parser {
                     // Parse the expression string
                     let lexer = crate::lexer::Lexer::new(expr_str);
                     let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
+                    let mut parser = self.child_parser(tokens);
                     match parser.expression() {
                         Ok(expr) => ast_parts.push(StringPart::Expr(expr)),
                         Err(e) => {
@@ -2352,7 +2382,7 @@ impl Parser {
                     // Parse the expression string
                     let lexer = crate::lexer::Lexer::new(expr_str);
                     let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
+                    let mut parser = self.child_parser(tokens);
                     match parser.expression() {
                         Ok(expr) => ast_parts.push(TemplatePart::Expr(expr)),
                         Err(e) => {
@@ -2380,7 +2410,7 @@ impl Parser {
                 LexerTemplatePart::RawExpr(expr_str) => {
                     let lexer = crate::lexer::Lexer::new(expr_str);
                     let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
+                    let mut parser = self.child_parser(tokens);
                     match parser.expression() {
                         Ok(expr) => ast_parts.push(TemplatePart::RawExpr(expr)),
                         Err(e) => {
@@ -2403,7 +2433,7 @@ impl Parser {
                     // Parse the base expression
                     let lexer = crate::lexer::Lexer::new(expr);
                     let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
+                    let mut parser = self.child_parser(tokens);
                     let base_expr = match parser.expression() {
                         Ok(e) => e,
                         Err(e) => {
@@ -2429,7 +2459,7 @@ impl Parser {
                         for arg_str in &filter.args {
                             let lexer = crate::lexer::Lexer::new(arg_str);
                             let tokens: Vec<_> = lexer.collect();
-                            let mut parser = Parser::new(tokens);
+                            let mut parser = self.child_parser(tokens);
                             match parser.expression() {
                                 Ok(arg_expr) => parsed_args.push(arg_expr),
                                 Err(e) => {
@@ -2463,7 +2493,7 @@ impl Parser {
                     // Parse the base expression
                     let lexer = crate::lexer::Lexer::new(expr);
                     let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
+                    let mut parser = self.child_parser(tokens);
                     let base_expr = match parser.expression() {
                         Ok(e) => e,
                         Err(e) => {
@@ -2488,7 +2518,7 @@ impl Parser {
                         for arg_str in &filter.args {
                             let lexer = crate::lexer::Lexer::new(arg_str);
                             let tokens: Vec<_> = lexer.collect();
-                            let mut parser = Parser::new(tokens);
+                            let mut parser = self.child_parser(tokens);
                             match parser.expression() {
                                 Ok(arg_expr) => parsed_args.push(arg_expr),
                                 Err(e) => {
@@ -2527,7 +2557,7 @@ impl Parser {
                     // Parse the iterable expression
                     let lexer = crate::lexer::Lexer::new(iterable);
                     let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
+                    let mut parser = self.child_parser(tokens);
                     let iterable_expr = match parser.expression() {
                         Ok(expr) => expr,
                         Err(e) => {
@@ -2566,7 +2596,7 @@ impl Parser {
                     // Parse the condition expression
                     let lexer = crate::lexer::Lexer::new(condition);
                     let tokens: Vec<_> = lexer.collect();
-                    let mut parser = Parser::new(tokens);
+                    let mut parser = self.child_parser(tokens);
                     let condition_expr = match parser.expression() {
                         Ok(expr) => expr,
                         Err(e) => {
@@ -2590,7 +2620,7 @@ impl Parser {
                     for (elif_condition, elif_body) in elif_chains {
                         let lexer = crate::lexer::Lexer::new(elif_condition);
                         let tokens: Vec<_> = lexer.collect();
-                        let mut parser = Parser::new(tokens);
+                        let mut parser = self.child_parser(tokens);
                         let elif_cond_expr = match parser.expression() {
                             Ok(expr) => expr,
                             Err(e) => {
@@ -2627,7 +2657,7 @@ impl Parser {
                     let data_ast = if let Some(expr_str) = data_expr {
                         let lexer = crate::lexer::Lexer::new(expr_str);
                         let tokens: Vec<_> = lexer.collect();
-                        let mut expr_parser = crate::parser::Parser::new(tokens);
+                        let mut expr_parser = self.child_parser(tokens);
                         match expr_parser.expression() {
                             Ok(expr) => Some(expr),
                             Err(e) => {

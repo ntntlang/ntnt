@@ -4002,7 +4002,7 @@ pub fn run_intent_check(
 
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
-    let mut parser = IntentParser::new(tokens);
+    let mut parser = IntentParser::new(tokens).with_source_file(&ntnt_path);
     let ast = parser.parse()?;
 
     // Run (will exit when shutdown_flag is set)
