@@ -66,6 +66,22 @@ impl RateSpec {
     }
 }
 
+/// A per-route override: a rate, or `off` to exempt the route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteRate {
+    Off,
+    Rate(RateSpec),
+}
+
+impl RouteRate {
+    pub fn parse(text: &str) -> std::result::Result<RouteRate, String> {
+        if text.trim().eq_ignore_ascii_case("off") {
+            return Ok(RouteRate::Off);
+        }
+        RateSpec::parse(text).map(RouteRate::Rate)
+    }
+}
+
 /// Outcome of one check, with what the 429 headers need.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decision {
@@ -363,9 +379,40 @@ impl Limiter {
 
     /// Check one request. `None` when the request is not subject to limits.
     pub fn check_request(&self, method: &str, path: &str, client: IpAddr) -> Option<Decision> {
+        self.check_route(method, path, client, None)
+    }
+
+    /// Check one request against its route. A route rate replaces the global
+    /// class budget and is counted per (route, client); `off` exempts it.
+    pub fn check_route(
+        &self,
+        method: &str,
+        path: &str,
+        client: IpAddr,
+        route: Option<(&str, RouteRate)>,
+    ) -> Option<Decision> {
         let class = classify(method)?;
         if self.config.exempt.iter().any(|p| p == path) {
             return None;
+        }
+        if let Some((route_id, override_rate)) = route {
+            let RouteRate::Rate(rate) = override_rate else {
+                return None;
+            };
+            let key = self.store.key((
+                1u8,
+                route_id,
+                class,
+                client_key(client, self.config.ipv6_prefix),
+            ));
+            let overflow = match class {
+                Class::Write => OVERFLOW_WRITE,
+                Class::Read => OVERFLOW_READ,
+            };
+            return Some(
+                self.store
+                    .check(key, overflow, rate, rate.count, self.now()),
+            );
         }
         let (rate, burst, overflow) = match class {
             Class::Write => (self.config.write, self.config.write_burst, OVERFLOW_WRITE),
@@ -379,6 +426,40 @@ impl Limiter {
 }
 
 static LIMITER: OnceLock<Option<Limiter>> = OnceLock::new();
+
+/// Store behind `check_limit`: always available (an explicit call), separate
+/// from the built-in limiter, bounded by `NTNT_RATE_LIMIT_MAX_KEYS`.
+struct KeyLimits {
+    store: Store,
+    base: Instant,
+}
+
+static KEY_LIMITS: OnceLock<KeyLimits> = OnceLock::new();
+
+fn key_limits() -> &'static KeyLimits {
+    KEY_LIMITS.get_or_init(|| {
+        let max_keys = std::env::var("NTNT_RATE_LIMIT_MAX_KEYS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n >= SHARDS && *n <= 100_000_000)
+            .unwrap_or(100_000);
+        KeyLimits {
+            store: Store::new(max_keys),
+            base: Instant::now(),
+        }
+    })
+}
+
+/// `check_limit(key, rate)`: an app-defined key (email, account, ...) in this
+/// process. The key is hashed with a process-random key; it is never stored.
+pub fn check_key(key: &str, rate: RateSpec) -> Decision {
+    let limits = key_limits();
+    let now = limits.base.elapsed().as_nanos().min(u64::MAX as u128 - 1) as u64;
+    let hashed = limits.store.key((2u8, key));
+    limits
+        .store
+        .check(hashed, OVERFLOW_WRITE, rate, rate.count, now)
+}
 
 /// Parse configuration once (from `listen()`); invalid values fail startup.
 /// Returns the limiter when enabled.
@@ -634,6 +715,50 @@ mod tests {
         assert!(l.check_request("GET", "/", ip).unwrap().allowed);
         assert!(l.check_request("POST", "/health", ip).is_none());
         assert!(l.check_request("OPTIONS", "/contact", ip).is_none());
+    }
+
+    #[test]
+    fn route_rates_override_and_exempt() {
+        let c = cfg(&[
+            ("NTNT_RATE_LIMIT", "on"),
+            ("NTNT_RATE_LIMIT_WRITE", "100/minute"),
+        ])
+        .unwrap();
+        let l = Limiter::new(c);
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        let contact = Some(("POST /contact", RouteRate::parse("2/minute").unwrap()));
+        assert!(
+            l.check_route("POST", "/contact", ip, contact)
+                .unwrap()
+                .allowed
+        );
+        assert!(
+            l.check_route("POST", "/contact", ip, contact)
+                .unwrap()
+                .allowed
+        );
+        assert!(
+            !l.check_route("POST", "/contact", ip, contact)
+                .unwrap()
+                .allowed
+        );
+        // The route budget is separate from the global write budget.
+        assert!(l.check_route("POST", "/other", ip, None).unwrap().allowed);
+        let off = Some(("POST /hook", RouteRate::parse("off").unwrap()));
+        assert!(l.check_route("POST", "/hook", ip, off).is_none());
+        assert!(RouteRate::parse("5/fortnight").is_err());
+    }
+
+    #[test]
+    fn check_key_is_per_key_and_bounded_by_rate() {
+        let rate = RateSpec::parse("2/minute").unwrap();
+        let a = format!("test-a-{}", std::process::id());
+        assert!(check_key(&a, rate).allowed);
+        let d = check_key(&a, rate);
+        assert!(d.allowed && d.remaining == 0);
+        let denied = check_key(&a, rate);
+        assert!(!denied.allowed && denied.retry_after_secs >= 29);
+        assert!(check_key(&format!("{a}-other"), rate).allowed);
     }
 
     #[test]

@@ -7665,6 +7665,7 @@ import { sse, text, html } from "std/http/server"
 
 | Function | Description |
 |----------|-------------|
+| [`check_limit`](#checklimit) | Count one event against an app-defined rate-limit key in this process. |
 | [`delete_cookie`](#deletecookie) | Build a Set-Cookie header value that deletes a cookie. |
 | [`error`](#error) | Create an HTTP 500 Internal Server Error response. |
 | [`get_cookie`](#getcookie) | Get a specific cookie value from a request. |
@@ -7685,7 +7686,42 @@ import { sse, text, html } from "std/http/server"
 | [`static_file`](#staticfile) | Create a cacheable HTTP response for static assets. |
 | [`status`](#status) | Create a plain-text HTTP response with an explicit status code. |
 | [`text`](#text) | Create a plain-text HTTP response with status 200. |
+| [`too_many_requests`](#toomanyrequests) | Create a 429 Too Many Requests response. |
 | [`with_cookie`](#withcookie) | Add a Set-Cookie header to a response. |
+
+#### `check_limit`
+
+```ntnt
+check_limit(key: String, rate: String) -> Map
+```
+
+Count one event against an app-defined rate-limit key in this process.
+
+For limits the server cannot see, such as per email address, account or form + client IP. Uses the same GCRA store design as the built-in limiter (process memory, bounded by NTNT_RATE_LIMIT_MAX_KEYS, resets on restart, not shared across hosts) but works whether or not NTNT_RATE_LIMIT is on: calling it is the opt-in. Keys are hashed; the raw key is not retained. Shared across all HTTP worker interpreters in the process.
+
+**Parameters:**
+
+- `key` — Any string identifying what is limited, e.g. "contact-email:" + email.
+- `rate` — "N/second", "N/minute", "N/hour" or "N/day".
+
+**Returns:** map { allowed: Bool, limit: Int, remaining: Int, retry_after: Int, reset: Int } (seconds).
+
+**Examples:**
+
+```ntnt
+check_limit("contact-email:" + email, "3/day")["allowed"]  // => true  // First submission today
+```
+
+**Errors:**
+
+- **TypeError**: check_limit() requires a key string and a rate string — *Fix: Pass two strings*
+- **RuntimeError**: invalid rate — *Fix: Use N/second|minute|hour|day, e.g. \"5/minute\"*
+
+**See also:** `too_many_requests`
+
+*Since v0.5.7*
+
+---
 
 #### `delete_cookie`
 
@@ -8370,6 +8406,38 @@ text("Hello, World!")  // => Response { status: 200, body: "Hello, World!" }  //
 **See also:** `html`, `json`, `status`, `redirect`, `response`
 
 *Since v0.1.0*
+
+---
+
+#### `too_many_requests`
+
+```ntnt
+too_many_requests(result?: Map) -> Response
+```
+
+Create a 429 Too Many Requests response.
+
+Pass the map returned by `check_limit` to set `Retry-After` and the `RateLimit-Limit/Remaining/Reset` headers; without it `Retry-After` is 60.
+
+**Parameters:**
+
+- `result` — Optional check_limit result.
+
+**Returns:** A 429 text/plain Response with Retry-After and no-store.
+
+**Examples:**
+
+```ntnt
+too_many_requests(check_limit("k", "1/minute"))  // => Response { status: 429 }  // Return 429 with Retry-After
+```
+
+**Errors:**
+
+- **TypeError**: too_many_requests() takes an optional check_limit result map — *Fix: Pass the map from check_limit, or nothing*
+
+**See also:** `check_limit`, `status`
+
+*Since v0.5.7*
 
 ---
 

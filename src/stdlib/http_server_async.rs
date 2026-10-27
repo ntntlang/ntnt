@@ -115,6 +115,18 @@ pub struct Route {
 pub struct RouteInfo {
     pub route: Route,
     pub handler_name: String,
+    /// Per-route rate override (#294).
+    pub rate: Option<crate::stdlib::rate_limit::RouteRate>,
+}
+
+/// A matched dynamic route.
+#[derive(Debug, Clone)]
+pub struct RouteMatch {
+    pub handler_name: String,
+    pub params: HashMap<String, String>,
+    /// "METHOD /pattern": the per-route limiter key.
+    pub route_id: String,
+    pub rate: Option<crate::stdlib::rate_limit::RouteRate>,
 }
 
 /// Static directory configuration
@@ -142,6 +154,18 @@ impl AsyncServerState {
 
     /// Register a route pattern
     pub async fn register_route(&self, method: &str, pattern: &str, handler_name: &str) {
+        self.register_route_with_rate(method, pattern, handler_name, None)
+            .await
+    }
+
+    /// Register a route pattern with an optional per-route rate.
+    pub async fn register_route_with_rate(
+        &self,
+        method: &str,
+        pattern: &str,
+        handler_name: &str,
+        rate: Option<crate::stdlib::rate_limit::RouteRate>,
+    ) {
         let route = Route {
             method: method.to_string(),
             pattern: pattern.to_string(),
@@ -150,6 +174,7 @@ impl AsyncServerState {
         let info = RouteInfo {
             route,
             handler_name: handler_name.to_string(),
+            rate,
         };
         let mut routes = self.routes.write().await;
         routes.push(info);
@@ -170,11 +195,26 @@ impl AsyncServerState {
         method: &str,
         path: &str,
     ) -> Option<(String, HashMap<String, String>)> {
+        self.find_route_with_rate(method, path)
+            .await
+            .map(|m| (m.handler_name, m.params))
+    }
+
+    /// Find a matching route with its identity and per-route rate.
+    pub async fn find_route_with_rate(&self, method: &str, path: &str) -> Option<RouteMatch> {
         let routes = self.routes.read().await;
+        let found = |info: &RouteInfo| {
+            match_route(path, &info.route).map(|params| RouteMatch {
+                handler_name: info.handler_name.clone(),
+                params,
+                route_id: format!("{} {}", info.route.method, info.route.pattern),
+                rate: info.rate,
+            })
+        };
         for info in routes.iter() {
             if info.route.method == method {
-                if let Some(params) = match_route(path, &info.route) {
-                    return Some((info.handler_name.clone(), params));
+                if let Some(m) = found(info) {
+                    return Some(m);
                 }
             }
         }
@@ -183,8 +223,8 @@ impl AsyncServerState {
         if method == "HEAD" {
             for info in routes.iter() {
                 if info.route.method == "GET" {
-                    if let Some(params) = match_route(path, &info.route) {
-                        return Some((info.handler_name.clone(), params));
+                    if let Some(m) = found(info) {
+                        return Some(m);
                     }
                 }
             }
@@ -281,6 +321,18 @@ impl AsyncServerState {
         handler_name: &str,
     ) {
         rt.block_on(self.register_route(method, pattern, handler_name));
+    }
+
+    /// Synchronous `register_route_with_rate`.
+    pub fn register_route_with_rate_blocking(
+        &self,
+        rt: &tokio::runtime::Runtime,
+        method: &str,
+        pattern: &str,
+        handler_name: &str,
+        rate: Option<crate::stdlib::rate_limit::RouteRate>,
+    ) {
+        rt.block_on(self.register_route_with_rate(method, pattern, handler_name, rate));
     }
 
     /// Synchronous version of register_static_dir for use from non-async context
@@ -810,10 +862,18 @@ async fn handle_request(
         .map(|s| s.to_string());
 
     // First, check for dynamic route match
-    let route_match = state.routes.find_route(method.as_str(), &path).await;
+    let route_match = state
+        .routes
+        .find_route_with_rate(method.as_str(), &path)
+        .await;
 
     match route_match {
-        Some((handler_name, params)) => {
+        Some(RouteMatch {
+            handler_name,
+            params,
+            route_id,
+            rate,
+        }) => {
             // Built-in rate limit (#294): off unless NTNT_RATE_LIMIT=on. Runs
             // before the body is read or the interpreter is involved.
             if let Some(limiter) = crate::stdlib::rate_limit::limiter() {
@@ -824,7 +884,8 @@ async fn handle_request(
                         .filter_map(|v| v.to_str().ok())
                         .collect()
                 });
-                if let Some(decision) = limiter.check_request(method.as_str(), &path, client) {
+                let route = rate.map(|r| (route_id.as_str(), r));
+                if let Some(decision) = limiter.check_route(method.as_str(), &path, client, route) {
                     if !decision.allowed {
                         if decision.first_trip {
                             eprintln!(

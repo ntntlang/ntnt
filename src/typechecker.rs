@@ -4695,6 +4695,16 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("text", ["content" => Type::String], Type::Named("Response".to_string()));
             sig!("redirect", ["url" => Type::String], Type::Named("Response".to_string()));
             sig!("status", ["code" => Type::Int, "body" => Type::Any], Type::Named("Response".to_string()));
+            sig!("check_limit", ["key" => Type::String, "rate" => Type::String], Type::Map {
+                key_type: Box::new(Type::String),
+                value_type: Box::new(Type::Any),
+            });
+            sig!(
+                "too_many_requests",
+                [],
+                Type::Named("Response".to_string()),
+                variadic
+            );
             sig!("parse_json", ["req" => Type::Any], Type::Generic {
                 name: "Result".to_string(),
                 args: vec![

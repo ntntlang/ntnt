@@ -5139,11 +5139,37 @@ impl Interpreter {
         let http_methods = ["get", "post", "put", "delete", "patch", "head", "options"];
 
         let env = self.environment.borrow();
+        // `export let rate = "5/minute"` applies to every method in the file;
+        // `export let rate_post = ...` overrides one method; "off" exempts (#294).
+        let file_rate = match env.values.get("rate") {
+            None => None,
+            Some(Value::String(r)) => Some(r.clone()),
+            Some(_) => {
+                return Err(IntentError::runtime_error(format!(
+                    "{}: `rate` must be a string like \"5/minute\" or \"off\"",
+                    file_path.display()
+                )))
+            }
+        };
+        let mut route_rates: Vec<(String, String)> = Vec::new();
         for method in http_methods {
             if let Some(handler) = env.values.get(method) {
                 // Check if it's a function
                 if matches!(handler, Value::Function { .. }) {
                     let http_method = method.to_uppercase();
+                    let method_rate = match env.values.get(&format!("rate_{method}")) {
+                        None => file_rate.clone(),
+                        Some(Value::String(r)) => Some(r.clone()),
+                        Some(_) => {
+                            return Err(IntentError::runtime_error(format!(
+                                "{}: `rate_{method}` must be a string like \"5/minute\" or \"off\"",
+                                file_path.display()
+                            )))
+                        }
+                    };
+                    if let Some(r) = method_rate {
+                        route_rates.push((http_method.clone(), r));
+                    }
                     routes.push((
                         http_method,
                         url_pattern.clone(),
@@ -5160,6 +5186,11 @@ impl Interpreter {
         self.environment = previous_env;
         self.current_file = previous_file;
         self.imported_files = previous_imports;
+
+        for (method, rate) in route_rates {
+            self.server_state
+                .set_route_rate(&method, &url_pattern, &rate)?;
+        }
 
         Ok(routes)
     }
@@ -7198,7 +7229,9 @@ impl Interpreter {
                     // Only intercept if first arg is a route pattern (starts with /)
                     // NOT if it's a URL (starts with http:// or https://) - those are HTTP client calls
                     let http_methods = ["get", "post", "put", "delete", "patch"];
-                    if http_methods.contains(&name.as_str()) && arguments.len() == 2 {
+                    if http_methods.contains(&name.as_str())
+                        && (arguments.len() == 2 || arguments.len() == 3)
+                    {
                         // Use eval_route_pattern to auto-detect route parameters:
                         // "/users/{id}" preserves {id} as a route param instead of interpolating
                         let pattern = self.eval_route_pattern(&arguments[0])?;
@@ -7216,6 +7249,35 @@ impl Interpreter {
                                 }
                                 let handler = self.eval_expression(&arguments[1])?;
                                 let method = name.to_uppercase();
+                                // Optional route options: map { "rate": "5/minute" } (#294).
+                                if let Some(options) = arguments.get(2) {
+                                    match self.eval_expression(options)? {
+                                        Value::Map(opts) => {
+                                            for (key, value) in &opts {
+                                                match (key.as_str(), value) {
+                                                    ("rate", Value::String(r)) => self
+                                                        .server_state
+                                                        .set_route_rate(&method, pattern_str, r)?,
+                                                    ("rate", _) => {
+                                                        return Err(IntentError::type_error(
+                                                            "route option `rate` must be a string like \"5/minute\" or \"off\"".to_string(),
+                                                        ))
+                                                    }
+                                                    (other, _) => {
+                                                        return Err(IntentError::type_error(format!(
+                                                            "unknown route option `{other}` (supported: rate)"
+                                                        )))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            return Err(IntentError::type_error(format!(
+                                                "{name}(pattern, handler, options): options must be a map"
+                                            )))
+                                        }
+                                    }
+                                }
                                 self.server_state.add_route_with_source(
                                     &method,
                                     pattern_str,
@@ -10341,7 +10403,17 @@ impl Interpreter {
 
             // Copy routes
             for (route, _handler, _source) in &server_state.routes {
-                async_routes.register_route_blocking(rt, &route.method, &route.pattern, "handler");
+                let rate = server_state
+                    .route_rates
+                    .get(&(route.method.clone(), route.pattern.clone()))
+                    .copied();
+                async_routes.register_route_with_rate_blocking(
+                    rt,
+                    &route.method,
+                    &route.pattern,
+                    "handler",
+                    rate,
+                );
             }
 
             // Copy static directories

@@ -3727,6 +3727,28 @@ NTNT_RATE_LIMIT_WRITE=10/minute ntnt run server.tnt
 - Set `NTNT_TRUSTED_PROXIES` behind a tunnel or proxy, or every visitor shares one budget.
 - Memory only, per process, resets on restart. Not DDoS protection; keep edge rules for volumetric floods.
 
+Per-route budgets replace the global one for that route (counted per route and client), and only apply when `NTNT_RATE_LIMIT=on`:
+
+```ntnt
+// routes/contact/index.tnt
+export let rate = "5/minute"        // every method in this file
+export let rate_post = "3/minute"   // or one method; "off" exempts the route
+export fn post(req) { ... }
+
+post("/subscribe", handler, map { "rate": "2/minute" })   // explicit routes
+```
+
+For keys the server cannot see (email, account), call `check_limit`. It always works, whether or not the built-in limiter is on:
+
+```ntnt
+import { check_limit, too_many_requests } from "std/http/server"
+
+let r = check_limit("contact-email:" + email, "3/day")
+if !r["allowed"] { return too_many_requests(r) }   // 429 + Retry-After
+```
+
+`check_limit` returns `map { allowed, limit, remaining, retry_after, reset }`, is shared by all HTTP workers in the process, and hashes keys. An invalid `rate` (route export, option or `check_limit`) is an error.
+
 ### Request Object Fields
 
 | Field | Type | Description |
