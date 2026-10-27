@@ -6764,6 +6764,29 @@ impl Interpreter {
                 }
 
                 let callee = self.eval_expression(function)?;
+                // A call skipped for a missing capability is a no-op: gate on
+                // the resolved callee before evaluating arguments, so e.g. a
+                // route's handler expression does not run in a job or test.
+                if let Value::NativeFunction {
+                    name,
+                    requires: Some(cap),
+                    ..
+                }
+                | Value::ContextFunction {
+                    name,
+                    requires: Some(cap),
+                    ..
+                } = &callee
+                {
+                    if !self.has_runtime_capability(*cap) {
+                        let (name, cap) = (name.clone(), *cap);
+                        if let Some(skipped) =
+                            self.check_native_call(&name, 0, usize::MAX, Some(cap), 0)?
+                        {
+                            return Ok(skipped);
+                        }
+                    }
+                }
                 let args: Result<Vec<Value>> = arguments
                     .iter()
                     .map(|arg| self.eval_expression(arg))

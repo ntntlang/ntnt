@@ -130,6 +130,9 @@ pub struct TypeContext {
     /// Nesting depth of function/lambda bodies being checked. Bodies run
     /// later, so top-level statement order does not apply inside them.
     function_depth: usize,
+    /// (scope index, name) bound by a route-name import inside a top-level
+    /// block: that binding is the import itself, not a shadowing local.
+    route_import_bindings: HashSet<(usize, String)>,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -699,6 +702,7 @@ impl TypeContext {
             route_imports_in_effect: HashSet::new(),
             reported_route_calls: HashSet::new(),
             function_depth: 0,
+            route_import_bindings: HashSet::new(),
             current_file: None,
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
@@ -718,6 +722,8 @@ impl TypeContext {
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.module_aliases.pop();
+        let depth = self.scopes.len();
+        self.route_import_bindings.retain(|(i, _)| *i < depth);
     }
 
     fn bind(&mut self, name: &str, typ: Type) {
@@ -1732,6 +1738,21 @@ impl TypeContext {
                 wildcard,
                 ..
             } => self.record_route_name_imports(items, source, *wildcard),
+            // Imports bind globally at runtime, so one nested in a top-level
+            // block (not a function body) still shadows route builtins.
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_block_route_imports(then_branch);
+                if let Some(else_branch) = else_branch {
+                    self.collect_block_route_imports(else_branch);
+                }
+            }
+            Statement::While { body, .. }
+            | Statement::ForIn { body, .. }
+            | Statement::Loop { body } => self.collect_block_route_imports(body),
             _ => {}
         }
     }
@@ -2224,8 +2245,13 @@ impl TypeContext {
             } => {
                 if alias.is_none() && self.function_depth == 0 {
                     let bound = self.route_names_bound_by(items, source, *wildcard);
-                    self.route_imports_in_effect
-                        .extend(bound.into_iter().map(|(local, _)| local));
+                    let scope = self.scopes.len() - 1;
+                    for (local, _) in bound {
+                        if scope > 0 {
+                            self.route_import_bindings.insert((scope, local.clone()));
+                        }
+                        self.route_imports_in_effect.insert(local);
+                    }
                 }
                 self.register_import(items, source, alias.as_deref(), *wildcard);
             }
@@ -3477,6 +3503,25 @@ impl TypeContext {
     /// Infer the return type of a function call
     /// Record route builtin names bound by a top-level import. Runs in the
     /// declaration pass so functions declared above the import are covered.
+    fn collect_block_route_imports(&mut self, block: &Block) {
+        for stmt in &block.statements {
+            let mut stmt = stmt;
+            while let Statement::Located { stmt: inner, .. } = stmt {
+                stmt = inner;
+            }
+            if matches!(
+                stmt,
+                Statement::Import { alias: None, .. }
+                    | Statement::If { .. }
+                    | Statement::While { .. }
+                    | Statement::ForIn { .. }
+                    | Statement::Loop { .. }
+            ) {
+                self.collect_declaration(stmt);
+            }
+        }
+    }
+
     fn record_route_name_imports(&mut self, items: &[ImportItem], source: &str, wildcard: bool) {
         for (local, exported) in self.route_names_bound_by(items, source, wildcard) {
             self.imported_route_names
@@ -3533,13 +3578,13 @@ impl TypeContext {
             return;
         };
         // A parameter or local binding in an enclosing scope shadows the import.
-        if self
-            .scopes
-            .iter()
-            .skip(1)
-            .any(|scope| scope.contains_key(name))
-        {
-            return;
+        let innermost = (1..self.scopes.len())
+            .rev()
+            .find(|&i| self.scopes[i].contains_key(name));
+        if let Some(i) = innermost {
+            if !self.route_import_bindings.contains(&(i, name.clone())) {
+                return;
+            }
         }
         // Certain: the import has already executed at this point. At top level
         // a call above the import still registers a route, so skip it. Inside a

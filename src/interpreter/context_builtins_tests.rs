@@ -139,3 +139,22 @@ fn route_registration_requires_a_path_pattern() {
     let err = out.expect_err("non-path pattern must not register silently");
     assert!(err.to_string().contains("fetch()"), "{err}");
 }
+
+#[test]
+fn capability_skipped_route_does_not_evaluate_its_handler() {
+    let source = r#"
+let mut ran = false
+fn make_handler() {
+    ran = true
+    return fn(req) { req }
+}
+let h = get
+h("/x", make_handler())
+get("/y", make_handler())
+str(ran)
+"#;
+    let program = Parser::new(Lexer::new(source).collect()).parse().unwrap();
+    let mut it = Interpreter::new();
+    it.set_execution_mode(ExecutionMode::Job);
+    assert_eq!(text(it.eval(&program)), "false");
+}
