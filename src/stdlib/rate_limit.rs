@@ -23,7 +23,11 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 const SHARDS: usize = 64;
-const OVERFLOW_KEY: u64 = u64::MAX;
+/// Reserved keys for the shared overflow budgets, one per request class.
+const OVERFLOW_WRITE: u64 = u64::MAX;
+const OVERFLOW_READ: u64 = u64::MAX - 1;
+/// A full shard is swept at most this often (bounds scan cost under key churn).
+const SWEEP_INTERVAL_NS: u64 = 1_000_000_000;
 const LOGGED_BIT: u64 = 1;
 
 /// A rate such as `30/minute`: `count` requests per `period_ns`.
@@ -117,9 +121,15 @@ fn gcra(stored: Option<u64>, now: u64, rate: RateSpec, burst: u64) -> (Decision,
     }
 }
 
+struct Shard {
+    map: HashMap<u64, u64>,
+    /// Monotonic ns of the last full-shard sweep (u64::MAX = never).
+    last_sweep: u64,
+}
+
 /// Bounded, sharded GCRA store with an injectable clock (nanoseconds).
 pub struct Store {
-    shards: Vec<Mutex<HashMap<u64, u64>>>,
+    shards: Vec<Mutex<Shard>>,
     per_shard: usize,
     hasher: RandomState,
 }
@@ -129,7 +139,12 @@ impl Store {
         let per_shard = (max_keys / SHARDS).max(1);
         Store {
             shards: (0..SHARDS)
-                .map(|_| Mutex::new(HashMap::with_capacity(per_shard.min(1024))))
+                .map(|_| {
+                    Mutex::new(Shard {
+                        map: HashMap::with_capacity(per_shard.min(1024)),
+                        last_sweep: u64::MAX,
+                    })
+                })
                 .collect(),
             per_shard,
             hasher: RandomState::new(),
@@ -137,48 +152,56 @@ impl Store {
     }
 
     /// Keyed hash, so an attacker cannot aim keys at one shard or at the
-    /// reserved overflow value.
+    /// reserved overflow values.
     pub fn key<K: Hash>(&self, key: K) -> u64 {
         let mut h = self.hasher.build_hasher();
         key.hash(&mut h);
-        let v = h.finish();
-        if v == OVERFLOW_KEY {
-            v - 1
-        } else {
-            v
-        }
+        h.finish().min(OVERFLOW_READ - 1)
     }
 
-    pub fn check(&self, key: u64, rate: RateSpec, burst: u64, now: u64) -> Decision {
+    /// Check `key` at `now`. `overflow` is the shared slot used when the shard
+    /// is full (one per request class, so classes keep separate budgets).
+    pub fn check(&self, key: u64, overflow: u64, rate: RateSpec, burst: u64, now: u64) -> Decision {
         let shard = &self.shards[(key as usize) & (SHARDS - 1)];
-        let mut map = match shard.lock() {
+        let mut guard = match shard.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 // Never panic or block the server: recover and start the shard fresh.
                 let mut guard = poisoned.into_inner();
-                guard.clear();
+                guard.map.clear();
+                guard.last_sweep = u64::MAX;
                 shard.clear_poison();
                 guard
             }
         };
+        let shard = &mut *guard;
         let mut slot = key;
-        if !map.contains_key(&key) && map.len() >= self.per_shard {
-            // Opportunistic sweep: entries whose TAT has passed hold no state.
-            map.retain(|k, v| *k == OVERFLOW_KEY || (*v & !LOGGED_BIT) > now);
-            if map.len() >= self.per_shard {
-                // Still full: new keys share one overflow budget; live keys stay.
-                slot = OVERFLOW_KEY;
+        if !shard.map.contains_key(&key) && shard.map.len() >= self.per_shard {
+            let due = shard.last_sweep == u64::MAX
+                || now.saturating_sub(shard.last_sweep) >= SWEEP_INTERVAL_NS;
+            if due {
+                // Entries whose TAT has passed (overflow included) hold no state.
+                shard.map.retain(|_, v| (*v & !LOGGED_BIT) > now);
+                shard.last_sweep = now;
+            }
+            if shard.map.len() >= self.per_shard {
+                // Still full: new keys share the class's overflow budget; live
+                // keys are never evicted.
+                slot = overflow;
             }
         }
-        let stored = map.get(&slot).copied();
+        let stored = shard.map.get(&slot).copied();
         let (decision, value) = gcra(stored, now, rate, burst);
-        map.insert(slot, value);
+        shard.map.insert(slot, value);
         decision
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.shards.iter().map(|s| s.lock().unwrap().len()).sum()
+        self.shards
+            .iter()
+            .map(|s| s.lock().unwrap().map.len())
+            .sum()
     }
 }
 
@@ -254,10 +277,15 @@ impl Config {
                 .filter(|p| *p >= 1 && *p <= 128)
                 .ok_or_else(|| format!("invalid NTNT_RATE_LIMIT_IPV6_PREFIX '{v}'"))?,
         };
-        let headers_on_allowed = matches!(
-            get("NTNT_RATE_LIMIT_HEADERS").as_deref().map(str::trim),
-            Some("all")
-        );
+        let headers_on_allowed = match get("NTNT_RATE_LIMIT_HEADERS").as_deref().map(str::trim) {
+            None | Some("") => false,
+            Some("all") => true,
+            Some(other) => {
+                return Err(format!(
+                    "invalid NTNT_RATE_LIMIT_HEADERS '{other}' (use all, or leave unset)"
+                ))
+            }
+        };
         Ok(Config {
             enabled,
             write,
@@ -339,14 +367,14 @@ impl Limiter {
         if self.config.exempt.iter().any(|p| p == path) {
             return None;
         }
-        let (rate, burst) = match class {
-            Class::Write => (self.config.write, self.config.write_burst),
-            Class::Read => (self.config.read, self.config.read_burst),
+        let (rate, burst, overflow) = match class {
+            Class::Write => (self.config.write, self.config.write_burst, OVERFLOW_WRITE),
+            Class::Read => (self.config.read, self.config.read_burst, OVERFLOW_READ),
         };
         let key = self
             .store
             .key((0u8, class, client_key(client, self.config.ipv6_prefix)));
-        Some(self.store.check(key, rate, burst, self.now()))
+        Some(self.store.check(key, overflow, rate, burst, self.now()))
     }
 }
 
@@ -411,6 +439,7 @@ mod tests {
             ("NTNT_RATE_LIMIT_BURST", "0"),
             ("NTNT_RATE_LIMIT_MAX_KEYS", "10"),
             ("NTNT_RATE_LIMIT_IPV6_PREFIX", "0"),
+            ("NTNT_RATE_LIMIT_HEADERS", "al"),
         ] {
             assert!(cfg(&[(k, v)]).is_err(), "{k}={v}");
         }
@@ -424,22 +453,22 @@ mod tests {
         let k = store.key("a");
         let t0 = 10 * S;
         for i in 0..3 {
-            let d = store.check(k, rate, 3, t0);
+            let d = store.check(k, OVERFLOW_WRITE, rate, 3, t0);
             assert!(d.allowed, "request {i}");
             assert_eq!(d.remaining, 2 - i);
         }
-        let denied = store.check(k, rate, 3, t0);
+        let denied = store.check(k, OVERFLOW_WRITE, rate, 3, t0);
         assert!(!denied.allowed);
         assert!(denied.first_trip);
         assert_eq!(denied.retry_after_secs, 20);
-        let again = store.check(k, rate, 3, t0 + S);
+        let again = store.check(k, OVERFLOW_WRITE, rate, 3, t0 + S);
         assert!(!again.allowed && !again.first_trip, "trip logged once");
         assert_eq!(again.retry_after_secs, 19);
         // One interval later exactly one more request fits.
-        assert!(store.check(k, rate, 3, t0 + 20 * S).allowed);
-        assert!(!store.check(k, rate, 3, t0 + 20 * S).allowed);
+        assert!(store.check(k, OVERFLOW_WRITE, rate, 3, t0 + 20 * S).allowed);
+        assert!(!store.check(k, OVERFLOW_WRITE, rate, 3, t0 + 20 * S).allowed);
         // After the full period the budget is back.
-        let later = store.check(k, rate, 3, t0 + 200 * S);
+        let later = store.check(k, OVERFLOW_WRITE, rate, 3, t0 + 200 * S);
         assert!(later.allowed);
         assert_eq!(later.remaining, 2);
     }
@@ -448,48 +477,129 @@ mod tests {
     fn keys_are_independent() {
         let store = Store::new(1_000);
         let rate = RateSpec::parse("1/minute").unwrap();
-        assert!(store.check(store.key("a"), rate, 1, S).allowed);
-        assert!(!store.check(store.key("a"), rate, 1, S).allowed);
-        assert!(store.check(store.key("b"), rate, 1, S).allowed);
+        assert!(
+            store
+                .check(store.key("a"), OVERFLOW_WRITE, rate, 1, S)
+                .allowed
+        );
+        assert!(
+            !store
+                .check(store.key("a"), OVERFLOW_WRITE, rate, 1, S)
+                .allowed
+        );
+        assert!(
+            store
+                .check(store.key("b"), OVERFLOW_WRITE, rate, 1, S)
+                .allowed
+        );
+    }
+
+    /// Find `n` keys landing in shard 0.
+    fn shard0_keys(store: &Store, tag: &str, n: usize) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut i = 0u64;
+        while out.len() < n {
+            let k = store.key((tag, i));
+            i += 1;
+            if (k as usize) & (SHARDS - 1) == 0 {
+                out.push(k);
+            }
+        }
+        out
     }
 
     #[test]
-    fn full_store_sweeps_expired_then_uses_overflow_without_evicting_live_keys() {
-        let store = Store::new(SHARDS); // one key per shard
+    fn full_shard_uses_overflow_without_evicting_live_keys_then_recovers() {
+        let store = Store::new(SHARDS); // one slot per shard
         let rate = RateSpec::parse("1/minute").unwrap();
         let now = 100 * S;
-        // Fill every shard with a live (limited) key.
-        let mut live = Vec::new();
-        let mut i = 0u64;
-        while live.len() < SHARDS {
-            let k = store.key(("live", i));
-            i += 1;
-            let shard = (k as usize) & (SHARDS - 1);
-            if live.iter().any(|(s, _)| *s == shard) {
-                continue;
-            }
-            assert!(store.check(k, rate, 1, now).allowed);
-            live.push((shard, k));
-        }
-        // A sprayed new key cannot evict the live one: it lands on the overflow budget.
-        let (shard0, live0) = live[0];
-        let mut spray = 0u64;
-        let newk = loop {
-            let k = store.key(("spray", spray));
-            spray += 1;
-            if (k as usize) & (SHARDS - 1) == shard0 {
-                break k;
-            }
-        };
-        assert!(store.check(newk, rate, 1, now).allowed); // overflow's first use
+        let keys = shard0_keys(&store, "k", 3);
+        let (live, sprayed, later_client) = (keys[0], keys[1], keys[2]);
+        assert!(store.check(live, OVERFLOW_WRITE, rate, 1, now).allowed);
+        // Shard full of a live key: the new key lands on the overflow budget.
+        assert!(store.check(sprayed, OVERFLOW_WRITE, rate, 1, now).allowed);
+        assert!(!store.check(sprayed, OVERFLOW_WRITE, rate, 1, now).allowed);
         assert!(
-            !store.check(live0, rate, 1, now).allowed,
+            !store.check(live, OVERFLOW_WRITE, rate, 1, now).allowed,
             "live key kept its state"
         );
-        assert!(store.len() <= SHARDS * 2);
-        // Once the live key's TAT has passed, it is swept and the new key fits.
-        let later = now + 120 * S;
-        assert!(store.check(newk, rate, 1, later).allowed);
+        assert!(store.len() <= SHARDS + 2);
+        // After everything (overflow included) expires, a new client gets its
+        // own slot again instead of being stuck on the shared budget.
+        let later = now + 600 * S;
+        assert!(
+            store
+                .check(later_client, OVERFLOW_WRITE, rate, 1, later)
+                .allowed
+        );
+        assert!(
+            !store
+                .check(later_client, OVERFLOW_WRITE, rate, 1, later)
+                .allowed
+        );
+        assert!(
+            store
+                .check(sprayed, OVERFLOW_WRITE, rate, 1, later + 1)
+                .allowed,
+            "overflow not shared with later_client"
+        );
+    }
+
+    #[test]
+    fn overflow_budgets_are_separate_per_class() {
+        let store = Store::new(SHARDS);
+        let write = RateSpec::parse("1/minute").unwrap();
+        let read = RateSpec::parse("60/minute").unwrap();
+        let now = 100 * S;
+        let keys = shard0_keys(&store, "c", 3);
+        assert!(store.check(keys[0], OVERFLOW_WRITE, write, 1, now).allowed);
+        assert!(store.check(keys[1], OVERFLOW_WRITE, write, 1, now).allowed); // write overflow spent
+        assert!(
+            store.check(keys[2], OVERFLOW_READ, read, 60, now).allowed,
+            "read overflow untouched"
+        );
+    }
+
+    #[test]
+    fn full_shard_sweeps_at_most_once_per_interval() {
+        let store = Store::new(SHARDS); // one slot per shard
+        let fast = RateSpec::parse("1000000/second").unwrap(); // 1 µs interval
+        let now = 100 * S;
+        let keys = shard0_keys(&store, "w", 3);
+        assert!(store.check(keys[0], OVERFLOW_WRITE, fast, 1, now).allowed); // TAT now+1µs
+                                                                             // First sweep (never swept before) reclaims keys[0]; keys[1] takes the slot.
+        assert!(
+            store
+                .check(keys[1], OVERFLOW_WRITE, fast, 1, now + 2_000)
+                .allowed
+        );
+        assert!(store.shards[0].lock().unwrap().map.contains_key(&keys[1]));
+        // keys[1] has expired, but the last sweep was 3 µs ago: no scan, overflow.
+        assert!(
+            store
+                .check(keys[2], OVERFLOW_WRITE, fast, 1, now + 5_000)
+                .allowed
+        );
+        {
+            let shard = store.shards[0].lock().unwrap();
+            assert!(
+                shard.map.contains_key(&OVERFLOW_WRITE),
+                "no sweep within the interval"
+            );
+            assert!(
+                shard.map.contains_key(&keys[1]),
+                "expired key not yet swept"
+            );
+        }
+        // One interval later the sweep runs and keys[2] gets its own slot.
+        assert!(
+            store
+                .check(keys[2], OVERFLOW_WRITE, fast, 1, now + 2_000 + S + 1)
+                .allowed
+        );
+        let shard = store.shards[0].lock().unwrap();
+        assert!(shard.map.contains_key(&keys[2]));
+        assert!(!shard.map.contains_key(&OVERFLOW_WRITE));
     }
 
     #[test]
@@ -539,7 +649,7 @@ mod tests {
         })
         .join();
         assert!(store.shards[shard].is_poisoned());
-        assert!(store.check(k, rate, 1, S).allowed);
+        assert!(store.check(k, OVERFLOW_WRITE, rate, 1, S).allowed);
         assert!(!store.shards[shard].is_poisoned());
     }
 }

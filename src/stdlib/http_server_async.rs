@@ -783,13 +783,8 @@ fn too_many_requests_response(
         .body(Body::from(body))
         .unwrap_or_else(|_| Response::new(Body::empty()));
     add_rate_headers(&mut response, d);
-    if let Some((name, value)) = csp {
-        if let Ok(v) = axum::http::HeaderValue::from_str(value) {
-            if let Ok(n) = axum::http::HeaderName::from_bytes(name.as_bytes()) {
-                response.headers_mut().insert(n, v);
-            }
-        }
-    }
+    // Same protection headers (CSP, HSTS in production, ...) as other responses.
+    apply_async_security_headers(&mut response, csp);
     response
 }
 
