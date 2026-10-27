@@ -3357,6 +3357,7 @@ impl TypeContext {
         body: &Block,
         expected_param_types: &[Type],
     ) -> Type {
+        self.function_depth += 1;
         self.push_scope();
         let prev_return = self.current_return_type.take();
         let prev_collected = std::mem::take(&mut self.collected_returns);
@@ -3399,6 +3400,7 @@ impl TypeContext {
         };
 
         self.current_return_type = prev_return;
+        self.function_depth -= 1;
         self.collected_returns = prev_collected;
         self.pop_scope();
         Type::Function {

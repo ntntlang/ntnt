@@ -1822,6 +1822,13 @@ fn test_import_shadows_route_activation_is_per_binding_and_top_level() {
         ),
         0
     );
+    // A callback passed through a typed parameter is a deferred body too.
+    assert_eq!(
+        count(
+            "fn keep(f: () -> Any) {\n    return f\n}\nlet setup = keep(fn() { get(\"/health\", fn(req) { req }) })\nimport { get } from \"std/kv\"\nsetup()\n"
+        ),
+        1
+    );
     // Lambdas are deferred bodies: they see later top-level imports.
     assert_eq!(
         count(
