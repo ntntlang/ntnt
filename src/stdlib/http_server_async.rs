@@ -401,7 +401,11 @@ async fn axum_to_bridge_request(
 
     // Trusted client IP (NTNT_TRUSTED_PROXIES); `ip` keeps legacy behaviour.
     let trusted_client_ip = crate::stdlib::client_ip::resolve_string(peer_addr.ip(), |name| {
-        req.headers().get(name).and_then(|v| v.to_str().ok())
+        req.headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect()
     });
 
     // Read body

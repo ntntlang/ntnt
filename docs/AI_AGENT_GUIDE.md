@@ -3725,7 +3725,7 @@ listen(8080)
 | `req.json` | Map \| None | Parsed JSON body (if Content-Type is JSON) |
 | `req.form` | Map \| None | Parsed form body (if Content-Type is form) |
 | `req.ip` | String | Legacy client IP: first `X-Forwarded-For` hop, which any client can spoof. Do not use for limits or auth. |
-| `req.client_ip` | String | Trusted client IP. Reads `NTNT_CLIENT_IP_HEADER` (default `X-Forwarded-For`, right to left, skipping trusted hops) only when the TCP peer is in `NTNT_TRUSTED_PROXIES`; otherwise the peer address. Use this for rate limits, audit logs and abuse checks. |
+| `req.client_ip` | String | Trusted client IP. Reads `NTNT_CLIENT_IP_HEADER` (default `X-Forwarded-For`, right to left, skipping trusted hops) only when the TCP peer is in `NTNT_TRUSTED_PROXIES`; otherwise the peer address. Use this for rate limits, audit logs and abuse checks. List only proxies you operate in `NTNT_TRUSTED_PROXIES`; a trusted proxy must set or overwrite the single-address header (e.g. Cloudflare's `CF-Connecting-IP`) itself, or append to `X-Forwarded-For`. Repeated `X-Forwarded-For` lines are read as one list; a repeated single-address header falls back to the peer. |
 | `req.peer_ip` | String | TCP peer address (the proxy, behind a tunnel) |
 | `req.id` | String | Unique request ID |
 | `req.context` | Map | Middleware-injected context |

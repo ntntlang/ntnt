@@ -28,19 +28,28 @@ impl Cidr {
             Some((a, p)) => (a.trim(), Some(p.trim())),
             None => (text, None),
         };
-        let ip: IpAddr = addr
+        let written: IpAddr = addr
             .parse()
             .map_err(|_| format!("invalid address in NTNT_TRUSTED_PROXIES: '{text}'"))?;
-        let ip = canonical(ip);
-        let bits: u8 = if ip.is_ipv4() { 32 } else { 128 };
-        let prefix: u8 = match prefix {
-            None => bits,
+        let written_bits: u8 = if written.is_ipv4() { 32 } else { 128 };
+        let written_prefix: u8 = match prefix {
+            None => written_bits,
             Some(p) => p
                 .parse::<u8>()
                 .ok()
-                .filter(|p| *p <= bits)
+                .filter(|p| *p <= written_bits)
                 .ok_or_else(|| format!("invalid prefix in NTNT_TRUSTED_PROXIES: '{text}'"))?,
         };
+        // Peers are canonicalised (IPv4-mapped IPv6 -> IPv4), so a mapped
+        // network of /96 or longer is stored as the equivalent IPv4 network.
+        let (ip, prefix) = match written {
+            IpAddr::V6(v6) if written_prefix >= 96 && v6.to_ipv4_mapped().is_some() => (
+                IpAddr::V4(v6.to_ipv4_mapped().unwrap_or(Ipv4Addr::UNSPECIFIED)),
+                written_prefix - 96,
+            ),
+            other => (other, written_prefix),
+        };
+        let bits: u8 = if ip.is_ipv4() { 32 } else { 128 };
         let mask = prefix_mask(bits, prefix);
         let value = to_u128(ip);
         if value & !mask != 0 {
@@ -133,10 +142,9 @@ impl ClientIpConfig {
             .map(|h| h.trim().to_ascii_lowercase())
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| "x-forwarded-for".to_string());
-        if !header
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
+        // RFC 9110 field-name = token.
+        let token = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+        if !header.bytes().all(token) {
             return Err(format!("invalid NTNT_CLIENT_IP_HEADER '{header}'"));
         }
         let multi_hop = header == "x-forwarded-for";
@@ -157,19 +165,27 @@ impl ClientIpConfig {
         self.trusted.iter().any(|c| c.contains(ip))
     }
 
-    /// Resolve the client IP for one request. `header` looks up a header by
-    /// lower-case name and returns its (possibly comma-joined) value.
-    pub fn resolve<'a>(&self, peer: IpAddr, header: impl Fn(&str) -> Option<&'a str>) -> IpAddr {
+    /// Resolve the client IP for one request. `header` returns every value of
+    /// a header (lower-case name) in the order received; repeated
+    /// `X-Forwarded-For` lines are one comma-separated list (RFC 9110 5.3), so
+    /// a client-supplied line before the proxy's own line cannot win.
+    pub fn resolve<'a>(&self, peer: IpAddr, header: impl Fn(&str) -> Vec<&'a str>) -> IpAddr {
         let peer = canonical(peer);
         // Fast path: nothing trusted, or the peer is not a trusted proxy.
         if self.trusted.is_empty() || !self.is_trusted(peer) {
             return peer;
         }
-        let Some(value) = header(&self.header) else {
+        let values = header(&self.header);
+        if values.is_empty() {
             return peer;
-        };
+        }
         if !self.multi_hop {
-            return match parse_hop(value) {
+            // A single-address header must arrive exactly once.
+            if values.len() != 1 {
+                warn_once();
+                return peer;
+            }
+            return match parse_hop(values[0]) {
                 Some(ip) => ip,
                 None => {
                     warn_once();
@@ -177,16 +193,19 @@ impl ClientIpConfig {
                 }
             };
         }
-        // X-Forwarded-For: right to left, skipping trusted hops; the first
-        // untrusted address is the client. A malformed hop stops the walk.
+        // X-Forwarded-For: right to left over all lines, skipping trusted
+        // hops; the first untrusted address is the client. A malformed hop
+        // stops the walk.
         let mut leftmost_trusted = None;
-        for hop in value.rsplit(',') {
-            match parse_hop(hop) {
-                Some(ip) if self.is_trusted(ip) => leftmost_trusted = Some(ip),
-                Some(ip) => return ip,
-                None => {
-                    warn_once();
-                    return peer;
+        for line in values.iter().rev() {
+            for hop in line.rsplit(',') {
+                match parse_hop(hop) {
+                    Some(ip) if self.is_trusted(ip) => leftmost_trusted = Some(ip),
+                    Some(ip) => return ip,
+                    None => {
+                        warn_once();
+                        return peer;
+                    }
                 }
             }
         }
@@ -224,7 +243,7 @@ pub fn config() -> &'static ClientIpConfig {
 }
 
 /// Convenience used by both servers.
-pub fn resolve_string<'a>(peer: IpAddr, header: impl Fn(&str) -> Option<&'a str>) -> String {
+pub fn resolve_string<'a>(peer: IpAddr, header: impl Fn(&str) -> Vec<&'a str>) -> String {
     config().resolve(peer, header).to_string()
 }
 
@@ -236,19 +255,24 @@ pub fn unknown_peer() -> IpAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
     }
 
     fn resolve(cfg: &ClientIpConfig, peer: &str, headers: &[(&str, &str)]) -> String {
-        let map: HashMap<String, String> = headers
+        let owned: Vec<(String, String)> = headers
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        cfg.resolve(ip(peer), |name| map.get(name).map(|s| s.as_str()))
-            .to_string()
+        cfg.resolve(ip(peer), |name| {
+            owned
+                .iter()
+                .filter(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+                .collect()
+        })
+        .to_string()
     }
 
     #[test]
@@ -346,6 +370,57 @@ mod tests {
             resolve(&ClientIpConfig::default(), "::ffff:192.0.2.1", &[]),
             "192.0.2.1"
         );
+    }
+
+    #[test]
+    fn repeated_header_lines_cannot_spoof() {
+        let cfg = ClientIpConfig::new("127.0.0.0/8", None).unwrap();
+        // Client sends its own XFF line; the proxy appends a separate line.
+        assert_eq!(
+            resolve(
+                &cfg,
+                "127.0.0.1",
+                &[
+                    ("x-forwarded-for", "6.6.6.6"),
+                    ("x-forwarded-for", "198.51.100.7")
+                ]
+            ),
+            "198.51.100.7"
+        );
+        let single = ClientIpConfig::new("127.0.0.0/8", Some("CF-Connecting-IP")).unwrap();
+        assert_eq!(
+            resolve(
+                &single,
+                "127.0.0.1",
+                &[
+                    ("cf-connecting-ip", "6.6.6.6"),
+                    ("cf-connecting-ip", "203.0.113.9")
+                ]
+            ),
+            "127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn mapped_cidrs_and_full_header_charset_are_accepted() {
+        let cfg = ClientIpConfig::new("::ffff:10.0.0.0/104", None).unwrap();
+        assert!(cfg.is_trusted(ip("10.1.2.3")));
+        assert!(!cfg.is_trusted(ip("11.0.0.1")));
+        assert_eq!(
+            resolve(
+                &cfg,
+                "::ffff:10.0.0.5",
+                &[("x-forwarded-for", "198.51.100.7")]
+            ),
+            "198.51.100.7"
+        );
+        // Host bits set in a mapped address below /96 are still refused; /96 is all of IPv4.
+        assert!(ClientIpConfig::new("::ffff:10.0.0.0/88", None).is_err());
+        assert!(ClientIpConfig::new("::ffff:0.0.0.0/96", None)
+            .unwrap()
+            .is_trusted(ip("192.0.2.1")));
+        assert!(ClientIpConfig::new("", Some("X.Client+IP")).is_ok());
+        assert!(ClientIpConfig::new("", Some("X Client")).is_err());
     }
 
     #[test]

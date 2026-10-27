@@ -1221,8 +1221,9 @@ pub fn request_to_value(
         request
             .headers()
             .iter()
-            .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+            .filter(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
             .map(|h| h.value.as_str())
+            .collect()
     });
     req_map.insert("client_ip".to_string(), Value::String(trusted_client_ip));
 
