@@ -3895,7 +3895,7 @@ impl Interpreter {
             Value::ContextFunction {
                 name: "get".to_string(),
                 arity: 2,
-                max_arity: 2,
+                max_arity: 3,
                 requires: Some(RuntimeCapability::HttpServer),
                 func: context_builtins::route_get,
             },
@@ -3918,7 +3918,7 @@ impl Interpreter {
             Value::ContextFunction {
                 name: "post".to_string(),
                 arity: 2,
-                max_arity: 2,
+                max_arity: 3,
                 requires: Some(RuntimeCapability::HttpServer),
                 func: context_builtins::route_post,
             },
@@ -3941,7 +3941,7 @@ impl Interpreter {
             Value::ContextFunction {
                 name: "put".to_string(),
                 arity: 2,
-                max_arity: 2,
+                max_arity: 3,
                 requires: Some(RuntimeCapability::HttpServer),
                 func: context_builtins::route_put,
             },
@@ -3964,7 +3964,7 @@ impl Interpreter {
             Value::ContextFunction {
                 name: "delete".to_string(),
                 arity: 2,
-                max_arity: 2,
+                max_arity: 3,
                 requires: Some(RuntimeCapability::HttpServer),
                 func: context_builtins::route_delete,
             },
@@ -3987,7 +3987,7 @@ impl Interpreter {
             Value::ContextFunction {
                 name: "patch".to_string(),
                 arity: 2,
-                max_arity: 2,
+                max_arity: 3,
                 requires: Some(RuntimeCapability::HttpServer),
                 func: context_builtins::route_patch,
             },
@@ -5208,11 +5208,37 @@ impl Interpreter {
         let http_methods = ["get", "post", "put", "delete", "patch", "head", "options"];
 
         let env = self.environment.borrow();
+        // `export let rate = "5/minute"` applies to every method in the file;
+        // `export let rate_post = ...` overrides one method; "off" exempts (#294).
+        let file_rate = match env.values.get("rate") {
+            None => None,
+            Some(Value::String(r)) => Some(r.clone()),
+            Some(_) => {
+                return Err(IntentError::runtime_error(format!(
+                    "{}: `rate` must be a string like \"5/minute\" or \"off\"",
+                    file_path.display()
+                )))
+            }
+        };
+        let mut route_rates: Vec<(String, String)> = Vec::new();
         for method in http_methods {
             if let Some(handler) = env.values.get(method) {
                 // Check if it's a function
                 if matches!(handler, Value::Function { .. }) {
                     let http_method = method.to_uppercase();
+                    let method_rate = match env.values.get(&format!("rate_{method}")) {
+                        None => file_rate.clone(),
+                        Some(Value::String(r)) => Some(r.clone()),
+                        Some(_) => {
+                            return Err(IntentError::runtime_error(format!(
+                                "{}: `rate_{method}` must be a string like \"5/minute\" or \"off\"",
+                                file_path.display()
+                            )))
+                        }
+                    };
+                    if let Some(r) = method_rate {
+                        route_rates.push((http_method.clone(), r));
+                    }
                     routes.push((
                         http_method,
                         url_pattern.clone(),
@@ -5229,6 +5255,11 @@ impl Interpreter {
         self.environment = previous_env;
         self.current_file = previous_file;
         self.imported_files = previous_imports;
+
+        for (method, rate) in route_rates {
+            self.server_state
+                .set_route_rate(&method, &url_pattern, &rate)?;
+        }
 
         Ok(routes)
     }
@@ -5294,7 +5325,41 @@ impl Interpreter {
         let method_name = method.to_lowercase();
         let env = self.environment.borrow();
         let handler = env.values.get(&method_name).cloned();
+        // Rate exports are applied at discovery; a changed rate needs a restart.
+        let reloaded_rate = match env.values.get(&format!("rate_{method_name}")) {
+            Some(Value::String(r)) => Some(r.clone()),
+            _ => match env.values.get("rate") {
+                Some(Value::String(r)) => Some(r.clone()),
+                _ => None,
+            },
+        };
         drop(env);
+        let pattern_rates: Vec<_> = self
+            .server_state
+            .routes
+            .iter()
+            .filter(|(r, _, src)| {
+                r.method == method.to_uppercase() && src.file_path.as_deref() == Some(file_path)
+            })
+            .map(|(r, _, _)| r.pattern.clone())
+            .collect();
+        for pattern in pattern_rates {
+            let current = self
+                .server_state
+                .route_rates
+                .get(&(method.to_uppercase(), pattern.clone()))
+                .copied();
+            let reloaded = reloaded_rate
+                .as_deref()
+                .and_then(|r| crate::stdlib::rate_limit::RouteRate::parse(r).ok());
+            if current != reloaded {
+                eprintln!(
+                    "[hot-reload] {} {}: rate limit change takes effect after restart",
+                    method.to_uppercase(),
+                    pattern
+                );
+            }
+        }
 
         // Restore environment and imports
         self.environment = previous_env;
@@ -9872,7 +9937,17 @@ impl Interpreter {
 
             // Copy routes
             for (route, _handler, _source) in &server_state.routes {
-                async_routes.register_route_blocking(rt, &route.method, &route.pattern, "handler");
+                let rate = server_state
+                    .route_rates
+                    .get(&(route.method.clone(), route.pattern.clone()))
+                    .copied();
+                async_routes.register_route_with_rate_blocking(
+                    rt,
+                    &route.method,
+                    &route.pattern,
+                    "handler",
+                    rate,
+                );
             }
 
             // Copy static directories

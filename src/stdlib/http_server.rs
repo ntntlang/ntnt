@@ -566,6 +566,8 @@ pub struct ServerState {
     pub cors_config: Option<CorsConfig>,    // Optional CORS configuration
     pub csp_config: Option<CspConfig>,      // Optional CSP configuration
     pub error_handler: Option<Value>,       // Global error handler callback
+    /// Per-route rate overrides keyed by (method, pattern) (#294).
+    pub route_rates: HashMap<(String, String), crate::stdlib::rate_limit::RouteRate>,
 }
 
 impl ServerState {
@@ -580,11 +582,13 @@ impl ServerState {
             cors_config: None,
             csp_config: None,
             error_handler: None,
+            route_rates: HashMap::new(),
         }
     }
 
     pub fn clear(&mut self) {
         self.routes.clear();
+        self.route_rates.clear();
         self.route_index.clear();
         self.static_dirs.clear();
         self.middleware.clear();
@@ -597,6 +601,7 @@ impl ServerState {
     /// If route_index has stale indices pointing into an empty routes vec, find_route panics.
     pub fn clear_routes_and_middleware(&mut self) {
         self.routes.clear();
+        self.route_rates.clear();
         self.route_index.clear();
         self.middleware.clear();
     }
@@ -713,6 +718,17 @@ impl ServerState {
         }
 
         None
+    }
+
+    /// Record a per-route rate (`export let rate`, `rate_<method>` or the
+    /// route option map). Invalid rates are an error at registration.
+    pub fn set_route_rate(&mut self, method: &str, pattern: &str, rate: &str) -> Result<()> {
+        let parsed = crate::stdlib::rate_limit::RouteRate::parse(rate).map_err(|e| {
+            IntentError::runtime_error(format!("{method} {pattern}: {e} (or \"off\")"))
+        })?;
+        self.route_rates
+            .insert((method.to_string(), pattern.to_string()), parsed);
+        Ok(())
     }
 
     /// Add a route with source file info for hot-reload
@@ -1585,6 +1601,123 @@ pub fn init() -> HashMap<String, Value> {
                 _ => Err(IntentError::type_error(
                     "status() requires int and string".to_string(),
                 )),
+            },
+        },
+    );
+
+    // @ntnt check_limit
+    // @module std/http/server
+    // @signature check_limit(key: String, rate: String) -> Map
+    // Count one event against an app-defined rate-limit key in this process.
+    //
+    // For limits the server cannot see, such as per email address, account or
+    // form + client IP. Uses the same GCRA store design as the built-in limiter
+    // (process memory, bounded by NTNT_RATE_LIMIT_MAX_KEYS, resets on restart,
+    // not shared across hosts) but works whether or not NTNT_RATE_LIMIT is on:
+    // calling it is the opt-in. Keys are hashed; the raw key is not retained.
+    // Shared across all HTTP worker interpreters in the process.
+    // @param key Any string identifying what is limited, e.g. "contact-email:" + email.
+    // @param rate "N/second", "N/minute", "N/hour" or "N/day".
+    // @returns map { allowed: Bool, limit: Int, remaining: Int, retry_after: Int, reset: Int } (seconds).
+    // @see_also too_many_requests
+    // @since v0.5.7
+    // @tags #http, #server, #security
+    // @example check_limit("contact-email:" + email, "3/day")["allowed"] => true ~ "First submission today"
+    // @error TypeError ~ "check_limit() requires a key string and a rate string" fix: "Pass two strings"
+    // @error RuntimeError ~ "invalid rate" fix: "Use N/second|minute|hour|day, e.g. \"5/minute\""
+    module.insert(
+        "check_limit".to_string(),
+        Value::NativeFunction {
+            name: "check_limit".to_string(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::String(key), Value::String(rate)) => {
+                    let spec = crate::stdlib::rate_limit::RateSpec::parse(rate)
+                        .map_err(IntentError::runtime_error)?;
+                    let d = crate::stdlib::rate_limit::check_key(key, spec);
+                    let mut out = HashMap::new();
+                    out.insert("allowed".to_string(), Value::Bool(d.allowed));
+                    out.insert("limit".to_string(), Value::Int(d.limit as i64));
+                    out.insert("remaining".to_string(), Value::Int(d.remaining as i64));
+                    out.insert(
+                        "retry_after".to_string(),
+                        Value::Int(d.retry_after_secs as i64),
+                    );
+                    out.insert("reset".to_string(), Value::Int(d.reset_secs as i64));
+                    Ok(Value::Map(out))
+                }
+                _ => Err(IntentError::type_error(
+                    "check_limit() requires a key string and a rate string".to_string(),
+                )),
+            },
+        },
+    );
+
+    // @ntnt too_many_requests
+    // @module std/http/server
+    // @signature too_many_requests(result?: Map) -> Response
+    // Create a 429 Too Many Requests response.
+    //
+    // Pass the map returned by `check_limit` to set `Retry-After` and the
+    // `RateLimit-Limit/Remaining/Reset` headers; without it `Retry-After` is 60.
+    // @param result Optional check_limit result.
+    // @returns A 429 text/plain Response with Retry-After and no-store.
+    // @see_also check_limit, status
+    // @since v0.5.7
+    // @tags #http, #server, #security
+    // @example too_many_requests(check_limit("k", "1/minute")) => Response { status: 429 } ~ "Return 429 with Retry-After"
+    // @error TypeError ~ "too_many_requests() takes an optional check_limit result map" fix: "Pass the map from check_limit, or nothing"
+    module.insert(
+        "too_many_requests".to_string(),
+        Value::NativeFunction {
+            name: "too_many_requests".to_string(),
+            arity: 0,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                let int = |m: &HashMap<String, Value>, k: &str| match m.get(k) {
+                    Some(Value::Int(n)) if *n >= 0 => Some(*n),
+                    _ => None,
+                };
+                let mut headers = HashMap::new();
+                headers.insert(
+                    "content-type".to_string(),
+                    Value::String("text/plain; charset=utf-8".to_string()),
+                );
+                headers.insert(
+                    "cache-control".to_string(),
+                    Value::String("no-store".to_string()),
+                );
+                let mut retry = 60;
+                match args.first() {
+                    None | Some(Value::Unit) => {}
+                    Some(Value::Map(m)) => {
+                        retry = int(m, "retry_after").unwrap_or(60).max(1);
+                        for (key, header) in [
+                            ("limit", "ratelimit-limit"),
+                            ("remaining", "ratelimit-remaining"),
+                            ("reset", "ratelimit-reset"),
+                        ] {
+                            if let Some(n) = int(m, key) {
+                                headers.insert(header.to_string(), Value::String(n.to_string()));
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        return Err(IntentError::type_error(
+                            "too_many_requests() takes an optional check_limit result map"
+                                .to_string(),
+                        ))
+                    }
+                }
+                headers.insert("retry-after".to_string(), Value::String(retry.to_string()));
+                Ok(create_response_value(
+                    429,
+                    headers,
+                    "Too Many Requests\n".to_string(),
+                ))
             },
         },
     );

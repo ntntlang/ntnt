@@ -148,6 +148,43 @@ fn register_route(interp: &mut Interpreter, method: &str, args: &[Value]) -> Res
     // Capability (HttpServer) is enforced by the call gate before this runs.
     match &args[0] {
         Value::String(pattern) if pattern.starts_with('/') => {
+            // Optional route options: map { "rate": "5/minute" | "off" } (#294).
+            // Validate everything before changing any state.
+            let mut rate: Option<String> = None;
+            match args.get(2) {
+                None | Some(Value::Unit) => {}
+                Some(Value::Map(opts)) => {
+                    for (key, value) in opts {
+                        match (key.as_str(), value) {
+                            ("rate", Value::String(r)) => {
+                                crate::stdlib::rate_limit::RouteRate::parse(r).map_err(|e| {
+                                    IntentError::runtime_error(format!("{method} {pattern}: {e} (or \"off\")"))
+                                })?;
+                                rate = Some(r.clone());
+                            }
+                            ("rate", _) => {
+                                return Err(IntentError::type_error(
+                                    "route option `rate` must be a string like \"5/minute\" or \"off\"".to_string(),
+                                ))
+                            }
+                            (other, _) => {
+                                return Err(IntentError::type_error(format!(
+                                    "unknown route option `{other}` (supported: rate)"
+                                )))
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err(IntentError::type_error(format!(
+                        "{}(pattern, handler, options): options must be a map",
+                        method.to_lowercase()
+                    )))
+                }
+            }
+            if let Some(r) = rate {
+                interp.server_state.set_route_rate(method, pattern, &r)?;
+            }
             interp.server_state.add_route_with_source(
                 method,
                 pattern,

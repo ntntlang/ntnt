@@ -23,9 +23,16 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 const SHARDS: usize = 64;
-/// Reserved keys for the shared overflow budgets, one per request class.
-const OVERFLOW_WRITE: u64 = u64::MAX;
-const OVERFLOW_READ: u64 = u64::MAX - 1;
+/// Class tags for the shared overflow budgets. Overflow state is kept per
+/// exact (class, rate, burst) so a full shard never makes one limit read
+/// another limit's saved time.
+const OVERFLOW_WRITE: u64 = 0;
+const OVERFLOW_READ: u64 = 1;
+/// Bound on distinct overflow identities per shard (rates are configuration
+/// or app code, so this is never reached in practice).
+const MAX_OVERFLOW_IDS: usize = 256;
+
+type OverflowId = (u64, u64, u64, u64);
 /// A full shard is swept at most this often (bounds scan cost under key churn).
 const SWEEP_INTERVAL_NS: u64 = 1_000_000_000;
 const LOGGED_BIT: u64 = 1;
@@ -63,6 +70,22 @@ impl RateSpec {
     /// flag bit never swallows the interval).
     fn interval_ns(&self) -> u64 {
         (self.period_ns / self.count).max(2)
+    }
+}
+
+/// A per-route override: a rate, or `off` to exempt the route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteRate {
+    Off,
+    Rate(RateSpec),
+}
+
+impl RouteRate {
+    pub fn parse(text: &str) -> std::result::Result<RouteRate, String> {
+        if text.trim().eq_ignore_ascii_case("off") {
+            return Ok(RouteRate::Off);
+        }
+        RateSpec::parse(text).map(RouteRate::Rate)
     }
 }
 
@@ -123,6 +146,7 @@ fn gcra(stored: Option<u64>, now: u64, rate: RateSpec, burst: u64) -> (Decision,
 
 struct Shard {
     map: HashMap<u64, u64>,
+    overflow: HashMap<OverflowId, u64>,
     /// Monotonic ns of the last full-shard sweep (u64::MAX = never).
     last_sweep: u64,
 }
@@ -142,6 +166,7 @@ impl Store {
                 .map(|_| {
                     Mutex::new(Shard {
                         map: HashMap::with_capacity(per_shard.min(1024)),
+                        overflow: HashMap::new(),
                         last_sweep: u64::MAX,
                     })
                 })
@@ -156,11 +181,11 @@ impl Store {
     pub fn key<K: Hash>(&self, key: K) -> u64 {
         let mut h = self.hasher.build_hasher();
         key.hash(&mut h);
-        h.finish().min(OVERFLOW_READ - 1)
+        h.finish()
     }
 
-    /// Check `key` at `now`. `overflow` is the shared slot used when the shard
-    /// is full (one per request class, so classes keep separate budgets).
+    /// Check `key` at `now`. `overflow` is the class tag of the shared budget
+    /// used when the shard is full; the slot is per (class, rate, burst).
     pub fn check(&self, key: u64, overflow: u64, rate: RateSpec, burst: u64, now: u64) -> Decision {
         let shard = &self.shards[(key as usize) & (SHARDS - 1)];
         let mut guard = match shard.lock() {
@@ -169,30 +194,52 @@ impl Store {
                 // Never panic or block the server: recover and start the shard fresh.
                 let mut guard = poisoned.into_inner();
                 guard.map.clear();
+                guard.overflow.clear();
                 guard.last_sweep = u64::MAX;
                 shard.clear_poison();
                 guard
             }
         };
         let shard = &mut *guard;
-        let mut slot = key;
+        let mut use_overflow = false;
         if !shard.map.contains_key(&key) && shard.map.len() >= self.per_shard {
             let due = shard.last_sweep == u64::MAX
                 || now.saturating_sub(shard.last_sweep) >= SWEEP_INTERVAL_NS;
             if due {
-                // Entries whose TAT has passed (overflow included) hold no state.
+                // Entries whose TAT has passed hold no state.
                 shard.map.retain(|_, v| (*v & !LOGGED_BIT) > now);
+                shard.overflow.retain(|_, v| (*v & !LOGGED_BIT) > now);
                 shard.last_sweep = now;
             }
-            if shard.map.len() >= self.per_shard {
-                // Still full: new keys share the class's overflow budget; live
-                // keys are never evicted.
-                slot = overflow;
-            }
+            // Still full: new keys share an overflow budget for this exact
+            // limit; live keys are never evicted.
+            use_overflow = shard.map.len() >= self.per_shard;
         }
-        let stored = shard.map.get(&slot).copied();
+        if use_overflow {
+            let id: OverflowId = (overflow, rate.count, rate.period_ns, burst);
+            if !shard.overflow.contains_key(&id) && shard.overflow.len() >= MAX_OVERFLOW_IDS {
+                shard.overflow.retain(|_, v| (*v & !LOGGED_BIT) > now);
+                if shard.overflow.len() >= MAX_OVERFLOW_IDS {
+                    // No room to track this limit: fail closed rather than
+                    // allowing untracked requests.
+                    return Decision {
+                        allowed: false,
+                        limit: burst,
+                        remaining: 0,
+                        retry_after_secs: ceil_secs(SWEEP_INTERVAL_NS).max(1),
+                        reset_secs: ceil_secs(SWEEP_INTERVAL_NS).max(1),
+                        first_trip: false,
+                    };
+                }
+            }
+            let stored = shard.overflow.get(&id).copied();
+            let (decision, value) = gcra(stored, now, rate, burst);
+            shard.overflow.insert(id, value);
+            return decision;
+        }
+        let stored = shard.map.get(&key).copied();
         let (decision, value) = gcra(stored, now, rate, burst);
-        shard.map.insert(slot, value);
+        shard.map.insert(key, value);
         decision
     }
 
@@ -200,7 +247,10 @@ impl Store {
     fn len(&self) -> usize {
         self.shards
             .iter()
-            .map(|s| s.lock().unwrap().map.len())
+            .map(|s| {
+                let g = s.lock().unwrap();
+                g.map.len() + g.overflow.len()
+            })
             .sum()
     }
 }
@@ -363,9 +413,40 @@ impl Limiter {
 
     /// Check one request. `None` when the request is not subject to limits.
     pub fn check_request(&self, method: &str, path: &str, client: IpAddr) -> Option<Decision> {
+        self.check_route(method, path, client, None)
+    }
+
+    /// Check one request against its route. A route rate replaces the global
+    /// class budget and is counted per (route, client); `off` exempts it.
+    pub fn check_route(
+        &self,
+        method: &str,
+        path: &str,
+        client: IpAddr,
+        route: Option<(&str, RouteRate)>,
+    ) -> Option<Decision> {
         let class = classify(method)?;
         if self.config.exempt.iter().any(|p| p == path) {
             return None;
+        }
+        if let Some((route_id, override_rate)) = route {
+            let RouteRate::Rate(rate) = override_rate else {
+                return None;
+            };
+            let key = self.store.key((
+                1u8,
+                route_id,
+                class,
+                client_key(client, self.config.ipv6_prefix),
+            ));
+            let overflow = match class {
+                Class::Write => OVERFLOW_WRITE,
+                Class::Read => OVERFLOW_READ,
+            };
+            return Some(
+                self.store
+                    .check(key, overflow, rate, rate.count, self.now()),
+            );
         }
         let (rate, burst, overflow) = match class {
             Class::Write => (self.config.write, self.config.write_burst, OVERFLOW_WRITE),
@@ -379,6 +460,40 @@ impl Limiter {
 }
 
 static LIMITER: OnceLock<Option<Limiter>> = OnceLock::new();
+
+/// Store behind `check_limit`: always available (an explicit call), separate
+/// from the built-in limiter, bounded by `NTNT_RATE_LIMIT_MAX_KEYS`.
+struct KeyLimits {
+    store: Store,
+    base: Instant,
+}
+
+static KEY_LIMITS: OnceLock<KeyLimits> = OnceLock::new();
+
+fn key_limits() -> &'static KeyLimits {
+    KEY_LIMITS.get_or_init(|| {
+        let max_keys = std::env::var("NTNT_RATE_LIMIT_MAX_KEYS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n >= SHARDS && *n <= 100_000_000)
+            .unwrap_or(100_000);
+        KeyLimits {
+            store: Store::new(max_keys),
+            base: Instant::now(),
+        }
+    })
+}
+
+/// `check_limit(key, rate)`: an app-defined key (email, account, ...) in this
+/// process. The key is hashed with a process-random key; it is never stored.
+pub fn check_key(key: &str, rate: RateSpec) -> Decision {
+    let limits = key_limits();
+    let now = limits.base.elapsed().as_nanos().min(u64::MAX as u128 - 1) as u64;
+    let hashed = limits.store.key((2u8, key));
+    limits
+        .store
+        .check(hashed, OVERFLOW_WRITE, rate, rate.count, now)
+}
 
 /// Parse configuration once (from `listen()`); invalid values fail startup.
 /// Returns the limiter when enabled.
@@ -561,6 +676,67 @@ mod tests {
     }
 
     #[test]
+    fn rates_that_hashed_together_keep_separate_overflow() {
+        // 11/minute and 27/day collided under the old modulo-4096 slots.
+        let store = Store::new(SHARDS);
+        let minute = RateSpec::parse("11/minute").unwrap();
+        let day = RateSpec::parse("27/day").unwrap();
+        let now = 100 * S;
+        let keys = shard0_keys(&store, "h", 30);
+        assert!(store.check(keys[0], OVERFLOW_WRITE, day, 27, now).allowed);
+        for k in &keys[1..28] {
+            store.check(*k, OVERFLOW_WRITE, day, 27, now);
+        }
+        assert!(
+            !store.check(keys[28], OVERFLOW_WRITE, day, 27, now).allowed,
+            "day overflow spent"
+        );
+        assert!(
+            store
+                .check(keys[29], OVERFLOW_WRITE, minute, 11, now)
+                .allowed,
+            "minute overflow untouched"
+        );
+    }
+
+    #[test]
+    fn full_overflow_table_fails_closed() {
+        let store = Store::new(SHARDS);
+        let now = 100 * S;
+        let keys = shard0_keys(&store, "f", MAX_OVERFLOW_IDS + 3);
+        let long = RateSpec::parse("1/day").unwrap();
+        assert!(store.check(keys[0], OVERFLOW_WRITE, long, 1, now).allowed); // fills the shard
+                                                                             // Fill the overflow table with distinct live limits (bursts 1..=MAX).
+        for (i, k) in keys[1..=MAX_OVERFLOW_IDS].iter().enumerate() {
+            assert!(
+                store
+                    .check(*k, OVERFLOW_WRITE, long, (i + 2) as u64, now)
+                    .allowed
+            );
+        }
+        // A new, untracked limit is denied rather than silently allowed.
+        let fresh = RateSpec::parse("5/hour").unwrap();
+        let d = store.check(keys[MAX_OVERFLOW_IDS + 1], OVERFLOW_WRITE, fresh, 5, now);
+        assert!(!d.allowed);
+        let again = store.check(keys[MAX_OVERFLOW_IDS + 2], OVERFLOW_WRITE, fresh, 5, now);
+        assert!(!again.allowed, "still not tracked, still denied");
+    }
+
+    #[test]
+    fn overflow_budgets_are_separate_per_rate() {
+        let store = Store::new(SHARDS);
+        let slow = RateSpec::parse("1/day").unwrap();
+        let fast = RateSpec::parse("100/minute").unwrap();
+        let now = 100 * S;
+        let keys = shard0_keys(&store, "r", 3);
+        assert!(store.check(keys[0], OVERFLOW_WRITE, slow, 1, now).allowed);
+        // keys[1] lands on the 1/day overflow and spends it.
+        assert!(store.check(keys[1], OVERFLOW_WRITE, slow, 1, now).allowed);
+        // A different rate in the same full shard has its own overflow budget.
+        assert!(store.check(keys[2], OVERFLOW_WRITE, fast, 100, now).allowed);
+    }
+
+    #[test]
     fn full_shard_sweeps_at_most_once_per_interval() {
         let store = Store::new(SHARDS); // one slot per shard
         let fast = RateSpec::parse("1000000/second").unwrap(); // 1 µs interval
@@ -582,10 +758,7 @@ mod tests {
         );
         {
             let shard = store.shards[0].lock().unwrap();
-            assert!(
-                shard.map.contains_key(&OVERFLOW_WRITE),
-                "no sweep within the interval"
-            );
+            assert!(!shard.overflow.is_empty(), "no sweep within the interval");
             assert!(
                 shard.map.contains_key(&keys[1]),
                 "expired key not yet swept"
@@ -599,7 +772,7 @@ mod tests {
         );
         let shard = store.shards[0].lock().unwrap();
         assert!(shard.map.contains_key(&keys[2]));
-        assert!(!shard.map.contains_key(&OVERFLOW_WRITE));
+        assert!(shard.overflow.is_empty());
     }
 
     #[test]
@@ -634,6 +807,50 @@ mod tests {
         assert!(l.check_request("GET", "/", ip).unwrap().allowed);
         assert!(l.check_request("POST", "/health", ip).is_none());
         assert!(l.check_request("OPTIONS", "/contact", ip).is_none());
+    }
+
+    #[test]
+    fn route_rates_override_and_exempt() {
+        let c = cfg(&[
+            ("NTNT_RATE_LIMIT", "on"),
+            ("NTNT_RATE_LIMIT_WRITE", "100/minute"),
+        ])
+        .unwrap();
+        let l = Limiter::new(c);
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        let contact = Some(("POST /contact", RouteRate::parse("2/minute").unwrap()));
+        assert!(
+            l.check_route("POST", "/contact", ip, contact)
+                .unwrap()
+                .allowed
+        );
+        assert!(
+            l.check_route("POST", "/contact", ip, contact)
+                .unwrap()
+                .allowed
+        );
+        assert!(
+            !l.check_route("POST", "/contact", ip, contact)
+                .unwrap()
+                .allowed
+        );
+        // The route budget is separate from the global write budget.
+        assert!(l.check_route("POST", "/other", ip, None).unwrap().allowed);
+        let off = Some(("POST /hook", RouteRate::parse("off").unwrap()));
+        assert!(l.check_route("POST", "/hook", ip, off).is_none());
+        assert!(RouteRate::parse("5/fortnight").is_err());
+    }
+
+    #[test]
+    fn check_key_is_per_key_and_bounded_by_rate() {
+        let rate = RateSpec::parse("2/minute").unwrap();
+        let a = format!("test-a-{}", std::process::id());
+        assert!(check_key(&a, rate).allowed);
+        let d = check_key(&a, rate);
+        assert!(d.allowed && d.remaining == 0);
+        let denied = check_key(&a, rate);
+        assert!(!denied.allowed && denied.retry_after_secs >= 29);
+        assert!(check_key(&format!("{a}-other"), rate).allowed);
     }
 
     #[test]
