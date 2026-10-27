@@ -219,12 +219,22 @@ impl Store {
             let id: OverflowId = (overflow, rate.count, rate.period_ns, burst);
             if !shard.overflow.contains_key(&id) && shard.overflow.len() >= MAX_OVERFLOW_IDS {
                 shard.overflow.retain(|_, v| (*v & !LOGGED_BIT) > now);
+                if shard.overflow.len() >= MAX_OVERFLOW_IDS {
+                    // No room to track this limit: fail closed rather than
+                    // allowing untracked requests.
+                    return Decision {
+                        allowed: false,
+                        limit: burst,
+                        remaining: 0,
+                        retry_after_secs: ceil_secs(SWEEP_INTERVAL_NS).max(1),
+                        reset_secs: ceil_secs(SWEEP_INTERVAL_NS).max(1),
+                        first_trip: false,
+                    };
+                }
             }
             let stored = shard.overflow.get(&id).copied();
             let (decision, value) = gcra(stored, now, rate, burst);
-            if shard.overflow.len() < MAX_OVERFLOW_IDS || stored.is_some() {
-                shard.overflow.insert(id, value);
-            }
+            shard.overflow.insert(id, value);
             return decision;
         }
         let stored = shard.map.get(&key).copied();
@@ -687,6 +697,29 @@ mod tests {
                 .allowed,
             "minute overflow untouched"
         );
+    }
+
+    #[test]
+    fn full_overflow_table_fails_closed() {
+        let store = Store::new(SHARDS);
+        let now = 100 * S;
+        let keys = shard0_keys(&store, "f", MAX_OVERFLOW_IDS + 3);
+        let long = RateSpec::parse("1/day").unwrap();
+        assert!(store.check(keys[0], OVERFLOW_WRITE, long, 1, now).allowed); // fills the shard
+                                                                             // Fill the overflow table with distinct live limits (bursts 1..=MAX).
+        for (i, k) in keys[1..=MAX_OVERFLOW_IDS].iter().enumerate() {
+            assert!(
+                store
+                    .check(*k, OVERFLOW_WRITE, long, (i + 2) as u64, now)
+                    .allowed
+            );
+        }
+        // A new, untracked limit is denied rather than silently allowed.
+        let fresh = RateSpec::parse("5/hour").unwrap();
+        let d = store.check(keys[MAX_OVERFLOW_IDS + 1], OVERFLOW_WRITE, fresh, 5, now);
+        assert!(!d.allowed);
+        let again = store.check(keys[MAX_OVERFLOW_IDS + 2], OVERFLOW_WRITE, fresh, 5, now);
+        assert!(!again.allowed, "still not tracked, still denied");
     }
 
     #[test]
