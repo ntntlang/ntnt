@@ -3541,11 +3541,19 @@ impl TypeContext {
         {
             return;
         }
-        // At top level, statements run in order: a call above the import still
-        // registers a route. Function bodies may run after any import.
-        if self.function_depth == 0 && !self.route_imports_in_effect.contains(name) {
+        // Certain: the import has already executed at this point. At top level
+        // a call above the import still registers a route, so skip it. Inside a
+        // function or callback declared before the import, whether it runs
+        // before or after the import is unknown statically: warn instead.
+        let certain = self.route_imports_in_effect.contains(name);
+        if self.function_depth == 0 && !certain {
             return;
         }
+        let severity = if certain {
+            Severity::Error
+        } else {
+            Severity::Warning
+        };
         let [pattern, handler] = arguments else {
             return;
         };
@@ -3580,7 +3588,7 @@ impl TypeContext {
             return;
         }
         self.emit_with_kind(
-            Severity::Error,
+            severity,
             DiagnosticKind::ImportShadowsRoute,
             format!(
                 "'{name}' is imported from \"{source}\", so {name}(\"{pattern}\", ...) calls that import instead of registering a route"

@@ -1837,3 +1837,35 @@ fn test_import_shadows_route_activation_is_per_binding_and_top_level() {
         1
     );
 }
+
+#[test]
+fn test_import_shadows_route_severity_tracks_execution_order_certainty() {
+    let severities = |src: &str| -> Vec<String> {
+        let (stdout, _stderr, _) = lint_code(src);
+        let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("lint json");
+        let mut out = Vec::new();
+        for file in json["files"].as_array().into_iter().flatten() {
+            for d in file["issues"].as_array().into_iter().flatten() {
+                if d["rule"] == "import_shadows_route" {
+                    out.push(d["severity"].as_str().unwrap_or("?").to_string());
+                }
+            }
+        }
+        out
+    };
+    // Import already in effect: certain error.
+    assert_eq!(
+        severities(
+            "import { get } from \"std/kv\"\nfn setup() {\n    get(\"/health\", fn(req) { req })\n}\n"
+        ),
+        ["error"]
+    );
+    // Callback declared before the import and run immediately: order unknown
+    // statically (here it actually registers the route), so a warning.
+    assert_eq!(
+        severities(
+            "fn run(f: () -> Any) {\n    return f()\n}\nrun(fn() { get(\"/health\", fn(req) { req }) })\nimport { get } from \"std/kv\"\n"
+        ),
+        ["warning"]
+    );
+}
