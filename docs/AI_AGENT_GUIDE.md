@@ -3737,8 +3737,11 @@ Per-route budgets replace the global one for that route (counted per route and c
 export let rate = "5/minute"        // every method in this file
 export let rate_post = "3/minute"   // or one method; "off" exempts the route
 export fn post(req) { ... }
+```
 
-post("/subscribe", handler, map { "rate": "2/minute" })   // explicit routes
+```ntnt
+// server.tnt: explicit routes take an options map
+post("/subscribe", subscribe_handler, map { "rate": "2/minute" })
 ```
 
 For keys the server cannot see (email, account), call `check_limit`. It always works, whether or not the built-in limiter is on:

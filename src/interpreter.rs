@@ -5325,7 +5325,41 @@ impl Interpreter {
         let method_name = method.to_lowercase();
         let env = self.environment.borrow();
         let handler = env.values.get(&method_name).cloned();
+        // Rate exports are applied at discovery; a changed rate needs a restart.
+        let reloaded_rate = match env.values.get(&format!("rate_{method_name}")) {
+            Some(Value::String(r)) => Some(r.clone()),
+            _ => match env.values.get("rate") {
+                Some(Value::String(r)) => Some(r.clone()),
+                _ => None,
+            },
+        };
         drop(env);
+        let pattern_rates: Vec<_> = self
+            .server_state
+            .routes
+            .iter()
+            .filter(|(r, _, src)| {
+                r.method == method.to_uppercase() && src.file_path.as_deref() == Some(file_path)
+            })
+            .map(|(r, _, _)| r.pattern.clone())
+            .collect();
+        for pattern in pattern_rates {
+            let current = self
+                .server_state
+                .route_rates
+                .get(&(method.to_uppercase(), pattern.clone()))
+                .copied();
+            let reloaded = reloaded_rate
+                .as_deref()
+                .and_then(|r| crate::stdlib::rate_limit::RouteRate::parse(r).ok());
+            if current != reloaded {
+                eprintln!(
+                    "[hot-reload] {} {}: rate limit change takes effect after restart",
+                    method.to_uppercase(),
+                    pattern
+                );
+            }
+        }
 
         // Restore environment and imports
         self.environment = previous_env;

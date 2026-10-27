@@ -23,25 +23,16 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 const SHARDS: usize = 64;
-/// Overflow budgets live in a reserved key range at the top of u64. Each
-/// (class, rate, burst) gets its own slot, so a full shard never makes one
-/// limit read another limit's saved time.
-const OVERFLOW_SLOTS: u64 = 4096;
-const OVERFLOW_BASE: u64 = u64::MAX - OVERFLOW_SLOTS + 1;
+/// Class tags for the shared overflow budgets. Overflow state is kept per
+/// exact (class, rate, burst) so a full shard never makes one limit read
+/// another limit's saved time.
 const OVERFLOW_WRITE: u64 = 0;
 const OVERFLOW_READ: u64 = 1;
+/// Bound on distinct overflow identities per shard (rates are configuration
+/// or app code, so this is never reached in practice).
+const MAX_OVERFLOW_IDS: usize = 256;
 
-fn overflow_slot(class_tag: u64, rate: RateSpec, burst: u64) -> u64 {
-    // Deterministic mix (not keyed: rates are configuration, not attacker input).
-    let mut x = class_tag
-        ^ rate.count.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ rate.period_ns.rotate_left(17)
-        ^ burst.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-    x ^= x >> 33;
-    OVERFLOW_BASE + (x % OVERFLOW_SLOTS)
-}
+type OverflowId = (u64, u64, u64, u64);
 /// A full shard is swept at most this often (bounds scan cost under key churn).
 const SWEEP_INTERVAL_NS: u64 = 1_000_000_000;
 const LOGGED_BIT: u64 = 1;
@@ -155,6 +146,7 @@ fn gcra(stored: Option<u64>, now: u64, rate: RateSpec, burst: u64) -> (Decision,
 
 struct Shard {
     map: HashMap<u64, u64>,
+    overflow: HashMap<OverflowId, u64>,
     /// Monotonic ns of the last full-shard sweep (u64::MAX = never).
     last_sweep: u64,
 }
@@ -174,6 +166,7 @@ impl Store {
                 .map(|_| {
                     Mutex::new(Shard {
                         map: HashMap::with_capacity(per_shard.min(1024)),
+                        overflow: HashMap::new(),
                         last_sweep: u64::MAX,
                     })
                 })
@@ -188,7 +181,7 @@ impl Store {
     pub fn key<K: Hash>(&self, key: K) -> u64 {
         let mut h = self.hasher.build_hasher();
         key.hash(&mut h);
-        h.finish().min(OVERFLOW_BASE - 1)
+        h.finish()
     }
 
     /// Check `key` at `now`. `overflow` is the class tag of the shared budget
@@ -201,30 +194,42 @@ impl Store {
                 // Never panic or block the server: recover and start the shard fresh.
                 let mut guard = poisoned.into_inner();
                 guard.map.clear();
+                guard.overflow.clear();
                 guard.last_sweep = u64::MAX;
                 shard.clear_poison();
                 guard
             }
         };
         let shard = &mut *guard;
-        let mut slot = key;
+        let mut use_overflow = false;
         if !shard.map.contains_key(&key) && shard.map.len() >= self.per_shard {
             let due = shard.last_sweep == u64::MAX
                 || now.saturating_sub(shard.last_sweep) >= SWEEP_INTERVAL_NS;
             if due {
-                // Entries whose TAT has passed (overflow included) hold no state.
+                // Entries whose TAT has passed hold no state.
                 shard.map.retain(|_, v| (*v & !LOGGED_BIT) > now);
+                shard.overflow.retain(|_, v| (*v & !LOGGED_BIT) > now);
                 shard.last_sweep = now;
             }
-            if shard.map.len() >= self.per_shard {
-                // Still full: new keys share the class's overflow budget; live
-                // keys are never evicted.
-                slot = overflow_slot(overflow, rate, burst);
-            }
+            // Still full: new keys share an overflow budget for this exact
+            // limit; live keys are never evicted.
+            use_overflow = shard.map.len() >= self.per_shard;
         }
-        let stored = shard.map.get(&slot).copied();
+        if use_overflow {
+            let id: OverflowId = (overflow, rate.count, rate.period_ns, burst);
+            if !shard.overflow.contains_key(&id) && shard.overflow.len() >= MAX_OVERFLOW_IDS {
+                shard.overflow.retain(|_, v| (*v & !LOGGED_BIT) > now);
+            }
+            let stored = shard.overflow.get(&id).copied();
+            let (decision, value) = gcra(stored, now, rate, burst);
+            if shard.overflow.len() < MAX_OVERFLOW_IDS || stored.is_some() {
+                shard.overflow.insert(id, value);
+            }
+            return decision;
+        }
+        let stored = shard.map.get(&key).copied();
         let (decision, value) = gcra(stored, now, rate, burst);
-        shard.map.insert(slot, value);
+        shard.map.insert(key, value);
         decision
     }
 
@@ -232,7 +237,10 @@ impl Store {
     fn len(&self) -> usize {
         self.shards
             .iter()
-            .map(|s| s.lock().unwrap().map.len())
+            .map(|s| {
+                let g = s.lock().unwrap();
+                g.map.len() + g.overflow.len()
+            })
             .sum()
     }
 }
@@ -658,6 +666,30 @@ mod tests {
     }
 
     #[test]
+    fn rates_that_hashed_together_keep_separate_overflow() {
+        // 11/minute and 27/day collided under the old modulo-4096 slots.
+        let store = Store::new(SHARDS);
+        let minute = RateSpec::parse("11/minute").unwrap();
+        let day = RateSpec::parse("27/day").unwrap();
+        let now = 100 * S;
+        let keys = shard0_keys(&store, "h", 30);
+        assert!(store.check(keys[0], OVERFLOW_WRITE, day, 27, now).allowed);
+        for k in &keys[1..28] {
+            store.check(*k, OVERFLOW_WRITE, day, 27, now);
+        }
+        assert!(
+            !store.check(keys[28], OVERFLOW_WRITE, day, 27, now).allowed,
+            "day overflow spent"
+        );
+        assert!(
+            store
+                .check(keys[29], OVERFLOW_WRITE, minute, 11, now)
+                .allowed,
+            "minute overflow untouched"
+        );
+    }
+
+    #[test]
     fn overflow_budgets_are_separate_per_rate() {
         let store = Store::new(SHARDS);
         let slow = RateSpec::parse("1/day").unwrap();
@@ -669,10 +701,6 @@ mod tests {
         assert!(store.check(keys[1], OVERFLOW_WRITE, slow, 1, now).allowed);
         // A different rate in the same full shard has its own overflow budget.
         assert!(store.check(keys[2], OVERFLOW_WRITE, fast, 100, now).allowed);
-        assert_ne!(
-            overflow_slot(OVERFLOW_WRITE, slow, 1),
-            overflow_slot(OVERFLOW_WRITE, fast, 100)
-        );
     }
 
     #[test]
@@ -697,12 +725,7 @@ mod tests {
         );
         {
             let shard = store.shards[0].lock().unwrap();
-            assert!(
-                shard
-                    .map
-                    .contains_key(&overflow_slot(OVERFLOW_WRITE, fast, 1)),
-                "no sweep within the interval"
-            );
+            assert!(!shard.overflow.is_empty(), "no sweep within the interval");
             assert!(
                 shard.map.contains_key(&keys[1]),
                 "expired key not yet swept"
@@ -716,9 +739,7 @@ mod tests {
         );
         let shard = store.shards[0].lock().unwrap();
         assert!(shard.map.contains_key(&keys[2]));
-        assert!(!shard
-            .map
-            .contains_key(&overflow_slot(OVERFLOW_WRITE, fast, 1)));
+        assert!(shard.overflow.is_empty());
     }
 
     #[test]
