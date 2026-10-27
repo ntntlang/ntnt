@@ -29,6 +29,7 @@ pub mod netmon;
 pub mod path;
 pub mod postgres;
 pub mod process;
+pub mod realtime;
 pub mod secrets;
 pub(crate) mod send_deadline;
 pub mod sqlite;
@@ -49,6 +50,7 @@ pub type StdlibModule = HashMap<String, Value>;
 pub fn shutdown_runtimes() {
     crate::control_socket::stop_control_socket();
     net::persistent::shutdown();
+    realtime::shutdown();
     concurrent::RUNTIME.shutdown();
     process::RUNTIME.shutdown();
     if let Err(e) = fs::owned::shutdown() {

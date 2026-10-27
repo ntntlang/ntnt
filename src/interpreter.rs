@@ -151,6 +151,10 @@ pub enum Value {
     /// Schedule handle (from schedule())
     ScheduleHandle(u64),
 
+    /// Process-local broadcast bus (from std/concurrent broadcast()).
+    /// Shared authority: publishing/subscribing requires this handle.
+    Broadcast(std::sync::Arc<crate::stdlib::realtime::Bus>),
+
     /// Return value (for control flow)
     Return(Box<Value>),
 
@@ -260,6 +264,7 @@ impl Value {
             Value::TxChannelHandle(_, _) => "TxChannel",
             Value::RxChannelHandle(_) => "RxChannel",
             Value::ScheduleHandle(_) => "Schedule",
+            Value::Broadcast(_) => "Broadcast",
             Value::Return(_) => "Return",
             Value::Break => "Break",
             Value::Continue => "Continue",
@@ -377,6 +382,7 @@ impl fmt::Display for Value {
             Value::TxChannelHandle(id, _) => write!(f, "TxChannel({})", id),
             Value::RxChannelHandle(id) => write!(f, "RxChannel({})", id),
             Value::ScheduleHandle(id) => write!(f, "Schedule({})", id),
+            Value::Broadcast(bus) => write!(f, "<broadcast {}>", bus.name()),
             Value::Return(v) => write!(f, "{}", v),
             Value::Break => write!(f, "<break>"),
             Value::Continue => write!(f, "<continue>"),
@@ -11381,6 +11387,7 @@ impl Interpreter {
             (Value::TxChannelHandle(a, _), Value::TxChannelHandle(b, _)) => a == b,
             (Value::RxChannelHandle(a), Value::RxChannelHandle(b)) => a == b,
             (Value::ScheduleHandle(a), Value::ScheduleHandle(b)) => a == b,
+            (Value::Broadcast(a), Value::Broadcast(b)) => std::sync::Arc::ptr_eq(a, b),
             _ => false, // Different types → not equal
         }
     }
@@ -11409,6 +11416,7 @@ impl Interpreter {
                     | Value::TxChannelHandle(_, _)
                     | Value::RxChannelHandle(_)
                     | Value::ScheduleHandle(_)
+                    | Value::Broadcast(_)
             );
             let rhs_is_handle = matches!(
                 &rhs,
@@ -11423,6 +11431,7 @@ impl Interpreter {
                     | Value::TxChannelHandle(_, _)
                     | Value::RxChannelHandle(_)
                     | Value::ScheduleHandle(_)
+                    | Value::Broadcast(_)
             );
 
             if lhs_is_enum || rhs_is_enum || lhs_is_handle || rhs_is_handle {

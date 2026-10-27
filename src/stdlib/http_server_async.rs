@@ -442,8 +442,17 @@ async fn axum_to_bridge_request(
 fn bridge_to_axum_response(
     resp: BridgeResponse,
     csp_header: Option<(&str, &str)>,
+    is_head: bool,
 ) -> Response<Body> {
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    if let Some(spec) = resp.sse.as_ref() {
+        // The stream opens only for a successful, final, non-HEAD response.
+        // Denials, redirects and errors from middleware/handlers carry no
+        // stream description, so they never subscribe.
+        if status.is_success() && !is_head {
+            return sse_to_axum_response(spec, resp.headers, status, csp_header);
+        }
+    }
 
     let mut response = Response::builder().status(status);
 
@@ -464,6 +473,65 @@ fn bridge_to_axum_response(
             .body(Body::from("Failed to build response"))
             .unwrap()
     });
+    apply_async_security_headers(&mut resp, csp_header);
+    resp
+}
+
+/// Protocol-fixed SSE headers that application headers may not override.
+const SSE_FIXED_HEADERS: [&str; 5] = [
+    "content-type",
+    "content-length",
+    "cache-control",
+    "x-accel-buffering",
+    "transfer-encoding",
+];
+
+/// Attach a live SSE body. Application headers (cookies, CORS, custom) are
+/// preserved; framing/caching headers are fixed by the protocol.
+fn sse_to_axum_response(
+    spec: &crate::stdlib::realtime::SseSpec,
+    headers: Vec<(String, String)>,
+    status: StatusCode,
+    csp_header: Option<(&str, &str)>,
+) -> Response<Body> {
+    use crate::stdlib::realtime::{open_stream, OpenError};
+    let stream = match open_stream(spec) {
+        Ok(stream) => stream,
+        Err(err) => {
+            let message = match err {
+                OpenError::ShuttingDown => "Server is shutting down",
+                OpenError::TooManyStreams => "Too many open event streams",
+            };
+            let mut resp = Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header("content-type", "text/plain; charset=utf-8")
+                .header("retry-after", "5")
+                .header("server", "ntnt-async")
+                .body(Body::from(message))
+                .expect("static response");
+            apply_async_security_headers(&mut resp, csp_header);
+            return resp;
+        }
+    };
+    let mut builder = Response::builder().status(status);
+    for (key, value) in headers {
+        if SSE_FIXED_HEADERS.contains(&key.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        if let (Ok(name), Ok(val)) = (
+            header::HeaderName::try_from(key.as_str()),
+            header::HeaderValue::from_str(&value),
+        ) {
+            builder = builder.header(name, val);
+        }
+    }
+    let mut resp = builder
+        .header("content-type", "text/event-stream; charset=utf-8")
+        .header("cache-control", "no-store, no-transform")
+        .header("x-accel-buffering", "no")
+        .header("server", "ntnt-async")
+        .body(Body::from_stream(stream))
+        .expect("validated SSE headers");
     apply_async_security_headers(&mut resp, csp_header);
     resp
 }
@@ -621,7 +689,11 @@ async fn handle_request(
             // Convert request and send to interpreter
             let mut response = match axum_to_bridge_request(req, params, peer_addr).await {
                 Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
-                    Ok(response) => bridge_to_axum_response(response, csp_ref),
+                    Ok(response) => bridge_to_axum_response(
+                        response,
+                        csp_ref,
+                        method == axum::http::Method::HEAD,
+                    ),
                     Err(e) => {
                         let error_msg = format!("{}", e);
                         // Structured error log — always printed regardless of mode
@@ -699,7 +771,11 @@ async fn handle_request(
             // can run before deciding the route is really missing.
             let mut response = match axum_to_bridge_request(req, HashMap::new(), peer_addr).await {
                 Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
-                    Ok(response) => bridge_to_axum_response(response, csp_ref),
+                    Ok(response) => bridge_to_axum_response(
+                        response,
+                        csp_ref,
+                        method == axum::http::Method::HEAD,
+                    ),
                     Err(e) => {
                         let error_msg = format!("{}", e);
                         eprintln!(

@@ -1275,6 +1275,36 @@ fn create_response_value(status: i64, headers: HashMap<String, Value>, body: Str
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
+    // @ntnt sse
+    // @module std/http/server
+    // @signature sse(bus: Broadcast, options?: Map) -> Response
+    // Return a Server-Sent Events stream of a broadcast bus from a GET handler.
+    //
+    // Middleware, authentication, status and headers apply as for any response;
+    // the stream opens only if this is the final response. The worker is released
+    // immediately: the open connection holds no interpreter. Events published
+    // after the stream opens are delivered; there is no replay. A comment
+    // heartbeat keeps proxies from timing out. Slow clients that fall behind the
+    // bus capacity are disconnected and should reconnect and refetch state.
+    // Options: `heartbeat_ms` (1000-300000, default 15000), `retry_ms` (client
+    // reconnect delay hint). HEAD and non-2xx responses never open a stream.
+    // @param bus A Broadcast from std/concurrent broadcast()
+    // @param options Optional map with `heartbeat_ms` and `retry_ms`
+    // @returns A streaming response
+    // @see_also broadcast, publish
+    // @since v0.5.7
+    // @example get("/events", fn(req) { sse(bus) }) => Unit ~ "Stream a bus to browsers via EventSource"
+    module.insert(
+        "sse".to_string(),
+        Value::NativeFunction {
+            name: "sse".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: crate::stdlib::realtime::sse_response,
+        },
+    );
+
     // @ntnt text
     // @module std/http/server
     // @module_description HTTP response builders for server route handlers
@@ -3157,6 +3187,14 @@ pub fn send_response_with_options(
     let config = get_security_config();
 
     let (status, mut headers, body) = match response {
+        // The synchronous test server cannot hold a stream open: reject
+        // explicitly instead of sending an empty 200.
+        Value::Map(map) if map.contains_key(crate::stdlib::realtime::SSE_KEY) => (
+            501,
+            HashMap::new(),
+            "sse() requires the async HTTP server (ntnt run); it is unavailable in ntnt test"
+                .to_string(),
+        ),
         Value::Map(map) => {
             let status = match map.get("status") {
                 Some(Value::Int(s)) => *s as u16,

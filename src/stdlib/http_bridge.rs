@@ -151,6 +151,9 @@ pub struct BridgeResponse {
     pub headers: Vec<(String, String)>,
     /// Response body
     pub body: String,
+    /// Server-Sent Events stream requested by `sse()`. Only a description:
+    /// the subscription is created on the async side if this response is sent.
+    pub sse: Option<crate::stdlib::realtime::SseSpec>,
 }
 
 impl BridgeResponse {
@@ -193,12 +196,14 @@ impl BridgeResponse {
                     status,
                     headers,
                     body,
+                    sse: crate::stdlib::realtime::spec_from_response(map),
                 }
             }
             _ => BridgeResponse {
                 status: 500,
                 headers: Vec::new(),
                 body: "Handler did not return a valid response".to_string(),
+                sse: None,
             },
         }
     }
@@ -212,6 +217,7 @@ impl BridgeResponse {
                 "text/plain; charset=utf-8".to_string(),
             )],
             body: message.to_string(),
+            sse: None,
         }
     }
 
@@ -471,6 +477,7 @@ mod tests {
                     status: 200,
                     headers: Vec::new(),
                     body: format!("Echo: {}", req.request.path),
+                    sse: None,
                 };
                 let _ = req.reply_tx.send(response);
             }
