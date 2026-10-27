@@ -1871,28 +1871,23 @@ fn test_import_shadows_route_severity_tracks_execution_order_certainty() {
 }
 
 #[test]
-fn test_import_shadows_route_sees_imports_in_top_level_blocks() {
+fn test_import_shadows_route_block_imports_are_block_scoped() {
     let count = |src: &str| {
         let (stdout, _stderr, _) = lint_code(src);
         stdout.matches("\"rule\": \"import_shadows_route\"").count()
     };
-    // Imports bind globally at runtime even inside a top-level block.
+    // Runtime imports are block-scoped: after the block, get() is the route
+    // builtin again, including for branches that never run.
     assert_eq!(
         count(
             "if true {\n    import { get } from \"std/kv\"\n}\nget(\"/health\", fn(req) { req })\n"
         ),
-        1
+        0
     );
+    // A block-local import does not make a later file-level call certain.
     assert_eq!(
         count(
-            "if true {\n    import { get } from \"std/kv\"\n    get(\"/health\", fn(req) { req })\n}\n"
-        ),
-        1
-    );
-    // A real local binding inside the block still shadows the import.
-    assert_eq!(
-        count(
-            "import { get } from \"std/kv\"\nif true {\n    let get = fn(a, b) { a }\n    get(\"/health\", fn(req) { req })\n}\n"
+            "if false {\n    import { get } from \"std/kv\"\n}\nget(\"/health\", fn(req) { req })\nimport { get } from \"std/kv\"\n"
         ),
         0
     );
