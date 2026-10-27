@@ -396,7 +396,7 @@ networks:
 - `web` and `cloudflared` are the only members of `edge`; `db`, `redis` and workers stay on `app-network`. For an even tighter rule, pin `cloudflared` with `ipv4_address` and trust that single address.
 - To check an existing network's range: `docker network inspect <compose-project>_edge --format '{{(index .IPAM.Config 0).Subnet}}'` (Compose prefixes network names with the project name).
 - `req.client_ip` is then the visitor's address. `req.ip` keeps its old, spoofable behaviour; use `client_ip` for limits, audit logs and abuse checks.
-- Without `NTNT_TRUSTED_PROXIES`, every visitor shares the proxy's address and one budget. With the limiter on and no trusted proxies, NTNT warns once when a request arrives from a private, loopback or unique-local address (a public proxy address does not trigger the warning).
+- Without `NTNT_TRUSTED_PROXIES`, every visitor shares the proxy's address and one budget. With the limiter on and no trusted proxies, NTNT warns once when a request arrives from a private, loopback, link-local or unique-local address (a public proxy address does not trigger the warning).
 - Per-route limits (`export let rate = "5/minute"`) and `check_limit(key, rate)` are described in the AI Agent Guide.
 - The limiter keeps state in process memory: it is per process, resets on restart and is not shared across hosts. It is not volumetric DDoS protection; keep Cloudflare's WAF and rate-limiting rules for floods.
 - `ntnt test` and `ntnt intent check` run apps on the single-threaded test server, which does not apply the built-in limiter. `check_limit` works in both.
