@@ -31,7 +31,7 @@ get("/bad", fn(req) {
     let res = publish(bus, fn() { 1 })
     return text(str(is_err(res)))
 })
-listen(0, map { "readiness": "json" })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
 "#;
 
 fn open(addr: SocketAddr, path: &str, method: &str) -> TcpStream {
@@ -201,4 +201,38 @@ fn sync_test_server_rejects_sse_explicitly() {
         stdout.contains("requires the async HTTP server"),
         "{stdout}"
     );
+}
+
+#[test]
+fn broadcast_handles_are_rejected_by_channels_even_when_nested() {
+    let source = r#"
+import { broadcast, channel, send } from "std/concurrent"
+let bus = broadcast("nested")
+let tx = channel()[0]
+fn attempt(label, payload) {
+    let r = send(tx, payload) otherwise {
+        print("rejected #{label}")
+        return false
+    }
+    print("accepted #{label}")
+    return true
+}
+attempt("bare", bus)
+attempt("array", [bus])
+attempt("map", map { "b": bus })
+attempt("plain", [1])
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("app.tnt");
+    std::fs::write(&file, source).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .arg("run")
+        .arg(&file)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for label in ["bare", "array", "map"] {
+        assert!(stdout.contains(&format!("rejected {label}")), "{stdout}");
+    }
+    assert!(stdout.contains("accepted plain"), "control case: {stdout}");
 }

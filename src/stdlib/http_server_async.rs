@@ -495,25 +495,9 @@ fn sse_to_axum_response(
     csp_header: Option<(&str, &str)>,
 ) -> Response<Body> {
     use crate::stdlib::realtime::{open_stream, OpenError};
-    let stream = match open_stream(spec) {
-        Ok(stream) => stream,
-        Err(err) => {
-            let message = match err {
-                OpenError::ShuttingDown => "Server is shutting down",
-                OpenError::TooManyStreams => "Too many open event streams",
-            };
-            let mut resp = Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("content-type", "text/plain; charset=utf-8")
-                .header("retry-after", "5")
-                .header("server", "ntnt-async")
-                .body(Body::from(message))
-                .expect("static response");
-            apply_async_security_headers(&mut resp, csp_header);
-            return resp;
-        }
-    };
-    let mut builder = Response::builder().status(status);
+    // Application headers (cookies, CORS, custom) apply to the stream and to
+    // a refusal alike; framing/caching headers are protocol-fixed.
+    let mut builder = Response::builder();
     for (key, value) in headers {
         if SSE_FIXED_HEADERS.contains(&key.to_ascii_lowercase().as_str()) {
             continue;
@@ -525,6 +509,31 @@ fn sse_to_axum_response(
             builder = builder.header(name, val);
         }
     }
+    let stream = match open_stream(spec) {
+        Ok(stream) => stream,
+        Err(err) => {
+            let message = match err {
+                OpenError::ShuttingDown => "Server is shutting down",
+                OpenError::TooManyStreams => "Too many open event streams",
+            };
+            let mut resp = builder
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header("content-type", "text/plain; charset=utf-8")
+                .header("cache-control", "no-store")
+                .header("retry-after", "5")
+                .header("server", "ntnt-async")
+                .body(Body::from(message))
+                .unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .body(Body::from(message))
+                        .expect("static response")
+                });
+            apply_async_security_headers(&mut resp, csp_header);
+            return resp;
+        }
+    };
+    let builder = builder.status(status);
     let mut resp = builder
         .header("content-type", "text/event-stream; charset=utf-8")
         .header("cache-control", "no-store, no-transform")

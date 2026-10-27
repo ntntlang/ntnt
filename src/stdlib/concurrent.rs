@@ -2598,8 +2598,26 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
                 .to_string(),
         ));
     }
+    // Broadcast is task-capturable but never a channel payload, even nested.
+    if contains_broadcast(value) {
+        return Err(IntentError::type_error(
+            "Broadcast handles cannot be sent through channels, including inside arrays, maps or structs"
+                .to_string(),
+        ));
+    }
     let serialized = SerializedValue::from_value(value)?;
     Ok(Value::Bool(sender_arc.send(serialized).is_ok()))
+}
+
+fn contains_broadcast(value: &Value) -> bool {
+    match value {
+        Value::Broadcast(_) => true,
+        Value::Array(items) => items.iter().any(contains_broadcast),
+        Value::Map(map) => map.values().any(contains_broadcast),
+        Value::Struct { fields, .. } => fields.values().any(contains_broadcast),
+        Value::EnumValue { values, .. } => values.iter().any(contains_broadcast),
+        _ => false,
+    }
 }
 
 fn concurrent_recv(ch: &Value) -> Result<Value> {

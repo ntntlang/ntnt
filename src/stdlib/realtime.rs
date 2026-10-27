@@ -41,8 +41,13 @@ pub const MAX_CONNECTIONS: usize = 1024;
 pub const DEFAULT_HEARTBEAT_MS: u64 = 15_000;
 const MAX_DEPTH: usize = 64;
 
+type Slot = tokio::sync::Mutex<Option<broadcast::Receiver<Arc<EncodedEvent>>>>;
+
 lazy_static::lazy_static! {
     static ref REGISTRY: Mutex<HashMap<String, Weak<Bus>>> = Mutex::new(HashMap::new());
+    /// Every open stream's receiver slot, so a publisher under budget
+    /// pressure can drop stalled receivers that are not being polled.
+    static ref SUBSCRIBERS: Mutex<Vec<Weak<Slot>>> = Mutex::new(Vec::new());
     static ref SHUTDOWN: watch::Sender<bool> = watch::channel(false).0;
 }
 static PAYLOAD_USED: AtomicUsize = AtomicUsize::new(0);
@@ -194,7 +199,9 @@ pub fn publish_value(args: &[Value]) -> Result<Value> {
     };
     match encode_frame(value, event.as_deref(), id.as_deref()) {
         Ok(frame) => {
-            if !reserve_payload(frame.len()) {
+            if !reserve_payload(frame.len())
+                && !(evict_stalled() > 0 && reserve_payload(frame.len()))
+            {
                 return Ok(Value::err(Value::String(
                     "realtime payload budget exhausted".into(),
                 )));
@@ -297,6 +304,11 @@ fn write_json(value: &Value, out: &mut Vec<u8>, depth: usize) -> std::result::Re
         }
         Value::Float(_) => return Err("cannot publish NaN or infinite numbers".into()),
         Value::String(s) => write_str(s, out)?,
+        // Each element needs at least 2 bytes ("0,"): reject impossible sizes
+        // before walking the whole input.
+        Value::Array(items) if out.len() + 2 * items.len() > MAX_EVENT_BYTES + 1 => {
+            return Err(format!("event exceeds {MAX_EVENT_BYTES} bytes"))
+        }
         Value::Array(items) => {
             out.push(b'[');
             for (i, item) in items.iter().enumerate() {
@@ -328,6 +340,10 @@ fn write_object(
     out: &mut Vec<u8>,
     depth: usize,
 ) -> std::result::Result<(), String> {
+    // Each entry needs at least 5 bytes (`"":0,`): reject before sorting keys.
+    if out.len() + 5 * map.len() > MAX_EVENT_BYTES + 1 {
+        return Err(format!("event exceeds {MAX_EVENT_BYTES} bytes"));
+    }
     let mut keys: Vec<&String> = map.keys().collect();
     keys.sort();
     out.push(b'{');
@@ -428,6 +444,32 @@ pub fn spec_from_response(map: &HashMap<String, Value>) -> Option<SseSpec> {
     })
 }
 
+/// A subscriber this far behind is considered stalled under budget pressure.
+const STALLED_BACKLOG: usize = 2;
+
+/// Drop receivers of streams that are behind and not currently awaiting a
+/// message (a stalled client stops Hyper from polling its body, so the stream
+/// cannot evict itself). Releasing a receiver frees the frames it retained.
+/// The stream ends with an overflow event when next polled. Returns the
+/// number evicted.
+fn evict_stalled() -> usize {
+    let mut subscribers = SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut evicted = 0;
+    subscribers.retain(|weak| {
+        let Some(slot) = weak.upgrade() else {
+            return false;
+        };
+        if let Ok(mut guard) = slot.try_lock() {
+            if guard.as_ref().is_some_and(|rx| rx.len() >= STALLED_BACKLOG) {
+                *guard = None;
+                evicted += 1;
+            }
+        }
+        true
+    });
+    evicted
+}
+
 /// Held by an open stream; released when the HTTP body is dropped.
 pub struct StreamPermit(());
 
@@ -456,7 +498,10 @@ fn acquire_stream_permit() -> Option<StreamPermit> {
 }
 
 struct StreamState {
-    rx: broadcast::Receiver<Arc<EncodedEvent>>,
+    /// Keeps the bus alive while the stream is open, so a bus created inside
+    /// the request (`sse(broadcast("x"))`) is not freed when the handler returns.
+    _bus: Arc<Bus>,
+    rx: Arc<Slot>,
     shutdown: watch::Receiver<bool>,
     heartbeat: tokio::time::Interval,
     preamble: Option<Bytes>,
@@ -491,8 +536,17 @@ pub fn open_stream(
         Some(retry) => format!("retry: {retry}\n\n"),
         None => ":\n\n".to_string(),
     };
+    let slot = Arc::new(tokio::sync::Mutex::new(Some(spec.bus.tx.subscribe())));
+    {
+        let mut subscribers = SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner());
+        if subscribers.len() >= 2 * MAX_CONNECTIONS {
+            subscribers.retain(|weak| weak.strong_count() > 0);
+        }
+        subscribers.push(Arc::downgrade(&slot));
+    }
     let state = StreamState {
-        rx: spec.bus.tx.subscribe(),
+        _bus: Arc::clone(&spec.bus),
+        rx: slot,
         shutdown,
         heartbeat,
         preamble: Some(Bytes::from(preamble)),
@@ -514,22 +568,31 @@ async fn next_frame(
     if *s.shutdown.borrow() {
         return None;
     }
+    let slot = Arc::clone(&s.rx);
+    let mut guard = slot.lock().await;
+    let Some(rx) = guard.as_mut() else {
+        // Evicted while stalled: tell the client, then end.
+        s.finished = true;
+        return Some((Ok(Bytes::from_static(OVERFLOW)), s));
+    };
     tokio::select! {
         biased;
         _ = s.shutdown.changed() => None,
-        received = s.rx.recv() => match received {
+        received = rx.recv() => match received {
             Ok(event) => Some((Ok(Bytes::from_owner(Frame(event))), s)),
             // A slow consumer loses its connection rather than silently
             // skipping events; the client reconnects and reconciles.
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 s.finished = true;
-                Some((Ok(Bytes::from_static(b"event: ntnt.overflow\ndata: null\n\n")), s))
+                Some((Ok(Bytes::from_static(OVERFLOW)), s))
             }
             Err(broadcast::error::RecvError::Closed) => None,
         },
         _ = s.heartbeat.tick() => Some((Ok(Bytes::from_static(b":\n\n")), s)),
     }
 }
+
+const OVERFLOW: &[u8] = b"event: ntnt.overflow\ndata: null\n\n";
 
 /// End all open streams and refuse new ones. Called on process shutdown.
 pub fn shutdown() {
@@ -676,6 +739,79 @@ mod tests {
         assert_eq!(stats().1, charged);
         drop(frame);
         assert!(stats().1 < charged);
+    }
+
+    #[tokio::test]
+    async fn stream_keeps_a_request_created_bus_alive() {
+        use futures_util::StreamExt;
+        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let spec = SseSpec {
+            bus: bus("test.ephemeral"),
+            heartbeat: Duration::from_secs(60),
+            retry_ms: None,
+        };
+        let mut stream = Box::pin(open_stream(&spec).unwrap());
+        drop(spec);
+        stream.next().await.unwrap().unwrap();
+        let again = bus("test.ephemeral");
+        assert_eq!(subscribers(&again), 1, "same bus while the stream is open");
+        publish_value(&[Value::Broadcast(again), Value::Int(5)]).unwrap();
+        assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"data: 5\n\n");
+    }
+
+    #[tokio::test]
+    async fn budget_pressure_evicts_stalled_subscribers_on_any_bus() {
+        use futures_util::StreamExt;
+        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let stalled_bus = match broadcast_value(&[
+            Value::String("test.stalled".into()),
+            map(&[("capacity", Value::Int(1024))]),
+        ])
+        .unwrap()
+        {
+            Value::Broadcast(bus) => bus,
+            _ => unreachable!(),
+        };
+        let spec = SseSpec {
+            bus: stalled_bus.clone(),
+            heartbeat: Duration::from_secs(60),
+            retry_ms: None,
+        };
+        let mut stalled = Box::pin(open_stream(&spec).unwrap());
+        stalled.next().await.unwrap().unwrap();
+        // Never poll `stalled` again: fill the budget through its bus.
+        let blob = Value::String("x".repeat(MAX_EVENT_BYTES - 64));
+        let mut published = 0;
+        for _ in 0..1024 {
+            match publish_value(&[Value::Broadcast(stalled_bus.clone()), blob.clone()]).unwrap() {
+                Value::EnumValue { variant, .. } if variant == "Ok" => published += 1,
+                other => panic!("publish failed under pressure: {other:?} after {published}"),
+            }
+        }
+        // Another bus can still publish, and the stalled stream was evicted.
+        let other = bus("test.other");
+        let ok = publish_value(&[Value::Broadcast(other), Value::Int(1)]).unwrap();
+        assert!(matches!(ok, Value::EnumValue { ref variant, .. } if variant == "Ok"));
+        assert!(stats().1 <= MAX_PAYLOAD_BUDGET);
+        let mut ended = false;
+        while let Some(frame) = stalled.next().await {
+            if frame.unwrap().starts_with(b"event: ntnt.overflow") {
+                ended = true;
+            }
+        }
+        assert!(ended, "evicted stream ends with an overflow event");
+    }
+
+    #[test]
+    fn oversized_collections_are_rejected_before_full_traversal() {
+        let wide: HashMap<String, Value> = (0..20_000)
+            .map(|i| (i.to_string(), Value::Int(0)))
+            .collect();
+        assert!(encode_frame(&Value::Map(wide), None, None).is_err());
+        let long = Value::Array(vec![Value::Int(0); 40_000]);
+        assert!(encode_frame(&long, None, None).is_err());
+        let fits = Value::Array(vec![Value::Int(0); 1000]);
+        assert!(encode_frame(&fits, None, None).is_ok());
     }
 
     #[tokio::test]
