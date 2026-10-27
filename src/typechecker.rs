@@ -132,7 +132,8 @@ pub struct TypeContext {
     function_depth: usize,
     /// Per scope (parallel to `scopes`): route names bound by an import
     /// inside that block or function body. Imports are block-scoped.
-    block_route_imports: Vec<HashMap<String, (String, String)>>,
+    /// Value: (module source, exported name, function depth of the import).
+    block_route_imports: Vec<HashMap<String, (String, String, usize)>>,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -2244,7 +2245,7 @@ impl TypeContext {
                     let bound = self.route_names_bound_by(items, source, *wildcard);
                     if let Some(imports) = self.block_route_imports.last_mut() {
                         for (local, exported) in bound {
-                            imports.insert(local, (source.clone(), exported));
+                            imports.insert(local, (source.clone(), exported, self.function_depth));
                         }
                     }
                 }
@@ -3555,9 +3556,15 @@ impl TypeContext {
         let innermost = (1..self.scopes.len()).rev().find(|&i| {
             self.scopes[i].contains_key(name) || self.block_route_imports[i].contains_key(name)
         });
+        // A block import is certain only for calls in the same body; a nested
+        // callback may run after a later local rebinding of the name.
         let (source, exported, block_import) = match innermost {
             Some(i) => match self.block_route_imports[i].get(name) {
-                Some((source, exported)) => (source.clone(), exported.clone(), true),
+                Some((source, exported, depth)) => (
+                    source.clone(),
+                    exported.clone(),
+                    *depth == self.function_depth,
+                ),
                 None => return,
             },
             None => match self.imported_route_names.get(name) {

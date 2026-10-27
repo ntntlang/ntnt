@@ -1905,6 +1905,21 @@ fn test_import_shadows_route_block_imports_are_block_scoped() {
         ),
         0
     );
+    // A callback defined after a block import may run after a later rebinding:
+    // a warning, not an error.
+    let (stdout, _stderr, _) = lint_code(
+        "if true {\n    import { get } from \"std/kv\"\n    let setup = fn() { get(\"/health\", fn(req) { req }) }\n    let get = fn(a, b) { a }\n    setup()\n}\n",
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("lint json");
+    let severities: Vec<String> = json["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|f| f["issues"].as_array().cloned().unwrap_or_default())
+        .filter(|d| d["rule"] == "import_shadows_route")
+        .map(|d| d["severity"].as_str().unwrap_or("?").to_string())
+        .collect();
+    assert_eq!(severities, ["warning"], "{stdout}");
     // A block-local import does not make a later file-level call certain.
     assert_eq!(
         count(
