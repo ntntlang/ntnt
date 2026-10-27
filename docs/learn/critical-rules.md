@@ -110,7 +110,7 @@ import { stringify } from "std/json"
 import { now, format } from "std/time"
 import { sha256, uuid } from "std/crypto"
 import { keys, values, entries, has_key } from "std/collections"
-import { open, get, set, del } from "std/kv"
+import { open, get as kv_get, set, del } from "std/kv"
 import { enqueue, configure_queue } from "std/jobs"
 ```
 

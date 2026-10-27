@@ -40,6 +40,10 @@ pub enum DiagnosticKind {
     /// A call with literal arguments statically violates the callee's
     /// `requires` clause — guaranteed E004 at runtime
     StaticContractViolation,
+    /// A route builtin name (`get`, `post`, ...) is imported from a module and
+    /// then called with a route pattern: the import shadows route
+    /// registration, so this call reaches the imported function instead
+    ImportShadowsRoute,
     /// General type error (mismatch, undefined, etc.)
     General,
 }
@@ -114,6 +118,8 @@ pub struct TypeContext {
     /// Whole-module aliases by lexical scope, parallel to `scopes`. Calls on
     /// these values dispatch to exported fields rather than through UFCS.
     module_aliases: Vec<HashSet<String>>,
+    /// Route builtin names bound by an import: local name -> module source
+    imported_route_names: HashMap<String, String>,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -236,6 +242,7 @@ pub fn check_program_with_lint_mode(
                         | DiagnosticKind::UnknownMethod
                         | DiagnosticKind::BlockBinding
                         | DiagnosticKind::StaticContractViolation
+                        | DiagnosticKind::ImportShadowsRoute
                 )
             {
                 d.severity = Severity::Error;
@@ -678,6 +685,7 @@ impl TypeContext {
             strict_lint: false,
             has_unresolved_import: false,
             module_aliases: vec![HashSet::new()],
+            imported_route_names: HashMap::new(),
             current_file: None,
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
@@ -2192,6 +2200,13 @@ impl TypeContext {
                 wildcard,
                 ..
             } => {
+                for item in items {
+                    let local = item.alias.as_ref().unwrap_or(&item.name);
+                    if matches!(local.as_str(), "get" | "post" | "put" | "delete" | "patch") {
+                        self.imported_route_names
+                            .insert(local.clone(), source.clone());
+                    }
+                }
                 self.register_import(items, source, alias.as_deref(), *wildcard);
             }
 
@@ -3436,7 +3451,42 @@ impl TypeContext {
     }
 
     /// Infer the return type of a function call
+    /// `import { get } from "std/kv"` then `get("/health", h)`: the import
+    /// shadows the route builtin, so the call no longer registers a route.
+    fn check_import_shadows_route(&mut self, function: &Expression, arguments: &[Expression]) {
+        let Expression::Identifier(name) = function else {
+            return;
+        };
+        let Some(source) = self.imported_route_names.get(name).cloned() else {
+            return;
+        };
+        let pattern = match arguments.first() {
+            Some(Expression::String(s)) => s.clone(),
+            Some(Expression::InterpolatedString(parts)) => match parts.first() {
+                Some(crate::ast::StringPart::Literal(s)) => s.clone(),
+                _ => return,
+            },
+            _ => return,
+        };
+        if !pattern.starts_with('/') {
+            return;
+        }
+        let line = self.find_line_near_call(name, Some(&format!("\"{pattern}")));
+        self.emit_with_kind(
+            Severity::Error,
+            DiagnosticKind::ImportShadowsRoute,
+            format!(
+                "'{name}' is imported from \"{source}\", so {name}(\"{pattern}\", ...) calls that import instead of registering a route"
+            ),
+            line,
+            Some(format!(
+                "Rename the import, e.g. `import {{ {name} as kv_{name} }} from \"{source}\"`, to keep {name}() as the route builtin"
+            )),
+        );
+    }
+
     fn infer_call(&mut self, function: &Expression, arguments: &[Expression]) -> Type {
+        self.check_import_shadows_route(function, arguments);
         // Get function name early for bidirectional inference
         let fn_name_for_bidir = match function {
             Expression::Identifier(name) => Some(name.clone()),

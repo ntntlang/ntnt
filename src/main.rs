@@ -3549,6 +3549,9 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
                         }
                         ntnt::typechecker::DiagnosticKind::UnknownMethod => "unknown_method",
                         ntnt::typechecker::DiagnosticKind::BlockBinding => "block_binding",
+                        ntnt::typechecker::DiagnosticKind::ImportShadowsRoute => {
+                            "import_shadows_route"
+                        }
                         ntnt::typechecker::DiagnosticKind::StaticContractViolation => {
                             "static_contract_violation"
                         }
@@ -3735,6 +3738,9 @@ fn lint_project(
                         }
                         ntnt::typechecker::DiagnosticKind::UnknownMethod => "unknown_method",
                         ntnt::typechecker::DiagnosticKind::BlockBinding => "block_binding",
+                        ntnt::typechecker::DiagnosticKind::ImportShadowsRoute => {
+                            "import_shadows_route"
+                        }
                         ntnt::typechecker::DiagnosticKind::StaticContractViolation => {
                             "static_contract_violation"
                         }

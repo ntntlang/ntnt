@@ -1708,3 +1708,33 @@ print(from_options)
     assert_eq!(exit, 0, "stderr={stderr}\nstdout={stdout}");
     assert!(!stdout.contains("type_check"), "{stdout}");
 }
+
+// ===========================================================================
+// import_shadows_route (#293): an import named like a route builtin shadows it
+// ===========================================================================
+
+#[test]
+fn test_import_shadows_route_errors_only_for_route_pattern_calls() {
+    let source = r#"import { open, get } from "std/kv"
+fn h(req) {
+    return req
+}
+let kv = unwrap(open("memory://"))
+let v = get(kv, "key")
+get("/health", h)
+"#;
+    let (stdout, _stderr, exit_code) = lint_code(source);
+    assert_eq!(
+        stdout.matches("\"rule\": \"import_shadows_route\"").count(),
+        1,
+        "only the route-pattern call is flagged: {stdout}"
+    );
+    assert!(stdout.contains("get as kv_get"), "rename hint: {stdout}");
+    assert_ne!(exit_code, 0, "error severity fails lint");
+
+    let renamed = source
+        .replace("import { open, get }", "import { open, get as kv_get }")
+        .replace("let v = get(kv", "let v = kv_get(kv");
+    let (stdout, _stderr, _) = lint_code(&renamed);
+    assert!(!stdout.contains("import_shadows_route"), "{stdout}");
+}

@@ -74,6 +74,8 @@ import { get, listen } from "std/http/server"  // WRONG
 
 Only import response builders: `json`, `html`, `text`, `redirect`, `status`, `parse_form`, `parse_json` from `"std/http/server"`.
 
+Builtins are ordinary bindings: a definition or import with the same name shadows them. Importing `get` from `std/kv` makes every bare `get(...)` the KV function, so import it as `get as kv_get` (lint rule `import_shadows_route` flags the mistake).
+
 ### 5. No semicolons — use newlines
 
 Semicolons parse fine but are unnecessary; `ntnt lint` warns (`unnecessary_semicolon`). Omit them.
@@ -154,7 +156,7 @@ import { now, format } from "std/time"
 import { sha256, uuid } from "std/crypto"
 import { first, last, keys, values, entries, has_key, get_key } from "std/collections"
 import { oauth, enable_auth, get_user, validate_csrf } from "std/auth"
-import { open, get, set, del, list } from "std/kv"
+import { open, get as kv_get, set, del, list } from "std/kv"
 import { log_info, log_warn, log_error, set_log_level } from "std/log"
 import { channel, send, recv, sleep_ms, spawn, await_task, parallel, race } from "std/concurrent"
 import { enqueue, enqueue_in, configure_queue, work_async, work_jobs } from "std/jobs"

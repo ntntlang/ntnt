@@ -296,7 +296,9 @@ pub fn init() -> HashMap<String, Value> {
                                     new_arr = keyed.into_iter().map(|(_, v)| v).collect();
                                     return Ok(Value::Array(new_arr));
                                 }
-                                Value::Function { .. } | Value::NativeFunction { .. } => {
+                                Value::Function { .. }
+                                | Value::NativeFunction { .. }
+                                | Value::ContextFunction { .. } => {
                                     return Err(IntentError::type_error(
                                         "sort() with a function key must be called directly — NativeFunction bodies cannot invoke user-defined functions.".to_string(),
                                     ))

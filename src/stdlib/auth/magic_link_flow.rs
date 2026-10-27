@@ -60,7 +60,10 @@ struct MagicLinkFlowOptions {
 pub(crate) type MagicLinkFlowInvoke<'a> = dyn FnMut(&Value, Vec<Value>) -> Result<Value> + 'a;
 
 fn value_is_callable(value: &Value) -> bool {
-    matches!(value, Value::Function { .. } | Value::NativeFunction { .. })
+    matches!(
+        value,
+        Value::Function { .. } | Value::NativeFunction { .. } | Value::ContextFunction { .. }
+    )
 }
 
 fn required_callable_option(
