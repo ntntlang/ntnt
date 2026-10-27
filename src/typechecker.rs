@@ -2190,6 +2190,7 @@ impl TypeContext {
                 source,
                 alias,
                 wildcard,
+                ..
             } => {
                 self.register_import(items, source, alias.as_deref(), *wildcard);
             }
@@ -4082,7 +4083,7 @@ impl TypeContext {
 
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(tokens).with_source_file(file_path);
         let ast = match parser.parse() {
             Ok(ast) => ast,
             Err(_) => return FileExports::default(),

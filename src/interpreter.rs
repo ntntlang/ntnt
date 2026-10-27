@@ -1606,7 +1606,10 @@ impl Interpreter {
             };
 
             let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
-            let ast = match crate::parser::Parser::new(tokens).parse() {
+            let ast = match crate::parser::Parser::new(tokens)
+                .with_source_file(&file_path)
+                .parse()
+            {
                 Ok(a) => a,
                 Err(e) => {
                     eval_error = Some(IntentError::runtime_error(format!(
@@ -2086,7 +2089,7 @@ impl Interpreter {
 
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(tokens).with_source_file(&file_path);
 
         let ast = match parser.parse() {
             Ok(ast) => ast,
@@ -4574,6 +4577,7 @@ impl Interpreter {
         source: &str,
         alias: Option<&str>,
         wildcard: bool,
+        source_file: Option<&std::path::Path>,
     ) -> Result<Value> {
         // Check if it's a standard library module
         if source.starts_with("std/") {
@@ -4589,8 +4593,16 @@ impl Interpreter {
             return self.bind_imports(items, &module, source, alias, wildcard);
         }
 
-        // Check canonicalized file path cache (prevents double evaluation)
-        let canonical_source = self.canonical_module_key(source);
+        // Use the declaration's path for both cache lookup and file loading.
+        let file_path = self.resolve_import_path(source, source_file);
+        let file_path = if file_path.extension().is_none() {
+            file_path.with_extension("tnt")
+        } else {
+            file_path
+        };
+        let canonical_source = Self::canonicalize_path(&file_path)
+            .to_string_lossy()
+            .to_string();
         if let Some(module) = self.loaded_modules.get(&canonical_source).cloned() {
             #[cfg(test)]
             {
@@ -4600,7 +4612,7 @@ impl Interpreter {
         }
 
         // Try to load from file
-        self.import_file_module(items, source, alias, wildcard)
+        self.import_file_module(items, file_path, canonical_source, alias, wildcard)
     }
 
     fn import_std_module(
@@ -4685,26 +4697,14 @@ impl Interpreter {
     fn import_file_module(
         &mut self,
         items: &[ImportItem],
-        source: &str,
+        file_path: std::path::PathBuf,
+        source_key: String,
         alias: Option<&str>,
         wildcard: bool,
     ) -> Result<Value> {
         use crate::lexer::Lexer;
         use crate::parser::Parser;
         use std::fs;
-
-        // Resolve the file path
-        let file_path = self.resolve_import_path(source);
-
-        // Add .tnt extension if not present
-        let file_path = if file_path.extension().is_none() {
-            file_path.with_extension("tnt")
-        } else {
-            file_path
-        };
-
-        let canonical_path = Self::canonicalize_path(&file_path);
-        let source_key = canonical_path.to_string_lossy().to_string();
 
         // Read and parse the file
         let source_code = fs::read_to_string(&file_path).map_err(|e| {
@@ -4717,7 +4717,7 @@ impl Interpreter {
 
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(tokens).with_source_file(&file_path);
         let ast = parser.parse()?;
 
         // Create a new environment for the module
@@ -4771,32 +4771,24 @@ impl Interpreter {
         self.bind_imports(items, &module_exports, &source_key, alias, wildcard)
     }
 
-    fn resolve_import_path(&self, source: &str) -> std::path::PathBuf {
+    fn resolve_import_path(
+        &self,
+        source: &str,
+        source_file: Option<&std::path::Path>,
+    ) -> std::path::PathBuf {
         if source.starts_with("./") || source.starts_with("../") {
-            // Relative import
-            if let Some(ref current) = self.current_file {
-                let current_dir = std::path::Path::new(current)
+            // File-backed imports retain their origin through functions/tasks.
+            // Source-less ASTs keep the embedder's existing interpreter fallback.
+            if let Some(current) =
+                source_file.or_else(|| self.current_file.as_deref().map(std::path::Path::new))
+            {
+                return current
                     .parent()
-                    .unwrap_or(std::path::Path::new("."));
-                current_dir.join(source)
-            } else {
-                std::path::PathBuf::from(source)
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(source);
             }
-        } else {
-            std::path::PathBuf::from(source)
         }
-    }
-
-    fn canonical_module_key(&self, source: &str) -> String {
-        let file_path = self.resolve_import_path(source);
-        let file_path = if file_path.extension().is_none() {
-            file_path.with_extension("tnt")
-        } else {
-            file_path
-        };
-        Self::canonicalize_path(&file_path)
-            .to_string_lossy()
-            .to_string()
+        std::path::PathBuf::from(source)
     }
 
     /// Load file-based routes from a directory
@@ -4973,7 +4965,7 @@ impl Interpreter {
 
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(tokens).with_source_file(&file_path);
         let ast = parser.parse()?;
 
         // Create a fresh environment for the module
@@ -5105,7 +5097,7 @@ impl Interpreter {
 
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(tokens).with_source_file(&file_path);
         let ast = parser.parse()?;
 
         // Create a fresh environment for the route module
@@ -5192,7 +5184,7 @@ impl Interpreter {
 
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(tokens).with_source_file(&file_path);
         let ast = parser.parse()?;
 
         // Create a fresh environment and save import state
@@ -5816,9 +5808,16 @@ impl Interpreter {
             Statement::Import {
                 items,
                 source,
+                source_file,
                 alias,
                 wildcard,
-            } => self.handle_import(items, source, alias.as_deref(), *wildcard),
+            } => self.handle_import(
+                items,
+                source,
+                alias.as_deref(),
+                *wildcard,
+                source_file.as_deref(),
+            ),
 
             Statement::Export {
                 items: _,
@@ -6812,10 +6811,10 @@ impl Interpreter {
                             }
                         };
 
-                        // Get template content from cache
-                        let content =
+                        // Keep the compiled template's file identity for imports.
+                        let template =
                             match crate::stdlib::template::get_compiled_template(template_id) {
-                                Some(t) => t.content,
+                                Some(t) => t,
                                 None => {
                                     return Err(IntentError::runtime_error(
                                         "Template not found in cache".to_string(),
@@ -6824,7 +6823,11 @@ impl Interpreter {
                             };
 
                         // Render with data
-                        return self.render_template_with_data(&content, &data_map);
+                        return self.render_template_with_data(
+                            &template.content,
+                            &data_map,
+                            std::path::Path::new(&template.resolved_path),
+                        );
                     }
 
                     // Special handling for std/fs functions - resolve paths relative to script
@@ -8279,7 +8282,10 @@ impl Interpreter {
         })
     }
 
-    fn parse_template_content(content: &str) -> Result<Vec<TemplatePart>> {
+    fn parse_template_content(
+        content: &str,
+        source_file: &std::path::Path,
+    ) -> Result<Vec<TemplatePart>> {
         // Wrap content in triple quotes to make it a template string, preserving
         // the external-template parser path used before automatic caching.
         let template_source = format!("\"\"\"{}\"\"\"", content);
@@ -8289,7 +8295,7 @@ impl Interpreter {
 
         let lexer = Lexer::new(&template_source);
         let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(tokens).with_source_file(source_file);
 
         match parser
             .expression()
@@ -8338,7 +8344,7 @@ impl Interpreter {
         }
 
         let content = Self::read_external_template_file(&resolved_path)?;
-        let parts = Rc::new(Self::parse_template_content(&content)?);
+        let parts = Rc::new(Self::parse_template_content(&content, &resolved_path)?);
         self.external_template_cache.insert(
             cache_key,
             CachedExternalTemplate {
@@ -8423,8 +8429,9 @@ impl Interpreter {
         &mut self,
         content: &str,
         data: &HashMap<String, Value>,
+        source_file: &std::path::Path,
     ) -> Result<Value> {
-        let parts = Rc::new(Self::parse_template_content(content)?);
+        let parts = Rc::new(Self::parse_template_content(content, source_file)?);
         self.render_template_parts_with_data(parts.as_slice(), data)
     }
 
@@ -10846,7 +10853,7 @@ impl Interpreter {
 
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(tokens).with_source_file(source_file);
 
         let ast = match parser.parse() {
             Ok(ast) => ast,

@@ -58,6 +58,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Union types
 - [x] Effect annotations foundation
 - [x] Module system with imports/exports
+- [x] Declaration-relative `./` and `../` imports across functions, callbacks, jobs and tasks; bare CWD-relative paths unchanged (#296).
 - [x] Standard library: std/string, std/math, std/collections, std/env, std/fs, std/path, std/json, std/time, std/crypto, std/url, std/http, std/auth, std/kv, std/log
 - [x] Traits with default implementations
 - [x] For-in loops and ranges

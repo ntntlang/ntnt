@@ -371,7 +371,7 @@ fn execute_code_quality(
         if run_validate || run_lint {
             let lexer = Lexer::new(&source);
             let tokens: Vec<_> = lexer.collect();
-            let mut parser = Parser::new(tokens);
+            let mut parser = Parser::new(tokens).with_source_file(file_path);
 
             match parser.parse() {
                 Ok(ast) => {

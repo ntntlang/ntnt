@@ -37,6 +37,7 @@ pub fn execute(request: &NativeRequest) -> NativeResponse {
     let result = (|| -> Result<NativeValue, String> {
         let source = std::fs::read_to_string(&request.source).map_err(|e| e.to_string())?;
         let program = Parser::new(Lexer::new(&source).collect())
+            .with_source_file(&request.source)
             .parse()
             .map_err(|e| e.to_string())?;
         interpreter.eval(&program).map_err(|e| e.to_string())?;

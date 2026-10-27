@@ -156,6 +156,8 @@ Recursive descent parser producing an AST:
 - Job definitions (`Job Name on queue { ... }`)
 - Batch definitions (`Batch Name { ... }`)
 
+File loaders use `Parser::with_source_file` to stamp immutable declaring-file metadata on import statements. Existing AST clones carry that origin through functions, jobs and tasks. The interpreter uses it only for explicit `./` and `../` imports, with one resolved path for cache lookup and loading; `current_file` resource-path behavior is unchanged. Source-less parsers retain their interpreter-context/CWD fallback, and runtime origin metadata is omitted from AST JSON.
+
 ### Interpreter (`interpreter.rs`)
 
 Tree-walking evaluator (~14,900 lines) with:

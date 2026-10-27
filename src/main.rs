@@ -1360,7 +1360,7 @@ fn run_file_with_workers(
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
 
-    let mut parser = IntentParser::new(tokens);
+    let mut parser = IntentParser::new(tokens).with_source_file(path);
     let ast = parser.parse()?;
 
     // Strict type checking: block execution if type errors found
@@ -1426,7 +1426,7 @@ fn run_worker_command(
 
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
-    let mut parser = IntentParser::new(tokens);
+    let mut parser = IntentParser::new(tokens).with_source_file(path);
     let ast = parser.parse()?;
 
     // Strict type checking (same gate as run_file)
@@ -1897,7 +1897,7 @@ fn jobs_load_kv(path: &PathBuf) -> anyhow::Result<ntnt::interpreter::Value> {
 
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
-    let mut parser = IntentParser::new(tokens);
+    let mut parser = IntentParser::new(tokens).with_source_file(path);
     let ast = parser.parse()?;
 
     if let Some(errors) = ntnt::typechecker::strict_check_with_file(&ast, &source, Some(&path_str))
@@ -2873,7 +2873,7 @@ fn test_http_server(
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
 
-    let mut parser = IntentParser::new(tokens);
+    let mut parser = IntentParser::new(tokens).with_source_file(path);
     let ast = parser.parse()?;
 
     // Run the server (will exit when shutdown_flag is set)
@@ -2961,7 +2961,7 @@ fn parse_file(path: &PathBuf, json: bool) -> anyhow::Result<()> {
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
 
-    let mut parser = IntentParser::new(tokens);
+    let mut parser = IntentParser::new(tokens).with_source_file(path);
     let ast = parser.parse()?;
 
     if json {
@@ -2990,7 +2990,7 @@ fn check_file(path: &PathBuf) -> anyhow::Result<()> {
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
 
-    let mut parser = IntentParser::new(tokens);
+    let mut parser = IntentParser::new(tokens).with_source_file(path);
     let (_ast, parse_errors) = parser.parse_with_recovery();
 
     if !parse_errors.is_empty() {
@@ -3034,7 +3034,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
         let source = fs::read_to_string(file_path)?;
         let lexer = Lexer::new(&source);
         let tokens: Vec<_> = lexer.collect();
-        let mut parser = IntentParser::new(tokens);
+        let mut parser = IntentParser::new(tokens).with_source_file(file_path);
 
         let ast = match parser.parse() {
             Ok(ast) => ast,
@@ -3528,7 +3528,7 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
 
         let lexer = Lexer::new(&source);
         let tokens: Vec<_> = lexer.collect();
-        let mut parser = IntentParser::new(tokens);
+        let mut parser = IntentParser::new(tokens).with_source_file(file_path);
 
         let (ast, parse_errors) = parser.parse_with_recovery();
 
@@ -3707,7 +3707,7 @@ fn lint_project(
 
         let lexer = Lexer::new(&source);
         let tokens: Vec<_> = lexer.collect();
-        let mut parser = IntentParser::new(tokens);
+        let mut parser = IntentParser::new(tokens).with_source_file(file_path);
 
         let (ast, parse_errors) = parser.parse_with_recovery();
 
