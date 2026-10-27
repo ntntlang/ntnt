@@ -24,6 +24,7 @@ Environment variables that control NTNT runtime behavior
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `NTNT_ALLOW_PRIVATE_IPS` | `true` | unset (disabled — private IPs blocked) | Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x). Required for Docker inter-container communication (e.g., calling a sidecar at 172.19.0.1). Disabled by default to prevent SSRF attacks. This does not enable `std/net` or `std/netmon` probes; use `NTNT_NET_ALLOW_PRIVATE=1` plus per-call `allow_private: true` for those. |
+| `NTNT_CLIENT_IP_HEADER` | `header name` | X-Forwarded-For | Header read from trusted proxies for `req.client_ip`. `X-Forwarded-For` is walked right to left, skipping trusted hops; the first untrusted address is the client. Repeated `X-Forwarded-For` lines are read as one list in received order. Any other header (e.g. `CF-Connecting-IP`) is taken as a single address and must appear once; a repeated or unparseable value falls back to the peer and logs one warning per process. |
 | `NTNT_CONTROL_SOCKET` | Unix socket path | private runtime directory plus project/group digest | Explicit worker control endpoint. Relative paths resolve from canonical project identity: nearest ntnt.toml ancestor of the main source directory (client: --dir or CWD), otherwise that directory itself. CLI --control-socket and embedded control_socket options win. Parent must be caller-owned and private (0700). Default sockets are outside the source tree. Explicit control configuration is unsupported on Windows. See worker-control.md. |
 | `NTNT_DB_POOL_SIZE` | `any positive integer` | 5 | Maximum number of connections per shared PostgreSQL database pool. Each worker keeps its own process-local pools keyed by connection string, so total connections = num_workers × num_databases × pool_size. Repeated connect(url) calls within a worker reuse the same shared pool. For multi-worker production deployments with multiple databases, keep this low (2-5) to avoid exhausting PostgreSQL max_connections. |
 | `NTNT_ENV` | `development`, `production`, `prod` | development (when unset) | Controls runtime mode. Production mode disables hot-reload for better performance. |
@@ -41,6 +42,7 @@ Environment variables that control NTNT runtime behavior
 | `NTNT_STRICT` | `1`, `true` | unset (disabled) | **Deprecated — use `NTNT_LINT_MODE=strict` instead.** Enable strict type checking. Still works but emits a deprecation warning. |
 | `NTNT_TASK_REMOVAL_TTL` | `non-negative integer (seconds)` | 86400 | Advanced compatibility setting for compact process-local task history age, measured from consumption/expiration. Read when the concurrency runtime initializes. Zero disables history; invalid values use the default. Count (100000) and estimated-memory (64 MiB) caps still apply. This no longer retains heavy task entries or results for seven days; public unconsumed results have a separate fixed one-hour inactivity/100000-result/128 MiB policy. |
 | `NTNT_TIMEOUT` | integer (seconds) | 30 | Request timeout for HTTP server in seconds. Also bounds how long async-server graceful shutdown waits for in-flight connections after SIGTERM/Ctrl+C before closing them. |
+| `NTNT_TRUSTED_PROXIES` | `comma-separated CIDRs or addresses, IPv4 and IPv6` | unset (no proxy is trusted; req.client_ip is the TCP peer) | Proxies whose client IP header is believed when computing `req.client_ip`. Behind Cloudflare Tunnel or Docker, trust the tunnel/Docker network CIDR (e.g. `172.18.0.0/16`). No provider IP lists are built in. List only proxies you operate: each must set or overwrite the client IP header itself. IPv4-mapped networks (`::ffff:10.0.0.0/104`) are accepted. Parsed once at `listen()`; an invalid entry (bad address, prefix out of range, host bits set) fails startup. `req.ip` is unchanged. |
 | `NTNT_TYPE_MODE` | `strict`, `warn`, `forgiving` | warn | Controls runtime behavior for type mismatches. `strict`: type mismatches crash (fail-closed, recommended for auth/payments). `warn`: log `[WARN]` and continue (default). `forgiving`: silent degradation (pre-v0.4 behavior). See [Type Safety Modes](#type-safety-modes). |
 | `NTNT_WORKER_GROUP` | nonempty string | default | Stable worker group within a canonical project. CLI --worker-group and embedded worker_group options win. Different groups have different default endpoints; an explicit socket path overrides group-based path selection. Explicit groups are unsupported on Windows. |
 
@@ -49,6 +51,9 @@ Environment variables that control NTNT runtime behavior
 ```bash
 # Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x)
 NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt
+
+# Header read from trusted proxies for `req.client_ip`
+NTNT_CLIENT_IP_HEADER=CF-Connecting-IP
 
 # Explicit worker control endpoint
 NTNT_CONTROL_SOCKET=/run/user/1000/app/jobs.sock ntnt worker app.tnt
@@ -100,6 +105,9 @@ NTNT_TASK_REMOVAL_TTL=86400 ntnt run server.tnt
 
 # Request timeout for HTTP server in seconds
 NTNT_TIMEOUT=60 ntnt run server.tnt
+
+# Proxies whose client IP header is believed when computing `req.client_ip`
+NTNT_TRUSTED_PROXIES=172.18.0.0/16 NTNT_CLIENT_IP_HEADER=CF-Connecting-IP ntnt run server.tnt
 
 # Controls runtime behavior for type mismatches
 NTNT_TYPE_MODE=strict ntnt run server.tnt

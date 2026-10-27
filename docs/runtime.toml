@@ -62,6 +62,20 @@ description = "Per-attempt Unix-socket connect, write, and read timeout. Values 
 example = "NTNT_SECRETS_TIMEOUT_MS=500"
 affects = ["std-secrets", "security"]
 
+[env_vars.NTNT_TRUSTED_PROXIES]
+values = ["comma-separated CIDRs or addresses, IPv4 and IPv6"]
+default = "unset (no proxy is trusted; req.client_ip is the TCP peer)"
+description = "Proxies whose client IP header is believed when computing `req.client_ip`. Behind Cloudflare Tunnel or Docker, trust the tunnel/Docker network CIDR (e.g. `172.18.0.0/16`). No provider IP lists are built in. List only proxies you operate: each must set or overwrite the client IP header itself. IPv4-mapped networks (`::ffff:10.0.0.0/104`) are accepted. Parsed once at `listen()`; an invalid entry (bad address, prefix out of range, host bits set) fails startup. `req.ip` is unchanged."
+example = "NTNT_TRUSTED_PROXIES=172.18.0.0/16 NTNT_CLIENT_IP_HEADER=CF-Connecting-IP ntnt run server.tnt"
+affects = ["http-server", "security"]
+
+[env_vars.NTNT_CLIENT_IP_HEADER]
+values = ["header name"]
+default = "X-Forwarded-For"
+description = "Header read from trusted proxies for `req.client_ip`. `X-Forwarded-For` is walked right to left, skipping trusted hops; the first untrusted address is the client. Repeated `X-Forwarded-For` lines are read as one list in received order. Any other header (e.g. `CF-Connecting-IP`) is taken as a single address and must appear once; a repeated or unparseable value falls back to the peer and logs one warning per process."
+example = "NTNT_CLIENT_IP_HEADER=CF-Connecting-IP"
+affects = ["http-server", "security"]
+
 [env_vars.NTNT_TIMEOUT]
 type = "integer (seconds)"
 default = "30"

@@ -399,6 +399,15 @@ async fn axum_to_bridge_request(
         }
     }
 
+    // Trusted client IP (NTNT_TRUSTED_PROXIES); `ip` keeps legacy behaviour.
+    let trusted_client_ip = crate::stdlib::client_ip::resolve_string(peer_addr.ip(), |name| {
+        req.headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect()
+    });
+
     // Read body
     let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
         .await
@@ -434,6 +443,7 @@ async fn axum_to_bridge_request(
         id: uuid::Uuid::new_v4().to_string(),
         ip: client_ip.unwrap_or_else(|| peer_addr.ip().to_string()),
         peer_ip: peer_addr.ip().to_string(),
+        client_ip: trusted_client_ip,
         protocol: "http".to_string(),
     })
 }

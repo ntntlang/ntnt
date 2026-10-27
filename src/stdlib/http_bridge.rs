@@ -64,6 +64,8 @@ pub struct BridgeRequest {
     pub ip: String,
     /// Immutable socket peer IP, unaffected by forwarding headers
     pub peer_ip: String,
+    /// Client IP trusted only through `NTNT_TRUSTED_PROXIES` (see stdlib::client_ip)
+    pub client_ip: String,
     /// Protocol (http/https)
     pub protocol: String,
 }
@@ -109,6 +111,10 @@ impl BridgeRequest {
         map.insert("id".to_string(), Value::String(self.id.clone()));
         map.insert("ip".to_string(), Value::String(self.ip.clone()));
         map.insert("peer_ip".to_string(), Value::String(self.peer_ip.clone()));
+        map.insert(
+            "client_ip".to_string(),
+            Value::String(self.client_ip.clone()),
+        );
         map.insert("protocol".to_string(), Value::String(self.protocol.clone()));
 
         // Query params
@@ -312,6 +318,7 @@ mod tests {
             id: "req-json".to_string(),
             ip: "203.0.113.99".to_string(),
             peer_ip: "127.0.0.1".to_string(),
+            client_ip: "127.0.0.1".to_string(),
             protocol: "http".to_string(),
         };
 
@@ -366,6 +373,7 @@ mod tests {
             id: "req-123".to_string(),
             ip: "203.0.113.99".to_string(),
             peer_ip: "127.0.0.1".to_string(),
+            client_ip: "127.0.0.1".to_string(),
             protocol: "http".to_string(),
         };
 
@@ -497,6 +505,7 @@ mod tests {
             id: "1".to_string(),
             ip: "203.0.113.99".to_string(),
             peer_ip: "127.0.0.1".to_string(),
+            client_ip: "127.0.0.1".to_string(),
             protocol: "http".to_string(),
         };
 

@@ -9858,6 +9858,7 @@ impl Interpreter {
             ));
         }
 
+        crate::stdlib::client_ip::init_from_env()?;
         let server = tiny_http::Server::http(addr)
             .map_err(|e| IntentError::runtime_error(format!("Failed to bind: {e}")))?;
         let bound = server
@@ -10379,6 +10380,7 @@ impl Interpreter {
 
         // Create server config
         let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
+        crate::stdlib::client_ip::init_from_env()?;
         let server_config = AsyncServerConfig {
             port: addr.port(),
             host: addr.ip().to_string(),
@@ -16252,6 +16254,7 @@ listen(0)
                     id: path.into(),
                     ip: "127.0.0.1".into(),
                     peer_ip: "127.0.0.1".into(),
+                    client_ip: "127.0.0.1".into(),
                     protocol: "http".into(),
                 },
                 reply_tx,

@@ -7,6 +7,7 @@
 //! ```
 
 pub mod auth;
+pub mod client_ip;
 pub mod collections;
 pub mod concurrent;
 pub mod crypto;
