@@ -130,6 +130,9 @@ pub struct TypeContext {
     /// Nesting depth of function/lambda bodies being checked. Bodies run
     /// later, so top-level statement order does not apply inside them.
     function_depth: usize,
+    /// Per scope (parallel to `scopes`): route names bound by an import
+    /// inside that block or function body. Imports are block-scoped.
+    block_route_imports: Vec<HashMap<String, (String, String)>>,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -699,6 +702,7 @@ impl TypeContext {
             route_imports_in_effect: HashSet::new(),
             reported_route_calls: HashSet::new(),
             function_depth: 0,
+            block_route_imports: vec![HashMap::new()],
             current_file: None,
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
@@ -713,11 +717,13 @@ impl TypeContext {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.module_aliases.push(HashSet::new());
+        self.block_route_imports.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.module_aliases.pop();
+        self.block_route_imports.pop();
     }
 
     fn bind(&mut self, name: &str, typ: Type) {
@@ -726,6 +732,10 @@ impl TypeContext {
         }
         if let Some(aliases) = self.module_aliases.last_mut() {
             aliases.remove(name);
+        }
+        // A later local definition replaces a block import of the same name.
+        if let Some(imports) = self.block_route_imports.last_mut() {
+            imports.remove(name);
         }
     }
 
@@ -2230,6 +2240,14 @@ impl TypeContext {
                         .extend(bound.into_iter().map(|(local, _)| local));
                 }
                 self.register_import(items, source, alias.as_deref(), *wildcard);
+                if alias.is_none() && self.scopes.len() > 1 {
+                    let bound = self.route_names_bound_by(items, source, *wildcard);
+                    if let Some(imports) = self.block_route_imports.last_mut() {
+                        for (local, exported) in bound {
+                            imports.insert(local, (source.clone(), exported));
+                        }
+                    }
+                }
             }
 
             // Already handled in Pass 1
@@ -3531,23 +3549,27 @@ impl TypeContext {
         let Expression::Identifier(name) = function else {
             return;
         };
-        let Some((source, exported)) = self.imported_route_names.get(name).cloned() else {
-            return;
+        // Resolve the nearest binding. A block import (checked in statement
+        // order, so already executed) is certain; any other local binding
+        // shadows the file-level import.
+        let innermost = (1..self.scopes.len()).rev().find(|&i| {
+            self.scopes[i].contains_key(name) || self.block_route_imports[i].contains_key(name)
+        });
+        let (source, exported, block_import) = match innermost {
+            Some(i) => match self.block_route_imports[i].get(name) {
+                Some((source, exported)) => (source.clone(), exported.clone(), true),
+                None => return,
+            },
+            None => match self.imported_route_names.get(name) {
+                Some((source, exported)) => (source.clone(), exported.clone(), false),
+                None => return,
+            },
         };
-        // A parameter or local binding in an enclosing scope shadows the import.
-        if self
-            .scopes
-            .iter()
-            .skip(1)
-            .any(|scope| scope.contains_key(name))
-        {
-            return;
-        }
         // Certain: the import has already executed at this point. At top level
         // a call above the import still registers a route, so skip it. Inside a
         // function or callback declared before the import, whether it runs
         // before or after the import is unknown statically: warn instead.
-        let certain = self.route_imports_in_effect.contains(name);
+        let certain = block_import || self.route_imports_in_effect.contains(name);
         if self.function_depth == 0 && !certain {
             return;
         }

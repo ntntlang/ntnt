@@ -1884,6 +1884,27 @@ fn test_import_shadows_route_block_imports_are_block_scoped() {
         ),
         0
     );
+    // Inside the block, after the import, the call reaches the import.
+    assert_eq!(
+        count(
+            "if true {\n    import { get } from \"std/kv\"\n    get(\"/health\", fn(req) { req })\n}\n"
+        ),
+        1
+    );
+    // Same for an import inside a function body.
+    assert_eq!(
+        count(
+            "fn setup() {\n    import { get } from \"std/kv\"\n    get(\"/health\", fn(req) { req })\n}\n"
+        ),
+        1
+    );
+    // A later local definition in the block replaces the import.
+    assert_eq!(
+        count(
+            "if true {\n    import { get } from \"std/kv\"\n    let get = fn(a, b) { a }\n    get(\"/health\", fn(req) { req })\n}\n"
+        ),
+        0
+    );
     // A block-local import does not make a later file-level call certain.
     assert_eq!(
         count(
