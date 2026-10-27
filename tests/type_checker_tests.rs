@@ -1794,3 +1794,39 @@ fn test_import_shadows_route_top_level_order_and_distinct_calls() {
         2
     );
 }
+
+#[test]
+fn test_import_shadows_route_activation_is_per_binding_and_top_level() {
+    let count = |src: &str| {
+        let (stdout, _stderr, _) = lint_code(src);
+        stdout.matches("\"rule\": \"import_shadows_route\"").count()
+    };
+    // An earlier import from the same module does not activate a later `get`.
+    assert_eq!(
+        count(
+            "import { get_int } from \"std/kv\"\nget(\"/health\", fn(req) { req })\nimport { get } from \"std/kv\"\n"
+        ),
+        0
+    );
+    // A function-local import does not activate top-level state.
+    assert_eq!(
+        count(
+            "fn local() {\n    import { get } from \"std/kv\"\n    return 1\n}\nget(\"/health\", fn(req) { req })\nimport { get } from \"std/kv\"\n"
+        ),
+        0
+    );
+    // Top-level blocks run in order too.
+    assert_eq!(
+        count(
+            "if true {\n    get(\"/health\", fn(req) { req })\n}\nimport { get } from \"std/kv\"\n"
+        ),
+        0
+    );
+    // Lambdas are deferred bodies: they see later top-level imports.
+    assert_eq!(
+        count(
+            "let setup = fn() { get(\"/health\", fn(req) { req }) }\nimport { get } from \"std/kv\"\nsetup()\n"
+        ),
+        1
+    );
+}

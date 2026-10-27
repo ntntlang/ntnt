@@ -127,6 +127,9 @@ pub struct TypeContext {
     /// Calls already reported for import_shadows_route, keyed by AST address
     /// (function bodies can be inferred more than once).
     reported_route_calls: HashSet<usize>,
+    /// Nesting depth of function/lambda bodies being checked. Bodies run
+    /// later, so top-level statement order does not apply inside them.
+    function_depth: usize,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -695,6 +698,7 @@ impl TypeContext {
             imported_route_names: HashMap::new(),
             route_imports_in_effect: HashSet::new(),
             reported_route_calls: HashSet::new(),
+            function_depth: 0,
             current_file: None,
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
@@ -1903,6 +1907,7 @@ impl TypeContext {
                 type_params: _,
                 ..
             } => {
+                self.function_depth += 1;
                 self.push_scope();
 
                 // Strict lint: warn about untyped parameters and missing return type
@@ -2057,6 +2062,7 @@ impl TypeContext {
                 }
 
                 self.current_return_type = prev_return;
+                self.function_depth -= 1;
                 self.collected_returns = prev_collected;
                 self.pop_scope();
             }
@@ -2216,14 +2222,10 @@ impl TypeContext {
                 wildcard,
                 ..
             } => {
-                if alias.is_none() {
-                    let in_effect: Vec<String> = self
-                        .imported_route_names
-                        .iter()
-                        .filter(|(_, (src, _))| src == source)
-                        .map(|(local, _)| local.clone())
-                        .collect();
-                    self.route_imports_in_effect.extend(in_effect);
+                if alias.is_none() && self.function_depth == 0 {
+                    let bound = self.route_names_bound_by(items, source, *wildcard);
+                    self.route_imports_in_effect
+                        .extend(bound.into_iter().map(|(local, _)| local));
                 }
                 self.register_import(items, source, alias.as_deref(), *wildcard);
             }
@@ -3101,6 +3103,7 @@ impl TypeContext {
             }
 
             Expression::Lambda { params, body } => {
+                self.function_depth += 1;
                 self.push_scope();
 
                 // Strict lint: warn about untyped lambda parameters
@@ -3158,6 +3161,7 @@ impl TypeContext {
 
                 // Restore outer function's collected_returns
                 self.current_return_type = prev_return;
+                self.function_depth -= 1;
                 self.collected_returns = prev_collected;
                 self.pop_scope();
                 Type::Function {
@@ -3472,6 +3476,19 @@ impl TypeContext {
     /// Record route builtin names bound by a top-level import. Runs in the
     /// declaration pass so functions declared above the import are covered.
     fn record_route_name_imports(&mut self, items: &[ImportItem], source: &str, wildcard: bool) {
+        for (local, exported) in self.route_names_bound_by(items, source, wildcard) {
+            self.imported_route_names
+                .insert(local, (source.to_string(), exported));
+        }
+    }
+
+    /// Route builtin names an import binds: (local name, exported name).
+    fn route_names_bound_by(
+        &mut self,
+        items: &[ImportItem],
+        source: &str,
+        wildcard: bool,
+    ) -> Vec<(String, String)> {
         const ROUTES: [&str; 5] = ["get", "post", "put", "delete", "patch"];
         if wildcard {
             let mut exported: Vec<String> = std_module_export_names(source);
@@ -3484,22 +3501,21 @@ impl TypeContext {
                         .collect();
                 }
             }
-            for name in exported
+            return exported
                 .into_iter()
                 .filter(|n| ROUTES.contains(&n.as_str()))
-            {
-                self.imported_route_names
-                    .insert(name.clone(), (source.to_string(), name));
-            }
-            return;
+                .map(|n| (n.clone(), n))
+                .collect();
         }
-        for item in items {
-            let local = item.alias.as_ref().unwrap_or(&item.name);
-            if ROUTES.contains(&local.as_str()) {
-                self.imported_route_names
-                    .insert(local.clone(), (source.to_string(), item.name.clone()));
-            }
-        }
+        items
+            .iter()
+            .filter_map(|item| {
+                let local = item.alias.as_ref().unwrap_or(&item.name);
+                ROUTES
+                    .contains(&local.as_str())
+                    .then(|| (local.clone(), item.name.clone()))
+            })
+            .collect()
     }
 
     /// `import { get } from "std/kv"` then `get("/health", h)`: the import
@@ -3525,7 +3541,7 @@ impl TypeContext {
         }
         // At top level, statements run in order: a call above the import still
         // registers a route. Function bodies may run after any import.
-        if self.scopes.len() == 1 && !self.route_imports_in_effect.contains(name) {
+        if self.function_depth == 0 && !self.route_imports_in_effect.contains(name) {
             return;
         }
         let [pattern, handler] = arguments else {
