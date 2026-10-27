@@ -1212,6 +1212,19 @@ pub fn request_to_value(
     let ip = client_ip.unwrap_or_else(|| peer_ip.clone());
     req_map.insert("ip".to_string(), Value::String(ip));
     req_map.insert("peer_ip".to_string(), Value::String(peer_ip));
+    // Trusted client IP (NTNT_TRUSTED_PROXIES); `ip` above keeps legacy behaviour.
+    let peer_addr = request
+        .remote_addr()
+        .map(|addr| addr.ip())
+        .unwrap_or_else(crate::stdlib::client_ip::unknown_peer);
+    let trusted_client_ip = crate::stdlib::client_ip::resolve_string(peer_addr, |name| {
+        request
+            .headers()
+            .iter()
+            .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+            .map(|h| h.value.as_str())
+    });
+    req_map.insert("client_ip".to_string(), Value::String(trusted_client_ip));
 
     // Request ID (from header or generate one)
     let id = request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());

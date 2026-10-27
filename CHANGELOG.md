@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `req.client_ip`: a client IP you can trust. A forwarding header (`NTNT_CLIENT_IP_HEADER`, default `X-Forwarded-For`) is believed only when the TCP peer is inside `NTNT_TRUSTED_PROXIES` (CIDRs); `X-Forwarded-For` is walked right to left past trusted hops. Otherwise it is the peer address. Invalid configuration fails startup. `req.ip` is unchanged and remains spoofable; use `client_ip` for limits and audit logs (#294).
+
 ## 0.5.6
 
 See the [complete release notes](docs/release-notes-v0.5.6.md) for upgrade guidance. TLS inspection, monitoring HTTPS probes and SMTP TLS now require a usable host/container CA store; update the NTNT binary for the security fixes, and restart after subsequent CA-only updates.

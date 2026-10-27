@@ -869,7 +869,9 @@ req.params        // Map<String, String>: route params
 req.query_params  // Map<String, String>: query string params
 req.headers       // Map<String, String>: headers map
 req.body          // String: raw body
-req.ip            // String: client IP (supports X-Forwarded-For)
+req.ip            // String: legacy client IP (first X-Forwarded-For hop; spoofable)
+req.client_ip     // String: trusted client IP (forwarded header only from NTNT_TRUSTED_PROXIES)
+req.peer_ip       // String: TCP peer address
 req.id            // String: request ID (from X-Request-ID or auto-generated)
 ```
 
@@ -3722,7 +3724,9 @@ listen(8080)
 | `req.body` | String | Raw request body |
 | `req.json` | Map \| None | Parsed JSON body (if Content-Type is JSON) |
 | `req.form` | Map \| None | Parsed form body (if Content-Type is form) |
-| `req.ip` | String | Client IP address |
+| `req.ip` | String | Legacy client IP: first `X-Forwarded-For` hop, which any client can spoof. Do not use for limits or auth. |
+| `req.client_ip` | String | Trusted client IP. Reads `NTNT_CLIENT_IP_HEADER` (default `X-Forwarded-For`, right to left, skipping trusted hops) only when the TCP peer is in `NTNT_TRUSTED_PROXIES`; otherwise the peer address. Use this for rate limits, audit logs and abuse checks. |
+| `req.peer_ip` | String | TCP peer address (the proxy, behind a tunnel) |
 | `req.id` | String | Unique request ID |
 | `req.context` | Map | Middleware-injected context |
 
