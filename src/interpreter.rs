@@ -10381,6 +10381,15 @@ impl Interpreter {
         // Create server config
         let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
         crate::stdlib::client_ip::init_from_env()?;
+        if let Some(limiter) = crate::stdlib::rate_limit::init_from_env()? {
+            eprintln!("[INFO] rate_limit: on ({})", limiter.config.summary());
+            if std::env::var("NTNT_TRUSTED_PROXIES")
+                .map(|v| v.trim().is_empty())
+                .unwrap_or(true)
+            {
+                eprintln!("[WARN] rate_limit: NTNT_TRUSTED_PROXIES is not set; behind a tunnel or Docker every visitor shares the proxy's address and one budget");
+            }
+        }
         let server_config = AsyncServerConfig {
             port: addr.port(),
             host: addr.ip().to_string(),

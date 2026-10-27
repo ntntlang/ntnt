@@ -4,6 +4,7 @@
 
 ### Added
 
+- Built-in HTTP rate limiting, **off by default** in every environment (`NTNT_RATE_LIMIT=on` to enable). Per-client budgets for writes (`NTNT_RATE_LIMIT_WRITE`, default 30/minute) and dynamic-route reads (`NTNT_RATE_LIMIT_READ`, default 600/minute), keyed by `req.client_ip` (IPv6 grouped by /64), enforced before the body is read or the interpreter runs. Over limit: `429` with `Retry-After` and `RateLimit-*` headers, logged once per episode. GCRA in bounded, sharded process memory; no dependencies; per process, resets on restart. Static files, OPTIONS and `/health`, `/ready` are exempt. Invalid configuration fails startup (#294).
 - `req.client_ip`: a client IP you can trust. A forwarding header (`NTNT_CLIENT_IP_HEADER`, default `X-Forwarded-For`) is believed only when the TCP peer is inside `NTNT_TRUSTED_PROXIES` (CIDRs); `X-Forwarded-For` is walked right to left past trusted hops. Otherwise it is the peer address. Invalid configuration fails startup. `req.ip` is unchanged and remains spoofable; use `client_ip` for limits and audit logs (#294).
 
 ## 0.5.6

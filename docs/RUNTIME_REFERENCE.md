@@ -35,6 +35,14 @@ Environment variables that control NTNT runtime behavior
 | `NTNT_POSTGRES_MAX_SHARED_POOLS` | `any positive integer` | 32 | Maximum shared PostgreSQL pools per process, including in-progress creation. Read once on first PostgreSQL connect; invalid values return Err. New targets evict the least-recently-connected unused pool. Live handles, operations and transactions prevent eviction; if all slots are in use, connect returns a recoverable capacity Err. Zero is invalid, not an unlimited mode. |
 | `NTNT_PROCESS_ALLOW` | platform-path-delimited executable paths | unset (all executables allowed after NTNT_PROCESS_ENABLE opt-in) | Optional exact allowlist for `std/process`, separated with the platform path delimiter (`:` on Unix and `;` on Windows). Both configured entries and requested executables are canonicalized before comparison. On Windows, `.bat` and `.cmd` files are rejected because the OS invokes `cmd.exe` implicitly; explicitly allowlist and invoke `cmd.exe` only when shell authority is intentional. |
 | `NTNT_PROCESS_ENABLE` | `1`, `true`, `yes`, `on` | unset (disabled — std/process calls rejected) | Explicitly enables native process execution through `std/process`. Arguments are passed directly to approved executables without an implicit shell. |
+| `NTNT_RATE_LIMIT` | `on`, `off` | off (in every environment and version; never enabled implicitly) | Master switch for the built-in HTTP rate limiter. When on, every dynamic-route request is checked per `req.client_ip` before its body is read or the interpreter runs; over-limit requests get `429` with `Retry-After` and `RateLimit-Limit/Remaining/Reset`. In-process memory only: per process, resets on restart. Static files, OPTIONS and `NTNT_RATE_LIMIT_EXEMPT` paths are never limited. Set `NTNT_TRUSTED_PROXIES` first, or every visitor behind a tunnel shares one budget (startup warns). Invalid values fail startup. |
+| `NTNT_RATE_LIMIT_BURST` | `integer 1..1000000` | the rate's count | Maximum burst for both classes. Default lets a client spend a full window's budget at once, then refills smoothly. |
+| `NTNT_RATE_LIMIT_EXEMPT` | `comma-separated exact paths` | /health,/ready | Paths never limited (exact match). |
+| `NTNT_RATE_LIMIT_HEADERS` | `all` | unset (headers only on 429) | Also send `RateLimit-Limit/Remaining/Reset` on allowed responses. |
+| `NTNT_RATE_LIMIT_IPV6_PREFIX` | `1..128` | 64 | IPv6 clients are grouped by this prefix (one /64 is usually one subscriber). IPv4 is exact. |
+| `NTNT_RATE_LIMIT_MAX_KEYS` | `integer >= 64` | 100000 | Upper bound on tracked clients (about 16 bytes each plus map overhead). When full, expired entries are dropped first; if still full, new clients share one overflow budget so a key-spraying attacker cannot evict real visitors' state. |
+| `NTNT_RATE_LIMIT_READ` | `N/second|minute|hour|day` | 600/minute | Per-client budget for GET/HEAD on dynamic routes when `NTNT_RATE_LIMIT=on`. Reads and writes are counted separately. |
+| `NTNT_RATE_LIMIT_WRITE` | `N/second|minute|hour|day` | 30/minute | Per-client budget for POST/PUT/PATCH/DELETE (and other non-GET methods) when `NTNT_RATE_LIMIT=on`. GCRA: smooth, no window-edge doubling. |
 | `NTNT_SECRETS_AUTHORIZATION_SCOPE` | opaque ASCII deployment identifier | unset (required for unix-socket) | Trusted non-credential deployment scope expected in every secrets-agent response. It detects endpoint miswiring but is not authentication and is never rendered in diagnostics. Leading or trailing whitespace is rejected. |
 | `NTNT_SECRETS_PROVIDER` | `env`, `unix-socket` | env | Selects the provider behind the opt-in `std/secrets` API. This setting does not affect `std/env`, `get_env`, `load_env`, or existing `.env` workflows. Provider configuration is evaluated only when an application calls `get_secret` or `require_secret`. The exact-name environment provider is development-only and is rejected when `NTNT_ENV` is `production` or `prod`; that restriction applies only to `std/secrets`. `unix-socket` is Unix-only and talks to any local secrets agent implementing the documented protocol, without depending directly on a secrets backend. |
 | `NTNT_SECRETS_SOCKET_ENDPOINTS` | comma-separated absolute Unix socket paths | unset (required for unix-socket) | Ordered local secrets-agent endpoints for secret lookup. One through eight unique paths are allowed. Each endpoint is tried twice, and failover occurs only for bounded unavailable results. Production paths must be beneath the host-controlled `/run/ntnt-secrets` root; raw paths are never included in runtime diagnostics. |
@@ -84,6 +92,30 @@ NTNT_PROCESS_ENABLE=1 NTNT_PROCESS_ALLOW=/usr/bin/ffmpeg:/usr/bin/sox ntnt run a
 
 # Explicitly enables native process execution through `std/process`
 NTNT_PROCESS_ENABLE=1 NTNT_PROCESS_ALLOW=/usr/bin/ffmpeg ntnt run audio.tnt
+
+# Master switch for the built-in HTTP rate limiter
+NTNT_RATE_LIMIT=on NTNT_TRUSTED_PROXIES=172.18.0.0/16 NTNT_CLIENT_IP_HEADER=CF-Connecting-IP ntnt run server.tnt
+
+# Maximum burst for both classes
+NTNT_RATE_LIMIT_BURST=5
+
+# Paths never limited (exact match).
+NTNT_RATE_LIMIT_EXEMPT=/health,/ready,/webhooks/stripe
+
+# Also send `RateLimit-Limit/Remaining/Reset` on allowed responses.
+NTNT_RATE_LIMIT_HEADERS=all
+
+# IPv6 clients are grouped by this prefix (one /64 is usually one subscriber)
+NTNT_RATE_LIMIT_IPV6_PREFIX=56
+
+# Upper bound on tracked clients (about 16 bytes each plus map overhead)
+NTNT_RATE_LIMIT_MAX_KEYS=200000
+
+# Per-client budget for GET/HEAD on dynamic routes when `NTNT_RATE_LIMIT=on`
+NTNT_RATE_LIMIT_READ=1200/minute
+
+# Per-client budget for POST/PUT/PATCH/DELETE (and other non-GET methods) when `NTNT_RATE_LIMIT=on`
+NTNT_RATE_LIMIT_WRITE=10/minute
 
 # Trusted non-credential deployment scope expected in every secrets-agent response
 NTNT_SECRETS_AUTHORIZATION_SCOPE=deployment-a

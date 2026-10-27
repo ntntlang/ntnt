@@ -3712,6 +3712,21 @@ get("/", home)
 listen(8080)
 ```
 
+### Built-in rate limiting (off by default)
+
+No code is needed. Enable with environment variables; it is never on implicitly.
+
+```bash
+NTNT_RATE_LIMIT=on \
+NTNT_TRUSTED_PROXIES=172.18.0.0/16 NTNT_CLIENT_IP_HEADER=CF-Connecting-IP \
+NTNT_RATE_LIMIT_WRITE=10/minute ntnt run server.tnt
+```
+
+- Budgets are per `req.client_ip`: writes (`NTNT_RATE_LIMIT_WRITE`, default `30/minute`) and dynamic GET/HEAD (`NTNT_RATE_LIMIT_READ`, default `600/minute`). Over limit: `429`, `Retry-After`, `RateLimit-*` headers, before your handler runs.
+- Static files, OPTIONS and `/health`, `/ready` (`NTNT_RATE_LIMIT_EXEMPT`) are never limited.
+- Set `NTNT_TRUSTED_PROXIES` behind a tunnel or proxy, or every visitor shares one budget.
+- Memory only, per process, resets on restart. Not DDoS protection; keep edge rules for volumetric floods.
+
 ### Request Object Fields
 
 | Field | Type | Description |

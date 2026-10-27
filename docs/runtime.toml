@@ -62,6 +62,62 @@ description = "Per-attempt Unix-socket connect, write, and read timeout. Values 
 example = "NTNT_SECRETS_TIMEOUT_MS=500"
 affects = ["std-secrets", "security"]
 
+[env_vars.NTNT_RATE_LIMIT]
+values = ["on", "off"]
+default = "off (in every environment and version; never enabled implicitly)"
+description = "Master switch for the built-in HTTP rate limiter. When on, every dynamic-route request is checked per `req.client_ip` before its body is read or the interpreter runs; over-limit requests get `429` with `Retry-After` and `RateLimit-Limit/Remaining/Reset`. In-process memory only: per process, resets on restart. Static files, OPTIONS and `NTNT_RATE_LIMIT_EXEMPT` paths are never limited. Set `NTNT_TRUSTED_PROXIES` first, or every visitor behind a tunnel shares one budget (startup warns). Invalid values fail startup."
+example = "NTNT_RATE_LIMIT=on NTNT_TRUSTED_PROXIES=172.18.0.0/16 NTNT_CLIENT_IP_HEADER=CF-Connecting-IP ntnt run server.tnt"
+affects = ["http-server", "security"]
+
+[env_vars.NTNT_RATE_LIMIT_WRITE]
+values = ["N/second|minute|hour|day"]
+default = "30/minute"
+description = "Per-client budget for POST/PUT/PATCH/DELETE (and other non-GET methods) when `NTNT_RATE_LIMIT=on`. GCRA: smooth, no window-edge doubling."
+example = "NTNT_RATE_LIMIT_WRITE=10/minute"
+affects = ["http-server"]
+
+[env_vars.NTNT_RATE_LIMIT_READ]
+values = ["N/second|minute|hour|day"]
+default = "600/minute"
+description = "Per-client budget for GET/HEAD on dynamic routes when `NTNT_RATE_LIMIT=on`. Reads and writes are counted separately."
+example = "NTNT_RATE_LIMIT_READ=1200/minute"
+affects = ["http-server"]
+
+[env_vars.NTNT_RATE_LIMIT_BURST]
+values = ["integer 1..1000000"]
+default = "the rate's count"
+description = "Maximum burst for both classes. Default lets a client spend a full window's budget at once, then refills smoothly."
+example = "NTNT_RATE_LIMIT_BURST=5"
+affects = ["http-server"]
+
+[env_vars.NTNT_RATE_LIMIT_EXEMPT]
+values = ["comma-separated exact paths"]
+default = "/health,/ready"
+description = "Paths never limited (exact match)."
+example = "NTNT_RATE_LIMIT_EXEMPT=/health,/ready,/webhooks/stripe"
+affects = ["http-server"]
+
+[env_vars.NTNT_RATE_LIMIT_MAX_KEYS]
+values = ["integer >= 64"]
+default = "100000"
+description = "Upper bound on tracked clients (about 16 bytes each plus map overhead). When full, expired entries are dropped first; if still full, new clients share one overflow budget so a key-spraying attacker cannot evict real visitors' state."
+example = "NTNT_RATE_LIMIT_MAX_KEYS=200000"
+affects = ["http-server"]
+
+[env_vars.NTNT_RATE_LIMIT_IPV6_PREFIX]
+values = ["1..128"]
+default = "64"
+description = "IPv6 clients are grouped by this prefix (one /64 is usually one subscriber). IPv4 is exact."
+example = "NTNT_RATE_LIMIT_IPV6_PREFIX=56"
+affects = ["http-server"]
+
+[env_vars.NTNT_RATE_LIMIT_HEADERS]
+values = ["all"]
+default = "unset (headers only on 429)"
+description = "Also send `RateLimit-Limit/Remaining/Reset` on allowed responses."
+example = "NTNT_RATE_LIMIT_HEADERS=all"
+affects = ["http-server"]
+
 [env_vars.NTNT_TRUSTED_PROXIES]
 values = ["comma-separated CIDRs or addresses, IPv4 and IPv6"]
 default = "unset (no proxy is trusted; req.client_ip is the TCP peer)"
