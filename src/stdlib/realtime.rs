@@ -21,7 +21,7 @@ use crate::interpreter::Value;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
@@ -41,7 +41,19 @@ pub const MAX_CONNECTIONS: usize = 1024;
 pub const DEFAULT_HEARTBEAT_MS: u64 = 15_000;
 const MAX_DEPTH: usize = 64;
 
-type Slot = tokio::sync::Mutex<Option<broadcast::Receiver<Arc<EncodedEvent>>>>;
+/// A stream's receiver plus when it last delivered a frame. The receiver is
+/// `None` once evicted.
+struct Slot {
+    rx: tokio::sync::Mutex<Option<broadcast::Receiver<Arc<EncodedEvent>>>>,
+    last_progress_ms: AtomicU64,
+}
+
+fn monotonic_ms() -> u64 {
+    lazy_static::lazy_static! {
+        static ref START: std::time::Instant = std::time::Instant::now();
+    }
+    START.elapsed().as_millis() as u64
+}
 
 lazy_static::lazy_static! {
     static ref REGISTRY: Mutex<HashMap<String, Weak<Bus>>> = Mutex::new(HashMap::new());
@@ -199,9 +211,9 @@ pub fn publish_value(args: &[Value]) -> Result<Value> {
     };
     match encode_frame(value, event.as_deref(), id.as_deref()) {
         Ok(frame) => {
-            if !reserve_payload(frame.len())
-                && !(evict_stalled() > 0 && reserve_payload(frame.len()))
-            {
+            let len = frame.len();
+            let fits = || PAYLOAD_USED.load(Ordering::Acquire) + len <= MAX_PAYLOAD_BUDGET;
+            if !reserve_payload(len) && !(evict_stalled(fits) > 0 && reserve_payload(len)) {
                 return Ok(Value::err(Value::String(
                     "realtime payload budget exhausted".into(),
                 )));
@@ -444,29 +456,47 @@ pub fn spec_from_response(map: &HashMap<String, Value>) -> Option<SseSpec> {
     })
 }
 
-/// A subscriber this far behind is considered stalled under budget pressure.
-const STALLED_BACKLOG: usize = 2;
+/// A stream is stalled if it has unread events and has delivered nothing for
+/// this long. A healthy client keeps Hyper polling, so it keeps progressing.
+#[cfg(not(test))]
+const STALL_AGE_MS: u64 = 2_000;
+#[cfg(test)]
+const STALL_AGE_MS: u64 = 100;
 
-/// Drop receivers of streams that are behind and not currently awaiting a
-/// message (a stalled client stops Hyper from polling its body, so the stream
-/// cannot evict itself). Releasing a receiver frees the frames it retained.
-/// The stream ends with an overflow event when next polled. Returns the
-/// number evicted.
-fn evict_stalled() -> usize {
-    let mut subscribers = SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner());
+/// Under budget pressure, drop the receivers of stalled streams, oldest
+/// progress first, until `enough()` reports the pending publish fits. A
+/// stalled client stops Hyper from polling its body, so the stream cannot
+/// evict itself; dropping its receiver releases the frames only it retained.
+/// Evicted streams end with an overflow event when next polled. Streams that
+/// are currently polled (receiver locked) or recently progressing are never
+/// touched. Returns the number evicted.
+fn evict_stalled(mut enough: impl FnMut() -> bool) -> usize {
+    let now = monotonic_ms();
+    let mut candidates: Vec<(u64, Arc<Slot>)> = {
+        let mut subscribers = SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner());
+        subscribers.retain(|weak| weak.strong_count() > 0);
+        subscribers
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter_map(|slot| {
+                let last = slot.last_progress_ms.load(Ordering::Acquire);
+                (now.saturating_sub(last) >= STALL_AGE_MS).then_some((last, slot))
+            })
+            .collect()
+    };
+    candidates.sort_by_key(|(last, _)| *last);
     let mut evicted = 0;
-    subscribers.retain(|weak| {
-        let Some(slot) = weak.upgrade() else {
-            return false;
-        };
-        if let Ok(mut guard) = slot.try_lock() {
-            if guard.as_ref().is_some_and(|rx| rx.len() >= STALLED_BACKLOG) {
+    for (_, slot) in candidates {
+        if enough() {
+            break;
+        }
+        if let Ok(mut guard) = slot.rx.try_lock() {
+            if guard.as_ref().is_some_and(|rx| !rx.is_empty()) {
                 *guard = None;
                 evicted += 1;
             }
         }
-        true
-    });
+    }
     evicted
 }
 
@@ -536,7 +566,10 @@ pub fn open_stream(
         Some(retry) => format!("retry: {retry}\n\n"),
         None => ":\n\n".to_string(),
     };
-    let slot = Arc::new(tokio::sync::Mutex::new(Some(spec.bus.tx.subscribe())));
+    let slot = Arc::new(Slot {
+        rx: tokio::sync::Mutex::new(Some(spec.bus.tx.subscribe())),
+        last_progress_ms: AtomicU64::new(monotonic_ms()),
+    });
     {
         let mut subscribers = SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner());
         if subscribers.len() >= 2 * MAX_CONNECTIONS {
@@ -569,7 +602,9 @@ async fn next_frame(
         return None;
     }
     let slot = Arc::clone(&s.rx);
-    let mut guard = slot.lock().await;
+    slot.last_progress_ms
+        .store(monotonic_ms(), Ordering::Release);
+    let mut guard = slot.rx.lock().await;
     let Some(rx) = guard.as_mut() else {
         // Evicted while stalled: tell the client, then end.
         s.finished = true;
@@ -779,6 +814,7 @@ mod tests {
         };
         let mut stalled = Box::pin(open_stream(&spec).unwrap());
         stalled.next().await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(STALL_AGE_MS * 2)).await;
         // Never poll `stalled` again: fill the budget through its bus.
         let blob = Value::String("x".repeat(MAX_EVENT_BYTES - 64));
         let mut published = 0;
@@ -800,6 +836,54 @@ mod tests {
             }
         }
         assert!(ended, "evicted stream ends with an overflow event");
+    }
+
+    #[tokio::test]
+    async fn eviction_spares_progressing_streams_and_stops_when_enough() {
+        use futures_util::StreamExt;
+        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let open = |name: &str| {
+            let spec = SseSpec {
+                bus: bus(name),
+                heartbeat: Duration::from_secs(60),
+                retry_ms: None,
+            };
+            (spec.bus.clone(), Box::pin(open_stream(&spec).unwrap()))
+        };
+        let (old_bus, mut oldest) = open("test.evict.oldest");
+        oldest.next().await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let (newer_bus, mut newer) = open("test.evict.newer");
+        newer.next().await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(STALL_AGE_MS * 2)).await;
+        let (fresh_bus, mut fresh) = open("test.evict.fresh");
+        fresh.next().await.unwrap().unwrap();
+        for b in [&old_bus, &newer_bus, &fresh_bus] {
+            for n in 0..2 {
+                publish_value(&[Value::Broadcast(b.clone()), Value::Int(n)]).unwrap();
+            }
+        }
+        // Enough after one eviction: only the oldest stalled stream goes.
+        let mut checks = 0;
+        assert_eq!(
+            evict_stalled(|| {
+                checks += 1;
+                checks > 1
+            }),
+            1
+        );
+        let ended = |frames: Vec<Bytes>| {
+            frames
+                .iter()
+                .any(|f| f.starts_with(b"event: ntnt.overflow"))
+        };
+        assert!(ended(oldest.by_ref().map(|f| f.unwrap()).collect().await));
+        // The newer stalled stream and the recently progressing one are intact.
+        assert_eq!(&newer.next().await.unwrap().unwrap()[..], b"data: 0\n\n");
+        assert_eq!(&fresh.next().await.unwrap().unwrap()[..], b"data: 0\n\n");
+        // Never enough: every stalled stream with a backlog is a candidate,
+        // but a stream that just progressed is not.
+        assert_eq!(evict_stalled(|| false), 0);
     }
 
     #[test]
