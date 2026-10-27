@@ -726,9 +726,31 @@ impl ServerState {
         let parsed = crate::stdlib::rate_limit::RouteRate::parse(rate).map_err(|e| {
             IntentError::runtime_error(format!("{method} {pattern}: {e} (or \"off\")"))
         })?;
-        self.route_rates
-            .insert((method.to_string(), pattern.to_string()), parsed);
+        self.set_parsed_route_rate(method, pattern, parsed);
         Ok(())
+    }
+
+    /// Record an already-validated route rate. The first registration of a
+    /// (method, pattern) serves requests, so a later duplicate cannot change
+    /// its rate; it is ignored with a warning.
+    pub fn set_parsed_route_rate(
+        &mut self,
+        method: &str,
+        pattern: &str,
+        rate: crate::stdlib::rate_limit::RouteRate,
+    ) {
+        if self
+            .routes
+            .iter()
+            .any(|(r, _, _)| r.method == method && r.pattern == pattern)
+        {
+            eprintln!(
+                "[WARN] {method} {pattern} is already registered; the rate on the duplicate registration is ignored"
+            );
+            return;
+        }
+        self.route_rates
+            .insert((method.to_string(), pattern.to_string()), rate);
     }
 
     /// Add a route with source file info for hot-reload
@@ -1623,6 +1645,7 @@ pub fn init() -> HashMap<String, Value> {
     // @since v0.5.7
     // @tags #http, #server, #security
     // @example check_limit("contact-email:" + email, "3/day")["allowed"] => true ~ "First submission today"
+    // @example check_limit("login:" + req.client_ip, "5/minute")["remaining"] => 4 ~ "Budget left after the first attempt"
     // @error TypeError ~ "check_limit() requires a key string and a rate string" fix: "Pass two strings"
     // @error RuntimeError ~ "invalid rate" fix: "Use N/second|minute|hour|day, e.g. \"5/minute\""
     module.insert(
@@ -1668,6 +1691,7 @@ pub fn init() -> HashMap<String, Value> {
     // @since v0.5.7
     // @tags #http, #server, #security
     // @example too_many_requests(check_limit("k", "1/minute")) => Response { status: 429 } ~ "Return 429 with Retry-After"
+    // @example too_many_requests() => Response { status: 429, headers: { "retry-after": "60" } } ~ "Without a result, Retry-After is 60"
     // @error TypeError ~ "too_many_requests() takes an optional check_limit result map" fix: "Pass the map from check_limit, or nothing"
     module.insert(
         "too_many_requests".to_string(),

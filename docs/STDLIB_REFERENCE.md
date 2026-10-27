@@ -55,34 +55,34 @@ These functions are available everywhere without importing.
 | [`compile(path: String)`](#compile) | Pre-compile a template file for repeated rendering. |
 | [`count(arr: Array \| String, predicate_or_substr: Function \| String)`](#count) | Count array elements matching a predicate, or substring occurrences in a string. |
 | [`delete(pattern: String, handler: Function)`](#delete) | Registers a DELETE route handler. |
-| [`enable_cors(options?: Map)`](#enablecors) | Enable CORS (Cross-Origin Resource Sharing) for the HTTP server. |
-| [`enable_csp(options?: Map \| Bool)`](#enablecsp) | Enable Content-Security-Policy headers for the HTTP server. |
+| [`enable_cors(options?: Map)`](#enable_cors) | Enable CORS (Cross-Origin Resource Sharing) for the HTTP server. |
+| [`enable_csp(options?: Map \| Bool)`](#enable_csp) | Enable Content-Security-Policy headers for the HTTP server. |
 | [`filter(arr: Array, predicate: Function)`](#filter) | Return the elements for which the predicate is truthy. |
 | [`find(arr: Array, predicate: Function)`](#find) | Return the first element for which the predicate is truthy, or None. |
-| [`flat_map(arr: Array, fn: Function)`](#flatmap) | Apply a function to each element and flatten the results into a single array. |
+| [`flat_map(arr: Array, fn: Function)`](#flat_map) | Apply a function to each element and flatten the results into a single array. |
 | [`float(x: Int \| Float \| String)`](#float) | Converts a value to float without throwing on parse failure. |
 | [`floor(x: Int \| Float)`](#floor) | Rounds down to the nearest integer. |
 | [`get(pattern: String, handler: Function)`](#get) | Registers a GET route handler. |
 | [`int(x: Int \| Float \| String \| Bool)`](#int) | Converts a value to integer without throwing on parse failure. |
-| [`int_or(value: Any, fallback: Int)`](#intor) | Converts a value to an integer, returning a local fallback on failure. |
-| [`is_array(val: Any)`](#isarray) | Returns true if the value is an Array. |
-| [`is_bool(val: Any)`](#isbool) | Returns true if the value is a Bool. |
-| [`is_err(res: Result<Any, Any>)`](#iserr) | Checks if a Result is Err. |
-| [`is_float(val: Any)`](#isfloat) | Returns true if the value is a Float. |
-| [`is_int(val: Any)`](#isint) | Returns true if the value is an integer. |
-| [`is_map(val: Any)`](#ismap) | Returns true if the value is a Map (dictionary/object). |
-| [`is_none(val: Any)`](#isnone) | Checks if a value is Option::None. |
-| [`is_ok(res: Result<Any, Any>)`](#isok) | Checks if a Result is Ok. |
-| [`is_some(val: Any)`](#issome) | Checks if a value is Option::Some. |
-| [`is_string(val: Any)`](#isstring) | Returns true if the value is a String. |
+| [`int_or(value: Any, fallback: Int)`](#int_or) | Converts a value to an integer, returning a local fallback on failure. |
+| [`is_array(val: Any)`](#is_array) | Returns true if the value is an Array. |
+| [`is_bool(val: Any)`](#is_bool) | Returns true if the value is a Bool. |
+| [`is_err(res: Result<Any, Any>)`](#is_err) | Checks if a Result is Err. |
+| [`is_float(val: Any)`](#is_float) | Returns true if the value is a Float. |
+| [`is_int(val: Any)`](#is_int) | Returns true if the value is an integer. |
+| [`is_map(val: Any)`](#is_map) | Returns true if the value is a Map (dictionary/object). |
+| [`is_none(val: Any)`](#is_none) | Checks if a value is Option::None. |
+| [`is_ok(res: Result<Any, Any>)`](#is_ok) | Checks if a Result is Ok. |
+| [`is_some(val: Any)`](#is_some) | Checks if a value is Option::Some. |
+| [`is_string(val: Any)`](#is_string) | Returns true if the value is a String. |
 | [`jobs(directory: String)`](#jobs) | Auto-discover and register job definitions from .tnt files in a directory. |
 | [`len(x: String \| Array \| Map)`](#len) | Returns the length of a string, array, or map. |
 | [`libs(directory: String)`](#libs) | Auto-import all .tnt files from a directory. |
 | [`listen(port: Int, options?: Map<String, Any>)`](#listen) | Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool, require fixture=true). Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged. JSON readiness is one flushed NTNT_READY line after bind with actual host/port. Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness. Starts an HTTP server on the given port. |
 | [`max(a: Int \| Float, b: Int \| Float)`](#max) | Returns the larger of two numbers. |
 | [`min(a: Int \| Float, b: Int \| Float)`](#min) | Returns the smaller of two numbers. |
-| [`new_server()`](#newserver) | Resets the server, clearing all registered routes. |
-| [`on_shutdown(handler: Function)`](#onshutdown) | Register a function to run when the server shuts down. |
+| [`new_server()`](#new_server) | Resets the server, clearing all registered routes. |
+| [`on_shutdown(handler: Function)`](#on_shutdown) | Register a function to run when the server shuts down. |
 | [`patch(pattern: String, handler: Function)`](#patch) | Registers a PATCH route handler. |
 | [`post(pattern: String, handler: Function)`](#post) | Registers a POST route handler. |
 | [`pow(base: Int \| Float, exp: Int \| Float)`](#pow) | Raises base to the power of exponent. |
@@ -92,9 +92,9 @@ These functions are available everywhere without importing.
 | [`reduce(arr: Array, initial: Any, fn: Function)`](#reduce) | Reduce an array to a single value by applying a function cumulatively. |
 | [`render(compiled: Map, data: Map)`](#render) | Render a pre-compiled template with data. |
 | [`round(x: Int \| Float, decimals?: Int)`](#round) | Rounds to the nearest integer, or to N decimal places. |
-| [`serve_static(prefix: String, directory: String)`](#servestatic) | Serve static files from a directory under a URL prefix. |
+| [`serve_static(prefix: String, directory: String)`](#serve_static) | Serve static files from a directory under a URL prefix. |
 | [`sign(x: Int \| Float)`](#sign) | Returns the sign of a number: -1, 0, or 1. |
-| [`sort_desc(arr: Array, key_or_fn?: String \| Function)`](#sortdesc) | Sort an array in descending order. |
+| [`sort_desc(arr: Array, key_or_fn?: String \| Function)`](#sort_desc) | Sort an array in descending order. |
 | [`sqrt(x: Int \| Float)`](#sqrt) | Returns the square root of a number. |
 | [`str(x: Any)`](#str) | Converts any value to its string representation. |
 | [`template(path: String, data: Map)`](#template) | Load and render an external HTML template with data. |
@@ -103,8 +103,8 @@ These functions are available everywhere without importing.
 | [`type(x: Any)`](#type) | Returns the type name of a value as a string. |
 | [`typeof(x: Any)`](#typeof) | Returns the type name of a value as a string. |
 | [`unwrap(x: Option<Any> \| Result<Any, Any>)`](#unwrap) | Extracts the value from Some or Ok, panics on None or Err. |
-| [`unwrap_or(x: Option<Any> \| Result<Any, Any>, default: Any)`](#unwrapor) | Extracts the value from Some or Ok, returns default on None or Err. |
-| [`use_middleware(handler: Function)`](#usemiddleware) | Register a middleware function for the HTTP server. |
+| [`unwrap_or(x: Option<Any> \| Result<Any, Any>, default: Any)`](#unwrap_or) | Extracts the value from Some or Ok, returns default on None or Err. |
+| [`use_middleware(handler: Function)`](#use_middleware) | Register a middleware function for the HTTP server. |
 
 #### `Err`
 
@@ -1961,69 +1961,69 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 
 | Function | Description |
 |----------|-------------|
-| [`auth_callback`](#authcallback) | Handle OAuth callback - exchanges code for tokens, creates session. |
-| [`auth_challenge_csrf_field`](#authchallengecsrffield) | Get an HTML hidden input field for the current staged auth challenge CSRF token. |
-| [`auth_challenge_csrf_token`](#authchallengecsrftoken) | Get the CSRF token bound to the current staged auth challenge. |
-| [`auth_health`](#authhealth) | Return auth diagnostics for the built-in `/auth/health` route. |
-| [`auth_logout`](#authlogout) | Handle logout - clears the session and redirects. |
-| [`auth_me`](#authme) | Return current user as JSON for SPAs. |
-| [`auth_start`](#authstart) | Handle OAuth login start - redirects to the provider's authorization page. |
-| [`begin_auth_challenge`](#beginauthchallenge) | Persist a pending auth challenge and attach the challenge cookie. |
-| [`begin_totp_enrollment`](#begintotpenrollment) | Start TOTP enrollment for a local identity and return one-time setup material. |
-| [`bootstrap_local_user`](#bootstraplocaluser) | Provision an initial local credential record for app setup flows. |
-| [`cancel_auth_challenge`](#cancelauthchallenge) | Cancel the current auth challenge and clear the challenge cookie. |
-| [`complete_auth_challenge`](#completeauthchallenge) | Upgrade the current auth challenge into a full authenticated session. |
-| [`confirm_totp_enrollment`](#confirmtotpenrollment) | Confirm a pending local TOTP enrollment using a code from the authenticator app. |
-| [`consume_magic_link`](#consumemagiclink) | Atomically consume a one-time passwordless sign-in token. |
-| [`consume_password_reset`](#consumepasswordreset) | Consume a one-time password reset token and rotate the local password. |
-| [`create_session_from_oauth`](#createsessionfromoauth) | Create a session from OAuth user info and tokens. |
-| [`csrf_field`](#csrffield) | Get an HTML hidden input field with the CSRF token. |
-| [`csrf_token`](#csrftoken) | Get the CSRF token for the current session. |
-| [`current_auth_challenge`](#currentauthchallenge) | Get the current staged auth challenge from the request. |
-| [`current_session`](#currentsession) | Get the current session from the request. |
-| [`current_user`](#currentuser) | Get the current authenticated user from the request. |
-| [`enable_auth`](#enableauth) | Initialize the authentication system with OAuth providers. Pass an empty provider array for local-only auth (passwords, magic links, sessions) without OAuth. Every call form accepts the same option keys. |
-| [`get_session`](#getsession) | Get the current session from the request. |
-| [`get_user`](#getuser) | Get the current authenticated user from the request. |
-| [`has_group`](#hasgroup) | Check app-owned group IDs from authenticated session data. |
-| [`issue_magic_link`](#issuemagiclink) | Issue a one-time passwordless sign-in token for an active local identity. |
-| [`issue_password_reset`](#issuepasswordreset) | Issue a one-time password reset token for a local identity. |
-| [`jwt_decode`](#jwtdecode) | Decode a JWT token WITHOUT verifying the signature. |
-| [`jwt_sign`](#jwtsign) | Create a signed JWT token from claims. |
-| [`jwt_verify`](#jwtverify) | Verify a JWT token and return its claims. |
-| [`local_user`](#localuser) | Load a safe local identity payload, including non-secret extension metadata. |
-| [`logout_all`](#logoutall) | Log out all sessions for the current user. |
-| [`logout_user`](#logoutuser) | Log out the current user and return a redirect response. |
-| [`magic_link_flow`](#magiclinkflow) | Coordinate a secure email magic-link request and confirmation flow. |
+| [`auth_callback`](#auth_callback) | Handle OAuth callback - exchanges code for tokens, creates session. |
+| [`auth_challenge_csrf_field`](#auth_challenge_csrf_field) | Get an HTML hidden input field for the current staged auth challenge CSRF token. |
+| [`auth_challenge_csrf_token`](#auth_challenge_csrf_token) | Get the CSRF token bound to the current staged auth challenge. |
+| [`auth_health`](#auth_health) | Return auth diagnostics for the built-in `/auth/health` route. |
+| [`auth_logout`](#auth_logout) | Handle logout - clears the session and redirects. |
+| [`auth_me`](#auth_me) | Return current user as JSON for SPAs. |
+| [`auth_start`](#auth_start) | Handle OAuth login start - redirects to the provider's authorization page. |
+| [`begin_auth_challenge`](#begin_auth_challenge) | Persist a pending auth challenge and attach the challenge cookie. |
+| [`begin_totp_enrollment`](#begin_totp_enrollment) | Start TOTP enrollment for a local identity and return one-time setup material. |
+| [`bootstrap_local_user`](#bootstrap_local_user) | Provision an initial local credential record for app setup flows. |
+| [`cancel_auth_challenge`](#cancel_auth_challenge) | Cancel the current auth challenge and clear the challenge cookie. |
+| [`complete_auth_challenge`](#complete_auth_challenge) | Upgrade the current auth challenge into a full authenticated session. |
+| [`confirm_totp_enrollment`](#confirm_totp_enrollment) | Confirm a pending local TOTP enrollment using a code from the authenticator app. |
+| [`consume_magic_link`](#consume_magic_link) | Atomically consume a one-time passwordless sign-in token. |
+| [`consume_password_reset`](#consume_password_reset) | Consume a one-time password reset token and rotate the local password. |
+| [`create_session_from_oauth`](#create_session_from_oauth) | Create a session from OAuth user info and tokens. |
+| [`csrf_field`](#csrf_field) | Get an HTML hidden input field with the CSRF token. |
+| [`csrf_token`](#csrf_token) | Get the CSRF token for the current session. |
+| [`current_auth_challenge`](#current_auth_challenge) | Get the current staged auth challenge from the request. |
+| [`current_session`](#current_session) | Get the current session from the request. |
+| [`current_user`](#current_user) | Get the current authenticated user from the request. |
+| [`enable_auth`](#enable_auth) | Initialize the authentication system with OAuth providers. Pass an empty provider array for local-only auth (passwords, magic links, sessions) without OAuth. Every call form accepts the same option keys. |
+| [`get_session`](#get_session) | Get the current session from the request. |
+| [`get_user`](#get_user) | Get the current authenticated user from the request. |
+| [`has_group`](#has_group) | Check app-owned group IDs from authenticated session data. |
+| [`issue_magic_link`](#issue_magic_link) | Issue a one-time passwordless sign-in token for an active local identity. |
+| [`issue_password_reset`](#issue_password_reset) | Issue a one-time password reset token for a local identity. |
+| [`jwt_decode`](#jwt_decode) | Decode a JWT token WITHOUT verifying the signature. |
+| [`jwt_sign`](#jwt_sign) | Create a signed JWT token from claims. |
+| [`jwt_verify`](#jwt_verify) | Verify a JWT token and return its claims. |
+| [`local_user`](#local_user) | Load a safe local identity payload, including non-secret extension metadata. |
+| [`logout_all`](#logout_all) | Log out all sessions for the current user. |
+| [`logout_user`](#logout_user) | Log out the current user and return a redirect response. |
+| [`magic_link_flow`](#magic_link_flow) | Coordinate a secure email magic-link request and confirmation flow. |
 | [`oauth`](#oauth) | Create an OAuth provider configuration. |
-| [`oauth_discover`](#oauthdiscover) | Create an OAuth provider using OIDC Discovery. |
-| [`oauth_exchange`](#oauthexchange) | Exchange OAuth authorization code for tokens and user info. |
-| [`oauth_introspect`](#oauthintrospect) | Introspect a token using the provider's introspection endpoint (RFC 7662). |
-| [`oauth_m2m`](#oauthm2m) | Get an access token using client credentials grant (M2M authentication). |
-| [`oauth_refresh`](#oauthrefresh) | Refresh the access token for the current session. |
-| [`oauth_start`](#oauthstart) | Generate an OAuth authorization URL for manual flow control. |
-| [`oauth_validate`](#oauthvalidate) | Validate an incoming bearer token (for APIs acting as resource servers). |
-| [`require_auth`](#requireauth) | Protect routes with the configured auth session. |
-| [`reset_totp`](#resettotp) | Clear a local user's pending or confirmed TOTP enrollment. |
-| [`rotate_session`](#rotatesession) | Rotate the current session ID and attach the new auth cookie to a response. |
-| [`session_data`](#sessiondata) | Get custom data stored in the current session. |
-| [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions, auth challenges, OAuth states, and exchange tokens from the session store. |
-| [`set_local_password`](#setlocalpassword) | Verify the current local credential, rotate the user's password, and clear setup-required local account state. |
-| [`set_session`](#setsession) | Store custom data in the current session. |
-| [`sign_in_session`](#signinsession) | Persist a request-aware session and attach the auth cookie to an existing response. |
-| [`sign_out_session`](#signoutsession) | Revoke the current session and attach a clearing auth cookie to a response. |
-| [`totp_qr_svg`](#totpqrsvg) | Render a TOTP enrollment URI as a local, deterministic QR SVG. |
-| [`totp_secret`](#totpsecret) | Generate a new TOTP secret for MFA setup. |
-| [`totp_status`](#totpstatus) | Read a local user's safe TOTP enrollment status. |
-| [`totp_uri`](#totpuri) | Generate an otpauth:// URI for QR codes. |
-| [`update_local_user_metadata`](#updatelocalusermetadata) | Merge or replace app-owned local identity metadata and return a safe payload. |
-| [`user_sessions`](#usersessions) | Get all active sessions for the current user. |
-| [`validate_csrf`](#validatecsrf) | Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH). |
-| [`verify_auth_challenge_csrf`](#verifyauthchallengecsrf) | Verify a submitted CSRF token against the current staged auth challenge. |
-| [`verify_csrf`](#verifycsrf) | Verify a CSRF token against the session's token. |
-| [`verify_local_password`](#verifylocalpassword) | Verify a local credential record and return a safe auth user payload. |
-| [`verify_local_totp`](#verifylocaltotp) | Verify a local user's confirmed TOTP code without exposing the stored secret. |
-| [`verify_totp`](#verifytotp) | Verify a TOTP code against a secret. |
+| [`oauth_discover`](#oauth_discover) | Create an OAuth provider using OIDC Discovery. |
+| [`oauth_exchange`](#oauth_exchange) | Exchange OAuth authorization code for tokens and user info. |
+| [`oauth_introspect`](#oauth_introspect) | Introspect a token using the provider's introspection endpoint (RFC 7662). |
+| [`oauth_m2m`](#oauth_m2m) | Get an access token using client credentials grant (M2M authentication). |
+| [`oauth_refresh`](#oauth_refresh) | Refresh the access token for the current session. |
+| [`oauth_start`](#oauth_start) | Generate an OAuth authorization URL for manual flow control. |
+| [`oauth_validate`](#oauth_validate) | Validate an incoming bearer token (for APIs acting as resource servers). |
+| [`require_auth`](#require_auth) | Protect routes with the configured auth session. |
+| [`reset_totp`](#reset_totp) | Clear a local user's pending or confirmed TOTP enrollment. |
+| [`rotate_session`](#rotate_session) | Rotate the current session ID and attach the new auth cookie to a response. |
+| [`session_data`](#session_data) | Get custom data stored in the current session. |
+| [`sessions_cleanup`](#sessions_cleanup) | Clean up expired sessions, auth challenges, OAuth states, and exchange tokens from the session store. |
+| [`set_local_password`](#set_local_password) | Verify the current local credential, rotate the user's password, and clear setup-required local account state. |
+| [`set_session`](#set_session) | Store custom data in the current session. |
+| [`sign_in_session`](#sign_in_session) | Persist a request-aware session and attach the auth cookie to an existing response. |
+| [`sign_out_session`](#sign_out_session) | Revoke the current session and attach a clearing auth cookie to a response. |
+| [`totp_qr_svg`](#totp_qr_svg) | Render a TOTP enrollment URI as a local, deterministic QR SVG. |
+| [`totp_secret`](#totp_secret) | Generate a new TOTP secret for MFA setup. |
+| [`totp_status`](#totp_status) | Read a local user's safe TOTP enrollment status. |
+| [`totp_uri`](#totp_uri) | Generate an otpauth:// URI for QR codes. |
+| [`update_local_user_metadata`](#update_local_user_metadata) | Merge or replace app-owned local identity metadata and return a safe payload. |
+| [`user_sessions`](#user_sessions) | Get all active sessions for the current user. |
+| [`validate_csrf`](#validate_csrf) | Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH). |
+| [`verify_auth_challenge_csrf`](#verify_auth_challenge_csrf) | Verify a submitted CSRF token against the current staged auth challenge. |
+| [`verify_csrf`](#verify_csrf) | Verify a CSRF token against the session's token. |
+| [`verify_local_password`](#verify_local_password) | Verify a local credential record and return a safe auth user payload. |
+| [`verify_local_totp`](#verify_local_totp) | Verify a local user's confirmed TOTP code without exposing the stored secret. |
+| [`verify_totp`](#verify_totp) | Verify a TOTP code against a secret. |
 
 #### `auth_callback`
 
@@ -3932,13 +3932,13 @@ import { push, pop, first } from "std/collections"
 | [`concat`](#concat) | Concatenates two arrays into a new array. |
 | [`entries`](#entries) | Returns an array of {key, value} maps from the map. |
 | [`first`](#first) | Returns the first element of an array. |
-| [`get_index`](#getindex) | Gets an element from an array by index with safe access. |
-| [`get_key`](#getkey) | Gets a value from a map by key with safe access. |
-| [`get_or`](#getor) | Gets a value from a map by key, returning a default if the key is missing. |
-| [`has_key`](#haskey) | Returns true if the map contains the specified key. |
-| [`has_value`](#hasvalue) | Deprecated: use includes() instead. Alias for backward compatibility. |
+| [`get_index`](#get_index) | Gets an element from an array by index with safe access. |
+| [`get_key`](#get_key) | Gets a value from a map by key with safe access. |
+| [`get_or`](#get_or) | Gets a value from a map by key, returning a default if the key is missing. |
+| [`has_key`](#has_key) | Returns true if the map contains the specified key. |
+| [`has_value`](#has_value) | Deprecated: use includes() instead. Alias for backward compatibility. |
 | [`includes`](#includes) | Returns true if the array includes the specified value (deep equality). |
-| [`is_empty`](#isempty) | Returns true if the array or string is empty. |
+| [`is_empty`](#is_empty) | Returns true if the array or string is empty. |
 | [`keys`](#keys) | Returns an array of all keys in the map. |
 | [`last`](#last) | Returns the last element of an array. |
 | [`merge`](#merge) | Shallow-merges two maps. Values from map2 win on key conflicts. |
@@ -3948,7 +3948,7 @@ import { push, pop, first } from "std/collections"
 | [`reverse`](#reverse) | Returns a new array with elements in reverse order. |
 | [`slice`](#slice) | Extracts a section of an array from start to end (exclusive). |
 | [`sort`](#sort) | Returns a new array with elements in sorted order. |
-| [`sort_by`](#sortby) | Returns a new array sorted by a custom comparator. |
+| [`sort_by`](#sort_by) | Returns a new array sorted by a custom comparator. |
 | [`values`](#values) | Returns an array of all values in the map. |
 
 #### `concat`
@@ -4653,26 +4653,26 @@ import { channel, send, recv } from "std/concurrent"
 | Function | Description |
 |----------|-------------|
 | [`after`](#after) | Runs a zero-parameter handler function after a delay. Returns a Task handle. Delay can be milliseconds (Int) or a human-readable string ("5s", "1m", "500ms"). The delay is cancellation-aware (50ms slices). |
-| [`await_task`](#awaittask) | Blocks until the task completes and consumes its result/error, releasing the serialized payload and heavy registry entry. Returns Ok(value) on success, Err(message) on failure or panic; the delivered value belongs to the caller. A compact consumed record remains for try_await subject to history age/count/byte limits. Invalid, expired or already-consumed handles raise a runtime error. |
+| [`await_task`](#await_task) | Blocks until the task completes and consumes its result/error, releasing the serialized payload and heavy registry entry. Returns Ok(value) on success, Err(message) on failure or panic; the delivered value belongs to the caller. A compact consumed record remains for try_await subject to history age/count/byte limits. Invalid, expired or already-consumed handles raise a runtime error. |
 | [`broadcast`](#broadcast) | Get or create a named, process-local fan-out bus for Server-Sent Events. |
-| [`cancel_schedule`](#cancelschedule) | Cancels a scheduled task. Sets the cancellation flag and removes from registry. Returns true if the schedule existed, false otherwise. |
-| [`cancel_task`](#canceltask) | Requests cooperative cancellation of a task. Sets the cancellation flag; the task thread will exit at the next yield point (recv, recv_timeout, sleep_ms, or fetch). Does NOT force immediate termination. Returns true if the task existed, false otherwise. |
+| [`cancel_schedule`](#cancel_schedule) | Cancels a scheduled task. Sets the cancellation flag and removes from registry. Returns true if the schedule existed, false otherwise. |
+| [`cancel_task`](#cancel_task) | Requests cooperative cancellation of a task. Sets the cancellation flag; the task thread will exit at the next yield point (recv, recv_timeout, sleep_ms, or fetch). Does NOT force immediate termination. Returns true if the task existed, false otherwise. |
 | [`channel`](#channel) | Creates a new unbounded channel and returns a [sender, receiver] pair. |
 | [`close`](#close) | Closes a channel receiver by removing it from the registry. Once removed, future send(tx, ...) returns false (crossbeam Disconnected). recv(rx) immediately returns Unit since the id is no longer found. Returns true if existed, false otherwise. |
 | [`parallel`](#parallel) | Runs all functions concurrently and returns results in input order. If any task fails (crash or returned Err), cancels all remaining tasks and returns that Err. |
 | [`publish`](#publish) | Publish a JSON-compatible value to every current subscriber of a bus. |
 | [`race`](#race) | Runs all functions concurrently and returns the first successful result. Failed or panicked tasks are skipped; all remaining tasks are cancelled on success. If all tasks fail, returns the last Err result. |
 | [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if all senders have been dropped (Disconnected) or the receiver was closed. This is a cancellation yield point: a cancelled task will exit here. Single-consumer: the receiver lock is held for the blocking duration. |
-| [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or all senders disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point. |
+| [`recv_timeout`](#recv_timeout) | Receives with timeout. Returns None if timeout expires or all senders disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point. |
 | [`schedule`](#schedule) | Runs a zero-parameter handler repeatedly at the given interval. Returns a Schedule handle. Interval can be milliseconds (Int) or a string ("5s", "1m"). Zero intervals are rejected. Each tick spawns a thread with catch_unwind; overlap prevention ensures a new tick won't start until the previous one finishes. Panics in tick execution are caught and logged — they don't kill the schedule. |
 | [`select`](#select) | Waits for the first available value from any of the given receiver handles. Returns a map with "status": "ok", "channel" (the RxChannel that fired), and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed/disconnected: returns {"status": "closed"}. All return shapes include a "status" key for consistent pattern matching. This is a cancellation yield point. |
 | [`send`](#send) | Sends a value through a channel using the sender handle (first element of channel()). Returns false if the receiver has been closed (crossbeam Disconnected). Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum. |
-| [`sleep_ms`](#sleepms) | Pauses execution for specified milliseconds. This is a cancellation yield point: a cancelled task will exit during sleep_ms(). Uses 50ms slices internally. Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks. |
+| [`sleep_ms`](#sleep_ms) | Pauses execution for specified milliseconds. This is a cancellation yield point: a cancelled task will exit during sleep_ms(). Uses 50ms slices internally. Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks. |
 | [`spawn`](#spawn) | Spawns a zero-parameter function as a background task. Returns a Task handle. The handler's closure environment is serialized for cross-thread use. Serializable capture types: Int, Float, Bool, String, Array, Map, Struct, Enum. The handler must have zero parameters (including no defaults). |
-| [`task_stats`](#taskstats) | Returns six process-local, nonnegative Int accounting fields in constant time: active_tasks, tracked_tasks, retained_results, retained_result_bytes, history_records, history_bytes. No IDs, payloads, errors or captures. active_tasks samples the existing capacity counter, including delayed work, workers and forgotten structured children until finalization. It can briefly straddle registry updates; do not derive it from the other counts. tracked_tasks includes running and completed heavy entries (also structured children), excluding compact history. retained_results counts unconsumed public outcomes, including failures/panics, not structured child results. Byte fields use existing estimated serialized/error and compact-history accounting, not process RSS, captures, channels or caller-owned results. Reads do not consume results, refresh inactivity, or trigger eviction; policy cleanup remains the existing reaper/completion/observation behavior. |
-| [`thread_count`](#threadcount) | Returns the number of available CPU threads. Useful for sizing parallel work. |
-| [`try_await`](#tryawait) | Non-blocking peek; does not consume an available result. Enforces retention first, then refreshes available-result inactivity recency. Public results have a one-hour inactivity, 100000-result and 128 MiB estimated-storage budget. Consumed/expired records contain no payload and remain for at most 24 hours after retirement, 100000 records or 64 MiB estimated metadata. NTNT_TASK_REMOVAL_TTL overrides only history age. Pruned handles are unknown; this process-local history disappears on restart. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired). |
-| [`try_recv`](#tryrecv) | Non-blocking receive. Returns None if no value is available or all senders disconnected. |
+| [`task_stats`](#task_stats) | Returns six process-local, nonnegative Int accounting fields in constant time: active_tasks, tracked_tasks, retained_results, retained_result_bytes, history_records, history_bytes. No IDs, payloads, errors or captures. active_tasks samples the existing capacity counter, including delayed work, workers and forgotten structured children until finalization. It can briefly straddle registry updates; do not derive it from the other counts. tracked_tasks includes running and completed heavy entries (also structured children), excluding compact history. retained_results counts unconsumed public outcomes, including failures/panics, not structured child results. Byte fields use existing estimated serialized/error and compact-history accounting, not process RSS, captures, channels or caller-owned results. Reads do not consume results, refresh inactivity, or trigger eviction; policy cleanup remains the existing reaper/completion/observation behavior. |
+| [`thread_count`](#thread_count) | Returns the number of available CPU threads. Useful for sizing parallel work. |
+| [`try_await`](#try_await) | Non-blocking peek; does not consume an available result. Enforces retention first, then refreshes available-result inactivity recency. Public results have a one-hour inactivity, 100000-result and 128 MiB estimated-storage budget. Consumed/expired records contain no payload and remain for at most 24 hours after retirement, 100000 records or 64 MiB estimated metadata. NTNT_TASK_REMOVAL_TTL overrides only history age. Pruned handles are unknown; this process-local history disappears on restart. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired). |
+| [`try_recv`](#try_recv) | Non-blocking receive. Returns None if no value is available or all senders disconnected. |
 
 #### `after`
 
@@ -5232,40 +5232,40 @@ import { base64_decode_bytes, base64url_encode_bytes, base64url_decode_bytes } f
 
 | Function | Description |
 |----------|-------------|
-| [`aes_decrypt`](#aesdecrypt) | Decrypts AES-256-GCM encrypted data produced by aes_encrypt. The input is a Base64-encoded string containing the nonce and ciphertext. The key must be the same 64-character hex string used for encryption. |
-| [`aes_encrypt`](#aesencrypt) | Encrypts plaintext using AES-256-GCM authenticated encryption. The key must be a 64-character hex string (32 bytes). A random 96-bit nonce is generated for each call and prepended to the ciphertext before Base64 encoding. |
-| [`aes_generate_key`](#aesgeneratekey) | Generates a random 256-bit AES key, returned as a 64-character hex string. Use this key with aes_encrypt and aes_decrypt. |
-| [`argon2_hash`](#argon2hash) | Hashes a password using Argon2id, the recommended password hashing algorithm. Returns a PHC-format string that includes the salt and parameters. Uses OWASP-recommended defaults: m=19456 KiB, t=2 iterations, p=1 parallelism. |
-| [`argon2_verify`](#argon2verify) | Verifies a password against an Argon2 hash in PHC format. Returns true if the password matches, false otherwise (including for invalid hashes). |
-| [`base64_decode`](#base64decode) | Decodes a standard Base64-encoded string back to plaintext. Returns Err if the input is not valid Base64 or not valid UTF-8. |
-| [`base64_decode_bytes`](#base64decodebytes) | Decode standard padded Base64 without interpreting UTF-8. Decoded payload is limited to 16 MiB; Value arrays use more heap memory. |
-| [`base64_encode`](#base64encode) | Encodes a string using standard Base64 encoding (RFC 4648). |
-| [`base64_encode_bytes`](#base64encodebytes) | RFC4648 standard padded base64 of checked raw bytes. |
-| [`base64url_decode`](#base64urldecode) | Decodes a URL-safe Base64-encoded string (no padding) back to plaintext. Returns Err if the input is not valid URL-safe Base64 or not valid UTF-8. |
-| [`base64url_decode_bytes`](#base64urldecodebytes) | Decode unpadded URL-safe Base64; decoded payload cap 16 MiB (Value arrays use more heap). |
-| [`base64url_encode`](#base64urlencode) | Encodes a string using URL-safe Base64 encoding (no padding). Uses the URL_SAFE_NO_PAD alphabet, suitable for URLs and filenames. |
-| [`base64url_encode_bytes`](#base64urlencodebytes) | Encode checked raw bytes as URL-safe Base64 without padding. |
-| [`csrf_generate`](#csrfgenerate) | Generate a CSRF token and its HMAC signature for stateless CSRF protection. |
-| [`csrf_validate`](#csrfvalidate) | Validate a CSRF token against its HMAC hash. |
-| [`hash_password`](#hashpassword) | Hash a password using bcrypt with configurable cost factor. |
-| [`hex_decode`](#hexdecode) | Decodes hex string to byte array. Returns Err for invalid hex. |
-| [`hex_encode`](#hexencode) | Encodes bytes or string as hex. |
-| [`hmac_sha256`](#hmacsha256) | HMAC-SHA256 lowercase hex over UTF-8 text or checked integer bytes in 0..255. |
-| [`hmac_sha256_bytes`](#hmacsha256bytes) | HMAC-SHA256 as 32 raw bytes. Text uses UTF-8; arrays require integers in 0..255. |
-| [`hmac_sha256_verify`](#hmacsha256verify) | Verify with RustCrypto MAC verification. Malformed hex or non-32-byte tags return Err; a valid mismatch returns Ok(false). |
-| [`is_valid_hash`](#isvalidhash) | Check if a string is a valid bcrypt hash format. |
-| [`random_bytes`](#randombytes) | Generates n cryptographically secure random bytes. Size limit 0-1048576. |
-| [`random_hex`](#randomhex) | Generates n random bytes as hex string (2n chars). |
+| [`aes_decrypt`](#aes_decrypt) | Decrypts AES-256-GCM encrypted data produced by aes_encrypt. The input is a Base64-encoded string containing the nonce and ciphertext. The key must be the same 64-character hex string used for encryption. |
+| [`aes_encrypt`](#aes_encrypt) | Encrypts plaintext using AES-256-GCM authenticated encryption. The key must be a 64-character hex string (32 bytes). A random 96-bit nonce is generated for each call and prepended to the ciphertext before Base64 encoding. |
+| [`aes_generate_key`](#aes_generate_key) | Generates a random 256-bit AES key, returned as a 64-character hex string. Use this key with aes_encrypt and aes_decrypt. |
+| [`argon2_hash`](#argon2_hash) | Hashes a password using Argon2id, the recommended password hashing algorithm. Returns a PHC-format string that includes the salt and parameters. Uses OWASP-recommended defaults: m=19456 KiB, t=2 iterations, p=1 parallelism. |
+| [`argon2_verify`](#argon2_verify) | Verifies a password against an Argon2 hash in PHC format. Returns true if the password matches, false otherwise (including for invalid hashes). |
+| [`base64_decode`](#base64_decode) | Decodes a standard Base64-encoded string back to plaintext. Returns Err if the input is not valid Base64 or not valid UTF-8. |
+| [`base64_decode_bytes`](#base64_decode_bytes) | Decode standard padded Base64 without interpreting UTF-8. Decoded payload is limited to 16 MiB; Value arrays use more heap memory. |
+| [`base64_encode`](#base64_encode) | Encodes a string using standard Base64 encoding (RFC 4648). |
+| [`base64_encode_bytes`](#base64_encode_bytes) | RFC4648 standard padded base64 of checked raw bytes. |
+| [`base64url_decode`](#base64url_decode) | Decodes a URL-safe Base64-encoded string (no padding) back to plaintext. Returns Err if the input is not valid URL-safe Base64 or not valid UTF-8. |
+| [`base64url_decode_bytes`](#base64url_decode_bytes) | Decode unpadded URL-safe Base64; decoded payload cap 16 MiB (Value arrays use more heap). |
+| [`base64url_encode`](#base64url_encode) | Encodes a string using URL-safe Base64 encoding (no padding). Uses the URL_SAFE_NO_PAD alphabet, suitable for URLs and filenames. |
+| [`base64url_encode_bytes`](#base64url_encode_bytes) | Encode checked raw bytes as URL-safe Base64 without padding. |
+| [`csrf_generate`](#csrf_generate) | Generate a CSRF token and its HMAC signature for stateless CSRF protection. |
+| [`csrf_validate`](#csrf_validate) | Validate a CSRF token against its HMAC hash. |
+| [`hash_password`](#hash_password) | Hash a password using bcrypt with configurable cost factor. |
+| [`hex_decode`](#hex_decode) | Decodes hex string to byte array. Returns Err for invalid hex. |
+| [`hex_encode`](#hex_encode) | Encodes bytes or string as hex. |
+| [`hmac_sha256`](#hmac_sha256) | HMAC-SHA256 lowercase hex over UTF-8 text or checked integer bytes in 0..255. |
+| [`hmac_sha256_bytes`](#hmac_sha256_bytes) | HMAC-SHA256 as 32 raw bytes. Text uses UTF-8; arrays require integers in 0..255. |
+| [`hmac_sha256_verify`](#hmac_sha256_verify) | Verify with RustCrypto MAC verification. Malformed hex or non-32-byte tags return Err; a valid mismatch returns Ok(false). |
+| [`is_valid_hash`](#is_valid_hash) | Check if a string is a valid bcrypt hash format. |
+| [`random_bytes`](#random_bytes) | Generates n cryptographically secure random bytes. Size limit 0-1048576. |
+| [`random_hex`](#random_hex) | Generates n random bytes as hex string (2n chars). |
 | [`sha256`](#sha256) | SHA-256 hash as hex string. Accepts text or checked integer bytes in 0..255. |
-| [`sha256_bytes`](#sha256bytes) | SHA-256 hash as byte array. Returns array of 32 integers (0-255). |
+| [`sha256_bytes`](#sha256_bytes) | SHA-256 hash as byte array. Returns array of 32 integers (0-255). |
 | [`sha384`](#sha384) | SHA-384 lowercase hex of exact UTF-8 or checked raw bytes. |
-| [`sha384_bytes`](#sha384bytes) | SHA-384 as 48 raw digest bytes for SRI. |
+| [`sha384_bytes`](#sha384_bytes) | SHA-384 as 48 raw digest bytes for SRI. |
 | [`sha512`](#sha512) | SHA-512 lowercase hex of UTF-8 text or checked integer bytes in 0..255. |
-| [`sha512_bytes`](#sha512bytes) | SHA-512 as 64 raw digest bytes; input bytes must be integers in 0..255. |
-| [`utf8_decode`](#utf8decode) | Decode checked bytes as UTF-8; invalid UTF-8 returns Err without lossy replacement. |
-| [`utf8_encode`](#utf8encode) | Encode text as exact UTF-8 bytes. |
+| [`sha512_bytes`](#sha512_bytes) | SHA-512 as 64 raw digest bytes; input bytes must be integers in 0..255. |
+| [`utf8_decode`](#utf8_decode) | Decode checked bytes as UTF-8; invalid UTF-8 returns Err without lossy replacement. |
+| [`utf8_encode`](#utf8_encode) | Encode text as exact UTF-8 bytes. |
 | [`uuid`](#uuid) | Generates a random UUID v4 string. |
-| [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
+| [`verify_password`](#verify_password) | Verify a password against a bcrypt hash. |
 
 #### `aes_decrypt`
 
@@ -6126,10 +6126,10 @@ import { parse_csv, parse_with_headers, stringify } from "std/csv"
 
 | Function | Description |
 |----------|-------------|
-| [`parse_csv`](#parsecsv) | Parses a CSV string into an array of rows, where each row is an array of strings. |
-| [`parse_with_headers`](#parsewithheaders) | Parses CSV into an array of maps using the first row as column headers. |
+| [`parse_csv`](#parse_csv) | Parses a CSV string into an array of rows, where each row is an array of strings. |
+| [`parse_with_headers`](#parse_with_headers) | Parses CSV into an array of maps using the first row as column headers. |
 | [`stringify`](#stringify) | Converts an array of rows to a CSV string. |
-| [`stringify_with_headers`](#stringifywithheaders) | Converts an array of maps to a CSV string with a header row. |
+| [`stringify_with_headers`](#stringify_with_headers) | Converts an array of maps to a CSV string with a header row. |
 
 #### `parse_csv`
 
@@ -6272,9 +6272,9 @@ import { configure_email, send_email, send_email_batch } from "std/email"
 
 | Function | Description |
 |----------|-------------|
-| [`configure_email`](#configureemail) | Configure the SMTP transport. Call once at startup, before send_email(). |
-| [`send_email`](#sendemail) | Send a single email through the configured transport. |
-| [`send_email_batch`](#sendemailbatch) | Send multiple emails, reusing one SMTP connection. |
+| [`configure_email`](#configure_email) | Configure the SMTP transport. Call once at startup, before send_email(). |
+| [`send_email`](#send_email) | Send a single email through the configured transport. |
+| [`send_email_batch`](#send_email_batch) | Send multiple emails, reusing one SMTP connection. |
 
 #### `configure_email`
 
@@ -6388,8 +6388,8 @@ import { get_env, args, cwd } from "std/env"
 |----------|-------------|
 | [`args`](#args) | Returns command-line arguments as an array of strings. |
 | [`cwd`](#cwd) | Returns the current working directory as a string. |
-| [`get_env`](#getenv) | Gets an environment variable by name. |
-| [`load_env`](#loadenv) | Loads environment variables from a .env file. |
+| [`get_env`](#get_env) | Gets an environment variable by name. |
+| [`load_env`](#load_env) | Loads environment variables from a .env file. |
 
 #### `args`
 
@@ -6508,39 +6508,39 @@ import { write_file_atomic, temp_file, temp_dir } from "std/fs"
 | Function | Description |
 |----------|-------------|
 | [`access`](#access) | Unix real-ID access check: empty mode checks existence; nonrepeating r/w/x combinations check access. Advisory and TOCTOU-prone, not permission to open. |
-| [`append_file`](#appendfile) | Append a string to the end of a file, creating it if it does not exist. |
+| [`append_file`](#append_file) | Append a string to the end of a file, creating it if it does not exist. |
 | [`chmod`](#chmod) | Unix chmod follows terminal symlinks, accepts 0..511. Not a race-free authorization operation. |
 | [`chown`](#chown) | Unix chown follows terminal symlinks. IDs exclude negative values and all-ones sentinel. OS may clear set-ID bits. |
 | [`copy`](#copy) | Copy a file to a new location, returning the number of bytes copied. |
 | [`exists`](#exists) | Check whether a file or directory exists at the given path. |
-| [`file_permissions`](#filepermissions) | Unix lstat returns mode (including special bits), uid, gid, is_symlink, is_file and is_dir. |
-| [`file_size`](#filesize) | Get the size of a file in bytes. |
-| [`file_stat`](#filestat) | Get filesystem metadata for a file or directory. |
-| [`is_dir`](#isdir) | Check whether the path points to a directory. |
-| [`is_file`](#isfile) | Check whether the path points to a regular file. |
+| [`file_permissions`](#file_permissions) | Unix lstat returns mode (including special bits), uid, gid, is_symlink, is_file and is_dir. |
+| [`file_size`](#file_size) | Get the size of a file in bytes. |
+| [`file_stat`](#file_stat) | Get filesystem metadata for a file or directory. |
+| [`is_dir`](#is_dir) | Check whether the path points to a directory. |
+| [`is_file`](#is_file) | Check whether the path points to a regular file. |
 | [`lstat`](#lstat) | Inspect without following the terminal symlink: size, is_file, is_dir, is_symlink, modified and created (Unix seconds, 0 if unavailable, matching file_stat). |
 | [`mkdir`](#mkdir) | Create a single directory. |
-| [`mkdir_all`](#mkdirall) | Create a directory and all missing parent directories. |
-| [`mkdir_private`](#mkdirprivate) | Unix single directory creation, default mode 448 restricted by umask; existing entries fail. |
-| [`read_bytes`](#readbytes) | Read the entire contents of a file as raw bytes. |
-| [`read_file`](#readfile) | Read the entire contents of a file as a UTF-8 string. |
-| [`read_link`](#readlink) | Return the exact symlink target without canonicalization. Non-UTF8 targets and non-symlinks return Err. |
+| [`mkdir_all`](#mkdir_all) | Create a directory and all missing parent directories. |
+| [`mkdir_private`](#mkdir_private) | Unix single directory creation, default mode 448 restricted by umask; existing entries fail. |
+| [`read_bytes`](#read_bytes) | Read the entire contents of a file as raw bytes. |
+| [`read_file`](#read_file) | Read the entire contents of a file as a UTF-8 string. |
+| [`read_link`](#read_link) | Return the exact symlink target without canonicalization. Non-UTF8 targets and non-symlinks return Err. |
 | [`readdir`](#readdir) | List the entries of a directory. |
 | [`remove`](#remove) | Remove a file from the filesystem. |
-| [`remove_dir`](#removedir) | Remove an empty directory. |
-| [`remove_dir_all`](#removedirall) | Recursively remove a directory and all of its contents. |
+| [`remove_dir`](#remove_dir) | Remove an empty directory. |
+| [`remove_dir_all`](#remove_dir_all) | Recursively remove a directory and all of its contents. |
 | [`rename`](#rename) | Rename or move a file or directory. |
 | [`symlink`](#symlink) | Create a symlink without replacement. Kind defaults to file; file or dir is required on Windows. Permission or Windows privilege denial returns Err. |
-| [`sync_dir`](#syncdir) | Unix directory descriptor sync. OS/filesystem durability semantics apply; no physical-media guarantee. |
-| [`sync_file`](#syncfile) | Sync an existing regular file descriptor. Unix rejects terminal symlinks and special files; non-Unix terminal links follow OS open semantics. |
-| [`temp_close`](#tempclose) | Close all aliases and remove the owned path. Success is idempotent; cleanup failure remains a terminal Err on repeated close, with no automatic retry. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
-| [`temp_dir`](#tempdir) | Create an owned directory. Options: trusted parent and separator/colon/NUL-free prefix. Unix mode 0700 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
-| [`temp_file`](#tempfile) | Create an owned private file. Options: trusted parent and separator/colon/NUL-free prefix. Unix mode 0600 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
-| [`temp_path`](#temppath) | Expose the open owned path for filesystem APIs. Closed and non-UTF8 paths return Err. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
-| [`write_bytes`](#writebytes) | Write up to 16 MiB of validated bytes, creating or truncating with ordinary symlink semantics. |
-| [`write_file`](#writefile) | Write a string to a file, creating or overwriting it. |
-| [`write_file_atomic`](#writefileatomic) | Atomically replace a file using an owned same-parent temporary inode and rename. Default sync:true syncs file and parent on Unix. Non-Unix requires sync:false and no mode. Unix mode defaults to 0600, restricted by umask at creation; explicit broader mode also exposes staging. Replaces terminal symlinks, uses a new inode, and does not preserve ownership or ACLs. Destination NUL is rejected before staging, including before Windows FFI publication. Trusted ancestors and filesystem rename guarantees are required; this is not race-free path authorization. Err distinguishes unpublished failure (including cleanup failure) from published durability_uncertain. |
-| [`write_file_exclusive`](#writefileexclusive) | Unix exclusive creation with initial mode (default 384, restricted by umask) and sync (default true). Options are mode and sync only. Trusted ancestors required. Never removes a partially written file. |
+| [`sync_dir`](#sync_dir) | Unix directory descriptor sync. OS/filesystem durability semantics apply; no physical-media guarantee. |
+| [`sync_file`](#sync_file) | Sync an existing regular file descriptor. Unix rejects terminal symlinks and special files; non-Unix terminal links follow OS open semantics. |
+| [`temp_close`](#temp_close) | Close all aliases and remove the owned path. Success is idempotent; cleanup failure remains a terminal Err on repeated close, with no automatic retry. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
+| [`temp_dir`](#temp_dir) | Create an owned directory. Options: trusted parent and separator/colon/NUL-free prefix. Unix mode 0700 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
+| [`temp_file`](#temp_file) | Create an owned private file. Options: trusted parent and separator/colon/NUL-free prefix. Unix mode 0600 under umask; other platforms use OS ACL rules. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
+| [`temp_path`](#temp_path) | Expose the open owned path for filesystem APIs. Closed and non-UTF8 paths return Err. At most 128 live resources. Aliases share identity; JSON/task/channel transfer is rejected. Explicit close is recommended; last-owner Drop and runtime shutdown are best-effort safety nets, not crash guarantees. Callers must not replace owned paths or their ancestors; recursive cleanup does not follow interior symlinks. |
+| [`write_bytes`](#write_bytes) | Write up to 16 MiB of validated bytes, creating or truncating with ordinary symlink semantics. |
+| [`write_file`](#write_file) | Write a string to a file, creating or overwriting it. |
+| [`write_file_atomic`](#write_file_atomic) | Atomically replace a file using an owned same-parent temporary inode and rename. Default sync:true syncs file and parent on Unix. Non-Unix requires sync:false and no mode. Unix mode defaults to 0600, restricted by umask at creation; explicit broader mode also exposes staging. Replaces terminal symlinks, uses a new inode, and does not preserve ownership or ACLs. Destination NUL is rejected before staging, including before Windows FFI publication. Trusted ancestors and filesystem rename guarantees are required; this is not race-free path authorization. Err distinguishes unpublished failure (including cleanup failure) from published durability_uncertain. |
+| [`write_file_exclusive`](#write_file_exclusive) | Unix exclusive creation with initial mode (default 384, restricted by umask) and sync (default true). Options are mode and sync only. Trusted ancestors required. Never removes a partially written file. |
 
 #### `access`
 
@@ -7507,12 +7507,12 @@ import { probe_fetch, fetch, download } from "std/http"
 | Function | Description |
 |----------|-------------|
 | [`Cache`](#cache) | Create a response cache with a time-to-live (TTL) in seconds. |
-| [`cache_clear`](#cacheclear) | Remove all cached responses from a cache. |
-| [`cache_delete`](#cachedelete) | Remove a cached response for a specific URL. |
-| [`cache_fetch`](#cachefetch) | Fetch a URL using a cache, returning a cached response if available. |
+| [`cache_clear`](#cache_clear) | Remove all cached responses from a cache. |
+| [`cache_delete`](#cache_delete) | Remove a cached response for a specific URL. |
+| [`cache_fetch`](#cache_fetch) | Fetch a URL using a cache, returning a cached response if available. |
 | [`download`](#download) | Stream an HTTP response to a file and promote it atomically. |
 | [`fetch`](#fetch) | Make an HTTP request to a URL. |
-| [`probe_fetch`](#probefetch) | Perform a fresh direct HTTP/1.1 GET monitoring sample; never follow redirects, use proxies/pools, retry addresses, or replay HTTP. Select only the first address from the existing SSRF-approved DNS set (a failed first address is terminal). Options: url, timeout_ms (default 30000; Int 1..60000), optional start_deadline_ms (UTC epoch ms) and start_monotonic_deadline_ms (std/time monotonic_now origin). Start authorization is checked after DNS/socket setup immediately before TCP connect, the first target contact (SYN), not the later HTTP write. Expiry returns exactly start_deadline_expired. This is userspace check-adjacent-syscall timing, not a guarantee about NIC wire time. Once contact is authorized, TLS and response may complete after the start deadline, subject to the independent timeout budget. sample_started_at_ms records the first connect attempt, sample_finished_at_ms the completed response; these UTC timestamps are not admission/queue timestamps. TLS verifies against host CA roots and the hostname, without bundled roots. SSL_CERT_FILE / SSL_CERT_DIR override host discovery. Trust is cached at first TLS use; restart NTNT after updates. Initial local OS/filesystem trust discovery is synchronous and cannot be interrupted by the network timeout budget. Existing HTTP SSRF policy applies; disabling SSRF protection rejects this probe API rather than bypassing validation. GET is the only method; redirect:manual/follow_redirects:false are optional. All other fetch options, credentials, headers, and Secret values are rejected. Timeout includes DNS, setup, connect, TLS and response. At most 16 complete probes run concurrently. Blocking system DNS can outlive caller waiting, but its worker cannot connect; at most 16 DNS workers run simultaneously, including timed-out workers. Probe or resolver saturation returns an error without target contact. Body bytes and decoded UTF-8 are capped by NTNT_MAX_RESPONSE_SIZE (default 50 MiB). |
+| [`probe_fetch`](#probe_fetch) | Perform a fresh direct HTTP/1.1 GET monitoring sample; never follow redirects, use proxies/pools, retry addresses, or replay HTTP. Select only the first address from the existing SSRF-approved DNS set (a failed first address is terminal). Options: url, timeout_ms (default 30000; Int 1..60000), optional start_deadline_ms (UTC epoch ms) and start_monotonic_deadline_ms (std/time monotonic_now origin). Start authorization is checked after DNS/socket setup immediately before TCP connect, the first target contact (SYN), not the later HTTP write. Expiry returns exactly start_deadline_expired. This is userspace check-adjacent-syscall timing, not a guarantee about NIC wire time. Once contact is authorized, TLS and response may complete after the start deadline, subject to the independent timeout budget. sample_started_at_ms records the first connect attempt, sample_finished_at_ms the completed response; these UTC timestamps are not admission/queue timestamps. TLS verifies against host CA roots and the hostname, without bundled roots. SSL_CERT_FILE / SSL_CERT_DIR override host discovery. Trust is cached at first TLS use; restart NTNT after updates. Initial local OS/filesystem trust discovery is synchronous and cannot be interrupted by the network timeout budget. Existing HTTP SSRF policy applies; disabling SSRF protection rejects this probe API rather than bypassing validation. GET is the only method; redirect:manual/follow_redirects:false are optional. All other fetch options, credentials, headers, and Secret values are rejected. Timeout includes DNS, setup, connect, TLS and response. At most 16 complete probes run concurrently. Blocking system DNS can outlive caller waiting, but its worker cannot connect; at most 16 DNS workers run simultaneously, including timed-out workers. Probe or resolver saturation returns an error without target contact. Body bytes and decoded UTF-8 are capped by NTNT_MAX_RESPONSE_SIZE (default 50 MiB). |
 
 #### `Cache`
 
@@ -7770,29 +7770,29 @@ import { sse, text, html } from "std/http/server"
 
 | Function | Description |
 |----------|-------------|
-| [`check_limit`](#checklimit) | Count one event against an app-defined rate-limit key in this process. |
-| [`delete_cookie`](#deletecookie) | Build a Set-Cookie header value that deletes a cookie. |
+| [`check_limit`](#check_limit) | Count one event against an app-defined rate-limit key in this process. |
+| [`delete_cookie`](#delete_cookie) | Build a Set-Cookie header value that deletes a cookie. |
 | [`error`](#error) | Create an HTTP 500 Internal Server Error response. |
-| [`get_cookie`](#getcookie) | Get a specific cookie value from a request. |
-| [`get_cookies`](#getcookies) | Get all cookies from a request as a map. |
+| [`get_cookie`](#get_cookie) | Get a specific cookie value from a request. |
+| [`get_cookies`](#get_cookies) | Get all cookies from a request as a map. |
 | [`html`](#html) | Create an HTML HTTP response. |
 | [`json`](#json) | Create a JSON HTTP response. |
-| [`not_found`](#notfound) | Create an HTTP 404 Not Found response. |
-| [`on_error`](#onerror) | Register a global error handler for HTTP route handlers. |
-| [`parse_form`](#parseform) | Parse a request body (or raw string) as URL-encoded form data. |
-| [`parse_json`](#parsejson) | Parse a request body (or raw string) as JSON. |
-| [`parse_multipart`](#parsemultipart) | Parse a multipart/form-data request body. |
+| [`not_found`](#not_found) | Create an HTTP 404 Not Found response. |
+| [`on_error`](#on_error) | Register a global error handler for HTTP route handlers. |
+| [`parse_form`](#parse_form) | Parse a request body (or raw string) as URL-encoded form data. |
+| [`parse_json`](#parse_json) | Parse a request body (or raw string) as JSON. |
+| [`parse_multipart`](#parse_multipart) | Parse a multipart/form-data request body. |
 | [`redirect`](#redirect) | Create an HTTP 302 redirect response. |
-| [`redirect_safe`](#redirectsafe) | Create a safe HTTP 302 redirect response that prevents open redirect attacks. |
+| [`redirect_safe`](#redirect_safe) | Create a safe HTTP 302 redirect response that prevents open redirect attacks. |
 | [`response`](#response) | Create a fully custom HTTP response. |
-| [`save_upload`](#saveupload) | Save an uploaded file to disk. |
-| [`set_cookie`](#setcookie) | Build a Set-Cookie header value string. |
+| [`save_upload`](#save_upload) | Save an uploaded file to disk. |
+| [`set_cookie`](#set_cookie) | Build a Set-Cookie header value string. |
 | [`sse`](#sse) | Return a Server-Sent Events stream of a broadcast bus from a GET handler. |
-| [`static_file`](#staticfile) | Create a cacheable HTTP response for static assets. |
+| [`static_file`](#static_file) | Create a cacheable HTTP response for static assets. |
 | [`status`](#status) | Create a plain-text HTTP response with an explicit status code. |
 | [`text`](#text) | Create a plain-text HTTP response with status 200. |
-| [`too_many_requests`](#toomanyrequests) | Create a 429 Too Many Requests response. |
-| [`with_cookie`](#withcookie) | Add a Set-Cookie header to a response. |
+| [`too_many_requests`](#too_many_requests) | Create a 429 Too Many Requests response. |
+| [`with_cookie`](#with_cookie) | Add a Set-Cookie header to a response. |
 
 #### `check_limit`
 
@@ -7815,6 +7815,7 @@ For limits the server cannot see, such as per email address, account or form + c
 
 ```ntnt
 check_limit("contact-email:" + email, "3/day")["allowed"]  // => true  // First submission today
+check_limit("login:" + req.client_ip, "5/minute")["remaining"]  // => 4  // Budget left after the first attempt
 ```
 
 **Errors:**
@@ -8534,6 +8535,7 @@ Pass the map returned by `check_limit` to set `Retry-After` and the `RateLimit-L
 
 ```ntnt
 too_many_requests(check_limit("k", "1/minute"))  // => Response { status: 429 }  // Return 429 with Retry-After
+too_many_requests()  // => Response { status: 429, headers: { "retry-after": "60" } }  // Without a result, Retry-After is 60
 ```
 
 **Errors:**
@@ -8594,32 +8596,32 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 
 | Function | Description |
 |----------|-------------|
-| [`assert_enqueued`](#assertenqueued) | Assert that a job was enqueued in testing mode. |
-| [`assert_not_enqueued`](#assertnotenqueued) | Assert that a job was NOT enqueued in testing mode. |
+| [`assert_enqueued`](#assert_enqueued) | Assert that a job was enqueued in testing mode. |
+| [`assert_not_enqueued`](#assert_not_enqueued) | Assert that a job was NOT enqueued in testing mode. |
 | [`batch`](#batch) | Create a new job batch that buffers enqueues until sealed. |
-| [`batch_id`](#batchid) | Returns the batch ID of the currently-executing job, or None. |
-| [`batch_status`](#batchstatus) | Get the current status and counters for a batch. |
-| [`cancel_job`](#canceljob) | Cancel a job by its ID. |
-| [`clear_jobs`](#clearjobs) | Clear all jobs from the test queue without executing them. |
-| [`configure_queue`](#configurequeue) | Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits. Durable execution leases default to 300 seconds, renewed every 30 seconds. Advanced lease_seconds accepts integers 10..86400; renewal uses one-third of the duration capped at 30 seconds. Configure before starting workers. Expired unstarted claims recover automatically; authorized executions become outcome_unknown with no TTL or automatic replay. Upgrade workers together; old active jobs without leases are shown as outcome_unknown. |
-| [`delete_jobs`](#deletejobs) | Bulk delete jobs by status. Deleting history does not shorten independent uniqueness windows. |
-| [`drain_jobs`](#drainjobs) | Execute all enqueued test jobs synchronously and return the count. |
+| [`batch_id`](#batch_id) | Returns the batch ID of the currently-executing job, or None. |
+| [`batch_status`](#batch_status) | Get the current status and counters for a batch. |
+| [`cancel_job`](#cancel_job) | Cancel a job by its ID. |
+| [`clear_jobs`](#clear_jobs) | Clear all jobs from the test queue without executing them. |
+| [`configure_queue`](#configure_queue) | Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits. Durable execution leases default to 300 seconds, renewed every 30 seconds. Advanced lease_seconds accepts integers 10..86400; renewal uses one-third of the duration capped at 30 seconds. Configure before starting workers. Expired unstarted claims recover automatically; authorized executions become outcome_unknown with no TTL or automatic replay. Upgrade workers together; old active jobs without leases are shown as outcome_unknown. |
+| [`delete_jobs`](#delete_jobs) | Bulk delete jobs by status. Deleting history does not shorten independent uniqueness windows. |
+| [`drain_jobs`](#drain_jobs) | Execute all enqueued test jobs synchronously and return the count. |
 | [`enqueue`](#enqueue) | Enqueue a background job for processing, or buffer a job into an open batch. |
-| [`enqueue_at`](#enqueueat) | Enqueue a job to run at a specific future time. |
-| [`enqueue_batch`](#enqueuebatch) | Enqueue multiple jobs of the same type in one call. |
-| [`enqueue_in`](#enqueuein) | Enqueue a job to run after a delay in seconds. |
-| [`enqueue_into`](#enqueueinto) | Dynamically add a job to a sealed batch. |
-| [`job_status`](#jobstatus) | Get the current status and data for a job by its ID. |
-| [`list_jobs`](#listjobs) | List jobs with optional status and queue filters. |
-| [`pause_queue`](#pausequeue) | Pause a queue — workers stop executing jobs from it. |
-| [`queue_status`](#queuestatus) | Get the current status of a queue, including whether it is paused. |
-| [`resume_queue`](#resumequeue) | Resume a paused queue — workers resume claiming and executing jobs from it. |
-| [`retry_job`](#retryjob) | Re-queue a failed or dead job for another attempt. |
-| [`scale_workers`](#scaleworkers) | Scale the number of worker threads for a named band up or down. |
+| [`enqueue_at`](#enqueue_at) | Enqueue a job to run at a specific future time. |
+| [`enqueue_batch`](#enqueue_batch) | Enqueue multiple jobs of the same type in one call. |
+| [`enqueue_in`](#enqueue_in) | Enqueue a job to run after a delay in seconds. |
+| [`enqueue_into`](#enqueue_into) | Dynamically add a job to a sealed batch. |
+| [`job_status`](#job_status) | Get the current status and data for a job by its ID. |
+| [`list_jobs`](#list_jobs) | List jobs with optional status and queue filters. |
+| [`pause_queue`](#pause_queue) | Pause a queue — workers stop executing jobs from it. |
+| [`queue_status`](#queue_status) | Get the current status of a queue, including whether it is paused. |
+| [`resume_queue`](#resume_queue) | Resume a paused queue — workers resume claiming and executing jobs from it. |
+| [`retry_job`](#retry_job) | Re-queue a failed or dead job for another attempt. |
+| [`scale_workers`](#scale_workers) | Scale the number of worker threads for a named band up or down. |
 | [`seal`](#seal) | Seal a batch, flushing all buffered jobs to KV in order. |
-| [`work_async`](#workasync) | Start one or more background worker threads that process jobs from the queue. |
-| [`work_jobs`](#workjobs) | Run a blocking worker loop that processes jobs from the queue. |
-| [`worker_status`](#workerstatus) | Return a status snapshot of the job worker system. |
+| [`work_async`](#work_async) | Start one or more background worker threads that process jobs from the queue. |
+| [`work_jobs`](#work_jobs) | Run a blocking worker loop that processes jobs from the queue. |
+| [`worker_status`](#worker_status) | Return a status snapshot of the job worker system. |
 
 #### `assert_enqueued`
 
@@ -9303,9 +9305,9 @@ import { parse_json, stringify, stringify_pretty } from "std/json"
 
 | Function | Description |
 |----------|-------------|
-| [`parse_json`](#parsejson) | Parses a JSON string into a value. |
+| [`parse_json`](#parse_json) | Parses a JSON string into a value. |
 | [`stringify`](#stringify) | Converts a value to a compact JSON string. |
-| [`stringify_pretty`](#stringifypretty) | Converts a value to a pretty-printed JSON string with indentation. |
+| [`stringify_pretty`](#stringify_pretty) | Converts a value to a pretty-printed JSON string with indentation. |
 
 #### `parse_json`
 
@@ -9420,22 +9422,22 @@ import { open, get, get_int } from "std/kv"
 | Function | Description |
 |----------|-------------|
 | [`decr`](#decr) | Atomically decrement an integer value by 1. |
-| [`decr_by`](#decrby) | Atomically decrement an integer value by amount. |
+| [`decr_by`](#decr_by) | Atomically decrement an integer value by amount. |
 | [`del`](#del) | Delete a key from the KV store. |
 | [`expire`](#expire) | Set a TTL (time-to-live) on an existing key. |
 | [`flush`](#flush) | Delete all keys from the KV store. |
 | [`get`](#get) | Get a value by key from the KV store. |
-| [`get_float`](#getfloat) | Get a value by key and convert it to a float. |
-| [`get_int`](#getint) | Get a value by key and convert it to an integer. |
-| [`get_json`](#getjson) | Get a value by key and parse it as JSON. |
-| [`get_str`](#getstr) | Get a value by key and convert it to a string. |
+| [`get_float`](#get_float) | Get a value by key and convert it to a float. |
+| [`get_int`](#get_int) | Get a value by key and convert it to an integer. |
+| [`get_json`](#get_json) | Get a value by key and parse it as JSON. |
+| [`get_str`](#get_str) | Get a value by key and convert it to a string. |
 | [`has`](#has) | Check if a key exists in the KV store. |
 | [`incr`](#incr) | Atomically increment an integer value by 1. |
-| [`incr_by`](#incrby) | Atomically increment an integer value by amount. |
+| [`incr_by`](#incr_by) | Atomically increment an integer value by amount. |
 | [`list`](#list) | List keys in the KV store, optionally filtered by prefix. |
 | [`open`](#open) | Open a KV store connection. |
 | [`set`](#set) | Set a key-value pair in the KV store. |
-| [`set_nx`](#setnx) | Set a key only if it doesn't already exist (atomic NX operation). |
+| [`set_nx`](#set_nx) | Set a key only if it doesn't already exist (atomic NX operation). |
 | [`ttl`](#ttl) | Get the remaining TTL (time-to-live) for a key in seconds. |
 
 #### `decr`
@@ -9947,12 +9949,12 @@ import { log_debug, log_info, log_warn } from "std/log"
 
 | Function | Description |
 |----------|-------------|
-| [`log_debug`](#logdebug) | Log a message at DEBUG level. |
-| [`log_error`](#logerror) | Log a message at ERROR level. |
-| [`log_info`](#loginfo) | Log a message at INFO level. |
-| [`log_warn`](#logwarn) | Log a message at WARN level. |
-| [`request_logger`](#requestlogger) | Create a request logging middleware function. |
-| [`set_log_level`](#setloglevel) | Set the global log level. |
+| [`log_debug`](#log_debug) | Log a message at DEBUG level. |
+| [`log_error`](#log_error) | Log a message at ERROR level. |
+| [`log_info`](#log_info) | Log a message at INFO level. |
+| [`log_warn`](#log_warn) | Log a message at WARN level. |
+| [`request_logger`](#request_logger) | Create a request logging middleware function. |
+| [`set_log_level`](#set_log_level) | Set the global log level. |
 
 #### `log_debug`
 
@@ -10141,10 +10143,10 @@ import { to_html, to_html_safe, parse_blocks } from "std/markdown"
 
 | Function | Description |
 |----------|-------------|
-| [`parse_blocks`](#parseblocks) | Parse Markdown into ordered, non-overlapping top-level blocks. |
-| [`replace_source_range`](#replacesourcerange) | Replace an inclusive-start, exclusive-end UTF-8 byte range in Markdown source. This pairs with parse_blocks() offsets while preserving every byte outside the range. |
-| [`to_html`](#tohtml) | Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags pass through as-is. Use to_html_safe() if the input is untrusted. |
-| [`to_html_safe`](#tohtmlsafe) | Convert a Markdown string to HTML with embedded HTML tags stripped. Use this when rendering user-supplied or untrusted Markdown content. |
+| [`parse_blocks`](#parse_blocks) | Parse Markdown into ordered, non-overlapping top-level blocks. |
+| [`replace_source_range`](#replace_source_range) | Replace an inclusive-start, exclusive-end UTF-8 byte range in Markdown source. This pairs with parse_blocks() offsets while preserving every byte outside the range. |
+| [`to_html`](#to_html) | Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags pass through as-is. Use to_html_safe() if the input is untrusted. |
+| [`to_html_safe`](#to_html_safe) | Convert a Markdown string to HTML with embedded HTML tags stripped. Use this when rendering user-supplied or untrusted Markdown content. |
 
 #### `parse_blocks`
 
@@ -10254,16 +10256,16 @@ import { sin, cos, tan } from "std/math"
 | [`exp`](#exp) | Compute e raised to the power of x. |
 | [`exp2`](#exp2) | Compute 2 raised to the power of x. |
 | [`hypot`](#hypot) | Compute the Euclidean distance sqrt(x^2 + y^2). |
-| [`is_finite`](#isfinite) | Check whether a numeric value is finite (not NaN and not infinite). |
-| [`is_infinite`](#isinfinite) | Check whether a numeric value is positive or negative infinity. |
-| [`is_nan`](#isnan) | Check whether a numeric value is NaN (Not a Number). |
+| [`is_finite`](#is_finite) | Check whether a numeric value is finite (not NaN and not infinite). |
+| [`is_infinite`](#is_infinite) | Check whether a numeric value is positive or negative infinity. |
+| [`is_nan`](#is_nan) | Check whether a numeric value is NaN (Not a Number). |
 | [`log`](#log) | Compute the natural logarithm (base e) of a value. |
 | [`log10`](#log10) | Compute the base-10 logarithm of a value. |
 | [`log2`](#log2) | Compute the base-2 logarithm of a value. |
 | [`radians`](#radians) | Convert an angle from degrees to radians. |
 | [`random`](#random) | Generate a random floating-point number in [0, 1). |
-| [`random_int`](#randomint) | Generate a random integer in the inclusive range [min, max]. |
-| [`random_range`](#randomrange) | Generate a random float in the half-open range [min, max). |
+| [`random_int`](#random_int) | Generate a random integer in the inclusive range [min, max]. |
+| [`random_range`](#random_range) | Generate a random float in the half-open range [min, max). |
 | [`sin`](#sin) | Compute the sine of an angle in radians. |
 | [`sinh`](#sinh) | Compute the hyperbolic sine of a value. |
 | [`tan`](#tan) | Compute the tangent of an angle in radians. |
@@ -11105,35 +11107,35 @@ import { ping_open, ping_probe, ping_close } from "std/net"
 
 | Function | Description |
 |----------|-------------|
-| [`dns_lookup`](#dnslookup) | Looks up DNS records for a name. Supports A, AAAA, ANAME, CAA, CDNSKEY, CDS, CNAME, CSYNC, DNSKEY, DS, HINFO, HTTPS, KEY, MX, NAPTR, NS, NSEC, NSEC3, NSEC3PARAM, NULL, OPENPGPKEY, PTR, RRSIG, SIG, SOA, SRV, SSHFP, SVCB, TLSA, and TXT records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). Optional start_deadline_ms (UTC epoch milliseconds) and start_monotonic_deadline_ms (std/time monotonic_now process-origin milliseconds) are nonnegative Ints or None. Either expired clock denies the first UDP send or TCP connect after socket setup, returning Err("start_deadline_expired") only when no earlier contact was possible. A first in-budget contact commits the lookup; replies, retries and TCP fallback may complete later under timeout_ms. Local/cached answers need no transmission. These userspace syscall checks cannot guarantee NIC wire-time against preemption. |
-| [`dns_reverse`](#dnsreverse) | Performs a reverse DNS/PTR lookup for an IPv4 or IPv6 address. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
-| [`ip_parse`](#ipparse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
-| [`ip_range_to_cidrs`](#iprangetocidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
-| [`net_capabilities`](#netcapabilities) | Reports which network probe capabilities are available to the current process without sending any traffic. The ICMP flags reflect whether the probe socket setup that ping() uses (create, configure, connect to loopback) succeeds: datagram ICMP is unprivileged where the OS allows it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW). ping is true when any ICMP echo path is available; traceroute is true when a raw ICMP path is available for either family (traceroute requires raw sockets). These are convenience aggregates: a caller targeting a specific family should check the per-family flags (e.g. icmpv6_raw), since a host may resolve only to a family whose raw socket is unavailable — in that case the probe call still returns a clear Err. traceroute_udp and traceroute_tcp are reported true only on Linux, where their probe send and reply handling are validated; traceroute_tcp also requires a raw TCP socket. ICMP traceroute remains cross-platform. |
+| [`dns_lookup`](#dns_lookup) | Looks up DNS records for a name. Supports A, AAAA, ANAME, CAA, CDNSKEY, CDS, CNAME, CSYNC, DNSKEY, DS, HINFO, HTTPS, KEY, MX, NAPTR, NS, NSEC, NSEC3, NSEC3PARAM, NULL, OPENPGPKEY, PTR, RRSIG, SIG, SOA, SRV, SSHFP, SVCB, TLSA, and TXT records. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). Optional start_deadline_ms (UTC epoch milliseconds) and start_monotonic_deadline_ms (std/time monotonic_now process-origin milliseconds) are nonnegative Ints or None. Either expired clock denies the first UDP send or TCP connect after socket setup, returning Err("start_deadline_expired") only when no earlier contact was possible. A first in-budget contact commits the lookup; replies, retries and TCP fallback may complete later under timeout_ms. Local/cached answers need no transmission. These userspace syscall checks cannot guarantee NIC wire-time against preemption. |
+| [`dns_reverse`](#dns_reverse) | Performs a reverse DNS/PTR lookup for an IPv4 or IPv6 address. No-answer DNS responses return Ok([]); invalid input and resolver/system failures return Err(String). |
+| [`ip_parse`](#ip_parse) | Parses an IPv4/IPv6 address or CIDR and returns canonical IPAM fields. |
+| [`ip_range_to_cidrs`](#ip_range_to_cidrs) | Converts an inclusive IPv4/IPv6 range into the minimal CIDR cover. |
+| [`net_capabilities`](#net_capabilities) | Reports which network probe capabilities are available to the current process without sending any traffic. The ICMP flags reflect whether the probe socket setup that ping() uses (create, configure, connect to loopback) succeeds: datagram ICMP is unprivileged where the OS allows it, raw ICMP usually requires elevated privileges (e.g. CAP_NET_RAW). ping is true when any ICMP echo path is available; traceroute is true when a raw ICMP path is available for either family (traceroute requires raw sockets). These are convenience aggregates: a caller targeting a specific family should check the per-family flags (e.g. icmpv6_raw), since a host may resolve only to a family whose raw socket is unavailable — in that case the probe call still returns a clear Err. traceroute_udp and traceroute_tcp are reported true only on Linux, where their probe send and reply handling are validated; traceroute_tcp also requires a raw TCP socket. ICMP traceroute remains cross-platform. |
 | [`ping`](#ping) | Performs an ICMP ping using native sockets (unprivileged datagram ICMP when available, raw ICMP as fallback). Unreachable targets return Ok with failed attempts; missing socket permissions and resolver/system failures return Err(String). Apps that want TCP port checks should use tcp_connect(); high-level reachability checks can use reachable(). Optional start_deadline_ms (UTC epoch milliseconds) and start_monotonic_deadline_ms (std/time monotonic_now process-origin milliseconds) are independently optional nonnegative Ints; absent/None preserves behavior. Both supplied clocks must remain before their deadline immediately before the first socket send, after resolution, policy, socket and packet setup; expiry returns Err("start_deadline_expired") without an attempted send. Malformed fields fail closed. The first attempted send commits the sample: requested later packets may continue after expiry, still bounded by timeout_ms. This userspace syscall check cannot guarantee NIC wire-time against preemption. |
-| [`ping_close`](#pingclose) | Idempotently close all aliases and release descriptor/capacity, including expired handles. Cancels an active probe; sends are nonblocking, receives use short kernel-woken waits. Close never waits for the full probe deadline, and releases capacity before returning. Cleanup normally completes within 50 ms, subject to OS/thread scheduling; probe cancellation is observed at the next bounded 5 ms receive checkpoint (OS timeout rounding may apply). No descriptor duplication or unsafe reuse; no sleep polling is added to RTT. |
-| [`ping_open`](#pingopen) | Open a process-local native IPv4/IPv6 ICMP session without sending. Pins the first resolver address after applying policy to every resolved address. Setup failure returns Err; no address fallback or automatic reopen. Options: idle_timeout_ms (1000..86400000, default 60000), allow_private (Bool). Private targets also require NTNT_NET_ALLOW_PRIVATE=1. Other options are rejected. At most 128 live/reserved sockets per process. Datagram first, raw fallback; socket permissions depend on the platform (raw normally requires CAP_NET_RAW). Aliases share state; handles cannot be forged, serialized, or transferred to tasks/channels/jobs. Open inside the owning task/worker. Normal, Worker and Job modes are supported; HotReload and UnitTest/native assertion execution are explicitly denied. Unused retained aliases expire with at most one second cleanup lag, subject to scheduling. Owner teardown, runtime shutdown, last-handle drop and fatal backend errors close sockets. |
-| [`ping_probe`](#pingprobe) | Send exactly one echo on the same socket; one in-flight operation per handle. Whole-operation timeout is 50..30000 ms (default 1000); no retries. Result fields: status (reply/timeout/target_error), probe_id (logical counter), seq (16-bit wire sequence), target_addr, reachable; from, ttl, latency_ms and error are present only when applicable. Non-replies never contain latency_ms. RTT uses a monotonic clock, excluding DNS/setup/idle time. Full payload correlation rejects late/duplicate packets across rollover; truncated error quotes are ignored. Kernel errors without generation proof return backend Err and invalidate the handle. Completion (including timeout/target_error) renews idle lease; in-flight probes do not expire. Entry checks expiry atomically; invalid/busy calls do not renew it. Fatal errors close. |
-| [`port_scan`](#portscan) | Performs a bounded TCP scan of explicit ports for one host. Only explicit port arrays are accepted; ranges are intentionally not expanded. Results are sorted by port. |
+| [`ping_close`](#ping_close) | Idempotently close all aliases and release descriptor/capacity, including expired handles. Cancels an active probe; sends are nonblocking, receives use short kernel-woken waits. Close never waits for the full probe deadline, and releases capacity before returning. Cleanup normally completes within 50 ms, subject to OS/thread scheduling; probe cancellation is observed at the next bounded 5 ms receive checkpoint (OS timeout rounding may apply). No descriptor duplication or unsafe reuse; no sleep polling is added to RTT. |
+| [`ping_open`](#ping_open) | Open a process-local native IPv4/IPv6 ICMP session without sending. Pins the first resolver address after applying policy to every resolved address. Setup failure returns Err; no address fallback or automatic reopen. Options: idle_timeout_ms (1000..86400000, default 60000), allow_private (Bool). Private targets also require NTNT_NET_ALLOW_PRIVATE=1. Other options are rejected. At most 128 live/reserved sockets per process. Datagram first, raw fallback; socket permissions depend on the platform (raw normally requires CAP_NET_RAW). Aliases share state; handles cannot be forged, serialized, or transferred to tasks/channels/jobs. Open inside the owning task/worker. Normal, Worker and Job modes are supported; HotReload and UnitTest/native assertion execution are explicitly denied. Unused retained aliases expire with at most one second cleanup lag, subject to scheduling. Owner teardown, runtime shutdown, last-handle drop and fatal backend errors close sockets. |
+| [`ping_probe`](#ping_probe) | Send exactly one echo on the same socket; one in-flight operation per handle. Whole-operation timeout is 50..30000 ms (default 1000); no retries. Result fields: status (reply/timeout/target_error), probe_id (logical counter), seq (16-bit wire sequence), target_addr, reachable; from, ttl, latency_ms and error are present only when applicable. Non-replies never contain latency_ms. RTT uses a monotonic clock, excluding DNS/setup/idle time. Full payload correlation rejects late/duplicate packets across rollover; truncated error quotes are ignored. Kernel errors without generation proof return backend Err and invalidate the handle. Completion (including timeout/target_error) renews idle lease; in-flight probes do not expire. Entry checks expiry atomically; invalid/busy calls do not renew it. Fatal errors close. |
+| [`port_scan`](#port_scan) | Performs a bounded TCP scan of explicit ports for one host. Only explicit port arrays are accepted; ranges are intentionally not expanded. Results are sorted by port. |
 | [`reachable`](#reachable) | Performs a high-level reachability check using ICMP plus TCP ports 80 and 443 by default. Caller-provided tcp_ports add extra explicit TCP ports. The result records the method that established reachability without pretending TCP is ping. |
-| [`subnet_contains`](#subnetcontains) | Returns true when the parent CIDR contains the entire child address or subnet. |
-| [`subnet_overlaps`](#subnetoverlaps) | Returns true when two IPv4 or IPv6 CIDRs overlap. |
-| [`subnet_split`](#subnetsplit) | Splits a CIDR into child subnets with a longer prefix, enforcing result caps. |
-| [`subnet_summarize`](#subnetsummarize) | Summarizes adjacent or overlapping CIDRs into the shortest equivalent route list. |
-| [`subnet_supernet`](#subnetsupernet) | Returns the parent/supernet of a CIDR. Defaults to one bit shorter. |
-| [`tcp_accept`](#tcpaccept) | Accept one independent native stream or return timeout; Normal mode only. |
-| [`tcp_close`](#tcpclose) | Close a native socket and release capacity; Normal mode only. |
-| [`tcp_connect`](#tcpconnect) | Performs a bounded TCP connect probe to one explicit port. Closed, refused, or timed-out ports return Ok(map { "connected": false, ... }); invalid input, policy denial, and resolver/system failures return Err(String). |
-| [`tcp_listen`](#tcplisten) | Bind a native TCP listener; Normal mode only. Default literal host is 127.0.0.1. |
-| [`tcp_local_addr`](#tcplocaladdr) | Inspect the actual local bound address as {host, port}; Normal mode only. |
-| [`tcp_peer_addr`](#tcppeeraddr) | Inspect accepted peer address as {host, port}; Normal mode only. |
-| [`tcp_read`](#tcpread) | Read one bounded raw-byte chunk, with EOF distinct from timeout; Normal mode only. |
-| [`tcp_read_exact`](#tcpreadexact) | Read exactly count positive bytes within the reader cap, preserving overread for later calls. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Timeout defaults to 5000ms, range 1..60000, covering the whole call even with continuous progress. Timeout, EOF, oversize and I/O errors preserve buffered bytes and report buffered_bytes; retry a smaller exact read to drain. Invalid arguments never consume bytes. Already-complete buffered frames may succeed after peer EOF. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles. |
-| [`tcp_read_until`](#tcpreaduntil) | Read through and include a nonempty UTF-8 or checked binary delimiter, using linear matching only within max_bytes. Delimiter length <= max_bytes <= reader cap. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Timeout defaults to 5000ms, range 1..60000, covering the whole call even with continuous progress. Timeout, EOF, oversize and I/O errors preserve buffered bytes and report buffered_bytes; retry a smaller exact read to drain. Invalid arguments never consume bytes. Already-complete buffered frames may succeed after peer EOF. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles. |
-| [`tcp_reader`](#tcpreader) | Attach exclusive read ownership to the existing socket. max_buffer_bytes: 1..65536 (default65536). Raw reads and second readers then fail. Last reader alias Drop closes the shared socket; there is no detach operation. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Invalid options or capacity failure leave the stream unattached. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles. |
-| [`tcp_shutdown`](#tcpshutdown) | Shut down a stream direction without releasing its descriptor; Normal mode only. |
-| [`tcp_write`](#tcpwrite) | Write all input bytes or invalidate the stream; Normal mode only. |
-| [`tls_info`](#tlsinfo) | Opens a bounded TLS connection and returns certificate metadata. Validation failures still return Ok(map { "valid": false, ... }) when a certificate is available. Trust uses the host CA store (or SSL_CERT_FILE / SSL_CERT_DIR), with no bundled fallback. Missing usable host roots return Err before target contact. Roots are cached at first TLS use; restart NTNT after updating the store or overrides. |
+| [`subnet_contains`](#subnet_contains) | Returns true when the parent CIDR contains the entire child address or subnet. |
+| [`subnet_overlaps`](#subnet_overlaps) | Returns true when two IPv4 or IPv6 CIDRs overlap. |
+| [`subnet_split`](#subnet_split) | Splits a CIDR into child subnets with a longer prefix, enforcing result caps. |
+| [`subnet_summarize`](#subnet_summarize) | Summarizes adjacent or overlapping CIDRs into the shortest equivalent route list. |
+| [`subnet_supernet`](#subnet_supernet) | Returns the parent/supernet of a CIDR. Defaults to one bit shorter. |
+| [`tcp_accept`](#tcp_accept) | Accept one independent native stream or return timeout; Normal mode only. |
+| [`tcp_close`](#tcp_close) | Close a native socket and release capacity; Normal mode only. |
+| [`tcp_connect`](#tcp_connect) | Performs a bounded TCP connect probe to one explicit port. Closed, refused, or timed-out ports return Ok(map { "connected": false, ... }); invalid input, policy denial, and resolver/system failures return Err(String). |
+| [`tcp_listen`](#tcp_listen) | Bind a native TCP listener; Normal mode only. Default literal host is 127.0.0.1. |
+| [`tcp_local_addr`](#tcp_local_addr) | Inspect the actual local bound address as {host, port}; Normal mode only. |
+| [`tcp_peer_addr`](#tcp_peer_addr) | Inspect accepted peer address as {host, port}; Normal mode only. |
+| [`tcp_read`](#tcp_read) | Read one bounded raw-byte chunk, with EOF distinct from timeout; Normal mode only. |
+| [`tcp_read_exact`](#tcp_read_exact) | Read exactly count positive bytes within the reader cap, preserving overread for later calls. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Timeout defaults to 5000ms, range 1..60000, covering the whole call even with continuous progress. Timeout, EOF, oversize and I/O errors preserve buffered bytes and report buffered_bytes; retry a smaller exact read to drain. Invalid arguments never consume bytes. Already-complete buffered frames may succeed after peer EOF. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles. |
+| [`tcp_read_until`](#tcp_read_until) | Read through and include a nonempty UTF-8 or checked binary delimiter, using linear matching only within max_bytes. Delimiter length <= max_bytes <= reader cap. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Timeout defaults to 5000ms, range 1..60000, covering the whole call even with continuous progress. Timeout, EOF, oversize and I/O errors preserve buffered bytes and report buffered_bytes; retry a smaller exact read to drain. Invalid arguments never consume bytes. Already-complete buffered frames may succeed after peer EOF. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles. |
+| [`tcp_reader`](#tcp_reader) | Attach exclusive read ownership to the existing socket. max_buffer_bytes: 1..65536 (default65536). Raw reads and second readers then fail. Last reader alias Drop closes the shared socket; there is no detach operation. Synchronous TcpServer capability; same-owner concurrent operations return busy. Available only in Normal mode; native Intent observers are denied before side effects. Invalid options or capacity failure leave the stream unattached. Aggregate 16 MiB covers reserved reader buffers and active matcher/output construction, not caller-retained arrays. Explicit close, last-reader Drop, fatal write failure and runtime shutdown release shared socket and framing state. JSON/task/channel transfer is rejected; use explicit close to release resources retained by closure cycles. |
+| [`tcp_shutdown`](#tcp_shutdown) | Shut down a stream direction without releasing its descriptor; Normal mode only. |
+| [`tcp_write`](#tcp_write) | Write all input bytes or invalidate the stream; Normal mode only. |
+| [`tls_info`](#tls_info) | Opens a bounded TLS connection and returns certificate metadata. Validation failures still return Ok(map { "valid": false, ... }) when a certificate is available. Trust uses the host CA store (or SSL_CERT_FILE / SSL_CERT_DIR), with no bundled fallback. Missing usable host roots return Err before target contact. Roots are cached at first TLS use; restart NTNT after updating the store or overrides. |
 | [`traceroute`](#traceroute) | Traces the network path to a host using TTL-stepped native probes. The method option selects the probe protocol: "icmp" (default) sends echo requests, "udp" sends datagrams to an unused port (destination reached on ICMP Port Unreachable), and "tcp" sends SYNs to a real port (reached on SYN-ACK/RST — the variant most likely to traverse firewalls). All methods need a raw ICMP socket for intermediate hops (usually CAP_NET_RAW; Docker: cap_add: [NET_RAW]). "icmp" is cross-platform; "udp" and "tcp" are Linux-only ("tcp" additionally needs a raw TCP socket). When the required capability is missing it returns Err(String) rather than degrading — check net_capabilities() (traceroute / traceroute_udp / traceroute_tcp) before probing. Each hop reports the responding router, latency, or a timeout; the trace stops at the destination, on a terminal ICMP error, or at max_hops. |
 
 #### `dns_lookup`
@@ -11814,8 +11816,8 @@ import { snmp_get, snmp_walk } from "std/netmon"
 
 | Function | Description |
 |----------|-------------|
-| [`snmp_get`](#snmpget) | Reads one bounded set of numeric OIDs from an SNMP agent. Slice 1 supports SNMPv2c only. The strict auth map must contain `version: "2c"` and a `community` Secret, normally returned by `require_secret()`; plaintext community strings are rejected. Unknown auth and option keys are rejected. SNMPv2c does not encrypt or authenticate its community or payload; use this slice only on trusted management networks or protected tunnels. |
-| [`snmp_walk`](#snmpwalk) | Walks one numeric OID subtree with bounded SNMPv2c GETNEXT requests. The community must be an opaque Secret. SNMPv2c is plaintext; use a trusted management network or protected tunnel. Every call requires `NTNT_NETMON_ENABLE=1`; private targets also require the shared process opt-in and `allow_private: true`. |
+| [`snmp_get`](#snmp_get) | Reads one bounded set of numeric OIDs from an SNMP agent. Slice 1 supports SNMPv2c only. The strict auth map must contain `version: "2c"` and a `community` Secret, normally returned by `require_secret()`; plaintext community strings are rejected. Unknown auth and option keys are rejected. SNMPv2c does not encrypt or authenticate its community or payload; use this slice only on trusted management networks or protected tunnels. |
+| [`snmp_walk`](#snmp_walk) | Walks one numeric OID subtree with bounded SNMPv2c GETNEXT requests. The community must be an opaque Secret. SNMPv2c is plaintext; use a trusted management network or protected tunnel. Every call requires `NTNT_NETMON_ENABLE=1`; private targets also require the shared process opt-in and `allow_private: true`. |
 
 #### `snmp_get`
 
@@ -11907,15 +11909,15 @@ import { join_path, join, dirname } from "std/path"
 | [`basename`](#basename) | Returns the filename portion of a path. |
 | [`dirname`](#dirname) | Returns the directory portion of a path. |
 | [`extension`](#extension) | Returns the file extension without the leading dot. |
-| [`is_absolute`](#isabsolute) | Returns true if the path is absolute. |
-| [`is_relative`](#isrelative) | Returns true if the path is relative. |
+| [`is_absolute`](#is_absolute) | Returns true if the path is absolute. |
+| [`is_relative`](#is_relative) | Returns true if the path is relative. |
 | [`join`](#join) | Deprecated: use join_path() instead. Alias for backward compatibility. |
-| [`join_path`](#joinpath) | Joins path segments into a single path string. |
+| [`join_path`](#join_path) | Joins path segments into a single path string. |
 | [`normalize`](#normalize) | Cleans up `..` and `.` path components without touching the filesystem. |
 | [`resolve`](#resolve) | Resolves a path to an absolute path using filesystem canonicalize. |
-| [`resolve_missing`](#resolvemissing) | Resolve existing symlinks in order, allowing genuinely missing suffixes. |
+| [`resolve_missing`](#resolve_missing) | Resolve existing symlinks in order, allowing genuinely missing suffixes. |
 | [`stem`](#stem) | Returns the filename without its extension. |
-| [`with_extension`](#withextension) | Returns the path with its extension changed to the given extension. |
+| [`with_extension`](#with_extension) | Returns the path with its extension changed to the given extension. |
 
 #### `basename`
 
@@ -12229,7 +12231,7 @@ import { connect, query, query_one } from "std/postgres"
 | [`connect`](#connect) | Open or reuse a shared connection pool to a PostgreSQL database. |
 | [`execute`](#execute) | Execute a SQL statement and return the number of affected rows. |
 | [`query`](#query) | Execute a SQL query and return all matching rows. |
-| [`query_one`](#queryone) | Execute a SQL query and return at most one row. |
+| [`query_one`](#query_one) | Execute a SQL query and return at most one row. |
 | [`rollback`](#rollback) | Roll back the current transaction. |
 
 #### `begin`
@@ -12518,7 +12520,7 @@ import { run, start, wait } from "std/process"
 | [`run`](#run) | Run a native program directly and wait for its bounded result. |
 | [`start`](#start) | Start a supervised native process and return an opaque handle. The runtime monitors exit, timeout, and captured-output limits without caller polling. On Unix, the child leads a process group so timeout and shutdown also terminate descendants. start() accepts the same options as run(), but stdout/stderr default to inherit instead of capture. |
 | [`terminate`](#terminate) | Request graceful termination of a supervised process. |
-| [`try_wait`](#trywait) | Inspect a supervised process without blocking. |
+| [`try_wait`](#try_wait) | Inspect a supervised process without blocking. |
 | [`wait`](#wait) | Wait for a supervised process and return its cached final result. The runtime retains at most 64 terminal handles and 64 MiB of terminal output; older handles return an invalid-handle error after eviction. |
 
 #### `kill`
@@ -12699,8 +12701,8 @@ import { get_secret, require_secret } from "std/secrets"
 
 | Function | Description |
 |----------|-------------|
-| [`get_secret`](#getsecret) | Looks up a secret by its provider-neutral logical name. |
-| [`require_secret`](#requiresecret) | Looks up a required secret and fails closed when it is not configured. |
+| [`get_secret`](#get_secret) | Looks up a secret by its provider-neutral logical name. |
+| [`require_secret`](#require_secret) | Looks up a required secret and fails closed when it is not configured. |
 
 #### `get_secret`
 
@@ -12786,7 +12788,7 @@ import { connect, query, query_one } from "std/sqlite"
 | [`connect`](#connect) | Open a connection to a SQLite database. |
 | [`execute`](#execute) | Execute a SQL statement and return the number of affected rows. |
 | [`query`](#query) | Execute a SELECT query and return all matching rows. |
-| [`query_one`](#queryone) | Execute a SELECT query and return a single row. |
+| [`query_one`](#query_one) | Execute a SELECT query and return a single row. |
 | [`rollback`](#rollback) | Roll back the current transaction. |
 
 #### `begin`
@@ -13103,63 +13105,63 @@ import { split, join, concat } from "std/string"
 | Function | Description |
 |----------|-------------|
 | [`capitalize`](#capitalize) | Capitalizes the first character, lowercases the rest. |
-| [`capture_all_pattern`](#captureallpattern) | Returns all matches with capture groups. |
-| [`capture_named_pattern`](#capturenamedpattern) | Returns first match with named capture groups as a map, or None if no match. |
-| [`capture_pattern`](#capturepattern) | Returns first match with capture groups, or None if no match. |
+| [`capture_all_pattern`](#capture_all_pattern) | Returns all matches with capture groups. |
+| [`capture_named_pattern`](#capture_named_pattern) | Returns first match with named capture groups as a map, or None if no match. |
+| [`capture_pattern`](#capture_pattern) | Returns first match with capture groups, or None if no match. |
 | [`center`](#center) | Centers string with padding on both sides. |
-| [`char_at`](#charat) | Returns character at index. |
+| [`char_at`](#char_at) | Returns character at index. |
 | [`chars`](#chars) | Splits string into array of characters. |
 | [`concat`](#concat) | Concatenates two strings, or joins an array of strings. |
 | [`contains`](#contains) | Checks if string contains substring. |
 | [`count`](#count) | Counts occurrences of substring. |
-| [`ends_with`](#endswith) | Checks if string ends with suffix. |
-| [`find_all_pattern`](#findallpattern) | Returns all regex matches. |
-| [`find_pattern`](#findpattern) | Returns first regex match or None. |
-| [`html_escape`](#htmlescape) | Escape HTML special characters in a string. |
-| [`index_of`](#indexof) | Returns index of first occurrence, or -1 if not found. |
-| [`is_alpha`](#isalpha) | Returns true if string contains only letters. |
-| [`is_alphanumeric`](#isalphanumeric) | Returns true if string contains only letters and digits. |
-| [`is_blank`](#isblank) | Returns true if string is empty or only whitespace. |
-| [`is_empty`](#isempty) | Returns true if string is empty. |
-| [`is_lowercase`](#islowercase) | Returns true if all letters are lowercase. |
-| [`is_numeric`](#isnumeric) | Returns true if string contains only digits. |
-| [`is_uppercase`](#isuppercase) | Returns true if all letters are uppercase. |
-| [`is_whitespace`](#iswhitespace) | Returns true if string contains only whitespace. |
+| [`ends_with`](#ends_with) | Checks if string ends with suffix. |
+| [`find_all_pattern`](#find_all_pattern) | Returns all regex matches. |
+| [`find_pattern`](#find_pattern) | Returns first regex match or None. |
+| [`html_escape`](#html_escape) | Escape HTML special characters in a string. |
+| [`index_of`](#index_of) | Returns index of first occurrence, or -1 if not found. |
+| [`is_alpha`](#is_alpha) | Returns true if string contains only letters. |
+| [`is_alphanumeric`](#is_alphanumeric) | Returns true if string contains only letters and digits. |
+| [`is_blank`](#is_blank) | Returns true if string is empty or only whitespace. |
+| [`is_empty`](#is_empty) | Returns true if string is empty. |
+| [`is_lowercase`](#is_lowercase) | Returns true if all letters are lowercase. |
+| [`is_numeric`](#is_numeric) | Returns true if string contains only digits. |
+| [`is_uppercase`](#is_uppercase) | Returns true if all letters are uppercase. |
+| [`is_whitespace`](#is_whitespace) | Returns true if string contains only whitespace. |
 | [`join`](#join) | Joins array elements into a string with a delimiter. |
-| [`keep_chars`](#keepchars) | Keeps only characters in the allowed set. |
-| [`last_index_of`](#lastindexof) | Returns index of last occurrence, or -1 if not found. |
+| [`keep_chars`](#keep_chars) | Keeps only characters in the allowed set. |
+| [`last_index_of`](#last_index_of) | Returns index of last occurrence, or -1 if not found. |
 | [`lines`](#lines) | Splits string by newlines. |
 | [`lower`](#lower) | Alias for to_lower. Converts string to lowercase. |
 | [`matches`](#matches) | Simple glob matching with * and ? wildcards. |
-| [`matches_pattern`](#matchespattern) | Checks if string matches regex pattern. |
-| [`pad_left`](#padleft) | Pads string on the left to reach target length. |
-| [`pad_right`](#padright) | Pads string on the right to reach target length. |
-| [`remove_chars`](#removechars) | Removes all characters in the chars set. |
+| [`matches_pattern`](#matches_pattern) | Checks if string matches regex pattern. |
+| [`pad_left`](#pad_left) | Pads string on the left to reach target length. |
+| [`pad_right`](#pad_right) | Pads string on the right to reach target length. |
+| [`remove_chars`](#remove_chars) | Removes all characters in the chars set. |
 | [`repeat`](#repeat) | Repeats a string n times. |
 | [`replace`](#replace) | Replaces all occurrences of from with to. |
-| [`replace_all`](#replaceall) | Alias for replace. Replaces all occurrences of from with to. |
-| [`replace_chars`](#replacechars) | Replaces any character in the chars set with replacement. |
-| [`replace_first`](#replacefirst) | Replaces first occurrence of from with to. |
-| [`replace_pattern`](#replacepattern) | Replaces all regex matches with replacement. |
+| [`replace_all`](#replace_all) | Alias for replace. Replaces all occurrences of from with to. |
+| [`replace_chars`](#replace_chars) | Replaces any character in the chars set with replacement. |
+| [`replace_first`](#replace_first) | Replaces first occurrence of from with to. |
+| [`replace_pattern`](#replace_pattern) | Replaces all regex matches with replacement. |
 | [`reverse`](#reverse) | Reverses a string. |
 | [`slugify`](#slugify) | Converts to a URL-friendly slug. |
 | [`split`](#split) | Splits a string into an array of substrings. |
-| [`split_pattern`](#splitpattern) | Splits string by regex pattern. |
-| [`starts_with`](#startswith) | Checks if string starts with prefix. |
+| [`split_pattern`](#split_pattern) | Splits string by regex pattern. |
+| [`starts_with`](#starts_with) | Checks if string starts with prefix. |
 | [`substring`](#substring) | Extracts substring from start to end (exclusive). |
 | [`title`](#title) | Capitalizes the first letter of each word. |
-| [`to_camel_case`](#tocamelcase) | Converts to camelCase. |
-| [`to_kebab_case`](#tokebabcase) | Converts to kebab-case. |
-| [`to_lower`](#tolower) | Converts string to lowercase. |
-| [`to_pascal_case`](#topascalcase) | Converts to PascalCase. |
-| [`to_snake_case`](#tosnakecase) | Converts to snake_case. |
-| [`to_upper`](#toupper) | Converts string to uppercase. |
+| [`to_camel_case`](#to_camel_case) | Converts to camelCase. |
+| [`to_kebab_case`](#to_kebab_case) | Converts to kebab-case. |
+| [`to_lower`](#to_lower) | Converts string to lowercase. |
+| [`to_pascal_case`](#to_pascal_case) | Converts to PascalCase. |
+| [`to_snake_case`](#to_snake_case) | Converts to snake_case. |
+| [`to_upper`](#to_upper) | Converts string to uppercase. |
 | [`trim`](#trim) | Removes leading and trailing whitespace. |
-| [`trim_chars`](#trimchars) | Removes specified characters from both ends. |
-| [`trim_end`](#trimend) | Alias for trim_right. Removes trailing whitespace. |
-| [`trim_left`](#trimleft) | Removes leading whitespace. |
-| [`trim_right`](#trimright) | Removes trailing whitespace. |
-| [`trim_start`](#trimstart) | Alias for trim_left. Removes leading whitespace. |
+| [`trim_chars`](#trim_chars) | Removes specified characters from both ends. |
+| [`trim_end`](#trim_end) | Alias for trim_right. Removes trailing whitespace. |
+| [`trim_left`](#trim_left) | Removes leading whitespace. |
+| [`trim_right`](#trim_right) | Removes trailing whitespace. |
+| [`trim_start`](#trim_start) | Alias for trim_left. Removes leading whitespace. |
 | [`truncate`](#truncate) | Truncates string to max length with suffix. |
 | [`upper`](#upper) | Alias for to_upper. Converts string to uppercase. |
 | [`words`](#words) | Splits string by whitespace. |
@@ -14757,51 +14759,51 @@ import { monotonic_now, monotonic_elapsed, monotonic_deadline } from "std/time"
 
 | Function | Description |
 |----------|-------------|
-| [`add_days`](#adddays) | Adds days to a Unix timestamp. |
-| [`add_hours`](#addhours) | Adds hours to a Unix timestamp. |
-| [`add_minutes`](#addminutes) | Adds minutes to a Unix timestamp. |
-| [`add_months`](#addmonths) | Adds months to a Unix timestamp with calendar-aware logic. |
-| [`add_seconds`](#addseconds) | Adds seconds to a Unix timestamp. |
-| [`add_weeks`](#addweeks) | Adds weeks to a Unix timestamp. |
-| [`add_years`](#addyears) | Adds years to a Unix timestamp with calendar-aware logic. |
+| [`add_days`](#add_days) | Adds days to a Unix timestamp. |
+| [`add_hours`](#add_hours) | Adds hours to a Unix timestamp. |
+| [`add_minutes`](#add_minutes) | Adds minutes to a Unix timestamp. |
+| [`add_months`](#add_months) | Adds months to a Unix timestamp with calendar-aware logic. |
+| [`add_seconds`](#add_seconds) | Adds seconds to a Unix timestamp. |
+| [`add_weeks`](#add_weeks) | Adds weeks to a Unix timestamp. |
+| [`add_years`](#add_years) | Adds years to a Unix timestamp with calendar-aware logic. |
 | [`after`](#after) | Checks whether the first timestamp is after the second. |
 | [`before`](#before) | Checks whether the first timestamp is before the second. |
 | [`day`](#day) | Extracts the day of the month from a Unix timestamp (UTC). |
-| [`day_of_year`](#dayofyear) | Extracts the ordinal day of the year from a timestamp (UTC). |
+| [`day_of_year`](#day_of_year) | Extracts the ordinal day of the year from a timestamp (UTC). |
 | [`diff`](#diff) | Computes the difference between two timestamps. |
-| [`duration_millis`](#durationmillis) | Creates a duration map from milliseconds (legacy utility). |
-| [`duration_secs`](#durationsecs) | Creates a duration map from seconds (legacy utility). |
+| [`duration_millis`](#duration_millis) | Creates a duration map from milliseconds (legacy utility). |
+| [`duration_secs`](#duration_secs) | Creates a duration map from seconds (legacy utility). |
 | [`elapsed`](#elapsed) | Returns the number of milliseconds elapsed since the given start time. |
 | [`equal`](#equal) | Checks whether two timestamps are equal. |
 | [`format`](#format) | Formats a Unix timestamp as a string using a strftime format pattern (UTC). |
-| [`format_in`](#formatin) | Formats a Unix timestamp as a string in the specified timezone. |
-| [`format_timestamp`](#formattimestamp) | Formats a Unix timestamp as a string (legacy alias for format()). |
-| [`from_now`](#fromnow) | Human-friendly relative time: "3 hours ago", "in 2 days", "just now". |
+| [`format_in`](#format_in) | Formats a Unix timestamp as a string in the specified timezone. |
+| [`format_timestamp`](#format_timestamp) | Formats a Unix timestamp as a string (legacy alias for format()). |
+| [`from_now`](#from_now) | Human-friendly relative time: "3 hours ago", "in 2 days", "just now". |
 | [`hour`](#hour) | Extracts the hour from a Unix timestamp (UTC). |
-| [`is_leap_year`](#isleapyear) | Checks whether the year of the given timestamp is a leap year. |
-| [`list_timezones`](#listtimezones) | Returns a list of commonly used IANA timezone identifiers. |
-| [`make_date`](#makedate) | Creates a Unix timestamp for midnight UTC from date components. |
-| [`make_time`](#maketime) | Creates a Unix timestamp from individual date and time components (UTC). |
+| [`is_leap_year`](#is_leap_year) | Checks whether the year of the given timestamp is a leap year. |
+| [`list_timezones`](#list_timezones) | Returns a list of commonly used IANA timezone identifiers. |
+| [`make_date`](#make_date) | Creates a Unix timestamp for midnight UTC from date components. |
+| [`make_time`](#make_time) | Creates a Unix timestamp from individual date and time components (UTC). |
 | [`minute`](#minute) | Extracts the minute from a Unix timestamp (UTC). |
-| [`monotonic_deadline`](#monotonicdeadline) | Checked process-local deadline. Zero is immediate; negative or overflowing timeouts return Err. |
-| [`monotonic_elapsed`](#monotonicelapsed) | Elapsed monotonic milliseconds. Negative or future starts return Err. |
-| [`monotonic_now`](#monotonicnow) | Nondecreasing process-local milliseconds from one Instant origin; not Unix time or cross-process persistent. |
-| [`monotonic_remaining`](#monotonicremaining) | Remaining monotonic milliseconds, saturating at zero. Negative deadlines return Err. |
+| [`monotonic_deadline`](#monotonic_deadline) | Checked process-local deadline. Zero is immediate; negative or overflowing timeouts return Err. |
+| [`monotonic_elapsed`](#monotonic_elapsed) | Elapsed monotonic milliseconds. Negative or future starts return Err. |
+| [`monotonic_now`](#monotonic_now) | Nondecreasing process-local milliseconds from one Instant origin; not Unix time or cross-process persistent. |
+| [`monotonic_remaining`](#monotonic_remaining) | Remaining monotonic milliseconds, saturating at zero. Negative deadlines return Err. |
 | [`month`](#month) | Extracts the month from a Unix timestamp (UTC). |
-| [`month_name`](#monthname) | Returns the full English name of the month for a timestamp (UTC). |
+| [`month_name`](#month_name) | Returns the full English name of the month for a timestamp (UTC). |
 | [`now`](#now) | Returns the current Unix timestamp in seconds (UTC). |
-| [`now_millis`](#nowmillis) | Returns the current Unix timestamp in milliseconds. |
-| [`now_nanos`](#nownanos) | Returns the current Unix timestamp in nanoseconds. |
-| [`parse_datetime`](#parsedatetime) | Parses a date/time string into a Unix timestamp using the given format. |
-| [`parse_iso`](#parseiso) | Parses an ISO 8601 (RFC 3339) string into a Unix timestamp. |
+| [`now_millis`](#now_millis) | Returns the current Unix timestamp in milliseconds. |
+| [`now_nanos`](#now_nanos) | Returns the current Unix timestamp in nanoseconds. |
+| [`parse_datetime`](#parse_datetime) | Parses a date/time string into a Unix timestamp using the given format. |
+| [`parse_iso`](#parse_iso) | Parses an ISO 8601 (RFC 3339) string into a Unix timestamp. |
 | [`second`](#second) | Extracts the second from a Unix timestamp (UTC). |
 | [`sleep`](#sleep) | Pauses execution for the specified number of milliseconds. |
-| [`time_ago`](#timeago) | Alias of from_now(): "3 hours ago", "in 2 days", "just now". |
-| [`to_iso`](#toiso) | Formats a Unix timestamp as an ISO 8601 (RFC 3339) string. |
-| [`to_timezone`](#totimezone) | Converts a Unix timestamp to a datetime map in the specified timezone. |
-| [`to_utc`](#toutc) | Converts a Unix timestamp to a UTC datetime map. |
+| [`time_ago`](#time_ago) | Alias of from_now(): "3 hours ago", "in 2 days", "just now". |
+| [`to_iso`](#to_iso) | Formats a Unix timestamp as an ISO 8601 (RFC 3339) string. |
+| [`to_timezone`](#to_timezone) | Converts a Unix timestamp to a datetime map in the specified timezone. |
+| [`to_utc`](#to_utc) | Converts a Unix timestamp to a UTC datetime map. |
 | [`weekday`](#weekday) | Extracts the day of the week from a Unix timestamp (UTC). |
-| [`weekday_name`](#weekdayname) | Returns the full English name of the weekday for a timestamp (UTC). |
+| [`weekday_name`](#weekday_name) | Returns the full English name of the weekday for a timestamp (UTC). |
 | [`year`](#year) | Extracts the year from a Unix timestamp (UTC). |
 
 #### `add_days`
@@ -16252,14 +16254,14 @@ import { parse_url, encode, encode_component } from "std/url"
 
 | Function | Description |
 |----------|-------------|
-| [`build_query`](#buildquery) | Builds a URL query string from a map of key-value pairs. |
+| [`build_query`](#build_query) | Builds a URL query string from a map of key-value pairs. |
 | [`decode`](#decode) | URL-decodes a percent-encoded string. |
 | [`encode`](#encode) | URL-encodes a string, preserving URL-safe characters. |
-| [`encode_component`](#encodecomponent) | URL-encodes a string component aggressively, safe for query parameters. |
+| [`encode_component`](#encode_component) | URL-encodes a string component aggressively, safe for query parameters. |
 | [`join`](#join) | Deprecated: use join_url() instead. Alias for backward compatibility. |
-| [`join_url`](#joinurl) | Joins a base URL with a path, handling trailing/leading slashes. |
-| [`parse_query`](#parsequery) | Parses a URL query string into a map of key-value pairs. |
-| [`parse_url`](#parseurl) | Parses a URL into its components: scheme, host, port, path, query, fragment. |
+| [`join_url`](#join_url) | Joins a base URL with a path, handling trailing/leading slashes. |
+| [`parse_query`](#parse_query) | Parses a URL query string into a map of key-value pairs. |
+| [`parse_url`](#parse_url) | Parses a URL into its components: scheme, host, port, path, query, fragment. |
 
 #### `build_query`
 
@@ -16499,11 +16501,11 @@ import { schema, validate, min_value } from "std/validate"
 |----------|-------------|
 | [`default`](#default) | Validator: supply a default when the field is absent. |
 | [`matches`](#matches) | Validator: string value must match the regex pattern. |
-| [`max_length`](#maxlength) | Validator: string (or array) length must be <= bound. |
-| [`max_value`](#maxvalue) | Validator: numeric value must be <= bound. |
-| [`min_length`](#minlength) | Validator: string (or array) length must be >= bound. |
-| [`min_value`](#minvalue) | Validator: numeric value must be >= bound. |
-| [`one_of`](#oneof) | Validator: value must equal one of the listed options. |
+| [`max_length`](#max_length) | Validator: string (or array) length must be <= bound. |
+| [`max_value`](#max_value) | Validator: numeric value must be <= bound. |
+| [`min_length`](#min_length) | Validator: string (or array) length must be >= bound. |
+| [`min_value`](#min_value) | Validator: numeric value must be >= bound. |
+| [`one_of`](#one_of) | Validator: value must equal one of the listed options. |
 | [`schema`](#schema) | Build a validation schema from a map of field names to rule lists. |
 | [`validate`](#validate) | Validate a map of input data against a schema. |
 
