@@ -121,6 +121,12 @@ pub struct TypeContext {
     /// Route builtin names bound by a top-level import:
     /// local name -> (module source, exported name)
     imported_route_names: HashMap<String, (String, String)>,
+    /// Route-name imports already executed at the current top-level point
+    /// (top-level statements run in order; function bodies run later).
+    route_imports_in_effect: HashSet<String>,
+    /// Calls already reported for import_shadows_route, keyed by AST address
+    /// (function bodies can be inferred more than once).
+    reported_route_calls: HashSet<usize>,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
     /// Cache of already-parsed module exports (to avoid re-parsing)
@@ -687,6 +693,8 @@ impl TypeContext {
             has_unresolved_import: false,
             module_aliases: vec![HashSet::new()],
             imported_route_names: HashMap::new(),
+            route_imports_in_effect: HashSet::new(),
+            reported_route_calls: HashSet::new(),
             current_file: None,
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
@@ -2208,6 +2216,15 @@ impl TypeContext {
                 wildcard,
                 ..
             } => {
+                if alias.is_none() {
+                    let in_effect: Vec<String> = self
+                        .imported_route_names
+                        .iter()
+                        .filter(|(_, (src, _))| src == source)
+                        .map(|(local, _)| local.clone())
+                        .collect();
+                    self.route_imports_in_effect.extend(in_effect);
+                }
                 self.register_import(items, source, alias.as_deref(), *wildcard);
             }
 
@@ -3506,6 +3523,11 @@ impl TypeContext {
         {
             return;
         }
+        // At top level, statements run in order: a call above the import still
+        // registers a route. Function bodies may run after any import.
+        if self.scopes.len() == 1 && !self.route_imports_in_effect.contains(name) {
+            return;
+        }
         let [pattern, handler] = arguments else {
             return;
         };
@@ -3533,10 +3555,9 @@ impl TypeContext {
             .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
         let line = self.find_line_near_call(name, Some(&format!("\"{pattern}")));
         // Function bodies can be inferred more than once; report each call once.
-        if self
-            .diagnostics
-            .iter()
-            .any(|d| matches!(d.kind, DiagnosticKind::ImportShadowsRoute) && d.line == line)
+        if !self
+            .reported_route_calls
+            .insert(arguments.as_ptr() as usize)
         {
             return;
         }

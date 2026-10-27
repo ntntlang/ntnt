@@ -1774,3 +1774,23 @@ fn test_import_shadows_route_respects_scope_shape_and_import_position() {
         lint_code("import { read_file as get } from \"std/fs\"\nget(\"/x\", fn(req) { req })\n");
     assert!(stdout.contains("read_file as fs_read_file"), "{stdout}");
 }
+
+#[test]
+fn test_import_shadows_route_top_level_order_and_distinct_calls() {
+    let count = |src: &str| {
+        let (stdout, _stderr, _) = lint_code(src);
+        stdout.matches("\"rule\": \"import_shadows_route\"").count()
+    };
+    // Top level runs in order: a route registered above the import is fine.
+    assert_eq!(
+        count("get(\"/health\", fn(req) { req })\nimport { get } from \"std/kv\"\n"),
+        0
+    );
+    // Distinct calls with overlapping patterns are each reported.
+    assert_eq!(
+        count(
+            "import { get } from \"std/kv\"\nget(\"/users/new\", fn(req) { req })\nget(\"/users\", fn(req) { req })\n"
+        ),
+        2
+    );
+}
