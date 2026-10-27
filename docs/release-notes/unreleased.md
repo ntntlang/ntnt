@@ -14,7 +14,7 @@ Every public site needs abuse limits on forms, logins and webhooks. NTNT now has
 
 **Trusted client IP.** New `req.client_ip` believes a forwarding header only when the TCP peer is inside `NTNT_TRUSTED_PROXIES` (CIDRs). `NTNT_CLIENT_IP_HEADER` picks the header (default `X-Forwarded-For`, walked right to left past trusted hops; `CF-Connecting-IP` behind Cloudflare). Otherwise it is the peer address. `req.ip` is unchanged and remains spoofable: switch limits and audit logs to `client_ip`.
 
-**Built-in limiter.** `NTNT_RATE_LIMIT=on` checks each dynamic-route request per visitor before the body is read or your handler runs: writes `NTNT_RATE_LIMIT_WRITE` (default 30/minute), reads `NTNT_RATE_LIMIT_READ` (600/minute). Over the limit: `429` with `Retry-After` and `RateLimit-*` headers, logged once per episode. Static files, OPTIONS, `/health` and `/ready` are exempt. Memory is bounded (`NTNT_RATE_LIMIT_MAX_KEYS`); IPv6 is grouped by /64. State is per process and resets on restart.
+**Built-in limiter.** `NTNT_RATE_LIMIT=on` checks each dynamic-route request per visitor before the body is read or your handler runs: writes `NTNT_RATE_LIMIT_WRITE` (default 30/minute), reads `NTNT_RATE_LIMIT_READ` (600/minute). Over the limit: `429` with `Retry-After` and `RateLimit-*` headers, logged once per episode. Static files, OPTIONS, `/health` and `/ready` are exempt. Memory is bounded (`NTNT_RATE_LIMIT_MAX_KEYS`); IPv6 clients are grouped by /64 by default (`NTNT_RATE_LIMIT_IPV6_PREFIX`). State is per process and resets on restart.
 
 **Per route and per key.**
 
@@ -28,11 +28,11 @@ let r = check_limit("contact-email:" + email, "3/day")
 if !r["allowed"] { return too_many_requests(r) }
 ```
 
-Route rates apply only with the limiter on; `check_limit` always works. Invalid rates and limiter settings fail at startup.
+Route rates apply only with the limiter on; `check_limit` always works. Invalid `NTNT_RATE_LIMIT*` / proxy settings and invalid route rates fail at startup or route registration; an invalid rate passed to `check_limit` is a runtime error when the handler calls it.
 
 **Upgrade notes.**
 - Nothing changes unless you set `NTNT_RATE_LIMIT=on` or call `check_limit`.
-- Behind a tunnel or proxy, set `NTNT_TRUSTED_PROXIES` before enabling the limiter, or every visitor shares one budget (NTNT warns once). See the Cloudflare Tunnel section of the deployment guide.
+- Behind a tunnel or proxy, set `NTNT_TRUSTED_PROXIES` before enabling the limiter, or every visitor shares one budget. NTNT warns once when a request comes from a private peer without trusted proxies. See the Cloudflare Tunnel section of the deployment guide.
 - `ntnt test` and `ntnt intent check` use the single-threaded test server, which does not apply the built-in limiter.
 - `get/post/put/patch/delete` accept an optional third argument, a route options map.
 - `STDLIB_REFERENCE.md` index links now keep underscores, fixing links such as `#flat_map`.

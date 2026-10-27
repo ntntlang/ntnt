@@ -35,6 +35,10 @@ Feature: Contact rate limit
     → they are told when to retry
     → the limit is reported
 
+  Scenario: The same mailbox with a different domain case shares the budget
+    When someone sends a message as {"email": "visitor@EXAMPLE.test"}
+    → it is rate limited
+
   Scenario: A different email has its own budget
     When someone sends a message as {"email": "other@example.test"}
     → it is accepted
