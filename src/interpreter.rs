@@ -1228,6 +1228,16 @@ impl Interpreter {
                 ))
     }
 
+    /// True when `name` is unbound or bound to the native function with that
+    /// canonical name, i.e. a spelling-keyed builtin fast path may apply.
+    fn name_resolves_to_builtin(&self, name: &str) -> bool {
+        match self.environment.borrow().get(name) {
+            None => true,
+            Some(Value::NativeFunction { name: native, .. }) => native == name,
+            Some(_) => false,
+        }
+    }
+
     /// Look up `name` in the server action registry. Returns `None` if no action is registered
     /// for this name+arity combination (caller should fall through to normal dispatch).
     fn dispatch_server_action(&mut self, name: &str, args: &[Expression]) -> Option<Result<Value>> {
@@ -6688,8 +6698,13 @@ impl Interpreter {
                         return result;
                     }
 
+                    // Built-in fast paths below are keyed by spelling. Only take them when the
+                    // name is unbound (implicit builtin) or still resolves to the native function
+                    // of that name, so user/imported definitions shadow them like any call.
+                    let builtin_spelling = self.name_resolves_to_builtin(name);
+
                     // Special handling for template(path, data) - load and render template
-                    if name == "template" && arguments.len() == 2 {
+                    if builtin_spelling && name == "template" && arguments.len() == 2 {
                         let path = self.eval_expression(&arguments[0])?;
                         let data = self.eval_expression(&arguments[1])?;
 
@@ -6721,7 +6736,7 @@ impl Interpreter {
                     }
 
                     // Special handling for compile(path) - pre-compile template
-                    if name == "compile" && arguments.len() == 1 {
+                    if builtin_spelling && name == "compile" && arguments.len() == 1 {
                         let path = self.eval_expression(&arguments[0])?;
 
                         let path_str = match &path {
@@ -6774,7 +6789,7 @@ impl Interpreter {
                     }
 
                     // Special handling for render(compiled, data) - render pre-compiled template
-                    if name == "render" && arguments.len() == 2 {
+                    if builtin_spelling && name == "render" && arguments.len() == 2 {
                         let compiled = self.eval_expression(&arguments[0])?;
                         let data = self.eval_expression(&arguments[1])?;
 
@@ -6840,7 +6855,10 @@ impl Interpreter {
                     let fs_two_path_fns = ["rename", "copy"];
                     let fs_path_content_fns = ["write_file", "append_file"];
 
-                    if fs_single_path_fns.contains(&name.as_str()) && arguments.len() == 1 {
+                    if builtin_spelling
+                        && fs_single_path_fns.contains(&name.as_str())
+                        && arguments.len() == 1
+                    {
                         let path = self.eval_expression(&arguments[0])?;
                         if let Value::String(path_str) = &path {
                             let resolved = self.resolve_path_relative_to_script(path_str);
@@ -6850,7 +6868,10 @@ impl Interpreter {
                         }
                     }
 
-                    if fs_two_path_fns.contains(&name.as_str()) && arguments.len() == 2 {
+                    if builtin_spelling
+                        && fs_two_path_fns.contains(&name.as_str())
+                        && arguments.len() == 2
+                    {
                         let from_path = self.eval_expression(&arguments[0])?;
                         let to_path = self.eval_expression(&arguments[1])?;
                         if let (Value::String(from_str), Value::String(to_str)) =
@@ -6865,7 +6886,10 @@ impl Interpreter {
                         }
                     }
 
-                    if fs_path_content_fns.contains(&name.as_str()) && arguments.len() == 2 {
+                    if builtin_spelling
+                        && fs_path_content_fns.contains(&name.as_str())
+                        && arguments.len() == 2
+                    {
                         let path = self.eval_expression(&arguments[0])?;
                         let content = self.eval_expression(&arguments[1])?;
                         if let Value::String(path_str) = &path {
@@ -6877,7 +6901,7 @@ impl Interpreter {
                     }
 
                     // Special handling for filter(arr, fn) - higher-order function
-                    if name == "filter" && arguments.len() == 2 {
+                    if builtin_spelling && name == "filter" && arguments.len() == 2 {
                         let arr = self.eval_expression(&arguments[0])?;
                         let predicate = self.eval_expression(&arguments[1])?;
 
@@ -6899,7 +6923,7 @@ impl Interpreter {
                     }
 
                     // Special handling for transform(arr, fn) - higher-order function
-                    if name == "transform" && arguments.len() == 2 {
+                    if builtin_spelling && name == "transform" && arguments.len() == 2 {
                         let arr = self.eval_expression(&arguments[0])?;
                         let transform_fn = self.eval_expression(&arguments[1])?;
 
@@ -6919,7 +6943,7 @@ impl Interpreter {
                     }
 
                     // Special handling for sort(arr) - higher-order function
-                    if name == "sort" {
+                    if builtin_spelling && name == "sort" {
                         if arguments.len() != 1 && arguments.len() != 2 {
                             return Err(IntentError::type_error(
                                 "sort() requires 1 or 2 arguments (arr, key_or_fn?)".to_string(),
@@ -7015,7 +7039,7 @@ impl Interpreter {
                     }
 
                     // Special handling for sort_by(arr, comparator) - higher-order function
-                    if name == "sort_by" {
+                    if builtin_spelling && name == "sort_by" {
                         if arguments.len() != 2 {
                             return Err(IntentError::type_error(
                                 "sort_by() requires 2 arguments (arr, comparator)".to_string(),
@@ -7028,7 +7052,10 @@ impl Interpreter {
                     }
 
                     // Special handling for sort_desc(arr, key_or_fn?) - higher-order function
-                    if name == "sort_desc" && (arguments.len() == 1 || arguments.len() == 2) {
+                    if builtin_spelling
+                        && name == "sort_desc"
+                        && (arguments.len() == 1 || arguments.len() == 2)
+                    {
                         let arr = self.eval_expression(&arguments[0])?;
                         let key_or_fn = if arguments.len() == 2 {
                             Some(self.eval_expression(&arguments[1])?)
@@ -7067,7 +7094,7 @@ impl Interpreter {
                     }
 
                     // Special handling for find(arr, fn) - higher-order function
-                    if name == "find" && arguments.len() == 2 {
+                    if builtin_spelling && name == "find" && arguments.len() == 2 {
                         let arr = self.eval_expression(&arguments[0])?;
                         let predicate = self.eval_expression(&arguments[1])?;
 
@@ -7088,7 +7115,7 @@ impl Interpreter {
                     }
 
                     // Special handling for any(arr, fn) - higher-order function
-                    if name == "any" && arguments.len() == 2 {
+                    if builtin_spelling && name == "any" && arguments.len() == 2 {
                         let arr = self.eval_expression(&arguments[0])?;
                         let predicate = self.eval_expression(&arguments[1])?;
 
@@ -7108,7 +7135,7 @@ impl Interpreter {
                     }
 
                     // Special handling for all(arr, fn) - higher-order function
-                    if name == "all" && arguments.len() == 2 {
+                    if builtin_spelling && name == "all" && arguments.len() == 2 {
                         let arr = self.eval_expression(&arguments[0])?;
                         let predicate = self.eval_expression(&arguments[1])?;
 
@@ -7129,7 +7156,7 @@ impl Interpreter {
 
                     // Special handling for count(arr, fn) - higher-order function
                     // Only intercept when first arg is array (to avoid conflict with std/string count)
-                    if name == "count" && arguments.len() == 2 {
+                    if builtin_spelling && name == "count" && arguments.len() == 2 {
                         let arr = self.eval_expression(&arguments[0])?;
                         if let Value::Array(items) = arr {
                             let predicate = self.eval_expression(&arguments[1])?;
@@ -7146,7 +7173,7 @@ impl Interpreter {
                     }
 
                     // Special handling for reduce(arr, initial, fn) - higher-order function
-                    if name == "reduce" && arguments.len() == 3 {
+                    if builtin_spelling && name == "reduce" && arguments.len() == 3 {
                         let arr = self.eval_expression(&arguments[0])?;
                         let mut acc = self.eval_expression(&arguments[1])?;
                         let func = self.eval_expression(&arguments[2])?;
@@ -7164,7 +7191,7 @@ impl Interpreter {
                     }
 
                     // Special handling for flat_map(arr, fn) - higher-order function
-                    if name == "flat_map" && arguments.len() == 2 {
+                    if builtin_spelling && name == "flat_map" && arguments.len() == 2 {
                         let arr = self.eval_expression(&arguments[0])?;
                         let func = self.eval_expression(&arguments[1])?;
 
@@ -7189,7 +7216,10 @@ impl Interpreter {
                     // Only intercept if first arg is a route pattern (starts with /)
                     // NOT if it's a URL (starts with http:// or https://) - those are HTTP client calls
                     let http_methods = ["get", "post", "put", "delete", "patch"];
-                    if http_methods.contains(&name.as_str()) && arguments.len() == 2 {
+                    if builtin_spelling
+                        && http_methods.contains(&name.as_str())
+                        && arguments.len() == 2
+                    {
                         // Use eval_route_pattern to auto-detect route parameters:
                         // "/users/{id}" preserves {id} as a route param instead of interpolating
                         let pattern = self.eval_route_pattern(&arguments[0])?;
@@ -16273,6 +16303,95 @@ listen(0)
                 expected,
                 "{path}"
             );
+        }
+    }
+
+    #[test]
+    fn test_user_functions_shadow_spelling_keyed_builtins() {
+        // Spelling-keyed builtin fast paths must not steal calls from user
+        // definitions of the same name (top-level, imported, or local closure).
+        let two_arg = [
+            "filter",
+            "transform",
+            "find",
+            "any",
+            "all",
+            "count",
+            "flat_map",
+            "sort",
+            "sort_by",
+            "sort_desc",
+            "template",
+            "render",
+        ];
+        for name in two_arg {
+            let src = format!(
+                "fn {name}(a, b) {{\n    return \"USER\"\n}}\n{name}([1, 2], fn(x) {{ true }})"
+            );
+            match eval(&src) {
+                Ok(Value::String(s)) => assert_eq!(s, "USER", "{name}"),
+                other => panic!("{name}: user function was not called: {other:?}"),
+            }
+        }
+        for (name, params, call) in [
+            ("reduce", "a, b, c", "reduce([1], 0, fn(a, x) { a })"),
+            ("compile", "p", "compile(\"x.html\")"),
+            ("read_file", "p", "read_file(\"missing.txt\")"),
+            (
+                "write_file",
+                "p, c",
+                "write_file(\"never-written.txt\", \"x\")",
+            ),
+        ] {
+            let src = format!("fn {name}({params}) {{\n    return \"USER\"\n}}\n{call}");
+            match eval(&src) {
+                Ok(Value::String(s)) => assert_eq!(s, "USER", "{name}"),
+                other => panic!("{name}: user function was not called: {other:?}"),
+            }
+        }
+        assert!(!std::path::Path::new("never-written.txt").exists());
+        // A closure bound to a builtin spelling also shadows it.
+        match eval("let filter = fn(a, b) { \"LOCAL\" }\nfilter([1], fn(x) { true })") {
+            Ok(Value::String(s)) => assert_eq!(s, "LOCAL"),
+            other => panic!("local closure: {other:?}"),
+        }
+        // Builtins, including aliased imports, keep their behavior.
+        match eval("filter([1, 2, 3], fn(x) { x > 1 })") {
+            Ok(Value::Array(a)) => assert_eq!(a.len(), 2),
+            other => panic!("builtin filter: {other:?}"),
+        }
+        match eval(
+            "import { sort_by as sb } from \"std/collections\"\nsb([1, 3, 2], fn(a, b) { b - a })",
+        ) {
+            Ok(Value::Array(a)) => assert!(matches!(a[0], Value::Int(3))),
+            other => panic!("aliased sort_by: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_imported_helper_shadows_spelling_keyed_builtin() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.tnt"),
+            "fn filter(xs, f) {\n    return \"IMPORTED\"\n}\n",
+        )
+        .unwrap();
+        let main = dir.path().join("main.tnt");
+        std::fs::write(
+            &main,
+            "import { filter } from \"./lib.tnt\"\nlet out = filter([1, 2], fn(x) { true })\n",
+        )
+        .unwrap();
+        let src = std::fs::read_to_string(&main).unwrap();
+        let ast = crate::parser::Parser::new(crate::lexer::Lexer::new(&src).collect())
+            .parse()
+            .unwrap();
+        let mut it = Interpreter::new();
+        it.set_current_file(main.to_str().unwrap());
+        it.eval(&ast).unwrap();
+        match it.get_global("out") {
+            Some(Value::String(s)) => assert_eq!(s, "IMPORTED"),
+            other => panic!("imported filter was not called: {other:?}"),
         }
     }
 
