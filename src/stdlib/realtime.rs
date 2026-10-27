@@ -614,7 +614,12 @@ async fn next_frame(
         biased;
         _ = s.shutdown.changed() => None,
         received = rx.recv() => match received {
-            Ok(event) => Some((Ok(Bytes::from_owner(Frame(event))), s)),
+            Ok(event) => {
+                // Delivered: the client is progressing even if it waited idle
+                // for a long time before this event.
+                slot.last_progress_ms.store(monotonic_ms(), Ordering::Release);
+                Some((Ok(Bytes::from_owner(Frame(event))), s))
+            }
             // A slow consumer loses its connection rather than silently
             // skipping events; the client reconnects and reconciles.
             Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -884,6 +889,33 @@ mod tests {
         // Never enough: every stalled stream with a backlog is a candidate,
         // but a stream that just progressed is not.
         assert_eq!(evict_stalled(|| false), 0);
+    }
+
+    #[tokio::test]
+    async fn long_idle_stream_that_just_received_is_not_stalled() {
+        use futures_util::StreamExt;
+        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let spec = SseSpec {
+            bus: bus("test.idle"),
+            heartbeat: Duration::from_secs(60),
+            retry_ms: None,
+        };
+        let mut stream = Box::pin(open_stream(&spec).unwrap());
+        stream.next().await.unwrap().unwrap();
+        // Waits idle past the stall age, then a burst arrives.
+        let waiting = tokio::spawn(async move {
+            let first = stream.next().await.unwrap().unwrap();
+            (stream, first)
+        });
+        tokio::time::sleep(Duration::from_millis(STALL_AGE_MS * 2)).await;
+        for n in 0..3 {
+            publish_value(&[Value::Broadcast(spec.bus.clone()), Value::Int(n)]).unwrap();
+        }
+        let (mut stream, first) = waiting.await.unwrap();
+        assert_eq!(&first[..], b"data: 0\n\n");
+        // Between polls, with unread events, it must not look stalled.
+        assert_eq!(evict_stalled(|| false), 0);
+        assert_eq!(&stream.next().await.unwrap().unwrap()[..], b"data: 1\n\n");
     }
 
     #[test]
