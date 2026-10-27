@@ -40,6 +40,9 @@ impl std::fmt::Debug for ChannelSender {
     }
 }
 
+/// Signature of a builtin that receives the interpreter.
+pub type ContextFn = fn(&mut Interpreter, &[Value]) -> Result<Value>;
+
 /// Runtime values
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -121,6 +124,17 @@ pub enum Value {
         arity: usize,
         max_arity: usize,
         func: fn(&[Value]) -> Result<Value>,
+        requires: Option<RuntimeCapability>,
+    },
+
+    /// Builtin that needs interpreter context (calling user closures, the
+    /// current file, server state). Dispatched like any value: the function
+    /// pointer is its identity, so same-named user definitions shadow it.
+    ContextFunction {
+        name: String,
+        arity: usize,
+        max_arity: usize,
+        func: ContextFn,
         requires: Option<RuntimeCapability>,
     },
 
@@ -252,7 +266,7 @@ impl Value {
             Value::EnumValue { enum_name, .. } => enum_name,
             Value::EnumConstructor { .. } => "EnumConstructor",
             Value::Function { .. } => "Function",
-            Value::NativeFunction { .. } => "NativeFunction",
+            Value::NativeFunction { .. } | Value::ContextFunction { .. } => "NativeFunction",
             Value::TaskHandle(_) => "Task",
             Value::ProcessHandle(_) => "Process",
             Value::TcpListener(_) => "TcpListener",
@@ -370,7 +384,9 @@ impl fmt::Display for Value {
                 write!(f, "<constructor {}::{}({})>", enum_name, variant, arity)
             }
             Value::Function { name, .. } => write!(f, "<fn {}>", name),
-            Value::NativeFunction { name, .. } => write!(f, "<native fn {}>", name),
+            Value::NativeFunction { name, .. } | Value::ContextFunction { name, .. } => {
+                write!(f, "<native fn {}>", name)
+            }
             Value::TaskHandle(id) => write!(f, "Task({})", id),
             Value::ProcessHandle(id) => write!(f, "Process({})", id),
             Value::TcpListener(_) => f.write_str("<TcpListener>"),
@@ -540,7 +556,12 @@ impl Environment {
     /// are skipped to match the lint rule, which only resolves variables.
     pub fn has_data_binding(&self, name: &str) -> bool {
         if let Some(value) = self.values.get(name) {
-            !matches!(value, Value::Function { .. } | Value::NativeFunction { .. })
+            !matches!(
+                value,
+                Value::Function { .. }
+                    | Value::NativeFunction { .. }
+                    | Value::ContextFunction { .. }
+            )
         } else if let Some(ref parent) = self.parent {
             parent.borrow().has_data_binding(name)
         } else {
@@ -2000,7 +2021,9 @@ impl Interpreter {
 
         // Verify it's a function
         match &func {
-            Value::Function { .. } | Value::NativeFunction { .. } => {}
+            Value::Function { .. }
+            | Value::NativeFunction { .. }
+            | Value::ContextFunction { .. } => {}
             _ => {
                 return Err(IntentError::type_error(format!(
                     "Expected function, got {}",
@@ -3869,16 +3892,12 @@ impl Interpreter {
         // @example get("/health", fn(req) { return json(map { "ok": true }) }) => Unit ~ "Register health check route"
         self.environment.borrow_mut().define(
             "get".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "get".to_string(),
                 arity: 2,
-                max_arity: 2,
-                requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "HTTP route functions must be called directly".to_string(),
-                    ))
-                },
+                max_arity: 3,
+                requires: Some(RuntimeCapability::HttpServer),
+                func: context_builtins::route_get,
             },
         );
 
@@ -3896,16 +3915,12 @@ impl Interpreter {
         // @example post("/users", fn(req) { return json(map { "created": true }) }) => Unit ~ "Register user creation route"
         self.environment.borrow_mut().define(
             "post".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "post".to_string(),
                 arity: 2,
-                max_arity: 2,
-                requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "HTTP route functions must be called directly".to_string(),
-                    ))
-                },
+                max_arity: 3,
+                requires: Some(RuntimeCapability::HttpServer),
+                func: context_builtins::route_post,
             },
         );
 
@@ -3923,16 +3938,12 @@ impl Interpreter {
         // @example put("/users/{id}", fn(req) { return json(map { "updated": true }) }) => Unit ~ "Register user update route"
         self.environment.borrow_mut().define(
             "put".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "put".to_string(),
                 arity: 2,
-                max_arity: 2,
-                requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "HTTP route functions must be called directly".to_string(),
-                    ))
-                },
+                max_arity: 3,
+                requires: Some(RuntimeCapability::HttpServer),
+                func: context_builtins::route_put,
             },
         );
 
@@ -3950,16 +3961,12 @@ impl Interpreter {
         // @example delete("/users/{id}", fn(req) { return json(map { "deleted": true }) }) => Unit ~ "Register user deletion route"
         self.environment.borrow_mut().define(
             "delete".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "delete".to_string(),
                 arity: 2,
-                max_arity: 2,
-                requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "HTTP route functions must be called directly".to_string(),
-                    ))
-                },
+                max_arity: 3,
+                requires: Some(RuntimeCapability::HttpServer),
+                func: context_builtins::route_delete,
             },
         );
 
@@ -3977,16 +3984,12 @@ impl Interpreter {
         // @example patch("/users/{id}", fn(req) { return json(map { "patched": true }) }) => Unit ~ "Register partial update route"
         self.environment.borrow_mut().define(
             "patch".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "patch".to_string(),
                 arity: 2,
-                max_arity: 2,
-                requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "HTTP route functions must be called directly".to_string(),
-                    ))
-                },
+                max_arity: 3,
+                requires: Some(RuntimeCapability::HttpServer),
+                func: context_builtins::route_patch,
             },
         );
 
@@ -4151,16 +4154,12 @@ impl Interpreter {
         // @gotcha Use \{{ and \}} for literal template delimiters where supported.
         self.environment.borrow_mut().define(
             "template".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "template".to_string(),
                 arity: 2,
                 max_arity: 2,
                 requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "template() must be called directly, not stored in a variable".to_string(),
-                    ))
-                },
+                func: context_builtins::template,
             },
         );
 
@@ -4181,16 +4180,12 @@ impl Interpreter {
         // @example compile("views/layout.html") => { "_template_id": 1, "path": "views/layout.html" } ~ "Pre-compile a template"
         self.environment.borrow_mut().define(
             "compile".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "compile".to_string(),
                 arity: 1,
                 max_arity: 1,
                 requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "compile() must be called directly, not stored in a variable".to_string(),
-                    ))
-                },
+                func: context_builtins::compile,
             },
         );
 
@@ -4214,16 +4209,12 @@ impl Interpreter {
         // @example render(tpl, map { "title": "Home" }) => "<html>..." ~ "Render a compiled template"
         self.environment.borrow_mut().define(
             "render".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "render".to_string(),
                 arity: 2,
                 max_arity: 2,
                 requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "render() must be called directly, not stored in a variable".to_string(),
-                    ))
-                },
+                func: context_builtins::render,
             },
         );
 
@@ -4243,16 +4234,102 @@ impl Interpreter {
         // @example transform(["a", "b"], fn(s) { s + "!" }) => ["a!", "b!"] ~ "Transform strings"
         self.environment.borrow_mut().define(
             "transform".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "transform".to_string(),
                 arity: 2,
                 max_arity: 2,
                 requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "transform() must be called directly, not stored in a variable".to_string(),
-                    ))
-                },
+                func: context_builtins::transform,
+            },
+        );
+
+        // @ntnt filter
+        // @signature filter(arr: Array, predicate: Function) -> Array
+        // Return the elements for which the predicate is truthy.
+        // @tags #collections, #higher-order
+        // @see_also filter, find, any, all, count, transform
+        // @since v0.2.0
+        // @example filter([1, 2, 3], fn(x) { x > 1 }) => [2, 3] ~ "Keep elements over 1"
+        self.environment.borrow_mut().define(
+            "filter".to_string(),
+            Value::ContextFunction {
+                name: "filter".to_string(),
+                arity: 2,
+                max_arity: 2,
+                requires: None,
+                func: context_builtins::filter,
+            },
+        );
+
+        // @ntnt find
+        // @signature find(arr: Array, predicate: Function) -> Option<Any>
+        // Return the first element for which the predicate is truthy, or None.
+        // @tags #collections, #higher-order
+        // @see_also filter, find, any, all, count, transform
+        // @since v0.2.0
+        // @example find([1, 2, 3], fn(x) { x > 1 }) => Some(2) ~ "First element over 1"
+        self.environment.borrow_mut().define(
+            "find".to_string(),
+            Value::ContextFunction {
+                name: "find".to_string(),
+                arity: 2,
+                max_arity: 2,
+                requires: None,
+                func: context_builtins::find,
+            },
+        );
+
+        // @ntnt any
+        // @signature any(arr: Array, predicate: Function) -> Bool
+        // True if the predicate is truthy for at least one element.
+        // @tags #collections, #higher-order
+        // @see_also filter, find, any, all, count, transform
+        // @since v0.2.0
+        // @example any([1, 2, 3], fn(x) { x > 2 }) => true ~ "Some element over 2"
+        self.environment.borrow_mut().define(
+            "any".to_string(),
+            Value::ContextFunction {
+                name: "any".to_string(),
+                arity: 2,
+                max_arity: 2,
+                requires: None,
+                func: context_builtins::any,
+            },
+        );
+
+        // @ntnt all
+        // @signature all(arr: Array, predicate: Function) -> Bool
+        // True if the predicate is truthy for every element.
+        // @tags #collections, #higher-order
+        // @see_also filter, find, any, all, count, transform
+        // @since v0.2.0
+        // @example all([1, 2, 3], fn(x) { x > 0 }) => true ~ "Every element positive"
+        self.environment.borrow_mut().define(
+            "all".to_string(),
+            Value::ContextFunction {
+                name: "all".to_string(),
+                arity: 2,
+                max_arity: 2,
+                requires: None,
+                func: context_builtins::all,
+            },
+        );
+
+        // @ntnt count
+        // @signature count(arr: Array | String, predicate_or_substr: Function | String) -> Int
+        // Count array elements matching a predicate, or substring occurrences in a string.
+        // @tags #collections, #higher-order
+        // @see_also filter, find, any, all, count, transform
+        // @since v0.2.0
+        // @example count([1, 2, 3], fn(x) { x > 1 }) => 2 ~ "Count matching elements"
+        self.environment.borrow_mut().define(
+            "count".to_string(),
+            Value::ContextFunction {
+                name: "count".to_string(),
+                arity: 2,
+                max_arity: 2,
+                requires: None,
+                func: context_builtins::count,
             },
         );
 
@@ -4273,16 +4350,12 @@ impl Interpreter {
         // @example reduce(["a", "b", "c"], "", fn(acc, s) { acc + s }) => "abc" ~ "Concatenate strings"
         self.environment.borrow_mut().define(
             "reduce".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "reduce".to_string(),
                 arity: 3,
                 max_arity: 3,
                 requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "reduce() must be called directly, not stored in a variable".to_string(),
-                    ))
-                },
+                func: context_builtins::reduce,
             },
         );
 
@@ -4303,16 +4376,12 @@ impl Interpreter {
         // @example flat_map([1, 2, 3], fn(x) { [x, x * 10] }) => [1, 10, 2, 20, 3, 30] ~ "Expand each element"
         self.environment.borrow_mut().define(
             "flat_map".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "flat_map".to_string(),
                 arity: 2,
                 max_arity: 2,
                 requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "flat_map() must be called directly, not stored in a variable".to_string(),
-                    ))
-                },
+                func: context_builtins::flat_map,
             },
         );
 
@@ -4332,16 +4401,12 @@ impl Interpreter {
         // @example sort_desc([map { "age": 30 }, map { "age": 20 }], "age") => [{ "age": 30 }, { "age": 20 }] ~ "Sort by field descending"
         self.environment.borrow_mut().define(
             "sort_desc".to_string(),
-            Value::NativeFunction {
+            Value::ContextFunction {
                 name: "sort_desc".to_string(),
                 arity: 1,
                 max_arity: 2,
                 requires: None,
-                func: |_args| {
-                    Err(IntentError::runtime_error(
-                        "sort_desc() must be called directly, not stored in a variable".to_string(),
-                    ))
-                },
+                func: context_builtins::sort_desc,
             },
         );
 
@@ -4499,6 +4564,7 @@ impl Interpreter {
                 self.loaded_modules.insert(name, module.clone());
             }
         }
+        context_builtins::install_module_overrides(&mut self.loaded_modules);
     }
 
     fn define_prelude(&mut self) {
@@ -4521,7 +4587,7 @@ impl Interpreter {
             (
                 "std/collections",
                 &[
-                    "keys", "values", "entries", "has_key", "get_key", "reverse", "sort",
+                    "keys", "values", "entries", "has_key", "get_key", "reverse", "sort", "sort_by",
                 ],
             ),
             (
@@ -4556,7 +4622,10 @@ impl Interpreter {
     }
 
     fn is_builtin_export(&self, name: &str, value: &Value) -> bool {
-        if matches!(value, Value::NativeFunction { .. }) {
+        if matches!(
+            value,
+            Value::NativeFunction { .. } | Value::ContextFunction { .. }
+        ) {
             return true;
         }
 
@@ -6723,621 +6792,37 @@ impl Interpreter {
                     if let Some(result) = self.dispatch_server_action(name, arguments) {
                         return result;
                     }
-
-                    // Special handling for template(path, data) - load and render template
-                    if name == "template" && arguments.len() == 2 {
-                        let path = self.eval_expression(&arguments[0])?;
-                        let data = self.eval_expression(&arguments[1])?;
-
-                        let path_str = match &path {
-                            Value::String(s) => s.clone(),
-                            _ => {
-                                return Err(IntentError::type_error(
-                                    "template() first argument must be a string path".to_string(),
-                                ))
-                            }
-                        };
-
-                        let data_map = match &data {
-                            Value::Map(m) => m.clone(),
-                            _ => {
-                                return Err(IntentError::type_error(
-                                    "template() second argument must be a map".to_string(),
-                                ))
-                            }
-                        };
-
-                        // Load or reuse parsed template parts
-                        let base_path = self.current_file.clone();
-                        let parts =
-                            self.get_cached_template_parts(&path_str, base_path.as_deref())?;
-
-                        // Render with data
-                        return self.render_template_parts_with_data(parts.as_slice(), &data_map);
-                    }
-
-                    // Special handling for compile(path) - pre-compile template
-                    if name == "compile" && arguments.len() == 1 {
-                        let path = self.eval_expression(&arguments[0])?;
-
-                        let path_str = match &path {
-                            Value::String(s) => s.clone(),
-                            _ => {
-                                return Err(IntentError::type_error(
-                                    "compile() argument must be a string path".to_string(),
-                                ))
-                            }
-                        };
-
-                        // Load template file
-                        let base_path = self.current_file.as_deref();
-                        let content =
-                            crate::stdlib::template::load_template_file(&path_str, base_path)?;
-
-                        // Resolve the full path for mtime tracking
-                        let resolved_path = if let Some(base) = base_path {
-                            let base_dir = std::path::Path::new(base)
-                                .parent()
-                                .unwrap_or(std::path::Path::new("."));
-                            base_dir.join(&path_str)
-                        } else {
-                            std::path::PathBuf::from(&path_str)
-                        };
-                        let resolved_str = resolved_path.to_string_lossy().to_string();
-                        let mtime = std::fs::metadata(&resolved_path)
-                            .ok()
-                            .and_then(|m| m.modified().ok());
-
-                        // Create compiled template
-                        let id = crate::stdlib::template::get_next_template_id();
-                        let compiled = crate::stdlib::template::CompiledTemplate {
-                            id,
-                            path: path_str.clone(),
-                            resolved_path: resolved_str,
-                            content,
-                            mtime,
-                        };
-
-                        // Store in cache
-                        crate::stdlib::template::store_compiled_template(id, compiled);
-
-                        // Return a map representing the compiled template
-                        let mut result = HashMap::new();
-                        result.insert("_template_id".to_string(), Value::Int(id as i64));
-                        result.insert("path".to_string(), Value::String(path_str));
-
-                        return Ok(Value::Map(result));
-                    }
-
-                    // Special handling for render(compiled, data) - render pre-compiled template
-                    if name == "render" && arguments.len() == 2 {
-                        let compiled = self.eval_expression(&arguments[0])?;
-                        let data = self.eval_expression(&arguments[1])?;
-
-                        // Get template ID from compiled template
-                        let template_id = match &compiled {
-                            Value::Map(m) => match m.get("_template_id") {
-                                Some(Value::Int(id)) => *id as u64,
-                                _ => {
-                                    return Err(IntentError::type_error(
-                                        "render() first argument must be a compiled template"
-                                            .to_string(),
-                                    ))
-                                }
-                            },
-                            _ => {
-                                return Err(IntentError::type_error(
-                                    "render() first argument must be a compiled template"
-                                        .to_string(),
-                                ))
-                            }
-                        };
-
-                        let data_map = match &data {
-                            Value::Map(m) => m.clone(),
-                            _ => {
-                                return Err(IntentError::type_error(
-                                    "render() second argument must be a map".to_string(),
-                                ))
-                            }
-                        };
-
-                        // Keep the compiled template's file identity for imports.
-                        let template =
-                            match crate::stdlib::template::get_compiled_template(template_id) {
-                                Some(t) => t,
-                                None => {
-                                    return Err(IntentError::runtime_error(
-                                        "Template not found in cache".to_string(),
-                                    ))
-                                }
-                            };
-
-                        // Render with data
-                        return self.render_template_with_data(
-                            &template.content,
-                            &data_map,
-                            std::path::Path::new(&template.resolved_path),
-                        );
-                    }
-
-                    // Special handling for std/fs functions - resolve paths relative to script
-                    // This makes apps portable: `ntnt run path/to/app.tnt` works from any directory
-                    let fs_single_path_fns = [
-                        "read_file",
-                        "read_bytes",
-                        "exists",
-                        "is_file",
-                        "is_dir",
-                        "mkdir",
-                        "mkdir_all",
-                        "readdir",
-                        "remove",
-                        "remove_dir",
-                        "remove_dir_all",
-                        "file_size",
-                    ];
-                    let fs_two_path_fns = ["rename", "copy"];
-                    let fs_path_content_fns = ["write_file", "append_file"];
-
-                    if fs_single_path_fns.contains(&name.as_str()) && arguments.len() == 1 {
-                        let path = self.eval_expression(&arguments[0])?;
-                        if let Value::String(path_str) = &path {
-                            let resolved = self.resolve_path_relative_to_script(path_str);
-                            let resolved_value = Value::String(resolved);
-                            let callee = self.eval_expression(function)?;
-                            return self.call_function(callee, vec![resolved_value]);
-                        }
-                    }
-
-                    if fs_two_path_fns.contains(&name.as_str()) && arguments.len() == 2 {
-                        let from_path = self.eval_expression(&arguments[0])?;
-                        let to_path = self.eval_expression(&arguments[1])?;
-                        if let (Value::String(from_str), Value::String(to_str)) =
-                            (&from_path, &to_path)
-                        {
-                            let resolved_from =
-                                Value::String(self.resolve_path_relative_to_script(from_str));
-                            let resolved_to =
-                                Value::String(self.resolve_path_relative_to_script(to_str));
-                            let callee = self.eval_expression(function)?;
-                            return self.call_function(callee, vec![resolved_from, resolved_to]);
-                        }
-                    }
-
-                    if fs_path_content_fns.contains(&name.as_str()) && arguments.len() == 2 {
-                        let path = self.eval_expression(&arguments[0])?;
-                        let content = self.eval_expression(&arguments[1])?;
-                        if let Value::String(path_str) = &path {
-                            let resolved =
-                                Value::String(self.resolve_path_relative_to_script(path_str));
-                            let callee = self.eval_expression(function)?;
-                            return self.call_function(callee, vec![resolved, content]);
-                        }
-                    }
-
-                    // Special handling for filter(arr, fn) - higher-order function
-                    if name == "filter" && arguments.len() == 2 {
-                        let arr = self.eval_expression(&arguments[0])?;
-                        let predicate = self.eval_expression(&arguments[1])?;
-
-                        if let Value::Array(items) = arr {
-                            let mut result = Vec::new();
-                            for item in items {
-                                let should_include =
-                                    self.call_function(predicate.clone(), vec![item.clone()])?;
-                                if should_include.is_truthy() {
-                                    result.push(item);
-                                }
-                            }
-                            return Ok(Value::Array(result));
-                        } else {
-                            return Err(IntentError::type_error(
-                                "filter() requires an array as first argument".to_string(),
-                            ));
-                        }
-                    }
-
-                    // Special handling for transform(arr, fn) - higher-order function
-                    if name == "transform" && arguments.len() == 2 {
-                        let arr = self.eval_expression(&arguments[0])?;
-                        let transform_fn = self.eval_expression(&arguments[1])?;
-
-                        if let Value::Array(items) = arr {
-                            let mut result = Vec::new();
-                            for item in items {
-                                let transformed =
-                                    self.call_function(transform_fn.clone(), vec![item])?;
-                                result.push(transformed);
-                            }
-                            return Ok(Value::Array(result));
-                        } else {
-                            return Err(IntentError::type_error(
-                                "transform() requires an array as first argument".to_string(),
-                            ));
-                        }
-                    }
-
-                    // Special handling for sort(arr) - higher-order function
-                    if name == "sort" {
-                        if arguments.len() != 1 && arguments.len() != 2 {
-                            return Err(IntentError::type_error(
-                                "sort() requires 1 or 2 arguments (arr, key_or_fn?)".to_string(),
-                            ));
-                        }
-
-                        let arr = self.eval_expression(&arguments[0])?;
-                        let key_or_fn = if arguments.len() == 2 {
-                            Some(self.eval_expression(&arguments[1])?)
-                        } else {
-                            None
-                        };
-
-                        if let Value::Array(mut items) = arr {
-                            if let Some(key_or_fn) = key_or_fn {
-                                let mut keyed: Vec<(Value, Value)> = Vec::new();
-                                for item in &items {
-                                    let key = match &key_or_fn {
-                                        Value::String(field) => {
-                                            if let Value::Map(m) = item {
-                                                m.get(field).cloned().unwrap_or(Value::Unit)
-                                            } else {
-                                                item.clone()
-                                            }
-                                        }
-                                        func @ (Value::Function { .. }
-                                        | Value::NativeFunction { .. }) => {
-                                            self.call_function(func.clone(), vec![item.clone()])?
-                                        }
-                                        _ => item.clone(),
-                                    };
-                                    keyed.push((key, item.clone()));
-                                }
-                                keyed.sort_by(|(a, _), (b, _)| Self::compare_values(a, b));
-                                items = keyed.into_iter().map(|(_, v)| v).collect();
-                                return Ok(Value::Array(items));
-                            }
-
-                            let mut all_int = true;
-                            let mut all_float = true;
-                            let mut all_string = true;
-
-                            for item in &items {
-                                match item {
-                                    Value::Int(_) => {
-                                        all_float = false;
-                                        all_string = false;
-                                    }
-                                    Value::Float(_) => {
-                                        all_int = false;
-                                        all_string = false;
-                                    }
-                                    Value::String(_) => {
-                                        all_int = false;
-                                        all_float = false;
-                                    }
-                                    _ => {
-                                        all_int = false;
-                                        all_float = false;
-                                        all_string = false;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if all_int {
-                                items.sort_by(|a, b| match (a, b) {
-                                    (Value::Int(ai), Value::Int(bi)) => ai.cmp(bi),
-                                    _ => std::cmp::Ordering::Equal,
-                                });
-                            } else if all_float {
-                                items.sort_by(|a, b| match (a, b) {
-                                    (Value::Float(af), Value::Float(bf)) => {
-                                        af.partial_cmp(bf).unwrap_or(std::cmp::Ordering::Equal)
-                                    }
-                                    _ => std::cmp::Ordering::Equal,
-                                });
-                            } else if all_string {
-                                items.sort_by(|a, b| match (a, b) {
-                                    (Value::String(sa), Value::String(sb)) => sa.cmp(sb),
-                                    _ => std::cmp::Ordering::Equal,
-                                });
-                            } else {
-                                items.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
-                            }
-
-                            return Ok(Value::Array(items));
-                        } else {
-                            return Err(IntentError::type_error(
-                                "sort() requires an array as first argument".to_string(),
-                            ));
-                        }
-                    }
-
-                    // Special handling for sort_by(arr, comparator) - higher-order function
-                    if name == "sort_by" {
-                        if arguments.len() != 2 {
-                            return Err(IntentError::type_error(
-                                "sort_by() requires 2 arguments (arr, comparator)".to_string(),
-                            ));
-                        }
-
-                        let arr = self.eval_expression(&arguments[0])?;
-                        let comparator = self.eval_expression(&arguments[1])?;
-                        return self.sort_by_hof(arr, comparator);
-                    }
-
-                    // Special handling for sort_desc(arr, key_or_fn?) - higher-order function
-                    if name == "sort_desc" && (arguments.len() == 1 || arguments.len() == 2) {
-                        let arr = self.eval_expression(&arguments[0])?;
-                        let key_or_fn = if arguments.len() == 2 {
-                            Some(self.eval_expression(&arguments[1])?)
-                        } else {
-                            None
-                        };
-
-                        if let Value::Array(mut items) = arr {
-                            let mut keyed: Vec<(Value, Value)> = Vec::new();
-                            for item in &items {
-                                let key = match &key_or_fn {
-                                    None => item.clone(),
-                                    Some(Value::String(field)) => {
-                                        if let Value::Map(m) = item {
-                                            m.get(field).cloned().unwrap_or(Value::Unit)
-                                        } else {
-                                            item.clone()
-                                        }
-                                    }
-                                    Some(
-                                        func @ (Value::Function { .. }
-                                        | Value::NativeFunction { .. }),
-                                    ) => self.call_function(func.clone(), vec![item.clone()])?,
-                                    _ => item.clone(),
-                                };
-                                keyed.push((key, item.clone()));
-                            }
-                            keyed.sort_by(|(a, _), (b, _)| Self::compare_values(b, a));
-                            items = keyed.into_iter().map(|(_, v)| v).collect();
-                            return Ok(Value::Array(items));
-                        } else {
-                            return Err(IntentError::type_error(
-                                "sort_desc() requires an array as first argument".to_string(),
-                            ));
-                        }
-                    }
-
-                    // Special handling for find(arr, fn) - higher-order function
-                    if name == "find" && arguments.len() == 2 {
-                        let arr = self.eval_expression(&arguments[0])?;
-                        let predicate = self.eval_expression(&arguments[1])?;
-
-                        if let Value::Array(items) = arr {
-                            for item in items {
-                                let result =
-                                    self.call_function(predicate.clone(), vec![item.clone()])?;
-                                if result.is_truthy() {
-                                    return Ok(Value::some(item));
-                                }
-                            }
-                            return Ok(Value::none());
-                        } else {
-                            return Err(IntentError::type_error(
-                                "find() requires an array as first argument".to_string(),
-                            ));
-                        }
-                    }
-
-                    // Special handling for any(arr, fn) - higher-order function
-                    if name == "any" && arguments.len() == 2 {
-                        let arr = self.eval_expression(&arguments[0])?;
-                        let predicate = self.eval_expression(&arguments[1])?;
-
-                        if let Value::Array(items) = arr {
-                            for item in items {
-                                let result = self.call_function(predicate.clone(), vec![item])?;
-                                if result.is_truthy() {
-                                    return Ok(Value::Bool(true));
-                                }
-                            }
-                            return Ok(Value::Bool(false));
-                        } else {
-                            return Err(IntentError::type_error(
-                                "any() requires an array as first argument".to_string(),
-                            ));
-                        }
-                    }
-
-                    // Special handling for all(arr, fn) - higher-order function
-                    if name == "all" && arguments.len() == 2 {
-                        let arr = self.eval_expression(&arguments[0])?;
-                        let predicate = self.eval_expression(&arguments[1])?;
-
-                        if let Value::Array(items) = arr {
-                            for item in items {
-                                let result = self.call_function(predicate.clone(), vec![item])?;
-                                if !result.is_truthy() {
-                                    return Ok(Value::Bool(false));
-                                }
-                            }
-                            return Ok(Value::Bool(true));
-                        } else {
-                            return Err(IntentError::type_error(
-                                "all() requires an array as first argument".to_string(),
-                            ));
-                        }
-                    }
-
-                    // Special handling for count(arr, fn) - higher-order function
-                    // Only intercept when first arg is array (to avoid conflict with std/string count)
-                    if name == "count" && arguments.len() == 2 {
-                        let arr = self.eval_expression(&arguments[0])?;
-                        if let Value::Array(items) = arr {
-                            let predicate = self.eval_expression(&arguments[1])?;
-                            let mut n = 0i64;
-                            for item in items {
-                                let result = self.call_function(predicate.clone(), vec![item])?;
-                                if result.is_truthy() {
-                                    n += 1;
-                                }
-                            }
-                            return Ok(Value::Int(n));
-                        }
-                        // Not an array - fall through to normal function resolution (e.g. std/string count)
-                    }
-
-                    // Special handling for reduce(arr, initial, fn) - higher-order function
-                    if name == "reduce" && arguments.len() == 3 {
-                        let arr = self.eval_expression(&arguments[0])?;
-                        let mut acc = self.eval_expression(&arguments[1])?;
-                        let func = self.eval_expression(&arguments[2])?;
-
-                        if let Value::Array(items) = arr {
-                            for item in items {
-                                acc = self.call_function(func.clone(), vec![acc, item])?;
-                            }
-                            return Ok(acc);
-                        } else {
-                            return Err(IntentError::type_error(
-                                "reduce() requires an array as first argument".to_string(),
-                            ));
-                        }
-                    }
-
-                    // Special handling for flat_map(arr, fn) - higher-order function
-                    if name == "flat_map" && arguments.len() == 2 {
-                        let arr = self.eval_expression(&arguments[0])?;
-                        let func = self.eval_expression(&arguments[1])?;
-
-                        if let Value::Array(items) = arr {
-                            let mut result = Vec::new();
-                            for item in items {
-                                let mapped = self.call_function(func.clone(), vec![item])?;
-                                match mapped {
-                                    Value::Array(inner) => result.extend(inner),
-                                    other => result.push(other),
-                                }
-                            }
-                            return Ok(Value::Array(result));
-                        } else {
-                            return Err(IntentError::type_error(
-                                "flat_map() requires an array as first argument".to_string(),
-                            ));
-                        }
-                    }
-
-                    // Special handling for HTTP route registration
-                    // Only intercept if first arg is a route pattern (starts with /)
-                    // NOT if it's a URL (starts with http:// or https://) - those are HTTP client calls
-                    let http_methods = ["get", "post", "put", "delete", "patch"];
-                    if http_methods.contains(&name.as_str())
-                        && (arguments.len() == 2 || arguments.len() == 3)
-                    {
-                        // Use eval_route_pattern to auto-detect route parameters:
-                        // "/users/{id}" preserves {id} as a route param instead of interpolating
-                        let pattern = self.eval_route_pattern(&arguments[0])?;
-
-                        // Check if this is a route pattern vs a URL
-                        if let Value::String(pattern_str) = &pattern {
-                            // Route patterns start with /, URLs start with http
-                            if pattern_str.starts_with('/') {
-                                // Route registration requires HttpServer capability
-                                if !self.has_runtime_capability(RuntimeCapability::HttpServer) {
-                                    if self.native_test_entry.is_some() {
-                                        return Err(self.reject_native_action(format!("Unsupported native test capability: {name} requires HttpServer")));
-                                    }
-                                    return Ok(Value::Unit);
-                                }
-                                let handler = self.eval_expression(&arguments[1])?;
-                                let method = name.to_uppercase();
-                                // Optional route options: map { "rate": "5/minute" } (#294).
-                                if let Some(options) = arguments.get(2) {
-                                    match self.eval_expression(options)? {
-                                        Value::Map(opts) => {
-                                            for (key, value) in &opts {
-                                                match (key.as_str(), value) {
-                                                    ("rate", Value::String(r)) => self
-                                                        .server_state
-                                                        .set_route_rate(&method, pattern_str, r)?,
-                                                    ("rate", _) => {
-                                                        return Err(IntentError::type_error(
-                                                            "route option `rate` must be a string like \"5/minute\" or \"off\"".to_string(),
-                                                        ))
-                                                    }
-                                                    (other, _) => {
-                                                        return Err(IntentError::type_error(format!(
-                                                            "unknown route option `{other}` (supported: rate)"
-                                                        )))
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        _ => {
-                                            return Err(IntentError::type_error(format!(
-                                                "{name}(pattern, handler, options): options must be a map"
-                                            )))
-                                        }
-                                    }
-                                }
-                                self.server_state.add_route_with_source(
-                                    &method,
-                                    pattern_str,
-                                    handler,
-                                    self.current_file.clone(),
-                                    self.imported_files.clone(),
-                                );
-                                return Ok(Value::Unit);
-                            }
-                            // Otherwise fall through to normal function call (HTTP client)
-                        }
-                    }
                 }
 
                 let callee = self.eval_expression(function)?;
+                // A call skipped for a missing capability is a no-op: gate on
+                // the resolved callee before evaluating arguments, so e.g. a
+                // route's handler expression does not run in a job or test.
+                if let Value::NativeFunction {
+                    name,
+                    requires: Some(cap),
+                    ..
+                }
+                | Value::ContextFunction {
+                    name,
+                    requires: Some(cap),
+                    ..
+                } = &callee
+                {
+                    if !self.has_runtime_capability(*cap) {
+                        let (name, cap) = (name.clone(), *cap);
+                        if let Some(skipped) =
+                            self.check_native_call(&name, 0, usize::MAX, Some(cap), 0)?
+                        {
+                            return Ok(skipped);
+                        }
+                    }
+                }
                 let args: Result<Vec<Value>> = arguments
                     .iter()
                     .map(|arg| self.eval_expression(arg))
                     .collect();
                 let args = args?;
-
-                if let Value::NativeFunction { name, .. } = &callee {
-                    if name == "sort_by" {
-                        if args.len() != 2 {
-                            return Err(IntentError::type_error(
-                                "sort_by() requires 2 arguments (arr, comparator)".to_string(),
-                            ));
-                        }
-
-                        let arr = args[0].clone();
-                        let comparator = args[1].clone();
-                        return self.sort_by_hof(arr, comparator);
-                    }
-
-                    // validate(schema, data) needs interpreter context so
-                    // custom fn(value) rules can call the closure. Dispatch
-                    // on the RESOLVED value (not the call-site name) so
-                    // aliased imports and let-bound references keep closure
-                    // support; user-defined validate() shadows naturally.
-                    if name == "validate" && args.len() == 2 {
-                        let mut invoke = |func: &Value, call_args: Vec<Value>| {
-                            self.call_function(func.clone(), call_args)
-                        };
-                        return crate::stdlib::validate::run_validation(
-                            &args[0],
-                            &args[1],
-                            &mut invoke,
-                        );
-                    }
-
-                    // magic_link_flow(req, options) invokes app-provided policy
-                    // closures (eligible, deliver, authorize), so it needs the
-                    // current interpreter context just like validate().
-                    if name == "magic_link_flow" && args.len() == 2 {
-                        let mut invoke = |func: &Value, call_args: Vec<Value>| {
-                            self.call_function(func.clone(), call_args)
-                        };
-                        return crate::stdlib::auth::run_magic_link_flow(&args, &mut invoke);
-                    }
-                }
 
                 self.call_function(callee, args)
             }
@@ -8180,19 +7665,6 @@ impl Interpreter {
 
             Expression::TemplateString(parts) => self.eval_template_parts(parts),
         }
-    }
-
-    /// Evaluate an expression as a route pattern.
-    ///
-    /// Route builtins (get, post, put, delete, patch) call this instead of
-    /// eval_expression() for their path argument.
-    ///
-    /// With `#{expr}` interpolation syntax, bare `{id}` in route patterns like
-    /// `"/users/{id}"` are naturally literal strings — no special handling needed.
-    /// This function now just delegates to eval_expression(), but is kept as a
-    /// named entry point for clarity and in case route-specific logic is needed later.
-    fn eval_route_pattern(&mut self, expr: &Expression) -> Result<Value> {
-        self.eval_expression(expr)
     }
 
     /// Parse auth configuration from enable_auth() arguments.
@@ -9499,6 +8971,77 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Capability and arity gate shared by native and context functions.
+    /// `Ok(Some(Unit))` means the call is silently skipped for this mode.
+    fn check_native_call(
+        &mut self,
+        fn_name: &str,
+        arity: usize,
+        max_arity: usize,
+        requires: Option<RuntimeCapability>,
+        nargs: usize,
+    ) -> Result<Option<Value>> {
+        // Capability gate: if the function declares a required capability,
+        // silently skip it (return Unit) when the active mode lacks that capability.
+        if let Some(cap) = requires {
+            // Task interpreters do not yet carry the native assertion observer.
+            // Reject at the capability boundary so aliases/caught errors cannot
+            // silently turn unsupported asynchronous work into passing evidence.
+            if self.native_test_entry.is_some()
+                && matches!(
+                    cap,
+                    RuntimeCapability::TaskSpawning
+                        | RuntimeCapability::Scheduling
+                        | RuntimeCapability::TcpServer
+                )
+            {
+                return Err(self.reject_native_action(format!(
+                    "Unsupported native test capability: {fn_name} requires {cap:?}"
+                )));
+            }
+            if !self.has_runtime_capability(cap) {
+                if self.native_test_entry.is_some() {
+                    return Err(self.reject_native_action(format!(
+                        "Unsupported native test capability: {fn_name} requires {cap:?}"
+                    )));
+                }
+                if cap == RuntimeCapability::TcpServer {
+                    return Err(IntentError::runtime_error(format!(
+                        "capability: {fn_name} requires TcpServer in Normal mode"
+                    )));
+                }
+                return Ok(Some(Value::Unit));
+            }
+        }
+
+        if arity == max_arity {
+            // Exact arity (most functions)
+            if nargs != arity && arity != 0 {
+                return Err(IntentError::ArityMismatch {
+                    name: fn_name.to_string(),
+                    expected: format!("{}", arity),
+                    got: nargs,
+                    line: 0,
+                });
+            }
+        } else {
+            // Range arity: min..=max
+            if nargs < arity || nargs > max_arity {
+                return Err(IntentError::ArityMismatch {
+                    name: fn_name.to_string(),
+                    expected: if arity == max_arity - 1 {
+                        format!("{} or {}", arity, max_arity)
+                    } else {
+                        format!("{}-{}", arity, max_arity)
+                    },
+                    got: nargs,
+                    line: 0,
+                });
+            }
+        }
+        Ok(None)
+    }
+
     fn call_function(&mut self, callee: Value, args: Vec<Value>) -> Result<Value> {
         match callee {
             Value::Function {
@@ -9562,68 +9105,10 @@ impl Interpreter {
                 func,
                 requires,
             } => {
-                // Capability gate: if the function declares a required capability,
-                // silently skip it (return Unit) when the active mode lacks that capability.
-                if let Some(cap) = requires {
-                    // Task interpreters do not yet carry the native assertion observer.
-                    // Reject at the capability boundary so aliases/caught errors cannot
-                    // silently turn unsupported asynchronous work into passing evidence.
-                    if self.native_test_entry.is_some()
-                        && matches!(
-                            cap,
-                            RuntimeCapability::TaskSpawning
-                                | RuntimeCapability::Scheduling
-                                | RuntimeCapability::TcpServer
-                        )
-                    {
-                        return Err(self.reject_native_action(format!(
-                            "Unsupported native test capability: {fn_name} requires {cap:?}"
-                        )));
-                    }
-                    if !self.has_runtime_capability(cap) {
-                        if self.native_test_entry.is_some() {
-                            return Err(self.reject_native_action(format!(
-                                "Unsupported native test capability: {fn_name} requires {cap:?}"
-                            )));
-                        }
-                        if cap == RuntimeCapability::TcpServer {
-                            return Err(IntentError::runtime_error(format!(
-                                "capability: {fn_name} requires TcpServer in Normal mode"
-                            )));
-                        }
-                        return Ok(Value::Unit);
-                    }
-                }
-
-                if arity == max_arity {
-                    // Exact arity (most functions)
-                    if args.len() != arity && arity != 0 {
-                        return Err(IntentError::ArityMismatch {
-                            name: fn_name.clone(),
-                            expected: format!("{}", arity),
-                            got: args.len(),
-                            line: 0,
-                        });
-                    }
-                } else {
-                    // Range arity: min..=max
-                    if args.len() < arity || args.len() > max_arity {
-                        return Err(IntentError::ArityMismatch {
-                            name: fn_name.clone(),
-                            expected: if arity == max_arity - 1 {
-                                format!("{} or {}", arity, max_arity)
-                            } else {
-                                format!("{}-{}", arity, max_arity)
-                            },
-                            got: args.len(),
-                            line: 0,
-                        });
-                    }
-                }
-                // Higher-order calls must keep comparator execution inside the
-                // interpreter, including capability gates and native observers.
-                if fn_name == "sort_by" && args.len() == 2 {
-                    return self.sort_by_hof(args[0].clone(), args[1].clone());
+                if let Some(skipped) =
+                    self.check_native_call(&fn_name, arity, max_arity, requires, args.len())?
+                {
+                    return Ok(skipped);
                 }
                 let _probe_context = self.probe_scope.enter();
                 if matches!(fn_name.as_str(), "ping_open" | "ping_probe" | "ping_close") {
@@ -9676,6 +9161,21 @@ impl Interpreter {
                     }
                 }
                 result
+            }
+
+            Value::ContextFunction {
+                name: fn_name,
+                arity,
+                max_arity,
+                func,
+                requires,
+            } => {
+                if let Some(skipped) =
+                    self.check_native_call(&fn_name, arity, max_arity, requires, args.len())?
+                {
+                    return Ok(skipped);
+                }
+                func(self, &args)
             }
 
             Value::EnumConstructor {
@@ -11143,7 +10643,9 @@ impl Interpreter {
                 continue;
             };
             let rendered = match &value {
-                Value::Function { .. } | Value::NativeFunction { .. } => continue,
+                Value::Function { .. }
+                | Value::NativeFunction { .. }
+                | Value::ContextFunction { .. } => continue,
                 Value::String(s) => format!("{:?}", s),
                 other => other.to_string(),
             };
@@ -11782,7 +11284,7 @@ impl Interpreter {
             if let Some(value) = env.get(&key) {
                 // Skip built-in functions for cleaner output
                 match &value {
-                    Value::NativeFunction { .. } => continue,
+                    Value::NativeFunction { .. } | Value::ContextFunction { .. } => continue,
                     Value::Function { name, params, .. } => {
                         let param_names: Vec<_> = params.iter().map(|p| p.name.as_str()).collect();
                         println!("  {} = fn {}({})", key, name, param_names.join(", "));
@@ -11843,7 +11345,9 @@ impl Interpreter {
                                 self.server_state.add_middleware(f);
                             }
                         }
-                        Value::Function { .. } | Value::NativeFunction { .. } => {
+                        Value::Function { .. }
+                        | Value::NativeFunction { .. }
+                        | Value::ContextFunction { .. } => {
                             self.server_state.add_middleware(mw_val);
                         }
                         _ => {
@@ -11889,7 +11393,9 @@ impl Interpreter {
 
         // Ensure handler is a function
         match &handler {
-            Value::Function { .. } | Value::NativeFunction { .. } => {}
+            Value::Function { .. }
+            | Value::NativeFunction { .. }
+            | Value::ContextFunction { .. } => {}
             _ => {
                 return Err(IntentError::type_error(format!(
                     "Route handler must be a function, got {}",
@@ -11950,7 +11456,9 @@ impl Interpreter {
                         self.server_state.add_middleware(f);
                     }
                 }
-                Value::Function { .. } | Value::NativeFunction { .. } => {
+                Value::Function { .. }
+                | Value::NativeFunction { .. }
+                | Value::ContextFunction { .. } => {
                     self.server_state.add_middleware(mw_val);
                 }
                 _ => {
@@ -12008,6 +11516,11 @@ impl Default for Interpreter {
 
 #[cfg(test)]
 mod fast_path_tests;
+
+mod context_builtins;
+
+#[cfg(test)]
+mod context_builtins_tests;
 
 #[cfg(test)]
 mod frame_restore_tests;

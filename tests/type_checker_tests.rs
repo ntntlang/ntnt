@@ -1708,3 +1708,223 @@ print(from_options)
     assert_eq!(exit, 0, "stderr={stderr}\nstdout={stdout}");
     assert!(!stdout.contains("type_check"), "{stdout}");
 }
+
+// ===========================================================================
+// import_shadows_route (#293): an import named like a route builtin shadows it
+// ===========================================================================
+
+#[test]
+fn test_import_shadows_route_errors_only_for_route_pattern_calls() {
+    let source = r#"import { open, get } from "std/kv"
+fn h(req) {
+    return req
+}
+let kv = unwrap(open("memory://"))
+let v = get(kv, "key")
+get("/health", h)
+"#;
+    let (stdout, _stderr, exit_code) = lint_code(source);
+    assert_eq!(
+        stdout.matches("\"rule\": \"import_shadows_route\"").count(),
+        1,
+        "only the route-pattern call is flagged: {stdout}"
+    );
+    assert!(stdout.contains("get as kv_get"), "rename hint: {stdout}");
+    assert_ne!(exit_code, 0, "error severity fails lint");
+
+    let renamed = source
+        .replace("import { open, get }", "import { open, get as kv_get }")
+        .replace("let v = get(kv", "let v = kv_get(kv");
+    let (stdout, _stderr, _) = lint_code(&renamed);
+    assert!(!stdout.contains("import_shadows_route"), "{stdout}");
+}
+
+#[test]
+fn test_import_shadows_route_respects_scope_shape_and_import_position() {
+    let count = |src: &str| {
+        let (stdout, _stderr, _) = lint_code(src);
+        stdout.matches("\"rule\": \"import_shadows_route\"").count()
+    };
+    // A parameter named like the import is the binding the call uses.
+    assert_eq!(
+        count(
+            "import { get } from \"std/kv\"\nfn register(get) {\n    return get(\"/health\", fn(req) { req })\n}\n"
+        ),
+        0
+    );
+    // Wildcard imports bind route names too.
+    assert_eq!(
+        count("import * from \"std/kv\"\nget(\"/health\", fn(req) { req })\n"),
+        1
+    );
+    // A function declared above the import still sees it when called.
+    assert_eq!(
+        count(
+            "fn setup() {\n    get(\"/health\", fn(req) { req })\n}\nimport { get } from \"std/kv\"\nsetup()\n"
+        ),
+        1
+    );
+    // A one-argument absolute-path call is not route registration.
+    assert_eq!(
+        count("import { read_file as get } from \"std/fs\"\nlet c = get(\"/tmp/config\")\n"),
+        0
+    );
+    // The hint uses the original export name.
+    let (stdout, _stderr, _) =
+        lint_code("import { read_file as get } from \"std/fs\"\nget(\"/x\", fn(req) { req })\n");
+    assert!(stdout.contains("read_file as fs_read_file"), "{stdout}");
+}
+
+#[test]
+fn test_import_shadows_route_top_level_order_and_distinct_calls() {
+    let count = |src: &str| {
+        let (stdout, _stderr, _) = lint_code(src);
+        stdout.matches("\"rule\": \"import_shadows_route\"").count()
+    };
+    // Top level runs in order: a route registered above the import is fine.
+    assert_eq!(
+        count("get(\"/health\", fn(req) { req })\nimport { get } from \"std/kv\"\n"),
+        0
+    );
+    // Distinct calls with overlapping patterns are each reported.
+    assert_eq!(
+        count(
+            "import { get } from \"std/kv\"\nget(\"/users/new\", fn(req) { req })\nget(\"/users\", fn(req) { req })\n"
+        ),
+        2
+    );
+}
+
+#[test]
+fn test_import_shadows_route_activation_is_per_binding_and_top_level() {
+    let count = |src: &str| {
+        let (stdout, _stderr, _) = lint_code(src);
+        stdout.matches("\"rule\": \"import_shadows_route\"").count()
+    };
+    // An earlier import from the same module does not activate a later `get`.
+    assert_eq!(
+        count(
+            "import { get_int } from \"std/kv\"\nget(\"/health\", fn(req) { req })\nimport { get } from \"std/kv\"\n"
+        ),
+        0
+    );
+    // A function-local import does not activate top-level state.
+    assert_eq!(
+        count(
+            "fn local() {\n    import { get } from \"std/kv\"\n    return 1\n}\nget(\"/health\", fn(req) { req })\nimport { get } from \"std/kv\"\n"
+        ),
+        0
+    );
+    // Top-level blocks run in order too.
+    assert_eq!(
+        count(
+            "if true {\n    get(\"/health\", fn(req) { req })\n}\nimport { get } from \"std/kv\"\n"
+        ),
+        0
+    );
+    // A callback passed through a typed parameter is a deferred body too.
+    assert_eq!(
+        count(
+            "fn keep(f: () -> Any) {\n    return f\n}\nlet setup = keep(fn() { get(\"/health\", fn(req) { req }) })\nimport { get } from \"std/kv\"\nsetup()\n"
+        ),
+        1
+    );
+    // Lambdas are deferred bodies: they see later top-level imports.
+    assert_eq!(
+        count(
+            "let setup = fn() { get(\"/health\", fn(req) { req }) }\nimport { get } from \"std/kv\"\nsetup()\n"
+        ),
+        1
+    );
+}
+
+#[test]
+fn test_import_shadows_route_severity_tracks_execution_order_certainty() {
+    let severities = |src: &str| -> Vec<String> {
+        let (stdout, _stderr, _) = lint_code(src);
+        let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("lint json");
+        let mut out = Vec::new();
+        for file in json["files"].as_array().into_iter().flatten() {
+            for d in file["issues"].as_array().into_iter().flatten() {
+                if d["rule"] == "import_shadows_route" {
+                    out.push(d["severity"].as_str().unwrap_or("?").to_string());
+                }
+            }
+        }
+        out
+    };
+    // Import already in effect: certain error.
+    assert_eq!(
+        severities(
+            "import { get } from \"std/kv\"\nfn setup() {\n    get(\"/health\", fn(req) { req })\n}\n"
+        ),
+        ["error"]
+    );
+    // Callback declared before the import and run immediately: order unknown
+    // statically (here it actually registers the route), so a warning.
+    assert_eq!(
+        severities(
+            "fn run(f: () -> Any) {\n    return f()\n}\nrun(fn() { get(\"/health\", fn(req) { req }) })\nimport { get } from \"std/kv\"\n"
+        ),
+        ["warning"]
+    );
+}
+
+#[test]
+fn test_import_shadows_route_block_imports_are_block_scoped() {
+    let count = |src: &str| {
+        let (stdout, _stderr, _) = lint_code(src);
+        stdout.matches("\"rule\": \"import_shadows_route\"").count()
+    };
+    // Runtime imports are block-scoped: after the block, get() is the route
+    // builtin again, including for branches that never run.
+    assert_eq!(
+        count(
+            "if true {\n    import { get } from \"std/kv\"\n}\nget(\"/health\", fn(req) { req })\n"
+        ),
+        0
+    );
+    // Inside the block, after the import, the call reaches the import.
+    assert_eq!(
+        count(
+            "if true {\n    import { get } from \"std/kv\"\n    get(\"/health\", fn(req) { req })\n}\n"
+        ),
+        1
+    );
+    // Same for an import inside a function body.
+    assert_eq!(
+        count(
+            "fn setup() {\n    import { get } from \"std/kv\"\n    get(\"/health\", fn(req) { req })\n}\n"
+        ),
+        1
+    );
+    // A later local definition in the block replaces the import.
+    assert_eq!(
+        count(
+            "if true {\n    import { get } from \"std/kv\"\n    let get = fn(a, b) { a }\n    get(\"/health\", fn(req) { req })\n}\n"
+        ),
+        0
+    );
+    // A callback defined after a block import may run after a later rebinding:
+    // a warning, not an error.
+    let (stdout, _stderr, _) = lint_code(
+        "if true {\n    import { get } from \"std/kv\"\n    let setup = fn() { get(\"/health\", fn(req) { req }) }\n    let get = fn(a, b) { a }\n    setup()\n}\n",
+    );
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("lint json");
+    let severities: Vec<String> = json["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|f| f["issues"].as_array().cloned().unwrap_or_default())
+        .filter(|d| d["rule"] == "import_shadows_route")
+        .map(|d| d["severity"].as_str().unwrap_or("?").to_string())
+        .collect();
+    assert_eq!(severities, ["warning"], "{stdout}");
+    // A block-local import does not make a later file-level call certain.
+    assert_eq!(
+        count(
+            "if false {\n    import { get } from \"std/kv\"\n}\nget(\"/health\", fn(req) { req })\nimport { get } from \"std/kv\"\n"
+        ),
+        0
+    );
+}

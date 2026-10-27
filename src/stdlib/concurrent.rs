@@ -1494,6 +1494,8 @@ struct CapturedBindings {
     values: HashMap<String, SerializedValue>,
     /// Full NativeFunction identities — reconstructed directly in the child interpreter.
     native_fns: Vec<CapturedNativeFn>,
+    /// Interpreter-context builtins (filter, template, ...), by fn pointer.
+    context_fns: Vec<CapturedContextFn>,
     /// Enum constructors are immutable metadata, not runtime-local closures.
     enum_constructors: Vec<CapturedEnumConstructor>,
 }
@@ -1543,6 +1545,17 @@ struct CapturedNativeFn {
     max_arity: usize,
     requires: Option<crate::interpreter::RuntimeCapability>,
     func: fn(&[Value]) -> Result<Value>,
+}
+
+/// Snapshot of a ContextFunction (a plain fn pointer, so Send).
+#[derive(Clone)]
+struct CapturedContextFn {
+    binding_name: String,
+    fn_name: String,
+    arity: usize,
+    max_arity: usize,
+    requires: Option<crate::interpreter::RuntimeCapability>,
+    func: crate::interpreter::ContextFn,
 }
 
 #[derive(Clone)]
@@ -2229,6 +2242,23 @@ impl CaptureBuilder {
                             requires,
                             func,
                         }),
+                    Value::ContextFunction {
+                        name: fn_name,
+                        arity,
+                        max_arity,
+                        func,
+                        requires,
+                    } => self.scopes[scope]
+                        .bindings
+                        .context_fns
+                        .push(CapturedContextFn {
+                            binding_name: name.clone(),
+                            fn_name,
+                            arity,
+                            max_arity,
+                            requires,
+                            func,
+                        }),
                     Value::Function {
                         name: fn_name,
                         params,
@@ -2457,6 +2487,18 @@ fn rebuild_scopes(
             define(
                 &cap.binding_name,
                 Value::NativeFunction {
+                    name: cap.fn_name.clone(),
+                    arity: cap.arity,
+                    max_arity: cap.max_arity,
+                    requires: cap.requires,
+                    func: cap.func,
+                },
+            );
+        }
+        for cap in &scope.bindings.context_fns {
+            define(
+                &cap.binding_name,
+                Value::ContextFunction {
                     name: cap.fn_name.clone(),
                     arity: cap.arity,
                     max_arity: cap.max_arity,

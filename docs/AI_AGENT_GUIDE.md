@@ -835,6 +835,8 @@ let ALLOWED = ["admin", "editor"]
 
 **CRITICAL:** Routing functions are GLOBAL BUILTINS. Only response builders need importing.
 
+Builtins are ordinary bindings, so a same-named definition or import shadows them (higher-order helpers, templates, routes, `std/fs` functions). If you need `std/kv` `get`, import it as `get as kv_get`; otherwise `get("/path", h)` calls the KV function. `ntnt lint` reports this as `import_shadows_route`. Builtins are also values: `let f = filter`, `xs.filter(p)`, passing `transform` to a function and using them inside `spawn` all work.
+
 ```ntnt
 // ONLY import response builders
 import { json, html, parse_form, parse_json } from "std/http/server"
@@ -2597,7 +2599,8 @@ There is no `login_url` option. Local-only apps pass an empty provider array and
 Redis/Valkey or SQLite-backed key-value store with TTL support.
 
 ```ntnt
-import { open, get, set, del, has, list, expire, ttl } from "std/kv"
+import { open, get as kv_get, set, del, has, list, expire, ttl } from "std/kv"
+// Rename `get`: a plain `get` import would shadow the route builtin get("/path", handler)
 
 // Connect (Redis or SQLite)
 let kv = unwrap(open("redis://localhost:6379"))
@@ -2605,7 +2608,7 @@ let kv = unwrap(open("sqlite:./cache.db"))
 
 // Basic operations
 set(kv, "user:1", map { "name": "Alice", "role": "admin" })
-let user = unwrap(get(kv, "user:1"))    // Option<Any> — returns None if missing
+let user = unwrap(kv_get(kv, "user:1")) // Option<Any> — returns None if missing
 
 // TTL (time-to-live)
 set(kv, "session:abc", data, map { "ttl": 3600 })  // Expires in 1 hour
@@ -3879,7 +3882,7 @@ import { now, format } from "std/time"
 import { sha256, uuid } from "std/crypto"
 import { first, last, keys, values, entries, has_key, get_key, get_index } from "std/collections"
 import { oauth, enable_auth, get_user, get_session, validate_csrf } from "std/auth"
-import { open, get, set, del, list } from "std/kv"
+import { open, get as kv_get, set, del, list } from "std/kv"
 import { log_info, log_warn, log_error, set_log_level, request_logger } from "std/log"
 import { parse_url, encode_component, build_query, parse_query } from "std/url"
 import { parse_csv, parse_with_headers } from "std/csv"

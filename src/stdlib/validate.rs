@@ -174,7 +174,7 @@ fn apply_rule(rule: &Value, value: Value, invoke: &mut ClosureInvoker) -> Result
     }
 
     // Bare NTNT closures are custom predicates
-    if matches!(rule, Value::Function { .. }) {
+    if matches!(rule, Value::Function { .. } | Value::ContextFunction { .. }) {
         return custom_outcome(invoke(rule, vec![value.clone()])?, value);
     }
 
@@ -440,8 +440,12 @@ pub fn run_validation(schema: &Value, data: &Value, invoke: &mut ClosureInvoker)
 fn check_schema_shape(rules: &HashMap<String, Value>) -> Result<()> {
     for (field, rules_value) in rules {
         for rule in field_rules(rules_value) {
-            let ok = matches!(rule, Value::NativeFunction { .. } | Value::Function { .. })
-                || as_validator(&rule).is_some();
+            let ok = matches!(
+                rule,
+                Value::NativeFunction { .. }
+                    | Value::ContextFunction { .. }
+                    | Value::Function { .. }
+            ) || as_validator(&rule).is_some();
             if !ok {
                 return Err(IntentError::type_error(format!(
                     "schema(): field '{}' has an invalid rule ({}) — rules are \
