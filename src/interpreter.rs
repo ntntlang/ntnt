@@ -5154,8 +5154,11 @@ impl Interpreter {
         Ok(routes)
     }
 
-    /// Process a single route file and extract HTTP method handlers
-    /// Returns: Vec<(method, pattern, handler, file_path, imported_files)>
+    /// Process a single route file and extract HTTP method handlers.
+    /// Returns one `DiscoveredRoute` per handler: (method, pattern, handler,
+    /// file_path, imported_files, parsed per-route rate).
+    /// Fails when an exported `rate` or `rate_<method>` is invalid, not a
+    /// string, or names an unknown method; interpreter state is restored first.
     fn process_route_file(
         &mut self,
         file_path: &std::path::Path,
