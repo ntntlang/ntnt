@@ -47,13 +47,18 @@ These functions are available everywhere without importing.
 | [`Ok(value: Any)`](#ok) | Wraps a value in Result::Ok. |
 | [`Some(value: Any)`](#some) | Wraps a value in Option::Some. |
 | [`abs(x: Int \| Float)`](#abs) | Returns the absolute value of a number. |
+| [`all(arr: Array, predicate: Function)`](#all) | True if the predicate is truthy for every element. |
+| [`any(arr: Array, predicate: Function)`](#any) | True if the predicate is truthy for at least one element. |
 | [`assert(condition: Bool)`](#assert) | Asserts a condition is truthy, throws ContractViolation if not. |
 | [`ceil(x: Int \| Float)`](#ceil) | Rounds up to the nearest integer. |
 | [`clamp(x: Int \| Float, min_val: Int \| Float, max_val: Int \| Float)`](#clamp) | Constrains a value between a minimum and maximum. |
 | [`compile(path: String)`](#compile) | Pre-compile a template file for repeated rendering. |
+| [`count(arr: Array \| String, predicate_or_substr: Function \| String)`](#count) | Count array elements matching a predicate, or substring occurrences in a string. |
 | [`delete(pattern: String, handler: Function)`](#delete) | Registers a DELETE route handler. |
 | [`enable_cors(options?: Map)`](#enablecors) | Enable CORS (Cross-Origin Resource Sharing) for the HTTP server. |
 | [`enable_csp(options?: Map \| Bool)`](#enablecsp) | Enable Content-Security-Policy headers for the HTTP server. |
+| [`filter(arr: Array, predicate: Function)`](#filter) | Return the elements for which the predicate is truthy. |
+| [`find(arr: Array, predicate: Function)`](#find) | Return the first element for which the predicate is truthy, or None. |
 | [`flat_map(arr: Array, fn: Function)`](#flatmap) | Apply a function to each element and flatten the results into a single array. |
 | [`float(x: Int \| Float \| String)`](#float) | Converts a value to float without throwing on parse failure. |
 | [`floor(x: Int \| Float)`](#floor) | Rounds down to the nearest integer. |
@@ -219,6 +224,46 @@ abs(-3.14)  // => 3.14  // Absolute value of negative float
 
 ---
 
+#### `all`
+
+```ntnt
+all(arr: Array, predicate: Function) -> Bool
+```
+
+True if the predicate is truthy for every element.
+
+**Examples:**
+
+```ntnt
+all([1, 2, 3], fn(x) { x > 0 })  // => true  // Every element positive
+```
+
+**See also:** `filter`, `find`, `any`, `all`, `count`, `transform`
+
+*Since v0.2.0*
+
+---
+
+#### `any`
+
+```ntnt
+any(arr: Array, predicate: Function) -> Bool
+```
+
+True if the predicate is truthy for at least one element.
+
+**Examples:**
+
+```ntnt
+any([1, 2, 3], fn(x) { x > 2 })  // => true  // Some element over 2
+```
+
+**See also:** `filter`, `find`, `any`, `all`, `count`, `transform`
+
+*Since v0.2.0*
+
+---
+
 #### `assert`
 
 ```ntnt
@@ -344,6 +389,26 @@ compile("views/layout.html")  // => { "_template_id": 1, "path": "views/layout.h
 
 ---
 
+#### `count`
+
+```ntnt
+count(arr: Array | String, predicate_or_substr: Function | String) -> Int
+```
+
+Count array elements matching a predicate, or substring occurrences in a string.
+
+**Examples:**
+
+```ntnt
+count([1, 2, 3], fn(x) { x > 1 })  // => 2  // Count matching elements
+```
+
+**See also:** `filter`, `find`, `any`, `all`, `count`, `transform`
+
+*Since v0.2.0*
+
+---
+
 #### `delete`
 
 ```ntnt
@@ -433,6 +498,46 @@ enable_csp(false)  // Disable CSP entirely
 **See also:** `enable_cors`, `listen`
 
 *Since v0.4.4*
+
+---
+
+#### `filter`
+
+```ntnt
+filter(arr: Array, predicate: Function) -> Array
+```
+
+Return the elements for which the predicate is truthy.
+
+**Examples:**
+
+```ntnt
+filter([1, 2, 3], fn(x) { x > 1 })  // => [2, 3]  // Keep elements over 1
+```
+
+**See also:** `filter`, `find`, `any`, `all`, `count`, `transform`
+
+*Since v0.2.0*
+
+---
+
+#### `find`
+
+```ntnt
+find(arr: Array, predicate: Function) -> Option<Any>
+```
+
+Return the first element for which the predicate is truthy, or None.
+
+**Examples:**
+
+```ntnt
+find([1, 2, 3], fn(x) { x > 1 })  // => Some(2)  // First element over 1
+```
+
+**See also:** `filter`, `find`, `any`, `all`, `count`, `transform`
+
+*Since v0.2.0*
 
 ---
 

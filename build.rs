@@ -506,7 +506,9 @@ fn extract_native_functions(content: &str) -> Vec<String> {
                 if let Some(name) = extract_quoted_string(next) {
                     if i + 2 < lines.len() {
                         let third = lines[i + 2].trim();
-                        if third.contains("Value::NativeFunction") {
+                        if third.contains("Value::NativeFunction")
+                            || third.contains("Value::ContextFunction")
+                        {
                             names.push(name);
                         }
                     }
@@ -517,7 +519,8 @@ fn extract_native_functions(content: &str) -> Vec<String> {
 
         // Pattern 2 (single-line): `module.insert("NAME".to_string(), Value::NativeFunction {`
         if (trimmed.starts_with("module.insert(\"") || trimmed.contains(".define(\""))
-            && trimmed.contains("Value::NativeFunction")
+            && (trimmed.contains("Value::NativeFunction")
+                || trimmed.contains("Value::ContextFunction"))
         {
             if let Some(name) = extract_quoted_string(trimmed) {
                 names.push(name);
