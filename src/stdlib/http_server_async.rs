@@ -442,8 +442,17 @@ async fn axum_to_bridge_request(
 fn bridge_to_axum_response(
     resp: BridgeResponse,
     csp_header: Option<(&str, &str)>,
+    is_head: bool,
 ) -> Response<Body> {
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    if let Some(spec) = resp.sse.as_ref() {
+        // The stream opens only for a successful, final, non-HEAD response.
+        // Denials, redirects and errors from middleware/handlers carry no
+        // stream description, so they never subscribe.
+        if status.is_success() && !is_head {
+            return sse_to_axum_response(spec, resp.headers, status, csp_header);
+        }
+    }
 
     let mut response = Response::builder().status(status);
 
@@ -464,6 +473,75 @@ fn bridge_to_axum_response(
             .body(Body::from("Failed to build response"))
             .unwrap()
     });
+    apply_async_security_headers(&mut resp, csp_header);
+    resp
+}
+
+/// Protocol-fixed SSE headers that application headers may not override.
+const SSE_FIXED_HEADERS: [&str; 6] = [
+    "content-type",
+    "content-length",
+    "content-encoding",
+    "cache-control",
+    "x-accel-buffering",
+    "transfer-encoding",
+];
+
+/// Attach a live SSE body. Application headers (cookies, CORS, custom) are
+/// preserved; framing/caching headers are fixed by the protocol.
+fn sse_to_axum_response(
+    spec: &crate::stdlib::realtime::SseSpec,
+    headers: Vec<(String, String)>,
+    status: StatusCode,
+    csp_header: Option<(&str, &str)>,
+) -> Response<Body> {
+    use crate::stdlib::realtime::{open_stream, OpenError};
+    // Application headers (cookies, CORS, custom) apply to the stream and to
+    // a refusal alike; framing/caching headers are protocol-fixed.
+    let mut builder = Response::builder();
+    for (key, value) in headers {
+        if SSE_FIXED_HEADERS.contains(&key.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        if let (Ok(name), Ok(val)) = (
+            header::HeaderName::try_from(key.as_str()),
+            header::HeaderValue::from_str(&value),
+        ) {
+            builder = builder.header(name, val);
+        }
+    }
+    let stream = match open_stream(spec) {
+        Ok(stream) => stream,
+        Err(err) => {
+            let message = match err {
+                OpenError::ShuttingDown => "Server is shutting down",
+                OpenError::TooManyStreams => "Too many open event streams",
+            };
+            let mut resp = builder
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header("content-type", "text/plain; charset=utf-8")
+                .header("cache-control", "no-store")
+                .header("retry-after", "5")
+                .header("server", "ntnt-async")
+                .body(Body::from(message))
+                .unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .body(Body::from(message))
+                        .expect("static response")
+                });
+            apply_async_security_headers(&mut resp, csp_header);
+            return resp;
+        }
+    };
+    let builder = builder.status(status);
+    let mut resp = builder
+        .header("content-type", "text/event-stream; charset=utf-8")
+        .header("cache-control", "no-store, no-transform")
+        .header("x-accel-buffering", "no")
+        .header("server", "ntnt-async")
+        .body(Body::from_stream(stream))
+        .expect("validated SSE headers");
     apply_async_security_headers(&mut resp, csp_header);
     resp
 }
@@ -621,7 +699,11 @@ async fn handle_request(
             // Convert request and send to interpreter
             let mut response = match axum_to_bridge_request(req, params, peer_addr).await {
                 Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
-                    Ok(response) => bridge_to_axum_response(response, csp_ref),
+                    Ok(response) => bridge_to_axum_response(
+                        response,
+                        csp_ref,
+                        method == axum::http::Method::HEAD,
+                    ),
                     Err(e) => {
                         let error_msg = format!("{}", e);
                         // Structured error log — always printed regardless of mode
@@ -699,7 +781,11 @@ async fn handle_request(
             // can run before deciding the route is really missing.
             let mut response = match axum_to_bridge_request(req, HashMap::new(), peer_addr).await {
                 Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
-                    Ok(response) => bridge_to_axum_response(response, csp_ref),
+                    Ok(response) => bridge_to_axum_response(
+                        response,
+                        csp_ref,
+                        method == axum::http::Method::HEAD,
+                    ),
                     Err(e) => {
                         let error_msg = format!("{}", e);
                         eprintln!(
@@ -1063,42 +1149,77 @@ pub async fn start_server_with_bridge(
     println!();
     println!("Press Ctrl+C to stop");
 
-    // Run the server with graceful shutdown. Graceful shutdown waits for every
-    // open connection, so a client that stops reading a large/slow response
-    // would otherwise keep the process alive forever after SIGTERM. Bound the
-    // drain by the request timeout. Axum spawns each connection as its own
-    // task, so returning here does not cancel stalled connections by itself;
-    // the caller owns the runtime and must shut it down (see
-    // `run_async_http_server`), which cancels those tasks and closes sockets.
-    let (signalled_tx, mut signalled_rx) = tokio::sync::watch::channel(false);
-    let signal = async move {
-        shutdown_signal().await;
-        let _ = signalled_tx.send(true);
-    };
-    let serve = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(signal);
-    let drain = shutdown_drain_limit(config.request_timeout_secs);
-    let drain_deadline = async move {
-        if signalled_rx.wait_for(|signalled| *signalled).await.is_err() {
-            std::future::pending::<()>().await;
-        }
-        tokio::time::sleep(drain).await;
-    };
+    // Serve connections with our own accept loop (instead of axum::serve) so
+    // HTTP/2 buffering can be bounded explicitly: a stalled SSE client must not
+    // let hyper buffer megabytes per stream. Graceful shutdown waits for open
+    // connections, bounded by the request timeout; connections still open at
+    // the deadline are spawned tasks that the caller cancels by shutting the
+    // runtime down (see `run_async_http_server`).
+    serve_connections(listener, app, config.request_timeout_secs).await
+}
+
+/// HTTP/2 concurrent streams allowed per connection.
+const H2_MAX_CONCURRENT_STREAMS: u32 = 128;
+/// HTTP/2 bytes hyper may buffer per stream before applying backpressure.
+const H2_MAX_SEND_BUF: usize = 64 * 1024;
+
+async fn serve_connections(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    request_timeout_secs: u64,
+) -> Result<()> {
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder;
+
+    let mut builder = Builder::new(TokioExecutor::new());
+    builder
+        .http2()
+        .max_concurrent_streams(H2_MAX_CONCURRENT_STREAMS)
+        .max_send_buf_size(H2_MAX_SEND_BUF);
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let signal = shutdown_signal();
+    tokio::pin!(signal);
+    loop {
+        let (stream, remote) = tokio::select! {
+            _ = &mut signal => break,
+            accepted = listener.accept() => match accepted {
+                Ok(pair) => pair,
+                Err(_) => {
+                    // Transient accept errors (e.g. EMFILE): back off briefly.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+            },
+        };
+        let app = app.clone();
+        let service = hyper::service::service_fn(move |mut req: Request<hyper::body::Incoming>| {
+            req.extensions_mut().insert(ConnectInfo(remote));
+            let mut app = app.clone();
+            async move {
+                use tower::Service as _;
+                app.call(req.map(Body::new)).await
+            }
+        });
+        let connection = builder
+            .serve_connection_with_upgrades(TokioIo::new(stream), service)
+            .into_owned();
+        let connection = graceful.watch(connection);
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+    }
+    drop(listener);
+    let drain = shutdown_drain_limit(request_timeout_secs);
     tokio::select! {
-        result = serve => {
-            result.map_err(|e| IntentError::runtime_error(format!("Server error: {}", e)))
-        }
-        _ = drain_deadline => {
+        _ = graceful.shutdown() => {}
+        _ = tokio::time::sleep(drain) => {
             eprintln!(
                 "[WARN] shutdown drain exceeded {}s; closing remaining connections",
                 drain.as_secs()
             );
-            Ok(())
         }
     }
+    Ok(())
 }
 
 /// Maximum time graceful shutdown waits for in-flight connections.

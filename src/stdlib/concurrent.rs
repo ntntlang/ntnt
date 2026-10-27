@@ -529,6 +529,8 @@ pub(crate) enum SerializedValue {
     RxChannelHandle(u64),
     /// Schedule handle — just the ID.
     ScheduleHandle(u64),
+    /// Broadcast bus — shared native authority, explicitly capturable by tasks.
+    Broadcast(Arc<crate::stdlib::realtime::Bus>),
 }
 
 impl SerializedValue {
@@ -595,6 +597,7 @@ impl SerializedValue {
             }
             Value::RxChannelHandle(id) => Ok(SerializedValue::RxChannelHandle(*id)),
             Value::ScheduleHandle(id) => Ok(SerializedValue::ScheduleHandle(*id)),
+            Value::Broadcast(bus) => Ok(SerializedValue::Broadcast(Arc::clone(bus))),
             _ => Err(IntentError::type_error(
                 "Only serializable types (Int, Float, String, Bool, Array, Map, Struct, Enum) can be sent across task boundaries".to_string(),
             )),
@@ -645,6 +648,7 @@ impl SerializedValue {
             ),
             SerializedValue::RxChannelHandle(id) => Value::RxChannelHandle(*id),
             SerializedValue::ScheduleHandle(id) => Value::ScheduleHandle(*id),
+            SerializedValue::Broadcast(bus) => Value::Broadcast(Arc::clone(bus)),
         }
     }
 }
@@ -2587,14 +2591,33 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
             | Value::TxChannelHandle(_, _)
             | Value::RxChannelHandle(_)
             | Value::ScheduleHandle(_)
+            | Value::Broadcast(_)
     ) {
         return Err(IntentError::type_error(
-            "Handles (Task, Process, TCP, TxChannel, RxChannel, Schedule) cannot be sent through channels"
+            "Handles (Task, Process, TCP, TxChannel, RxChannel, Schedule, Broadcast) cannot be sent through channels"
+                .to_string(),
+        ));
+    }
+    // Broadcast is task-capturable but never a channel payload, even nested.
+    if contains_broadcast(value) {
+        return Err(IntentError::type_error(
+            "Broadcast handles cannot be sent through channels, including inside arrays, maps or structs"
                 .to_string(),
         ));
     }
     let serialized = SerializedValue::from_value(value)?;
     Ok(Value::Bool(sender_arc.send(serialized).is_ok()))
+}
+
+fn contains_broadcast(value: &Value) -> bool {
+    match value {
+        Value::Broadcast(_) => true,
+        Value::Array(items) => items.iter().any(contains_broadcast),
+        Value::Map(map) => map.values().any(contains_broadcast),
+        Value::Struct { fields, .. } => fields.values().any(contains_broadcast),
+        Value::EnumValue { values, .. } => values.iter().any(contains_broadcast),
+        _ => false,
+    }
 }
 
 fn concurrent_recv(ch: &Value) -> Result<Value> {
@@ -3674,6 +3697,61 @@ pub fn init() -> HashMap<String, Value> {
                     "sleep_ms requires an integer".to_string(),
                 )),
             },
+        },
+    );
+
+    // @ntnt broadcast
+    // @module std/concurrent
+    // @signature broadcast(name: String, options?: Map) -> Broadcast
+    // Get or create a named, process-local fan-out bus for Server-Sent Events.
+    //
+    // All HTTP workers and in-process tasks share buses by name. The returned
+    // handle is the authority to publish and subscribe; a client-supplied string
+    // is not. Unused buses are freed. Options: `capacity` (Int 1-1024, default
+    // 64) is the number of recent events a slow subscriber may fall behind before
+    // it is disconnected. Not shared across OS processes.
+    // @param name 1-128 characters of [A-Za-z0-9._:-]
+    // @param options Optional map with `capacity`
+    // @returns A Broadcast handle
+    // @see_also publish, sse
+    // @since v0.5.7
+    // @example broadcast("metrics") => <broadcast metrics> ~ "Create or get a bus"
+    module.insert(
+        "broadcast".to_string(),
+        Value::NativeFunction {
+            name: "broadcast".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: crate::stdlib::realtime::broadcast_value,
+        },
+    );
+
+    // @ntnt publish
+    // @module std/concurrent
+    // @signature publish(bus: Broadcast, value: Any, options?: Map) -> Result<Unit, String>
+    // Publish a JSON-compatible value to every current subscriber of a bus.
+    //
+    // The value is validated and encoded once, then shared by all subscribers.
+    // Never waits for clients. Zero subscribers is a successful no-op (no replay
+    // is stored). Options: `event` (String) and `id` (String or Int) become SSE
+    // `event:`/`id:` fields. Err for Secret values, functions, handles, NaN,
+    // more than 64 KiB encoded, or an exhausted process payload budget.
+    // @param bus A Broadcast from broadcast()
+    // @param value JSON-compatible data
+    // @param options Optional map with `event` and `id`
+    // @returns Ok(()) once queued for subscribers; not proof of delivery
+    // @see_also broadcast, sse
+    // @since v0.5.7
+    // @example publish(bus, map { "cpu": 42 }, map { "event": "metrics" }) => Ok(()) ~ "Publish a named event"
+    module.insert(
+        "publish".to_string(),
+        Value::NativeFunction {
+            name: "publish".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: None,
+            func: crate::stdlib::realtime::publish_value,
         },
     );
 

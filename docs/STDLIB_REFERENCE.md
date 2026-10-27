@@ -4549,11 +4549,13 @@ import { channel, send, recv } from "std/concurrent"
 |----------|-------------|
 | [`after`](#after) | Runs a zero-parameter handler function after a delay. Returns a Task handle. Delay can be milliseconds (Int) or a human-readable string ("5s", "1m", "500ms"). The delay is cancellation-aware (50ms slices). |
 | [`await_task`](#awaittask) | Blocks until the task completes and consumes its result/error, releasing the serialized payload and heavy registry entry. Returns Ok(value) on success, Err(message) on failure or panic; the delivered value belongs to the caller. A compact consumed record remains for try_await subject to history age/count/byte limits. Invalid, expired or already-consumed handles raise a runtime error. |
+| [`broadcast`](#broadcast) | Get or create a named, process-local fan-out bus for Server-Sent Events. |
 | [`cancel_schedule`](#cancelschedule) | Cancels a scheduled task. Sets the cancellation flag and removes from registry. Returns true if the schedule existed, false otherwise. |
 | [`cancel_task`](#canceltask) | Requests cooperative cancellation of a task. Sets the cancellation flag; the task thread will exit at the next yield point (recv, recv_timeout, sleep_ms, or fetch). Does NOT force immediate termination. Returns true if the task existed, false otherwise. |
 | [`channel`](#channel) | Creates a new unbounded channel and returns a [sender, receiver] pair. |
 | [`close`](#close) | Closes a channel receiver by removing it from the registry. Once removed, future send(tx, ...) returns false (crossbeam Disconnected). recv(rx) immediately returns Unit since the id is no longer found. Returns true if existed, false otherwise. |
 | [`parallel`](#parallel) | Runs all functions concurrently and returns results in input order. If any task fails (crash or returned Err), cancels all remaining tasks and returns that Err. |
+| [`publish`](#publish) | Publish a JSON-compatible value to every current subscriber of a bus. |
 | [`race`](#race) | Runs all functions concurrently and returns the first successful result. Failed or panicked tasks are skipped; all remaining tasks are cancelled on success. If all tasks fail, returns the last Err result. |
 | [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if all senders have been dropped (Disconnected) or the receiver was closed. This is a cancellation yield point: a cancelled task will exit here. Single-consumer: the receiver lock is held for the blocking duration. |
 | [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or all senders disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point. |
@@ -4617,6 +4619,35 @@ await_task(task)  // => Ok(42)  // Wait for task result
 **See also:** `spawn`, `try_await`, `cancel_task`
 
 *Since v0.4.6*
+
+---
+
+#### `broadcast`
+
+```ntnt
+broadcast(name: String, options?: Map) -> Broadcast
+```
+
+Get or create a named, process-local fan-out bus for Server-Sent Events.
+
+All HTTP workers and in-process tasks share buses by name. The returned handle is the authority to publish and subscribe; a client-supplied string is not. Unused buses are freed. Options: `capacity` (Int 1-1024, default 64) is the number of recent events a slow subscriber may fall behind before it is disconnected. Not shared across OS processes.
+
+**Parameters:**
+
+- `name` — 1-128 characters of [A-Za-z0-9._:-]
+- `options` — Optional map with `capacity`
+
+**Returns:** A Broadcast handle
+
+**Examples:**
+
+```ntnt
+broadcast("metrics")  // => <broadcast metrics>  // Create or get a bus
+```
+
+**See also:** `publish`, `sse`
+
+*Since v0.5.7*
 
 ---
 
@@ -4753,6 +4784,36 @@ let [a, b] = parallel([fn() { 1 }, fn() { 2 }])
 **See also:** `race`, `spawn`, `await_task`
 
 *Since v0.4.6*
+
+---
+
+#### `publish`
+
+```ntnt
+publish(bus: Broadcast, value: Any, options?: Map) -> Result<Unit, String>
+```
+
+Publish a JSON-compatible value to every current subscriber of a bus.
+
+The value is validated and encoded once, then shared by all subscribers. Never waits for clients. Zero subscribers is a successful no-op (no replay is stored). Options: `event` (String) and `id` (String or Int) become SSE `event:`/`id:` fields. Err for Secret values, functions, handles, NaN, more than 64 KiB encoded, or an exhausted process payload budget.
+
+**Parameters:**
+
+- `bus` — A Broadcast from broadcast()
+- `value` — JSON-compatible data
+- `options` — Optional map with `event` and `id`
+
+**Returns:** Ok(()) once queued for subscribers; not proof of delivery
+
+**Examples:**
+
+```ntnt
+publish(bus, map { "cpu": 42 }, map { "event": "metrics" })  // => Ok(())  // Publish a named event
+```
+
+**See also:** `broadcast`, `sse`
+
+*Since v0.5.7*
 
 ---
 
@@ -7597,7 +7658,7 @@ Perform a fresh direct HTTP/1.1 GET monitoring sample; never follow redirects, u
 HTTP response builders for server route handlers
 
 ```ntnt
-import { text, html, json } from "std/http/server"
+import { sse, text, html } from "std/http/server"
 ```
 
 ### Functions
@@ -7620,6 +7681,7 @@ import { text, html, json } from "std/http/server"
 | [`response`](#response) | Create a fully custom HTTP response. |
 | [`save_upload`](#saveupload) | Save an uploaded file to disk. |
 | [`set_cookie`](#setcookie) | Build a Set-Cookie header value string. |
+| [`sse`](#sse) | Return a Server-Sent Events stream of a broadcast bus from a GET handler. |
 | [`static_file`](#staticfile) | Create a cacheable HTTP response for static assets. |
 | [`status`](#status) | Create a plain-text HTTP response with an explicit status code. |
 | [`text`](#text) | Create a plain-text HTTP response with status 200. |
@@ -8176,6 +8238,35 @@ set_cookie("token", "xyz", map { "http_only": true, "secure": true })  // => "to
 **See also:** `get_cookie`, `get_cookies`, `delete_cookie`, `with_cookie`
 
 *Since v0.3.11*
+
+---
+
+#### `sse`
+
+```ntnt
+sse(bus: Broadcast, options?: Map) -> Response
+```
+
+Return a Server-Sent Events stream of a broadcast bus from a GET handler.
+
+Middleware, authentication, status and headers apply as for any response; the stream opens only if this is the final response. The worker is released immediately: the open connection holds no interpreter. Events published after the stream opens are delivered; there is no replay. A comment heartbeat keeps proxies from timing out. Slow clients that fall behind the bus capacity are disconnected and should reconnect and refetch state. Options: `heartbeat_ms` (1000-300000, default 15000), `retry_ms` (client reconnect delay hint). HEAD and non-2xx responses never open a stream.
+
+**Parameters:**
+
+- `bus` — A Broadcast from std/concurrent broadcast()
+- `options` — Optional map with `heartbeat_ms` and `retry_ms`
+
+**Returns:** A streaming response
+
+**Examples:**
+
+```ntnt
+get("/events", fn(req) { sse(bus) })  // => Unit  // Stream a bus to browsers via EventSource
+```
+
+**See also:** `broadcast`, `publish`
+
+*Since v0.5.7*
 
 ---
 

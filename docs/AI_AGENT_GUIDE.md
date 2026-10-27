@@ -4060,6 +4060,37 @@ Follow/error use one 30-second default timeout budget and cap both received byte
 
 Downloads preserve existing file options and atomic promotion. Non-success diagnostics report status without reflecting response bodies. A committed no-overwrite download with failed temporary cleanup returns `Ok` with `cleanup_warning` and `temporary_path`. See [0.5.4 migration notes](migration-v0.5.4-fetch.md).
 
+## Server-Sent Events (live updates)
+
+Push live data to browsers with a broadcast bus and `sse()`. Requires the async server (`ntnt run`); `ntnt test` returns 501 for `sse()`.
+
+```ntnt
+import { json, sse } from "std/http/server"
+import { broadcast, publish } from "std/concurrent"
+
+let metrics = broadcast("metrics")
+
+get("/events", fn(req) {
+    // Middleware/auth run first; a denial or redirect opens no stream.
+    return sse(metrics)
+})
+
+post("/report", fn(req) {
+    let data = parse_json(req) otherwise { return status(400, "bad json") }
+    publish(metrics, data, map { "event": "metrics" }) otherwise { return status(503, err) }
+    return json(map { "ok": true })
+})
+```
+
+Browser: `new EventSource("/events").addEventListener("metrics", e => render(JSON.parse(e.data)))`.
+
+- `broadcast(name, options?)` returns the shared bus for `name` across all HTTP workers and in-process tasks (not across OS processes). The handle is the authority; never build a bus name from client input to grant access. Option `capacity` (default 64): how far a slow client may fall behind before it is disconnected.
+- `publish(bus, value, options?)` returns `Result<Unit, String>`. The value is JSON-encoded once and shared by all subscribers. `Ok` means queued for current subscribers, not delivered; zero subscribers is `Ok`. `Err` for Secret values, functions/handles, NaN, more than 64 KiB, or an exhausted process budget. Options: `event`, `id`.
+- `sse(bus, options?)` returns a normal response map; add headers/cookies before returning. `content-type`, `cache-control`, `content-length` and `x-accel-buffering` are fixed by the runtime. Options: `heartbeat_ms` (default 15000), `retry_ms`.
+- An open stream holds no worker or thread. Only events published after it opens are delivered: there is no replay, and `id`/`Last-Event-ID` are plain wire fields. Treat events as invalidations or deltas and refetch authoritative state on connect and reconnect.
+- A client that falls behind receives `event: ntnt.overflow` and is disconnected; EventSource reconnects automatically. Streams end on shutdown. Limit: 1024 open streams per process (503 beyond).
+- `Broadcast` can be captured by `spawn`/`schedule` tasks. It cannot be sent through channels, stored in KV/DB/jobs, or returned as JSON.
+
 ## Streaming HTTP Downloads
 
 `download` accepts the same request map as `fetch` and writes response bytes to a sibling temporary file before atomic promotion. Request-map downloads do not overwrite or create parents unless explicitly enabled.

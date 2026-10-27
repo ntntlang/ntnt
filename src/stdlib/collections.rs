@@ -1126,6 +1126,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::TxChannelHandle(a, _), Value::TxChannelHandle(b, _)) => a == b,
         (Value::RxChannelHandle(a), Value::RxChannelHandle(b)) => a == b,
         (Value::ScheduleHandle(a), Value::ScheduleHandle(b)) => a == b,
+        (Value::Broadcast(a), Value::Broadcast(b)) => std::sync::Arc::ptr_eq(a, b),
         _ => false,
     }
 }
