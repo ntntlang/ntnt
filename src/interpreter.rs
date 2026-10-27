@@ -498,6 +498,24 @@ impl Environment {
         None
     }
 
+    /// Whether `name` is unbound or bound to the native function of the same
+    /// canonical name. Inspects bindings in place without cloning values.
+    fn binding_is_native_named(&self, name: &str) -> bool {
+        let check = |value: &Value| matches!(value, Value::NativeFunction { name: native, .. } if native == name);
+        if let Some(value) = self.values.get(name) {
+            return check(value);
+        }
+        let mut next = self.parent.clone();
+        while let Some(env_rc) = next {
+            let env = env_rc.borrow();
+            if let Some(value) = env.values.get(name) {
+                return check(value);
+            }
+            next = env.parent.clone();
+        }
+        true
+    }
+
     fn len_of_binding(&self, name: &str) -> Option<Result<Value>> {
         if let Some(value) = self.values.get(name) {
             return Some(Self::len_of_value(value));
@@ -1047,6 +1065,47 @@ fn auto_unwrap_field(inner_val: Value, field: &str) -> Result<Value> {
     }
 }
 
+/// Bare-name call spellings that `Expression::Call` handles with a builtin
+/// fast path before ordinary lookup. Must cover every such branch.
+const SPELLING_KEYED_BUILTINS: &[&str] = &[
+    "template",
+    "compile",
+    "render",
+    "filter",
+    "transform",
+    "sort",
+    "sort_by",
+    "sort_desc",
+    "find",
+    "any",
+    "all",
+    "count",
+    "reduce",
+    "flat_map",
+    "magic_link_flow",
+    "read_file",
+    "read_bytes",
+    "exists",
+    "is_file",
+    "is_dir",
+    "mkdir",
+    "mkdir_all",
+    "readdir",
+    "remove",
+    "remove_dir",
+    "remove_dir_all",
+    "file_size",
+    "rename",
+    "copy",
+    "write_file",
+    "append_file",
+    "get",
+    "post",
+    "put",
+    "delete",
+    "patch",
+];
+
 impl Interpreter {
     pub(crate) fn configure_native_test(&mut self, entry: &str) {
         self.execution_mode = ExecutionMode::UnitTest;
@@ -1231,11 +1290,10 @@ impl Interpreter {
     /// True when `name` is unbound or bound to the native function with that
     /// canonical name, i.e. a spelling-keyed builtin fast path may apply.
     fn name_resolves_to_builtin(&self, name: &str) -> bool {
-        match self.environment.borrow().get(name) {
-            None => true,
-            Some(Value::NativeFunction { name: native, .. }) => native == name,
-            Some(_) => false,
-        }
+        // Only spellings with a fast path need the binding probe; every other
+        // bare-name call skips it entirely.
+        SPELLING_KEYED_BUILTINS.contains(&name)
+            && self.environment.borrow().binding_is_native_named(name)
     }
 
     /// Look up `name` in the server action registry. Returns `None` if no action is registered
@@ -16333,15 +16391,15 @@ listen(0)
                 other => panic!("{name}: user function was not called: {other:?}"),
             }
         }
+        let scratch = tempfile::tempdir().unwrap();
+        let unwritten = scratch.path().join("never-written.txt");
+        let unwritten_literal = serde_json::to_string(&unwritten.to_string_lossy()).unwrap();
+        let write_call = format!("write_file({unwritten_literal}, \"x\")");
         for (name, params, call) in [
             ("reduce", "a, b, c", "reduce([1], 0, fn(a, x) { a })"),
             ("compile", "p", "compile(\"x.html\")"),
             ("read_file", "p", "read_file(\"missing.txt\")"),
-            (
-                "write_file",
-                "p, c",
-                "write_file(\"never-written.txt\", \"x\")",
-            ),
+            ("write_file", "p, c", write_call.as_str()),
         ] {
             let src = format!("fn {name}({params}) {{\n    return \"USER\"\n}}\n{call}");
             match eval(&src) {
@@ -16349,7 +16407,7 @@ listen(0)
                 other => panic!("{name}: user function was not called: {other:?}"),
             }
         }
-        assert!(!std::path::Path::new("never-written.txt").exists());
+        assert!(!unwritten.exists());
         // A closure bound to a builtin spelling also shadows it.
         match eval("let filter = fn(a, b) { \"LOCAL\" }\nfilter([1], fn(x) { true })") {
             Ok(Value::String(s)) => assert_eq!(s, "LOCAL"),
@@ -16365,6 +16423,43 @@ listen(0)
         ) {
             Ok(Value::Array(a)) => assert!(matches!(a[0], Value::Int(3))),
             other => panic!("aliased sort_by: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_spelling_keyed_builtin_list_covers_every_fast_path() {
+        // Every guarded spelling branch in call evaluation (and the fs/route name
+        // arrays) must be in SPELLING_KEYED_BUILTINS, or that branch silently
+        // stops firing for the real builtin.
+        let file = include_str!("interpreter.rs");
+        let start = file
+            .find("let builtin_spelling = self.name_resolves_to_builtin(name);")
+            .unwrap();
+        let src = &file[start
+            ..start
+                + file[start..]
+                    .find("let callee = self.eval_expression(function)?;\n                let args")
+                    .unwrap()];
+        let mut spellings = Vec::new();
+        for part in src.split("builtin_spelling && name == \"").skip(1) {
+            spellings.push(part.split('"').next().unwrap().to_string());
+        }
+        for array in [
+            "fs_single_path_fns",
+            "fs_two_path_fns",
+            "fs_path_content_fns",
+            "http_methods",
+        ] {
+            let decl = format!("let {array} = [");
+            let body = src.split(&decl).nth(1).unwrap().split(']').next().unwrap();
+            spellings.extend(body.split('"').skip(1).step_by(2).map(str::to_string));
+        }
+        assert!(spellings.len() > 30, "{spellings:?}");
+        for spelling in spellings {
+            assert!(
+                SPELLING_KEYED_BUILTINS.contains(&spelling.as_str()),
+                "fast path for {spelling} missing from SPELLING_KEYED_BUILTINS"
+            );
         }
     }
 
