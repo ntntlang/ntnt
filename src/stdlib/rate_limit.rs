@@ -17,7 +17,7 @@
 use crate::error::{IntentError, Result};
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::{BuildHasher, Hash};
 use std::net::IpAddr;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -176,12 +176,9 @@ impl Store {
         }
     }
 
-    /// Keyed hash, so an attacker cannot aim keys at one shard or at the
-    /// reserved overflow values.
+    /// Keyed hash, so an attacker cannot aim keys at one shard.
     pub fn key<K: Hash>(&self, key: K) -> u64 {
-        let mut h = self.hasher.build_hasher();
-        key.hash(&mut h);
-        h.finish()
+        self.hasher.hash_one(key)
     }
 
     /// Check `key` at `now`. `overflow` is the class tag of the shared budget
@@ -851,6 +848,58 @@ mod tests {
         let denied = check_key(&a, rate);
         assert!(!denied.allowed && denied.retry_after_secs >= 29);
         assert!(check_key(&format!("{a}-other"), rate).allowed);
+    }
+
+    /// Timing from #294 (machine-dependent, so ignored by default). Run with
+    /// `cargo test --release --lib rate_limit::tests::check_timing -- --ignored --nocapture`.
+    /// Prints uncontended latency, and for 16 threads both per-thread latency
+    /// and aggregate cost per check, on one key (worst case) and on distinct keys.
+    #[test]
+    #[ignore]
+    fn check_timing() {
+        let store = std::sync::Arc::new(Store::new(100_000));
+        let rate = RateSpec::parse("1000000000/second").unwrap();
+        let key = store.key("bench");
+        let n = 2_000_000u64;
+        let start = Instant::now();
+        for i in 0..n {
+            std::hint::black_box(store.check(key, OVERFLOW_WRITE, rate, 1_000_000_000, i));
+        }
+        let single = start.elapsed().as_nanos() as f64 / n as f64;
+        println!("check: {single:.1} ns uncontended");
+        let threads = 16u64;
+        let per = 200_000u64;
+        for same_key in [true, false] {
+            let start = Instant::now();
+            let handles: Vec<_> = (0..threads)
+                .map(|t| {
+                    let store = store.clone();
+                    std::thread::spawn(move || {
+                        let k = if same_key { key } else { store.key(("t", t)) };
+                        for i in 0..per {
+                            std::hint::black_box(store.check(
+                                k,
+                                OVERFLOW_WRITE,
+                                rate,
+                                1_000_000_000,
+                                t * per + i,
+                            ));
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+            let wall = start.elapsed().as_nanos() as f64;
+            println!(
+                "check at {threads} threads, {}: {:.1} ns per-thread latency, {:.1} ns aggregate per check",
+                if same_key { "one key" } else { "distinct keys" },
+                wall / per as f64,
+                wall / (per * threads) as f64
+            );
+        }
+        assert!(single < 100.0, "uncontended {single} ns");
     }
 
     #[test]

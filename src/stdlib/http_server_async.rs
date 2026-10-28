@@ -881,6 +881,11 @@ async fn handle_request(
             // Built-in rate limit (#294): off unless NTNT_RATE_LIMIT=on. Runs
             // before the body is read or the interpreter is involved.
             if let Some(limiter) = crate::stdlib::rate_limit::limiter() {
+                if crate::stdlib::client_ip::no_trusted_proxies()
+                    && crate::stdlib::client_ip::is_private_peer(peer_addr.ip())
+                {
+                    crate::stdlib::client_ip::warn_private_peer_once(peer_addr.ip());
+                }
                 let client = crate::stdlib::client_ip::config().resolve(peer_addr.ip(), |name| {
                     req.headers()
                         .get_all(name)

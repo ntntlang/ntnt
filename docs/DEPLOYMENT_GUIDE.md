@@ -366,6 +366,41 @@ DB_PASSWORD=your-db-password
 NTNT_TIMEOUT=30
 ```
 
+### Real Visitor IPs and Rate Limiting
+
+Behind a tunnel, every request reaches NTNT from the `cloudflared` container, so the TCP peer is the tunnel, not the visitor. Tell NTNT which proxies to believe and which header carries the visitor's address.
+
+Trust only the proxy. Anything inside a trusted range can set the header, so don't trust a network shared with the database, workers or other services. Put `cloudflared` and the web service on a small dedicated network with a pinned subnet, and trust that:
+
+```yaml
+# docker-compose.yml
+services:
+  web:
+    networks: [app-network, edge]
+    environment:
+      NTNT_TRUSTED_PROXIES: "172.30.250.0/29"   # the edge network only
+      NTNT_CLIENT_IP_HEADER: "CF-Connecting-IP"  # Cloudflare sets and overwrites this
+      NTNT_RATE_LIMIT: "on"                       # off by default, in every environment
+      NTNT_RATE_LIMIT_WRITE: "30/minute"          # per visitor; reads default to 600/minute
+  cloudflared:
+    networks: [edge]
+
+networks:
+  app-network:
+  edge:
+    ipam:
+      config:
+        - subnet: 172.30.250.0/29
+```
+
+- `web` and `cloudflared` are the only members of `edge`; `db`, `redis` and workers stay on `app-network`. For an even tighter rule, pin `cloudflared` with `ipv4_address` and trust that single address.
+- To check an existing network's range: `docker network inspect <compose-project>_edge --format '{{(index .IPAM.Config 0).Subnet}}'` (Compose prefixes network names with the project name).
+- `req.client_ip` is then the visitor's address. `req.ip` keeps its old, spoofable behaviour; use `client_ip` for limits, audit logs and abuse checks.
+- Without `NTNT_TRUSTED_PROXIES`, every visitor shares the proxy's address and one budget. With the limiter on and no trusted proxies, NTNT warns once when a request arrives from a private, loopback, link-local or unique-local address (a public proxy address does not trigger the warning).
+- Per-route limits (`export let rate = "5/minute"`) and `check_limit(key, rate)` are described in the AI Agent Guide.
+- The limiter keeps state in process memory: it is per process, resets on restart and is not shared across hosts. It is not volumetric DDoS protection; keep Cloudflare's WAF and rate-limiting rules for floods.
+- `ntnt test` and `ntnt intent check` run apps on the single-threaded test server, which does not apply the built-in limiter. `check_limit` works in both.
+
 ---
 
 ## Full Production Example
@@ -550,6 +585,9 @@ sudo systemctl start ntnt-web ntnt-worker
 | `NTNT_DETAILED_ERRORS` | `true` (dev) | Show stack traces in error responses |
 | `NTNT_NETMON_ENABLE` | unset | Explicitly enable `std/netmon` protocol calls for the process |
 | `NTNT_NET_ALLOW_PRIVATE` | unset | Process-level opt-in for `std/net` and `std/netmon` calls against private/loopback targets (each call must also pass `allow_private: true`) |
+| `NTNT_TRUSTED_PROXIES` | unset | CIDRs whose client IP header is believed for `req.client_ip` |
+| `NTNT_CLIENT_IP_HEADER` | `X-Forwarded-For` | Header read from trusted proxies (e.g. `CF-Connecting-IP`) |
+| `NTNT_RATE_LIMIT` | `off` | `on` enables built-in per-visitor rate limiting; see the runtime reference for the other `NTNT_RATE_LIMIT_*` settings |
 
 ---
 
