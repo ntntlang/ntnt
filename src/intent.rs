@@ -1756,7 +1756,7 @@ impl Glossary {
     /// the built-in corpus (strings, numbers, edge).
     /// Otherwise, returns a single TestCase.
     ///
-    /// Returns (Vec<TestCase>, unresolved_outcomes, component_refs, input_ref)
+    /// Returns `(Vec<TestCase>, unresolved_outcomes, component_refs, input_ref)`.
     pub fn resolve_scenario_with_test_data(
         &self,
         scenario: &Scenario,
@@ -6091,7 +6091,7 @@ fn format_assertion(assertion: &Assertion) -> String {
 }
 
 /// Find the intent file for a given NTNT file
-/// Looks for: <name>.intent, <name>.tnt.intent, or intent.yaml in same directory
+/// Looks for `<name>.intent`, `<name>.tnt.intent`, or `intent.yaml` in the same directory.
 pub fn find_intent_file(ntnt_path: &Path) -> Option<std::path::PathBuf> {
     let parent = ntnt_path.parent()?;
     let stem = ntnt_path.file_stem()?.to_string_lossy();

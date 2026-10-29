@@ -2858,9 +2858,9 @@ mod tests {
         assert!(matches!(result, Some(Value::Int(42))));
 
         // Test float
-        kv.set("float_key", &Value::Float(3.14), None).unwrap();
+        kv.set("float_key", &Value::Float(12.34), None).unwrap();
         let result = kv.get("float_key").unwrap();
-        assert!(matches!(result, Some(Value::Float(f)) if (f - 3.14).abs() < 0.001));
+        assert!(matches!(result, Some(Value::Float(f)) if (f - 12.34).abs() < 0.001));
 
         // Test bool
         kv.set("bool_key", &Value::Bool(true), None).unwrap();
@@ -2957,7 +2957,7 @@ mod tests {
         set(&[
             kv.clone(),
             Value::String("float_key".to_string()),
-            Value::String("3.14".to_string()),
+            Value::String("12.34".to_string()),
         ])
         .unwrap();
         set(&[
@@ -3006,7 +3006,7 @@ mod tests {
         assert!(matches!(result, Value::Int(0)));
 
         let result = get_float(&[kv.clone(), Value::String("float_key".to_string())]).unwrap();
-        assert!(matches!(result, Value::Float(f) if (f - 3.14).abs() < 0.0001));
+        assert!(matches!(result, Value::Float(f) if (f - 12.34).abs() < 0.0001));
 
         let result = get_float(&[
             kv.clone(),

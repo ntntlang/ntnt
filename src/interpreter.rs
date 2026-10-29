@@ -153,7 +153,7 @@ pub enum Value {
     TempDir(std::sync::Arc<crate::stdlib::fs::owned::TempOwner>),
 
     /// Channel sender handle — the sending end returned by channel().
-    /// Holds an opaque Arc<dyn Any + Send + Sync> (actually Arc<crossbeam::Sender<T>>)
+    /// Holds an opaque `Arc<dyn Any + Send + Sync>` (actually `Arc<crossbeam::Sender<T>>`)
     /// so that when all TxChannelHandle clones drop, the sender drops and the receiver
     /// sees Disconnected — exactly how Rust's mpsc/crossbeam channels work.
     TxChannelHandle(u64, ChannelSender),
@@ -12749,8 +12749,8 @@ let pairs = map { "a": 1, "b": 2 }
         assert!(matches!(eval("abs(5)").unwrap(), Value::Int(5)));
         assert!(matches!(eval("abs(0)").unwrap(), Value::Int(0)));
         // Float
-        if let Value::Float(f) = eval("abs(-3.14)").unwrap() {
-            assert!((f - 3.14).abs() < 0.001);
+        if let Value::Float(f) = eval("abs(-12.34)").unwrap() {
+            assert!((f - 12.34).abs() < 0.001);
         } else {
             panic!("Expected float");
         }
