@@ -19,17 +19,17 @@ There is deliberately **no `ntnt db migrate`** yet. The existing `ntnt migrate` 
 `--manifest` defaults to `ntnt.toml` in the current directory; there is no implicit ancestor/target selection. The migration directory is relative to that manifest, not the caller's working directory.
 
 ```toml
-[database]
+[databases.app]
 engine = "postgresql"
 schema = "app"
-migrations_dir = "migrations"
+migrations_dir = "migrations/app"
 
-[database.targets.development]
+[databases.app.targets.development]
 connection_secret = "APP_INSPECTION_DATABASE"
 database = "app_development"
 role = "app_owner"
 
-[database.scratch]
+[databases.app.scratch]
 connection_secret = "APP_REPLAY_DATABASE"
 database = "app_replay"
 role = "app_replay_owner"
@@ -42,17 +42,58 @@ required = true
 required = true
 ```
 
-- Select a named target with `--target`. There is no fallback connection, URL argument, `url_env` alias, plaintext manifest credential, or `--force` bypass. Unknown database fields are errors.
+- Declare logical stores as `[databases.<name>]`. `--database <name>` selects one; omit it only when exactly one database is declared. Unknown or ambiguous selection fails before connection lookup. Names start with an ASCII letter and contain at most 63 ASCII letters, digits, underscores or hyphens.
+- Select a named deployment target with `--target`; it is always required, even for a single database or target. There is no fallback connection, URL argument, `url_env` alias, plaintext manifest credential, or `--force` bypass. Unknown fields in the selected database definition are errors.
 - Connections reuse the existing **`std/secrets` providers and declaration validation**. Development's environment provider reads the exact logical name. Production uses the configured Unix-socket provider; the environment provider remains disabled in production. See [Secrets Agent Protocol](secrets-agent-protocol.md). Declarations are read from the captured manifest, not reopened during replay.
 - A connection secret must specify exactly one host, the declared `user`/`dbname`, and **`sslmode=disable`**, with no startup `options`. This initial adapter reuses the existing NoTLS driver. Use a trusted local Unix socket or a separately secured local transport; do not send credentials over an untrusted plaintext network. TLS transport is not implemented and there is no silent TLS downgrade.
-- Database, role and managed-schema names use ASCII letters/digits/underscores, start with a letter, and are at most 63 bytes. SQL object identifiers may be quoted. System schemas, `_ntnt`, and `public` cannot be the managed schema.
+- Physical database, role and managed-schema names use ASCII letters/digits/underscores, start with a letter, and are at most 63 bytes. SQL object identifiers may be quoted. System schemas, `_ntnt`, and `public` cannot be the managed schema.
 - The **target managed schema must already exist**. Commands do not create it or `_ntnt`. Empty, explicitly provisioned managed schemas can be planned without a ledger. A nonempty unrecognized scope is not assumed to have an empty history.
 - The declared target role is the logical owner for expected owner/grant canonicalization. Scratch uses its separate owner role. Other owners/grantees remain distinct; ownership and grants are never stripped wholesale. Multi-owner histories or additional grants that cannot be reproduced by the supported history will not receive a clean comparison. Target authority/membership facts are also bound into plans.
+
+## Multiple databases in one application
+
+A **logical database** (`app`, `analytics`) owns an engine, managed schema, migration directory, named deployment targets, and optional scratch configuration. A **target** (`development`, `production`) selects an endpoint for that logical database's history. Targets are not separate migration histories.
+
+For example, add this alongside the `app` definition above:
+
+```toml
+[databases.analytics]
+engine = "postgresql"
+schema = "analytics"
+migrations_dir = "migrations/analytics"
+
+[databases.analytics.targets.development]
+connection_secret = "ANALYTICS_INSPECTION_DATABASE"
+database = "analytics_development"
+role = "analytics_owner"
+
+[databases.analytics.scratch]
+connection_secret = "ANALYTICS_REPLAY_DATABASE"
+database = "analytics_replay"
+role = "analytics_replay_owner"
+disposable = true
+
+[secrets.ANALYTICS_INSPECTION_DATABASE]
+required = true
+[secrets.ANALYTICS_REPLAY_DATABASE]
+required = true
+```
+
+```sh
+ntnt db plan --database app --target development --json
+ntnt db plan --database analytics --target development --json
+```
+
+Only the selected store's migration directory and connection secrets are accessed. Other stores may be unprovisioned or use a future adapter; their backend-specific fields are not interpreted by this operation. Registry names/table shapes and the shared secret declaration boundary remain validated. Each invocation operates on one logical database—there is no implicit `--all`, cross-database execution, or distributed transaction.
+
+Reports identify the logical name as `database`, the deployment label as `target.name`, and the actual connected database as `target.identity.database`. Plans bind both logical database and target labels as well as physical identity, so even aliases for the same endpoint cannot exchange plans silently. A single database's explicit and implicit selection produce the same binding. The captured manifest is still bound in full: editing any part of that manifest invalidates an earlier plan; changing an unselected migration file does not.
+
+This named form replaces the unmerged PR prototype's singular `[database]` configuration. Move its tables under `[databases.app]`, `[databases.app.targets.<target>]`, and `[databases.app.scratch]`. Singular or mixed forms are rejected with a configuration error rather than guessed or silently combined. The top-level `[secrets.<name>]` declarations remain unchanged.
 
 ## Immutable SQL inventory
 
 ```text
-migrations/
+migrations/app/
   0001_accounts.sql
   0002_timezone.sql
   0002_timezone.toml
@@ -167,7 +208,7 @@ JSON has `format_version: 1`, UTC `observed_at`, stable diagnostic codes, source
 
 Plans bind:
 
-- captured manifest, ordered source/checksum identities and policy;
+- logical database and target names, captured manifest, ordered source/checksum identities and policy;
 - cluster/database identity, database name, role/authority/memberships, engine and settings;
 - managed scope, observed base history/catalog, applied prefix and replayed expected base;
 - adapter/canonicalization version, exact pending migration identities and candidate fingerprint.

@@ -20,7 +20,8 @@ pub struct Diagnostic {
 impl Diagnostic {
     pub(crate) fn new(code: &str, message: &str) -> Self {
         let next_action = match code {
-            "DB_REFERENCE_UNAVAILABLE" => "Configure [database.scratch] with a distinct disposable database and secret, then rerun inspection.",
+            "DB_REFERENCE_UNAVAILABLE" => "Configure [databases.<name>.scratch] for the selected database with a distinct disposable database and secret, then rerun inspection.",
+            "DB_DATABASE_REQUIRED" | "DB_DATABASE_UNKNOWN" => "Select a declared [databases.<name>] with --database <name>. --database may be omitted only when exactly one logical database is declared; --target is always required.",
             "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty matching PostgreSQL database owned by a separate unprivileged role. Do not reset the selected target.",
             "DB_REPLAY_UNSUPPORTED" => "Review the named migration against docs/DATABASE_MIGRATIONS.md. Unsupported SQL needs adapter support or separate manual review; do not replay it on the target.",
             "DB_COVERAGE_INCOMPLETE" | "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
@@ -68,6 +69,9 @@ pub enum DbCommand {
 pub struct Options {
     #[arg(long, default_value = "ntnt.toml")]
     pub manifest: PathBuf,
+    /// Logical database name; optional only when exactly one is declared.
+    #[arg(long)]
+    pub database: Option<String>,
     #[arg(long)]
     pub target: String,
     #[arg(long)]
@@ -190,8 +194,12 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 .map_err(|_| Diagnostic::new("DB_PLAN_INVALID", "Invalid saved plan JSON."))
         })
     });
-    let result = inventory::CapturedInputs::load(&options.manifest, &options.target)
-        .and_then(|inputs| database_runtime(report::inspect(inputs, command)));
+    let result = inventory::CapturedInputs::load(
+        &options.manifest,
+        &options.target,
+        options.database.as_deref(),
+    )
+    .and_then(|inputs| database_runtime(report::inspect(inputs, command)));
     let mut report = result.unwrap_or_else(|d| report::failure(command, d));
     if let Some(prior) = prior {
         let valid = prior.as_ref().is_ok_and(|p| {
@@ -241,6 +249,9 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             "Database {command}: {}",
             report["outcome"].as_str().unwrap_or("unknown")
         );
+        if let Some(database) = report.get("database") {
+            println!("Logical database: {database}");
+        }
         if let Some(t) = report.get("target") {
             println!(
                 "Target: {} / {} ({})",

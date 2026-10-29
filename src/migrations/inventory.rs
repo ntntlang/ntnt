@@ -87,6 +87,7 @@ impl Migration {
 
 pub(crate) struct CapturedInputs {
     pub config: Database,
+    pub database_name: String,
     pub target_name: String,
     pub endpoint: Endpoint,
     pub document: toml::Value,
@@ -141,16 +142,41 @@ pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 impl CapturedInputs {
-    pub fn load(manifest: &Path, target: &str) -> Result<Self> {
+    pub fn load(manifest: &Path, target: &str, database: Option<&str>) -> Result<Self> {
         let bytes = file_bytes(manifest)?;
         let document: toml::Value = std::str::from_utf8(&bytes)
             .ok()
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| invalid("Invalid UTF-8/TOML manifest."))?;
-        let config: Database = document
-            .get("database")
-            .cloned()
-            .ok_or_else(|| invalid("Explicit [database] configuration is required."))?
+        if document.get("database").is_some() {
+            return Err(invalid("Use named [databases.<name>] tables instead of the prototype [database] table; the two forms cannot be mixed."));
+        }
+        let databases = document
+            .get("databases")
+            .and_then(toml::Value::as_table)
+            .filter(|databases| !databases.is_empty())
+            .ok_or_else(|| invalid("Declare at least one [databases.<name>] table."))?;
+        if databases.iter().any(|(name, value)| {
+            name.is_empty()
+                || name.len() > 63
+                || !name.as_bytes()[0].is_ascii_alphabetic()
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                || !value.is_table()
+        }) {
+            return Err(invalid("Database names must start with an ASCII letter and contain at most 63 letters, digits, underscores or hyphens; each entry must be a table."));
+        }
+        let database_name = match database {
+            Some(name) if databases.contains_key(name) => name.to_owned(),
+            Some(_) => return Err(Diagnostic::new("DB_DATABASE_UNKNOWN", "The selected logical database is not declared; no fallback database was selected.")),
+            None if databases.len() == 1 => databases.keys().next().unwrap().clone(),
+            None => return Err(Diagnostic::new("DB_DATABASE_REQUIRED", "Multiple logical databases are declared; select one with --database before choosing its target.")),
+        };
+        // Only the selected definition is interpreted. Other stores may use a
+        // future adapter, unavailable credentials, or unprovisioned directories.
+        let config: Database = databases[&database_name]
+            .clone()
             .try_into()
             .map_err(|_| invalid("Unknown or invalid database configuration field."))?;
         if config.engine != "postgresql"
@@ -309,15 +335,17 @@ impl CapturedInputs {
         migrations.sort_by_key(|m| m.id);
         let summaries: Vec<_> = migrations.iter().map(Migration::summary).collect();
         let policy_digest = json_digest(
-            &serde_json::json!({"policy":"read-only-target/restricted-replay-v1", "database":config}),
+            &serde_json::json!({"policy":"read-only-target/restricted-replay-v1", "database_name":database_name, "database":config}),
         );
         let input_digest = digest(&[
             b"ntnt-inputs-v1",
             &bytes,
+            database_name.as_bytes(),
             json_digest(&summaries).as_bytes(),
         ]);
         Ok(Self {
             config,
+            database_name,
             target_name: target.into(),
             endpoint,
             document,
@@ -337,11 +365,11 @@ mod tests {
         std::fs::write(
             root.path().join("ntnt.toml"),
             r#"
-[database]
+[databases.app]
 engine="postgresql"
 schema="app"
 migrations_dir="migrations"
-[database.targets.local]
+[databases.app.targets.local]
 connection_secret="TEST_URL"
 database="target"
 role="target_role"
@@ -377,8 +405,8 @@ role="target_role"
             "CREATE TABLE app.two(id INT);",
         )
         .unwrap();
-        let a = CapturedInputs::load(&p, "local").unwrap();
-        let b = CapturedInputs::load(&p, "local").unwrap();
+        let a = CapturedInputs::load(&p, "local", None).unwrap();
+        let b = CapturedInputs::load(&p, "local", None).unwrap();
         assert_eq!(a.input_digest, b.input_digest);
         assert_eq!(
             a.migrations.iter().map(|m| m.id).collect::<Vec<_>>(),
@@ -392,7 +420,10 @@ role="target_role"
         .unwrap();
         std::fs::write(&p, "database='replacement'").unwrap();
         assert_eq!(a.migrations[0].sql, "CREATE TABLE app.two(id INT);");
-        assert_eq!(a.document["database"]["schema"].as_str(), Some("app"));
+        assert_eq!(
+            a.document["databases"]["app"]["schema"].as_str(),
+            Some("app")
+        );
     }
     #[test]
     fn metadata_presence_and_exact_comments_are_checksummed() {
@@ -403,12 +434,12 @@ role="target_role"
             "CREATE TABLE app.t(id INT);",
         )
         .unwrap();
-        let a = CapturedInputs::load(&manifest, "local").unwrap();
+        let a = CapturedInputs::load(&manifest, "local", None).unwrap();
         let side = root.path().join("migrations/1_first.toml");
         std::fs::write(&side, "").unwrap();
-        let b = CapturedInputs::load(&manifest, "local").unwrap();
+        let b = CapturedInputs::load(&manifest, "local", None).unwrap();
         std::fs::write(&side, "# comment only\n").unwrap();
-        let c = CapturedInputs::load(&manifest, "local").unwrap();
+        let c = CapturedInputs::load(&manifest, "local", None).unwrap();
         assert_ne!(a.migrations[0].checksum, b.migrations[0].checksum);
         assert_ne!(b.migrations[0].checksum, c.migrations[0].checksum);
         for metadata in [
@@ -419,7 +450,10 @@ role="target_role"
         ] {
             std::fs::write(&side, metadata).unwrap();
             assert_eq!(
-                CapturedInputs::load(&manifest, "local").err().unwrap().code,
+                CapturedInputs::load(&manifest, "local", None)
+                    .err()
+                    .unwrap()
+                    .code,
                 "DB_METADATA_UNSUPPORTED"
             );
         }
@@ -438,7 +472,7 @@ role="target_role"
         )
         .unwrap();
         assert_eq!(
-            CapturedInputs::load(&root.path().join("ntnt.toml"), "local")
+            CapturedInputs::load(&root.path().join("ntnt.toml"), "local", None)
                 .err()
                 .unwrap()
                 .code,
@@ -459,13 +493,19 @@ role="target_role"
         let link = root.path().join("migrations/1_first.sql");
         symlink(root.path().join("original.sql"), &link).unwrap();
         assert_eq!(
-            CapturedInputs::load(&manifest, "local").err().unwrap().code,
+            CapturedInputs::load(&manifest, "local", None)
+                .err()
+                .unwrap()
+                .code,
             "DB_INPUT_IO"
         );
         std::fs::remove_file(&link).unwrap();
         std::fs::create_dir(&link).unwrap();
         assert_eq!(
-            CapturedInputs::load(&manifest, "local").err().unwrap().code,
+            CapturedInputs::load(&manifest, "local", None)
+                .err()
+                .unwrap()
+                .code,
             "DB_INPUT_IO"
         );
     }

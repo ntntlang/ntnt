@@ -53,7 +53,10 @@ remove selected fixture headers without replacing HTTP parsing or framing.
 
 `src/migrations/` owns immutable SQL/metadata capture, versioned results, history
 validation, PostgreSQL catalog fingerprints, applied-prefix drift and target-bound
-plans. `ntnt db status|plan|verify` dispatches to that core without invoking the
+plans. Named `[databases.<name>]` definitions separate logical stores from deployment
+targets; selection, migration capture, credentials and scratch stay scoped to one
+store, and plans bind the logical store/target labels plus physical identity.
+`ntnt db status|plan|verify` dispatches to that core without invoking the
 interpreter or the existing source `ntnt migrate` command. Captured manifest
 secret declarations reuse the existing native secrets providers without reopening
 source policy or changing interpreter-global secret state.

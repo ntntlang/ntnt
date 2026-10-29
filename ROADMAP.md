@@ -37,7 +37,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 ## SQL-first database management (#245)
 
 - [x] First increment: deterministic SQL/metadata inventory, explicit secret-backed
-  targets/scopes, PostgreSQL catalog/history inspection, disposable restricted
+  logical databases/targets/scopes, PostgreSQL catalog/history inspection, disposable restricted
   replay, applied-prefix drift, and non-authorizing target-bound plans through
   `ntnt db status|plan|verify`. See [coverage and limitations](docs/DATABASE_MIGRATIONS.md).
 - [ ] PostgreSQL exact-plan execution, SQL contracts, per-migration commit truth,

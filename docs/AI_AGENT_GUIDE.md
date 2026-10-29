@@ -1702,8 +1702,12 @@ ntnt db plan --target development --json --out review.json
 ntnt db verify --target development --against review.json --json
 ```
 
-Configure `[database]`, named targets and a separate disposable scratch database
-using declared `std/secrets` references. These commands never initialize or mutate
+Configure logical stores under `[databases.<name>]`, each with its own migration
+directory, named targets, and disposable scratch database using declared
+`std/secrets` references. Select `--database app --target development`; omit
+`--database` only when exactly one store is declared. `--target` is always required.
+Only the selected store is inspected, and its logical name is bound into plans.
+These commands never initialize or mutate
 the target, execute SQL checks, or adopt an existing database. They compare the live
 catalog to replay at the **applied prefix**, not the pending repository head. Read
 `catalog.uncovered`, `diagnostics`, and `assertions`: unknown coverage is not no drift,

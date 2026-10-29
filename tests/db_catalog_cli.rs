@@ -6,11 +6,11 @@ fn project() -> tempfile::TempDir {
     std::fs::write(
         root.path().join("ntnt.toml"),
         r#"
-[database]
+[databases.app]
 engine = "postgresql"
 migrations_dir = "migrations"
 schema = "app"
-[database.targets.local]
+[databases.app.targets.local]
 connection_secret = "DB_TARGET"
 database = "target"
 role = "target_role"

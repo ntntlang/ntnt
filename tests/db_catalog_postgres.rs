@@ -40,15 +40,15 @@ impl Fixture {
             root.path().join("ntnt.toml"),
             format!(
                 r#"
-[database]
+[databases.app]
 engine = "postgresql"
 migrations_dir = "migrations"
 schema = "app"
-[database.targets.test]
+[databases.app.targets.test]
 connection_secret = "DB_TARGET"
 database = "{target}"
 role = "{target}"
-[database.scratch]
+[databases.app.scratch]
 connection_secret = "DB_SCRATCH"
 database = "{scratch}"
 role = "{scratch}"
@@ -120,6 +120,156 @@ impl Drop for Fixture {
             let _ = self.admin.batch_execute(&format!("DROP ROLE {name}"));
         }
     }
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn logical_database_and_target_selection_are_bound_into_plans() {
+    let f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
+    let implicit = f.command("plan");
+    let explicit = f.command_args("plan", &["--database", "app"]);
+    assert_eq!(implicit["outcome"], "pass");
+    assert_eq!(implicit["plan_digest"], explicit["plan_digest"]);
+    assert_eq!(explicit["database"], "app");
+    assert_eq!(explicit["binding"]["database"], "app");
+    assert_eq!(explicit["binding"]["target_name"], "test");
+
+    let manifest_path = f.root.path().join("ntnt.toml");
+    let mut manifest: toml::Value = std::fs::read_to_string(&manifest_path)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let alias = manifest["databases"]["app"].clone();
+    manifest["databases"]
+        .as_table_mut()
+        .unwrap()
+        .insert("alias".into(), alias);
+    std::fs::write(manifest_path, toml::to_string(&manifest).unwrap()).unwrap();
+    let app = f.command_args("plan", &["--database", "app", "--out", "app-plan.json"]);
+    let alias = f.command_args("plan", &["--database", "alias"]);
+    assert_eq!(app["outcome"], "pass");
+    assert_eq!(alias["outcome"], "pass");
+    assert_eq!(app["target"]["identity"], alias["target"]["identity"]);
+    assert_ne!(app["plan_digest"], alias["plan_digest"]);
+    let wrong = f.command_args(
+        "verify",
+        &["--database", "alias", "--against", "app-plan.json"],
+    );
+    assert_eq!(wrong["plan_validation"]["outcome"], "fail");
+    let matching = f.command_args(
+        "verify",
+        &["--database", "app", "--against", "app-plan.json"],
+    );
+    assert_eq!(matching["plan_validation"]["outcome"], "pass");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn multiple_databases_have_independent_connections_migrations_and_scratch() {
+    let app = Fixture::new();
+    let analytics = Fixture::new();
+    app.sql("0001_app.sql", "CREATE TABLE app.accounts(id INTEGER);");
+    analytics
+        .target()
+        .batch_execute("CREATE SCHEMA analytics")
+        .unwrap();
+    let directory = app.root.path().join("analytics-migrations");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(
+        directory.join("0001_analytics.sql"),
+        "CREATE TABLE analytics.events(id BIGINT);",
+    )
+    .unwrap();
+    let manifest_path = app.root.path().join("ntnt.toml");
+    let mut manifest: toml::Value = std::fs::read_to_string(&manifest_path)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let other: toml::Value = std::fs::read_to_string(analytics.root.path().join("ntnt.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut definition = other["databases"]["app"].clone();
+    definition["schema"] = "analytics".into();
+    definition["migrations_dir"] = "analytics-migrations".into();
+    definition["targets"]["test"]["connection_secret"] = "ANALYTICS_TARGET".into();
+    definition["scratch"]["connection_secret"] = "ANALYTICS_SCRATCH".into();
+    manifest["databases"]
+        .as_table_mut()
+        .unwrap()
+        .insert("analytics".into(), definition);
+    for secret in ["ANALYTICS_TARGET", "ANALYTICS_SCRATCH"] {
+        manifest["secrets"]
+            .as_table_mut()
+            .unwrap()
+            .insert(secret.into(), toml::Value::Table(Default::default()));
+    }
+    std::fs::write(manifest_path, toml::to_string(&manifest).unwrap()).unwrap();
+    let run = |database: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .args([
+                "db",
+                "plan",
+                "--database",
+                database,
+                "--target",
+                "test",
+                "--json",
+            ])
+            .env_remove("DB_TARGET")
+            .env_remove("DB_SCRATCH")
+            .env_remove("ANALYTICS_TARGET")
+            .env_remove("ANALYTICS_SCRATCH")
+            .env(
+                if database == "app" {
+                    "DB_TARGET"
+                } else {
+                    "ANALYTICS_TARGET"
+                },
+                if database == "app" {
+                    &app.target_url
+                } else {
+                    &analytics.target_url
+                },
+            )
+            .env(
+                if database == "app" {
+                    "DB_SCRATCH"
+                } else {
+                    "ANALYTICS_SCRATCH"
+                },
+                if database == "app" {
+                    &app.scratch_url
+                } else {
+                    &analytics.scratch_url
+                },
+            )
+            .env("NTNT_ENV", "development")
+            .env("NTNT_SECRETS_PROVIDER", "env")
+            .current_dir(app.root.path())
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{}", report["diagnostics"]);
+        report
+    };
+    let first = run("app");
+    let second = run("analytics");
+    assert_eq!(first["target"]["identity"]["database"], app.target);
+    assert_eq!(second["target"]["identity"]["database"], analytics.target);
+    assert_eq!(first["scratch"]["identity"]["database"], app.scratch);
+    assert_eq!(second["scratch"]["identity"]["database"], analytics.scratch);
+    assert_eq!(first["source"]["migrations"][0]["source"], "0001_app.sql");
+    assert_eq!(
+        second["source"]["migrations"][0]["source"],
+        "0001_analytics.sql"
+    );
+    assert_eq!(second["target"]["schema"], "analytics");
+    assert_ne!(first["plan_digest"], second["plan_digest"]);
+    // A damaged unselected history must not be read while planning app.
+    std::fs::write(directory.join("0001_analytics.toml"), "unsupported = true").unwrap();
+    assert_eq!(run("app")["plan_digest"], first["plan_digest"]);
 }
 
 #[test]

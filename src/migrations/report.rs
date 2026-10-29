@@ -110,7 +110,7 @@ async fn inspect_observed(
         })
         .collect();
     let mut report = json!({"format_version":1,"command":command,"observed_at":chrono::Utc::now().to_rfc3339(),
-        "outcome":"unknown","target":{"name":inputs.target_name,"schema":inputs.config.schema,"identity":identity},
+        "outcome":"unknown","database":inputs.database_name,"target":{"name":inputs.target_name,"schema":inputs.config.schema,"identity":identity},
         "source":{"input_digest":inputs.input_digest,"policy_digest":inputs.policy_digest,"migrations":inventory},
         "capabilities":Postgres::capabilities(identity.version),"catalog":catalog,
         "history":{"outcome":"unknown"},"drift":{"outcome":"unknown","differences":[]},
@@ -230,7 +230,7 @@ async fn inspect_observed(
     // Binding excludes observation time, display filters and scratch physical IDs.
     // It includes every authority-relevant source, policy, target and base fact.
     let binding = json!({"format_version":1,"adapter":"postgresql-catalog-v1","canonicalization_version":1,
-        "input_digest":inputs.input_digest,"policy_digest":inputs.policy_digest,"target":identity,
+        "input_digest":inputs.input_digest,"policy_digest":inputs.policy_digest,"database":inputs.database_name,"target_name":inputs.target_name,"target":identity,
         "managed_schema":inputs.config.schema,"base_history_digest":json_digest(&history),
         "base_catalog_digest":json_digest(&catalog),"applied_count":applied,
         "expected_base_digest":expected.as_ref().map(json_digest)});
