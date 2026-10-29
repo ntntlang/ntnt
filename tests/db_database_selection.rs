@@ -44,6 +44,49 @@ fn invoke(root: &std::path::Path, args: &[&str]) -> Value {
 }
 
 #[test]
+fn invalid_database_diagnostic_identifies_key_without_echoing_values() {
+    let root = project();
+    let manifest = root.path().join("ntnt.toml");
+    let original = std::fs::read_to_string(&manifest).unwrap();
+    for (extra, key) in [
+        (
+            "\n[databases]\nanalytics = 'credential_should_not_leak'\n",
+            "databases.\"analytics\"",
+        ),
+        (
+            "\n[databases.\"bad\\nname\"]\nvalue = 'credential_should_not_leak'\n",
+            "databases.\"bad\\nname\"",
+        ),
+    ] {
+        std::fs::write(&manifest, format!("{original}{extra}")).unwrap();
+        let report = invoke(root.path(), &["--database", "app"]);
+        let diagnostic = &report["diagnostics"][0];
+        assert_eq!(diagnostic["code"], "DB_CONFIG");
+        let message = diagnostic["message"].as_str().unwrap();
+        assert!(
+            message.contains(key),
+            "missing offending database key: {message}"
+        );
+        assert!(!message.contains("credential_should_not_leak"));
+        assert!(!message.contains('\n'));
+    }
+    let long_name = "x".repeat(10_000);
+    std::fs::write(
+        &manifest,
+        format!("{original}\n[databases.\"{long_name}\"]\nvalue = 'credential_should_not_leak'\n"),
+    )
+    .unwrap();
+    let report = invoke(root.path(), &["--database", "app"]);
+    let message = report["diagnostics"][0]["message"].as_str().unwrap();
+    assert!(message.contains('…'));
+    assert!(
+        message.len() < 512,
+        "malformed key diagnostics must stay bounded"
+    );
+    assert!(!message.contains("credential_should_not_leak"));
+}
+
+#[test]
 fn explicit_selection_ignores_unselected_backend_and_unavailable_files() {
     let root = project();
     let manifest = root.path().join("ntnt.toml");

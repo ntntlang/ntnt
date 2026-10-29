@@ -2,6 +2,8 @@
 use std::fs::{File, Metadata, OpenOptions};
 use std::path::Path;
 
+/// Open without following the final link and prevent a FIFO replacement from blocking capture.
+/// Windows additionally denies concurrent writes/deletion while this handle is held.
 pub(super) fn open(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -51,6 +53,8 @@ pub(super) fn single_link(_file: &File, _metadata: &Metadata) -> bool {
     false
 }
 
+/// Compare the platform-supported identity and metadata observations during capture.
+/// This complements handle restrictions; metadata equality alone is not a general filesystem sandbox.
 pub(super) fn same(a: &Metadata, b: &Metadata) -> bool {
     #[cfg(unix)]
     {

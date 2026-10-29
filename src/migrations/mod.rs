@@ -10,6 +10,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize)]
+/// Machine-readable failure with a stable code and an actionable, non-secret explanation.
 pub struct Diagnostic {
     pub code: String,
     pub message: String,
@@ -52,11 +53,13 @@ impl std::error::Error for Diagnostic {}
 pub type Result<T> = std::result::Result<T, Diagnostic>;
 
 #[derive(clap::Args)]
+/// Inspect database history, catalog drift and plans without changing the target.
 pub struct DbArgs {
     #[command(subcommand)]
     pub command: DbCommand,
 }
 #[derive(clap::Subcommand)]
+/// Read-only-target operations sharing one captured-input and catalog pipeline.
 pub enum DbCommand {
     /// Inspect catalog, migration history, pending changes and drift (read-only target).
     Status(Options),
@@ -66,6 +69,7 @@ pub enum DbCommand {
     Verify(Options),
 }
 #[derive(clap::Args)]
+/// Explicit selection and output controls shared by database inspection commands.
 pub struct Options {
     #[arg(long, default_value = "ntnt.toml")]
     pub manifest: PathBuf,
@@ -87,6 +91,8 @@ pub struct Options {
     pub against: Option<PathBuf>,
 }
 
+/// Run one database operation with an outer deadline and bounded runtime teardown.
+/// Dedicated sessions are discarded; uncancellable resolver work cannot keep the CLI alive.
 fn database_runtime<T>(future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -109,39 +115,9 @@ fn database_runtime<T>(future: impl std::future::Future<Output = Result<T>>) -> 
     result
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn oversized_artifact_is_rejected_before_creating_output() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("oversized.json");
-        let report = serde_json::json!({
-            "format_version": 1,
-            "outcome": "pass",
-            "plan": {"padding": "x".repeat(super::inventory::MAX_INPUT_BYTES)},
-        });
-        let error = super::save_report(&path, "plan", &report).unwrap_err();
-        assert_eq!(error.code, "DB_OUTPUT_LIMIT");
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn runtime_cleanup_does_not_wait_for_uncancellable_resolver_work() {
-        let start = std::time::Instant::now();
-        super::database_runtime(async {
-            let (started, wait) = tokio::sync::oneshot::channel();
-            tokio::task::spawn_blocking(move || {
-                let _ = started.send(());
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            });
-            wait.await.unwrap();
-            Ok(())
-        })
-        .unwrap();
-        assert!(start.elapsed() < std::time::Duration::from_millis(500));
-    }
-}
-
+/// Save a bounded report or compact plan to a new file without replacing existing data.
+/// Artifact size is checked against the reader limit before creation. An I/O failure
+/// returns an error and may leave a partial newly created file, never a success verdict.
 fn save_report(path: &std::path::Path, command: &str, report: &serde_json::Value) -> Result<()> {
     use std::io::Write;
     // Save the plan descriptor, not duplicated display catalogs and source
@@ -181,6 +157,11 @@ fn save_report(path: &std::path::Path, command: &str, report: &serde_json::Value
     file.sync_all().map_err(|_| output_error())
 }
 
+/// Synchronous CLI entry point: capture inputs, inspect/replay, and render one result.
+///
+/// The selected deployment target is never mutated. Optional output files are new-only,
+/// and saved-plan validation checks identity rather than granting execution authority.
+/// Returns an error after rendering any failed or unknown result.
 pub fn run(args: DbArgs) -> anyhow::Result<()> {
     let (command, options) = match args.command {
         DbCommand::Status(o) => ("status", o),
@@ -305,5 +286,38 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         Ok(())
     } else {
         anyhow::bail!("Database inspection did not pass")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn oversized_artifact_is_rejected_before_creating_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.json");
+        let report = serde_json::json!({
+            "format_version": 1,
+            "outcome": "pass",
+            "plan": {"padding": "x".repeat(super::inventory::MAX_INPUT_BYTES)},
+        });
+        let error = super::save_report(&path, "plan", &report).unwrap_err();
+        assert_eq!(error.code, "DB_OUTPUT_LIMIT");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn runtime_cleanup_does_not_wait_for_uncancellable_resolver_work() {
+        let start = std::time::Instant::now();
+        super::database_runtime(async {
+            let (started, wait) = tokio::sync::oneshot::channel();
+            tokio::task::spawn_blocking(move || {
+                let _ = started.send(());
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            });
+            wait.await.unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
     }
 }

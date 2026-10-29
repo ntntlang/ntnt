@@ -10,6 +10,8 @@ use std::time::Duration;
 use tokio_postgres::{Client, Config, NoTls, Row};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Apply the per-exchange deadline and expose only SQLSTATE, never server error payloads.
+/// The owning adapter must discard its dedicated connection after cancellation/errors.
 pub(crate) async fn bounded<T>(
     future: impl Future<Output = std::result::Result<T, tokio_postgres::Error>>,
 ) -> Result<T> {
@@ -74,6 +76,9 @@ pub(crate) trait RelationalAdapter {
     fn capabilities(version: i32) -> Value;
 }
 impl Postgres {
+    /// Open a dedicated session after checking explicit host, role, database and transport.
+    /// The initial connection is read-only by default; this adapter accepts only explicit
+    /// NoTLS configuration on trusted transport and never silently downgrades TLS.
     pub async fn connect(
         secret: &crate::interpreter::SecretValue,
         endpoint: &Endpoint,
@@ -124,6 +129,8 @@ impl Postgres {
     pub async fn rollback(&self) -> Result<()> {
         self.batch("ROLLBACK").await
     }
+    /// Observe physical cluster/database identity, session settings and role authority.
+    /// Reject endpoint mismatches or unsupported engine versions before trusting a plan.
     pub async fn identity(&self, endpoint: &Endpoint) -> Result<Identity> {
         let r = bounded(self.client.query_one(
             r#"
@@ -174,6 +181,9 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         }
         Ok(identity)
     }
+    /// Read history only after validating the reserved ledger's physical shape and policies.
+    /// Local unknown objects fail closed; unrelated global coverage gaps are reported
+    /// separately and must not masquerade as corrupt migration history.
     pub async fn history(&self) -> Result<History> {
         let ns = self
             .rows(
@@ -262,6 +272,9 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 .collect(),
         })
     }
+    /// Validate isolation, compatible settings and restricted ownership before creating scope.
+    /// On success a rollback-only transaction remains open. The caller must roll back on
+    /// every success/error exit or discard the session; no reset/adoption is performed.
     pub async fn prepare_scratch(
         &self,
         target: &Identity,
@@ -332,6 +345,8 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     }
 }
 
+/// Replace potentially sensitive deparsed definitions with identities before reporting.
+/// Structural metadata remains available for object-level differences.
 fn protect_definitions(value: &mut Value) {
     // Engine-deparsed SQL may itself contain credentials (for example a view
     // invoking a remote database). Keep exact-byte identities, never literals or
@@ -348,6 +363,8 @@ fn protect_definitions(value: &mut Value) {
         }
     }
 }
+/// Normalize only typed owner/grant fields for the explicitly mapped logical owner.
+/// Preserve other principals and privileges; never rewrite arbitrary SQL or strings.
 fn canonical_roles(value: &mut Value, role: &str) {
     match value {
         Value::Object(map) => {

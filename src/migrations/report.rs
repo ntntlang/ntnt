@@ -12,6 +12,8 @@ pub(super) fn failure(command: &str, d: Diagnostic) -> Value {
     json!({"format_version":1,"command":command,"observed_at":chrono::Utc::now().to_rfc3339(),
         "outcome":"unknown","diagnostics":[d],"assertions":{"outcome":"not_run","executed":0}})
 }
+/// Verify that applied entries are the exact immutable prefix of captured source history.
+/// Dirty, missing, reordered or edited entries require reconciliation; none are repaired.
 fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize> {
     if history.entries.len() > inputs.migrations.len() {
         return Err(Diagnostic::new(
@@ -41,6 +43,7 @@ fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize> {
     }
     Ok(history.entries.len())
 }
+/// Report object-level differences, keeping the verdict unknown if either catalog is partial.
 fn compare(observed: &Catalog, expected: &Catalog) -> Value {
     let keys: std::collections::BTreeSet<_> = observed
         .objects
@@ -60,6 +63,9 @@ fn compare(observed: &Catalog, expected: &Catalog) -> Value {
     json!({"outcome":outcome,"differences":differences,"expected_fingerprint":json_digest(expected),"observed_fingerprint":json_digest(observed)})
 }
 
+/// Capture target facts in a read-only snapshot and release that session before replay.
+/// Scratch work uses separate identity/credentials; the result is schema evidence, not
+/// data-preservation proof, executed SQL assertions, or permission to migrate.
 pub(super) async fn inspect(inputs: CapturedInputs, command: &str) -> Result<Value> {
     let secret = crate::stdlib::secrets::require_from_manifest(
         &inputs.endpoint.connection_secret,
@@ -93,6 +99,9 @@ pub(super) async fn inspect(inputs: CapturedInputs, command: &str) -> Result<Val
     };
     inspect_observed(&inputs, command, identity, catalog, history).await
 }
+/// Combine captured target facts with applied-prefix and optional candidate replay.
+/// Plan bindings retain logical labels, physical identity and exact source/policy digests.
+/// Missing or incomplete evidence stays unknown; no target connection remains open here.
 async fn inspect_observed(
     inputs: &CapturedInputs,
     command: &str,

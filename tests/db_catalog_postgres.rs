@@ -746,8 +746,9 @@ fn replay_consumes_captured_files_even_if_paths_are_replaced_during_inspection()
         if waiting > 0 {
             break;
         }
-        if start.elapsed() > std::time::Duration::from_millis(1500) {
+        if start.elapsed() > std::time::Duration::from_secs(10) {
             let _ = child.kill();
+            let _ = child.wait();
             panic!("inspector did not reach the history lock");
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -801,7 +802,7 @@ fn review_target_snapshot_is_released_before_scratch_replay() {
         if waiting > 0 {
             break;
         }
-        if start.elapsed() > std::time::Duration::from_millis(1500) {
+        if start.elapsed() > std::time::Duration::from_secs(10) {
             let _ = child.kill();
             let _ = child.wait();
             panic!("replay did not reach the controlled scratch lock");

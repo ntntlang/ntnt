@@ -7,6 +7,8 @@ use std::path::Path;
 
 pub(super) const MAX_INPUT_BYTES: usize = 1_048_576;
 
+/// Hash length-framed byte parts so concatenation boundaries cannot alias.
+/// This is a content identity, not an authentication or authorization token.
 pub(crate) fn digest(parts: &[&[u8]]) -> String {
     let mut hash = Sha256::new();
     for part in parts {
@@ -15,6 +17,8 @@ pub(crate) fn digest(parts: &[&[u8]]) -> String {
     }
     hex::encode(hash.finalize())
 }
+/// Hash a serializable model with sorted object keys while preserving array order.
+/// Caller-owned models must exclude credentials and other values not intended for a binding.
 pub(crate) fn json_digest(value: &impl Serialize) -> String {
     fn sort(value: &mut serde_json::Value) {
         match value {
@@ -79,6 +83,7 @@ pub(crate) struct Migration {
     pub intent_ids: Vec<String>,
 }
 impl Migration {
+    /// Expose source identities and traceability without raw SQL or sidecar contents.
     pub fn summary(&self) -> serde_json::Value {
         serde_json::json!({"id":self.id.to_string(), "source":self.name,
             "checksum":self.checksum, "sql_digest":digest(&[self.sql.as_bytes()]), "metadata_digest":self.metadata.as_ref().map(|b| digest(&[b])), "intent_ids":self.intent_ids})
@@ -105,6 +110,8 @@ pub(crate) fn identifier(s: &str) -> bool {
         && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
         && s.as_bytes()[0].is_ascii_alphabetic()
 }
+/// Capture one bounded regular file and reject links or detected replacement/mutation.
+/// Callers retain these bytes instead of reopening a validated path during execution.
 pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
     let bad = || {
         Diagnostic::new(
@@ -142,6 +149,10 @@ pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 impl CapturedInputs {
+    /// Capture the manifest and exactly one logical database's ordered migration inputs.
+    /// Ambiguous selection and malformed registry entries fail before credential lookup;
+    /// unselected stores' directories are not visited. Exact bytes and logical selection
+    /// participate in plan identity, while secret resolution remains a later operation.
     pub fn load(manifest: &Path, target: &str, database: Option<&str>) -> Result<Self> {
         let bytes = file_bytes(manifest)?;
         let document: toml::Value = std::str::from_utf8(&bytes)
@@ -156,7 +167,7 @@ impl CapturedInputs {
             .and_then(toml::Value::as_table)
             .filter(|databases| !databases.is_empty())
             .ok_or_else(|| invalid("Declare at least one [databases.<name>] table."))?;
-        if databases.iter().any(|(name, value)| {
+        if let Some((name, _)) = databases.iter().find(|(name, value)| {
             name.is_empty()
                 || name.len() > 63
                 || !name.as_bytes()[0].is_ascii_alphabetic()
@@ -165,7 +176,13 @@ impl CapturedInputs {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
                 || !value.is_table()
         }) {
-            return Err(invalid("Database names must start with an ASCII letter and contain at most 63 letters, digits, underscores or hyphens; each entry must be a table."));
+            // Identify the key, never the associated value. Bound and escape
+            // malformed names so an error cannot inject terminal control text.
+            let mut label: String = name.chars().take(63).collect();
+            if label.len() < name.len() {
+                label.push('…');
+            }
+            return Err(invalid(&format!("Invalid database entry databases.{label:?}: names must start with an ASCII letter and contain at most 63 letters, digits, underscores or hyphens; each entry must be a table.")));
         }
         let database_name = match database {
             Some(name) if databases.contains_key(name) => name.to_owned(),
