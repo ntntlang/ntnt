@@ -1,5 +1,12 @@
 # Unreleased
 
+## Markdown parser dependency security update
+
+Upgrade `pulldown-cmark` to 0.13.5 and require that patched minimum for
+[RUSTSEC-2026-0414](https://rustsec.org/advisories/RUSTSEC-2026-0414), which causes
+exponential parser-event growth with empty-label wikilinks. NTNT's Markdown
+functions do not enable the affected wikilink option; their options are unchanged.
+
 ## Relative imports keep their declaring-file origin (#296)
 
 Explicit `./` and `../` imports now resolve relative to the file containing the import, including inside ordinary functions, returned callbacks, job bodies and concurrent tasks. They no longer change meaning based on the caller or worker CWD. Bare file paths, absolute imports and standard-library imports are unchanged, as are lazy loading and ordinary template/filesystem resource paths.

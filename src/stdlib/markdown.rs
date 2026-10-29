@@ -429,6 +429,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wikilinks_with_empty_labels_have_bounded_event_growth() {
+        // RUSTSEC-2026-0414: 16 empty-label wikilinks yielded 327,676 events
+        // before pulldown-cmark 0.13.5. Exercise the opt-in dependency path;
+        // NTNT's markdown_options() does not enable wikilinks.
+        let input = "[[a|]] ".repeat(16);
+        // Stop just beyond the expected count so a regression stays cheap.
+        let events = Parser::new_ext(&input, Options::ENABLE_WIKILINKS)
+            .take(66)
+            .count();
+        assert_eq!(events, 65);
+    }
+
+    #[test]
     fn test_basic_markdown() {
         match markdown_to_html("# Hello", false) {
             Value::String(s) => assert!(s.contains("<h1>Hello</h1>")),
