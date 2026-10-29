@@ -37,6 +37,8 @@ fn exact_authority_fresh_execution_and_unchanged_rerun() {
     let r = f.apply("plan.json", Some(digest));
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+    assert_eq!(r["target"]["identity"], p["target"]["identity"], "{r}");
+    assert_eq!(r["source"]["input_digest"], p["source"]["input_digest"]);
     f.target()
         .batch_execute("INSERT INTO app.accounts(id) VALUES(17)")
         .unwrap();

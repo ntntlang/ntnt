@@ -1,7 +1,7 @@
 //! Exact-plan PostgreSQL execution. No plan digest self-authorizes a write.
 //! The caller retains progress across cancellation; sessions are never pooled.
 use super::inventory::{json_digest, CapturedInputs};
-use super::postgres::{History, Postgres, RelationalAdapter};
+use super::postgres::{History, Identity, Postgres, RelationalAdapter};
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
 
@@ -48,6 +48,12 @@ fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
         || plan["candidate"]["fingerprint"] != fingerprints[inputs.migrations.len()]
         || b["expected_base_digest"] != fingerprints[base]
         || b["base_catalog_digest"] != fingerprints[base]
+        || b["format_version"] != 1
+        || !b["base_history_digest"].as_str().is_some_and(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        })
         || b["adapter"] != "postgresql-catalog-v1"
         || b["canonicalization_version"] != 1
         || b["input_digest"] != inputs.input_digest
@@ -88,10 +94,11 @@ async fn locked_prefix(
     pg: &Postgres,
     inputs: &CapturedInputs,
     saved: &Value,
-) -> Result<(usize, History)> {
+) -> Result<(usize, History, Identity)> {
     let base = validate(inputs, saved)?;
     pg.begin_migration(&inputs.config.schema).await?;
-    if json!(pg.identity(&inputs.endpoint).await?) != saved["plan"]["binding"]["target"] {
+    let identity = pg.identity(&inputs.endpoint).await?;
+    if json!(&identity) != saved["plan"]["binding"]["target"] {
         return Err(stale());
     }
     let history = pg
@@ -118,7 +125,7 @@ async fn locked_prefix(
             "Incoming foreign keys from outside the managed schema block execution.",
         ));
     }
-    Ok((applied, history))
+    Ok((applied, history, identity))
 }
 
 fn mark_prefix(report: &mut Value, count: usize) {
@@ -146,8 +153,9 @@ async fn reconcile(
 ) -> Result<()> {
     let pg = connect(inputs).await?;
     pg.own_migrations().await?;
-    let (count, _) = locked_prefix(&pg, inputs, saved).await?;
+    let (count, _, identity) = locked_prefix(&pg, inputs, saved).await?;
     pg.rollback().await?;
+    report["target"]["identity"] = json!(identity);
     if count < attempted || count > inputs.migrations.len() {
         return Err(stale());
     }
@@ -242,6 +250,8 @@ pub(super) async fn migrate(
     report["database"] = json!(inputs.database_name);
     report["target"] = json!({"name":inputs.target_name,"schema":inputs.config.schema});
     report["plan_digest"] = saved["plan_digest"].clone();
+    report["source"] =
+        json!({"input_digest":inputs.input_digest,"policy_digest":inputs.policy_digest});
     report["progress"] = json!(inputs
         .migrations
         .iter()
@@ -267,7 +277,9 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
     let pg = connect(inputs).await?;
     pg.own_migrations().await?;
     loop {
-        let (applied, history) = locked_prefix(&pg, inputs, saved).await?;
+        let (applied, history, identity) = locked_prefix(&pg, inputs, saved).await?;
+        report["capabilities"] = Postgres::capabilities(identity.version);
+        report["target"]["identity"] = json!(identity);
         mark_prefix(report, applied);
         if applied == inputs.migrations.len() {
             pg.rollback().await?;
