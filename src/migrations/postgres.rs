@@ -459,11 +459,12 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         if !super::analysis::contract_supported(sql, schema) {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
-                "Unsupported check syntax.",
+                "Checks require managed-schema-qualified tables and supported builtin expressions.",
             ));
         }
-        self.batch(&format!("SET LOCAL search_path=pg_catalog,\"{schema}\";"))
-            .await?;
+        // Relations are explicitly qualified by the validated contract grammar.
+        // Only builtin functions/operators participate in unqualified lookup.
+        self.batch("SET LOCAL search_path=pg_catalog").await?;
         let passed = bounded(async {
             let rows = self
                 .client

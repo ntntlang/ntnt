@@ -14,7 +14,10 @@ fn stale() -> Diagnostic {
 fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
     let plan = &saved["plan"];
     let b = &plan["binding"];
-    let base = b["applied_count"].as_u64().ok_or_else(stale)? as usize;
+    let base = b["applied_count"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(stale)?;
     let fingerprints = plan["execution"]["prefix_fingerprints"]
         .as_array()
         .ok_or_else(stale)?;
@@ -354,6 +357,60 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn applied_count_cannot_wrap_into_a_valid_prefix() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join("migrations")).unwrap();
+        let manifest = project.path().join("ntnt.toml");
+        std::fs::write(
+            &manifest,
+            r#"
+[databases.app]
+engine = "postgresql"
+schema = "app"
+migrations_dir = "migrations"
+[databases.app.targets.test]
+connection_secret = "DB_TARGET"
+database = "target"
+role = "owner"
+[secrets.DB_TARGET]
+"#,
+        )
+        .unwrap();
+        let inputs = CapturedInputs::load(&manifest, "test", None).unwrap();
+        // A descriptor fixture for the pure validator, not database evidence.
+        let fingerprint = "a".repeat(64);
+        let mut plan = json!({
+            "binding": {"format_version":1,"applied_count":0,
+                "expected_base_digest":fingerprint,"base_catalog_digest":fingerprint,
+                "base_history_digest":fingerprint,"adapter":"postgresql-catalog-v1",
+                "canonicalization_version":1,"input_digest":inputs.input_digest,
+                "policy_digest":inputs.policy_digest,"database":"app",
+                "target_name":"test","managed_schema":"app"},
+            "execution":{"format":"postgresql-transactional-v1","prefix_fingerprints":[fingerprint]},
+            "candidate":{"outcome":"pass","fingerprint":fingerprint},
+            "authorized":false,"executable":false,"classification":"requires_review","pending":[]
+        });
+        let saved = |plan: &Value| {
+            json!({"format_version":1,"outcome":"pass",
+            "plan_digest":json_digest(plan),"plan":plan})
+        };
+        assert_eq!(validate(&inputs, &saved(&plan)).unwrap(), 0);
+        for value in [
+            json!(1),
+            json!(u64::from(u32::MAX) + 1),
+            json!(u64::MAX),
+            json!(-1),
+            Value::Null,
+        ] {
+            plan["binding"]["applied_count"] = value;
+            assert_eq!(
+                validate(&inputs, &saved(&plan)).unwrap_err().code,
+                "DB_PLAN_STALE"
+            );
+        }
+    }
 
     #[test]
     fn work_deadline_retains_prefix_and_identifies_unacknowledged_commit() {

@@ -403,7 +403,9 @@ fn check_query(q: &Query, schema: &str, depth: usize) -> bool {
             let TableFactor::Table { name: n, .. } = &table.relation else {
                 return false;
             };
-            if !name(n, schema) {
+            // Preserve pg_catalog-first builtin lookup without letting a table
+            // reference silently resolve outside the inspected managed schema.
+            if n.0.len() != 2 || !name(n, schema) {
                 return false;
             }
             minimal.push_str(&format!(" FROM {n}"));
@@ -449,6 +451,33 @@ fn check_query(q: &Query, schema: &str, depth: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn contract_relations_require_the_managed_schema_at_every_query_level() {
+        for sql in [
+            "SELECT true FROM pg_class",
+            "SELECT true FROM PG_CLASS",
+            "SELECT true FROM \"pg_class\"",
+            "SELECT true FROM pg_stat_activity",
+            "SELECT true FROM pg_authid",
+            "SELECT true FROM accounts",
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_class WHERE oid = 0)",
+            "SELECT (SELECT count(*) FROM pg_class) = 0 FROM app.accounts",
+            "SELECT true FROM pg_catalog.pg_class",
+            "SELECT true FROM public.accounts",
+        ] {
+            assert!(!contract_supported(sql, "app"), "{sql}");
+        }
+        for sql in [
+            "SELECT true",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.pg_class WHERE oid = 0)",
+            "SELECT true FROM \"app\".\"pg_class\"",
+            "SELECT true FROM APP.accounts",
+            "SELECT (SELECT count(*) FROM app.pg_class) = 0 FROM app.accounts",
+        ] {
+            assert!(contract_supported(sql, "app"), "{sql}");
+        }
+    }
+
     #[test]
     fn parser_bounds_expression_depth_on_small_thread_stack() {
         let sql = format!(

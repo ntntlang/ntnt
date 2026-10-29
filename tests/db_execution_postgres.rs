@@ -199,6 +199,66 @@ fn checks_reject_unsupported_effect_paths_without_executing_them() {
 
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn contract_cannot_read_a_system_table_instead_of_managed_rows() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.pg_class(oid INTEGER);",
+    );
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .batch_execute("INSERT INTO app.pg_class VALUES(0)")
+        .unwrap();
+    f.sql(
+        "0002_expand.sql",
+        "ALTER TABLE app.pg_class ADD COLUMN checked BOOLEAN DEFAULT true;",
+    );
+    let metadata = f.root.path().join("migrations/0002_expand.toml");
+    std::fs::write(
+        &metadata,
+        "[requires]\nempty='SELECT NOT EXISTS (SELECT 1 FROM pg_class WHERE oid = 0)'",
+    )
+    .unwrap();
+    let mut rejected = f.command("plan");
+    // Before the fix this produced an executable plan and incorrectly committed
+    // against pg_catalog.pg_class. Exercise that real path, not a parser mock.
+    if rejected["outcome"] == "pass" {
+        std::fs::write(
+            f.root.path().join("unqualified.json"),
+            serde_json::to_vec(&rejected).unwrap(),
+        )
+        .unwrap();
+        rejected = f.apply("unqualified.json", rejected["plan_digest"].as_str());
+    }
+    assert!(code(&rejected, "DB_CHECK_UNSUPPORTED"), "{rejected}");
+    assert_eq!(rejected["assertions"]["executed"], 0);
+
+    std::fs::write(
+        &metadata,
+        "[requires]\nempty='SELECT NOT EXISTS (SELECT 1 FROM app.pg_class WHERE oid = 0)'",
+    )
+    .unwrap();
+    let plan = f.plan("qualified.json");
+    let failed = f.apply("qualified.json", plan["plan_digest"].as_str());
+    assert!(code(&failed, "DB_CHECK_FAILED"), "{failed}");
+    assert_eq!(failed["progress"][1]["state"], "failed");
+    assert_eq!(failed["assertions"]["executed"], 1);
+    assert!(!f.target().query_one("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='app' AND table_name='pg_class' AND column_name='checked')",&[]).unwrap().get::<_,bool>(0));
+    f.target()
+        .batch_execute("DELETE FROM app.pg_class")
+        .unwrap();
+    assert_eq!(
+        f.apply("qualified.json", plan["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn stale_and_incomplete_execution_artifacts_never_bootstrap() {
     let f = Fixture::new();
     f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
