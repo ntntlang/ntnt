@@ -577,6 +577,8 @@ fn expensive_supported_check_times_out_and_rolls_back() {
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn ledger_mutation_validation_rejects_defaults_checks_triggers_and_legacy() {
     for tamper in [
+        "ALTER TABLE _ntnt.schema_migrations_v2 DROP CONSTRAINT schema_migrations_v2_pkey",
+        "ALTER TABLE _ntnt.schema_migrations_v2 SET UNLOGGED",
         "ALTER TABLE _ntnt.schema_migrations_v2 ALTER COLUMN state SET DEFAULT 'applied'",
         "ALTER TABLE _ntnt.schema_migrations_v2 ADD CONSTRAINT trap CHECK(pg_try_advisory_lock(7654321)) NOT VALID",
         "CREATE FUNCTION public.trap() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN PERFORM pg_advisory_lock(7654321); RETURN NEW; END$$; CREATE TRIGGER trap BEFORE INSERT ON _ntnt.schema_migrations_v2 FOR EACH ROW EXECUTE FUNCTION public.trap()",
@@ -661,4 +663,66 @@ fn protected_authority_reference_and_actual_wrong_target_are_required() {
         &other.apply("fresh.json", fresh["plan_digest"].as_str()),
         "DB_APPROVAL_REQUIRED"
     ));
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn populated_null_duplicate_and_multirow_contracts_reject_before_ddl() {
+    for (rows, check) in [
+        (
+            "(1,'same'),(2,'same')",
+            "SELECT NOT EXISTS (SELECT email FROM app.t GROUP BY email HAVING count(*) > 1)",
+        ),
+        (
+            "(1,'preserved'),(2,NULL)",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE email IS NULL)",
+        ),
+        ("(1,'preserved'),(2,'other')", "SELECT true FROM app.t"),
+    ] {
+        let f = Fixture::new();
+        f.sql(
+            "0001_initial.sql",
+            "CREATE TABLE app.t(id INTEGER, email TEXT);",
+        );
+        let first = f.plan("first.json");
+        assert_eq!(
+            f.apply("first.json", first["plan_digest"].as_str())["outcome"],
+            "pass"
+        );
+        f.target()
+            .batch_execute(&format!("INSERT INTO app.t VALUES {rows}"))
+            .unwrap();
+        f.sql(
+            "0002_unique.sql",
+            "ALTER TABLE app.t ADD CONSTRAINT email_unique UNIQUE(email);",
+        );
+        std::fs::write(
+            f.root.path().join("migrations/0002_unique.toml"),
+            format!("[requires]\ncheck={check:?}"),
+        )
+        .unwrap();
+        let plan = f.plan("upgrade.json");
+        let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+        assert!(code(&r, "DB_CHECK_FAILED"), "{r}");
+        assert_eq!(r["assertions"]["executed"], 1);
+        assert_eq!(
+            f.target()
+                .query_one("SELECT count(*) FROM app.t", &[])
+                .unwrap()
+                .get::<_, i64>(0),
+            2
+        );
+        assert_eq!(
+            f.target()
+                .query_one("SELECT count(*) FROM _ntnt.schema_migrations_v2", &[])
+                .unwrap()
+                .get::<_, i64>(0),
+            1
+        );
+        assert!(!f
+            .target()
+            .query_one("SELECT to_regclass('app.email_unique') IS NOT NULL", &[])
+            .unwrap()
+            .get::<_, bool>(0));
+    }
 }

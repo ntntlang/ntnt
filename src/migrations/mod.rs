@@ -340,7 +340,7 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
     if report["outcome"] == "pass" {
         Ok(())
     } else {
-        anyhow::bail!("Database inspection did not pass")
+        anyhow::bail!("Database operation did not pass")
     }
 }
 

@@ -18,7 +18,9 @@ impl Upstream {
         if std::path::Path::new(host).is_absolute() {
             UnixStream::connect(std::path::Path::new(host).join(".s.PGSQL.5432")).map(Self::Unix)
         } else {
-            std::net::TcpStream::connect((host, 5432)).map(Self::Tcp)
+            let stream = std::net::TcpStream::connect((host, 5432))?;
+            stream.set_nodelay(true)?;
+            Ok(Self::Tcp(stream))
         }
     }
     fn try_clone(&self) -> std::io::Result<Self> {

@@ -208,6 +208,27 @@ async fn checks(
     Ok(())
 }
 
+/// Reserve part of the CLI's outer deadline for fresh reconciliation. Dropping
+/// the timed-out future drops its owned physical connection before recovery starts.
+async fn work_deadline<T>(
+    future: impl std::future::Future<Output = Result<T>>,
+    budget: std::time::Duration,
+) -> Result<T> {
+    tokio::time::timeout(budget, future).await.map_err(|_| {
+        Diagnostic::new(
+            "DB_TIMEOUT",
+            "Migration work deadline exceeded; session discarded and committed progress retained.",
+        )
+    })?
+}
+
+fn uncertain_commit(report: &Value) -> Option<usize> {
+    report["progress"]
+        .as_array()?
+        .iter()
+        .position(|entry| entry["state"] == "unknown" && entry["phase"] == "commit")
+}
+
 /// Execute one immutable transition per transaction. No bootstrap precedes
 /// authorization and locked revalidation. Any failure discards the physical
 /// session; an uncertain commit only triggers fresh inspection, never SQL retry.
@@ -226,6 +247,23 @@ pub(super) async fn migrate(
         .iter()
         .map(|m| json!({"source":m.name,"state":"not_run"}))
         .collect::<Vec<_>>());
+    let result = work_deadline(
+        apply_owned(inputs, saved, report),
+        std::time::Duration::from_secs(100),
+    )
+    .await;
+    if result.as_ref().is_err_and(|d| d.code == "DB_TIMEOUT") {
+        if let Some(attempted) = uncertain_commit(report) {
+            if let Err(recovery) = reconcile(inputs, saved, report, attempted).await {
+                report["reconciliation"] = json!({"outcome":"unknown","diagnostic":recovery});
+            }
+        }
+    }
+    result
+}
+
+/// Own the connection inside the cancellable work future, never outside it.
+async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value) -> Result<()> {
     let pg = connect(inputs).await?;
     pg.own_migrations().await?;
     loop {
@@ -298,5 +336,37 @@ pub(super) async fn migrate(
         }
         report["progress"][applied]["state"] = json!("committed");
         report["applied_count"] = json!(applied + 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_deadline_retains_prefix_and_identifies_unacknowledged_commit() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut progress = json!({"progress":[]});
+        let error = runtime
+            .block_on(work_deadline(
+                async {
+                    progress["progress"] = json!([
+                        {"state":"committed","phase":"commit"},
+                        {"state":"unknown","phase":"commit"},
+                        {"state":"not_run"}
+                    ]);
+                    std::future::pending::<Result<()>>().await
+                },
+                std::time::Duration::from_millis(5),
+            ))
+            .unwrap_err();
+        assert_eq!(error.code, "DB_TIMEOUT");
+        assert_eq!(progress["progress"][0]["state"], "committed");
+        assert_eq!(uncertain_commit(&progress), Some(1));
+        progress["progress"][1]["state"] = json!("committed");
+        assert_eq!(uncertain_commit(&progress), None);
     }
 }
