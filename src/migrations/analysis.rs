@@ -309,7 +309,7 @@ pub(crate) fn analyze(sql: &str, schema: &str) -> Analysis {
         };
         a.operations.push(operation.into());
         a.hazards.push(hazard.into());
-        if !allowed(&s, schema) {
+        if !allowed(&s, schema) || a.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES") {
             a.replay_supported = false;
             a.unknowns.push("SQL_UNSUPPORTED".into());
         }
@@ -320,9 +320,164 @@ pub(crate) fn analyze(sql: &str, schema: &str) -> Analysis {
     a.unknowns.dedup();
     a
 }
+/// Checks use a separate closed query grammar, not a SELECT/volatility heuristic.
+/// Live relation/type/operator resolution still requires the adapter purity gate
+/// under native locks; this syntax predicate alone is deliberately insufficient.
+pub(crate) fn contract_supported(sql: &str, schema: &str) -> bool {
+    let Some(statements) = parse(sql) else {
+        return false;
+    };
+    matches!(statements.as_slice(), [Statement::Query(q)] if check_query(q, schema, 0))
+}
+
+fn check_expr(e: &Expr, schema: &str, depth: usize) -> bool {
+    if depth > 24 {
+        return false;
+    }
+    match e {
+        e if literal(e) => true,
+        Expr::Identifier(i) => ident(i),
+        Expr::Nested(e) | Expr::IsNull(e) | Expr::IsNotNull(e) => check_expr(e, schema, depth + 1),
+        Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr,
+        } => check_expr(expr, schema, depth + 1),
+        Expr::BinaryOp { left, op, right } => {
+            // Reuse only the operator allowlist, not an open function visitor.
+            expression(
+                &Expr::BinaryOp {
+                    left: Box::new(Expr::Identifier(Ident::new("x"))),
+                    op: op.clone(),
+                    right: Box::new(Expr::Identifier(Ident::new("x"))),
+                },
+                0,
+            ) && check_expr(left, schema, depth + 1)
+                && check_expr(right, schema, depth + 1)
+        }
+        Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => {
+            check_query(subquery, schema, depth + 1)
+        }
+        Expr::Function(_) => ["SELECT count(*)", "SELECT pg_catalog.count(*)"]
+            .iter()
+            .any(|sql| {
+                let Some(s) = parse(sql) else { return false };
+                let Statement::Query(q) = &s[0] else {
+                    return false;
+                };
+                let SetExpr::Select(s) = &*q.body else {
+                    return false;
+                };
+                s.projection == [SelectItem::UnnamedExpr(e.clone())]
+            }),
+        _ => false,
+    }
+}
+
+fn check_query(q: &Query, schema: &str, depth: usize) -> bool {
+    if depth > 24 {
+        return false;
+    }
+    let SetExpr::Select(s) = &*q.body else {
+        return false;
+    };
+    if s.projection.is_empty()
+        || s.projection.len() > 8
+        || !s
+            .projection
+            .iter()
+            .all(|p| matches!(p, SelectItem::UnnamedExpr(e) if check_expr(e,schema,depth+1)))
+    {
+        return false;
+    }
+    let mut minimal = format!(
+        "SELECT {}",
+        s.projection
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    match s.from.as_slice() {
+        [] => (),
+        [table] => {
+            let TableFactor::Table { name: n, .. } = &table.relation else {
+                return false;
+            };
+            // Preserve pg_catalog-first builtin lookup without letting a table
+            // reference silently resolve outside the inspected managed schema.
+            if n.0.len() != 2 || !name(n, schema) {
+                return false;
+            }
+            minimal.push_str(&format!(" FROM {n}"));
+        }
+        _ => return false,
+    }
+    if let Some(e) = &s.selection {
+        if !check_expr(e, schema, depth + 1) {
+            return false;
+        }
+        minimal.push_str(&format!(" WHERE {e}"));
+    }
+    match &s.group_by {
+        GroupByExpr::Expressions(es, modifiers) if modifiers.is_empty() => {
+            if !es
+                .iter()
+                .all(|e| matches!(e, Expr::Identifier(i) if ident(i)))
+            {
+                return false;
+            }
+            if !es.is_empty() {
+                minimal.push_str(&format!(
+                    " GROUP BY {}",
+                    es.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        _ => return false,
+    }
+    if let Some(e) = &s.having {
+        if !check_expr(e, schema, depth + 1) {
+            return false;
+        }
+        minimal.push_str(&format!(" HAVING {e}"));
+    }
+    parse(&minimal)
+        .is_some_and(|ss| matches!(ss.as_slice(), [Statement::Query(expected)] if **expected==*q))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn contract_relations_require_the_managed_schema_at_every_query_level() {
+        for sql in [
+            "SELECT true FROM pg_class",
+            "SELECT true FROM PG_CLASS",
+            "SELECT true FROM \"pg_class\"",
+            "SELECT true FROM pg_stat_activity",
+            "SELECT true FROM pg_authid",
+            "SELECT true FROM accounts",
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_class WHERE oid = 0)",
+            "SELECT (SELECT count(*) FROM pg_class) = 0 FROM app.accounts",
+            "SELECT true FROM pg_catalog.pg_class",
+            "SELECT true FROM public.accounts",
+        ] {
+            assert!(!contract_supported(sql, "app"), "{sql}");
+        }
+        for sql in [
+            "SELECT true",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.pg_class WHERE oid = 0)",
+            "SELECT true FROM \"app\".\"pg_class\"",
+            "SELECT true FROM APP.accounts",
+            "SELECT (SELECT count(*) FROM app.pg_class) = 0 FROM app.accounts",
+        ] {
+            assert!(contract_supported(sql, "app"), "{sql}");
+        }
+    }
+
     #[test]
     fn parser_bounds_expression_depth_on_small_thread_stack() {
         let sql = format!(
