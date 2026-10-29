@@ -67,6 +67,8 @@ pub(crate) struct HistoryEntry {
 pub(crate) struct History {
     pub present: bool,
     pub entries: Vec<HistoryEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Value>,
 }
 
 /// Small relational boundary: each adapter owns its native catalog and operation
@@ -195,6 +197,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             return Ok(History {
                 present: false,
                 entries: vec![],
+                scope: None,
             });
         }
         let rels = self.rows("SELECT c.oid,c.relname::text,c.relkind::text,c.relrowsecurity,c.relforcerowsecurity FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='_ntnt' AND c.relkind NOT IN ('i','S')",&[]).await?;
@@ -202,24 +205,32 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             Diagnostic::new("DB_LEDGER_UNKNOWN","Unrecognized, unreadable, or policy-filtered _ntnt ledger; explicit adoption/reconciliation is required.")
         };
         if rels.len() != 1
-            || rels[0].get::<_, String>(1) != "schema_migrations_v1"
+            || !["schema_migrations_v1", "schema_migrations_v2"]
+                .contains(&rels[0].get::<_, String>(1).as_str())
             || rels[0].get::<_, String>(2) != "r"
             || rels[0].get::<_, bool>(3)
             || rels[0].get::<_, bool>(4)
         {
             return Err(bad());
         }
-        self.batch("LOCK TABLE ONLY _ntnt.schema_migrations_v1 IN ACCESS SHARE MODE")
-            .await
-            .map_err(|_| bad())?;
+        let table: String = rels[0].get(1);
+        let v2 = table == "schema_migrations_v2";
+        self.batch(&format!(
+            "LOCK TABLE ONLY _ntnt.{table} IN ACCESS SHARE MODE"
+        ))
+        .await
+        .map_err(|_| bad())?;
         let attrs=self.rows("SELECT a.attname::text,a.atttypid,a.attnotnull FROM pg_catalog.pg_attribute a WHERE a.attrelid=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",&[&rels[0].get::<_,u32>(0)]).await?;
-        let expected = [
+        let mut expected = vec![
             ("position", 20u32),
             ("id", 25),
             ("name", 25),
             ("checksum", 25),
             ("state", 25),
         ];
+        if v2 {
+            expected.extend([("logical_database", 25), ("managed_schema", 25)]);
+        }
         if attrs.len() != expected.len()
             || attrs.iter().zip(expected).any(|(a, (n, t))| {
                 a.get::<_, String>(0) != n || a.get::<_, u32>(1) != t || !a.get::<_, bool>(2)
@@ -227,7 +238,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         {
             return Err(bad());
         }
-        let checks=self.rows("SELECT c.oid=$1 AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT c.relispartition AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=c.oid) AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite WHERE ev_class=c.oid) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON c.relnamespace=n.oid WHERE n.nspname='_ntnt' AND c.relname='schema_migrations_v1'",&[&rels[0].get::<_,u32>(0)]).await?;
+        let checks=self.rows("SELECT c.oid=$1 AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity AND NOT c.relispartition AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=c.oid) AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite WHERE ev_class=c.oid) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON c.relnamespace=n.oid WHERE n.nspname='_ntnt' AND c.oid=$1",&[&rels[0].get::<_,u32>(0)]).await?;
         if checks.len() != 1 || !checks[0].get::<_, bool>(0) {
             return Err(bad());
         }
@@ -254,12 +265,24 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         if safe.len() != 1 || !safe[0].get::<_, bool>(0) {
             return Err(bad());
         }
-        let rows=self.rows("SELECT position,pg_catalog.left(id,21),pg_catalog.left(name,256),pg_catalog.left(checksum,65),pg_catalog.left(state,32),octet_length(id)<=20 AND octet_length(name)<=255 AND octet_length(checksum)=64 AND octet_length(state)<=31 FROM ONLY _ntnt.schema_migrations_v1 ORDER BY position LIMIT 10001",&[]).await.map_err(|_| bad())?;
+        let rows=self.rows(&format!("SELECT position,pg_catalog.left(id,21),pg_catalog.left(name,256),pg_catalog.left(checksum,65),pg_catalog.left(state,32),octet_length(id)<=20 AND octet_length(name)<=255 AND octet_length(checksum)=64 AND octet_length(state)<=31 FROM ONLY _ntnt.{table} ORDER BY position LIMIT 10001"),&[]).await.map_err(|_| bad())?;
+        let scope = if v2 {
+            let scopes = self.rows("SELECT DISTINCT pg_catalog.left(logical_database,64),pg_catalog.left(managed_schema,64) FROM ONLY _ntnt.schema_migrations_v2 LIMIT 2", &[]).await?;
+            if scopes.len() != 1 {
+                return Err(bad());
+            }
+            Some(
+                json!({"database":scopes[0].get::<_,String>(0),"schema":scopes[0].get::<_,String>(1)}),
+            )
+        } else {
+            None
+        };
         if rows.iter().any(|r| !r.get::<_, bool>(5)) {
             return Err(bad());
         }
         Ok(History {
             present: true,
+            scope,
             entries: rows
                 .into_iter()
                 .map(|r| HistoryEntry {
@@ -272,6 +295,79 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 .collect(),
         })
     }
+    /// Acquire database-local ownership of the single reserved ledger namespace.
+    /// This session lock survives per-migration commits. Drop discards the socket;
+    /// it cannot leak into a pool. PostgreSQL lock_timeout bounds competing owners.
+    pub async fn own_migrations(&self) -> Result<()> {
+        self.rows("SELECT pg_catalog.pg_advisory_lock(1853124212, 245)", &[])
+            .await?;
+        Ok(())
+    }
+
+    /// Native locks protect data assumptions from ordinary writers, unlike advisory
+    /// ownership. READ COMMITTED takes the validation snapshot *after* these locks.
+    /// Administrators and schema-owner credentials remain trusted, not sandboxed.
+    pub async fn begin_migration(&self, schema: &str) -> Result<()> {
+        self.batch("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE; SET LOCAL search_path=pg_catalog; SET LOCAL row_security=off; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
+        let tables = self.rows("SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(c.relname) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE (n.nspname=$1 OR n.nspname='_ntnt') AND c.relkind='r' ORDER BY n.nspname,c.relname", &[&schema]).await?;
+        for row in tables {
+            self.batch(&format!(
+                "LOCK TABLE ONLY {} IN ACCESS EXCLUSIVE MODE",
+                row.get::<_, String>(0)
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// A readable legacy ledger is not a writable one. Only our scoped v2 heap,
+    /// owned by this role and without defaults/triggers/rules/checks/FKs, may receive
+    /// an INSERT. The reserved namespace supports one logical store per database.
+    pub async fn writable_history(&self, database: &str, schema: &str) -> Result<History> {
+        let history = self.history().await?;
+        if !history.present {
+            return Ok(history);
+        }
+        if history.scope != Some(json!({"database":database,"schema":schema})) {
+            return Err(Diagnostic::new("DB_LEDGER_SCOPE", "Execution requires the scoped v2 ledger for this logical store/schema. Legacy or differently scoped history is read-only; no adoption is automatic."));
+        }
+        let safe = self.rows(r#"SELECT n.nspowner=r.oid AND c.relowner=r.oid
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_attrdef WHERE adrelid=c.oid)
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid=c.oid)
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite WHERE ev_class=c.oid)
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid=c.oid AND contype NOT IN ('p','n'))
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid=c.oid AND (attisdropped OR attidentity<>'' OR attgenerated<>''))
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.aclexplode(coalesce(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a WHERE a.grantee<>r.oid)
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.aclexplode(coalesce(c.relacl,pg_catalog.acldefault('r',c.relowner))) a WHERE a.grantee<>r.oid)
+          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+          JOIN pg_catalog.pg_roles r ON r.rolname=current_user
+          WHERE n.nspname='_ntnt' AND c.relname='schema_migrations_v2'"#, &[]).await?;
+        if safe.len() != 1 || !safe[0].get::<_, bool>(0) {
+            return Err(Diagnostic::new(
+                "DB_LEDGER_UNSAFE",
+                "Ledger is not a supported mutation-safe owned heap; no write was attempted.",
+            ));
+        }
+        Ok(history)
+    }
+
+    /// Bootstrap only inside the first authorized migration transaction. Empty or
+    /// unrecognized existing namespaces are never reset or automatically adopted.
+    pub async fn record_migration(
+        &self,
+        migration: &Migration,
+        position: usize,
+        database: &str,
+        schema: &str,
+        present: bool,
+    ) -> Result<()> {
+        if !present {
+            self.batch("CREATE SCHEMA _ntnt; CREATE TABLE _ntnt.schema_migrations_v2 (position bigint NOT NULL PRIMARY KEY,id text NOT NULL,name text NOT NULL,checksum text NOT NULL,state text NOT NULL,logical_database text NOT NULL,managed_schema text NOT NULL)").await?;
+        }
+        self.rows("INSERT INTO _ntnt.schema_migrations_v2(position,id,name,checksum,state,logical_database,managed_schema) VALUES($1,$2,$3,$4,'applied',$5,$6)", &[&(position as i64), &migration.id.to_string(), &migration.name, &migration.checksum, &database, &schema]).await?;
+        Ok(())
+    }
+
     /// Validate isolation, compatible settings and restricted ownership before creating scope.
     /// On success a rollback-only transaction remains open. The caller must roll back on
     /// every success/error exit or discard the session; no reset/adoption is performed.

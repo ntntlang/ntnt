@@ -63,6 +63,7 @@ pub(crate) struct Database {
     pub migrations_dir: String,
     pub targets: BTreeMap<String, Endpoint>,
     pub scratch: Option<Scratch>,
+    pub approval_secret: Option<String>,
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -227,6 +228,21 @@ impl CapturedInputs {
                 "Scratch must be explicitly disposable with its own secret reference.",
             ));
         }
+        if config.approval_secret.as_ref().is_some_and(|name| {
+            crate::secret::validate_secret_name(name).is_err()
+                || config
+                    .targets
+                    .values()
+                    .any(|e| &e.connection_secret == name)
+                || config
+                    .scratch
+                    .as_ref()
+                    .is_some_and(|s| &s.endpoint.connection_secret == name)
+        }) {
+            return Err(invalid(
+                "Approval must use a separately named secret, never a connection secret.",
+            ));
+        }
         // Portable lexical confinement; never reinterpret backslashes/drives on a different OS.
         if config.migrations_dir.is_empty()
             || config.migrations_dir.contains(['\\', ':', '\0'])
@@ -352,7 +368,7 @@ impl CapturedInputs {
         migrations.sort_by_key(|m| m.id);
         let summaries: Vec<_> = migrations.iter().map(Migration::summary).collect();
         let policy_digest = json_digest(
-            &serde_json::json!({"policy":"read-only-target/restricted-replay-v1", "database_name":database_name, "database":config}),
+            &serde_json::json!({"policy":"exact-plan/transactional-postgresql-v1", "database_name":database_name, "database":config}),
         );
         let input_digest = digest(&[
             b"ntnt-inputs-v1",

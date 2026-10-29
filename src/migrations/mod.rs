@@ -2,6 +2,7 @@
 
 mod analysis;
 mod catalog_sql;
+mod execution;
 mod input_file;
 mod inventory;
 mod postgres;
@@ -31,10 +32,10 @@ impl Diagnostic {
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
             "DB_SECRET" => "Declare the connection secret in ntnt.toml and configure the existing std/secrets provider. Never pass a connection URL on the command line.",
             "DB_TIMEOUT" => "Check endpoint availability and conflicting database locks, then rerun the read-only command.",
-            "DB_PLAN_STALE" | "DB_PLAN_INVALID" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
+            "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_APPROVAL_REQUIRED" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
             "DB_OUTPUT" => "Select a new output filename with a writable parent directory; existing files are never replaced.",
             "DB_OUTPUT_LIMIT" => "Reduce the saved report using --object, or reduce oversized migration metadata. No artifact was written; verification is never truncated to fit.",
-            _ => "Correct the reported input or configuration using docs/DATABASE_MIGRATIONS.md; no target changes were made.",
+            _ => "Correct the reported input or configuration using docs/DATABASE_MIGRATIONS.md; inspect committed progress before retrying any migration.",
         };
         Self {
             code: code.into(),
@@ -67,6 +68,13 @@ pub enum DbCommand {
     Plan(Options),
     /// Verify the applied catalog/history; never runs application checks or repairs.
     Verify(Options),
+    /// Execute an externally authorized exact plan, one transaction per migration.
+    Migrate {
+        #[command(flatten)]
+        options: Options,
+        #[arg(long)]
+        plan: PathBuf,
+    },
 }
 #[derive(clap::Args)]
 /// Explicit selection and output controls shared by database inspection commands.
@@ -163,10 +171,11 @@ fn save_report(path: &std::path::Path, command: &str, report: &serde_json::Value
 /// and saved-plan validation checks identity rather than granting execution authority.
 /// Returns an error after rendering any failed or unknown result.
 pub fn run(args: DbArgs) -> anyhow::Result<()> {
-    let (command, options) = match args.command {
-        DbCommand::Status(o) => ("status", o),
-        DbCommand::Plan(o) => ("plan", o),
-        DbCommand::Verify(o) => ("verify", o),
+    let (command, options, execution_plan) = match args.command {
+        DbCommand::Status(o) => ("status", o, None),
+        DbCommand::Plan(o) => ("plan", o, None),
+        DbCommand::Verify(o) => ("verify", o, None),
+        DbCommand::Migrate { options, plan } => ("migrate", options, Some(plan)),
     };
     // Capture a review artifact before database I/O; never reopen it later.
     let prior = options.against.as_ref().map(|p| {
@@ -175,13 +184,50 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 .map_err(|_| Diagnostic::new("DB_PLAN_INVALID", "Invalid saved plan JSON."))
         })
     });
-    let result = inventory::CapturedInputs::load(
+    let inputs = inventory::CapturedInputs::load(
         &options.manifest,
         &options.target,
         options.database.as_deref(),
-    )
-    .and_then(|inputs| database_runtime(report::inspect(inputs, command)));
-    let mut report = result.unwrap_or_else(|d| report::failure(command, d));
+    );
+    let mut report = if let Some(path) = execution_plan {
+        let mut progress = serde_json::json!({"format_version":1,"command":"migrate",
+            "observed_at":chrono::Utc::now().to_rfc3339(),"outcome":"unknown","diagnostics":[],
+            "progress":[],"assertions":{"outcome":"not_run","executed":0}});
+        let work = inputs.and_then(|inputs| {
+            if options.against.is_some() {
+                return Err(Diagnostic::new(
+                    "DB_CONFIG",
+                    "migrate uses --plan, not --against.",
+                ));
+            }
+            let bytes = inventory::file_bytes(&path)?;
+            let saved = serde_json::from_slice(&bytes).map_err(|_| {
+                Diagnostic::new("DB_PLAN_INVALID", "Invalid saved execution plan JSON.")
+            })?;
+            database_runtime(execution::migrate(&inputs, &saved, &mut progress))
+        });
+        if let Err(d) = work {
+            progress["diagnostics"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!(d));
+            progress["outcome"] = serde_json::json!(if progress["progress"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["state"] == "unknown")
+            {
+                "unknown"
+            } else {
+                "fail"
+            });
+        }
+        progress
+    } else {
+        inputs
+            .and_then(|inputs| database_runtime(report::inspect(inputs, command)))
+            .unwrap_or_else(|d| report::failure(command, d))
+    };
     if let Some(prior) = prior {
         let valid = prior.as_ref().is_ok_and(|p| {
             p["format_version"] == 1
@@ -278,9 +324,18 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             );
         }
         if let Some(d) = report.get("plan_digest") {
-            println!("Plan digest: {d} (not authorization; target execution is not implemented)");
+            println!("Plan digest: {d} (not authorization)");
         }
-        println!("Assertions: not_run (0 executed). Catalog equivalence is not data correctness.");
+        println!(
+            "Assertions: {} ({} executed). Catalog equivalence is not data correctness.",
+            report["assertions"]["outcome"]
+                .as_str()
+                .unwrap_or("not_run"),
+            report["assertions"]["executed"]
+        );
+        for entry in report["progress"].as_array().into_iter().flatten() {
+            println!("Migration {}: {}", entry["source"], entry["state"]);
+        }
     }
     if report["outcome"] == "pass" {
         Ok(())

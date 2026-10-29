@@ -309,7 +309,7 @@ pub(crate) fn analyze(sql: &str, schema: &str) -> Analysis {
         };
         a.operations.push(operation.into());
         a.hazards.push(hazard.into());
-        if !allowed(&s, schema) {
+        if !allowed(&s, schema) || a.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES") {
             a.replay_supported = false;
             a.unknowns.push("SQL_UNSUPPORTED".into());
         }

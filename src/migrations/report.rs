@@ -14,7 +14,15 @@ pub(super) fn failure(command: &str, d: Diagnostic) -> Value {
 }
 /// Verify that applied entries are the exact immutable prefix of captured source history.
 /// Dirty, missing, reordered or edited entries require reconciliation; none are repaired.
-fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize> {
+pub(super) fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize> {
+    if history.scope.as_ref().is_some_and(|scope| {
+        *scope != json!({"database":inputs.database_name,"schema":inputs.config.schema})
+    }) {
+        return Err(Diagnostic::new(
+            "DB_LEDGER_SCOPE",
+            "History belongs to a different logical database or managed schema.",
+        ));
+    }
     if history.entries.len() > inputs.migrations.len() {
         return Err(Diagnostic::new(
             "DB_HISTORY_MISSING",
@@ -158,6 +166,7 @@ async fn inspect_observed(
     }
     let mut expected = None;
     let mut candidate = None;
+    let mut fingerprints = Vec::new();
     if let Some(scratch_config) = &inputs.config.scratch {
         let replay = async {
             let secret = crate::stdlib::secrets::require_from_manifest(
@@ -176,6 +185,11 @@ async fn inspect_observed(
                     .prepare_scratch(&identity, &scratch_config.endpoint, &inputs.config.schema)
                     .await?;
                 report["scratch"] = json!({"identity":scratch_identity,"disposable":true});
+                fingerprints.push(json_digest(
+                    &scratch
+                        .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
+                        .await?,
+                ));
                 if applied == 0 {
                     expected = Some(
                         scratch
@@ -192,6 +206,16 @@ async fn inspect_observed(
                     scratch
                         .execute_captured(migration, &inputs.config.schema)
                         .await?;
+                    let step = scratch
+                        .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
+                        .await?;
+                    if !step.uncovered.is_empty() {
+                        return Err(Diagnostic::new(
+                            "DB_COVERAGE_INCOMPLETE",
+                            "Intermediate catalog exceeds execution coverage.",
+                        ));
+                    }
+                    fingerprints.push(json_digest(&step));
                     if index + 1 == applied {
                         expected = Some(
                             scratch
@@ -262,8 +286,8 @@ async fn inspect_observed(
     };
     report["binding"] = binding.clone();
     if command == "plan" {
-        let plan = json!({"binding":binding,"pending":pending,"candidate":{"outcome":candidate_outcome,"fingerprint":candidate.as_ref().map(json_digest)},
-            "authorized":false,"executable":false,"automatic_safe":false,"classification":if report["outcome"]=="pass" && candidate_outcome=="pass" {"requires_review"} else {"blocked"},"required_authority":"A later executor must revalidate under its migration lock and obtain exact-target/exact-plan approval; this digest grants no authority.",
+        let plan = json!({"execution":{"format":"postgresql-transactional-v1","prefix_fingerprints":fingerprints},"binding":binding,"pending":pending,"candidate":{"outcome":candidate_outcome,"fingerprint":candidate.as_ref().map(json_digest)},
+            "authorized":false,"executable":false,"automatic_safe":false,"classification":if report["outcome"]=="pass" && candidate_outcome=="pass" {"requires_review"} else {"blocked"},"required_authority":"migrate requires this exact digest from the separately protected approval_secret provider, then revalidates under ownership. This digest alone grants no authority.",
             "data_checks":{"outcome":"not_run","reason":"Constraints, casts, nulls, duplicates, orphans and deployed-client compatibility require later data/behavior evidence."}});
         report["plan_digest"] = json!(json_digest(&plan));
         report["plan"] = plan;
