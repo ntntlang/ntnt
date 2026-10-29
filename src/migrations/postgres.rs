@@ -221,13 +221,13 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         if checks.len() != 1 || !checks[0].get::<_, bool>(0) {
             return Err(bad());
         }
-        if !self
-            .catalog("_ntnt", "")
-            .await
-            .map_err(|_| bad())?
-            .uncovered
-            .is_empty()
-        {
+        let ledger_scope = self.catalog("_ntnt", "").await.map_err(|_| bad())?;
+        if ledger_scope.uncovered.iter().any(|key| {
+            ledger_scope
+                .objects
+                .get(key)
+                .is_none_or(|object| object["external"] != true)
+        }) {
             return Err(bad());
         }
         // The ledger is read only after its physical table and every dependent

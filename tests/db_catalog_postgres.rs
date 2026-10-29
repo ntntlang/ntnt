@@ -615,6 +615,116 @@ fn replay_consumes_captured_files_even_if_paths_are_replaced_during_inspection()
 
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn review_target_snapshot_is_released_before_scratch_replay() {
+    let mut f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
+    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    config.dbname(&f.scratch);
+    let mut locker = config.connect(NoTls).unwrap();
+    locker
+        .batch_execute("BEGIN; LOCK TABLE pg_catalog.pg_namespace IN ACCESS EXCLUSIVE MODE")
+        .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args(["db", "plan", "--target", "test", "--json"])
+        .env("DB_TARGET", &f.target_url)
+        .env("DB_SCRATCH", &f.scratch_url)
+        .env("NTNT_SECRETS_PROVIDER", "env")
+        .env("NTNT_ENV", "development")
+        .current_dir(f.root.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        let waiting: i64 = f
+            .admin
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE usename=$1 AND wait_event_type='Lock'",
+                &[&f.scratch],
+            )
+            .unwrap()
+            .get(0);
+        if waiting > 0 {
+            break;
+        }
+        if start.elapsed() > std::time::Duration::from_millis(1500) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("replay did not reach the controlled scratch lock");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let target_transactions: i64 = f.admin.query_one(
+        "SELECT count(*) FROM pg_stat_activity WHERE usename=$1 AND application_name='ntnt-db-inspect-v1' AND xact_start IS NOT NULL",
+        &[&f.target],
+    ).unwrap().get(0);
+    locker.batch_execute("ROLLBACK").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(target_transactions, 0, "the read-only target transaction must end before scratch work; otherwise long replays hit its idle deadline");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn review_large_report_saves_a_reopenable_plan() {
+    let f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
+    let ids: Vec<_> = (0..6000)
+        .map(|i| format!("requirement.{i:05}.{}", "x".repeat(80)))
+        .collect();
+    std::fs::write(
+        f.root.path().join("migrations/0001_initial.toml"),
+        format!("intent_ids = {ids:?}"),
+    )
+    .unwrap();
+    let report = f.command_args("plan", &["--out", "large-plan.json"]);
+    assert_eq!(report["outcome"], "pass");
+    assert!(
+        serde_json::to_vec_pretty(&report).unwrap().len() > 1_048_576,
+        "fixture must reproduce a full report larger than the input bound"
+    );
+    let fresh = f.command_args("verify", &["--against", "large-plan.json"]);
+    assert_eq!(
+        fresh["plan_validation"]["outcome"], "pass",
+        "a successfully saved plan must be readable without changing its source/target binding"
+    );
+    assert!(
+        std::fs::metadata(f.root.path().join("large-plan.json"))
+            .unwrap()
+            .len()
+            <= 1_048_576
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn review_external_extension_does_not_masquerade_as_corrupt_history() {
+    let f = Fixture::new();
+    f.seed_first("CREATE TABLE app.t(id INTEGER);");
+    f.target()
+        .batch_execute("CREATE EXTENSION pgcrypto WITH SCHEMA public")
+        .unwrap();
+    let report = f.command("verify");
+    assert_eq!(
+        report["history"]["outcome"], "pass",
+        "external catalog coverage is not ledger corruption"
+    );
+    assert_eq!(report["history"]["applied_count"], 1);
+    assert_eq!(report["outcome"], "unknown");
+    assert!(has_code(&report, "DB_COVERAGE_INCOMPLETE"));
+    assert!(!has_code(&report, "DB_LEDGER_UNKNOWN"));
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn sql_errors_and_unrecognized_ledger_values_do_not_leak_literals() {
     let f = Fixture::new();
     f.sql(

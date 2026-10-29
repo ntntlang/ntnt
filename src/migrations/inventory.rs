@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
 
+pub(super) const MAX_INPUT_BYTES: usize = 1_048_576;
+
 pub(crate) fn digest(parts: &[&[u8]]) -> String {
     let mut hash = Sha256::new();
     for part in parts {
@@ -110,7 +112,7 @@ pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
         )
     };
     let meta = std::fs::symlink_metadata(path).map_err(|_| bad())?;
-    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > 1_048_576 {
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_INPUT_BYTES as u64 {
         return Err(bad());
     }
     let file = super::input_file::open(path).map_err(|_| bad())?;
@@ -123,12 +125,12 @@ pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
     }
     let mut bytes = Vec::new();
     (&file)
-        .take(1_048_577)
+        .take((MAX_INPUT_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| bad())?;
     let after = std::fs::symlink_metadata(path).map_err(|_| bad())?;
     let finished = file.metadata().map_err(|_| bad())?;
-    if bytes.len() > 1_048_576
+    if bytes.len() > MAX_INPUT_BYTES
         || !super::input_file::same(&meta, &opened)
         || !super::input_file::same(&opened, &after)
         || !super::input_file::same(&opened, &finished)

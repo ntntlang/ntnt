@@ -1,7 +1,7 @@
 //! Shared report construction: authored history, observed target, expected prefix.
 use super::analysis::analyze;
 use super::inventory::{json_digest, CapturedInputs};
-use super::postgres::{Catalog, History, Postgres, RelationalAdapter};
+use super::postgres::{Catalog, History, Identity, Postgres, RelationalAdapter};
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
 
@@ -72,24 +72,34 @@ pub(super) async fn inspect(inputs: CapturedInputs, command: &str) -> Result<Val
         )
     })?;
     let target = Postgres::connect(&secret, &inputs.endpoint).await?;
-    let result = inspect_target(&target, &inputs, command).await;
-    let cleanup = target.rollback().await;
-    match (result, cleanup) {
-        (Ok(report), Ok(())) => Ok(report),
-        (Err(d), _) => Err(d),
-        (_, Err(d)) => Err(d),
+    let observed = async {
+        target.begin_readonly().await?;
+        let identity = target.identity(&inputs.endpoint).await?;
+        let catalog = target
+            .catalog(&inputs.config.schema, &inputs.endpoint.role)
+            .await?;
+        // Retain a history error as a report diagnostic alongside the catalog.
+        let history = target.history().await;
+        Ok::<_, Diagnostic>((identity, catalog, history))
     }
+    .await;
+    let cleanup = target.rollback().await;
+    // No target lock or idle transaction survives into scratch replay. Closing
+    // now also avoids an idle-session disconnect erasing a completed report.
+    drop(target);
+    let (identity, catalog, history) = match (observed, cleanup) {
+        (Ok(observed), Ok(())) => observed,
+        (Err(d), _) | (_, Err(d)) => return Err(d),
+    };
+    inspect_observed(&inputs, command, identity, catalog, history).await
 }
-async fn inspect_target(
-    target: &Postgres,
+async fn inspect_observed(
     inputs: &CapturedInputs,
     command: &str,
+    identity: Identity,
+    catalog: Catalog,
+    history: Result<History>,
 ) -> Result<Value> {
-    target.begin_readonly().await?;
-    let identity = target.identity(&inputs.endpoint).await?;
-    let catalog = target
-        .catalog(&inputs.config.schema, &inputs.endpoint.role)
-        .await?;
     let inventory: Vec<_> = inputs
         .migrations
         .iter()
@@ -106,7 +116,7 @@ async fn inspect_target(
         "history":{"outcome":"unknown"},"drift":{"outcome":"unknown","differences":[]},
         "assertions":{"outcome":"not_run","executed":0,"reason":"SQL contracts and data/business invariants are not executed in PR1."},
         "diagnostics":[],"limitations":["Catalog equivalence is not data correctness or business compatibility.","No production row scans or lock-duration estimates.","No target DDL, adoption, authorization or repair.","Noncooperating concurrent DDL/writers are not excluded by this observation."]});
-    let history = match target.history().await {
+    let history = match history {
         Ok(h) => h,
         Err(d) => {
             diagnostic(&mut report, d);

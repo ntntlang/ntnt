@@ -31,6 +31,7 @@ impl Diagnostic {
             "DB_TIMEOUT" => "Check endpoint availability and conflicting database locks, then rerun the read-only command.",
             "DB_PLAN_STALE" | "DB_PLAN_INVALID" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
             "DB_OUTPUT" => "Select a new output filename with a writable parent directory; existing files are never replaced.",
+            "DB_OUTPUT_LIMIT" => "Reduce the saved report using --object, or reduce oversized migration metadata. No artifact was written; verification is never truncated to fit.",
             _ => "Correct the reported input or configuration using docs/DATABASE_MIGRATIONS.md; no target changes were made.",
         };
         Self {
@@ -71,7 +72,7 @@ pub struct Options {
     pub target: String,
     #[arg(long)]
     pub json: bool,
-    /// Write a report to a NEW file (never overwrite source or an existing plan).
+    /// Write a report/compact plan to a NEW file (never overwrite existing files).
     #[arg(long)]
     pub out: Option<PathBuf>,
     /// Restrict displayed catalog objects, not verification or plan identity.
@@ -107,6 +108,20 @@ fn database_runtime<T>(future: impl std::future::Future<Output = Result<T>>) -> 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn oversized_artifact_is_rejected_before_creating_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.json");
+        let report = serde_json::json!({
+            "format_version": 1,
+            "outcome": "pass",
+            "plan": {"padding": "x".repeat(super::inventory::MAX_INPUT_BYTES)},
+        });
+        let error = super::save_report(&path, "plan", &report).unwrap_err();
+        assert_eq!(error.code, "DB_OUTPUT_LIMIT");
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn runtime_cleanup_does_not_wait_for_uncancellable_resolver_work() {
         let start = std::time::Instant::now();
         super::database_runtime(async {
@@ -121,6 +136,45 @@ mod tests {
         .unwrap();
         assert!(start.elapsed() < std::time::Duration::from_millis(500));
     }
+}
+
+fn save_report(path: &std::path::Path, command: &str, report: &serde_json::Value) -> Result<()> {
+    use std::io::Write;
+    // Save the plan descriptor, not duplicated display catalogs and source
+    // summaries. stdout still contains the complete observation report.
+    let artifact = if command == "plan" && !report["plan"].is_null() {
+        serde_json::json!({
+            "format_version": report["format_version"],
+            "command": command,
+            "observed_at": report["observed_at"],
+            "outcome": report["outcome"],
+            "plan": report["plan"],
+            "plan_digest": report["plan_digest"],
+            "diagnostics": report["diagnostics"],
+        })
+    } else {
+        report.clone()
+    };
+    let output_error = || {
+        Diagnostic::new("DB_OUTPUT", "Cannot save report. Destination must be a new writable file; existing files are never replaced.")
+    };
+    let bytes = serde_json::to_vec_pretty(&artifact).map_err(|_| output_error())?;
+    if bytes.len() > inventory::MAX_INPUT_BYTES {
+        return Err(Diagnostic::new(
+            "DB_OUTPUT_LIMIT",
+            "Saved artifact exceeds the 1 MiB readback limit; no file was created.",
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|_| output_error())?;
+    file.write_all(&bytes).map_err(|_| output_error())?;
+    file.sync_all().map_err(|_| output_error())
 }
 
 pub fn run(args: DbArgs) -> anyhow::Result<()> {
@@ -171,22 +225,12 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         report["display_filter"] = serde_json::json!(filter);
     }
     if let Some(path) = &options.out {
-        use std::io::Write;
-        let write = || -> std::io::Result<()> {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(path)?;
-            file.write_all(serde_json::to_string_pretty(&report)?.as_bytes())?;
-            file.sync_all()
-        };
-        if write().is_err() {
+        if let Err(diagnostic) = save_report(path, command, &report) {
             report["outcome"] = serde_json::json!("fail");
-            report["diagnostics"].as_array_mut().unwrap().push(serde_json::json!(Diagnostic::new("DB_OUTPUT","Cannot save report. Destination must be a new writable file; existing files are never replaced.")));
+            report["diagnostics"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!(diagnostic));
         }
     }
     let output = serde_json::to_string_pretty(&report)?;
