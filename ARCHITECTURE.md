@@ -49,6 +49,31 @@ async startup failure before workers begin; readiness uses the actual post-bind
 address. An outer Axum response filter and a bounded tiny_http serialization writer
 remove selected fixture headers without replacing HTTP parsing or framing.
 
+## Native database inspection and planning (#245, first increment)
+
+`src/migrations/` owns immutable SQL/metadata capture, versioned results, history
+validation, PostgreSQL catalog fingerprints, applied-prefix drift and target-bound
+plans. `ntnt db status|plan|verify` dispatches to that core without invoking the
+interpreter or the existing source `ntnt migrate` command. Captured manifest
+secret declarations reuse the existing native secrets providers without reopening
+source policy or changing interpreter-global secret state.
+
+The small relational adapter boundary owns catalog inspection and operation/version
+capabilities. PostgreSQL sessions are dedicated physical connections with bounded
+I/O; the target is inspected in a repeatable-read, read-only transaction. A separate,
+explicitly disposable database with verified physical identity, matching settings
+and an unprivileged role derives expected state using a restricted PostgreSQL AST
+subset in a rollback-only transaction. The captured-byte execution primitive is
+shared native code for the later authorized executor, not a separate rehearsal
+framework. Catalog coverage and opaque objects remain explicit. SQL definitions
+are fingerprinted rather than emitted, because stored definitions can contain
+credentials.
+
+No target DDL, SQL contracts, baseline adoption, SQLite adapter, query lint, or
+application/startup migration behavior is added by this increment. See
+[Database Migrations](docs/DATABASE_MIGRATIONS.md) for the precise format, coverage,
+read-only boundaries, deadlines and later work.
+
 ## Source Structure
 
 ```

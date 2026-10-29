@@ -34,6 +34,23 @@ This document outlines the implementation plan for NTNT, a programming language 
 - Deferred: outbound TCP/UDP/TLS/Unix sockets, general file streams/incremental hashing, HTTP lifecycle.
 - Release gates: independent exact-snapshot review and hosted platform CI; current evidence is recorded on the corresponding implementation PRs.
 
+## SQL-first database management (#245)
+
+- [x] First increment: deterministic SQL/metadata inventory, explicit secret-backed
+  targets/scopes, PostgreSQL catalog/history inspection, disposable restricted
+  replay, applied-prefix drift, and non-authorizing target-bound plans through
+  `ntnt db status|plan|verify`. See [coverage and limitations](docs/DATABASE_MIGRATIONS.md).
+- [ ] PostgreSQL exact-plan execution, SQL contracts, per-migration commit truth,
+  locking/cancellation/reconciliation, and populated-data rehearsal.
+- [ ] SQLite adapter and shared lifecycle conformance.
+- [ ] Deliberate existing-database adoption and the first complete foundation release.
+- [ ] Narrow non-transactional concurrent-index execution/recovery.
+- [ ] Schema-aware query validation, dependencies and Intent views.
+
+The first increment is read-only on the selected target and does not replace
+application startup migrations or provide `ntnt db migrate`. KV/document-store
+evolution remains deferred rather than being forced through the relational adapter.
+
 ## Current Status
 
 ### Completed ✅
