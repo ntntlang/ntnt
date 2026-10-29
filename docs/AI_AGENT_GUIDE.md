@@ -1692,6 +1692,34 @@ Type checking strictness is controlled by `NTNT_TYPE_MODE` and `NTNT_LINT_MODE` 
 
 ## Database Pattern
 
+### Read-only catalog/history planning (`ntnt db`, first increment)
+
+For an explicitly configured PostgreSQL target, use:
+
+```bash
+ntnt db status --target development --json
+ntnt db plan --target development --json --out review.json
+ntnt db verify --target development --against review.json --json
+```
+
+Configure logical stores under `[databases.<name>]`, each with its own migration
+directory, named targets, and disposable scratch database using declared
+`std/secrets` references. Select `--database app --target development`; omit
+`--database` only when exactly one store is declared. `--target` is always required.
+Only the selected store is inspected, and its logical name is bound into plans.
+These commands never initialize or mutate
+the target, execute SQL checks, or adopt an existing database. They compare the live
+catalog to replay at the **applied prefix**, not the pending repository head. Read
+`catalog.uncovered`, `diagnostics`, and `assertions`: unknown coverage is not no drift,
+and zero executed SQL assertions is `not_run`, not a business-verification pass.
+Plans are not executable or authorizing; unsupported SQL/metadata stays blocked.
+
+There is no `ntnt db migrate` in this increment. Existing `ntnt migrate` still
+converts source interpolation syntax. SQLite and existing application-owned runners
+are unchanged. See [Database Migrations](DATABASE_MIGRATIONS.md) before configuring
+connections, scratch privileges, or interpreting a plan; its replay subset and
+NoTLS trusted-local-transport restriction are intentional and explicit.
+
 ### SQLite (bundled, no server needed)
 
 ```ntnt

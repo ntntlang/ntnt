@@ -116,17 +116,21 @@ fn load_declarations(source_path: &Path) -> (PathBuf, SecretDeclarations) {
     let Ok(document) = content.parse::<toml::Value>() else {
         return (source_identity, SecretDeclarations::Invalid);
     };
+    (source_identity, declarations_from_document(&document))
+}
+
+fn declarations_from_document(document: &toml::Value) -> SecretDeclarations {
     let Some(secrets) = document.get("secrets") else {
-        return (source_identity, SecretDeclarations::Loaded(HashSet::new()));
+        return SecretDeclarations::Loaded(HashSet::new());
     };
     let Some(table) = secrets.as_table() else {
-        return (source_identity, SecretDeclarations::Invalid);
+        return SecretDeclarations::Invalid;
     };
 
     let mut declared = HashSet::with_capacity(table.len());
     for (name, metadata) in table {
         let Some(metadata) = metadata.as_table() else {
-            return (source_identity, SecretDeclarations::Invalid);
+            return SecretDeclarations::Invalid;
         };
         if validate_secret_name(name).is_err()
             || metadata.keys().any(|key| {
@@ -148,11 +152,11 @@ fn load_declarations(source_path: &Path) -> (PathBuf, SecretDeclarations) {
                     .is_none_or(|items| items.iter().any(|item| !item.is_str()))
             })
         {
-            return (source_identity, SecretDeclarations::Invalid);
+            return SecretDeclarations::Invalid;
         }
         declared.insert(name.clone());
     }
-    (source_identity, SecretDeclarations::Loaded(declared))
+    SecretDeclarations::Loaded(declared)
 }
 
 fn enforce_declared(name: &str) -> Result<()> {
@@ -573,6 +577,23 @@ fn configured_provider_group() -> Result<ProviderGroup> {
         timeout_ms.as_deref(),
         is_production_mode(),
     )
+}
+
+/// Native consumers with a captured manifest must not reopen source policy or
+/// reconfigure the interpreter's process-global application identity.
+pub(crate) fn require_from_manifest(name: &str, document: &toml::Value) -> Result<SecretValue> {
+    validate_secret_name(name)?;
+    match declarations_from_document(document) {
+        SecretDeclarations::Loaded(names) if names.contains(name) => (),
+        _ => {
+            return Err(IntentError::runtime_error(
+                "Secret is not declared in the captured manifest".to_string(),
+            ))
+        }
+    }
+    configured_provider_group()?
+        .lookup(name)?
+        .ok_or_else(|| IntentError::runtime_error("Required secret is not configured".to_string()))
 }
 
 fn lookup_secret(name: &str) -> Result<Option<SecretValue>> {

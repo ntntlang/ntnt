@@ -44,6 +44,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Inspect SQL migration history, catalogs, drift and plans (not source migration).
+    Db(ntnt::migrations::DbArgs),
     /// Start the interactive REPL
     Repl,
     /// Run an NTNT source file
@@ -1011,6 +1013,7 @@ fn main() {
             update,
         }) => run_learn_command(platform, check, update),
         Some(Commands::Migrate { path, dry_run }) => run_migrate_command(&path, dry_run),
+        Some(Commands::Db(args)) => ntnt::migrations::run(args),
         Some(Commands::Completions { shell }) => {
             generate_completions(shell);
             Ok(())
