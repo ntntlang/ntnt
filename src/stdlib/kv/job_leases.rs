@@ -1591,23 +1591,54 @@ mod tests {
         expire(&handle, &id);
         let locked = rusqlite::Connection::open(&path).unwrap();
         locked.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let shared = get_sqlite_kv(&handle).unwrap();
+        let (store_locked, wait_for_store) = std::sync::mpsc::channel();
+        let (local_seen, wait_for_local) = std::sync::mpsc::channel();
         let (busy_seen, wait_for_busy) = std::sync::mpsc::channel();
         let release = std::thread::spawn(move || {
-            // Release only after recovery really encounters the held SQLite
-            // writer, not after a sleep that can hide the race on a fast host.
+            // Force local mutex contention before permitting any SQLite access.
+            let guard = shared.lock().unwrap();
+            store_locked.send(()).unwrap();
+            wait_for_local.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(
+                matches!(
+                    wait_for_busy.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ),
+                "local_busy must not signal that the SQLite writer may be released"
+            );
+            drop(guard);
+            // The separate SQLite writer remains held until recovery reaches it.
             wait_for_busy.recv_timeout(Duration::from_secs(5)).unwrap();
             locked.execute_batch("ROLLBACK").unwrap();
         });
-        let mut observed = false;
+        wait_for_store.recv_timeout(Duration::from_secs(5)).unwrap();
+        let local_error = conditional::StorageFailure::LocalBusy.intent().to_string();
+        let sqlite_error = conditional::StorageFailure::Busy.intent().to_string();
+        let mut observed_local = false;
+        let mut observed_sqlite = false;
         let recovery = retry_test_contention(Duration::from_secs(5), || {
             let result = recover(&handle, 1);
-            if result.as_ref().is_err_and(conditional::is_contention_error) && !observed {
-                observed = true;
+            if result
+                .as_ref()
+                .is_err_and(|error| error.to_string() == sqlite_error)
+                && !observed_sqlite
+            {
+                observed_sqlite = true;
                 busy_seen.send(()).unwrap();
+            }
+            if result
+                .as_ref()
+                .is_err_and(|error| error.to_string() == local_error)
+                && !observed_local
+            {
+                observed_local = true;
+                local_seen.send(()).unwrap();
             }
             result
         });
         release.join().unwrap();
+        assert!(observed_local && observed_sqlite);
         let counts = recovery.unwrap();
         assert_eq!((counts.requeued, counts.unknown), (1, 0));
         assert!(
