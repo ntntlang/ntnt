@@ -421,6 +421,70 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         .await?;
         Ok(identity)
     }
+    /// Reject unsupported live invocation paths before preparing any authored
+    /// check. Names alone and provolatile are not proofs: only builtin base types,
+    /// heap tables, builtin indexes/operators and the closed grammar are admitted.
+    /// Custom implicit/assignment casts are rejected database-wide, conservatively.
+    pub async fn check_purity(&self, schema: &str) -> Result<()> {
+        let catalog = self.catalog(schema, "").await?;
+        if !catalog.uncovered.is_empty() {
+            return Err(Diagnostic::new(
+                "DB_CHECK_UNSUPPORTED",
+                "Live objects exceed contract purity coverage.",
+            ));
+        }
+        let safe = self.rows(r#"SELECT NOT EXISTS (
+          SELECT 1 FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
+          JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind='r'
+          AND a.attnum>0 AND NOT a.attisdropped AND a.atttypid NOT IN (16,17,20,21,23,25,700,701,1043,1082,1114,1184,1700,2950))
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast WHERE oid>=16384 AND castcontext IN ('i','a'))
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind NOT IN ('r','i'))"#, &[&schema]).await?;
+        if !safe[0].get::<_, bool>(0) {
+            return Err(Diagnostic::new(
+                "DB_CHECK_UNSUPPORTED",
+                "Live types or casts exceed the verified builtin contract subset.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Execute captured check bytes once; consume at most two rows and inspect
+    /// types without displaying values. False/NULL/shape/type/error/timeout fail.
+    /// On any failure the caller rolls back or discards this dedicated session.
+    pub async fn check(&self, sql: &str, schema: &str) -> Result<()> {
+        use futures_util::TryStreamExt;
+        if !super::analysis::contract_supported(sql, schema) {
+            return Err(Diagnostic::new(
+                "DB_CHECK_UNSUPPORTED",
+                "Unsupported check syntax.",
+            ));
+        }
+        self.batch(&format!("SET LOCAL search_path=pg_catalog,\"{schema}\";"))
+            .await?;
+        let passed = bounded(async {
+            let rows = self
+                .client
+                .query_raw(
+                    sql,
+                    std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>(),
+                )
+                .await?;
+            tokio::pin!(rows);
+            let first = rows.try_next().await?;
+            let second = rows.try_next().await?;
+            Ok(first.is_some_and(|row| {
+                row.len() == 1
+                    && row.columns()[0].type_() == &tokio_postgres::types::Type::BOOL
+                    && row.try_get::<_, Option<bool>>(0).ok() == Some(Some(true))
+            }) && second.is_none())
+        })
+        .await?;
+        if !passed {
+            return Err(Diagnostic::new("DB_CHECK_FAILED", "Contract requires exactly one row containing one non-NULL Boolean true; values suppressed."));
+        }
+        Ok(())
+    }
+
     /// Shared execution primitive: consumes captured bytes only, within a caller-
     /// owned transaction. PR2 can reuse this after authorization/locking/checks.
     pub async fn execute_captured(&self, migration: &Migration, schema: &str) -> Result<()> {
@@ -429,6 +493,9 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             d.source = Some(migration.name.clone());
             return Err(d);
         }
+        // DDL coercions can invoke custom assignment/implicit casts too. Verify
+        // native resolution before both scratch replay and authorized execution.
+        self.check_purity(schema).await?;
         // pg_catalog is implicitly searched first when omitted, while CREATE
         // uses the first explicit namespace. Never let app objects shadow builtins.
         self.batch(&format!("SET LOCAL search_path=\"{schema}\";"))
@@ -490,9 +557,9 @@ fn canonical_roles(value: &mut Value, role: &str) {
 impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
-            "operations": {"catalog_inspection":"supported_subset", "restricted_ddl_replay":"rollback_only_scratch", "target_ddl":"not_implemented", "sql_contracts":"not_implemented", "concurrent_indexes":"not_implemented", "baseline_adoption":"not_implemented"},
+            "operations": {"catalog_inspection":"supported_subset", "restricted_ddl_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_subset", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"not_implemented"},
             "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_grants":"canonical_role_names", "views_sequences_routines_triggers_policies":"inventoried_opaque", "partitioning_extensions_custom_types_external_dependencies":"unknown"},
-            "guarantees": {"target_transaction":"repeatable_read_read_only", "replay":"restricted_subset_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":false}})
+            "guarantees": {"target_transaction":"repeatable_read_read_only", "replay":"restricted_subset_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
     async fn catalog(&self, schema: &str, role: &str) -> Result<Catalog> {
         self.batch("SET LOCAL search_path=pg_catalog").await?;

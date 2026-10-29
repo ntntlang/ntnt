@@ -70,6 +70,10 @@ pub(crate) struct Database {
 struct Metadata {
     #[serde(default)]
     intent_ids: Vec<String>,
+    #[serde(default)]
+    requires: BTreeMap<String, String>,
+    #[serde(default)]
+    ensures: BTreeMap<String, String>,
 }
 
 // SQL/metadata are deliberately private and never Debug/Serialize: reports carry
@@ -82,12 +86,14 @@ pub(crate) struct Migration {
     pub sql: String,
     pub metadata: Option<Vec<u8>>,
     pub intent_ids: Vec<String>,
+    pub requires: BTreeMap<String, String>,
+    pub ensures: BTreeMap<String, String>,
 }
 impl Migration {
     /// Expose source identities and traceability without raw SQL or sidecar contents.
     pub fn summary(&self) -> serde_json::Value {
         serde_json::json!({"id":self.id.to_string(), "source":self.name,
-            "checksum":self.checksum, "sql_digest":digest(&[self.sql.as_bytes()]), "metadata_digest":self.metadata.as_ref().map(|b| digest(&[b])), "intent_ids":self.intent_ids})
+            "checksum":self.checksum, "sql_digest":digest(&[self.sql.as_bytes()]), "metadata_digest":self.metadata.as_ref().map(|b| digest(&[b])), "intent_ids":self.intent_ids, "requires":self.requires.keys().collect::<Vec<_>>(), "ensures":self.ensures.keys().collect::<Vec<_>>()})
     }
 }
 
@@ -327,7 +333,7 @@ impl CapturedInputs {
             let metadata = sources.get(&format!("{stem}.toml")).cloned();
             let parsed: Metadata = match &metadata {
                 Some(b) => std::str::from_utf8(b).ok().and_then(|s| toml::from_str(s).ok())
-                    .ok_or_else(|| Diagnostic::new("DB_METADATA_UNSUPPORTED", "Only intent_ids traceability metadata is supported; checks and execution modes are not implemented."))?,
+                    .ok_or_else(|| Diagnostic::new("DB_METADATA_UNSUPPORTED", "Supported metadata: intent_ids and named requires/ensures SQL maps; execution modes are not supported."))?,
                 None => Metadata::default(),
             };
             if parsed
@@ -336,6 +342,19 @@ impl CapturedInputs {
                 .any(|s| s.len() > 128 || s.is_empty() || s.chars().any(char::is_control))
             {
                 return Err(invalid("Invalid Intent traceability ID."));
+            }
+            if parsed.requires.len() + parsed.ensures.len() > 64
+                || parsed
+                    .requires
+                    .iter()
+                    .chain(&parsed.ensures)
+                    .any(|(name, sql)| {
+                        !identifier(name)
+                            || sql.len() > 65536
+                            || !super::analysis::contract_supported(sql, &config.schema)
+                    })
+            {
+                return Err(Diagnostic::new("DB_CHECK_UNSUPPORTED", "Checks require bounded names and the documented closed SELECT expression subset; unsupported SQL is never executed."));
             }
             let checksum = digest(&[
                 b"ntnt-migration-v1",
@@ -355,6 +374,8 @@ impl CapturedInputs {
                 sql,
                 metadata,
                 intent_ids: parsed.intent_ids,
+                requires: parsed.requires,
+                ensures: parsed.ensures,
             });
         }
         for name in sources.keys().filter(|n| n.ends_with(".toml")) {

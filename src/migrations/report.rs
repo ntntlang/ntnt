@@ -131,7 +131,7 @@ async fn inspect_observed(
         "source":{"input_digest":inputs.input_digest,"policy_digest":inputs.policy_digest,"migrations":inventory},
         "capabilities":Postgres::capabilities(identity.version),"catalog":catalog,
         "history":{"outcome":"unknown"},"drift":{"outcome":"unknown","differences":[]},
-        "assertions":{"outcome":"not_run","executed":0,"reason":"SQL contracts and data/business invariants are not executed in PR1."},
+        "assertions":{"outcome":"not_run","executed":0,"reason":"Transition contracts are not executed by catalog replay or read-only inspection."},
         "diagnostics":[],"limitations":["Catalog equivalence is not data correctness or business compatibility.","No production row scans or lock-duration estimates.","No target DDL, adoption, authorization or repair.","Noncooperating concurrent DDL/writers are not excluded by this observation."]});
     let history = match history {
         Ok(h) => h,

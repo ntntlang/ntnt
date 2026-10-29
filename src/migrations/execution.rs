@@ -176,6 +176,38 @@ async fn connect(inputs: &CapturedInputs) -> Result<Postgres> {
     Postgres::connect(&secret, &inputs.endpoint).await
 }
 
+/// Count only checks actually attempted on this target in this invocation.
+/// Historical transition checks never become permanent verify assertions.
+async fn checks(
+    pg: &Postgres,
+    checks: &std::collections::BTreeMap<String, String>,
+    schema: &str,
+    source: &str,
+    phase: &str,
+    report: &mut Value,
+) -> Result<()> {
+    if checks.is_empty() {
+        return Ok(());
+    }
+    pg.check_purity(schema).await?;
+    for (name, sql) in checks {
+        let count = report["assertions"]["executed"].as_u64().unwrap_or(0);
+        report["assertions"]["executed"] = json!(count + 1);
+        report["assertions"]["outcome"] = json!("unknown");
+        let result = pg.check(sql, schema).await;
+        if report["assertions"]["checks"].is_null() {
+            report["assertions"]["checks"] = json!([]);
+        }
+        report["assertions"]["checks"].as_array_mut().unwrap().push(json!({"source":source,"name":name,"phase":phase,"outcome":if result.is_ok() {"pass"} else {"fail"}}));
+        report["assertions"]["outcome"] = json!(if result.is_ok() { "pass" } else { "fail" });
+        result.map_err(|mut d| {
+            d.source = Some(source.into());
+            d
+        })?;
+    }
+    Ok(())
+}
+
 /// Execute one immutable transition per transaction. No bootstrap precedes
 /// authorization and locked revalidation. Any failure discards the physical
 /// session; an uncertain commit only triggers fresh inspection, never SQL retry.
@@ -209,8 +241,26 @@ pub(super) async fn migrate(
         // socket rolls back. Keep in-flight progress conservative until cleanup.
         report["progress"][applied]["state"] = json!("unknown");
         let work = async {
+            checks(
+                &pg,
+                &migration.requires,
+                &inputs.config.schema,
+                &migration.name,
+                "requires",
+                report,
+            )
+            .await?;
             pg.execute_captured(migration, &inputs.config.schema)
                 .await?;
+            checks(
+                &pg,
+                &migration.ensures,
+                &inputs.config.schema,
+                &migration.name,
+                "ensures",
+                report,
+            )
+            .await?;
             let catalog = pg
                 .catalog(&inputs.config.schema, &inputs.endpoint.role)
                 .await?;
