@@ -1,4 +1,4 @@
-//! Native SQL migration inspection and replay. Target execution is intentionally absent.
+//! Native SQL history, catalog replay and externally authorized PostgreSQL execution.
 
 mod analysis;
 mod catalog_sql;
@@ -31,7 +31,7 @@ impl Diagnostic {
             "DB_LEDGER_UNKNOWN" | "DB_UNRECOGNIZED_HISTORY" => "Inspect the existing ledger and managed scope with an operator. Baseline adoption is not implemented; never insert fictional applied rows.",
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
             "DB_SECRET" => "Declare the connection secret in ntnt.toml and configure the existing std/secrets provider. Never pass a connection URL on the command line.",
-            "DB_TIMEOUT" => "Check endpoint availability and conflicting database locks, then rerun the read-only command.",
+            "DB_TIMEOUT" => "Check endpoint availability and conflicting locks. Preserve committed progress; reconcile unknown migration outcomes with the same reviewed plan before any further SQL.",
             "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_APPROVAL_REQUIRED" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
             "DB_OUTPUT" => "Select a new output filename with a writable parent directory; existing files are never replaced.",
             "DB_OUTPUT_LIMIT" => "Reduce the saved report using --object, or reduce oversized migration metadata. No artifact was written; verification is never truncated to fit.",
@@ -54,13 +54,13 @@ impl std::error::Error for Diagnostic {}
 pub type Result<T> = std::result::Result<T, Diagnostic>;
 
 #[derive(clap::Args)]
-/// Inspect database history, catalog drift and plans without changing the target.
+/// Inspect database history/catalogs or execute a separately authorized exact plan.
 pub struct DbArgs {
     #[command(subcommand)]
     pub command: DbCommand,
 }
 #[derive(clap::Subcommand)]
-/// Read-only-target operations sharing one captured-input and catalog pipeline.
+/// Read-only observations and explicit execution share captured inputs and catalog evidence.
 pub enum DbCommand {
     /// Inspect catalog, migration history, pending changes and drift (read-only target).
     Status(Options),
@@ -112,7 +112,7 @@ fn database_runtime<T>(future: impl std::future::Future<Output = Result<T>>) -> 
             .map_err(|_| {
                 Diagnostic::new(
                     "DB_TIMEOUT",
-                    "Total inspection/replay deadline exceeded; dedicated sessions discarded.",
+                    "Total database operation deadline exceeded; dedicated sessions discarded. Retain reported committed progress and reconcile unknown work using the same plan.",
                 )
             })?
     });
@@ -167,8 +167,8 @@ fn save_report(path: &std::path::Path, command: &str, report: &serde_json::Value
 
 /// Synchronous CLI entry point: capture inputs, inspect/replay, and render one result.
 ///
-/// The selected deployment target is never mutated. Optional output files are new-only,
-/// and saved-plan validation checks identity rather than granting execution authority.
+/// Only `migrate` may mutate the target, after independent approval and locked
+/// revalidation. Output files are new-only; inspection/plan digests never authorize writes.
 /// Returns an error after rendering any failed or unknown result.
 pub fn run(args: DbArgs) -> anyhow::Result<()> {
     let (command, options, execution_plan) = match args.command {

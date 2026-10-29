@@ -1,5 +1,5 @@
 //! Dedicated physical PostgreSQL sessions, bounded I/O and trusted catalog SQL.
-//! No application routine, row sample, SQL contract, or target DDL is executed.
+//! Authored DDL/checks require closed validation; inspection uses only fixed catalog SQL.
 use super::inventory::{Endpoint, Migration};
 use super::{Diagnostic, Result};
 use serde::{Deserialize, Serialize};
@@ -486,7 +486,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     }
 
     /// Shared execution primitive: consumes captured bytes only, within a caller-
-    /// owned transaction. PR2 can reuse this after authorization/locking/checks.
+    /// owned transaction. Replay and authorized migration use exactly this primitive.
     pub async fn execute_captured(&self, migration: &Migration, schema: &str) -> Result<()> {
         if !super::analysis::analyze(&migration.sql, schema).replay_supported {
             let mut d=Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration is outside the supported replay subset; no arbitrary SQL sandbox is claimed.");
@@ -559,7 +559,7 @@ impl RelationalAdapter for Postgres {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
             "operations": {"catalog_inspection":"supported_subset", "restricted_ddl_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_subset", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"not_implemented"},
             "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_grants":"canonical_role_names", "views_sequences_routines_triggers_policies":"inventoried_opaque", "partitioning_extensions_custom_types_external_dependencies":"unknown"},
-            "guarantees": {"target_transaction":"repeatable_read_read_only", "replay":"restricted_subset_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
+            "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"restricted_subset_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
     async fn catalog(&self, schema: &str, role: &str) -> Result<Catalog> {
         self.batch("SET LOCAL search_path=pg_catalog").await?;

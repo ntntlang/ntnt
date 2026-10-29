@@ -190,7 +190,7 @@ jobs:
   # creates fresh target/scratch databases and distinct unprivileged roles per
   # test. No shared auth tables or application credentials are used.
   db-catalog:
-    name: Database Catalog (PostgreSQL ${{ matrix.postgres }})
+    name: Database Catalog and Execution (PostgreSQL ${{ matrix.postgres }})
     needs: changes
     if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -220,9 +220,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: db-catalog
-      - name: Run real read-only, identity, replay and drift contracts
+      - name: Run real inspection, execution, contracts and commit recovery
         run: |
           cargo test --locked --test db_catalog_postgres -- --ignored --test-threads=2 --nocapture
+          cargo test --locked --test db_execution_postgres -- --ignored --test-threads=2 --nocapture
           cargo test --locked --lib migrations::postgres::tests::target_transaction_is_really_read_only_even_for_superuser -- --ignored --exact --nocapture
         env:
           RUST_MIN_STACK: 8388608
