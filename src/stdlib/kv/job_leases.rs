@@ -1168,11 +1168,13 @@ mod tests {
         .unwrap()
     }
     fn expire(handle: &Value, id: &str) {
-        transaction(handle, |store| {
-            let mut lease = store.lease(id)?.unwrap();
-            store.remove_due(&due_key(id, &lease))?;
-            lease.deadline_ms = store.now()? - 1;
-            store.save_lease(id, &lease)
+        retry_test_contention(Duration::from_secs(5), || {
+            transaction(handle, |store| {
+                let mut lease = store.lease(id)?.unwrap();
+                store.remove_due(&due_key(id, &lease))?;
+                lease.deadline_ms = store.now()? - 1;
+                store.save_lease(id, &lease)
+            })
         })
         .unwrap();
     }
@@ -1515,6 +1517,144 @@ mod tests {
         assert!(!final_batch.more_due);
         assert_eq!(text(&state(&handle, &legacy), "status"), Some("active"));
     }
+    // Public KV handles remain registered after claim threads exit, so TTL
+    // maintenance can still race these assertions. Retry only labelled storage
+    // contention; permanent errors and exhausted budgets must fail the test.
+    fn retry_test_contention<T>(
+        budget: Duration,
+        mut operation: impl FnMut() -> Result<T>,
+    ) -> Result<T> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            match operation() {
+                Err(error)
+                    if conditional::is_contention_error(&error)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(
+                        Duration::from_millis(5)
+                            .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                    );
+                }
+                result => return result,
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_claim_fixture_does_not_retry_permanent_errors() {
+        let mut attempts = 0;
+        let error = retry_test_contention(Duration::from_secs(5), || {
+            attempts += 1;
+            recover(&Value::Unit, 1)
+        })
+        .expect_err("invalid storage handle must fail");
+        assert!(!conditional::is_contention_error(&error));
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn concurrent_claim_fixture_stops_at_its_retry_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("held-writer.db");
+        let handle = open_kv(path.to_str().unwrap()).unwrap();
+        let locked = rusqlite::Connection::open(&path).unwrap();
+        locked.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut attempts = 0;
+        let error = retry_test_contention(Duration::ZERO, || {
+            attempts += 1;
+            recover(&handle, 1)
+        })
+        .expect_err("a held writer must exhaust the zero retry budget");
+        locked.execute_batch("ROLLBACK").unwrap();
+        assert!(conditional::is_contention_error(&error));
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn concurrent_claim_fixture_recovery_handles_a_busy_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recovery-contention.db");
+        let handle = open_kv(path.to_str().unwrap()).unwrap();
+        let (id, pending) = fixture(&handle, "pending");
+        retry_test_contention(Duration::from_secs(5), || {
+            claim(
+                &handle,
+                "jobs:pending:05:",
+                "jobs:pending:05:~",
+                "fixture",
+                60_000,
+            )
+        })
+        .unwrap()
+        .unwrap();
+        expire(&handle, &id);
+        let locked = rusqlite::Connection::open(&path).unwrap();
+        locked.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let shared = get_sqlite_kv(&handle).unwrap();
+        let (store_locked, wait_for_store) = std::sync::mpsc::channel();
+        let (local_seen, wait_for_local) = std::sync::mpsc::channel();
+        let (busy_seen, wait_for_busy) = std::sync::mpsc::channel();
+        let release = std::thread::spawn(move || {
+            // Force local mutex contention before permitting any SQLite access.
+            let guard = shared.lock().unwrap();
+            store_locked.send(()).unwrap();
+            wait_for_local.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(
+                matches!(
+                    wait_for_busy.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ),
+                "local_busy must not signal that the SQLite writer may be released"
+            );
+            drop(guard);
+            // The separate SQLite writer remains held until recovery reaches it.
+            wait_for_busy.recv_timeout(Duration::from_secs(5)).unwrap();
+            locked.execute_batch("ROLLBACK").unwrap();
+        });
+        wait_for_store.recv_timeout(Duration::from_secs(5)).unwrap();
+        let local_error = conditional::StorageFailure::LocalBusy.intent().to_string();
+        let sqlite_error = conditional::StorageFailure::Busy.intent().to_string();
+        let mut observed_local = false;
+        let mut observed_sqlite = false;
+        let recovery = retry_test_contention(Duration::from_secs(5), || {
+            let result = recover(&handle, 1);
+            if result
+                .as_ref()
+                .is_err_and(|error| error.to_string() == sqlite_error)
+                && !observed_sqlite
+            {
+                observed_sqlite = true;
+                busy_seen.send(()).unwrap();
+            }
+            if result
+                .as_ref()
+                .is_err_and(|error| error.to_string() == local_error)
+                && !observed_local
+            {
+                observed_local = true;
+                local_seen.send(()).unwrap();
+            }
+            result
+        });
+        release.join().unwrap();
+        assert!(observed_local && observed_sqlite);
+        let counts = recovery.unwrap();
+        assert_eq!((counts.requeued, counts.unknown), (1, 0));
+        assert!(
+            retry_test_contention(Duration::from_secs(5), || get(&handle, &id))
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(kv_get(&handle, &pending).unwrap(), Value::String(owner) if owner == id));
+        assert_eq!(
+            retry_test_contention(Duration::from_secs(5), || recover(&handle, 1))
+                .unwrap()
+                .requeued,
+            0
+        );
+    }
+
     fn concurrency(url: &str) {
         let handle = open_kv(url).unwrap();
         let (id, _) = fixture(&handle, "pending");
@@ -1526,19 +1666,17 @@ mod tests {
                 std::thread::spawn(move || {
                     let handle = open_kv(&url).unwrap();
                     barrier.wait();
-                    for _ in 0..100 {
-                        match claim(
+                    retry_test_contention(Duration::from_secs(5), || {
+                        claim(
                             &handle,
                             "jobs:pending:05:",
                             "jobs:pending:05:~",
                             &format!("worker-{n}"),
                             60_000,
-                        ) {
-                            Ok(result) => return result.map(|c| (c.id, c.token)),
-                            Err(_) => std::thread::sleep(Duration::from_millis(5)),
-                        }
-                    }
-                    panic!("contention did not settle")
+                        )
+                    })
+                    .unwrap()
+                    .map(|claim| (claim.id, claim.token))
                 })
             })
             .collect();
@@ -1548,9 +1686,20 @@ mod tests {
             .collect();
         assert_eq!(winners.len(), 1);
         assert_eq!(winners[0].0, id);
-        assert_eq!(get(&handle, &id).unwrap().unwrap().token, winners[0].1);
+        assert_eq!(
+            retry_test_contention(Duration::from_secs(5), || get(&handle, &id))
+                .unwrap()
+                .unwrap()
+                .token,
+            winners[0].1
+        );
         expire(&handle, &id);
-        assert_eq!(recover(&handle, 1).unwrap().requeued, 1);
+        assert_eq!(
+            retry_test_contention(Duration::from_secs(5), || recover(&handle, 1))
+                .unwrap()
+                .requeued,
+            1
+        );
         kv_del(&handle, &get_pending(&handle, &id)).unwrap();
     }
     fn get_pending(handle: &Value, id: &str) -> String {
