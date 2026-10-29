@@ -13,6 +13,7 @@ pub mod intent;
 pub mod intent_studio_server;
 pub mod interpreter;
 pub mod lexer;
+pub mod migrations;
 pub mod native_test;
 pub mod parser;
 mod secret;

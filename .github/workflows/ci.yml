@@ -186,6 +186,49 @@ jobs:
           NTNT_RETENTION_TEST_REDIS: redis://127.0.0.1:6379/15
           NTNT_CLAIMS_TEST_REDIS: redis://127.0.0.1:6379/14
 
+  # Deliberately separate from auth-backends: a fixture-only control database
+  # creates fresh target/scratch databases and distinct unprivileged roles per
+  # test. No shared auth tables or application credentials are used.
+  db-catalog:
+    name: Database Catalog (PostgreSQL ${{ matrix.postgres }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['16', '17', '18']
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_DB: ntnt_db_catalog_control
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ntnt_db_fixture
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: db-catalog
+      - name: Run real read-only, identity, replay and drift contracts
+        run: |
+          cargo test --locked --test db_catalog_postgres -- --ignored --test-threads=2 --nocapture
+          cargo test --locked --lib migrations::postgres::tests::target_transaction_is_really_read_only_even_for_superuser -- --ignored --exact --nocapture
+        env:
+          RUST_MIN_STACK: 8388608
+          NTNT_DB_TEST_ADMIN: host=127.0.0.1 user=postgres password=ntnt_db_fixture dbname=ntnt_db_catalog_control sslmode=disable
+          NTNT_DB_TEST_HOST: 127.0.0.1
+
   dependency-audit:
     name: RustSec audit
     runs-on: ubuntu-latest
@@ -280,12 +323,12 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [test, auth-backends, dependency-audit, lint, docs-and-examples, macos-release-socket]
+    needs: [test, auth-backends, db-catalog, dependency-audit, lint, docs-and-examples, macos-release-socket]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI results
         run: |
-          results=("${{ needs.test.result }}" "${{ needs['auth-backends'].result }}" "${{ needs['dependency-audit'].result }}" "${{ needs.lint.result }}" "${{ needs['docs-and-examples'].result }}" "${{ needs['macos-release-socket'].result }}")
+          results=("${{ needs.test.result }}" "${{ needs['auth-backends'].result }}" "${{ needs['db-catalog'].result }}" "${{ needs['dependency-audit'].result }}" "${{ needs.lint.result }}" "${{ needs['docs-and-examples'].result }}" "${{ needs['macos-release-socket'].result }}")
           for result in "${results[@]}"; do
             if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
               echo "::error::CI job failed or was cancelled: $result"
