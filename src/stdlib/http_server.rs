@@ -4244,9 +4244,9 @@ mod tests {
 
     #[test]
     fn test_intent_value_to_json_float() {
-        let value = Value::Float(3.14);
+        let value = Value::Float(12.34);
         let json = intent_value_to_json(&value);
-        assert_eq!(json, serde_json::json!(3.14));
+        assert_eq!(json, serde_json::json!(12.34));
     }
 
     #[test]

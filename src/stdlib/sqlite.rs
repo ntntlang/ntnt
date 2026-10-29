@@ -1061,8 +1061,8 @@ mod tests {
             rusqlite::types::Value::Integer(v) => assert_eq!(v, 42),
             _ => panic!("Expected Integer"),
         }
-        match value_to_sqlite(&Value::Float(3.14)).expect("float parameter") {
-            rusqlite::types::Value::Real(v) => assert!((v - 3.14).abs() < f64::EPSILON),
+        match value_to_sqlite(&Value::Float(12.34)).expect("float parameter") {
+            rusqlite::types::Value::Real(v) => assert!((v - 12.34).abs() < f64::EPSILON),
             _ => panic!("Expected Real"),
         }
         match value_to_sqlite(&Value::String("hello".to_string())).expect("string parameter") {

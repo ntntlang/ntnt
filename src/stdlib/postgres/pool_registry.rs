@@ -3,7 +3,7 @@
 //! Keys are hashes only. Ready pools and pending verifications both consume one
 //! slot. Same-key callers share verification; no network work runs under the
 //! registry mutex. Every handle, operation and transaction snapshot must retain
-//! an Arc<SharedPool>, never just clone its underlying deadpool Pool.
+//! an `Arc<SharedPool>`, never just clone its underlying deadpool `Pool`.
 //!
 //! LRU means last admission through a ready cache hit or completed creation
 //! (coalesced creation callers share that admission). Queries do not refresh it.
