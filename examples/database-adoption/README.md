@@ -43,6 +43,7 @@ file creation by `ntnt db`.
 ```sh
 ntnt db status --database app --target test --json
 ntnt db plan --database app --target test --adopt-through 1 --out adoption.json --json
+ntnt db verify --database app --target test --against adoption.json --json
 # Review the exact baseline, target, checks and plan. Separately provision
 # DB_APPROVAL with the reviewed digest through the protected provider.
 ntnt db migrate --database app --target test --plan adoption.json --json

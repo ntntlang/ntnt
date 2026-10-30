@@ -410,6 +410,14 @@ fn postgres_imports_only_verified_legacy_history_without_replaying_sql() {
     let plan = f.command("plan", &["--adopt-through", "1", "--out", "import.json"]);
     assert_eq!(plan["outcome"], "pass", "{plan}");
     assert_eq!(plan["plan"]["action"]["kind"], "import_legacy_v1");
+    let checked = f.command("verify", &["--against", "import.json"]);
+    assert_eq!(checked["outcome"], "pass", "{checked}");
+    assert_eq!(checked["plan_validation"]["outcome"], "pass");
+    assert_eq!(checked["assertions"]["executed"], 0);
+    assert_eq!(
+        f.text("SELECT state FROM _ntnt.schema_migrations_v1"),
+        "applied"
+    );
     assert!(code(&f.apply("import.json", None), "DB_APPROVAL_REQUIRED"));
     let imported = f.apply("import.json", plan["plan_digest"].as_str());
     assert_eq!(imported["outcome"], "pass", "{imported}");
@@ -497,6 +505,24 @@ fn adoption_covers_an_exact_multi_file_prefix(f: Fixture) {
         3
     );
     assert_eq!(plan["plan"]["pending"], serde_json::json!([]));
+    // Changed rows deliberately make the adoption check false. Readonly
+    // revalidation must still check only schema/history/input identity.
+    f.execute(&format!(
+        "INSERT INTO {}.items(id,value) VALUES(18,'not-part-of-the-plan')",
+        f.schema()
+    ));
+    for command in ["verify", "status", "plan"] {
+        let checked = f.command(command, &["--against", "adopt.json"]);
+        assert_eq!(checked["outcome"], "pass", "{checked}");
+        assert_eq!(checked["plan_validation"]["outcome"], "pass");
+        assert_eq!(checked["plan_validation"]["authorized"], false);
+        assert_eq!(checked["assertions"]["executed"], 0);
+        if command == "plan" {
+            assert_eq!(checked["plan_digest"], plan["plan_digest"]);
+        }
+    }
+    f.execute(&format!("DELETE FROM {}.items WHERE id=18", f.schema()));
+    assert_unadopted(&f);
     let adopted = f.apply("adopt.json", plan["plan_digest"].as_str());
     assert_eq!(adopted["outcome"], "pass", "{adopted}");
     assert_eq!(adopted["progress"][0]["migration_sql_executed"], false);

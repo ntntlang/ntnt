@@ -1071,3 +1071,124 @@ fn sqlite_documented_application_adopts_upgrades_and_preserves_old_readers() {
         2
     );
 }
+
+#[test]
+fn sqlite_upgrade_reconciliation_distinguishes_adopted_from_applied() {
+    use std::io::Write;
+    let f = Fixture::new();
+    f.sql(
+        "0001_existing.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    f.sql(
+        "0010_expand.sql",
+        "ALTER TABLE t ADD COLUMN value TEXT DEFAULT 'retained';",
+    );
+    f.target().execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY); ALTER TABLE t ADD COLUMN value TEXT DEFAULT 'retained'; INSERT INTO t(id) VALUES(17)").unwrap();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(f.root.path().join("ntnt.toml"))
+            .unwrap(),
+        "\n[databases.app.adoption_checks]\ncurrent='SELECT count(*)=1 FROM main.t'"
+    )
+    .unwrap();
+    let plan = f.command("plan", &["--adopt-through", "10", "--out", "adopt.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    assert_eq!(
+        f.apply("adopt.json", plan["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.sql(
+        "0020_upgrade.sql",
+        "ALTER TABLE t ADD COLUMN label TEXT DEFAULT 'new';",
+    );
+    let plan = f.plan("upgrade.json");
+    let reader = f.target();
+    reader.execute_batch("BEGIN DEFERRED").unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let failed = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert!(code(&failed, "DB_BUSY"), "{failed}");
+    assert_eq!(failed["reconciliation"]["outcome"], "pass");
+    assert_eq!(failed["applied_count"], 0);
+    assert_eq!(failed["reconciliation"]["applied_count"], 0, "{failed}");
+    assert_eq!(failed["reconciliation"]["adopted_count"], 2);
+    assert_eq!(failed["reconciliation"]["imported_count"], 0);
+    assert_eq!(failed["reconciliation"]["covered_count"], 2);
+    reader.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM _ntnt_schema_migrations_v2", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM pragma_table_info('t')", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        f.apply("upgrade.json", plan["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+}
+
+#[test]
+fn sqlite_human_adoption_output_names_the_checkpoint_not_a_null_migration() {
+    let (f, plan) = existing_adoption_fixture("SELECT count(*)=1 FROM main.t");
+    let human = |command: &str, args: &[&str], approval: Option<&str>| {
+        let template = f.process(command);
+        let mut process = std::process::Command::new(template.get_program());
+        process.args(
+            template
+                .get_args()
+                .filter(|arg| *arg != std::ffi::OsStr::new("--json")),
+        );
+        for (key, value) in template.get_envs() {
+            if let Some(value) = value {
+                process.env(key, value);
+            } else {
+                process.env_remove(key);
+            }
+        }
+        process.current_dir(f.root.path()).args(args);
+        if let Some(approval) = approval {
+            process.env("DB_APPROVAL", approval);
+        }
+        let output = process.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let review = human("verify", &["--against", "adopt.json"], None);
+    assert!(
+        review.contains("Adoption reference: adopt_baseline through ID 1"),
+        "{review}"
+    );
+    assert!(review.contains("adoption not executed"), "{review}");
+    let applied = human(
+        "migrate",
+        &["--plan", "adopt.json"],
+        plan["plan_digest"].as_str(),
+    );
+    assert!(
+        applied.contains("Adoption adopt_baseline through ID 1: committed"),
+        "{applied}"
+    );
+    assert!(
+        applied.contains("migration SQL executed: false"),
+        "{applied}"
+    );
+    assert!(!applied.contains("Migration null"));
+}

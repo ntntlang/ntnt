@@ -11,9 +11,9 @@ fn stale() -> Diagnostic {
     Diagnostic::new("DB_PLAN_STALE", "Execution artifact is incomplete or no longer matches captured inputs, policy, target, history or catalog. Review a new plan; do not blindly retry SQL.")
 }
 
-/// Validate the execution capability, ordered prefix evidence and exact captured
-/// source before resolving authority. Old inspection-only artifacts fail closed.
-fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
+/// Validate the descriptor, ordered prefix evidence and exact captured source.
+/// This is pure: no I/O or approval lookup. Old inspection-only artifacts fail closed.
+pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
     let plan = &saved["plan"];
     let action = Adoption::from_plan(inputs, saved).map_err(|_| stale())?;
     let end = action.as_ref().map_or(inputs.migrations.len(), |a| a.count);
@@ -218,7 +218,8 @@ async fn reconcile(
         mark_counts(report, &history);
         report["progress"][0]["state"] = json!(if adopted { "committed" } else { "failed" });
         report["progress"][0]["reconciled"] = json!(true);
-        report["reconciliation"] = json!({"outcome":"pass","covered_count":count});
+        report["reconciliation"] = history.counts();
+        report["reconciliation"]["outcome"] = json!("pass");
         return Ok(());
     }
     if count < attempted || count > inputs.migrations.len() {
@@ -231,7 +232,8 @@ async fn reconcile(
     } else {
         report["progress"][attempted]["state"] = json!("failed");
     }
-    report["reconciliation"] = json!({"outcome":"pass","applied_count":count});
+    report["reconciliation"] = history.counts();
+    report["reconciliation"]["outcome"] = json!("pass");
     Ok(())
 }
 

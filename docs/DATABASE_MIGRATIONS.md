@@ -257,6 +257,7 @@ The existing four-command workflow remains; there is no separate migration runne
 
 ```sh
 ntnt db plan --database app --target development --adopt-through 10 --out adoption.json --json
+ntnt db verify --database app --target development --against adoption.json --json
 # Review SQL, reference/catalog differences, target identity and named data checks.
 # Separately deliver this exact digest via the existing approval_secret provider.
 ntnt db migrate --database app --target development --plan adoption.json --json
@@ -297,6 +298,12 @@ It compares observed schema with the replayed requested baseline, not an assumed
 empty target. Mismatch or incomplete coverage blocks adoption. The artifact uses
 `postgresql-adoption-v1` or `sqlite-adoption-v1`, distinct from ordinary execution
 formats, and still has no authority without the separately protected approval.
+`status`, `verify` or `plan --against adoption.json` revalidate that saved action's
+requested baseline read-only, without running its data checks or applying history.
+An unchanged pre-adoption artifact remains valid even though standalone inspection
+still reports unrecognized history. After adoption changes the base ledger, use
+ordinary `verify`; `--against` compares the saved pre-action base, not a deployment
+receipt or permission to execute.
 
 Execution uses the existing owned session/native locks and rechecks identity,
 source, history and catalog after acquisition. It runs the captured adoption checks
@@ -322,7 +329,9 @@ IDs, missing files or a forged checkpoint cannot be treated as valid history.
 Reports separate `covered_count`, `applied_count`, `adopted_count` and
 `imported_count`. For example, a checkpoint covering three old files followed by
 one real migration has four covered, three adopted and one applied. These describe
-ledger evidence, not assertions executed in this invocation. Normal execution
+ledger evidence, not assertions executed in this invocation. Fresh reconciliation
+reports use the same separate counts; adopted/imported coverage is never relabeled
+as applied migrations after a failed or unacknowledged upgrade. Normal execution
 progress labels covered old files `baseline_covered`; the adoption action explicitly
 reports `migration_sql_executed = false`. Actual named checks still count in
 `assertions.executed`. For saved-format compatibility, `binding.applied_count`

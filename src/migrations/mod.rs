@@ -239,7 +239,19 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 if options.adopt_through.is_some() && (command!="plan" || options.against.is_some()) {
                     return Err(Diagnostic::new("DB_CONFIG","--adopt-through is only for an explicit plan, not status/verify/--against."));
                 }
-                database_runtime(report::inspect(inputs, command, options.adopt_through))
+                let mut adopt_through=options.adopt_through;
+                if let Some(Ok(saved))=&prior {
+                    if saved["plan"].get("action").is_some() {
+                        // Reuse the pure descriptor validator, never approval or
+                        // the writer path. The explicit CLI target still owns
+                        // all connection selection and inspection stays readonly.
+                        execution::validate(&inputs,saved)?;
+                        if let Some(action)=adoption::Adoption::from_plan(&inputs,saved)? {
+                            adopt_through=Some(action.through_id.parse().map_err(|_|Diagnostic::new("DB_PLAN_STALE","Invalid adoption prefix ID in saved artifact."))?);
+                        }
+                    }
+                }
+                database_runtime(report::inspect(inputs, command, adopt_through))
             })
             .unwrap_or_else(|d| report::failure(command, d))
     };
@@ -253,13 +265,18 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 && p["plan_digest"] == inventory::json_digest(&p["plan"])
                 && !report["binding"].is_null()
                 && p["plan"]["binding"] == report["binding"]
-                && p["plan"]["pending"]
-                    == serde_json::json!(report["source"]["migrations"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .skip(report["history"]["covered_count"].as_u64().unwrap() as usize)
-                        .collect::<Vec<_>>())
+                && if p["plan"].get("action").is_some() {
+                    p["plan"]["action"] == report["adoption"]["action"]
+                        && p["plan"]["pending"] == serde_json::json!([])
+                } else {
+                    p["plan"]["pending"]
+                        == serde_json::json!(report["source"]["migrations"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .skip(report["history"]["covered_count"].as_u64().unwrap() as usize)
+                            .collect::<Vec<_>>())
+                }
         });
         report["plan_validation"] =
             serde_json::json!({"outcome":if valid {"pass"} else {"fail"},"authorized":false});
@@ -310,6 +327,14 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 report["drift"]["outcome"]
             );
         }
+        if let Some(action) = report.get("adoption").and_then(|a| a.get("action")) {
+            println!(
+                "Adoption reference: {} through ID {} ({} source files); adoption not executed.",
+                action["kind"].as_str().unwrap_or("unknown"),
+                action["through_id"].as_str().unwrap_or("unknown"),
+                action["count"]
+            );
+        }
         if let Some(objects) = report["catalog"]["objects"].as_object() {
             println!(
                 "Catalog coverage: {} object(s) displayed; unverified objects: {}",
@@ -353,7 +378,17 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             report["assertions"]["executed"]
         );
         for entry in report["progress"].as_array().into_iter().flatten() {
-            println!("Migration {}: {}", entry["source"], entry["state"]);
+            if let Some(kind) = entry["kind"].as_str() {
+                println!(
+                    "Adoption {} through ID {}: {}; migration SQL executed: {}",
+                    kind,
+                    entry["through_id"].as_str().unwrap_or("unknown"),
+                    entry["state"].as_str().unwrap_or("unknown"),
+                    entry["migration_sql_executed"]
+                );
+            } else {
+                println!("Migration {}: {}", entry["source"], entry["state"]);
+            }
         }
     }
     if report["outcome"] == "pass" {

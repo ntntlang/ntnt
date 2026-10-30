@@ -897,3 +897,79 @@ fn adoption_commit_disconnects_reconcile_checkpoints_and_legacy_imports() {
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn upgrade_reconciliation_preserves_adoption_and_import_counts() {
+    use db_proxy::{Fault, Proxy};
+    use std::io::Write;
+    for legacy in [false, true] {
+        for fault in [Fault::BeforeCommit, Fault::AfterCommit] {
+            let mut f = Fixture::new();
+            let schema = "CREATE TABLE app.t(id INTEGER PRIMARY KEY,value TEXT);";
+            if legacy {
+                f.seed_first(schema);
+            } else {
+                f.sql("0001_initial.sql", schema);
+                f.target().batch_execute(schema).unwrap();
+            }
+            f.target()
+                .batch_execute("INSERT INTO app.t VALUES(17,'retained')")
+                .unwrap();
+            writeln!(
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(f.root.path().join("ntnt.toml"))
+                    .unwrap(),
+                "\n[databases.app.adoption_checks]\ncurrent='SELECT count(*)=1 FROM app.t'"
+            )
+            .unwrap();
+            let plan = f.command_args("plan", &["--adopt-through", "1", "--out", "adopt.json"]);
+            assert_eq!(plan["outcome"], "pass", "{plan}");
+            assert_eq!(
+                f.apply("adopt.json", plan["plan_digest"].as_str())["outcome"],
+                "pass"
+            );
+            f.sql(
+                "0002_upgrade.sql",
+                "ALTER TABLE app.t ADD COLUMN label TEXT DEFAULT 'new';",
+            );
+            let plan = f.plan("upgrade.json");
+            let proxy = Proxy::new(fault, 1);
+            let direct = f.target_url.clone();
+            f.target_url =
+                direct.replace(&std::env::var("NTNT_DB_TEST_HOST").unwrap(), proxy.host());
+            let result = f.apply("upgrade.json", plan["plan_digest"].as_str());
+            assert!(proxy.fired.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(result["reconciliation"]["outcome"], "pass", "{result}");
+            f.target_url = direct;
+            let applied = f
+                .target()
+                .query_one(
+                    "SELECT count(*) FROM _ntnt.schema_migrations_v2 WHERE state='applied'",
+                    &[],
+                )
+                .unwrap()
+                .get::<_, i64>(0);
+            assert_eq!(
+                result["reconciliation"]["applied_count"], applied,
+                "{result}"
+            );
+            assert_eq!(
+                result["reconciliation"]["adopted_count"],
+                if legacy { 0 } else { 1 }
+            );
+            assert_eq!(
+                result["reconciliation"]["imported_count"],
+                if legacy { 1 } else { 0 }
+            );
+            assert_eq!(result["reconciliation"]["covered_count"], applied + 1);
+            assert_eq!(result["applied_count"], applied);
+            assert_eq!(
+                f.apply("upgrade.json", plan["plan_digest"].as_str())["outcome"],
+                "pass"
+            );
+        }
+    }
+}
