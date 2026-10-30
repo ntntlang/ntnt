@@ -58,7 +58,7 @@ fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
                 adapter::execution_format(&inputs.config.engine)
             }
         || base > inputs.migrations.len()
-        || (action.is_some() && base != 0)
+        || action.as_ref().is_some_and(|a| base != a.base_count())
         || fingerprints.len() != end + 1
         || fingerprints.iter().any(|v| {
             !v.as_str().is_some_and(|s| {
@@ -124,9 +124,18 @@ async fn locked_prefix(
     if json!(&identity) != saved["plan"]["binding"]["target"] {
         return Err(stale());
     }
-    let history = db
-        .writable_history(&inputs.database_name, &inputs.config.schema)
-        .await?;
+    let history = if action.is_some() {
+        let history = db.history().await?;
+        if history.scope.is_some() {
+            db.writable_history(&inputs.database_name, &inputs.config.schema)
+                .await?
+        } else {
+            history
+        }
+    } else {
+        db.writable_history(&inputs.database_name, &inputs.config.schema)
+            .await?
+    };
     let applied = super::report::prefix(&history, inputs)?;
     let catalog = db
         .catalog(&inputs.config.schema, &inputs.endpoint.role)
@@ -141,7 +150,7 @@ async fn locked_prefix(
         if history == action.after(inputs)? {
             true
         } else {
-            action.before(&history)?;
+            action.before(inputs, &history)?;
             if json_digest(&history) != saved["plan"]["binding"]["base_history_digest"] {
                 return Err(stale());
             }
@@ -170,6 +179,7 @@ fn mark_counts(report: &mut Value, history: &History) {
 fn mark_prefix(report: &mut Value, count: usize, history: &History) {
     let counts = history.counts();
     let adopted = counts["adopted_count"].as_u64().unwrap_or(0);
+    let imported = counts["imported_count"].as_u64().unwrap_or(0);
     for (index, entry) in report["progress"]
         .as_array_mut()
         .unwrap()
@@ -180,6 +190,8 @@ fn mark_prefix(report: &mut Value, count: usize, history: &History) {
         if entry["state"] != "committed" {
             entry["state"] = json!(if (index as u64) < adopted {
                 "baseline_covered"
+            } else if (index as u64) < imported {
+                "history_imported"
             } else {
                 "already_applied"
             });
@@ -348,7 +360,14 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
             mark_counts(report, &history);
             if adopted {
                 db.rollback().await?;
-                report["progress"][0]["state"] = json!("already_adopted");
+                report["progress"][0]["state"] = json!(if action
+                    .as_ref()
+                    .is_some_and(|a| a.kind == "import_legacy_v1")
+                {
+                    "already_imported"
+                } else {
+                    "already_adopted"
+                });
                 report["outcome"] = json!("pass");
                 return Ok(());
             }
@@ -407,12 +426,17 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 return Err(stale());
             }
             if let Some(action) = &action {
-                db.record_checkpoint(
-                    &inputs.checkpoint(action.count)?,
-                    &inputs.database_name,
-                    &inputs.config.schema,
-                )
-                .await?;
+                if action.kind == "import_legacy_v1" {
+                    db.import_legacy_history(&inputs.database_name, &inputs.config.schema)
+                        .await?;
+                } else {
+                    db.record_checkpoint(
+                        &inputs.checkpoint(action.count)?,
+                        &inputs.database_name,
+                        &inputs.config.schema,
+                    )
+                    .await?;
+                }
                 if db
                     .writable_history(&inputs.database_name, &inputs.config.schema)
                     .await?

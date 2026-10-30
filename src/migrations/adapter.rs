@@ -164,6 +164,15 @@ impl Adapter {
             Self::Sqlite(db) => db.check(sql).await,
         }
     }
+    pub async fn import_legacy_history(&self, database: &str, schema: &str) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.import_legacy_history(database, schema).await,
+            Self::Sqlite(_) => Err(Diagnostic::new(
+                "DB_ADOPTION_INPUT",
+                "SQLite has no supported legacy ledger import.",
+            )),
+        }
+    }
     pub async fn record_checkpoint(
         &self,
         entry: &super::model::HistoryEntry,

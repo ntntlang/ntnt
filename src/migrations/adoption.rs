@@ -15,16 +15,19 @@ pub(super) struct Adoption {
     pub checks: Vec<String>,
 }
 fn invalid() -> Diagnostic {
-    Diagnostic::new("DB_ADOPTION_INPUT","Adoption requires an exact captured prefix, named adoption_checks, and an unrecognized target with no ledger. No history is inferred or repaired.")
+    Diagnostic::new("DB_ADOPTION_INPUT","Adoption requires an exact captured prefix, named adoption_checks, and either no ledger or a fully matching recognized legacy v1 ledger. No history is inferred or repaired.")
 }
 impl Adoption {
-    fn new(inputs: &CapturedInputs, count: usize) -> Result<Self> {
-        if inputs.config.adoption_checks.is_empty() {
+    fn new(inputs: &CapturedInputs, count: usize, kind: &str) -> Result<Self> {
+        if inputs.config.adoption_checks.is_empty()
+            || !(kind == "adopt_baseline"
+                || (kind == "import_legacy_v1" && inputs.config.engine == "postgresql"))
+        {
             return Err(invalid());
         }
         let checkpoint = inputs.checkpoint(count)?;
         Ok(Self {
-            kind: "adopt_baseline".into(),
+            kind: kind.into(),
             through_id: checkpoint.id,
             count,
             prefix_checksum: checkpoint.checksum,
@@ -38,11 +41,14 @@ impl Adoption {
             .position(|m| m.id == through)
             .map(|n| n + 1)
             .ok_or_else(invalid)?;
-        Self::new(inputs, count)
+        Self::new(inputs, count, "adopt_baseline")
     }
     pub fn request(inputs: &CapturedInputs, through: u64, history: &History) -> Result<Self> {
-        let action = Self::selected(inputs, through)?;
-        action.before(history)?;
+        let mut action = Self::selected(inputs, through)?;
+        if history.present && history.scope.is_none() && inputs.config.engine == "postgresql" {
+            action.kind = "import_legacy_v1".into();
+        }
+        action.before(inputs, history)?;
         Ok(action)
     }
     pub fn from_plan(inputs: &CapturedInputs, saved: &Value) -> Result<Option<Self>> {
@@ -50,13 +56,29 @@ impl Adoption {
             return Ok(None);
         };
         let action: Self = serde_json::from_value(value.clone()).map_err(|_| invalid())?;
-        if action != Self::new(inputs, action.count)? {
+        if action != Self::new(inputs, action.count, &action.kind)? {
             return Err(invalid());
         }
         Ok(Some(action))
     }
-    pub fn before(&self, history: &History) -> Result<()> {
-        if history.present || !history.entries.is_empty() || history.scope.is_some() {
+    pub fn base_count(&self) -> usize {
+        if self.kind == "import_legacy_v1" {
+            self.count
+        } else {
+            0
+        }
+    }
+    pub fn before(&self, inputs: &CapturedInputs, history: &History) -> Result<()> {
+        if self.kind == "import_legacy_v1" {
+            if !history.present
+                || history.scope.is_some()
+                || inputs.config.engine != "postgresql"
+                || history.entries.iter().any(|e| e.state != "applied")
+                || super::report::prefix(history, inputs)? != self.count
+            {
+                return Err(invalid());
+            }
+        } else if history.present || !history.entries.is_empty() || history.scope.is_some() {
             return Err(invalid());
         }
         Ok(())
@@ -65,7 +87,23 @@ impl Adoption {
         Ok(History {
             present: true,
             scope: Some(json!({"database":inputs.database_name,"schema":inputs.config.schema})),
-            entries: vec![inputs.checkpoint(self.count)?],
+            entries: if self.kind == "import_legacy_v1" {
+                inputs
+                    .migrations
+                    .iter()
+                    .take(self.count)
+                    .enumerate()
+                    .map(|(i, m)| super::model::HistoryEntry {
+                        position: i as i64 + 1,
+                        id: m.id.to_string(),
+                        name: m.name.clone(),
+                        checksum: m.checksum.clone(),
+                        state: "imported".into(),
+                    })
+                    .collect()
+            } else {
+                vec![inputs.checkpoint(self.count)?]
+            },
         })
     }
 }

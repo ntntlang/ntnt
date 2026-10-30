@@ -31,6 +31,11 @@ pub(super) fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize
         ));
     }
     let mut covered = 0;
+    let mut applied_started = false;
+    let has_checkpoint = history
+        .entries
+        .first()
+        .is_some_and(|e| e.state == "adopted");
     for (i, entry) in history.entries.iter().enumerate() {
         if i == 0 && entry.state == "adopted" {
             if history.scope.is_none() {
@@ -70,7 +75,13 @@ pub(super) fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize
                 "Applied history exceeds the captured source prefix.",
             )
         })?;
-        if entry.state != "applied" {
+        if entry.state == "imported" {
+            if history.scope.is_none() || has_checkpoint || applied_started {
+                return Err(Diagnostic::new("DB_HISTORY_DIVERGENT","Imported history must be a leading scoped prefix, never combined with a baseline checkpoint."));
+            }
+        } else if entry.state == "applied" {
+            applied_started = true;
+        } else {
             return Err(Diagnostic::new(
                 "DB_HISTORY_DIRTY",
                 "Ledger contains non-applied work; explicit reconciliation is required.",

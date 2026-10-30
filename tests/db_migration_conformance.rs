@@ -380,3 +380,71 @@ fn sqlite_adopts_populated_checkpoint_then_upgrades() {
 fn postgres_adopts_populated_checkpoint_then_upgrades() {
     adopt_populated_checkpoint_then_upgrade(Fixture::pg())
 }
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_imports_only_verified_legacy_history_without_replaying_sql() {
+    let pg = pg_fixture::Fixture::new();
+    let initial = pg.seed_first("CREATE TABLE app.items(id INTEGER PRIMARY KEY,value TEXT);");
+    let checksum = initial["source"]["migrations"][0]["checksum"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    pg.target()
+        .batch_execute("INSERT INTO app.items VALUES(17,'preserved')")
+        .unwrap();
+    let f = Fixture::Postgres(Box::new(pg));
+    adoption_checks(
+        &f,
+        "SELECT NOT EXISTS (SELECT 1 FROM app.items WHERE value IS NULL)",
+    );
+    let ordinary = f.plan("ordinary.json");
+    assert!(code(
+        &f.apply("ordinary.json", ordinary["plan_digest"].as_str()),
+        "DB_LEDGER_SCOPE"
+    ));
+    let plan = f.command("plan", &["--adopt-through", "1", "--out", "import.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    assert_eq!(plan["plan"]["action"]["kind"], "import_legacy_v1");
+    assert!(code(&f.apply("import.json", None), "DB_APPROVAL_REQUIRED"));
+    let imported = f.apply("import.json", plan["plan_digest"].as_str());
+    assert_eq!(imported["outcome"], "pass", "{imported}");
+    assert_eq!(imported["assertions"]["executed"], 1);
+    assert_eq!(imported["progress"][0]["kind"], "import_legacy_v1");
+    assert_eq!(
+        f.text("SELECT checksum FROM _ntnt.schema_migrations_v2"),
+        checksum
+    );
+    assert_eq!(
+        f.text("SELECT state FROM _ntnt.schema_migrations_v2"),
+        "imported"
+    );
+    assert_eq!(
+        f.text("SELECT value FROM app.items WHERE id=17"),
+        "preserved"
+    );
+    let verified = f.command("verify", &[]);
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["history"]["applied_count"], 0);
+    assert_eq!(verified["history"]["imported_count"], 1);
+    assert_eq!(verified["history"]["adopted_count"], 0);
+    assert_eq!(verified["history"]["covered_count"], 1);
+    assert_eq!(
+        f.apply("import.json", plan["plan_digest"].as_str())["progress"][0]["state"],
+        "already_imported"
+    );
+    f.sql(
+        "0002_upgrade.sql",
+        "ALTER TABLE app.items ADD COLUMN label TEXT DEFAULT 'after-import';",
+    );
+    let plan = f.plan("upgrade.json");
+    let upgraded = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_eq!(upgraded["outcome"], "pass", "{upgraded}");
+    assert_eq!(upgraded["progress"][0]["state"], "history_imported");
+    assert_eq!(upgraded["progress"][1]["state"], "committed");
+    assert_eq!(
+        f.text("SELECT label FROM app.items WHERE id=17"),
+        "after-import"
+    );
+    assert_eq!(f.command("verify", &[])["history"]["applied_count"], 1);
+}

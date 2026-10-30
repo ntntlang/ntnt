@@ -324,6 +324,10 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         if history.scope != Some(json!({"database":database,"schema":schema})) {
             return Err(Diagnostic::new("DB_LEDGER_SCOPE", "Execution requires the scoped v2 ledger for this logical store/schema. Legacy or differently scoped history is read-only; no adoption is automatic."));
         }
+        self.mutation_safe_ledger("schema_migrations_v2").await?;
+        Ok(history)
+    }
+    async fn mutation_safe_ledger(&self, table: &str) -> Result<()> {
         let safe = self.rows(r#"SELECT n.nspowner=r.oid AND c.relowner=r.oid AND c.relpersistence='p'
           AND (SELECT count(*)=1 FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_index i ON i.indexrelid=k.conindid
                WHERE k.conrelid=c.oid AND k.contype='p' AND k.conkey=ARRAY[1]::smallint[]
@@ -337,14 +341,35 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.aclexplode(coalesce(c.relacl,pg_catalog.acldefault('r',c.relowner))) a WHERE a.grantee<>r.oid)
           FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
           JOIN pg_catalog.pg_roles r ON r.rolname=current_user
-          WHERE n.nspname='_ntnt' AND c.relname='schema_migrations_v2'"#, &[]).await?;
+          WHERE n.nspname='_ntnt' AND c.relname=$1"#, &[&table]).await?;
         if safe.len() != 1 || !safe[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_LEDGER_UNSAFE",
                 "Ledger is not a supported mutation-safe owned heap; no write was attempted.",
             ));
         }
-        Ok(history)
+        Ok(())
+    }
+
+    /// Import only the recognized, immutable, owned v1 ledger under native locks.
+    /// Preserve every source identity/checksum; imported is not newly executed SQL.
+    pub async fn import_legacy_history(&self, database: &str, schema: &str) -> Result<()> {
+        let history = self.history().await?;
+        if !history.present
+            || history.scope.is_some()
+            || history.entries.is_empty()
+            || history.entries.iter().any(|e| e.state != "applied")
+        {
+            return Err(Diagnostic::new(
+                "DB_ADOPTION_INPUT",
+                "Only a recognized nonempty legacy v1 ledger can be imported.",
+            ));
+        }
+        self.mutation_safe_ledger("schema_migrations_v1").await?;
+        self.batch("ALTER TABLE _ntnt.schema_migrations_v1 RENAME TO schema_migrations_v2; ALTER TABLE _ntnt.schema_migrations_v2 ADD COLUMN logical_database text, ADD COLUMN managed_schema text;").await?;
+        self.rows("UPDATE _ntnt.schema_migrations_v2 SET logical_database=$1,managed_schema=$2,state='imported'",&[&database,&schema]).await?;
+        self.batch("ALTER TABLE _ntnt.schema_migrations_v2 ALTER COLUMN logical_database SET NOT NULL, ALTER COLUMN managed_schema SET NOT NULL").await?;
+        Ok(())
     }
 
     /// Bootstrap only inside the first authorized migration transaction. Empty or
