@@ -154,6 +154,164 @@ fn sse_delivers_cross_worker_events_with_fixed_headers_and_denials_open_nothing(
     }
 }
 
+#[test]
+fn configured_stream_and_topic_limits_apply_across_workers_and_release_on_disconnect() {
+    let source = APP.replace(
+        "listen(0, map {",
+        "get(\"/new-topic\", fn(req) {\n    let other = broadcast(\"other\") otherwise { return text(err) }\n    return text(\"unexpected\")\n})\nlisten(0, map { \"realtime\": map { \"max_connections\": 1, \"max_topics\": 1 },",
+    );
+    let mut server = fixture::Fixture::start(
+        &source,
+        &["run"],
+        &[("NTNT_ENV", "production"), ("NTNT_WORKERS", "4")],
+    );
+    let addr = server.ready();
+    // A denial and HEAD must not consume the sole stream permit.
+    assert!(get_body(addr, "/private").starts_with("HTTP/1.1 401"));
+    let mut head = open(addr, "/events", "HEAD");
+    read_until(&mut head, &mut Vec::new(), b"\r\n\r\n", 1);
+    let mut first = open(addr, "/events", "GET");
+    read_until(&mut first, &mut Vec::new(), b"retry: 1000\n\n", 1);
+    for _ in 0..8 {
+        let rejected = get_body(addr, "/events");
+        assert!(rejected.starts_with("HTTP/1.1 503"), "{rejected}");
+        let topic = get_body(addr, "/new-topic");
+        assert!(
+            topic.contains("too many broadcast names (limit 1)"),
+            "{topic}"
+        );
+        assert!(get_body(addr, "/pub?n=7").ends_with("true"));
+    }
+    drop(first);
+    // Transport drop is asynchronous: retry only until its permit is released.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut next = open(addr, "/events", "GET");
+        let mut response = Vec::new();
+        read_until(&mut next, &mut response, b"\r\n\r\n", 1);
+        if response.starts_with(b"HTTP/1.1 200") {
+            read_until(&mut next, &mut response, b"retry: 1000\n\n", 1);
+            break;
+        }
+        assert!(response.starts_with(b"HTTP/1.1 503"));
+        assert!(Instant::now() < deadline, "stream permit leaked");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn configured_event_size_is_used_even_with_no_subscribers_and_can_be_raised() {
+    for (limit, payload, accepted) in [(32, 64, false), (100_000, 70_000, true)] {
+        let source = format!(
+            r#"
+import {{ text }} from "std/http/server"
+import {{ broadcast, publish, spawn, await_task }} from "std/concurrent"
+let bus = broadcast("size")
+get("/publish", fn(req) {{
+    let task = spawn(fn() {{ is_ok(publish(bus, "{}")) }})
+    return text(str(await_task(task) ?? false))
+}})
+listen(0, map {{ "readiness": "json", "host": "127.0.0.1", "realtime": map {{ "max_event_bytes": {limit} }} }})
+"#,
+            "x".repeat(payload)
+        );
+        let mut server = fixture::Fixture::start(
+            &source,
+            &["run"],
+            &[("NTNT_ENV", "production"), ("NTNT_WORKERS", "2")],
+        );
+        let addr = server.ready();
+        for _ in 0..4 {
+            let response = get_body(addr, "/publish");
+            assert!(response.ends_with(&accepted.to_string()), "{response}");
+        }
+    }
+}
+
+#[test]
+fn configured_payload_budget_rejects_a_burst_and_is_released_on_disconnect() {
+    // The probe frame needs the entire byte budget, not leftover space that
+    // would allow a small publish to succeed even with leaked earlier frames.
+    let probe = "x".repeat(512 - b"data: \"\"\n\n".len());
+    let source = APP.replace(
+        "listen(0, map {",
+        &format!(
+            r#"
+get("/fill", fn(req) {{
+    for n in 0..100000 {{
+        let queued = publish(bus, "{}") otherwise {{ return text(err) }}
+    }}
+    return text("budget was not enforced")
+}})
+get("/probe", fn(req) {{ text(str(is_ok(publish(bus, "{}")))) }})
+listen(0, map {{ "realtime": map {{ "max_event_bytes": 512, "max_payload_bytes": 512 }},
+"#,
+            "x".repeat(200),
+            probe
+        ),
+    );
+    let mut server = fixture::Fixture::start(
+        &source,
+        &["run"],
+        &[("NTNT_ENV", "production"), ("NTNT_WORKERS", "2")],
+    );
+    let addr = server.ready();
+    let mut stream = open(addr, "/events", "GET");
+    read_until(&mut stream, &mut Vec::new(), b"retry: 1000\n\n", 1);
+    let response = get_body(addr, "/fill");
+    assert!(
+        response.contains("realtime payload budget exhausted"),
+        "{response}"
+    );
+    drop(stream);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if get_body(addr, "/probe").ends_with("true") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "payload budget leaked after disconnect"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn invalid_realtime_options_and_incompatible_setup_fail_before_readiness() {
+    for realtime in [
+        "true",
+        "map { \"unknown\": 1 }",
+        "map { \"max_connections\": 0 }",
+        "map { \"max_topics\": -1 }",
+        "map { \"max_event_bytes\": 1.5 }",
+        "map { \"max_payload_bytes\": \"100\" }",
+        "map { \"max_payload_bytes\": 0 }",
+        "map { \"max_payload_bytes\": 32, \"max_event_bytes\": 64 }",
+    ] {
+        let source = APP.replace(
+            "listen(0, map {",
+            &format!("listen(0, map {{ \"realtime\": {realtime},"),
+        );
+        let mut failed = fixture::Fixture::start(&source, &["run"], &[]);
+        assert!(!failed.wait().success(), "{realtime}");
+        assert!(!failed.stdout().contains("NTNT_READY"));
+        assert!(failed.stderr().contains("realtime"), "{}", failed.stderr());
+    }
+    let source = APP.replace(
+        "listen(0, map {",
+        "let other = broadcast(\"setup-other\")\nlisten(0, map { \"realtime\": map { \"max_topics\": 1 },",
+    );
+    let mut failed = fixture::Fixture::start(&source, &["run"], &[]);
+    assert!(!failed.wait().success());
+    assert!(!failed.stdout().contains("NTNT_READY"));
+    assert!(
+        failed.stderr().contains("max_topics"),
+        "{}",
+        failed.stderr()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn sigterm_ends_open_and_stalled_streams_promptly() {

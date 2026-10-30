@@ -1617,7 +1617,7 @@ Feature: User Authentication
 
 ## Phase 10: Background Jobs, WebSockets & Real-Time
 
-**Status:** Jobs Complete ✅ (DD-037, DD-051, DD-052) · SSE/WebSockets Not Started (DD-041 design direction accepted)
+**Status:** Jobs Complete ✅ (DD-037, DD-051, DD-052) · SSE implemented on the v0.5.7 development line · WebSockets pending (DD-041 Slice B)
 
 **Goal:** Production-ready background job system with a declarative Job DSL, pluggable backends, and deep IDD integration — plus WebSocket and SSE support for pushing data to clients. Jobs are first-class language constructs — the `Job` keyword is syntax, not a library import — with the runtime and queue management provided by `std/jobs`.
 
@@ -1714,16 +1714,16 @@ ProcessPayment.enqueue_in(3600, map { "order_id": "456", "amount": 29.99 })
 
 ### 10.5 Native SSE and WebSockets
 
-**Status:** Design direction accepted; implementation not started. [DD-041](design-docs/dd-041-sse-streaming.md) is the canonical design and replaces the earlier WebSocket API sketch here.
+**Status:** Slice A (SSE) implemented in #295, with configurable process resource caps. Not yet in an official release. Slice B (WebSockets) remains unimplemented. [DD-041](design-docs/dd-041-sse-streaming.md) records the design and remaining gates.
 
 **Scope:** Support both protocols through the existing Axum/Tokio server, with SSE first and WebSockets second. Ordinary routes and middleware return typed streaming/upgrade responses; idle connections do not retain an interpreter or OS thread.
 
-- [ ] Verify native response/upgrade ownership, streamed-body cleanup/shutdown, and multi-worker callback identity through narrow feasibility probes.
-- [ ] Slice A: bounded native broadcast/publish, ordinary `sse()` response builder, auth/header handling, enforced connection/byte limits, lag handling and lifecycle cleanup.
+- [x] Gate 0 feasibility probes and SSE ownership/shutdown checks (#292, #289, #290); WebSocket-specific upgrade/generation/fairness checks remain in Slice B.
+- [x] Slice A: bounded native broadcast/publish, ordinary `sse()` response builder, auth/header handling, configurable process connection/topic/byte caps, lag handling and lifecycle cleanup.
 - [ ] Slice B: setup-registered WebSocket endpoints, `websocket()` response builder, text/binary send/close, explicit connection state, bounded fair worker callbacks and exact-Origin policy.
 - [ ] Prove multi-worker fan-out, slow-client bounds, cancellation/reload/shutdown behavior, and ordinary HTTP performance with real protocol clients.
 
-The API names above are proposed, not shipped. The first scope is process-local live delivery, not durable replay or cross-process job push. No room DSL, separate realtime framework, per-connection generator/scheduler, client SDK, or interpreter-wide async refactor; see DD-041 for the full contract, non-goals and acceptance checks.
+`broadcast`, `publish` and `sse` exist on main; the WebSocket APIs remain proposed. The scope is process-local live delivery, not durable replay or cross-process job push. No room DSL, separate realtime framework, per-connection generator/scheduler, client SDK, or interpreter-wide async refactor; see DD-041 for the implemented boundary and remaining acceptance checks.
 
 ### 10.6 IDD Integration & CLI
 
@@ -1773,7 +1773,7 @@ Feature: Welcome Email Job
 - In-memory, PostgreSQL, and Redis/Valkey backends
 - Resilience: heartbeats, retries, dead letter queue, rate limiting, graceful shutdown
 - Job composition: chains (sequential), workflows (DAG), batches (parallel)
-- Native SSE and WebSocket support in two slices, with bounded process-local fan-out and worker callbacks (DD-041; design accepted, implementation not started)
+- Native SSE and WebSocket support in two slices, with bounded process-local fan-out and worker callbacks (DD-041; SSE implemented, WebSockets pending)
 - IDD integration for testing jobs in `.intent` files
 - `ntnt jobs` CLI commands for monitoring and management
 - Simulation mode for dry-run execution

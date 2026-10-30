@@ -3863,6 +3863,14 @@ impl Interpreter {
         // Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged.
         // JSON readiness is one flushed NTNT_READY line after bind with actual host/port.
         // Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness.
+        // Since v0.5.7 `realtime` accepts positive Int max_connections (1024),
+        // max_topics (256), max_event_bytes (65536), max_payload_bytes (33554432).
+        // Event bytes must not exceed payload bytes. Limits are process-wide,
+        // fixed before readiness, and shared by HTTP workers and in-process tasks.
+        // Primary setup uses defaults; too many live setup buses fail startup.
+        // Secondary setup uses the configured caps: allow space for transient
+        // setup buses alongside live ones. Readiness does not wait for all workers.
+        // Changing limits requires a process restart, not hot reload.
         // @param options Optional immutable listener and fixture response policy.
         // Starts an HTTP server on the given port.
         //
@@ -9447,6 +9455,7 @@ impl Interpreter {
         use std::time::Duration;
 
         let addr = options.address(port, self.test_mode.as_ref().map(|m| m.0))?;
+        crate::stdlib::realtime::configure(options.realtime)?;
         let is_test_mode = self.test_mode.is_some();
         let shutdown_flag = self.test_mode.as_ref().map(|m| m.2.clone());
 
@@ -9921,6 +9930,7 @@ impl Interpreter {
         }
 
         let addr = options.address(port, None)?;
+        crate::stdlib::realtime::configure(options.realtime)?;
         // Enable hot-reload unless in production mode
         let is_production = is_production_mode();
         self.server_state.hot_reload = !is_production;
