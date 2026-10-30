@@ -84,8 +84,12 @@ Uncertain commits trigger fresh locked inspection, never automatic SQL replay.
 Native fresh/populated rehearsal tests exercise this same executor.
 
 Catalog coverage and unknown effects remain explicit. Definitions are hashed, not
-emitted, because stored SQL can contain credentials. Baseline adoption,
-nontransactional operations, query lint and application/startup migration integration
+emitted, because stored SQL can contain credentials. Explicit adoption plans reuse
+this same executor: a matching source-prefix baseline becomes one adopted checkpoint,
+not fictional applied history. Recognized owned PostgreSQL v1 history can be imported
+with unchanged source checksums and distinct imported states. Manifest adoption checks
+run under ownership; normal inspect/verify never reruns historical transition checks.
+Nontransactional operations, query lint and application/startup migration integration
 remain later work. See [Database Migrations](docs/DATABASE_MIGRATIONS.md) for each
 engine's exact coverage, authority boundary, deadlines and recovery limitations.
 

@@ -837,3 +837,358 @@ fn sqlite_hot_journal_inspection_is_readonly_and_names_the_recovery_action() {
     );
     assert_eq!(f.command("verify", &[])["outcome"], "pass");
 }
+
+fn existing_adoption_fixture(check: &str) -> (Fixture, Value) {
+    use std::io::Write;
+    let f = Fixture::new();
+    f.sql(
+        "0001_baseline.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY,value TEXT);",
+    );
+    f.target().execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO t VALUES(17,'retained')").unwrap();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(f.root.path().join("ntnt.toml"))
+            .unwrap(),
+        "\n[databases.app.adoption_checks]\ncurrent={check:?}"
+    )
+    .unwrap();
+    let plan = f.command("plan", &["--adopt-through", "1", "--out", "adopt.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    (f, plan)
+}
+#[test]
+fn sqlite_competing_adopters_record_one_checkpoint() {
+    use sqlite_fixture::Running;
+    let (f, plan) = existing_adoption_fixture("SELECT count(*)=1 FROM main.t");
+    let digest = plan["plan_digest"].as_str().unwrap();
+    let a = Running::spawn(&f, "adopt.json", digest);
+    let b = Running::spawn(&f, "adopt.json", digest);
+    let a = a.result();
+    let b = b.result();
+    assert_eq!(a["outcome"], "pass", "{a}");
+    assert_eq!(b["outcome"], "pass", "{b}");
+    let mut states = vec![
+        a["progress"][0]["state"].as_str().unwrap(),
+        b["progress"][0]["state"].as_str().unwrap(),
+    ];
+    states.sort();
+    assert_eq!(states, vec!["already_adopted", "committed"]);
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM _ntnt_schema_migrations_v2", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.target()
+            .query_row("SELECT value FROM t WHERE id=17", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        "retained"
+    );
+}
+#[test]
+fn sqlite_adoption_busy_commit_reconciles_without_inventing_execution() {
+    let (f, plan) = existing_adoption_fixture("SELECT count(*)=1 FROM main.t");
+    let reader = f.target();
+    reader.execute_batch("BEGIN DEFERRED").unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let failed = f.apply("adopt.json", plan["plan_digest"].as_str());
+    assert!(code(&failed, "DB_BUSY"), "{failed}");
+    assert_eq!(failed["reconciliation"]["outcome"], "pass", "{failed}");
+    assert_eq!(failed["progress"][0]["state"], "failed");
+    assert_eq!(failed["covered_count"], 0);
+    assert_eq!(failed["applied_count"], 0);
+    reader.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        f.target()
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='_ntnt_schema_migrations_v2'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    let recovered = f.apply("adopt.json", plan["plan_digest"].as_str());
+    assert_eq!(recovered["outcome"], "pass", "{recovered}");
+    assert_eq!(recovered["covered_count"], 1);
+    assert_eq!(recovered["adopted_count"], 1);
+    assert_eq!(recovered["applied_count"], 0);
+}
+
+#[test]
+fn sqlite_adoption_cancellation_and_timeout_leave_no_checkpoint() {
+    use sqlite_fixture::Running;
+    use std::io::Write;
+    for kill in [true, false] {
+        let f = Fixture::new();
+        let schema = "CREATE TABLE a(id INTEGER); CREATE TABLE b(value INTEGER);";
+        f.sql("0001_baseline.sql", schema);
+        f.target().execute_batch(schema).unwrap();
+        f.target().execute_batch("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<30000) INSERT INTO a SELECT x FROM n; INSERT INTO b SELECT id FROM a;").unwrap();
+        writeln!(std::fs::OpenOptions::new().append(true).open(f.root.path().join("ntnt.toml")).unwrap(),"\n[databases.app.adoption_checks]\nexpensive='SELECT NOT EXISTS (SELECT 1 FROM main.a WHERE (SELECT count(*) FROM main.b WHERE value>id)<0)'").unwrap();
+        let plan = f.command("plan", &["--adopt-through", "1", "--out", "adopt.json"]);
+        assert_eq!(plan["outcome"], "pass", "{plan}");
+        if kill {
+            let mut child = Running::spawn(&f, "adopt.json", plan["plan_digest"].as_str().unwrap());
+            let contender = f.target();
+            contender.busy_timeout(std::time::Duration::ZERO).unwrap();
+            child.until(|| match contender.execute_batch("BEGIN IMMEDIATE") {
+                Ok(()) => {
+                    contender.execute_batch("ROLLBACK").unwrap();
+                    false
+                }
+                Err(e) => {
+                    assert_eq!(
+                        e.sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::DatabaseBusy)
+                    );
+                    true
+                }
+            });
+            child.kill();
+        } else {
+            let start = std::time::Instant::now();
+            let failed = f.apply("adopt.json", plan["plan_digest"].as_str());
+            assert!(code(&failed, "DB_TIMEOUT"), "{failed}");
+            assert_eq!(failed["assertions"]["executed"], 1);
+            assert_eq!(failed["assertions"]["outcome"], "fail");
+            assert!(start.elapsed() < std::time::Duration::from_secs(12));
+        }
+        let c = f.target();
+        c.busy_timeout(std::time::Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='_ntnt_schema_migrations_v2'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM a", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            30000
+        );
+        c.execute_batch("DELETE FROM b").unwrap();
+        let recovered = f.apply("adopt.json", plan["plan_digest"].as_str());
+        assert_eq!(recovered["outcome"], "pass", "{recovered}");
+        assert_eq!(recovered["adopted_count"], 1);
+        assert_eq!(recovered["applied_count"], 0);
+    }
+}
+
+#[test]
+fn sqlite_documented_application_adopts_upgrades_and_preserves_old_readers() {
+    let f = Fixture::new();
+    let example =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/database-adoption");
+    for name in ["ntnt.toml", "app-v1.tnt", "app-v2.tnt"] {
+        std::fs::copy(example.join(name), f.root.path().join(name)).unwrap();
+    }
+    for name in ["0001_existing.sql", "0010_locale.sql", "0010_locale.toml"] {
+        std::fs::copy(
+            example.join("migrations").join(name),
+            f.root.path().join("migrations").join(name),
+        )
+        .unwrap();
+    }
+    let baseline = std::fs::read_to_string(example.join("migrations/0001_existing.sql")).unwrap();
+    // The old application already exists, with real representative rows and no
+    // NTNT ledger. This fixture does not fabricate historical migration entries.
+    f.target().execute_batch(&baseline).unwrap();
+    f.target().execute_batch("INSERT INTO customers VALUES(17,'Ada Example','ada@example.test'); INSERT INTO orders VALUES(80,17,2500),(81,17,4100); PRAGMA journal_mode=WAL;").unwrap();
+    rusqlite::Connection::open(&f.scratch_path)
+        .unwrap()
+        .execute_batch("PRAGMA journal_mode=WAL")
+        .unwrap();
+    let app = |name: &str| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .args(["run", name])
+            .env("EXAMPLE_DATABASE_FILE", &f.target_path)
+            .env("NTNT_ENV", "development")
+            .env("NTNT_SECRETS_PROVIDER", "env")
+            .current_dir(f.root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let old = app("app-v1.tnt");
+    assert_eq!(
+        old,
+        serde_json::json!([
+            {"id":17,"name":"Ada Example","email":"ada@example.test","total_cents":2500},
+            {"id":17,"name":"Ada Example","email":"ada@example.test","total_cents":4100}
+        ])
+    );
+    assert!(code(&f.command("status", &[]), "DB_UNRECOGNIZED_HISTORY"));
+    let plan = f.command("plan", &["--adopt-through", "1", "--out", "adoption.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    assert_eq!(plan["plan"]["action"]["count"], 1);
+    assert!(!plan.to_string().contains("ada@example.test"));
+    let adopted = f.apply("adoption.json", plan["plan_digest"].as_str());
+    assert_eq!(adopted["outcome"], "pass", "{adopted}");
+    assert_eq!(adopted["assertions"]["executed"], 3);
+    assert_eq!(app("app-v1.tnt"), old);
+    let plan = f.plan("upgrade.json");
+    let upgraded = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_eq!(upgraded["outcome"], "pass", "{upgraded}");
+    assert_eq!(upgraded["assertions"]["executed"], 2);
+    let mut new = old.clone();
+    for row in new.as_array_mut().unwrap() {
+        row["locale"] = serde_json::json!("en");
+    }
+    assert_eq!(app("app-v2.tnt"), new);
+    assert_eq!(app("app-v1.tnt"), old);
+    assert_eq!(
+        f.apply("upgrade.json", plan["plan_digest"].as_str())["assertions"]["executed"],
+        0
+    );
+    let verified = f.command("verify", &[]);
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["history"]["adopted_count"], 1);
+    assert_eq!(verified["history"]["applied_count"], 1);
+    assert_eq!(verified["assertions"]["executed"], 0);
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM orders", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn sqlite_upgrade_reconciliation_distinguishes_adopted_from_applied() {
+    use std::io::Write;
+    let f = Fixture::new();
+    f.sql(
+        "0001_existing.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    f.sql(
+        "0010_expand.sql",
+        "ALTER TABLE t ADD COLUMN value TEXT DEFAULT 'retained';",
+    );
+    f.target().execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY); ALTER TABLE t ADD COLUMN value TEXT DEFAULT 'retained'; INSERT INTO t(id) VALUES(17)").unwrap();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(f.root.path().join("ntnt.toml"))
+            .unwrap(),
+        "\n[databases.app.adoption_checks]\ncurrent='SELECT count(*)=1 FROM main.t'"
+    )
+    .unwrap();
+    let plan = f.command("plan", &["--adopt-through", "10", "--out", "adopt.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    assert_eq!(
+        f.apply("adopt.json", plan["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.sql(
+        "0020_upgrade.sql",
+        "ALTER TABLE t ADD COLUMN label TEXT DEFAULT 'new';",
+    );
+    let plan = f.plan("upgrade.json");
+    let reader = f.target();
+    reader.execute_batch("BEGIN DEFERRED").unwrap();
+    assert_eq!(
+        reader
+            .query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let failed = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert!(code(&failed, "DB_BUSY"), "{failed}");
+    assert_eq!(failed["reconciliation"]["outcome"], "pass");
+    assert_eq!(failed["applied_count"], 0);
+    assert_eq!(failed["reconciliation"]["applied_count"], 0, "{failed}");
+    assert_eq!(failed["reconciliation"]["adopted_count"], 2);
+    assert_eq!(failed["reconciliation"]["imported_count"], 0);
+    assert_eq!(failed["reconciliation"]["covered_count"], 2);
+    reader.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM _ntnt_schema_migrations_v2", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM pragma_table_info('t')", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        f.apply("upgrade.json", plan["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+}
+
+#[test]
+fn sqlite_human_adoption_output_names_the_checkpoint_not_a_null_migration() {
+    let (f, plan) = existing_adoption_fixture("SELECT count(*)=1 FROM main.t");
+    let human = |command: &str, args: &[&str], approval: Option<&str>| {
+        let template = f.process(command);
+        let mut process = std::process::Command::new(template.get_program());
+        process.args(
+            template
+                .get_args()
+                .filter(|arg| *arg != std::ffi::OsStr::new("--json")),
+        );
+        for (key, value) in template.get_envs() {
+            if let Some(value) = value {
+                process.env(key, value);
+            } else {
+                process.env_remove(key);
+            }
+        }
+        process.current_dir(f.root.path()).args(args);
+        if let Some(approval) = approval {
+            process.env("DB_APPROVAL", approval);
+        }
+        let output = process.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let review = human("verify", &["--against", "adopt.json"], None);
+    assert!(
+        review.contains("Adoption reference: adopt_baseline through ID 1"),
+        "{review}"
+    );
+    assert!(review.contains("adoption not executed"), "{review}");
+    let applied = human(
+        "migrate",
+        &["--plan", "adopt.json"],
+        plan["plan_digest"].as_str(),
+    );
+    assert!(
+        applied.contains("Adoption adopt_baseline through ID 1: committed"),
+        "{applied}"
+    );
+    assert!(
+        applied.contains("migration SQL executed: false"),
+        "{applied}"
+    );
+    assert!(!applied.contains("Migration null"));
+}

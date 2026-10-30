@@ -1,0 +1,5 @@
+intent_ids = ["preserve-existing-customer-orders"]
+[requires]
+existing_emails = "SELECT NOT EXISTS (SELECT 1 FROM main.customers WHERE email IS NULL)"
+[ensures]
+filled_locale = "SELECT NOT EXISTS (SELECT 1 FROM main.customers WHERE locale <> 'en')"

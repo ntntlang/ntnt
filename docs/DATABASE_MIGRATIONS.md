@@ -13,7 +13,7 @@ ntnt db status --target development --object accounts
 
 `status` and `verify` inspect history and compare the observed catalog with replay at the **applied prefix**. `plan` additionally replays pending SQL and captures a non-authorizing review artifact. Pending migrations are not drift. `--object` is a case-sensitive substring filter on displayed catalog keys; it never narrows verification, hides incomplete coverage, or changes the plan binding. Without `--json`, the same result is rendered for humans.
 
-`migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Baseline adoption, concurrent indexes/non-transactional operations, backfill orchestration and query lint are not implemented. PostgreSQL migration DML remains unsupported; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
+`migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Explicit reviewed baseline adoption and recognized PostgreSQL legacy-history import use that same executor; see below. Concurrent indexes/non-transactional operations, backfill orchestration and query lint are not implemented. PostgreSQL migration DML remains unsupported; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
 
 ## Explicit configuration and secrets
 
@@ -234,19 +234,158 @@ Execution uses `_ntnt.schema_migrations_v2`. Its first five NOT NULL columns are
 
 | Column | PostgreSQL type |
 |---|---|
-| position | bigint (one-based, consecutive) |
+| position | bigint (one-based source position; an adopted checkpoint covers its prefix) |
 | id | text (canonical decimal ID) |
 | name | text (SQL filename) |
 | checksum | text (checksum v1) |
-| state | text (`applied` for a clean prefix) |
+| state | text (`applied`, explicit `adopted` checkpoint, or recognized `imported` legacy entry) |
 
 v2 appends `logical_database text NOT NULL` and `managed_schema text NOT NULL`, in that order. Every row must bind the same selected logical store/schema. The table must be permanent (logged), with a valid, immediate primary key on position. Execution explicitly enables local synchronous commit. `_ntnt` and the ledger must be owned by the selected role, with no other grantees, defaults/generated columns, mutating triggers, check/FK constraints or rules before insertion. Unknown objects, RLS, custom/expression indexes, inheritance or unrecognized ledger formats block execution.
 
-Read-only commands still recognize the earlier unscoped five-column `_ntnt.schema_migrations_v1` for portable historical inspection. **Execution refuses v1**, even if its checksums match: no silent rewriting or scope adoption occurs. Only an absent reserved namespace on a verified empty base may be bootstrapped. An empty existing v2 or arbitrary namespace is not trusted as a new base.
+Read-only commands recognize the earlier unscoped five-column `_ntnt.schema_migrations_v1`. **Ordinary migration execution refuses v1**, even if its checksums match. Only an explicit adoption plan can import the strictly validated owned legacy ledger described below; no silent rewriting or scope adoption occurs. Ordinary execution bootstraps only an absent reserved namespace on a verified empty base. An empty existing v2 or arbitrary namespace is never trusted as a new base.
 
 The relation must be an ordinary heap table with no inheritance, RLS, rewrite rules, custom/expression indexes, or unrecognized namespace objects. Inspection locks the physical ledger in ACCESS SHARE mode, validates its built-in types/structure before reading rows, and uses `row_security=off` as an additional fail-closed check. A view or RLS policy cannot masquerade as a ledger and invoke user SQL. Malformed ledger row values are not echoed in failure reports.
 
-**Do not create or seed this ledger to adopt an existing database.** Legacy inspection tests seed v1 explicitly; execution/rehearsal tests use the real runner to create v2. Production baseline adoption is not implemented. An absent ledger plus nonempty managed scope requires deliberate later adoption; no checksum rewriting, fabricated history or automatic repair occurs.
+**Do not create or seed this ledger to adopt an existing database.** Legacy inspection tests seed v1 explicitly; execution/adoption rehearsals use the real runner. An absent ledger plus nonempty managed scope still fails ordinary inspection/planning; use the explicit reviewed adoption path below rather than fabricating applied history. No automatic repair or source-checksum rewriting occurs.
+
+## Explicit adoption of existing databases
+
+Use adoption when an existing PostgreSQL managed schema or SQLite file matches a
+reviewed, replayable prefix of your immutable SQL inventory but has no NTNT ledger.
+This is an **observed checkpoint**, not evidence that NTNT executed those old files.
+The existing four-command workflow remains; there is no separate migration runner:
+
+```sh
+ntnt db plan --database app --target development --adopt-through 10 --out adoption.json --json
+ntnt db verify --database app --target development --against adoption.json --json
+# Review SQL, reference/catalog differences, target identity and named data checks.
+# Separately deliver this exact digest via the existing approval_secret provider.
+ntnt db migrate --database app --target development --plan adoption.json --json
+ntnt db verify --database app --target development --json
+# Later changes use ordinary plan/migrate, with their own review and approval.
+```
+
+`--adopt-through` is a positive **migration ID**, not a file count. It is accepted
+only on `plan`, not status, verify, migrate or alongside `--against`. The selected
+ID must exist in captured source. Gaps in IDs remain valid. Supply the expected SQL
+history/baseline yourself and review it; the tool does not dump the live target and
+then declare that target to be its own reference. The whole selected prefix must
+replay within the adapter's supported grammar in the same isolated scratch used
+for ordinary planning. Only that prefix is replayed; future pending SQL is not
+included in this adoption action. No old migration SQL executes on the target.
+
+Declare **at least one named adoption check** in the selected database's manifest:
+
+```toml
+[databases.app.adoption_checks]
+no_null_email = "SELECT NOT EXISTS (SELECT 1 FROM app.accounts WHERE email IS NULL)"
+no_duplicates = "SELECT NOT EXISTS (SELECT email FROM app.accounts GROUP BY email HAVING count(*) > 1)"
+```
+
+Use `main.accounts` for SQLite. Names, query grammar, limits and true/NULL/type/shape
+rules are the same as transition contracts (64 bounded checks; SQLite true is
+integer `1`). Checks are sorted by name. These are adoption-operation policy,
+separate from historical `requires`/`ensures`: changing the manifest invalidates
+old plans without editing the legacy source/checksums you are trying to import.
+Historical transition checks may be superseded and are never selected implicitly
+as adoption checks. Check results live in the execution report; archive the
+reviewed plan/report for audit. They are not a new permanent-invariant registry.
+
+Planning remains readonly and performs **zero data assertions**. It binds the
+requested prefix checksum, action kind, check names and exact captured manifest,
+source/policy, logical selection, physical target and observed ledger/catalog.
+It compares observed schema with the replayed requested baseline, not an assumed
+empty target. Mismatch or incomplete coverage blocks adoption. The artifact uses
+`postgresql-adoption-v1` or `sqlite-adoption-v1`, distinct from ordinary execution
+formats, and still has no authority without the separately protected approval.
+`status`, `verify` or `plan --against adoption.json` revalidate that saved action's
+requested baseline read-only, without running its data checks or applying history.
+An unchanged pre-adoption artifact remains valid even though standalone inspection
+still reports unrecognized history. After adoption changes the base ledger, use
+ordinary `verify`; `--against` compares the saved pre-action base, not a deployment
+receipt or permission to execute.
+
+Execution uses the existing owned session/native locks and rechecks identity,
+source, history and catalog after acquisition. It runs the captured adoption checks
+against current data, then commits only the validated ledger change in that same
+transaction. SQL errors, false checks, drift, wrong targets, unknown ledgers and
+failed cleanup cannot become a successful adoption. An adoption plan never also
+applies pending migrations; plan those separately afterward.
+
+### Checkpoint and history truth
+
+For a target with **no reserved ledger**, one scoped v2 record has:
+
+- `state = "adopted"`;
+- `position` equal to the number of covered source files, with the final file's ID/name;
+- a domain-separated `ntnt-baseline-v1` checksum of the entire ordered prefix's
+  exact source identities (including each SQL file and sidecar checksum).
+
+It does not insert fictional `applied` rows for each old file. Later real migrations
+append consecutive source positions with ordinary per-file checksums and `applied`
+states. Keep the whole baseline prefix: edited SQL/metadata, inserted historical
+IDs, missing files or a forged checkpoint cannot be treated as valid history.
+
+Reports separate `covered_count`, `applied_count`, `adopted_count` and
+`imported_count`. For example, a checkpoint covering three old files followed by
+one real migration has four covered, three adopted and one applied. These describe
+ledger evidence, not assertions executed in this invocation. Fresh reconciliation
+reports use the same separate counts; adopted/imported coverage is never relabeled
+as applied migrations after a failed or unacknowledged upgrade. Normal execution
+progress labels covered old files `baseline_covered`; the adoption action explicitly
+reports `migration_sql_executed = false`. Actual named checks still count in
+`assertions.executed`. For saved-format compatibility, `binding.applied_count`
+retains its historical spelling for the **covered-prefix index**; consumers should
+use the separate history counts to distinguish adoption/import from execution.
+
+A same-plan retry recognizes a matching committed checkpoint (`already_adopted`)
+without rerunning old SQL or transition checks. New source/policy, later migrations
+or an unrelated ledger extension require the appropriate fresh plan, not a reset.
+Uncertain COMMIT acknowledgement uses the same fresh locked reconciliation as
+normal migrations; unavailable evidence stays unknown and never triggers blind SQL
+re-execution. Data-dependent checks run again only if adoption did not commit.
+
+### Recognized legacy PostgreSQL history
+
+The only supported legacy import is the unscoped `_ntnt.schema_migrations_v1`
+format already recognized by this adapter. Its whole nonempty history must exactly
+match the selected prefix: ordered positions, canonical IDs, filenames, checksums
+and clean `applied` states. The requested ID must be that history's final ID.
+Adoption still requires matching replayed schema and current named checks.
+
+Under the existing migration/table locks, a separately approved `import_legacy_v1`
+action validates the physical ledger as a permanent owned heap with a valid
+immediate position primary key and no extra grants, defaults, mutating triggers,
+rules, check/FK constraints or unsupported dependencies. It transactionally renames
+the same table to v2, adds explicit logical-database/schema scope, and marks those
+existing rows `imported`, preserving their source identities/checksums. A normal
+migration plan cannot perform this import implicitly. Repeats report
+`already_imported`; subsequent ordinary progress uses `history_imported` for those
+rows. Import must be a leading scoped prefix, never mixed with an adopted checkpoint.
+
+Unknown formats, empty/dirty/edited/ambiguous ledgers, missing source and unsafe
+ownership/physical definitions are refused, not reconstructed, acknowledged or
+repaired. There is no arbitrary Flyway/application-ledger importer and no SQLite
+legacy-ledger import. Do not change checksums or seed a recognized-looking table to
+bypass this boundary. Older NTNT versions do not understand the new states and
+fail closed; retire old migration writers before adopting/importing a deployment.
+
+### Rehearsal and operational boundary
+
+The [customer/order example](../examples/database-adoption/README.md) executes the
+whole existing-app → inspect → plan/adopt → upgrade → rerun → verify workflow on
+disposable SQLite files. Its native test runs old and new `.tnt` application readers
+and asserts exact retained values plus the expansion's default. Shared native
+fixtures exercise adoption on both adapters, including real PostgreSQL legacy
+imports and commit-fault reconciliation.
+
+This completes the transactional foundation's explicit adoption path **within the
+published inspection/SQL coverage**. It is not blanket production rollout approval,
+automatic baseline generation, full schema coverage, proof of arbitrary business
+mappings or a backup/restore system. Archive reviewed artifacts, arrange a tested
+recovery path and retire conflicting old writers; actual application deployment
+requires its own authorization. Concurrent/nontransactional DDL and schema-aware
+query analysis remain later work.
 
 ## SQLite native files and rebuilds
 
@@ -269,7 +408,7 @@ disposable = true
 [secrets.LOCAL_MIGRATION_APPROVAL]
 ```
 
-Resolve the connection secrets to **absolute native paths of existing regular files**, not URLs, SQLite URIs, `:memory:`, or connection strings. Provision the empty deployment and scratch files yourself with SQLite first. Do not declare `database`/`role` for SQLite; its managed scope is exactly `main`, the entire file except the reserved ledger. There is no ATTACH, temp namespace, multi-store file, implicit creation, baseline adoption or reset.
+Resolve the connection secrets to **absolute native paths of existing regular files**, not URLs, SQLite URIs, `:memory:`, or connection strings. Provision the empty deployment and scratch files yourself with SQLite first. Do not declare `database`/`role` for SQLite; its managed scope is exactly `main`, the entire file except the reserved ledger. There is no ATTACH, temp namespace, multi-store file, implicit creation or reset. Existing-file adoption is explicit and subject to the same scope/coverage checks.
 
 Files must have one hard link and no symlink path components. Filename components cannot contain `:` on any platform (a Windows drive prefix is allowed); NTFS alternate streams have independent contents but share file-level identity and are not supported. Use the native canonical path on macOS (for example `/private/...`, not its `/var` alias). Identity binds native device/inode or Windows volume/file-index plus available creation time, not merely path spelling. Plans also bind the bundled SQLite version, encoding, page size, auto-vacuum and journal mode, with Unix owner/group/mode or Windows readonly metadata. File paths themselves are not disclosed. Replacement/copying changes identity and requires a new plan. The Unix adapter checks SQLite's open-file movement status without opening and closing a second descriptor that could drop SQLite's POSIX locks; Windows retains a non-delete-sharing guard. Filesystem administrators, local directories and OS ACL administration remain trusted. These checks are **not a filesystem sandbox or full ACL attestation**; use local storage with reliable SQLite locking, not network/shared filesystems.
 
@@ -291,7 +430,7 @@ Only concrete managed relations are eligible. `CREATE TABLE ... AS SELECT` is re
 
 Virtual/shadow tables, generated columns, AUTOINCREMENT/`sqlite_sequence`, expression/partial indexes, custom collations/functions, unsafe/unsupported view or trigger programs, statistics/internal objects, bind parameters, ATTACH/DETACH, authored PRAGMAs, transaction/savepoint/session control and extension loading are unsupported. Unsupported catalog coverage blocks a clean result. DML and trigger effects remain review-required (`SQLITE_EFFECTS_NOT_INFERRED`); metadata never turns an unknown effect into automatic safety. Large transformations belong in separately operated application jobs.
 
-The reserved `_ntnt*` namespace contains only `_ntnt_schema_migrations_v2`, a STRICT table with the same seven ordered scope/history fields as PostgreSQL (`position INTEGER`, the others TEXT). Only the exact native ledger definition is recognized; extra indexes, triggers, views or columns block mutation. A missing ledger is acceptable only at a verified empty base. An empty existing ledger, unknown history or nonempty unadopted file is not a new database. Do not seed this table as an adoption shortcut.
+The reserved `_ntnt*` namespace contains only `_ntnt_schema_migrations_v2`, a STRICT table with the same seven ordered scope/history fields as PostgreSQL (`position INTEGER`, the others TEXT). Only the exact native ledger definition is recognized; extra indexes, triggers, views or columns block mutation. A missing ledger can be bootstrapped only at a verified empty base for ordinary migrations, or by an independently approved matching-baseline adoption. An empty existing ledger, unknown history or nonempty unadopted file is not a new database. Do not seed this table as an adoption shortcut.
 
 ### Explicit one-table rebuild
 
@@ -353,6 +492,6 @@ cargo test --locked --test db_migration_conformance -- --include-ignored --test-
 cargo test --locked --lib migrations::postgres::tests::target_transaction_is_really_read_only_even_for_superuser -- --ignored --exact --nocapture
 ```
 
-The shared conformance suite executes the same history/drift, approval/stale/wrong-target, contract failure and committed-prefix recovery scenarios on both native adapters. SQLite-only tests also cover physical file aliases/replacement, read-only nonmutation, WAL, bounded busy waits, competing CLI processes, forced process death before commit and after an acknowledged-to-SQLite prefix, busy-COMMIT fresh reconciliation, timeout/discard, ledger tampering, redaction and populated rebuild preservation. Native SQLite fixtures provision disposable local files only; no service is needed.
+The shared conformance suite executes the same history/drift, approval/stale/wrong-target, contract failure and committed-prefix recovery scenarios on both native adapters. It also exercises populated baseline adoption, exact multi-file coverage, required check failures, unknown ledgers and later upgrades. PostgreSQL cases import only recognized immutable legacy history and reject unsafe ledger definitions. Adoption commit-fault tests distinguish baseline/import records from SQL execution; SQLite cases cover competing adopters, cancellation/timeout and busy-COMMIT recovery. SQLite-only tests also cover physical file aliases/replacement, read-only nonmutation, WAL, bounded busy waits, competing CLI processes, forced process death before commit and after an acknowledged-to-SQLite prefix, busy-COMMIT fresh reconciliation, timeout/discard, ledger tampering, redaction and populated rebuild preservation. Native SQLite fixtures provision disposable local files only; no service is needed.
 
 PostgreSQL fixtures create/drop databases and roles. They test real read-only transactions, no target bootstrap, applied-prefix versus pending drift, invalid indexes, constraint validity/grants, immutable SQL/metadata history, malformed/RLS/view ledgers, unknown coverage, physical scratch collisions, low-privilege/empty/matching scratch, redaction, bounded waits, cleanup, source replacement during a blocked inspection, and target/source/authority-bound plans. Execution tests additionally cover fresh construction, populated upgrade preservation, exact authority, stale plans, partial commits and reruns, false/NULL/shape/type/error/timeout checks, native/advisory contention, snapshots after lock acquisition, process cancellation, unsafe/scoped ledgers, unsupported effects and source replacement. A test-only wire proxy drops connections before COMMIT, after durable COMMIT but before acknowledgement, during rollback, and during reconciliation. It is not linked into release code and exposes no authorization bypass. These executed fixture checks are not evidence about arbitrary application business behavior or real deployment compatibility.

@@ -1,6 +1,7 @@
 //! Native SQL history, catalog replay and externally authorized relational execution.
 
 mod adapter;
+mod adoption;
 mod analysis;
 mod catalog_sql;
 mod execution;
@@ -26,6 +27,7 @@ pub struct Diagnostic {
 impl Diagnostic {
     pub(crate) fn new(code: &str, message: &str) -> Self {
         let next_action = match code {
+            "DB_ADOPTION_INPUT" => "Select an exact source-prefix ID with plan --adopt-through and declare named adoption_checks. Only absent history or matching recognized legacy history is eligible; never reset or rewrite a ledger to force adoption.",
             "DB_SQLITE_RECOVERY_REQUIRED" => "If a writer is active, wait for it to finish and retry inspection. Otherwise rerun migrate with the same approved plan to recover and reconcile under ownership; do not delete the journal or make inspection writable.",
             "DB_REFERENCE_UNAVAILABLE" => "Configure [databases.<name>.scratch] for the selected database with a distinct disposable database and secret, then rerun inspection.",
             "DB_DATABASE_REQUIRED" | "DB_DATABASE_UNKNOWN" => "Select a declared [databases.<name>] with --database <name>. --database may be omitted only when exactly one logical database is declared; --target is always required.",
@@ -33,7 +35,8 @@ impl Diagnostic {
             "DB_REPLAY_UNSUPPORTED" => "Review the named migration against docs/DATABASE_MIGRATIONS.md. Unsupported SQL needs adapter support or separate manual review; do not replay it on the target.",
             "DB_COVERAGE_INCOMPLETE" | "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
             "DB_DRIFT" => "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.",
-            "DB_LEDGER_UNKNOWN" | "DB_UNRECOGNIZED_HISTORY" => "Inspect the existing ledger and managed scope with an operator. Baseline adoption is not implemented; never insert fictional applied rows.",
+            "DB_UNRECOGNIZED_HISTORY" => "Review the existing managed scope. To adopt a matching captured prefix, declare named adoption_checks and create an explicit plan --adopt-through <migration-id>; obtain separate exact-plan approval before migrate. Never insert fictional applied rows.",
+            "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
             "DB_SECRET" => "Declare the connection secret in ntnt.toml and configure the existing std/secrets provider. Never pass a connection URL on the command line.",
             "DB_TIMEOUT" => "Check endpoint availability and conflicting locks. Preserve committed progress; reconcile unknown migration outcomes with the same reviewed plan before any further SQL.",
@@ -102,6 +105,9 @@ pub struct Options {
     /// Revalidate a previously saved plan's source/target/base binding (no execution).
     #[arg(long)]
     pub against: Option<PathBuf>,
+    /// Plan explicit adoption through this migration ID; never execute its old SQL.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub adopt_through: Option<u64>,
 }
 
 /// Run one database operation with an outer deadline and bounded runtime teardown.
@@ -199,10 +205,10 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             "observed_at":chrono::Utc::now().to_rfc3339(),"outcome":"unknown","diagnostics":[],
             "progress":[],"assertions":{"outcome":"not_run","executed":0}});
         let work = inputs.and_then(|inputs| {
-            if options.against.is_some() {
+            if options.against.is_some() || options.adopt_through.is_some() {
                 return Err(Diagnostic::new(
                     "DB_CONFIG",
-                    "migrate uses --plan, not --against.",
+                    "migrate uses only --plan; --adopt-through belongs to plan.",
                 ));
             }
             let bytes = inventory::file_bytes(&path)?;
@@ -230,7 +236,24 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         progress
     } else {
         inputs
-            .and_then(|inputs| database_runtime(report::inspect(inputs, command)))
+            .and_then(|inputs| {
+                if options.adopt_through.is_some() && (command!="plan" || options.against.is_some()) {
+                    return Err(Diagnostic::new("DB_CONFIG","--adopt-through is only for an explicit plan, not status/verify/--against."));
+                }
+                let mut adopt_through=options.adopt_through;
+                if let Some(Ok(saved))=&prior {
+                    if saved["plan"].get("action").is_some() {
+                        // Reuse the pure descriptor validator, never approval or
+                        // the writer path. The explicit CLI target still owns
+                        // all connection selection and inspection stays readonly.
+                        execution::validate(&inputs,saved)?;
+                        if let Some(action)=adoption::Adoption::from_plan(&inputs,saved)? {
+                            adopt_through=Some(action.through_id.parse().map_err(|_|Diagnostic::new("DB_PLAN_STALE","Invalid adoption prefix ID in saved artifact."))?);
+                        }
+                    }
+                }
+                database_runtime(report::inspect(inputs, command, adopt_through))
+            })
             .unwrap_or_else(|d| report::failure(command, d))
     };
     if let Some(prior) = prior {
@@ -243,13 +266,18 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 && p["plan_digest"] == inventory::json_digest(&p["plan"])
                 && !report["binding"].is_null()
                 && p["plan"]["binding"] == report["binding"]
-                && p["plan"]["pending"]
-                    == serde_json::json!(report["source"]["migrations"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .skip(report["history"]["applied_count"].as_u64().unwrap() as usize)
-                        .collect::<Vec<_>>())
+                && if p["plan"].get("action").is_some() {
+                    p["plan"]["action"] == report["adoption"]["action"]
+                        && p["plan"]["pending"] == serde_json::json!([])
+                } else {
+                    p["plan"]["pending"]
+                        == serde_json::json!(report["source"]["migrations"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .skip(report["history"]["covered_count"].as_u64().unwrap() as usize)
+                            .collect::<Vec<_>>())
+                }
         });
         report["plan_validation"] =
             serde_json::json!({"outcome":if valid {"pass"} else {"fail"},"authorized":false});
@@ -292,8 +320,20 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         }
         if let Some(h) = report.get("history") {
             println!(
-                "History: {} applied, {} pending; drift: {}",
-                h["applied_count"], h["pending_count"], report["drift"]["outcome"]
+                "History: {} applied, {} adopted, {} imported, {} pending; drift: {}",
+                h["applied_count"],
+                h["adopted_count"],
+                h["imported_count"],
+                h["pending_count"],
+                report["drift"]["outcome"]
+            );
+        }
+        if let Some(action) = report.get("adoption").and_then(|a| a.get("action")) {
+            println!(
+                "Adoption reference: {} through ID {} ({} source files); adoption not executed.",
+                action["kind"].as_str().unwrap_or("unknown"),
+                action["through_id"].as_str().unwrap_or("unknown"),
+                action["count"]
             );
         }
         if let Some(objects) = report["catalog"]["objects"].as_object() {
@@ -339,7 +379,17 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             report["assertions"]["executed"]
         );
         for entry in report["progress"].as_array().into_iter().flatten() {
-            println!("Migration {}: {}", entry["source"], entry["state"]);
+            if let Some(kind) = entry["kind"].as_str() {
+                println!(
+                    "Adoption {} through ID {}: {}; migration SQL executed: {}",
+                    kind,
+                    entry["through_id"].as_str().unwrap_or("unknown"),
+                    entry["state"].as_str().unwrap_or("unknown"),
+                    entry["migration_sql_executed"]
+                );
+            } else {
+                println!("Migration {}: {}", entry["source"], entry["state"]);
+            }
         }
     }
     if report["outcome"] == "pass" {

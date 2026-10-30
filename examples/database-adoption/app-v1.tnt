@@ -1,0 +1,9 @@
+// Existing application's read path: no schema or migration logic here.
+import { connect, query, close } from "std/db/sqlite"
+import { stringify } from "std/json"
+
+let file = unwrap(get_env("EXAMPLE_DATABASE_FILE"))
+let db = unwrap(connect(file))
+let orders = unwrap(query(db, "SELECT customers.id, customers.name, customers.email, orders.total_cents FROM customers JOIN orders ON orders.customer_id = customers.id WHERE customers.id = ? ORDER BY orders.id", [17]))
+print(stringify(orders))
+close(db)

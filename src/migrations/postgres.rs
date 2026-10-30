@@ -324,6 +324,10 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         if history.scope != Some(json!({"database":database,"schema":schema})) {
             return Err(Diagnostic::new("DB_LEDGER_SCOPE", "Execution requires the scoped v2 ledger for this logical store/schema. Legacy or differently scoped history is read-only; no adoption is automatic."));
         }
+        self.mutation_safe_ledger("schema_migrations_v2").await?;
+        Ok(history)
+    }
+    async fn mutation_safe_ledger(&self, table: &str) -> Result<()> {
         let safe = self.rows(r#"SELECT n.nspowner=r.oid AND c.relowner=r.oid AND c.relpersistence='p'
           AND (SELECT count(*)=1 FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_index i ON i.indexrelid=k.conindid
                WHERE k.conrelid=c.oid AND k.contype='p' AND k.conkey=ARRAY[1]::smallint[]
@@ -337,14 +341,35 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.aclexplode(coalesce(c.relacl,pg_catalog.acldefault('r',c.relowner))) a WHERE a.grantee<>r.oid)
           FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
           JOIN pg_catalog.pg_roles r ON r.rolname=current_user
-          WHERE n.nspname='_ntnt' AND c.relname='schema_migrations_v2'"#, &[]).await?;
+          WHERE n.nspname='_ntnt' AND c.relname=$1"#, &[&table]).await?;
         if safe.len() != 1 || !safe[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_LEDGER_UNSAFE",
                 "Ledger is not a supported mutation-safe owned heap; no write was attempted.",
             ));
         }
-        Ok(history)
+        Ok(())
+    }
+
+    /// Import only the recognized, immutable, owned v1 ledger under native locks.
+    /// Preserve every source identity/checksum; imported is not newly executed SQL.
+    pub async fn import_legacy_history(&self, database: &str, schema: &str) -> Result<()> {
+        let history = self.history().await?;
+        if !history.present
+            || history.scope.is_some()
+            || history.entries.is_empty()
+            || history.entries.iter().any(|e| e.state != "applied")
+        {
+            return Err(Diagnostic::new(
+                "DB_ADOPTION_INPUT",
+                "Only a recognized nonempty legacy v1 ledger can be imported.",
+            ));
+        }
+        self.mutation_safe_ledger("schema_migrations_v1").await?;
+        self.batch("ALTER TABLE _ntnt.schema_migrations_v1 RENAME TO schema_migrations_v2; ALTER TABLE _ntnt.schema_migrations_v2 ADD COLUMN logical_database text, ADD COLUMN managed_schema text;").await?;
+        self.rows("UPDATE _ntnt.schema_migrations_v2 SET logical_database=$1,managed_schema=$2,state='imported'",&[&database,&schema]).await?;
+        self.batch("ALTER TABLE _ntnt.schema_migrations_v2 ALTER COLUMN logical_database SET NOT NULL, ALTER COLUMN managed_schema SET NOT NULL").await?;
+        Ok(())
     }
 
     /// Bootstrap only inside the first authorized migration transaction. Empty or
@@ -357,10 +382,33 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         schema: &str,
         present: bool,
     ) -> Result<()> {
+        self.record_entry(
+            &HistoryEntry {
+                position: position as i64,
+                id: migration.id.to_string(),
+                name: migration.name.clone(),
+                checksum: migration.checksum.clone(),
+                state: "applied".into(),
+            },
+            database,
+            schema,
+            present,
+        )
+        .await
+    }
+    /// Insert a validated record inside the caller-owned migration transaction.
+    /// Only an absent reserved ledger may be bootstrapped; eligibility is checked upstream.
+    pub async fn record_entry(
+        &self,
+        entry: &HistoryEntry,
+        database: &str,
+        schema: &str,
+        present: bool,
+    ) -> Result<()> {
         if !present {
             self.batch("CREATE SCHEMA _ntnt; CREATE TABLE _ntnt.schema_migrations_v2 (position bigint NOT NULL PRIMARY KEY,id text NOT NULL,name text NOT NULL,checksum text NOT NULL,state text NOT NULL,logical_database text NOT NULL,managed_schema text NOT NULL)").await?;
         }
-        self.rows("INSERT INTO _ntnt.schema_migrations_v2(position,id,name,checksum,state,logical_database,managed_schema) VALUES($1,$2,$3,$4,'applied',$5,$6)", &[&(position as i64), &migration.id.to_string(), &migration.name, &migration.checksum, &database, &schema]).await?;
+        self.rows("INSERT INTO _ntnt.schema_migrations_v2(position,id,name,checksum,state,logical_database,managed_schema) VALUES($1,$2,$3,$4,$5,$6,$7)", &[&entry.position,&entry.id,&entry.name,&entry.checksum,&entry.state,&database,&schema]).await?;
         Ok(())
     }
 
@@ -554,7 +602,7 @@ fn canonical_roles(value: &mut Value, role: &str) {
 impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
-            "operations": {"catalog_inspection":"supported_subset", "restricted_ddl_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_subset", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"not_implemented"},
+            "operations": {"catalog_inspection":"supported_subset", "restricted_ddl_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_subset", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"reviewed_prefix_checkpoint"},
             "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_grants":"canonical_role_names", "views_sequences_routines_triggers_policies":"inventoried_opaque", "partitioning_extensions_custom_types_external_dependencies":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"restricted_subset_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }

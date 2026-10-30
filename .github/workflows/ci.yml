@@ -34,6 +34,7 @@ jobs:
             rust:
               - 'src/**'
               - 'tests/**'
+              - 'examples/database-adoption/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
@@ -222,7 +223,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: db-catalog
-      - name: Run real inspection, execution, contracts and commit recovery
+      - name: Run real inspection, execution, adoption, contracts and commit recovery
         run: |
           cargo test --locked --test db_catalog_postgres -- --ignored --test-threads=2 --nocapture
           cargo test --locked --test db_execution_postgres -- --ignored --test-threads=2 --nocapture

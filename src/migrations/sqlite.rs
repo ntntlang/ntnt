@@ -867,17 +867,38 @@ impl Sqlite {
         database: &str,
         present: bool,
     ) -> Result<()> {
-        let migration = migration.clone();
+        self.record_entry(
+            &HistoryEntry {
+                position: position as i64,
+                id: migration.id.to_string(),
+                name: migration.name.clone(),
+                checksum: migration.checksum.clone(),
+                state: "applied".into(),
+            },
+            database,
+            present,
+        )
+        .await
+    }
+    /// Insert a validated record inside the caller-owned migration transaction.
+    /// Only an absent reserved ledger may be bootstrapped; eligibility is checked upstream.
+    pub async fn record_entry(
+        &self,
+        entry: &HistoryEntry,
+        database: &str,
+        present: bool,
+    ) -> Result<()> {
+        let entry = entry.clone();
         let database = database.to_owned();
         self.run(move|s|{
             if !present {s.conn.execute_batch(LEDGER_SQL).map_err(sql_error)?;}
-            s.conn.execute("INSERT INTO main._ntnt_schema_migrations_v2(position,id,name,checksum,state,logical_database,managed_schema) VALUES(?1,?2,?3,?4,'applied',?5,'main')",rusqlite::params![position as i64,migration.id.to_string(),migration.name,migration.checksum,database]).map_err(sql_error)?;
+            s.conn.execute("INSERT INTO main._ntnt_schema_migrations_v2(position,id,name,checksum,state,logical_database,managed_schema) VALUES(?1,?2,?3,?4,?5,?6,'main')",rusqlite::params![entry.position,entry.id,entry.name,entry.checksum,entry.state,database]).map_err(sql_error)?;
             Ok(())
         }).await
     }
     pub fn capabilities(version: i32) -> Value {
         json!({"adapter":"sqlite-catalog-v1","canonicalization_version":1,"sqlite_version_number":version,
-            "operations":{"catalog_inspection":"supported_subset","target_ddl":"exact_plan_transactional_subset","sql_contracts":"integer_boolean_native_authorizer","baseline_adoption":"not_implemented","concurrent_indexes":"unsupported"},
+            "operations":{"catalog_inspection":"supported_subset","target_ddl":"exact_plan_transactional_subset","sql_contracts":"integer_boolean_native_authorizer","baseline_adoption":"reviewed_prefix_checkpoint","concurrent_indexes":"unsupported"},
             "guarantees":{"execution_transaction":"begin_immediate_before_inspection","atomic_target_ddl_checks_ledger":true,"checks":"native_authorizer_and_closed_expression_grammar","authority":"external_filesystem_and_secret_provider"}})
     }
 }
