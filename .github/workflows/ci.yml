@@ -107,6 +107,8 @@ jobs:
       # across threads, eb9f77d; shared JOB_RUNTIME state, ef3d79d/DD-059) —
       # every process gets its own environment and its own globals. Local
       # network fixtures are grouped/serialized via .config/nextest.toml.
+      # Real-file SQLite lifecycle/rebuild/recovery and shared conformance tests
+      # are non-ignored: all three OS runners exercise the native adapter.
       - name: Run tests
         run: cargo nextest run --locked
         env:
@@ -224,6 +226,7 @@ jobs:
         run: |
           cargo test --locked --test db_catalog_postgres -- --ignored --test-threads=2 --nocapture
           cargo test --locked --test db_execution_postgres -- --ignored --test-threads=2 --nocapture
+          cargo test --locked --test db_migration_conformance -- --include-ignored --test-threads=2 --nocapture
           cargo test --locked --lib migrations::postgres::tests::target_transaction_is_really_read_only_even_for_superuser -- --ignored --exact --nocapture
         env:
           RUST_MIN_STACK: 8388608

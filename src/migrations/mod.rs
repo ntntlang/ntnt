@@ -1,12 +1,16 @@
-//! Native SQL history, catalog replay and externally authorized PostgreSQL execution.
+//! Native SQL history, catalog replay and externally authorized relational execution.
 
+mod adapter;
 mod analysis;
 mod catalog_sql;
 mod execution;
 mod input_file;
 mod inventory;
+mod model;
 mod postgres;
 mod report;
+mod sqlite;
+mod sqlite_file;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -22,9 +26,10 @@ pub struct Diagnostic {
 impl Diagnostic {
     pub(crate) fn new(code: &str, message: &str) -> Self {
         let next_action = match code {
+            "DB_SQLITE_RECOVERY_REQUIRED" => "If a writer is active, wait for it to finish and retry inspection. Otherwise rerun migrate with the same approved plan to recover and reconcile under ownership; do not delete the journal or make inspection writable.",
             "DB_REFERENCE_UNAVAILABLE" => "Configure [databases.<name>.scratch] for the selected database with a distinct disposable database and secret, then rerun inspection.",
             "DB_DATABASE_REQUIRED" | "DB_DATABASE_UNKNOWN" => "Select a declared [databases.<name>] with --database <name>. --database may be omitted only when exactly one logical database is declared; --target is always required.",
-            "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty matching PostgreSQL database owned by a separate unprivileged role. Do not reset the selected target.",
+            "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty engine-matching scratch database/file. PostgreSQL requires a separate unprivileged owner role. Do not reset the selected target.",
             "DB_REPLAY_UNSUPPORTED" => "Review the named migration against docs/DATABASE_MIGRATIONS.md. Unsupported SQL needs adapter support or separate manual review; do not replay it on the target.",
             "DB_COVERAGE_INCOMPLETE" | "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
             "DB_DRIFT" => "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.",

@@ -97,7 +97,7 @@ ctrlc = "3.4"
 deadpool-postgres = "0.14"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "hooks", "limits"] }
 rust_decimal = { version = "1.43", features = ["db-postgres", "db-tokio-postgres"] }
 chrono = "0.4"
 chrono-tz = "0.10.4"

@@ -45,7 +45,9 @@ pub(crate) fn json_digest(value: &impl Serialize) -> String {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Endpoint {
     pub connection_secret: String,
+    #[serde(default)]
     pub database: String,
+    #[serde(default)]
     pub role: String,
 }
 #[derive(Clone, Deserialize, Serialize)]
@@ -74,6 +76,8 @@ struct Metadata {
     requires: BTreeMap<String, String>,
     #[serde(default)]
     ensures: BTreeMap<String, String>,
+    #[serde(default)]
+    sqlite_rebuild: Option<String>,
 }
 
 // SQL/metadata are deliberately private and never Debug/Serialize: reports carry
@@ -88,12 +92,17 @@ pub(crate) struct Migration {
     pub intent_ids: Vec<String>,
     pub requires: BTreeMap<String, String>,
     pub ensures: BTreeMap<String, String>,
+    pub sqlite_rebuild: Option<String>,
 }
 impl Migration {
     /// Expose source identities and traceability without raw SQL or sidecar contents.
     pub fn summary(&self) -> serde_json::Value {
-        serde_json::json!({"id":self.id.to_string(), "source":self.name,
-            "checksum":self.checksum, "sql_digest":digest(&[self.sql.as_bytes()]), "metadata_digest":self.metadata.as_ref().map(|b| digest(&[b])), "intent_ids":self.intent_ids, "requires":self.requires.keys().collect::<Vec<_>>(), "ensures":self.ensures.keys().collect::<Vec<_>>()})
+        let mut summary = serde_json::json!({"id":self.id.to_string(), "source":self.name,
+            "checksum":self.checksum, "sql_digest":digest(&[self.sql.as_bytes()]), "metadata_digest":self.metadata.as_ref().map(|b| digest(&[b])), "intent_ids":self.intent_ids, "requires":self.requires.keys().collect::<Vec<_>>(), "ensures":self.ensures.keys().collect::<Vec<_>>()});
+        if let Some(table) = &self.sqlite_rebuild {
+            summary["sqlite_rebuild"] = serde_json::json!(table);
+        }
+        summary
     }
 }
 
@@ -203,16 +212,16 @@ impl CapturedInputs {
             .clone()
             .try_into()
             .map_err(|_| invalid("Unknown or invalid database configuration field."))?;
-        if config.engine != "postgresql"
-            || !identifier(&config.schema)
-            || config.schema == "public"
-            || config.schema == "information_schema"
-            || config.schema == "_ntnt"
-            || config.schema.starts_with("pg_")
-        {
-            return Err(invalid(
-                "Use PostgreSQL and an explicit non-system managed schema (not public).",
-            ));
+        match config.engine.as_str() {
+            "postgresql"
+                if identifier(&config.schema)
+                    && !["public", "information_schema", "_ntnt"]
+                        .contains(&config.schema.as_str())
+                    && !config.schema.starts_with("pg_") => {}
+            "sqlite" if config.schema == "main" => (),
+            _ => return Err(invalid(
+                "Use PostgreSQL with an explicit non-system schema, or SQLite with schema=main.",
+            )),
         }
         let endpoint = config
             .targets
@@ -220,8 +229,9 @@ impl CapturedInputs {
             .cloned()
             .ok_or_else(|| invalid("Select a declared database target."))?;
         for ep in std::iter::once(&endpoint).chain(config.scratch.iter().map(|s| &s.endpoint)) {
-            if !identifier(&ep.database)
-                || !identifier(&ep.role)
+            if (config.engine == "postgresql"
+                && (!identifier(&ep.database) || !identifier(&ep.role)))
+                || (config.engine == "sqlite" && (!ep.database.is_empty() || !ep.role.is_empty()))
                 || crate::secret::validate_secret_name(&ep.connection_secret).is_err()
             {
                 return Err(invalid("Database/role names must be simple identifiers and connections must use logical secret references."));
@@ -356,6 +366,16 @@ impl CapturedInputs {
             {
                 return Err(Diagnostic::new("DB_CHECK_UNSUPPORTED", "Checks require bounded names and the documented closed SELECT expression subset; unsupported SQL is never executed."));
             }
+            if parsed.sqlite_rebuild.as_ref().is_some_and(|table| {
+                config.engine != "sqlite"
+                    || !identifier(table)
+                    || table.to_ascii_lowercase().starts_with("sqlite_")
+            }) {
+                return Err(Diagnostic::new(
+                    "DB_METADATA_UNSUPPORTED",
+                    "sqlite_rebuild requires one ordinary table name and the SQLite adapter.",
+                ));
+            }
             let checksum = digest(&[
                 b"ntnt-migration-v1",
                 name.as_bytes(),
@@ -376,6 +396,7 @@ impl CapturedInputs {
                 intent_ids: parsed.intent_ids,
                 requires: parsed.requires,
                 ensures: parsed.ensures,
+                sqlite_rebuild: parsed.sqlite_rebuild,
             });
         }
         for name in sources.keys().filter(|n| n.ends_with(".toml")) {
@@ -389,7 +410,7 @@ impl CapturedInputs {
         migrations.sort_by_key(|m| m.id);
         let summaries: Vec<_> = migrations.iter().map(Migration::summary).collect();
         let policy_digest = json_digest(
-            &serde_json::json!({"policy":"exact-plan/transactional-postgresql-v1", "database_name":database_name, "database":config}),
+            &serde_json::json!({"policy":if config.engine=="sqlite" {"exact-plan/transactional-sqlite-v1"} else {"exact-plan/transactional-postgresql-v1"}, "database_name":database_name, "database":config}),
         );
         let input_digest = digest(&[
             b"ntnt-inputs-v1",

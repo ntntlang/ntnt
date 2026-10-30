@@ -61,21 +61,28 @@ interpreter or the existing source `ntnt migrate` command. Captured manifest
 secret declarations reuse the existing native secrets providers without reopening
 source policy or changing interpreter-global secret state.
 
-The small relational adapter boundary owns catalog inspection and operation/version
-capabilities. PostgreSQL sessions are dedicated physical connections with bounded
-I/O; the target is inspected in a repeatable-read, read-only transaction. A separate,
-explicitly disposable database with verified physical identity, matching settings
-and an unprivileged role derives expected state using a restricted PostgreSQL AST
-subset in a rollback-only transaction. The captured-byte execution primitive is
-shared native code for the later authorized executor, not a separate rehearsal
-framework. Catalog coverage and opaque objects remain explicit. SQL definitions
-are fingerprinted rather than emitted, because stored definitions can contain
-credentials.
+Two concrete native adapters own catalog/dialect coverage, connection identity,
+locking and operation/version capabilities. The shared core owns immutable inputs,
+plans/approval, history validation, transactional checks/execution and committed-prefix
+recovery; it is not a plugin framework or portable-SQL translator. Both adapters use
+owned physical connections, not application pools. Inspection releases the target
+snapshot before rollback-only replay in explicitly disposable, distinct scratch.
 
-No target DDL, SQL contracts, baseline adoption, SQLite adapter, query lint, or
-application/startup migration behavior is added by this increment. See
-[Database Migrations](docs/DATABASE_MIGRATIONS.md) for the precise format, coverage,
-read-only boundaries, deadlines and later work.
+Authorized execution uses one transaction per migration: requires, captured SQL,
+ensures, expected-catalog verification and the success ledger commit together.
+PostgreSQL keeps a database-local advisory lock across commits and acquires native
+table locks before observation. SQLite reserves the writer with BEGIN IMMEDIATE
+before each observation and revalidates on every acquisition. Its native authorizer
+mediates resolved effects; an explicit guarded table-rebuild mode preserves named
+dependencies, checks row counts/FKs, and restores FK enforcement before commit.
+Uncertain commits trigger fresh locked inspection, never automatic SQL replay.
+Native fresh/populated rehearsal tests exercise this same executor.
+
+Catalog coverage and unknown effects remain explicit. Definitions are hashed, not
+emitted, because stored SQL can contain credentials. Baseline adoption,
+nontransactional operations, query lint and application/startup migration integration
+remain later work. See [Database Migrations](docs/DATABASE_MIGRATIONS.md) for each
+engine's exact coverage, authority boundary, deadlines and recovery limitations.
 
 ## Source Structure
 

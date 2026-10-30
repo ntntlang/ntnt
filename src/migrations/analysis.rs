@@ -12,15 +12,17 @@ pub(crate) struct Analysis {
 /// Parse PostgreSQL syntax within fixed token and recursion bounds.
 /// Invalid, empty or unsupported input is not evidence that replay would be safe.
 fn parse(sql: &str) -> Option<Vec<Statement>> {
-    let dialect = PostgreSqlDialect {};
-    let tokens = sqlparser::tokenizer::Tokenizer::new(&dialect, sql)
+    parse_with(sql, &PostgreSqlDialect {})
+}
+fn parse_with(sql: &str, dialect: &dyn sqlparser::dialect::Dialect) -> Option<Vec<Statement>> {
+    let tokens = sqlparser::tokenizer::Tokenizer::new(dialect, sql)
         .tokenize_with_location()
         .ok()?;
     // Bound both parser work and recursive AST destruction on all CLI stacks.
     if tokens.len() > 4096 {
         return None;
     }
-    Parser::new(&dialect)
+    Parser::new(dialect)
         .with_recursion_limit(64)
         .with_tokens_with_locations(tokens)
         .parse_statements()
@@ -239,13 +241,21 @@ fn allowed(statement: &Statement, schema: &str) -> bool {
 /// Classify supported operations, known hazards and analysis gaps without executing SQL.
 /// Unknown syntax remains explicitly unsupported rather than inheriting a safe verdict.
 pub(crate) fn analyze(sql: &str, schema: &str) -> Analysis {
+    analyze_for("postgresql", sql, schema)
+}
+pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
     let mut a = Analysis {
         replay_supported: true,
         operations: vec![],
         hazards: vec![],
         unknowns: vec![],
     };
-    let Some(statements) = parse(sql).filter(|s| !s.is_empty()) else {
+    let parsed = if engine == "sqlite" {
+        parse_with(sql, &sqlparser::dialect::SQLiteDialect {})
+    } else {
+        parse(sql)
+    };
+    let Some(statements) = parsed.filter(|s| !s.is_empty()) else {
         a.replay_supported = false;
         a.unknowns.push("SQL_PARSE_EMPTY_OR_LIMIT".into());
         return a;
@@ -254,6 +264,15 @@ pub(crate) fn analyze(sql: &str, schema: &str) -> Analysis {
         let (operation, hazard) = match &s {
             Statement::CreateTable(_) => ("create_table", "DDL_LOCKS"),
             Statement::CreateIndex(_) => ("create_index", "INDEX_BUILD_LOCK_SCAN"),
+            Statement::CreateView { .. } if engine == "sqlite" => {
+                ("create_view", "VIEW_DEPENDENCIES")
+            }
+            Statement::CreateTrigger { .. } if engine == "sqlite" => {
+                ("create_trigger", "TRIGGER_EFFECTS")
+            }
+            Statement::DropTrigger { .. } if engine == "sqlite" => {
+                ("drop_trigger", "REMOVED_TRIGGER")
+            }
             Statement::AlterTable(t) => {
                 for op in &t.operations {
                     if matches!(
@@ -309,7 +328,35 @@ pub(crate) fn analyze(sql: &str, schema: &str) -> Analysis {
         };
         a.operations.push(operation.into());
         a.hazards.push(hazard.into());
-        if !allowed(&s, schema) || a.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES") {
+        let supported = if engine == "sqlite" {
+            // SQLite's native authorizer, not PostgreSQL's AST rules, checks
+            // resolved objects/functions before any authored statement executes.
+            a.unknowns.push("SQLITE_EFFECTS_NOT_INFERRED".into());
+            // CREATE authorizes references in its own CHECK/index definitions.
+            // CTAS must not use that newly declared name to authorize an
+            // eponymous virtual-table source during the same preparation. Keep
+            // copies explicit: CREATE ordinary table, then INSERT ... SELECT.
+            !matches!(&s, Statement::CreateTable(table) if table.query.is_some())
+                && matches!(
+                    s,
+                    Statement::CreateTable(_)
+                        | Statement::AlterTable(_)
+                        | Statement::CreateIndex(_)
+                        | Statement::CreateView { .. }
+                        | Statement::CreateTrigger { .. }
+                        | Statement::DropTrigger { .. }
+                        | Statement::Insert(_)
+                        | Statement::Update(_)
+                        | Statement::Delete(_)
+                        | Statement::Drop {
+                            object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
+                            ..
+                        }
+                )
+        } else {
+            allowed(&s, schema)
+        };
+        if !supported || a.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES") {
             a.replay_supported = false;
             a.unknowns.push("SQL_UNSUPPORTED".into());
         }

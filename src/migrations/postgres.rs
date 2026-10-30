@@ -2,9 +2,8 @@
 //! Authored DDL/checks require closed validation; inspection uses only fixed catalog SQL.
 use super::inventory::{Endpoint, Migration};
 use super::{Diagnostic, Result};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::Duration;
 use tokio_postgres::{Client, Config, NoTls, Row};
@@ -50,26 +49,7 @@ pub(crate) struct Identity {
     pub settings: Value,
     pub authority: Value,
 }
-#[derive(Clone, Debug, Default, Serialize)]
-pub(crate) struct Catalog {
-    pub objects: BTreeMap<String, Value>,
-    pub uncovered: Vec<String>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct HistoryEntry {
-    pub position: i64,
-    pub id: String,
-    pub name: String,
-    pub checksum: String,
-    pub state: String,
-}
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct History {
-    pub present: bool,
-    pub entries: Vec<HistoryEntry>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<Value>,
-}
+use super::model::{Catalog, History, HistoryEntry};
 
 /// Small relational boundary: each adapter owns its native catalog and operation
 /// capabilities. A driver alone does not confer migration support.
@@ -295,6 +275,19 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 .collect(),
         })
     }
+    pub async fn validate_execution_scope(&self, schema: &str) -> Result<()> {
+        // A cross-scope dependent is not an owned object. Even non-cascading changes
+        // are conservatively rejected rather than promising a transitive effect bound.
+        let incoming = self.rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_class c ON c.oid=k.confrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_class f ON f.oid=k.conrelid JOIN pg_catalog.pg_namespace fn ON fn.oid=f.relnamespace WHERE n.nspname=$1 AND fn.nspname<>$1)", &[&schema]).await?;
+        if incoming[0].get::<_, bool>(0) {
+            return Err(Diagnostic::new(
+                "DB_EXTERNAL_DEPENDENCY",
+                "Incoming foreign keys from outside the managed schema block execution.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Acquire database-local ownership of the single reserved ledger namespace.
     /// This session lock survives per-migration commits. Drop discards the socket;
     /// it cannot leak into a pool. PostgreSQL lock_timeout bounds competing owners.
