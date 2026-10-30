@@ -230,6 +230,9 @@ listen(0, map {{ "readiness": "json", "host": "127.0.0.1", "realtime": map {{ "m
 
 #[test]
 fn configured_payload_budget_rejects_a_burst_and_is_released_on_disconnect() {
+    // The probe frame needs the entire byte budget, not leftover space that
+    // would allow a small publish to succeed even with leaked earlier frames.
+    let probe = "x".repeat(512 - b"data: \"\"\n\n".len());
     let source = APP.replace(
         "listen(0, map {",
         &format!(
@@ -240,9 +243,11 @@ get("/fill", fn(req) {{
     }}
     return text("budget was not enforced")
 }})
-listen(0, map {{ "realtime": map {{ "max_event_bytes": 256, "max_payload_bytes": 512 }},
+get("/probe", fn(req) {{ text(str(is_ok(publish(bus, "{}")))) }})
+listen(0, map {{ "realtime": map {{ "max_event_bytes": 512, "max_payload_bytes": 512 }},
 "#,
-            "x".repeat(200)
+            "x".repeat(200),
+            probe
         ),
     );
     let mut server = fixture::Fixture::start(
@@ -261,7 +266,7 @@ listen(0, map {{ "realtime": map {{ "max_event_bytes": 256, "max_payload_bytes":
     drop(stream);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if get_body(addr, "/pub?n=1").ends_with("true") {
+        if get_body(addr, "/probe").ends_with("true") {
             break;
         }
         assert!(
