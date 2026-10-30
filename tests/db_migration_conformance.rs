@@ -476,6 +476,19 @@ fn untracked(f: &Fixture) {
 fn assert_unadopted(f: &Fixture) {
     let status = f.command("status", &[]);
     assert!(code(&status, "DB_UNRECOGNIZED_HISTORY"), "{status}");
+    let guidance = status["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_UNRECOGNIZED_HISTORY")
+        .unwrap()["next_action"]
+        .as_str()
+        .unwrap();
+    assert!(
+        guidance.contains("plan --adopt-through") && guidance.contains("adoption_checks"),
+        "{guidance}"
+    );
+    assert!(!guidance.contains("not implemented"), "{guidance}");
     assert_eq!(status["history"]["ledger"]["present"], false);
     assert_eq!(status["history"]["covered_count"], 0);
 }
@@ -724,6 +737,22 @@ fn adoption_never_repairs_unknown_ledgers(f: Fixture) {
     f.execute(setup);
     let rejected = f.command("plan", &["--adopt-through", "1"]);
     assert!(code(&rejected, "DB_LEDGER_UNKNOWN"), "{rejected}");
+    let guidance = rejected["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_LEDGER_UNKNOWN")
+        .unwrap()["next_action"]
+        .as_str()
+        .unwrap();
+    assert!(
+        guidance.contains("operator") && guidance.contains("never reset"),
+        "{guidance}"
+    );
+    assert!(
+        !guidance.contains("plan --adopt-through") && !guidance.contains("not implemented"),
+        "{guidance}"
+    );
     assert_eq!(f.count(query), 17);
     assert_eq!(
         f.text(&format!(
