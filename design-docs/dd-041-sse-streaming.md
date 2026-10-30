@@ -1,6 +1,6 @@
 # DD-041: Native SSE and WebSockets
 
-**Status:** Slice A (native SSE) implemented on main for the v0.5.7 development line; not yet released. Slice B (WebSockets) remains unimplemented.
+**Status:** Slice A (native SSE) implemented for v0.6.0. Slice B (WebSockets) remains unimplemented.
 **Author:** Larri
 **Created:** 2026-03-17
 **Revised:** 2026-10-25
@@ -73,7 +73,7 @@ Ordinary response builders, normal middleware before streaming, named buses shar
 
 ## 3. Public surface: small and additive
 
-All APIs below are **proposed**, not available in v0.5.6. No parser syntax, async language syntax, or new route DSL is required.
+The SSE APIs (`broadcast`, `publish`, `sse`) are implemented for v0.6.0. WebSocket APIs and later lifecycle requirements below remain **proposed**; consult the AI guide for current operational coverage. None of these APIs was available in v0.5.6. No new parser syntax or route DSL is required.
 
 - `std/concurrent.broadcast(name, options?) -> Broadcast`: a named, runtime-scoped native fan-out source.
 - `std/concurrent.publish(bus, value, event_options?) -> Result<Unit, String>`: validate and JSON-encode once, then publish without waiting for any client. Zero subscribers is a successful no-op, not replay storage. Optional `event` and `id` fields are SSE metadata; neither is an authorization grant.
@@ -85,7 +85,7 @@ All APIs below are **proposed**, not available in v0.5.6. No parser syntax, asyn
 
 Keep existing `send()` behavior unchanged. The explicit `publish()` verb avoids changing channel return semantics or overloading event metadata onto every channel operation. Do not introduce separate `std/sse`, `std/ws`, and generic event-framework APIs for this slice.
 
-### SSE example — proposed API
+### SSE example — implemented API
 
 ```ntnt
 import { broadcast, publish } from "std/concurrent"

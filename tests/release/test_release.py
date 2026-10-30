@@ -34,6 +34,29 @@ class WorkflowTests(unittest.TestCase):
         for name in ("build", "armv7", "packaging-tests"):
             self.assertNotIn("permissions", self.jobs[name])
 
+    def test_publish_uses_curated_notes_and_title_for_exact_tag(self):
+        publish = next(s for s in self.jobs["release"]["steps"] if s.get("uses", "").startswith("softprops/"))
+        self.assertEqual(publish["with"].get("body_path"), "docs/release-notes/${{ steps.version.outputs.version }}.md")
+        self.assertEqual(publish["with"]["name"], "${{ steps.version.outputs.title }}")
+        self.assertEqual(publish["with"]["generate_release_notes"], "true")
+        select = next(s for s in self.jobs["release"]["steps"] if s.get("id") == "version")
+        with tempfile.TemporaryDirectory(prefix="ntnt-notes-fixture-") as directory:
+            root = Path(directory)
+            output = root / "output"
+            env = dict(os.environ, GITHUB_REF="refs/tags/v9.8.7", GITHUB_OUTPUT=str(output))
+            missing = subprocess.run(["bash", "-e", "-c", select["run"]], cwd=root, env=env, capture_output=True, text=True)
+            self.assertNotEqual(missing.returncode, 0)
+            notes = root / "docs/release-notes/v9.8.7.md"
+            notes.parent.mkdir(parents=True)
+            notes.write_text("# NTNT v9.8.7 — Fixture release\n\nCurated message.\n")
+            valid = subprocess.run(["bash", "-e", "-c", select["run"]], cwd=root, env=env, capture_output=True, text=True)
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            self.assertEqual(output.read_text().splitlines(), ["version=v9.8.7", "title=NTNT v9.8.7 — Fixture release"])
+            for heading in ("", "Missing heading\n", "# NTNT v9.8.6 — Wrong version\n"):
+                notes.write_text(heading)
+                malformed = subprocess.run(["bash", "-e", "-c", select["run"]], cwd=root, env=env, capture_output=True, text=True)
+                self.assertNotEqual(malformed.returncode, 0)
+
     def test_artifact_upload_and_publish_have_same_arm_files(self):
         upload = next(step for step in self.jobs["armv7"]["steps"] if step.get("uses", "").startswith("actions/upload-artifact"))
         publish = next(step for step in self.jobs["release"]["steps"] if step.get("uses", "").startswith("softprops/"))

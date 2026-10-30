@@ -2,7 +2,7 @@
 
 > **Auto-generated from [syntax.toml](syntax.toml)** - Do not edit directly.
 >
-> Last updated: v0.5.7
+> Last updated: v0.6.0
 
 ## Table of Contents
 

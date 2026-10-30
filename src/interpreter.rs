@@ -3870,7 +3870,7 @@ impl Interpreter {
         // Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged.
         // JSON readiness is one flushed NTNT_READY line after bind with actual host/port.
         // Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness.
-        // Since v0.5.7 `realtime` accepts positive Int max_connections (1024),
+        // Since v0.6.0 `realtime` accepts positive Int max_connections (1024),
         // max_topics (256), max_event_bytes (65536), max_payload_bytes (33554432).
         // Event bytes must not exceed payload bytes. Limits are process-wide,
         // fixed before readiness, and shared by HTTP workers and in-process tasks.

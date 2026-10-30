@@ -3757,7 +3757,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param options Optional map with `capacity`
     // @returns A Broadcast handle
     // @see_also publish, sse
-    // @since v0.5.7
+    // @since v0.6.0
     // @example broadcast("metrics") => <broadcast metrics> ~ "Create or get a bus"
     module.insert(
         "broadcast".to_string(),
@@ -3787,7 +3787,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param options Optional map with `event` and `id`
     // @returns Ok(()) once queued for subscribers; not proof of delivery
     // @see_also broadcast, sse
-    // @since v0.5.7
+    // @since v0.6.0
     // @example publish(bus, map { "cpu": 42 }, map { "event": "metrics" }) => Ok(()) ~ "Publish a named event"
     module.insert(
         "publish".to_string(),
