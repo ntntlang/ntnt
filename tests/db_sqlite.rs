@@ -683,10 +683,7 @@ fn hidden_rowid_trigger(alias: &str) {
         .unwrap();
     f.sql("0002_trigger.sql", &format!("CREATE TRIGGER hidden AFTER UPDATE OF {alias} ON t BEGIN DELETE FROM _ntnt_schema_migrations_v2; END;"));
     let rejected = f.command("plan", &[]);
-    assert_ne!(
-        rejected["outcome"], "pass",
-        "hidden {alias} trigger escaped coverage"
-    );
+    assert!(code(&rejected, "DB_COVERAGE_INCOMPLETE"), "{rejected}");
     assert_eq!(
         f.target()
             .query_row("SELECT count(*) FROM _ntnt_schema_migrations_v2", [], |r| r
@@ -722,6 +719,42 @@ fn sqlite_hidden_underscore_rowid_trigger_cannot_escape_catalog_authorization() 
 fn sqlite_hidden_oid_trigger_cannot_escape_catalog_authorization() {
     hidden_rowid_trigger("oid");
 }
+#[test]
+fn sqlite_without_rowid_trigger_cannot_escape_catalog_authorization() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY) WITHOUT ROWID;",
+    );
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute_batch("INSERT INTO t VALUES(17)")
+        .unwrap();
+    f.sql(
+        "0002_trigger.sql",
+        "CREATE TRIGGER hidden AFTER UPDATE OF id ON t BEGIN DELETE FROM _ntnt_schema_migrations_v2; END;",
+    );
+    let rejected = f.command("plan", &[]);
+    assert!(code(&rejected, "DB_COVERAGE_INCOMPLETE"), "{rejected}");
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM _ntnt_schema_migrations_v2", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.target()
+            .query_row("SELECT id FROM t", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        17
+    );
+}
+
 #[test]
 fn sqlite_without_rowid_table_trigger_keeps_native_coverage() {
     let f = Fixture::new();
