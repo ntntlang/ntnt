@@ -164,6 +164,17 @@ impl Adapter {
             Self::Sqlite(db) => db.check(sql).await,
         }
     }
+    pub async fn record_checkpoint(
+        &self,
+        entry: &super::model::HistoryEntry,
+        database: &str,
+        schema: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.record_entry(entry, database, schema, false).await,
+            Self::Sqlite(db) => db.record_entry(entry, database, false).await,
+        }
+    }
     pub async fn record_migration(
         &self,
         migration: &Migration,

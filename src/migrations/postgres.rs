@@ -357,10 +357,31 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         schema: &str,
         present: bool,
     ) -> Result<()> {
+        self.record_entry(
+            &HistoryEntry {
+                position: position as i64,
+                id: migration.id.to_string(),
+                name: migration.name.clone(),
+                checksum: migration.checksum.clone(),
+                state: "applied".into(),
+            },
+            database,
+            schema,
+            present,
+        )
+        .await
+    }
+    pub async fn record_entry(
+        &self,
+        entry: &HistoryEntry,
+        database: &str,
+        schema: &str,
+        present: bool,
+    ) -> Result<()> {
         if !present {
             self.batch("CREATE SCHEMA _ntnt; CREATE TABLE _ntnt.schema_migrations_v2 (position bigint NOT NULL PRIMARY KEY,id text NOT NULL,name text NOT NULL,checksum text NOT NULL,state text NOT NULL,logical_database text NOT NULL,managed_schema text NOT NULL)").await?;
         }
-        self.rows("INSERT INTO _ntnt.schema_migrations_v2(position,id,name,checksum,state,logical_database,managed_schema) VALUES($1,$2,$3,$4,'applied',$5,$6)", &[&(position as i64), &migration.id.to_string(), &migration.name, &migration.checksum, &database, &schema]).await?;
+        self.rows("INSERT INTO _ntnt.schema_migrations_v2(position,id,name,checksum,state,logical_database,managed_schema) VALUES($1,$2,$3,$4,$5,$6,$7)", &[&entry.position,&entry.id,&entry.name,&entry.checksum,&entry.state,&database,&schema]).await?;
         Ok(())
     }
 

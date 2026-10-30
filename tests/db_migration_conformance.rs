@@ -278,3 +278,105 @@ fn postgres_contract_failures() {
 fn postgres_wrong_target() {
     wrong_target(Fixture::pg)
 }
+
+fn adoption_checks(f: &Fixture, sql: &str) {
+    use std::io::Write;
+    let mut manifest = std::fs::OpenOptions::new()
+        .append(true)
+        .open(f.root().join("ntnt.toml"))
+        .unwrap();
+    writeln!(
+        manifest,
+        "\n[databases.app.adoption_checks]\nrepresentative={sql:?}"
+    )
+    .unwrap();
+}
+fn adopt_populated_checkpoint_then_upgrade(f: Fixture) {
+    let initial = format!(
+        "CREATE TABLE {}.items(id INTEGER PRIMARY KEY,value TEXT);",
+        f.schema()
+    );
+    f.sql("0001_baseline.sql", &initial);
+    f.execute(&initial);
+    f.execute(&format!(
+        "INSERT INTO {}.items VALUES(17,'retained')",
+        f.schema()
+    ));
+    assert!(code(&f.command("status", &[]), "DB_UNRECOGNIZED_HISTORY"));
+    adoption_checks(
+        &f,
+        &format!(
+            "SELECT NOT EXISTS (SELECT 1 FROM {}.items WHERE value IS NULL)",
+            f.schema()
+        ),
+    );
+    let plan = f.command("plan", &["--adopt-through", "1", "--out", "adoption.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    assert_eq!(plan["plan"]["action"]["kind"], "adopt_baseline");
+    assert_eq!(plan["assertions"]["executed"], 0);
+    assert!(code(
+        &f.apply("adoption.json", None),
+        "DB_APPROVAL_REQUIRED"
+    ));
+    let adopted = f.apply("adoption.json", plan["plan_digest"].as_str());
+    assert_eq!(adopted["outcome"], "pass", "{adopted}");
+    assert_eq!(adopted["assertions"]["executed"], 1);
+    assert_eq!(adopted["progress"][0]["kind"], "adopt_baseline");
+    assert_eq!(adopted["progress"][0]["state"], "committed");
+    let status = f.command("verify", &[]);
+    assert_eq!(status["outcome"], "pass", "{status}");
+    assert_eq!(status["history"]["applied_count"], 0);
+    assert_eq!(status["history"]["adopted_count"], 1);
+    assert_eq!(status["history"]["covered_count"], 1);
+    assert_eq!(
+        status["history"]["ledger"]["entries"][0]["state"],
+        "adopted"
+    );
+    assert_eq!(f.count(&format!("SELECT count(*) FROM {}", f.ledger())), 1);
+    assert_eq!(
+        f.text(&format!(
+            "SELECT value FROM {}.items WHERE id=17",
+            f.schema()
+        )),
+        "retained"
+    );
+    // Adoption checks are an observed transition, not persistent invariants.
+    f.execute(&format!("INSERT INTO {}.items VALUES(18,NULL)", f.schema()));
+    let again = f.apply("adoption.json", plan["plan_digest"].as_str());
+    assert_eq!(again["outcome"], "pass", "{again}");
+    assert_eq!(again["assertions"]["executed"], 0);
+    assert_eq!(again["progress"][0]["state"], "already_adopted");
+    f.sql(
+        "0002_upgrade.sql",
+        &format!(
+            "ALTER TABLE {}.items ADD COLUMN label TEXT DEFAULT 'expanded';",
+            f.schema()
+        ),
+    );
+    let upgrade = f.plan("upgrade.json");
+    let applied = f.apply("upgrade.json", upgrade["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    assert_eq!(applied["progress"][0]["state"], "baseline_covered");
+    assert_eq!(applied["progress"][1]["state"], "committed");
+    assert_eq!(
+        f.text(&format!(
+            "SELECT label FROM {}.items WHERE id=17",
+            f.schema()
+        )),
+        "expanded"
+    );
+    let verified = f.command("verify", &[]);
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["history"]["covered_count"], 2);
+    assert_eq!(verified["history"]["adopted_count"], 1);
+    assert_eq!(verified["history"]["applied_count"], 1);
+}
+#[test]
+fn sqlite_adopts_populated_checkpoint_then_upgrades() {
+    adopt_populated_checkpoint_then_upgrade(Fixture::sqlite())
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_adopts_populated_checkpoint_then_upgrades() {
+    adopt_populated_checkpoint_then_upgrade(Fixture::pg())
+}

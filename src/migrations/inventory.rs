@@ -66,6 +66,8 @@ pub(crate) struct Database {
     pub targets: BTreeMap<String, Endpoint>,
     pub scratch: Option<Scratch>,
     pub approval_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub adoption_checks: BTreeMap<String, String>,
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -165,6 +167,33 @@ pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 impl CapturedInputs {
+    /// Bind the exact covered source prefix without claiming its SQL was executed.
+    pub fn checkpoint(&self, count: usize) -> Result<super::model::HistoryEntry> {
+        let last = count
+            .checked_sub(1)
+            .and_then(|n| self.migrations.get(n))
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    "DB_ADOPTION_INPUT",
+                    "Adoption requires a nonempty captured migration prefix.",
+                )
+            })?;
+        let prefix: Vec<_> = self
+            .migrations
+            .iter()
+            .take(count)
+            .map(Migration::summary)
+            .collect();
+        Ok(super::model::HistoryEntry {
+            position: count as i64,
+            id: last.id.to_string(),
+            name: last.name.clone(),
+            checksum: json_digest(
+                &serde_json::json!({"format":"ntnt-baseline-v1","prefix":prefix}),
+            ),
+            state: "adopted".into(),
+        })
+    }
     /// Capture the manifest and exactly one logical database's ordered migration inputs.
     /// Ambiguous selection and malformed registry entries fail before credential lookup;
     /// unselected stores' directories are not visited. Exact bytes and logical selection
@@ -222,6 +251,15 @@ impl CapturedInputs {
             _ => return Err(invalid(
                 "Use PostgreSQL with an explicit non-system schema, or SQLite with schema=main.",
             )),
+        }
+        if config.adoption_checks.len() > 64
+            || config.adoption_checks.iter().any(|(name, sql)| {
+                !identifier(name)
+                    || sql.len() > 65536
+                    || !super::analysis::contract_supported(sql, &config.schema)
+            })
+        {
+            return Err(Diagnostic::new("DB_CHECK_UNSUPPORTED", "Adoption checks require bounded names and the supported schema-qualified SELECT expression subset."));
         }
         let endpoint = config
             .targets

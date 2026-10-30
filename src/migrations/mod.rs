@@ -1,6 +1,7 @@
 //! Native SQL history, catalog replay and externally authorized relational execution.
 
 mod adapter;
+mod adoption;
 mod analysis;
 mod catalog_sql;
 mod execution;
@@ -102,6 +103,9 @@ pub struct Options {
     /// Revalidate a previously saved plan's source/target/base binding (no execution).
     #[arg(long)]
     pub against: Option<PathBuf>,
+    /// Plan explicit adoption through this migration ID; never execute its old SQL.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub adopt_through: Option<u64>,
 }
 
 /// Run one database operation with an outer deadline and bounded runtime teardown.
@@ -199,10 +203,10 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             "observed_at":chrono::Utc::now().to_rfc3339(),"outcome":"unknown","diagnostics":[],
             "progress":[],"assertions":{"outcome":"not_run","executed":0}});
         let work = inputs.and_then(|inputs| {
-            if options.against.is_some() {
+            if options.against.is_some() || options.adopt_through.is_some() {
                 return Err(Diagnostic::new(
                     "DB_CONFIG",
-                    "migrate uses --plan, not --against.",
+                    "migrate uses only --plan; --adopt-through belongs to plan.",
                 ));
             }
             let bytes = inventory::file_bytes(&path)?;
@@ -230,7 +234,12 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         progress
     } else {
         inputs
-            .and_then(|inputs| database_runtime(report::inspect(inputs, command)))
+            .and_then(|inputs| {
+                if options.adopt_through.is_some() && (command!="plan" || options.against.is_some()) {
+                    return Err(Diagnostic::new("DB_CONFIG","--adopt-through is only for an explicit plan, not status/verify/--against."));
+                }
+                database_runtime(report::inspect(inputs, command, options.adopt_through))
+            })
             .unwrap_or_else(|d| report::failure(command, d))
     };
     if let Some(prior) = prior {
@@ -248,7 +257,7 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .skip(report["history"]["applied_count"].as_u64().unwrap() as usize)
+                        .skip(report["history"]["covered_count"].as_u64().unwrap() as usize)
                         .collect::<Vec<_>>())
         });
         report["plan_validation"] =
@@ -292,8 +301,12 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         }
         if let Some(h) = report.get("history") {
             println!(
-                "History: {} applied, {} pending; drift: {}",
-                h["applied_count"], h["pending_count"], report["drift"]["outcome"]
+                "History: {} applied, {} adopted, {} imported, {} pending; drift: {}",
+                h["applied_count"],
+                h["adopted_count"],
+                h["imported_count"],
+                h["pending_count"],
+                report["drift"]["outcome"]
             );
         }
         if let Some(objects) = report["catalog"]["objects"].as_object() {

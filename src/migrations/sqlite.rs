@@ -867,11 +867,30 @@ impl Sqlite {
         database: &str,
         present: bool,
     ) -> Result<()> {
-        let migration = migration.clone();
+        self.record_entry(
+            &HistoryEntry {
+                position: position as i64,
+                id: migration.id.to_string(),
+                name: migration.name.clone(),
+                checksum: migration.checksum.clone(),
+                state: "applied".into(),
+            },
+            database,
+            present,
+        )
+        .await
+    }
+    pub async fn record_entry(
+        &self,
+        entry: &HistoryEntry,
+        database: &str,
+        present: bool,
+    ) -> Result<()> {
+        let entry = entry.clone();
         let database = database.to_owned();
         self.run(move|s|{
             if !present {s.conn.execute_batch(LEDGER_SQL).map_err(sql_error)?;}
-            s.conn.execute("INSERT INTO main._ntnt_schema_migrations_v2(position,id,name,checksum,state,logical_database,managed_schema) VALUES(?1,?2,?3,?4,'applied',?5,'main')",rusqlite::params![position as i64,migration.id.to_string(),migration.name,migration.checksum,database]).map_err(sql_error)?;
+            s.conn.execute("INSERT INTO main._ntnt_schema_migrations_v2(position,id,name,checksum,state,logical_database,managed_schema) VALUES(?1,?2,?3,?4,?5,?6,'main')",rusqlite::params![entry.position,entry.id,entry.name,entry.checksum,entry.state,database]).map_err(sql_error)?;
             Ok(())
         }).await
     }

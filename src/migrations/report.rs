@@ -30,14 +30,53 @@ pub(super) fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize
             "Applied history contains migrations missing from the captured inventory.",
         ));
     }
-    for (i, (entry, migration)) in history.entries.iter().zip(&inputs.migrations).enumerate() {
+    let mut covered = 0;
+    for (i, entry) in history.entries.iter().enumerate() {
+        if i == 0 && entry.state == "adopted" {
+            if history.scope.is_none() {
+                return Err(Diagnostic::new(
+                    "DB_LEDGER_SCOPE",
+                    "An adopted checkpoint must bind the logical database and managed schema.",
+                ));
+            }
+            let count = usize::try_from(entry.position)
+                .ok()
+                .filter(|n| *n > 0 && *n <= inputs.migrations.len())
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        "DB_HISTORY_MISSING",
+                        "The adopted source prefix is missing or invalid.",
+                    )
+                })?;
+            let expected = inputs.checkpoint(count)?;
+            if entry.id != expected.id || entry.name != expected.name {
+                return Err(Diagnostic::new(
+                    "DB_HISTORY_DIVERGENT",
+                    "Adopted checkpoint does not identify this ordered source prefix.",
+                ));
+            }
+            if entry.checksum != expected.checksum {
+                return Err(Diagnostic::new(
+                    "DB_HISTORY_EDITED",
+                    "Source bytes covered by the adopted checkpoint have changed.",
+                ));
+            }
+            covered = count;
+            continue;
+        }
+        let migration = inputs.migrations.get(covered).ok_or_else(|| {
+            Diagnostic::new(
+                "DB_HISTORY_MISSING",
+                "Applied history exceeds the captured source prefix.",
+            )
+        })?;
         if entry.state != "applied" {
             return Err(Diagnostic::new(
                 "DB_HISTORY_DIRTY",
                 "Ledger contains non-applied work; explicit reconciliation is required.",
             ));
         }
-        if entry.position != i as i64 + 1
+        if entry.position != covered as i64 + 1
             || entry.id != migration.id.to_string()
             || entry.name != migration.name
         {
@@ -49,8 +88,9 @@ pub(super) fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize
                 "Applied SQL or metadata bytes have changed.",
             ));
         }
+        covered += 1;
     }
-    Ok(history.entries.len())
+    Ok(covered)
 }
 /// Report object-level differences, keeping the verdict unknown if either catalog is partial.
 fn compare(observed: &Catalog, expected: &Catalog) -> Value {
@@ -75,7 +115,14 @@ fn compare(observed: &Catalog, expected: &Catalog) -> Value {
 /// Capture target facts in a read-only snapshot and release that session before replay.
 /// Scratch work uses separate identity/credentials; the result is schema evidence, not
 /// data-preservation proof, executed SQL assertions, or permission to migrate.
-pub(super) async fn inspect(inputs: CapturedInputs, command: &str) -> Result<Value> {
+pub(super) async fn inspect(
+    inputs: CapturedInputs,
+    command: &str,
+    adopt_through: Option<u64>,
+) -> Result<Value> {
+    if let Some(id) = adopt_through {
+        super::adoption::Adoption::selected(&inputs, id)?;
+    }
     let secret = crate::stdlib::secrets::require_from_manifest(
         &inputs.endpoint.connection_secret,
         &inputs.document,
@@ -112,7 +159,7 @@ pub(super) async fn inspect(inputs: CapturedInputs, command: &str) -> Result<Val
         (Ok(observed), Ok(())) => observed,
         (Err(d), _) | (_, Err(d)) => return Err(d),
     };
-    inspect_observed(&inputs, command, identity, catalog, history).await
+    inspect_observed(&inputs, command, identity, catalog, history, adopt_through).await
 }
 /// Combine captured target facts with applied-prefix and optional candidate replay.
 /// Plan bindings retain logical labels, physical identity and exact source/policy digests.
@@ -123,6 +170,7 @@ async fn inspect_observed(
     identity: Identity,
     catalog: Catalog,
     history: Result<History>,
+    adopt_through: Option<u64>,
 ) -> Result<Value> {
     let inventory: Vec<_> = inputs
         .migrations
@@ -160,8 +208,20 @@ async fn inspect_observed(
             return Ok(report);
         }
     };
-    report["history"] = json!({"outcome":"pass","ledger":history,"applied_count":applied,"pending_count":inputs.migrations.len()-applied});
-    if !history.present
+    let adoption = adopt_through
+        .map(|id| super::adoption::Adoption::request(inputs, id, &history))
+        .transpose()?;
+    let reference = adoption.as_ref().map_or(applied, |a| a.count);
+    report["history"] =
+        json!({"outcome":"pass","ledger":history,"pending_count":inputs.migrations.len()-applied});
+    for (key, value) in history.counts().as_object().unwrap() {
+        report["history"][key] = value.clone();
+    }
+    if let Some(action) = &adoption {
+        report["adoption"] = json!({"action":action,"outcome":"not_run","sql_executed":false});
+    }
+    if adoption.is_none()
+        && !history.present
         && catalog
             .objects
             .iter()
@@ -207,14 +267,16 @@ async fn inspect_observed(
                         .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
                         .await?,
                 ));
-                if applied == 0 {
+                if reference == 0 {
                     expected = Some(
                         scratch
                             .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
                             .await?,
                     );
                 }
-                let count = if command == "plan" {
+                let count = if let Some(action) = &adoption {
+                    action.count
+                } else if command == "plan" {
                     inputs.migrations.len()
                 } else {
                     applied
@@ -233,7 +295,7 @@ async fn inspect_observed(
                         ));
                     }
                     fingerprints.push(json_digest(&step));
-                    if index + 1 == applied {
+                    if index + 1 == reference {
                         expected = Some(
                             scratch
                                 .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
@@ -272,6 +334,9 @@ async fn inspect_observed(
     }
     if let Some(expected) = &expected {
         report["drift"] = compare(&catalog, expected);
+        if adoption.is_some() {
+            report["drift"]["reference"] = json!("requested_baseline");
+        }
     }
     report["outcome"] = report["drift"]["outcome"].clone();
     if report["drift"]["outcome"] == "fail" {
@@ -287,7 +352,11 @@ async fn inspect_observed(
     let pending: Vec<_> = inputs
         .migrations
         .iter()
-        .skip(applied)
+        .skip(if adoption.is_some() {
+            inputs.migrations.len()
+        } else {
+            applied
+        })
         .map(|m| {
             let mut v = m.summary();
             v["analysis"] = json!(analyze_for(
@@ -307,9 +376,12 @@ async fn inspect_observed(
     };
     report["binding"] = binding.clone();
     if command == "plan" {
-        let plan = json!({"execution":{"format":adapter::execution_format(&inputs.config.engine),"prefix_fingerprints":fingerprints},"binding":binding,"pending":pending,"candidate":{"outcome":candidate_outcome,"fingerprint":candidate.as_ref().map(json_digest)},
+        let mut plan = json!({"execution":{"format":if adoption.is_some() {super::adoption::format(&inputs.config.engine)} else {adapter::execution_format(&inputs.config.engine)},"prefix_fingerprints":fingerprints},"binding":binding,"pending":pending,"candidate":{"outcome":candidate_outcome,"fingerprint":candidate.as_ref().map(json_digest)},
             "authorized":false,"executable":false,"automatic_safe":false,"classification":if report["outcome"]=="pass" && candidate_outcome=="pass" {"requires_review"} else {"blocked"},"required_authority":"migrate requires this exact digest from the separately protected approval_secret provider, then revalidates under ownership. This digest alone grants no authority.",
             "data_checks":{"outcome":"not_run","reason":"Constraints, casts, nulls, duplicates, orphans and deployed-client compatibility require later data/behavior evidence."}});
+        if let Some(action) = adoption {
+            plan["action"] = json!(action);
+        }
         report["plan_digest"] = json!(json_digest(&plan));
         report["plan"] = plan;
         if candidate_outcome != "pass" && report["outcome"] == "pass" {
