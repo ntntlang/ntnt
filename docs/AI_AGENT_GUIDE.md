@@ -1720,8 +1720,11 @@ reviewed digest. PostgreSQL and SQLite share one transactional execution/recover
 core, but retain native SQL, identities, coverage and locking. SQLite uses existing
 local files, a native authorizer, BEGIN IMMEDIATE and an explicit guarded rebuild
 mode. Rehearse populated upgrades through the same executor; empty replay and row
-counts do not prove mappings or deployed-client compatibility. Adoption remains
-unsupported. Existing application-owned runners and the `ntnt migrate` source
+counts do not prove mappings or deployed-client compatibility. Existing databases
+can be explicitly adopted with `plan --adopt-through <id>`, named manifest
+`adoption_checks`, then independently approved `migrate --plan`. This records an
+observed source-prefix checkpoint, not old SQL execution; unknown or unsafe legacy
+history is never repaired. Existing application-owned runners and the `ntnt migrate` source
 interpolation command are unchanged. See [Database Migrations](DATABASE_MIGRATIONS.md)
 for the precise authority, file/transport, contract and recovery boundaries before
 configuring a deployment.

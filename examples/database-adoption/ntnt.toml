@@ -1,0 +1,18 @@
+# Disposable SQLite adoption example, never an implicit production target.
+[databases.app]
+engine = "sqlite"
+schema = "main"
+migrations_dir = "migrations"
+approval_secret = "DB_APPROVAL"
+[databases.app.targets.test]
+connection_secret = "DB_TARGET"
+[databases.app.scratch]
+connection_secret = "DB_SCRATCH"
+disposable = true
+[databases.app.adoption_checks]
+no_null_email = "SELECT NOT EXISTS (SELECT 1 FROM main.customers WHERE email IS NULL)"
+no_duplicate_email = "SELECT NOT EXISTS (SELECT email FROM main.customers GROUP BY email HAVING count(*) > 1)"
+no_orphans = "SELECT NOT EXISTS (SELECT 1 FROM main.orders WHERE NOT EXISTS (SELECT 1 FROM main.customers WHERE id = customer_id))"
+[secrets.DB_TARGET]
+[secrets.DB_SCRATCH]
+[secrets.DB_APPROVAL]

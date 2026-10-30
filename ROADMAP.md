@@ -44,13 +44,16 @@ This document outlines the implementation plan for NTNT, a programming language 
   locking/cancellation/reconciliation, and populated-data rehearsal.
 - [x] SQLite adapter and shared lifecycle conformance, including guarded populated
   rebuilds and native cross-process failure/recovery cases.
-- [ ] Deliberate existing-database adoption and the first complete foundation release.
+- [x] Deliberate existing-database adoption, recognized legacy import and the
+  complete transactional foundation, with a populated application rehearsal.
 - [ ] Narrow non-transactional concurrent-index execution/recovery.
 - [ ] Schema-aware query validation, dependencies and Intent views.
 
 Inspection/planning stays read-only on the selected target; `ntnt db migrate`
 requires an exact reviewed plan plus separately protected approval. This does not
-replace application startup migrations or adopt existing databases. KV/document-store
+replace application startup migrations. Existing-database adoption requires an
+explicit reviewed `plan --adopt-through` and separate approval; it never happens
+implicitly. KV/document-store
 evolution remains deferred rather than being forced through the relational adapter.
 
 ## Current Status

@@ -330,7 +330,7 @@ pub(super) async fn migrate(
         .map(|m| json!({"source":m.name,"state":"not_run"}))
         .collect::<Vec<_>>());
     if let Some(action) = &action {
-        report["progress"] = json!([{"kind":action.kind,"through_id":action.through_id,"covered_count":action.count,"state":"not_run","executed_sql":false}]);
+        report["progress"] = json!([{"kind":action.kind,"through_id":action.through_id,"covered_count":action.count,"state":"not_run","migration_sql_executed":false}]);
     }
     let result = work_deadline(
         apply_owned(inputs, saved, report),

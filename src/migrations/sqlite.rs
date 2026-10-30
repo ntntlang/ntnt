@@ -880,6 +880,8 @@ impl Sqlite {
         )
         .await
     }
+    /// Insert a validated record inside the caller-owned migration transaction.
+    /// Only an absent reserved ledger may be bootstrapped; eligibility is checked upstream.
     pub async fn record_entry(
         &self,
         entry: &HistoryEntry,
@@ -896,7 +898,7 @@ impl Sqlite {
     }
     pub fn capabilities(version: i32) -> Value {
         json!({"adapter":"sqlite-catalog-v1","canonicalization_version":1,"sqlite_version_number":version,
-            "operations":{"catalog_inspection":"supported_subset","target_ddl":"exact_plan_transactional_subset","sql_contracts":"integer_boolean_native_authorizer","baseline_adoption":"not_implemented","concurrent_indexes":"unsupported"},
+            "operations":{"catalog_inspection":"supported_subset","target_ddl":"exact_plan_transactional_subset","sql_contracts":"integer_boolean_native_authorizer","baseline_adoption":"reviewed_prefix_checkpoint","concurrent_indexes":"unsupported"},
             "guarantees":{"execution_transaction":"begin_immediate_before_inspection","atomic_target_ddl_checks_ledger":true,"checks":"native_authorizer_and_closed_expression_grammar","authority":"external_filesystem_and_secret_provider"}})
     }
 }

@@ -396,6 +396,8 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         )
         .await
     }
+    /// Insert a validated record inside the caller-owned migration transaction.
+    /// Only an absent reserved ledger may be bootstrapped; eligibility is checked upstream.
     pub async fn record_entry(
         &self,
         entry: &HistoryEntry,
@@ -600,7 +602,7 @@ fn canonical_roles(value: &mut Value, role: &str) {
 impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
-            "operations": {"catalog_inspection":"supported_subset", "restricted_ddl_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_subset", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"not_implemented"},
+            "operations": {"catalog_inspection":"supported_subset", "restricted_ddl_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_subset", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"reviewed_prefix_checkpoint"},
             "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_grants":"canonical_role_names", "views_sequences_routines_triggers_policies":"inventoried_opaque", "partitioning_extensions_custom_types_external_dependencies":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"restricted_subset_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }

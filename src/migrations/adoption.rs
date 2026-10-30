@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Captured adoption action; count is covered source files, not executed SQL.
 pub(super) struct Adoption {
     pub kind: String,
     pub through_id: String,
@@ -34,6 +35,7 @@ impl Adoption {
             checks: inputs.config.adoption_checks.keys().cloned().collect(),
         })
     }
+    /// Resolve the explicit ID/check policy before any database I/O.
     pub fn selected(inputs: &CapturedInputs, through: u64) -> Result<Self> {
         let count = inputs
             .migrations
@@ -43,6 +45,7 @@ impl Adoption {
             .ok_or_else(invalid)?;
         Self::new(inputs, count, "adopt_baseline")
     }
+    /// Select an absent-ledger checkpoint or a fully matching recognized import.
     pub fn request(inputs: &CapturedInputs, through: u64, history: &History) -> Result<Self> {
         let mut action = Self::selected(inputs, through)?;
         if history.present && history.scope.is_none() && inputs.config.engine == "postgresql" {
@@ -51,6 +54,7 @@ impl Adoption {
         action.before(inputs, history)?;
         Ok(action)
     }
+    /// Reconstruct the descriptor from captured inputs before resolving approval.
     pub fn from_plan(inputs: &CapturedInputs, saved: &Value) -> Result<Option<Self>> {
         let Some(value) = saved["plan"].get("action") else {
             return Ok(None);
@@ -61,6 +65,7 @@ impl Adoption {
         }
         Ok(Some(action))
     }
+    /// Covered-prefix index expected before this adoption action.
     pub fn base_count(&self) -> usize {
         if self.kind == "import_legacy_v1" {
             self.count
@@ -68,6 +73,7 @@ impl Adoption {
             0
         }
     }
+    /// Validate original ledger eligibility without mutating or repairing it.
     pub fn before(&self, inputs: &CapturedInputs, history: &History) -> Result<()> {
         if self.kind == "import_legacy_v1" {
             if !history.present
@@ -83,6 +89,7 @@ impl Adoption {
         }
         Ok(())
     }
+    /// Exact expected ledger for post-write validation and fresh reconciliation.
     pub fn after(&self, inputs: &CapturedInputs) -> Result<History> {
         Ok(History {
             present: true,

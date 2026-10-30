@@ -27,6 +27,7 @@ pub struct Diagnostic {
 impl Diagnostic {
     pub(crate) fn new(code: &str, message: &str) -> Self {
         let next_action = match code {
+            "DB_ADOPTION_INPUT" => "Select an exact source-prefix ID with plan --adopt-through and declare named adoption_checks. Only absent history or matching recognized legacy history is eligible; never reset or rewrite a ledger to force adoption.",
             "DB_SQLITE_RECOVERY_REQUIRED" => "If a writer is active, wait for it to finish and retry inspection. Otherwise rerun migrate with the same approved plan to recover and reconcile under ownership; do not delete the journal or make inspection writable.",
             "DB_REFERENCE_UNAVAILABLE" => "Configure [databases.<name>.scratch] for the selected database with a distinct disposable database and secret, then rerun inspection.",
             "DB_DATABASE_REQUIRED" | "DB_DATABASE_UNKNOWN" => "Select a declared [databases.<name>] with --database <name>. --database may be omitted only when exactly one logical database is declared; --target is always required.",

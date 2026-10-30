@@ -229,7 +229,8 @@ async fn inspect_observed(
         report["history"][key] = value.clone();
     }
     if let Some(action) = &adoption {
-        report["adoption"] = json!({"action":action,"outcome":"not_run","sql_executed":false});
+        report["adoption"] =
+            json!({"action":action,"outcome":"not_run","migration_sql_executed":false});
     }
     if adoption.is_none()
         && !history.present
