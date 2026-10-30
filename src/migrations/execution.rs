@@ -1,7 +1,8 @@
-//! Exact-plan PostgreSQL execution. No plan digest self-authorizes a write.
+//! Exact-plan relational execution. No plan digest self-authorizes a write.
 //! The caller retains progress across cancellation; sessions are never pooled.
+use super::adapter::{self, Access, Adapter, Identity};
 use super::inventory::{json_digest, CapturedInputs};
-use super::postgres::{History, Identity, Postgres, RelationalAdapter};
+use super::model::History;
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
 
@@ -27,7 +28,11 @@ fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
         .skip(base)
         .map(|m| {
             let mut s = m.summary();
-            s["analysis"] = json!(super::analysis::analyze(&m.sql, &inputs.config.schema));
+            s["analysis"] = json!(super::analysis::analyze_for(
+                &inputs.config.engine,
+                &m.sql,
+                &inputs.config.schema
+            ));
             s
         })
         .collect();
@@ -38,7 +43,7 @@ fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
         || plan["executable"] != false
         || plan["classification"] != "requires_review"
         || plan["candidate"]["outcome"] != "pass"
-        || plan["execution"]["format"] != "postgresql-transactional-v1"
+        || plan["execution"]["format"] != adapter::execution_format(&inputs.config.engine)
         || base > inputs.migrations.len()
         || fingerprints.len() != inputs.migrations.len() + 1
         || fingerprints.iter().any(|v| {
@@ -57,7 +62,7 @@ fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
                 && s.bytes()
                     .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
         })
-        || b["adapter"] != "postgresql-catalog-v1"
+        || b["adapter"] != adapter::catalog_format(&inputs.config.engine)
         || b["canonicalization_version"] != 1
         || b["input_digest"] != inputs.input_digest
         || b["policy_digest"] != inputs.policy_digest
@@ -65,10 +70,10 @@ fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
         || b["target_name"] != inputs.target_name
         || b["managed_schema"] != inputs.config.schema
         || plan["pending"] != json!(pending)
-        || inputs
-            .migrations
-            .iter()
-            .any(|m| !super::analysis::analyze(&m.sql, &inputs.config.schema).replay_supported)
+        || inputs.migrations.iter().any(|m| {
+            !super::analysis::analyze_for(&inputs.config.engine, &m.sql, &inputs.config.schema)
+                .replay_supported
+        })
     {
         return Err(stale());
     }
@@ -94,21 +99,21 @@ fn authorize(inputs: &CapturedInputs, saved: &Value) -> Result<()> {
 /// Matching progress is recognized at *every* planned prefix, never by final
 /// catalog alone. An unrelated extension, dirty history or changed SQL blocks it.
 async fn locked_prefix(
-    pg: &Postgres,
+    db: &Adapter,
     inputs: &CapturedInputs,
     saved: &Value,
 ) -> Result<(usize, History, Identity)> {
     let base = validate(inputs, saved)?;
-    pg.begin_migration(&inputs.config.schema).await?;
-    let identity = pg.identity(&inputs.endpoint).await?;
+    db.begin_migration(&inputs.config.schema).await?;
+    let identity = db.identity(&inputs.endpoint).await?;
     if json!(&identity) != saved["plan"]["binding"]["target"] {
         return Err(stale());
     }
-    let history = pg
+    let history = db
         .writable_history(&inputs.database_name, &inputs.config.schema)
         .await?;
     let applied = super::report::prefix(&history, inputs)?;
-    let catalog = pg
+    let catalog = db
         .catalog(&inputs.config.schema, &inputs.endpoint.role)
         .await?;
     if !catalog.uncovered.is_empty()
@@ -119,15 +124,7 @@ async fn locked_prefix(
     {
         return Err(stale());
     }
-    // A cross-scope dependent is not an owned object. Even non-cascading changes
-    // are conservatively rejected rather than promising a transitive effect bound.
-    let incoming = pg.rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_class c ON c.oid=k.confrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_class f ON f.oid=k.conrelid JOIN pg_catalog.pg_namespace fn ON fn.oid=f.relnamespace WHERE n.nspname=$1 AND fn.nspname<>$1)", &[&inputs.config.schema]).await?;
-    if incoming[0].get::<_, bool>(0) {
-        return Err(Diagnostic::new(
-            "DB_EXTERNAL_DEPENDENCY",
-            "Incoming foreign keys from outside the managed schema block execution.",
-        ));
-    }
+    db.validate_execution_scope(&inputs.config.schema).await?;
     Ok((applied, history, identity))
 }
 
@@ -154,10 +151,10 @@ async fn reconcile(
     report: &mut Value,
     attempted: usize,
 ) -> Result<()> {
-    let pg = connect(inputs).await?;
-    pg.own_migrations().await?;
-    let (count, _, identity) = locked_prefix(&pg, inputs, saved).await?;
-    pg.rollback().await?;
+    let db = connect(inputs, saved).await?;
+    db.own_migrations().await?;
+    let (count, _, identity) = locked_prefix(&db, inputs, saved).await?;
+    db.rollback().await?;
     report["target"]["identity"] = json!(identity);
     if count < attempted || count > inputs.migrations.len() {
         return Err(stale());
@@ -173,7 +170,7 @@ async fn reconcile(
     Ok(())
 }
 
-async fn connect(inputs: &CapturedInputs) -> Result<Postgres> {
+async fn connect(inputs: &CapturedInputs, saved: &Value) -> Result<Adapter> {
     let secret = crate::stdlib::secrets::require_from_manifest(
         &inputs.endpoint.connection_secret,
         &inputs.document,
@@ -184,13 +181,19 @@ async fn connect(inputs: &CapturedInputs) -> Result<Postgres> {
             "Cannot resolve target connection secret; provider details suppressed.",
         )
     })?;
-    Postgres::connect(&secret, &inputs.endpoint).await
+    Adapter::connect(
+        &secret,
+        &inputs.endpoint,
+        &inputs.config.engine,
+        Access::Execute(saved["plan"]["binding"]["target"].clone()),
+    )
+    .await
 }
 
 /// Count only checks actually attempted on this target in this invocation.
 /// Historical transition checks never become permanent verify assertions.
 async fn checks(
-    pg: &Postgres,
+    db: &Adapter,
     checks: &std::collections::BTreeMap<String, String>,
     schema: &str,
     source: &str,
@@ -200,12 +203,12 @@ async fn checks(
     if checks.is_empty() {
         return Ok(());
     }
-    pg.check_purity(schema).await?;
+    db.check_purity(schema).await?;
     for (name, sql) in checks {
         let count = report["assertions"]["executed"].as_u64().unwrap_or(0);
         report["assertions"]["executed"] = json!(count + 1);
         report["assertions"]["outcome"] = json!("unknown");
-        let result = pg.check(sql, schema).await;
+        let result = db.check(sql, schema).await;
         if report["assertions"]["checks"].is_null() {
             report["assertions"]["checks"] = json!([]);
         }
@@ -277,15 +280,15 @@ pub(super) async fn migrate(
 
 /// Own the connection inside the cancellable work future, never outside it.
 async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value) -> Result<()> {
-    let pg = connect(inputs).await?;
-    pg.own_migrations().await?;
+    let db = connect(inputs, saved).await?;
+    db.own_migrations().await?;
     loop {
-        let (applied, history, identity) = locked_prefix(&pg, inputs, saved).await?;
-        report["capabilities"] = Postgres::capabilities(identity.version);
+        let (applied, history, identity) = locked_prefix(&db, inputs, saved).await?;
+        report["capabilities"] = identity.capabilities();
         report["target"]["identity"] = json!(identity);
         mark_prefix(report, applied);
         if applied == inputs.migrations.len() {
-            pg.rollback().await?;
+            db.rollback().await?;
             report["outcome"] = json!("pass");
             return Ok(());
         }
@@ -295,7 +298,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
         report["progress"][applied]["state"] = json!("unknown");
         let work = async {
             checks(
-                &pg,
+                &db,
                 &migration.requires,
                 &inputs.config.schema,
                 &migration.name,
@@ -303,10 +306,10 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 report,
             )
             .await?;
-            pg.execute_captured(migration, &inputs.config.schema)
+            db.execute_captured(migration, &inputs.config.schema)
                 .await?;
             checks(
-                &pg,
+                &db,
                 &migration.ensures,
                 &inputs.config.schema,
                 &migration.name,
@@ -314,7 +317,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 report,
             )
             .await?;
-            let catalog = pg
+            let catalog = db
                 .catalog(&inputs.config.schema, &inputs.endpoint.role)
                 .await?;
             if !catalog.uncovered.is_empty()
@@ -323,7 +326,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
             {
                 return Err(stale());
             }
-            pg.record_migration(
+            db.record_migration(
                 migration,
                 applied + 1,
                 &inputs.database_name,
@@ -335,15 +338,15 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
         }
         .await;
         if let Err(d) = work {
-            let cleanup = pg.rollback().await;
+            let cleanup = db.rollback().await;
             report["progress"][applied]["state"] =
                 json!(if cleanup.is_ok() { "failed" } else { "unknown" });
             report["cleanup"] = json!(if cleanup.is_ok() { "pass" } else { "unknown" });
             return Err(d);
         }
         report["progress"][applied]["phase"] = json!("commit");
-        if let Err(d) = pg.batch("COMMIT").await {
-            drop(pg);
+        if let Err(d) = db.commit().await {
+            drop(db);
             if let Err(recovery) = reconcile(inputs, saved, report, applied).await {
                 report["reconciliation"] = json!({"outcome":"unknown","diagnostic":recovery});
             }

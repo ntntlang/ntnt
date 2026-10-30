@@ -1,7 +1,8 @@
 //! Shared report construction: authored history, observed target, expected prefix.
-use super::analysis::analyze;
+use super::adapter::{self, Access, Adapter, Identity};
+use super::analysis::analyze_for;
 use super::inventory::{json_digest, CapturedInputs};
-use super::postgres::{Catalog, History, Identity, Postgres, RelationalAdapter};
+use super::model::{Catalog, History};
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
 
@@ -85,7 +86,13 @@ pub(super) async fn inspect(inputs: CapturedInputs, command: &str) -> Result<Val
             "Cannot resolve declared target connection secret; provider details suppressed.",
         )
     })?;
-    let target = Postgres::connect(&secret, &inputs.endpoint).await?;
+    let target = Adapter::connect(
+        &secret,
+        &inputs.endpoint,
+        &inputs.config.engine,
+        Access::Inspect,
+    )
+    .await?;
     let observed = async {
         target.begin_readonly().await?;
         let identity = target.identity(&inputs.endpoint).await?;
@@ -122,14 +129,18 @@ async fn inspect_observed(
         .iter()
         .map(|m| {
             let mut v = m.summary();
-            v["analysis"] = json!(analyze(&m.sql, &inputs.config.schema));
+            v["analysis"] = json!(analyze_for(
+                &inputs.config.engine,
+                &m.sql,
+                &inputs.config.schema
+            ));
             v
         })
         .collect();
     let mut report = json!({"format_version":1,"command":command,"observed_at":chrono::Utc::now().to_rfc3339(),
         "outcome":"unknown","database":inputs.database_name,"target":{"name":inputs.target_name,"schema":inputs.config.schema,"identity":identity},
         "source":{"input_digest":inputs.input_digest,"policy_digest":inputs.policy_digest,"migrations":inventory},
-        "capabilities":Postgres::capabilities(identity.version),"catalog":catalog,
+        "capabilities":identity.capabilities(),"catalog":catalog,
         "history":{"outcome":"unknown"},"drift":{"outcome":"unknown","differences":[]},
         "assertions":{"outcome":"not_run","executed":0,"reason":"Transition contracts are not executed by catalog replay or read-only inspection."},
         "diagnostics":[],"limitations":["Catalog equivalence is not data correctness or business compatibility.","No production row scans or lock-duration estimates.","No target DDL, adoption, authorization or repair.","Noncooperating concurrent DDL/writers are not excluded by this observation."]});
@@ -179,7 +190,13 @@ async fn inspect_observed(
                     "Cannot resolve separately declared scratch connection secret.",
                 )
             })?;
-            let scratch = Postgres::connect(&secret, &scratch_config.endpoint).await?;
+            let scratch = Adapter::connect(
+                &secret,
+                &scratch_config.endpoint,
+                &inputs.config.engine,
+                Access::Scratch(json!(&identity)),
+            )
+            .await?;
             let work = async {
                 let scratch_identity = scratch
                     .prepare_scratch(&identity, &scratch_config.endpoint, &inputs.config.schema)
@@ -251,7 +268,7 @@ async fn inspect_observed(
             diagnostic(&mut report, d);
         }
     } else {
-        diagnostic(&mut report,Diagnostic::new("DB_REFERENCE_UNAVAILABLE","No explicitly disposable matching scratch database is configured; expected state is unverified."));
+        diagnostic(&mut report,Diagnostic::new("DB_REFERENCE_UNAVAILABLE","No explicitly disposable matching scratch database/file is configured; expected state is unverified."));
     }
     if let Some(expected) = &expected {
         report["drift"] = compare(&catalog, expected);
@@ -262,7 +279,7 @@ async fn inspect_observed(
     }
     // Binding excludes observation time, display filters and scratch physical IDs.
     // It includes every authority-relevant source, policy, target and base fact.
-    let binding = json!({"format_version":1,"adapter":"postgresql-catalog-v1","canonicalization_version":1,
+    let binding = json!({"format_version":1,"adapter":adapter::catalog_format(&inputs.config.engine),"canonicalization_version":1,
         "input_digest":inputs.input_digest,"policy_digest":inputs.policy_digest,"database":inputs.database_name,"target_name":inputs.target_name,"target":identity,
         "managed_schema":inputs.config.schema,"base_history_digest":json_digest(&history),
         "base_catalog_digest":json_digest(&catalog),"applied_count":applied,
@@ -273,7 +290,11 @@ async fn inspect_observed(
         .skip(applied)
         .map(|m| {
             let mut v = m.summary();
-            v["analysis"] = json!(analyze(&m.sql, &inputs.config.schema));
+            v["analysis"] = json!(analyze_for(
+                &inputs.config.engine,
+                &m.sql,
+                &inputs.config.schema
+            ));
             v
         })
         .collect();
@@ -286,7 +307,7 @@ async fn inspect_observed(
     };
     report["binding"] = binding.clone();
     if command == "plan" {
-        let plan = json!({"execution":{"format":"postgresql-transactional-v1","prefix_fingerprints":fingerprints},"binding":binding,"pending":pending,"candidate":{"outcome":candidate_outcome,"fingerprint":candidate.as_ref().map(json_digest)},
+        let plan = json!({"execution":{"format":adapter::execution_format(&inputs.config.engine),"prefix_fingerprints":fingerprints},"binding":binding,"pending":pending,"candidate":{"outcome":candidate_outcome,"fingerprint":candidate.as_ref().map(json_digest)},
             "authorized":false,"executable":false,"automatic_safe":false,"classification":if report["outcome"]=="pass" && candidate_outcome=="pass" {"requires_review"} else {"blocked"},"required_authority":"migrate requires this exact digest from the separately protected approval_secret provider, then revalidates under ownership. This digest alone grants no authority.",
             "data_checks":{"outcome":"not_run","reason":"Constraints, casts, nulls, duplicates, orphans and deployed-client compatibility require later data/behavior evidence."}});
         report["plan_digest"] = json!(json_digest(&plan));

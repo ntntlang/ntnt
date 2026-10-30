@@ -1,12 +1,16 @@
 //! Native SQL history, catalog replay and externally authorized PostgreSQL execution.
 
+mod adapter;
 mod analysis;
 mod catalog_sql;
 mod execution;
 mod input_file;
 mod inventory;
+mod model;
 mod postgres;
 mod report;
+mod sqlite;
+mod sqlite_file;
 use serde::Serialize;
 use std::path::PathBuf;
 

@@ -45,7 +45,9 @@ pub(crate) fn json_digest(value: &impl Serialize) -> String {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Endpoint {
     pub connection_secret: String,
+    #[serde(default)]
     pub database: String,
+    #[serde(default)]
     pub role: String,
 }
 #[derive(Clone, Deserialize, Serialize)]
@@ -203,16 +205,19 @@ impl CapturedInputs {
             .clone()
             .try_into()
             .map_err(|_| invalid("Unknown or invalid database configuration field."))?;
-        if config.engine != "postgresql"
-            || !identifier(&config.schema)
-            || config.schema == "public"
-            || config.schema == "information_schema"
-            || config.schema == "_ntnt"
-            || config.schema.starts_with("pg_")
-        {
-            return Err(invalid(
-                "Use PostgreSQL and an explicit non-system managed schema (not public).",
-            ));
+        match config.engine.as_str() {
+            "postgresql"
+                if identifier(&config.schema)
+                    && !["public", "information_schema", "_ntnt"]
+                        .contains(&config.schema.as_str())
+                    && !config.schema.starts_with("pg_") =>
+            {
+                ()
+            }
+            "sqlite" if config.schema == "main" => (),
+            _ => return Err(invalid(
+                "Use PostgreSQL with an explicit non-system schema, or SQLite with schema=main.",
+            )),
         }
         let endpoint = config
             .targets
@@ -220,8 +225,9 @@ impl CapturedInputs {
             .cloned()
             .ok_or_else(|| invalid("Select a declared database target."))?;
         for ep in std::iter::once(&endpoint).chain(config.scratch.iter().map(|s| &s.endpoint)) {
-            if !identifier(&ep.database)
-                || !identifier(&ep.role)
+            if (config.engine == "postgresql"
+                && (!identifier(&ep.database) || !identifier(&ep.role)))
+                || (config.engine == "sqlite" && (!ep.database.is_empty() || !ep.role.is_empty()))
                 || crate::secret::validate_secret_name(&ep.connection_secret).is_err()
             {
                 return Err(invalid("Database/role names must be simple identifiers and connections must use logical secret references."));
@@ -389,7 +395,7 @@ impl CapturedInputs {
         migrations.sort_by_key(|m| m.id);
         let summaries: Vec<_> = migrations.iter().map(Migration::summary).collect();
         let policy_digest = json_digest(
-            &serde_json::json!({"policy":"exact-plan/transactional-postgresql-v1", "database_name":database_name, "database":config}),
+            &serde_json::json!({"policy":if config.engine=="sqlite" {"exact-plan/transactional-sqlite-v1"} else {"exact-plan/transactional-postgresql-v1"}, "database_name":database_name, "database":config}),
         );
         let input_digest = digest(&[
             b"ntnt-inputs-v1",

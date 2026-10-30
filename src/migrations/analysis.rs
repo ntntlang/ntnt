@@ -12,15 +12,17 @@ pub(crate) struct Analysis {
 /// Parse PostgreSQL syntax within fixed token and recursion bounds.
 /// Invalid, empty or unsupported input is not evidence that replay would be safe.
 fn parse(sql: &str) -> Option<Vec<Statement>> {
-    let dialect = PostgreSqlDialect {};
-    let tokens = sqlparser::tokenizer::Tokenizer::new(&dialect, sql)
+    parse_with(sql, &PostgreSqlDialect {})
+}
+fn parse_with(sql: &str, dialect: &dyn sqlparser::dialect::Dialect) -> Option<Vec<Statement>> {
+    let tokens = sqlparser::tokenizer::Tokenizer::new(dialect, sql)
         .tokenize_with_location()
         .ok()?;
     // Bound both parser work and recursive AST destruction on all CLI stacks.
     if tokens.len() > 4096 {
         return None;
     }
-    Parser::new(&dialect)
+    Parser::new(dialect)
         .with_recursion_limit(64)
         .with_tokens_with_locations(tokens)
         .parse_statements()
@@ -239,13 +241,21 @@ fn allowed(statement: &Statement, schema: &str) -> bool {
 /// Classify supported operations, known hazards and analysis gaps without executing SQL.
 /// Unknown syntax remains explicitly unsupported rather than inheriting a safe verdict.
 pub(crate) fn analyze(sql: &str, schema: &str) -> Analysis {
+    analyze_for("postgresql", sql, schema)
+}
+pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
     let mut a = Analysis {
         replay_supported: true,
         operations: vec![],
         hazards: vec![],
         unknowns: vec![],
     };
-    let Some(statements) = parse(sql).filter(|s| !s.is_empty()) else {
+    let parsed = if engine == "sqlite" {
+        parse_with(sql, &sqlparser::dialect::SQLiteDialect {})
+    } else {
+        parse(sql)
+    };
+    let Some(statements) = parsed.filter(|s| !s.is_empty()) else {
         a.replay_supported = false;
         a.unknowns.push("SQL_PARSE_EMPTY_OR_LIMIT".into());
         return a;
