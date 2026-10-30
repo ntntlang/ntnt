@@ -82,3 +82,58 @@ disposable = true
         c
     }
 }
+
+/// An owned CLI child; a failed synchronization assertion must not orphan it.
+pub struct Running(Option<std::process::Child>);
+impl Running {
+    pub fn spawn(f: &Fixture, path: &str, approval: &str) -> Self {
+        Self(Some(
+            f.process("migrate")
+                .args(["--plan", path])
+                .env("DB_APPROVAL", approval)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ))
+    }
+    pub fn until(&mut self, mut predicate: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if predicate() {
+                return;
+            }
+            if self.0.as_mut().unwrap().try_wait().unwrap().is_some() {
+                let out = self.0.take().unwrap().wait_with_output().unwrap();
+                panic!(
+                    "CLI exited before the controlled boundary: {} {}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "CLI did not reach the controlled boundary"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    pub fn kill(mut self) {
+        let mut child = self.0.take().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    pub fn result(mut self) -> Value {
+        let out = self.0.take().unwrap().wait_with_output().unwrap();
+        serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)))
+    }
+}
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}

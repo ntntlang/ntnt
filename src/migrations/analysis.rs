@@ -264,6 +264,15 @@ pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
         let (operation, hazard) = match &s {
             Statement::CreateTable(_) => ("create_table", "DDL_LOCKS"),
             Statement::CreateIndex(_) => ("create_index", "INDEX_BUILD_LOCK_SCAN"),
+            Statement::CreateView { .. } if engine == "sqlite" => {
+                ("create_view", "VIEW_DEPENDENCIES")
+            }
+            Statement::CreateTrigger { .. } if engine == "sqlite" => {
+                ("create_trigger", "TRIGGER_EFFECTS")
+            }
+            Statement::DropTrigger { .. } if engine == "sqlite" => {
+                ("drop_trigger", "REMOVED_TRIGGER")
+            }
             Statement::AlterTable(t) => {
                 for op in &t.operations {
                     if matches!(
@@ -319,7 +328,30 @@ pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
         };
         a.operations.push(operation.into());
         a.hazards.push(hazard.into());
-        if !allowed(&s, schema) || a.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES") {
+        let supported = if engine == "sqlite" {
+            // SQLite's native authorizer, not PostgreSQL's AST rules, checks
+            // resolved objects/functions before any authored statement executes.
+            a.unknowns.push("SQLITE_EFFECTS_NOT_INFERRED".into());
+            matches!(
+                s,
+                Statement::CreateTable(_)
+                    | Statement::AlterTable(_)
+                    | Statement::CreateIndex(_)
+                    | Statement::CreateView { .. }
+                    | Statement::CreateTrigger { .. }
+                    | Statement::DropTrigger { .. }
+                    | Statement::Insert(_)
+                    | Statement::Update(_)
+                    | Statement::Delete(_)
+                    | Statement::Drop {
+                        object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
+                        ..
+                    }
+            )
+        } else {
+            allowed(&s, schema)
+        };
+        if !supported || a.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES") {
             a.replay_supported = false;
             a.unknowns.push("SQL_UNSUPPORTED".into());
         }

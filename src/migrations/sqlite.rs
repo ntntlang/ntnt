@@ -64,19 +64,28 @@ fn schema_table(name: &str) -> bool {
 enum Policy {
     Migration,
     Check,
+    Definition,
 }
 /// Engine resolution, not just source spelling, mediates every authored access.
-fn authorize(ctx: AuthContext<'_>, policy: Policy) -> Authorization {
+fn authorize(
+    ctx: AuthContext<'_>,
+    policy: Policy,
+    tables: &mut std::collections::HashSet<String>,
+) -> Authorization {
     use AuthAction::*;
-    let write = matches!(policy, Policy::Migration);
+    let write = !matches!(policy, Policy::Check);
+    let schema_access = matches!(policy, Policy::Migration);
     let main = ctx.database_name == Some("main");
     let ordinary = |name: &str| !reserved(name) && !internal(name);
     let schema = |name: &str| {
-        write && schema_table(name) && matches!(ctx.database_name, Some("main" | "temp"))
+        schema_access && schema_table(name) && matches!(ctx.database_name, Some("main" | "temp"))
     };
     let allowed = match ctx.action {
         Select => true,
-        Read { table_name, .. } => (main && ordinary(table_name)) || schema(table_name),
+        Read { table_name, .. } => {
+            (main && ordinary(table_name) && tables.contains(&table_name.to_ascii_lowercase()))
+                || schema(table_name)
+        }
         Function { function_name } => match function_name.to_ascii_lowercase().as_str() {
             "count" => true,
             "sqlite_rename_table"
@@ -90,11 +99,41 @@ fn authorize(ctx: AuthContext<'_>, policy: Policy) -> Authorization {
             | "printf"
             | "quote"
             | "coalesce"
-            | "ifnull" => write,
+            | "ifnull"
+            | "lower"
+            | "upper"
+            | "trim"
+            | "abs"
+            | "typeof" => write,
             _ => false,
         },
-        CreateTable { table_name } | DropTable { table_name } => {
-            write && main && ordinary(table_name)
+        CreateTable { table_name } => {
+            if schema_access && main && ordinary(table_name) {
+                tables.insert(table_name.to_ascii_lowercase());
+                true
+            } else {
+                false
+            }
+        }
+        CreateView { view_name } => {
+            if schema_access && main && ordinary(view_name) {
+                tables.insert(view_name.to_ascii_lowercase());
+                true
+            } else {
+                false
+            }
+        }
+        DropTable { table_name } => {
+            schema_access
+                && main
+                && ordinary(table_name)
+                && tables.contains(&table_name.to_ascii_lowercase())
+        }
+        DropView { view_name } => {
+            schema_access
+                && main
+                && ordinary(view_name)
+                && tables.contains(&view_name.to_ascii_lowercase())
         }
         CreateIndex {
             index_name,
@@ -103,14 +142,43 @@ fn authorize(ctx: AuthContext<'_>, policy: Policy) -> Authorization {
         | DropIndex {
             index_name,
             table_name,
-        } => write && main && ordinary(table_name) && !reserved(index_name),
-        Reindex { index_name } => write && main && !reserved(index_name),
+        } => {
+            schema_access
+                && main
+                && ordinary(table_name)
+                && tables.contains(&table_name.to_ascii_lowercase())
+                && !reserved(index_name)
+        }
+        Reindex { index_name } => schema_access && main && !reserved(index_name),
+        CreateTrigger {
+            trigger_name,
+            table_name,
+        }
+        | DropTrigger {
+            trigger_name,
+            table_name,
+        } => {
+            schema_access
+                && main
+                && ordinary(table_name)
+                && tables.contains(&table_name.to_ascii_lowercase())
+                && ordinary(trigger_name)
+        }
         AlterTable {
             database_name,
             table_name,
-        } => write && database_name == "main" && ordinary(table_name),
+        } => {
+            schema_access
+                && database_name == "main"
+                && ordinary(table_name)
+                && tables.contains(&table_name.to_ascii_lowercase())
+        }
         Insert { table_name } | Delete { table_name } | Update { table_name, .. } => {
-            write && ((main && ordinary(table_name)) || schema(table_name))
+            write
+                && ((main
+                    && ordinary(table_name)
+                    && tables.contains(&table_name.to_ascii_lowercase()))
+                    || schema(table_name))
         }
         _ => false,
     };
@@ -125,12 +193,62 @@ fn authored<T>(
     policy: Policy,
     operation: impl FnOnce(&Connection) -> Result<T>,
 ) -> Result<T> {
+    let mut tables = known_tables(conn)?;
     conn.authorizer(Some(move |context: AuthContext<'_>| {
-        authorize(context, policy)
+        authorize(context, policy, &mut tables)
     }));
     let result = operation(conn);
     conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
     result
+}
+
+/// Eponymous virtual tables can report database=main without appearing in the
+/// catalog. Admit only concrete schema relations, not names that merely look local.
+fn known_tables(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    Ok(rows(
+        conn,
+        "SELECT name FROM main.sqlite_schema WHERE type IN ('table','view')",
+        &[],
+    )?
+    .into_iter()
+    .filter_map(|row| {
+        row[0]
+            .as_str()
+            .filter(|name| !reserved(name) && !internal(name))
+            .map(str::to_ascii_lowercase)
+    })
+    .collect())
+}
+
+/// SQLite finds native statement boundaries (including trigger bodies and quoted
+/// semicolons). Refresh the resolved-relation allowlist after each statement, so
+/// a dropped name cannot fall through to an eponymous virtual table later.
+fn execute_script(conn: &Connection, sql: &str) -> Result<()> {
+    let mut batch = rusqlite::Batch::new(conn, sql);
+    loop {
+        let mut tables = known_tables(conn)?;
+        conn.authorizer(Some(move |context: AuthContext<'_>| {
+            authorize(context, Policy::Migration, &mut tables)
+        }));
+        let result = (|| {
+            let Some(mut statement) = batch.next().map_err(sql_error)? else {
+                return Ok(false);
+            };
+            if statement.parameter_count() != 0 {
+                return Err(Diagnostic::new(
+                    "DB_SQL_UNSUPPORTED",
+                    "Migration SQL cannot contain uncaptured bind parameters.",
+                ));
+            }
+            let mut output = statement.raw_query();
+            while output.next().map_err(sql_error)?.is_some() {}
+            Ok(true)
+        })();
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        if !result? {
+            return Ok(());
+        }
+    }
 }
 
 fn rows(conn: &Connection, sql: &str, args: &[&dyn rusqlite::ToSql]) -> Result<Vec<Vec<Value>>> {
@@ -208,7 +326,9 @@ impl State {
     }
     fn catalog(&self) -> Result<Catalog> {
         self.file.check_connection(&self.conn)?;
+        self.history(None)?;
         let mut catalog = Catalog::default();
+        let mut programs = Vec::new();
         catalog.objects.insert(
             "schema:main".into(),
             json!({"engine":"sqlite","scope":"entire_main_file"}),
@@ -246,8 +366,31 @@ impl State {
                     item["without_rowid"] = detail[2].clone();
                     item["strict"] = detail[3].clone();
                     let columns=rows(&self.conn,"SELECT cid,name,type,\"notnull\",dflt_value,pk,hidden FROM pragma_table_xinfo(?1,'main')",&[&name])?;
+                    let assignment = columns
+                        .iter()
+                        .map(|column| {
+                            let name = column[1].as_str().unwrap();
+                            format!("{}={}", quote(name), quote(name))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    for query in [
+                        format!("EXPLAIN INSERT INTO main.{} DEFAULT VALUES", quote(name)),
+                        format!("EXPLAIN UPDATE main.{} SET {assignment}", quote(name)),
+                        format!("EXPLAIN DELETE FROM main.{}", quote(name)),
+                    ] {
+                        programs.push((key.clone(), query));
+                    }
                     for mut column in columns {
                         let column_name = column[1].as_str().unwrap().to_owned();
+                        if column_name.len() > 255
+                            || column[2].as_str().is_none_or(|t| t.len() > 255)
+                        {
+                            return Err(Diagnostic::new(
+                                "DB_CATALOG_LIMIT",
+                                "SQLite column metadata exceeds inspection bounds.",
+                            ));
+                        }
                         supported &= column[6] == 0;
                         if !column[4].is_null() {
                             column[4] = json!({"sha256":json_digest(&column[4]),"redacted":true});
@@ -257,7 +400,16 @@ impl State {
                             json!(column),
                         );
                     }
-                    item["foreign_keys"]=json!(rows(&self.conn,"SELECT id,seq,\"table\",\"from\",\"to\",on_update,on_delete,\"match\" FROM pragma_foreign_key_list(?1,'main') ORDER BY id,seq",&[&name])?);
+                    item["foreign_keys"] = json!(rows(
+                        &self.conn,
+                        r#"SELECT id,seq,"table","from","to",on_update,on_delete,"match" FROM pragma_foreign_key_list(?1,'main') ORDER BY id,seq"#,
+                        &[&name]
+                    )?);
+                    supported &= item["foreign_keys"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|fk| fk[2].as_str().is_some_and(|n| !reserved(n) && !internal(n)));
                 }
                 "index" => {
                     let columns=rows(&self.conn,"SELECT seqno,cid,name,\"desc\",coll,key FROM pragma_index_xinfo(?1,'main') ORDER BY seqno",&[&name])?;
@@ -271,6 +423,13 @@ impl State {
                     item["properties"]=json!(rows(&self.conn,"SELECT \"unique\",origin,partial FROM pragma_index_list(?1,'main') WHERE name=?2",&[&table,&name])?);
                     supported &= item["properties"][0][2] == 0;
                 }
+                "view" => programs.push((
+                    key.clone(),
+                    format!("EXPLAIN SELECT * FROM main.{}", quote(name)),
+                )),
+                "trigger" => {
+                    supported &= table_info.iter().any(|r| r[0] == table && r[1] == "table")
+                }
                 _ => supported = false,
             }
             if !supported {
@@ -283,6 +442,23 @@ impl State {
                     "SQLite catalog exceeds 10,000 objects.",
                 ));
             }
+        }
+        if catalog.uncovered.is_empty() {
+            // Compile only: never step an application query during inspection.
+            // Native authorization covers trigger/view/default programs as well
+            // as their resolved base relations; SQL definitions remain opaque.
+            for (key, sql) in programs {
+                if authored(&self.conn, Policy::Definition, |conn| {
+                    conn.prepare(&sql).map_err(sql_error)?;
+                    Ok(())
+                })
+                .is_err()
+                {
+                    catalog.uncovered.push(key);
+                }
+            }
+            catalog.uncovered.sort();
+            catalog.uncovered.dedup();
         }
         Ok(catalog)
     }
@@ -363,6 +539,81 @@ impl State {
     }
 }
 
+/// A narrow, explicit mode for rebuilding one existing table. It may change that
+/// table's column/constraint definition, but not silently retire other tables or
+/// named dependent objects. Row counts are a guard, not proof of business meaning.
+struct RebuildGuard {
+    required: std::collections::BTreeMap<String, Value>,
+    counts: std::collections::BTreeMap<String, i64>,
+}
+impl RebuildGuard {
+    fn counts(state: &State) -> Result<std::collections::BTreeMap<String, i64>> {
+        let mut counts = std::collections::BTreeMap::new();
+        for row in rows(
+            &state.conn,
+            "SELECT name FROM main.sqlite_schema WHERE type='table' ORDER BY name",
+            &[],
+        )? {
+            let name = row[0].as_str().unwrap();
+            if reserved(name) || internal(name) {
+                continue;
+            }
+            counts.insert(
+                name.to_owned(),
+                integer(
+                    &state.conn,
+                    &format!("SELECT count(*) FROM main.{}", quote(name)),
+                )?,
+            );
+        }
+        Ok(counts)
+    }
+    fn capture(state: &State, table: &str) -> Result<Self> {
+        let catalog = state.catalog()?;
+        if !catalog.uncovered.is_empty() {
+            return Err(Diagnostic::new(
+                "DB_COVERAGE_INCOMPLETE",
+                "SQLite rebuild requires complete supported catalog coverage.",
+            ));
+        }
+        let counts = Self::counts(state)?;
+        let selected = counts
+            .keys()
+            .find(|name| name.eq_ignore_ascii_case(table))
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    "DB_REBUILD_GUARD",
+                    "sqlite_rebuild must name an existing ordinary table.",
+                )
+            })?;
+        let table_key = format!("table:{}", quote(selected));
+        let column_prefix = format!("column:{}.", quote(selected));
+        let required = catalog
+            .objects
+            .into_iter()
+            .filter(|(key, _)| {
+                key != &table_key
+                    && !key.starts_with(&column_prefix)
+                    && !key.starts_with("index:\"sqlite_autoindex_")
+            })
+            .collect();
+        Ok(Self { required, counts })
+    }
+    fn verify(self, state: &State) -> Result<()> {
+        let catalog = state.catalog()?;
+        if !catalog.uncovered.is_empty()
+            || self
+                .required
+                .iter()
+                .any(|(key, value)| catalog.objects.get(key) != Some(value))
+            || self.counts != Self::counts(state)?
+        {
+            return Err(Diagnostic::new("DB_REBUILD_GUARD","SQLite rebuild must preserve existing table row counts, other table definitions, and named indexes/triggers/views. Split deliberate retirements into separately reviewed migrations; row values suppressed."));
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct Sqlite {
     state: Arc<Mutex<State>>,
     interrupted: Arc<AtomicBool>,
@@ -390,6 +641,9 @@ impl Sqlite {
             let conn=Connection::open_with_flags(file.path(),flags|OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(sql_error)?;
             file.check_connection(&conn)?;
             conn.busy_timeout(Duration::from_secs(2)).map_err(sql_error)?;
+            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_SQL_LENGTH,1_048_576);
+            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,16*1_048_576);
+            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_EXPR_DEPTH,64);
             conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE,true).map_err(sql_error)?;
             conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL,false).map_err(sql_error)?;
             conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML,false).map_err(sql_error)?;
@@ -493,6 +747,7 @@ impl Sqlite {
         }).await
     }
     pub async fn execute_captured(&self, migration: &Migration) -> Result<()> {
+        let source = migration.name.clone();
         let migration = migration.clone();
         self.run(move |s| {
             s.file.check_connection(&s.conn)?;
@@ -508,12 +763,53 @@ impl Sqlite {
                     "Migration is outside the supported SQLite subset.",
                 ));
             }
-            authored(&s.conn, Policy::Migration, |conn| {
-                conn.execute_batch(&migration.sql).map_err(sql_error)
-            })?;
-            s.foreign_keys()
+            let guard = migration
+                .sqlite_rebuild
+                .as_deref()
+                .map(|table| RebuildGuard::capture(s, table))
+                .transpose()?;
+            if guard.is_some() {
+                // SQLite's native configuration API (unlike PRAGMA) supports this
+                // inside the already-owned transaction. Required for DROP/rebuild
+                // without firing implicit ON DELETE cascades. Never authored SQL.
+                if s.conn
+                    .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, false)
+                    .map_err(sql_error)?
+                {
+                    return Err(Diagnostic::new(
+                        "DB_REBUILD_GUARD",
+                        "Cannot enter the validated SQLite rebuild mode.",
+                    ));
+                }
+            }
+            let outcome = (|| {
+                execute_script(&s.conn, &migration.sql)?;
+                s.history(None)?;
+                s.foreign_keys()?;
+                if let Some(guard) = guard {
+                    guard.verify(s)?;
+                }
+                Ok(())
+            })();
+            // Restore enforcement before postconditions/ledger/COMMIT, on errors
+            // too. A failed restoration discards the dedicated session.
+            if !s
+                .conn
+                .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, true)
+                .map_err(sql_error)?
+            {
+                return Err(Diagnostic::new(
+                    "DB_REBUILD_GUARD",
+                    "Cannot restore SQLite foreign-key enforcement.",
+                ));
+            }
+            outcome
         })
         .await
+        .map_err(|mut d| {
+            d.source = Some(source);
+            d
+        })
     }
     pub async fn check_purity(&self) -> Result<()> {
         self.run(|s| {
