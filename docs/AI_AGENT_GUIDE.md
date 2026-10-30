@@ -4208,9 +4208,20 @@ or per user. Primary setup before the first `listen` uses the defaults; startup 
 a topic cap below the number of live setup buses rather than discarding their handles.
 Secondary workers initialize afterward under the configured caps. Size `max_topics`
 for their transient setup buses **alongside already-live process buses**, not just
-the final retained names. An undersized cap can make a secondary worker retry setup
-while the primary continues serving; readiness does not yet wait for all workers
-(the generation/readiness barrier remains WebSocket Slice B work).
+the final retained names. With a live setup bus or an explicit `realtime` map,
+all configured workers must finish initial setup **before the async listener binds
+or reports readiness**. An undersized cap now fails startup rather than silently
+serving with missing workers. Read/parse/evaluation errors and initialization panics
+are fatal on this initial path; a shared 10-second deadline bounds the startup
+decision. If buses are created only inside request handlers, use `"realtime": map {}`
+to opt into this barrier. Buffered-only apps without an explicit realtime map keep
+their existing listener-first startup behavior.
+
+This checks successful initialization, **not** source/endpoint-generation parity,
+quarantined respawn or callback capacity. Established workers retain their existing
+restart/backoff policy. The startup deadline does not preempt arbitrary application
+code: the CLI exits on startup failure; a Rust embedder must not treat an error as
+proof that blocked setup/native work has been forcibly interrupted.
 Limits are fixed before binding/readiness and require a process restart to change;
 hot reload does not reconfigure them. Standalone scripts retain the default caps.
 The synchronous test server validates the configuration but still returns 501 for

@@ -3,7 +3,7 @@
 **Status:** Gate 0 executed on 2026-10-26; Slice A (SSE) merged in #295, with configurable process resource caps added as a follow-up. Not yet released. Slice B remains unimplemented and gated on its own acceptance checks.
 **Target baseline:** `58710b9b9b9468575257ccc141dcbaed639d468b` (DD-041 merged); runtime/Cargo remain identical to v0.5.6.
 **Design:** [DD-041](dd-041-sse-streaming.md).
-**Publication:** Historical implementation plan plus Gate 0 evidence. The task lists below describe the accepted target, not a claim that every planned invariant landed in Slice A. See DD-041's implemented boundary for process scope, missing finite leases and deferred generation/readiness work. #298 has since merged the interpreter-context function prerequisite; it is no longer a blocker to Slice B.
+**Publication:** Historical implementation plan plus Gate 0 evidence. The task lists below describe the accepted target, not a claim that every planned invariant landed in Slice A. See DD-041's implemented boundary for process scope, missing finite leases and deferred generation work. Initial worker setup now gates realtime bind/readiness with fail-fast errors and a shared 10-second deadline; this is not program-generation/endpoint parity or quarantined rejoin. #298 has merged the interpreter-context function prerequisite; it is no longer a blocker to Slice B.
 
 ## Outcome and limits
 

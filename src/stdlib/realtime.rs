@@ -119,6 +119,15 @@ impl Limits {
 // concurrently with a lower limit being installed. No guard crosses await.
 static LIMITS: RwLock<Option<Limits>> = RwLock::new(None);
 
+/// Setup-time registration opts an application into the realtime startup path.
+pub(crate) fn has_live_buses() -> bool {
+    REGISTRY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .any(|bus| bus.strong_count() > 0)
+}
+
 pub(crate) fn configure(limits: Limits) -> Result<()> {
     let mut configured = LIMITS.write().unwrap_or_else(|e| e.into_inner());
     if let Some(current) = *configured {

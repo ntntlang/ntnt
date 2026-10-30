@@ -692,15 +692,17 @@ pub enum RuntimeCapability {
 }
 
 /// Why an HTTP worker's request loop returned — the supervisor loop
-/// respawns on StartupFailed (with backoff) and exits on Shutdown
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// retries StartupFailed after startup, but reports initial realtime failures.
+#[derive(Debug, Clone, PartialEq)]
 enum WorkerExit {
     /// The request channel closed: the server is shutting down
     Shutdown,
     /// The worker could not initialize (file read, parse, or eval failure —
-    /// often a transient hot-reload race); worth retrying
-    StartupFailed,
+    /// often a transient hot-reload race).
+    StartupFailed(String),
 }
+
+type HttpWorkerStartup = std::sync::mpsc::Sender<(usize, std::result::Result<(), String>)>;
 
 /// Execution mode controls how server-related functions behave
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -3874,7 +3876,11 @@ impl Interpreter {
         // fixed before readiness, and shared by HTTP workers and in-process tasks.
         // Primary setup uses defaults; too many live setup buses fail startup.
         // Secondary setup uses the configured caps: allow space for transient
-        // setup buses alongside live ones. Readiness does not wait for all workers.
+        // setup buses alongside live ones. With a live setup bus or explicit
+        // realtime map, all workers initialize before binding/readiness; errors
+        // fail startup and the shared initialization deadline is 10 seconds.
+        // An empty realtime map opts in when buses are created only in handlers.
+        // This does not verify source/endpoint-generation compatibility.
         // Changing limits requires a process restart, not hot reload.
         // @param options Optional immutable listener and fixture response policy.
         // Starts an HTTP server on the given port.
@@ -10058,6 +10064,37 @@ impl Interpreter {
             csp_config: self.server_state.get_csp_config().cloned(),
         };
 
+        // Existing buffered-only apps keep listener-first startup. Realtime
+        // registration (or an explicit realtime map for lazy bus creation)
+        // requires every secondary interpreter to initialize before binding.
+        let realtime_startup =
+            options.realtime_configured || crate::stdlib::realtime::has_live_buses();
+        let source_file = self.main_source_file.clone().unwrap_or_default();
+        let mut worker_handles = Vec::new();
+        if realtime_startup {
+            let (worker_startup_tx, worker_startup_rx) = std::sync::mpsc::channel();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            worker_handles =
+                Self::spawn_http_workers(num_workers, &rx, &source_file, Some(worker_startup_tx));
+            for initialized in 1..num_workers {
+                match worker_startup_rx.recv_timeout(
+                    deadline.saturating_duration_since(std::time::Instant::now()),
+                ) {
+                    Ok((_, Ok(()))) => {}
+                    Ok((worker, Err(error))) => return Err(IntentError::runtime_error(format!(
+                        "realtime worker {worker} failed initialization: {error}"
+                    ))),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Err(IntentError::runtime_error(format!(
+                        "realtime worker initialization timed out after 10s ({}/{} secondary workers ready)",
+                        initialized - 1, num_workers - 1,
+                    ))),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(IntentError::runtime_error(
+                        "realtime worker startup channel closed before initialization completed",
+                    )),
+                }
+            }
+        }
+
         // Spawn async server in a separate thread
         // Note: We move interpreter_handle into the thread (not clone) so it's dropped
         // when the server shuts down, which closes the channel and signals the main loop to exit
@@ -10086,60 +10123,8 @@ impl Interpreter {
             ));
         }
 
-        // Spawn additional worker threads (workers 2..N). Each is wrapped in
-        // a supervisor loop so a crashed worker (panic) or a failed startup
-        // (transient file read, parse error during a hot-reload race) is
-        // retried instead of silently losing capacity for the process
-        // lifetime. Backoff doubles per consecutive failure (1s..30s) so a
-        // persistently-failing worker (e.g. poisoned global mutex) cannot
-        // hot-spin; it resets after a run that lasted long enough to have
-        // served real traffic.
-        let mut worker_handles = Vec::new();
-        if num_workers > 1 {
-            let source_file = self.main_source_file.clone().unwrap_or_default();
-            for worker_id in 1..num_workers {
-                let worker_rx = rx.clone();
-                let worker_source = source_file.clone();
-                let handle = thread::spawn(move || {
-                    let mut backoff = std::time::Duration::from_secs(1);
-                    const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
-                    loop {
-                        let rx = worker_rx.clone();
-                        let source = worker_source.clone();
-                        let started = std::time::Instant::now();
-                        let result =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                                Self::run_worker(worker_id, rx, &source)
-                            }));
-                        match result {
-                            Ok(WorkerExit::Shutdown) => break, // channel closed
-                            Ok(WorkerExit::StartupFailed) => {
-                                eprintln!(
-                                    "[worker {}] startup failed — retrying in {:?}",
-                                    worker_id, backoff
-                                );
-                            }
-                            Err(_) => {
-                                eprintln!(
-                                    "[worker {}] crashed (panic) — respawning in {:?}",
-                                    worker_id, backoff
-                                );
-                            }
-                        }
-                        if worker_rx.is_disconnected() {
-                            break;
-                        }
-                        // A run that survived past the backoff window was
-                        // healthy — reset; otherwise keep doubling
-                        if started.elapsed() > MAX_BACKOFF {
-                            backoff = std::time::Duration::from_secs(1);
-                        }
-                        std::thread::sleep(backoff);
-                        backoff = (backoff * 2).min(MAX_BACKOFF);
-                    }
-                });
-                worker_handles.push(handle);
-            }
+        if !realtime_startup {
+            worker_handles = Self::spawn_http_workers(num_workers, &rx, &source_file, None);
         }
 
         // Main thread (worker 0): process requests with hot-reload support
@@ -10494,6 +10479,53 @@ impl Interpreter {
         }
     }
 
+    /// Supervision is shared by both startup paths. Only the initial realtime
+    /// setup is fail-fast; established workers retain the existing restart policy.
+    fn spawn_http_workers(
+        num_workers: usize,
+        rx: &flume::Receiver<crate::stdlib::http_bridge::HandlerRequest>,
+        source_file: &str,
+        startup: Option<HttpWorkerStartup>,
+    ) -> Vec<std::thread::JoinHandle<()>> {
+        (1..num_workers)
+            .map(|worker_id| {
+                let worker_rx = rx.clone();
+                let source = source_file.to_string();
+                let mut startup = startup.clone();
+                std::thread::spawn(move || {
+                    let mut backoff = std::time::Duration::from_secs(1);
+                    const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+                    loop {
+                        let started = std::time::Instant::now();
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            Self::run_worker(worker_id, worker_rx.clone(), &source, &mut startup)
+                        }));
+                        let error = match result {
+                            Ok(WorkerExit::Shutdown) => break,
+                            Ok(WorkerExit::StartupFailed(error)) => {
+                                format!("startup failed: {error}")
+                            }
+                            Err(_) => "crashed (panic)".to_string(),
+                        };
+                        if let Some(startup) = startup.take() {
+                            let _ = startup.send((worker_id, Err(error)));
+                            break;
+                        }
+                        eprintln!("[worker {worker_id}] {error} — retrying in {backoff:?}");
+                        if worker_rx.is_disconnected() {
+                            break;
+                        }
+                        if started.elapsed() > MAX_BACKOFF {
+                            backoff = std::time::Duration::from_secs(1);
+                        }
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                    }
+                })
+            })
+            .collect()
+    }
+
     /// Run a worker thread that processes requests from the shared channel.
     /// Each worker creates its own Interpreter, parses the source file, and
     /// processes requests independently without hot-reload.
@@ -10501,6 +10533,7 @@ impl Interpreter {
         worker_id: usize,
         rx: flume::Receiver<crate::stdlib::http_bridge::HandlerRequest>,
         source_file: &str,
+        startup: &mut Option<HttpWorkerStartup>,
     ) -> WorkerExit {
         use crate::stdlib::http_bridge::HandlerRequest;
 
@@ -10509,7 +10542,9 @@ impl Interpreter {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[worker {}] Failed to read source file: {}", worker_id, e);
-                return WorkerExit::StartupFailed;
+                return WorkerExit::StartupFailed(format!(
+                    "failed to read source file '{source_file}': {e}"
+                ));
             }
         };
 
@@ -10524,7 +10559,7 @@ impl Interpreter {
             Ok(ast) => ast,
             Err(e) => {
                 eprintln!("[worker {}] Parse error: {}", worker_id, e);
-                return WorkerExit::StartupFailed;
+                return WorkerExit::StartupFailed(format!("parse error in '{source_file}': {e}"));
             }
         };
 
@@ -10537,12 +10572,18 @@ impl Interpreter {
         // Evaluate the source to register routes, middleware, etc.
         if let Err(e) = interpreter.eval(&ast) {
             eprintln!("[worker {}] Eval error: {}", worker_id, e);
-            return WorkerExit::StartupFailed;
+            return WorkerExit::StartupFailed(format!("eval error in '{source_file}': {e}"));
         }
 
         // Worker mode suppresses once-only side effects during initialization.
         // Requests need task APIs, not Normal-mode server lifecycle authority.
         interpreter.http_worker_request_tasks = true;
+
+        if let Some(startup) = startup.take() {
+            if startup.send((worker_id, Ok(()))).is_err() {
+                return WorkerExit::Shutdown;
+            }
+        }
 
         // Worker request loop — no hot-reload, just process requests
         loop {
@@ -16047,6 +16088,122 @@ c")
         }
     }
 
+    fn assert_http_workers_exit(workers: Vec<std::thread::JoinHandle<()>>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while workers.iter().any(|worker| !worker.is_finished()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "HTTP startup worker did not exit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for worker in workers {
+            worker.join().expect("startup worker panicked");
+        }
+    }
+
+    #[test]
+    fn test_http_worker_startup_errors_identify_the_source_file() {
+        for (source, expected) in [
+            (None, "failed to read source file"),
+            (Some("let broken ="), "parse error"),
+            (Some("assert(false)"), "eval error"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let source_file = dir.path().join("startup-error.tnt");
+            if let Some(source) = source {
+                std::fs::write(&source_file, source).unwrap();
+            }
+            let (_tx, rx) = flume::unbounded();
+            let path = source_file.to_str().unwrap();
+            let WorkerExit::StartupFailed(error) = Interpreter::run_worker(1, rx, path, &mut None)
+            else {
+                panic!("worker unexpectedly initialized: {source:?}");
+            };
+            assert!(error.contains(expected), "{error}");
+            assert!(error.contains(path), "missing source file in {error}");
+        }
+    }
+
+    #[test]
+    fn test_acknowledged_http_worker_exits_when_startup_aborts() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_file = dir.path().join("worker.tnt");
+        std::fs::write(&source_file, "let initialized = true").unwrap();
+        let (tx, rx) = flume::unbounded();
+        let (startup_tx, startup_rx) = std::sync::mpsc::channel();
+        let workers = Interpreter::spawn_http_workers(
+            2,
+            &rx,
+            source_file.to_str().unwrap(),
+            Some(startup_tx),
+        );
+        assert_eq!(
+            startup_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            (1, Ok(()))
+        );
+        assert!(
+            !workers[0].is_finished(),
+            "initialized worker should be waiting for requests"
+        );
+        // The parent takes this same path after a peer setup or listener error.
+        // Assert thread cleanup in-process, not merely CLI process termination.
+        drop(tx);
+        drop(startup_rx);
+        assert_http_workers_exit(workers);
+    }
+
+    #[test]
+    fn test_http_worker_finishing_after_startup_receiver_drops_exits_without_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_file = dir.path().join("worker.tnt");
+        let started = dir.path().join("started");
+        let gate = dir.path().join("continue");
+        std::fs::write(
+            &source_file,
+            format!(
+                r#"
+import {{ exists, write_file }} from "std/fs"
+import {{ sleep_ms }} from "std/concurrent"
+write_file({}, "started")
+while !exists({}) {{ sleep_ms(10) }}
+"#,
+                serde_json::to_string(started.to_str().unwrap()).unwrap(),
+                serde_json::to_string(gate.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+        let (tx, rx) = flume::unbounded();
+        let (startup_tx, startup_rx) = std::sync::mpsc::channel();
+        let workers = Interpreter::spawn_http_workers(
+            2,
+            &rx,
+            source_file.to_str().unwrap(),
+            Some(startup_tx),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !started.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not enter setup gate"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(
+            startup_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        // Simulate timeout while non-preemptible setup is still in progress.
+        drop(startup_rx);
+        std::fs::write(gate, b"continue").unwrap();
+        // Keep the bridge sender alive: the dropped startup receiver itself
+        // must stop this late worker, rather than a closed request queue.
+        assert_http_workers_exit(workers);
+        drop(tx);
+    }
+
     #[test]
     fn test_http_worker_request_tasks_preserve_bootstrap_suppression() {
         use crate::stdlib::http_bridge::{BridgeRequest, HandlerRequest};
@@ -16159,7 +16316,7 @@ listen(0)
         drop(tx);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let exit = Interpreter::run_worker(1, rx, source_file.to_str().unwrap());
+            let exit = Interpreter::run_worker(1, rx, source_file.to_str().unwrap(), &mut None);
             done_tx.send(exit).unwrap();
         });
         let exit = done_rx

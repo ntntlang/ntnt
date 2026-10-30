@@ -22,18 +22,24 @@ defaults; values must be positive platform-sized integers and the event cap must
 fit within the payload budget. Setup uses default caps; incompatible live setup
 resources fail primary startup. Secondary setup runs under configured caps, so
 topic sizing must accommodate transient setup buses alongside already-live process
-buses. An undersized cap can cause secondary setup retries after primary readiness;
-the all-worker readiness barrier is still deferred below. Limits change only on
+buses. Initial worker setup is now gated before bind/readiness when a live setup
+bus or explicit realtime listen map exists: errors fail startup, and one shared
+10-second deadline bounds the decision. Use an empty realtime map for request-only
+bus creation. This does not establish program-generation/endpoint compatibility.
+Limits change only on
 process restart. The async protocol tests, not synchronous `ntnt test`, exercise SSE.
 
 The current bus registry, accounting and cancellation are **process-scoped**, not
 isolated per embedded server/application generation. It does not implement finite
 connection leases or immediate authorization revocation. The callback registry,
-worker readiness/generation barrier, quarantined respawn, WebSocket upgrade,
+worker generation-compatibility barrier, quarantined respawn, WebSocket upgrade,
 Origin policy and callback-vs-HTTP fairness remain Slice B work. Those original
 requirements are not completed merely by the SSE merge. The rest of this DD is
 the accepted target design; use the AI guide/generated API docs for the implemented
-SSE signatures and configuration.
+SSE signatures and configuration. Initial worker success is now checked, but
+post-start supervision still uses the previous retry policy. No forced interruption
+of blocked application/native setup is promised; CLI startup failures exit the
+process, while Rust embedding code must account for non-preemptible work.
 
 ## 1. Decision
 
