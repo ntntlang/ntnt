@@ -633,11 +633,20 @@ pub fn parse_static_extensions(value: Option<&Value>) -> Result<Option<Vec<Strin
 
 /// Whether a request-relative file path may be served under an optional extension allowlist.
 /// With an allowlist, a file with no extension, a dotfile, or an unlisted extension is not served.
+/// Callers apply this to the requested name and again to the canonical target, so a symlink
+/// named `asset.css` cannot serve a `payload.exe` it points at.
 pub fn static_extension_allowed(relative: &str, extensions: Option<&[String]>) -> bool {
     let Some(allowed) = extensions else {
         return true;
     };
-    let file_name = relative.rsplit('/').next().unwrap_or(relative);
+    let file_name = relative
+        .rsplit(['/', std::path::MAIN_SEPARATOR])
+        .next()
+        .unwrap_or(relative);
+    // Dotfiles are never served under an allowlist, including `.private.json`.
+    if file_name.starts_with('.') {
+        return false;
+    }
     match file_name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
             let ext = ext.to_ascii_lowercase();
@@ -1078,6 +1087,13 @@ impl ServerState {
                 if let Ok(canonical) = full_path.canonicalize() {
                     if let Ok(base_canonical) = std::path::Path::new(directory).canonicalize() {
                         if canonical.starts_with(&base_canonical) {
+                            // The allowlist also governs the resolved target, not just the link name.
+                            if !static_extension_allowed(
+                                &canonical.to_string_lossy(),
+                                mount.extensions.as_deref(),
+                            ) {
+                                return None;
+                            }
                             return Some((canonical.to_string_lossy().to_string(), relative));
                         }
                     }
@@ -4864,9 +4880,12 @@ mod tests {
             "setup.exe",
             "README",
             ".env",
+            ".private.css",
         ] {
             std::fs::write(temp_dir.join(name), b"x").unwrap();
         }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(temp_dir.join("setup.exe"), temp_dir.join("alias.css")).unwrap();
         let mut state = ServerState::new();
         state.add_static_dir_with_extensions(
             "/assets".to_string(),
@@ -4884,6 +4903,7 @@ mod tests {
             "/assets/setup.exe",
             "/assets/README",
             "/assets/.env",
+            "/assets/.private.css",
             "/assets",
         ] {
             assert!(
@@ -4891,6 +4911,11 @@ mod tests {
                 "{denied} must not be served"
             );
         }
+        #[cfg(unix)]
+        assert!(
+            state.find_static_file("/assets/alias.css").is_none(),
+            "symlink target must satisfy the allowlist"
+        );
         // Without an allowlist the same files are still served (unchanged default).
         let mut open = ServerState::new();
         open.add_static_dir(
@@ -4938,6 +4963,10 @@ mod tests {
         let allowed = vec!["pdf".to_string()];
         assert!(static_extension_allowed("docs/a.PDF", Some(&allowed)));
         assert!(!static_extension_allowed("docs/.pdf", Some(&allowed)));
+        assert!(!static_extension_allowed(
+            "docs/.hidden.pdf",
+            Some(&allowed)
+        ));
         assert!(!static_extension_allowed("docs/a", Some(&allowed)));
     }
 

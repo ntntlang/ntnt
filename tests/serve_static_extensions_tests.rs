@@ -41,9 +41,12 @@ fn populate(public: &std::path::Path) {
         ("index.html", "<h1>no</h1>"),
         ("README", "text"),
         (".env", "SECRET=1"),
+        (".private.css", "SECRET=2"),
     ] {
         fs::write(public.join(name), body).unwrap();
     }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(public.join("run.sh"), public.join("alias.css")).unwrap();
 }
 
 const SOURCE: &str = r#"
@@ -73,6 +76,9 @@ fn allowlist_enforced_by_async_server_in_development_and_production() {
             ("/assets/index.html", 404),
             ("/assets/README", 404),
             ("/assets/.env", 404),
+            ("/assets/.private.css", 404),
+            #[cfg(unix)]
+            ("/assets/alias.css", 404),
             ("/assets/", 404),
             ("/open/run.sh", 200),
             ("/open/.env", 200),
@@ -80,9 +86,9 @@ fn allowlist_enforced_by_async_server_in_development_and_production() {
         ] {
             let (status, text) = request(addr, path);
             assert_eq!(status, expected, "{env:?} {path}: {text}");
-            if path == "/assets/.env" || path == "/assets/run.sh" {
+            if expected == 404 {
                 assert!(
-                    !text.contains("SECRET=1") && !text.contains("#!/bin/sh"),
+                    !text.contains("SECRET=") && !text.contains("#!/bin/sh"),
                     "{path} leaked body"
                 );
             }

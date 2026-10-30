@@ -3733,12 +3733,11 @@ post("/items", create_item)
 ```ntnt
 import { html } from "std/http/server"
 
-// Serve CSS/JS/images from ./public/ at /assets/
-serve_static("/assets", "./public")
-
-// Public asset trees: serve only known content types. Anything else under the
-// prefix (.sh, .tnt, .exe, .html, dotfiles, extensionless files) answers 404,
-// so a stray or uploaded file can never be served or executed by the site.
+// Serve CSS/JS/images from ./public/ at /assets/, restricted to known content
+// types. Anything else under the prefix (.sh, .tnt, .exe, .html, dotfiles,
+// extensionless files) answers 404, so a stray or uploaded file can never be
+// served or executed by the site. Use ONE mount per prefix; an earlier
+// unrestricted serve_static("/assets", "./public") would serve files first.
 serve_static("/assets", "./public", map {
     "extensions": ["css", "js", "mjs", "map", "png", "jpg", "jpeg", "gif", "webp", "avif",
                    "svg", "ico", "woff", "woff2", "ttf", "pdf", "txt", "xml", "json", "webmanifest"]

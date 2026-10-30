@@ -289,6 +289,13 @@ impl AsyncServerState {
                 if let Ok(canonical) = file_path.canonicalize() {
                     if let Ok(base_canonical) = std::path::Path::new(&dir.fs_path).canonicalize() {
                         if canonical.starts_with(&base_canonical) && canonical.is_file() {
+                            // The allowlist also governs the resolved target, not just the link name.
+                            if !crate::stdlib::http_server::static_extension_allowed(
+                                &canonical.to_string_lossy(),
+                                dir.extensions.as_deref(),
+                            ) {
+                                return None;
+                            }
                             return Some((
                                 canonical.to_string_lossy().to_string(),
                                 dir.url_prefix.clone(),
@@ -1689,9 +1696,18 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("ntnt_async_static_ext_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        for name in ["a.css", "a.sh", "a.tnt", "index.html", "noext"] {
+        for name in [
+            "a.css",
+            "a.sh",
+            "a.tnt",
+            "index.html",
+            "noext",
+            ".hidden.css",
+        ] {
             std::fs::write(dir.join(name), b"x").unwrap();
         }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("a.tnt"), dir.join("alias.css")).unwrap();
         let state = AsyncServerState::new();
         state
             .register_static_dir_with_extensions(
@@ -1706,9 +1722,15 @@ mod tests {
             "/assets/a.tnt",
             "/assets/index.html",
             "/assets/noext",
+            "/assets/.hidden.css",
         ] {
             assert!(state.find_static_file(denied).await.is_none(), "{denied}");
         }
+        #[cfg(unix)]
+        assert!(
+            state.find_static_file("/assets/alias.css").await.is_none(),
+            "symlink target must satisfy the allowlist"
+        );
         let open = AsyncServerState::new();
         open.register_static_dir("/assets", &dir.to_string_lossy())
             .await;
