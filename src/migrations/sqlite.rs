@@ -381,6 +381,23 @@ impl State {
                     ] {
                         programs.push((key.clone(), query));
                     }
+                    if detail[2] == 0 {
+                        // UPDATE OF can name SQLite's hidden row identifiers,
+                        // absent from table_xinfo. Each spelling has its own
+                        // trigger event match, even when aliases share storage.
+                        // WITHOUT ROWID tables have only the declared columns.
+                        for alias in ["rowid", "_rowid_", "oid"] {
+                            programs.push((
+                                key.clone(),
+                                format!(
+                                    "EXPLAIN UPDATE main.{} SET {}={}",
+                                    quote(name),
+                                    quote(alias),
+                                    quote(alias)
+                                ),
+                            ));
+                        }
+                    }
                     for mut column in columns {
                         let column_name = column[1].as_str().unwrap().to_owned();
                         if column_name.len() > 255

@@ -666,3 +666,79 @@ fn sqlite_filename_stream_syntax_is_rejected_before_target_access() {
         "pass"
     );
 }
+
+fn hidden_rowid_trigger(alias: &str) {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(value TEXT); CREATE TABLE audit(id INTEGER);",
+    );
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute_batch("INSERT INTO t VALUES('retained')")
+        .unwrap();
+    f.sql("0002_trigger.sql", &format!("CREATE TRIGGER hidden AFTER UPDATE OF {alias} ON t BEGIN DELETE FROM _ntnt_schema_migrations_v2; END;"));
+    let rejected = f.command("plan", &[]);
+    assert_ne!(
+        rejected["outcome"], "pass",
+        "hidden {alias} trigger escaped coverage"
+    );
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM _ntnt_schema_migrations_v2", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    // A supported trigger on that same hidden alias must still work normally.
+    f.sql("0002_trigger.sql", &format!("CREATE TRIGGER observed AFTER UPDATE OF {alias} ON t BEGIN INSERT INTO audit VALUES(new.rowid); END;"));
+    let safe = f.plan("safe.json");
+    let applied = f.apply("safe.json", safe["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    f.target()
+        .execute_batch(&format!("UPDATE t SET {alias}=17"))
+        .unwrap();
+    assert_eq!(
+        f.target()
+            .query_row("SELECT id FROM audit", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        17
+    );
+    assert_eq!(f.command("verify", &[])["outcome"], "pass");
+}
+#[test]
+fn sqlite_hidden_rowid_trigger_cannot_escape_catalog_authorization() {
+    hidden_rowid_trigger("rowid");
+}
+#[test]
+fn sqlite_hidden_underscore_rowid_trigger_cannot_escape_catalog_authorization() {
+    hidden_rowid_trigger("_rowid_");
+}
+#[test]
+fn sqlite_hidden_oid_trigger_cannot_escape_catalog_authorization() {
+    hidden_rowid_trigger("oid");
+}
+#[test]
+fn sqlite_without_rowid_table_trigger_keeps_native_coverage() {
+    let f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE t(id INTEGER PRIMARY KEY) WITHOUT ROWID; CREATE TABLE audit(id INTEGER); CREATE TRIGGER observed AFTER UPDATE OF id ON t BEGIN INSERT INTO audit VALUES(new.id); END;");
+    let plan = f.plan("plan.json");
+    assert_eq!(
+        f.apply("plan.json", plan["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute_batch("INSERT INTO t VALUES(1); UPDATE t SET id=17")
+        .unwrap();
+    assert_eq!(
+        f.target()
+            .query_row("SELECT id FROM audit", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        17
+    );
+    assert_eq!(f.command("verify", &[])["outcome"], "pass");
+}
