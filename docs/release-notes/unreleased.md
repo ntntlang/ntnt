@@ -1,5 +1,27 @@
 # Unreleased
 
+## Verified database adoption and the SQL-first foundation
+
+`ntnt db plan --adopt-through <migration-id>` now captures explicit adoption of a
+reviewed PostgreSQL/SQLite source prefix. `migrate --plan` uses the existing separate
+approval provider, owned connection, native locks and transactional check/recovery
+path. It compares the live schema with disposable replay and runs named manifest
+`adoption_checks`; it never replays the old application SQL onto an existing target.
+
+A new baseline becomes one scoped `adopted` checkpoint, not fabricated applied
+rows. Recognized, mutation-safe PostgreSQL v1 history can be imported with unchanged
+source checksums and `imported` states. Reports distinguish covered/adopted/imported
+history from executed migrations, including fresh commit reconciliation. Saved
+adoption plans can be revalidated readonly with `--against`.
+
+This completes the supported transactional foundation, including populated
+adoption-to-upgrade rehearsal and old/new application reader checks. Existing
+startup runners are not invoked or replaced; unknown ledgers are not repaired.
+Older runtimes refuse the new ledger states. Nontransactional operations, query
+analysis, backup/restore and production application rollout remain separate. See
+[Database Migrations](../DATABASE_MIGRATIONS.md) and the
+[disposable application example](../../examples/database-adoption/README.md).
+
 ## Native Server-Sent Events (DD-041 Slice A)
 
 `broadcast()` and `publish()` from `std/concurrent`, plus `sse()` from
