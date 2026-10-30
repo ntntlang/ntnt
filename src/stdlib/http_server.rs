@@ -1340,6 +1340,8 @@ pub fn init() -> HashMap<String, Value> {
     // bus capacity are disconnected and should reconnect and refetch state.
     // Options: `heartbeat_ms` (1000-300000, default 15000), `retry_ms` (client
     // reconnect delay hint). HEAD and non-2xx responses never open a stream.
+    // The process stream limit is 1024 by default (503 beyond it); configure
+    // max_connections in listen's `realtime` map. Disconnect releases the permit.
     // @param bus A Broadcast from std/concurrent broadcast()
     // @param options Optional map with `heartbeat_ms` and `retry_ms`
     // @returns A streaming response
@@ -5188,6 +5190,7 @@ pub struct ListenOptions {
     pub readiness: bool,
     pub fixture: bool,
     pub headers: FixtureHeaders,
+    pub(crate) realtime: crate::stdlib::realtime::Limits,
 }
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FixtureHeaders {
@@ -5212,6 +5215,9 @@ impl ListenOptions {
                         options.readiness = s == "json"
                     }
                     ("fixture", Value::Bool(b)) => options.fixture = *b,
+                    ("realtime", value) => {
+                        options.realtime = crate::stdlib::realtime::Limits::parse(value)?;
+                    }
                     ("suppress_server_header", Value::Bool(b)) => {
                         options.headers.suppress_server = *b
                     }

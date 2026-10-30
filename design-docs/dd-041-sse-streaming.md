@@ -1,6 +1,6 @@
 # DD-041: Native SSE and WebSockets
 
-**Status:** Accepted design direction — implementation not started; feasibility gates pending.
+**Status:** Slice A (native SSE) implemented on main for the v0.5.7 development line; not yet released. Slice B (WebSockets) remains unimplemented.
 **Author:** Larri
 **Created:** 2026-03-17
 **Revised:** 2026-10-25
@@ -9,7 +9,31 @@
 
 Approval accepts the two-slice design direction, not a claim of shipped APIs or authorization to implement/deploy. API details and numerical defaults remain subject to the feasibility and measurement gates below.
 
-The [proposed implementation plan](dd-041-implementation-plan.md) details ownership contracts, dependency-ordered slices and the runtime experiments required before implementation. It remains subject to review; the feasibility gates have not been executed.
+The [implementation plan](dd-041-implementation-plan.md) records the executed Gate 0 probes and remaining WebSocket acceptance checks. #295 merged the native SSE implementation; #298 merged the interpreter-context function prerequisite. The design below includes proposed Slice B behavior, not a claim that every original invariant has shipped.
+
+## Implemented boundary
+
+Slice A provides `broadcast`, `publish`, and `sse`, shared encoded frames,
+bounded process-wide resources, heartbeat, lag/stalled-receiver handling,
+final-response-only subscription and cooperative shutdown. The `listen` option
+`realtime` now accepts `max_connections` (1024), `max_topics` (256),
+`max_event_bytes` (65536), and `max_payload_bytes` (33554432). Omitted keys retain
+defaults; values must be positive platform-sized integers and the event cap must
+fit within the payload budget. Setup uses default caps; incompatible live setup
+resources fail primary startup. Secondary setup runs under configured caps, so
+topic sizing must accommodate transient setup buses alongside already-live process
+buses. An undersized cap can cause secondary setup retries after primary readiness;
+the all-worker readiness barrier is still deferred below. Limits change only on
+process restart. The async protocol tests, not synchronous `ntnt test`, exercise SSE.
+
+The current bus registry, accounting and cancellation are **process-scoped**, not
+isolated per embedded server/application generation. It does not implement finite
+connection leases or immediate authorization revocation. The callback registry,
+worker readiness/generation barrier, quarantined respawn, WebSocket upgrade,
+Origin policy and callback-vs-HTTP fairness remain Slice B work. Those original
+requirements are not completed merely by the SSE merge. The rest of this DD is
+the accepted target design; use the AI guide/generated API docs for the implemented
+SSE signatures and configuration.
 
 ## 1. Decision
 
@@ -215,4 +239,4 @@ Additional reference behavior was checked in the pinned tower-http 0.5.2 timeout
 
 ## 10. Accepted direction and implementation gate
 
-The maintainer has accepted the two-slice direction: process-local live delivery and explicit state, without replay/brokers/rooms/generators. Implementation has not started; proposed API details and suggested limits still require the feasibility and measurement checks above. The first implementation task is the narrow bridge/upgrade/callback feasibility probe, not coding the entire design at once. If first-release requirements include cross-process job push, durable replay, arbitrary request-local closures, or immediate session revocation, revise that scope explicitly before implementation; those materially change the work.
+The maintainer has accepted the two-slice direction: process-local live delivery and explicit state, without replay/brokers/rooms/generators. Gate 0 and Slice A have landed; see the implemented boundary above. Slice B must still prove upgrade ownership, worker readiness/generation compatibility and fairness under worker loss before its proposed APIs are considered available. If requirements include cross-process job push, durable replay, arbitrary request-local closures, or immediate session revocation, revise that scope explicitly; those materially change the work.
