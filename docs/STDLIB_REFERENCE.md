@@ -78,7 +78,7 @@ These functions are available everywhere without importing.
 | [`jobs(directory: String)`](#jobs) | Auto-discover and register job definitions from .tnt files in a directory. |
 | [`len(x: String \| Array \| Map)`](#len) | Returns the length of a string, array, or map. |
 | [`libs(directory: String)`](#libs) | Auto-import all .tnt files from a directory. |
-| [`listen(port: Int, options?: Map<String, Any>)`](#listen) | Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool, require fixture=true). Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged. JSON readiness is one flushed NTNT_READY line after bind with actual host/port. Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness. Starts an HTTP server on the given port. |
+| [`listen(port: Int, options?: Map<String, Any>)`](#listen) | Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool, require fixture=true). Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged. JSON readiness is one flushed NTNT_READY line after bind with actual host/port. Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness. Since v0.5.7 `realtime` accepts positive Int max_connections (1024), max_topics (256), max_event_bytes (65536), max_payload_bytes (33554432). Event bytes must not exceed payload bytes. Limits are process-wide, fixed before readiness, and shared by HTTP workers and in-process tasks. Primary setup uses defaults; too many live setup buses fail startup. Secondary setup uses the configured caps: allow space for transient setup buses alongside live ones. Readiness does not wait for all workers. Changing limits requires a process restart, not hot reload. Starts an HTTP server on the given port. |
 | [`max(a: Int \| Float, b: Int \| Float)`](#max) | Returns the larger of two numbers. |
 | [`min(a: Int \| Float, b: Int \| Float)`](#min) | Returns the smaller of two numbers. |
 | [`new_server()`](#new_server) | Resets the server, clearing all registered routes. |
@@ -1124,7 +1124,7 @@ libs("lib/")  // Auto-load all lib files into the current scope
 listen(port: Int, options?: Map<String, Any>) -> Unit
 ```
 
-Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool, require fixture=true). Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged. JSON readiness is one flushed NTNT_READY line after bind with actual host/port. Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness. Starts an HTTP server on the given port.
+Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool, require fixture=true). Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged. JSON readiness is one flushed NTNT_READY line after bind with actual host/port. Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness. Since v0.5.7 `realtime` accepts positive Int max_connections (1024), max_topics (256), max_event_bytes (65536), max_payload_bytes (33554432). Event bytes must not exceed payload bytes. Limits are process-wide, fixed before readiness, and shared by HTTP workers and in-process tasks. Primary setup uses defaults; too many live setup buses fail startup. Secondary setup uses the configured caps: allow space for transient setup buses alongside live ones. Readiness does not wait for all workers. Changing limits requires a process restart, not hot reload. Starts an HTTP server on the given port.
 
 This must be called after registering route handlers with get(), post(), put(), delete(), or patch(). The server blocks and serves requests until the process is terminated.
 
@@ -4735,7 +4735,7 @@ broadcast(name: String, options?: Map) -> Broadcast
 
 Get or create a named, process-local fan-out bus for Server-Sent Events.
 
-All HTTP workers and in-process tasks share buses by name. The returned handle is the authority to publish and subscribe; a client-supplied string is not. Unused buses are freed. Options: `capacity` (Int 1-1024, default 64) is the number of recent events a slow subscriber may fall behind before it is disconnected. Not shared across OS processes.
+All HTTP workers and in-process tasks share buses by name. The returned handle is the authority to publish and subscribe; a client-supplied string is not. Unused buses are freed. Options: `capacity` (Int 1-1024, default 64) is the number of recent events a slow subscriber may fall behind before it is disconnected. Not shared across OS processes. The process topic limit defaults to 256 and is configurable with listen(..., map { "realtime": ... }).
 
 **Parameters:**
 
@@ -4900,7 +4900,7 @@ publish(bus: Broadcast, value: Any, options?: Map) -> Result<Unit, String>
 
 Publish a JSON-compatible value to every current subscriber of a bus.
 
-The value is validated and encoded once, then shared by all subscribers. Never waits for clients. Zero subscribers is a successful no-op (no replay is stored). Options: `event` (String) and `id` (String or Int) become SSE `event:`/`id:` fields. Err for Secret values, functions, handles, NaN, more than 64 KiB encoded, or an exhausted process payload budget.
+The value is validated and encoded once, then shared by all subscribers. Never waits for clients. Zero subscribers is a successful no-op (no replay is stored). Options: `event` (String) and `id` (String or Int) become SSE `event:`/`id:` fields. Err for Secret values, functions, handles, NaN, an oversized encoded frame (64 KiB default), or an exhausted process payload budget (32 MiB default). Configure these with listen's `realtime` map; limits also apply with zero subscribers and inside concurrent tasks.
 
 **Parameters:**
 
@@ -8391,7 +8391,7 @@ sse(bus: Broadcast, options?: Map) -> Response
 
 Return a Server-Sent Events stream of a broadcast bus from a GET handler.
 
-Middleware, authentication, status and headers apply as for any response; the stream opens only if this is the final response. The worker is released immediately: the open connection holds no interpreter. Events published after the stream opens are delivered; there is no replay. A comment heartbeat keeps proxies from timing out. Slow clients that fall behind the bus capacity are disconnected and should reconnect and refetch state. Options: `heartbeat_ms` (1000-300000, default 15000), `retry_ms` (client reconnect delay hint). HEAD and non-2xx responses never open a stream.
+Middleware, authentication, status and headers apply as for any response; the stream opens only if this is the final response. The worker is released immediately: the open connection holds no interpreter. Events published after the stream opens are delivered; there is no replay. A comment heartbeat keeps proxies from timing out. Slow clients that fall behind the bus capacity are disconnected and should reconnect and refetch state. Options: `heartbeat_ms` (1000-300000, default 15000), `retry_ms` (client reconnect delay hint). HEAD and non-2xx responses never open a stream. The process stream limit is 1024 by default (503 beyond it); configure max_connections in listen's `realtime` map. Disconnect releases the permit.
 
 **Parameters:**
 

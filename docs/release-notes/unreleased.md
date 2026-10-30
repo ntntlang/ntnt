@@ -1,5 +1,31 @@
 # Unreleased
 
+## Native Server-Sent Events (DD-041 Slice A)
+
+`broadcast()` and `publish()` from `std/concurrent`, plus `sse()` from
+`std/http/server`, provide process-local live delivery through ordinary routes,
+middleware and authentication. All HTTP workers and in-process tasks share named
+buses. Events are encoded once, streams hold no interpreter/thread, and slow
+consumers are disconnected rather than silently skipping events. There is no
+replay or cross-process delivery; clients reconcile state on reconnect.
+
+`listen(port, map { "realtime": map { ... } })` configures positive integer caps:
+`max_connections` (default 1024), `max_topics` (256), `max_event_bytes` (65536), and
+`max_payload_bytes` (33554432). Omitted keys preserve those defaults; unknown keys,
+non-positive/non-integer values, an event cap above the payload budget, or a topic
+cap below existing live primary-setup buses fail before readiness. Secondary workers
+set up afterward under the configured caps; allow room for their transient buses
+alongside already-live buses to avoid setup retries. Readiness does not yet wait
+for all workers. Limits are process-wide and fixed at startup; changing them
+requires a process restart. A full stream cap
+returns HTTP 503; oversized events and exhausted byte budgets return `Err` from
+`publish`, including from tasks and when there are no subscribers. JSON escaping
+is bounded while encoding, rather than checked only after expansion.
+
+SSE requires `ntnt run`; `ntnt test` returns an explicit 501. WebSockets remain a
+separate, unimplemented DD-041 Slice B. See the AI guide's Server-Sent Events
+section and `examples/sse_dashboard.tnt`.
+
 ## Markdown parser dependency security update
 
 Upgrade `pulldown-cmark` to 0.13.5 and require that patched minimum for

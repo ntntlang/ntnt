@@ -22,7 +22,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 
@@ -40,6 +40,98 @@ pub const MAX_CONNECTIONS: usize = 1024;
 /// Default heartbeat (comment frame) interval.
 pub const DEFAULT_HEARTBEAT_MS: u64 = 15_000;
 const MAX_DEPTH: usize = 64;
+
+/// Process-wide limits, fixed by the first listener. Scripts use the same
+/// defaults before listen(); HTTP workers and task captures share this policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Limits {
+    max_topics: usize,
+    max_connections: usize,
+    max_event_bytes: usize,
+    max_payload_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_topics: MAX_TOPICS,
+            max_connections: MAX_CONNECTIONS,
+            max_event_bytes: MAX_EVENT_BYTES,
+            max_payload_bytes: MAX_PAYLOAD_BUDGET,
+        }
+    }
+}
+
+impl Limits {
+    pub(crate) fn parse(value: &Value) -> Result<Self> {
+        let Value::Map(map) = value else {
+            return Err(IntentError::type_error("listen realtime must be a Map"));
+        };
+        let mut limits = Self::default();
+        for (key, value) in map {
+            let target = match key.as_str() {
+                "max_topics" => &mut limits.max_topics,
+                "max_connections" => &mut limits.max_connections,
+                "max_event_bytes" => &mut limits.max_event_bytes,
+                "max_payload_bytes" => &mut limits.max_payload_bytes,
+                _ => {
+                    return Err(IntentError::type_error(format!(
+                        "unknown realtime option: {key}"
+                    )))
+                }
+            };
+            let number = match value {
+                Value::Int(n) if *n > 0 => usize::try_from(*n).ok(),
+                _ => None,
+            };
+            *target = number.ok_or_else(|| {
+                IntentError::type_error(format!(
+                    "realtime {key} must be a positive Int that fits this platform"
+                ))
+            })?;
+        }
+        if limits.max_event_bytes > limits.max_payload_bytes {
+            return Err(IntentError::type_error(
+                "realtime max_event_bytes must not exceed max_payload_bytes",
+            ));
+        }
+        Ok(limits)
+    }
+}
+
+// Operations hold a read guard until admission/publication finishes. The
+// startup write guard prevents a task from admitting under the old defaults
+// concurrently with a lower limit being installed. No guard crosses await.
+static LIMITS: RwLock<Option<Limits>> = RwLock::new(None);
+
+pub(crate) fn configure(limits: Limits) -> Result<()> {
+    let mut configured = LIMITS.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(current) = *configured {
+        return if current == limits {
+            Ok(())
+        } else {
+            Err(IntentError::runtime_error(
+                "realtime limits are already fixed for this process",
+            ))
+        };
+    }
+    let mut registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    registry.retain(|_, weak| weak.strong_count() > 0);
+    if registry.len() > limits.max_topics {
+        return Err(IntentError::runtime_error(
+            "realtime max_topics is below the number of live setup buses",
+        ));
+    }
+    if PAYLOAD_USED.load(Ordering::Acquire) > limits.max_payload_bytes
+        || OPEN_STREAMS.load(Ordering::Acquire) > limits.max_connections
+    {
+        return Err(IntentError::runtime_error(
+            "realtime limits are below resources already in use",
+        ));
+    }
+    *configured = Some(limits);
+    Ok(())
+}
 
 /// A stream's receiver plus when it last delivered a frame. The receiver is
 /// `None` once evicted.
@@ -107,10 +199,10 @@ impl AsRef<[u8]> for Frame {
     }
 }
 
-fn reserve_payload(len: usize) -> bool {
+fn reserve_payload(len: usize, max_bytes: usize) -> bool {
     let mut used = PAYLOAD_USED.load(Ordering::Acquire);
     loop {
-        let Some(next) = used.checked_add(len).filter(|n| *n <= MAX_PAYLOAD_BUDGET) else {
+        let Some(next) = used.checked_add(len).filter(|n| *n <= max_bytes) else {
             return false;
         };
         match PAYLOAD_USED.compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Acquire) {
@@ -166,6 +258,8 @@ pub fn broadcast_value(args: &[Value]) -> Result<Value> {
             }
         }
     }
+    let configuration = LIMITS.read().unwrap_or_else(|e| e.into_inner());
+    let limits = configuration.unwrap_or_default();
     let mut registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(bus) = registry.get(&name).and_then(Weak::upgrade) {
         if requested.is_some_and(|c| c != bus.capacity) {
@@ -177,9 +271,10 @@ pub fn broadcast_value(args: &[Value]) -> Result<Value> {
         return Ok(Value::Broadcast(bus));
     }
     registry.retain(|_, weak| weak.strong_count() > 0);
-    if registry.len() >= MAX_TOPICS {
+    if registry.len() >= limits.max_topics {
         return Err(IntentError::runtime_error(format!(
-            "too many broadcast names (limit {MAX_TOPICS})"
+            "too many broadcast names (limit {})",
+            limits.max_topics
         )));
     }
     let capacity = requested.unwrap_or(DEFAULT_CAPACITY);
@@ -209,11 +304,25 @@ pub fn publish_value(args: &[Value]) -> Result<Value> {
         Some(Value::Map(map)) => event_metadata(map)?,
         Some(_) => return Err(IntentError::type_error("publish() options must be a map")),
     };
-    match encode_frame(value, event.as_deref(), id.as_deref()) {
+    let configuration = LIMITS.read().unwrap_or_else(|e| e.into_inner());
+    let limits = configuration.unwrap_or_default();
+    match encode_frame_with_limit(
+        value,
+        event.as_deref(),
+        id.as_deref(),
+        limits.max_event_bytes,
+    ) {
         Ok(frame) => {
             let len = frame.len();
-            let fits = || PAYLOAD_USED.load(Ordering::Acquire) + len <= MAX_PAYLOAD_BUDGET;
-            if !reserve_payload(len) && !(evict_stalled(fits) > 0 && reserve_payload(len)) {
+            let fits = || {
+                PAYLOAD_USED
+                    .load(Ordering::Acquire)
+                    .checked_add(len)
+                    .is_some_and(|n| n <= limits.max_payload_bytes)
+            };
+            if !reserve_payload(len, limits.max_payload_bytes)
+                && !(evict_stalled(fits) > 0 && reserve_payload(len, limits.max_payload_bytes))
+            {
                 return Ok(Value::err(Value::String(
                     "realtime payload budget exhausted".into(),
                 )));
@@ -252,12 +361,22 @@ fn event_metadata(map: &HashMap<String, Value>) -> Result<(Option<String>, Optio
 
 /// Encode one SSE frame: optional `event:`/`id:` lines and one `data:` line of
 /// compact JSON. Size is bounded while encoding.
-pub(crate) fn encode_frame(
+#[cfg(test)]
+fn encode_frame(
     value: &Value,
     event: Option<&str>,
     id: Option<&str>,
 ) -> std::result::Result<Vec<u8>, String> {
-    let mut out = Vec::with_capacity(256);
+    encode_frame_with_limit(value, event, id, MAX_EVENT_BYTES)
+}
+
+fn encode_frame_with_limit(
+    value: &Value,
+    event: Option<&str>,
+    id: Option<&str>,
+    max_bytes: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(256.min(max_bytes));
     if let Some(event) = event {
         if event.is_empty() || event.len() > 128 || event.contains(['\r', '\n']) {
             return Err("event name must be 1-128 characters without line breaks".into());
@@ -277,33 +396,51 @@ pub(crate) fn encode_frame(
         out.push(b'\n');
     }
     out.extend_from_slice(b"data: ");
-    write_json(value, &mut out, 0)?;
+    write_json(value, &mut out, 0, max_bytes)?;
     out.extend_from_slice(b"\n\n");
-    if out.len() > MAX_EVENT_BYTES {
-        return Err(format!("event exceeds {MAX_EVENT_BYTES} bytes"));
-    }
+    check_len(&out, max_bytes)?;
     Ok(out)
 }
 
-fn check_len(out: &[u8]) -> std::result::Result<(), String> {
-    if out.len() > MAX_EVENT_BYTES {
-        Err(format!("event exceeds {MAX_EVENT_BYTES} bytes"))
+fn check_len(out: &[u8], max_bytes: usize) -> std::result::Result<(), String> {
+    if out.len() > max_bytes {
+        Err(format!("event exceeds {max_bytes} bytes"))
     } else {
         Ok(())
     }
 }
 
-fn write_str(s: &str, out: &mut Vec<u8>) -> std::result::Result<(), String> {
-    if out.len() + s.len() > MAX_EVENT_BYTES {
-        return Err(format!("event exceeds {MAX_EVENT_BYTES} bytes"));
+fn write_str(s: &str, out: &mut Vec<u8>, max_bytes: usize) -> std::result::Result<(), String> {
+    if s.len() > max_bytes.saturating_sub(out.len()) {
+        return Err(format!("event exceeds {max_bytes} bytes"));
     }
-    serde_json::to_writer(&mut *out, s).map_err(|e| e.to_string())?;
-    check_len(out)
+    // Escaping can expand a string sixfold. Stop the serializer before growing
+    // beyond the configured frame size, not after an unbounded allocation.
+    struct Bounded<'a>(&'a mut Vec<u8>, usize);
+    impl std::io::Write for Bounded<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.1.saturating_sub(self.0.len()) {
+                return Err(std::io::Error::other("event size limit"));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Bounded(out, max_bytes), s)
+        .map_err(|_| format!("event exceeds {max_bytes} bytes"))
 }
 
 /// Bounded JSON encoding of publishable values. Rejects secrets, functions
 /// and runtime handles, including nested ones, even with zero subscribers.
-fn write_json(value: &Value, out: &mut Vec<u8>, depth: usize) -> std::result::Result<(), String> {
+fn write_json(
+    value: &Value,
+    out: &mut Vec<u8>,
+    depth: usize,
+    max_bytes: usize,
+) -> std::result::Result<(), String> {
     if depth > MAX_DEPTH {
         return Err(format!("event nesting exceeds {MAX_DEPTH} levels"));
     }
@@ -315,11 +452,13 @@ fn write_json(value: &Value, out: &mut Vec<u8>, depth: usize) -> std::result::Re
             serde_json::to_writer(&mut *out, f).map_err(|e| e.to_string())?
         }
         Value::Float(_) => return Err("cannot publish NaN or infinite numbers".into()),
-        Value::String(s) => write_str(s, out)?,
+        Value::String(s) => write_str(s, out, max_bytes)?,
         // Each element needs at least 2 bytes ("0,"): reject impossible sizes
         // before walking the whole input.
-        Value::Array(items) if out.len() + 2 * items.len() > MAX_EVENT_BYTES + 1 => {
-            return Err(format!("event exceeds {MAX_EVENT_BYTES} bytes"))
+        Value::Array(items)
+            if items.len() > max_bytes.saturating_sub(out.len()).saturating_add(1) / 2 =>
+        {
+            return Err(format!("event exceeds {max_bytes} bytes"))
         }
         Value::Array(items) => {
             out.push(b'[');
@@ -327,34 +466,35 @@ fn write_json(value: &Value, out: &mut Vec<u8>, depth: usize) -> std::result::Re
                 if i > 0 {
                     out.push(b',');
                 }
-                write_json(item, out, depth + 1)?;
+                write_json(item, out, depth + 1, max_bytes)?;
             }
             out.push(b']');
         }
-        Value::Map(map) => write_object(map, out, depth)?,
-        Value::Struct { fields, .. } => write_object(fields, out, depth)?,
+        Value::Map(map) => write_object(map, out, depth, max_bytes)?,
+        Value::Struct { fields, .. } => write_object(fields, out, depth, max_bytes)?,
         Value::EnumValue {
             enum_name,
             variant,
             values,
         } if enum_name == "Option" => match (variant.as_str(), values.first()) {
-            ("Some", Some(inner)) => write_json(inner, out, depth + 1)?,
+            ("Some", Some(inner)) => write_json(inner, out, depth + 1, max_bytes)?,
             _ => out.extend_from_slice(b"null"),
         },
         Value::Secret(_) => return Err("Secret values cannot be published".into()),
         other => return Err(format!("cannot publish a {} value", other.type_name())),
     }
-    check_len(out)
+    check_len(out, max_bytes)
 }
 
 fn write_object(
     map: &HashMap<String, Value>,
     out: &mut Vec<u8>,
     depth: usize,
+    max_bytes: usize,
 ) -> std::result::Result<(), String> {
     // Each entry needs at least 5 bytes (`"":0,`): reject before sorting keys.
-    if out.len() + 5 * map.len() > MAX_EVENT_BYTES + 1 {
-        return Err(format!("event exceeds {MAX_EVENT_BYTES} bytes"));
+    if map.len() > max_bytes.saturating_sub(out.len()).saturating_add(1) / 5 {
+        return Err(format!("event exceeds {max_bytes} bytes"));
     }
     let mut keys: Vec<&String> = map.keys().collect();
     keys.sort();
@@ -363,9 +503,9 @@ fn write_object(
         if i > 0 {
             out.push(b',');
         }
-        write_str(key, out)?;
+        write_str(key, out, max_bytes)?;
         out.push(b':');
-        write_json(&map[key], out, depth + 1)?;
+        write_json(&map[key], out, depth + 1, max_bytes)?;
     }
     out.push(b'}');
     Ok(())
@@ -509,10 +649,10 @@ impl Drop for StreamPermit {
     }
 }
 
-fn acquire_stream_permit() -> Option<StreamPermit> {
+fn acquire_stream_permit(max_connections: usize) -> Option<StreamPermit> {
     let mut open = OPEN_STREAMS.load(Ordering::Acquire);
     loop {
-        if open >= MAX_CONNECTIONS {
+        if open >= max_connections {
             return None;
         }
         match OPEN_STREAMS.compare_exchange_weak(
@@ -557,7 +697,9 @@ pub fn open_stream(
     if *shutdown.borrow() {
         return Err(OpenError::ShuttingDown);
     }
-    let permit = acquire_stream_permit().ok_or(OpenError::TooManyStreams)?;
+    let configuration = LIMITS.read().unwrap_or_else(|e| e.into_inner());
+    let limits = configuration.unwrap_or_default();
+    let permit = acquire_stream_permit(limits.max_connections).ok_or(OpenError::TooManyStreams)?;
     let mut heartbeat =
         tokio::time::interval_at(tokio::time::Instant::now() + spec.heartbeat, spec.heartbeat);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -572,7 +714,7 @@ pub fn open_stream(
     });
     {
         let mut subscribers = SUBSCRIBERS.lock().unwrap_or_else(|e| e.into_inner());
-        if subscribers.len() >= 2 * MAX_CONNECTIONS {
+        if subscribers.len() >= limits.max_connections.saturating_mul(2) {
             subscribers.retain(|weak| weak.strong_count() > 0);
         }
         subscribers.push(Arc::downgrade(&slot));
@@ -674,6 +816,82 @@ mod tests {
             Value::Broadcast(bus) => bus,
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn realtime_limits_parse_defaults_and_reject_invalid_values() {
+        assert_eq!(Limits::parse(&map(&[])).unwrap(), Limits::default());
+        for key in [
+            "max_connections",
+            "max_topics",
+            "max_event_bytes",
+            "max_payload_bytes",
+        ] {
+            for value in [
+                Value::Int(0),
+                Value::Int(-1),
+                Value::Float(1.0),
+                Value::Bool(true),
+                Value::Unit,
+            ] {
+                assert!(Limits::parse(&map(&[(key, value)])).is_err(), "{key}");
+            }
+            let mut values = vec![(key, Value::Int(i64::MAX))];
+            if key == "max_event_bytes" {
+                values.push(("max_payload_bytes", Value::Int(i64::MAX)));
+            }
+            assert_eq!(
+                Limits::parse(&map(&values)).is_ok(),
+                usize::BITS == 64,
+                "{key}"
+            );
+        }
+        let limits = Limits::parse(&map(&[
+            ("max_topics", Value::Int(3)),
+            ("max_connections", Value::Int(2)),
+            ("max_event_bytes", Value::Int(16)),
+            ("max_payload_bytes", Value::Int(32)),
+        ]))
+        .unwrap();
+        assert_eq!(
+            limits,
+            Limits {
+                max_topics: 3,
+                max_connections: 2,
+                max_event_bytes: 16,
+                max_payload_bytes: 32
+            }
+        );
+        assert!(Limits::parse(&map(&[("max_payload_bytes", Value::Int(1))])).is_err());
+        assert!(Limits::parse(&map(&[("typo", Value::Int(1))])).is_err());
+    }
+
+    #[test]
+    fn configured_encoding_bound_includes_framing_metadata_and_escaping() {
+        let value = Value::String("x".into());
+        let frame = encode_frame(&value, Some("tick"), Some("1")).unwrap();
+        assert!(encode_frame_with_limit(&value, Some("tick"), Some("1"), frame.len()).is_ok());
+        assert!(encode_frame_with_limit(&value, Some("tick"), Some("1"), frame.len() - 1).is_err());
+        let mut out = Vec::new();
+        assert!(write_str(&"\0".repeat(32), &mut out, 32).is_err());
+        assert!(
+            out.len() <= 32,
+            "escaping must not first allocate the expanded string"
+        );
+    }
+
+    #[test]
+    fn configured_budget_stays_charged_until_the_last_frame_reference_drops() {
+        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let before = stats().1;
+        assert!(reserve_payload(32, before + 32));
+        let event = Arc::new(EncodedEvent { bytes: vec![0; 32] });
+        let bytes = Bytes::from_owner(Frame(event.clone()));
+        assert!(!reserve_payload(1, before + 32));
+        drop(event);
+        assert_eq!(stats().1, before + 32);
+        drop(bytes);
+        assert_eq!(stats().1, before);
     }
 
     #[test]

@@ -3751,7 +3751,8 @@ pub fn init() -> HashMap<String, Value> {
     // handle is the authority to publish and subscribe; a client-supplied string
     // is not. Unused buses are freed. Options: `capacity` (Int 1-1024, default
     // 64) is the number of recent events a slow subscriber may fall behind before
-    // it is disconnected. Not shared across OS processes.
+    // it is disconnected. Not shared across OS processes. The process topic
+    // limit defaults to 256 and is configurable with listen(..., map { "realtime": ... }).
     // @param name 1-128 characters of [A-Za-z0-9._:-]
     // @param options Optional map with `capacity`
     // @returns A Broadcast handle
@@ -3778,7 +3779,9 @@ pub fn init() -> HashMap<String, Value> {
     // Never waits for clients. Zero subscribers is a successful no-op (no replay
     // is stored). Options: `event` (String) and `id` (String or Int) become SSE
     // `event:`/`id:` fields. Err for Secret values, functions, handles, NaN,
-    // more than 64 KiB encoded, or an exhausted process payload budget.
+    // an oversized encoded frame (64 KiB default), or an exhausted process
+    // payload budget (32 MiB default). Configure these with listen's `realtime`
+    // map; limits also apply with zero subscribers and inside concurrent tasks.
     // @param bus A Broadcast from broadcast()
     // @param value JSON-compatible data
     // @param options Optional map with `event` and `id`
