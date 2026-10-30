@@ -559,15 +559,92 @@ pub struct ServerState {
     pub routes: Vec<(Route, Value, RouteSource)>, // Routes with handlers and source info
     /// Route index for O(1) lookup by (method, segment_count) -> route indices
     route_index: HashMap<(String, usize), Vec<usize>>,
-    pub static_dirs: Vec<(String, String)>, // (url_prefix, filesystem_path)
-    pub middleware: Vec<Value>,             // Middleware functions to run before handlers
-    pub hot_reload: bool,                   // Whether hot-reload is enabled
-    pub shutdown_handlers: Vec<Value>,      // Functions to call on server shutdown
-    pub cors_config: Option<CorsConfig>,    // Optional CORS configuration
-    pub csp_config: Option<CspConfig>,      // Optional CSP configuration
-    pub error_handler: Option<Value>,       // Global error handler callback
+    pub static_dirs: Vec<StaticMount>,
+    pub middleware: Vec<Value>, // Middleware functions to run before handlers
+    pub hot_reload: bool,       // Whether hot-reload is enabled
+    pub shutdown_handlers: Vec<Value>, // Functions to call on server shutdown
+    pub cors_config: Option<CorsConfig>, // Optional CORS configuration
+    pub csp_config: Option<CspConfig>, // Optional CSP configuration
+    pub error_handler: Option<Value>, // Global error handler callback
     /// Per-route rate overrides keyed by (method, pattern) (#294).
     pub route_rates: HashMap<(String, String), crate::stdlib::rate_limit::RouteRate>,
+}
+
+/// A directory mounted by `serve_static`, with its optional served-extension allowlist.
+#[derive(Debug, Clone)]
+pub struct StaticMount {
+    pub prefix: String,
+    pub directory: String,
+    /// Lowercase extensions (no leading dot) this mount may serve. `None` serves every file.
+    pub extensions: Option<Vec<String>>,
+}
+
+/// Parse the optional third `serve_static` argument: `map { "extensions": ["css", "png", …] }`.
+/// Returns `Ok(None)` when no options are given.
+pub fn parse_static_extensions(value: Option<&Value>) -> Result<Option<Vec<String>>> {
+    let Some(value) = value else { return Ok(None) };
+    let Value::Map(map) = value else {
+        return Err(IntentError::type_error(
+            "serve_static options must be a Map".to_string(),
+        ));
+    };
+    let mut extensions: Option<Vec<String>> = None;
+    for (key, value) in map {
+        match (key.as_str(), value) {
+            ("extensions", Value::Array(items)) => {
+                let mut list = Vec::with_capacity(items.len());
+                for item in items {
+                    let Value::String(raw) = item else {
+                        return Err(IntentError::type_error(
+                            "serve_static extensions must be strings".to_string(),
+                        ));
+                    };
+                    let ext = raw.trim().trim_start_matches('.').to_ascii_lowercase();
+                    if ext.is_empty() || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+                        return Err(IntentError::type_error(format!(
+                            "serve_static extension {raw:?} must be alphanumeric, e.g. \"css\" or \"woff2\""
+                        )));
+                    }
+                    if !list.contains(&ext) {
+                        list.push(ext);
+                    }
+                }
+                if list.is_empty() {
+                    return Err(IntentError::type_error(
+                        "serve_static extensions must list at least one extension".to_string(),
+                    ));
+                }
+                extensions = Some(list);
+            }
+            ("extensions", _) => {
+                return Err(IntentError::type_error(
+                    "serve_static extensions must be an array of strings".to_string(),
+                ))
+            }
+            _ => {
+                return Err(IntentError::type_error(format!(
+                    "invalid serve_static option: {key}"
+                )))
+            }
+        }
+    }
+    Ok(extensions)
+}
+
+/// Whether a request-relative file path may be served under an optional extension allowlist.
+/// With an allowlist, a file with no extension, a dotfile, or an unlisted extension is not served.
+pub fn static_extension_allowed(relative: &str, extensions: Option<&[String]>) -> bool {
+    let Some(allowed) = extensions else {
+        return true;
+    };
+    let file_name = relative.rsplit('/').next().unwrap_or(relative);
+    match file_name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
+            let ext = ext.to_ascii_lowercase();
+            allowed.iter().any(|a| *a == ext)
+        }
+        _ => false,
+    }
 }
 
 impl ServerState {
@@ -931,7 +1008,20 @@ impl ServerState {
     }
 
     pub fn add_static_dir(&mut self, prefix: String, directory: String) {
-        self.static_dirs.push((prefix, directory));
+        self.add_static_dir_with_extensions(prefix, directory, None);
+    }
+
+    pub fn add_static_dir_with_extensions(
+        &mut self,
+        prefix: String,
+        directory: String,
+        extensions: Option<Vec<String>>,
+    ) {
+        self.static_dirs.push(StaticMount {
+            prefix,
+            directory,
+            extensions,
+        });
     }
 
     pub fn add_middleware(&mut self, handler: Value) {
@@ -939,7 +1029,8 @@ impl ServerState {
     }
 
     pub fn find_static_file(&self, path: &str) -> Option<(String, String)> {
-        for (prefix, directory) in &self.static_dirs {
+        for mount in &self.static_dirs {
+            let (prefix, directory) = (&mount.prefix, &mount.directory);
             // Check if path starts with prefix
             let prefix_path = if prefix.ends_with('/') {
                 prefix.clone()
@@ -972,6 +1063,11 @@ impl ServerState {
                     urlencoding::decode(&relative).unwrap_or_else(|_| relative.clone().into());
                 if decoded.contains("..") {
                     return None; // Encoded path traversal attempt - reject
+                }
+
+                // Served-extension allowlist: unlisted, extensionless and dotfile paths are not served.
+                if !static_extension_allowed(&relative, mount.extensions.as_deref()) {
+                    return None;
                 }
 
                 // Construct full filesystem path
@@ -4754,6 +4850,95 @@ mod tests {
         // Path doesn't match prefix
         let result = state.find_static_file("/other/file.txt");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_static_extension_allowlist_filters_lookup() {
+        let temp_dir = std::env::temp_dir().join(format!("ntnt_static_ext_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(temp_dir.join("img"));
+        for name in [
+            "style.css",
+            "img/photo.PNG",
+            "run.sh",
+            "evil.tnt",
+            "setup.exe",
+            "README",
+            ".env",
+        ] {
+            std::fs::write(temp_dir.join(name), b"x").unwrap();
+        }
+        let mut state = ServerState::new();
+        state.add_static_dir_with_extensions(
+            "/assets".to_string(),
+            temp_dir.to_string_lossy().to_string(),
+            Some(vec!["css".to_string(), "png".to_string()]),
+        );
+        assert!(state.find_static_file("/assets/style.css").is_some());
+        assert!(
+            state.find_static_file("/assets/img/photo.PNG").is_some(),
+            "case-insensitive"
+        );
+        for denied in [
+            "/assets/run.sh",
+            "/assets/evil.tnt",
+            "/assets/setup.exe",
+            "/assets/README",
+            "/assets/.env",
+            "/assets",
+        ] {
+            assert!(
+                state.find_static_file(denied).is_none(),
+                "{denied} must not be served"
+            );
+        }
+        // Without an allowlist the same files are still served (unchanged default).
+        let mut open = ServerState::new();
+        open.add_static_dir(
+            "/assets".to_string(),
+            temp_dir.to_string_lossy().to_string(),
+        );
+        assert!(open.find_static_file("/assets/run.sh").is_some());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_parse_static_extensions() {
+        assert_eq!(parse_static_extensions(None).unwrap(), None);
+        let value = Value::Map(HashMap::from([(
+            "extensions".to_string(),
+            Value::Array(vec![
+                Value::String(".CSS".to_string()),
+                Value::String("png".to_string()),
+                Value::String("css".to_string()),
+            ]),
+        )]));
+        assert_eq!(
+            parse_static_extensions(Some(&value)).unwrap(),
+            Some(vec!["css".to_string(), "png".to_string()])
+        );
+        for bad in [
+            Value::String("css".to_string()),
+            Value::Map(HashMap::from([("ext".to_string(), Value::Array(vec![]))])),
+            Value::Map(HashMap::from([(
+                "extensions".to_string(),
+                Value::Array(vec![]),
+            )])),
+            Value::Map(HashMap::from([(
+                "extensions".to_string(),
+                Value::String("css".to_string()),
+            )])),
+            Value::Map(HashMap::from([(
+                "extensions".to_string(),
+                Value::Array(vec![Value::String("c/ss".to_string())]),
+            )])),
+        ] {
+            assert!(parse_static_extensions(Some(&bad)).is_err(), "{bad:?}");
+        }
+        assert!(static_extension_allowed("anything", None));
+        let allowed = vec!["pdf".to_string()];
+        assert!(static_extension_allowed("docs/a.PDF", Some(&allowed)));
+        assert!(!static_extension_allowed("docs/.pdf", Some(&allowed)));
+        assert!(!static_extension_allowed("docs/a", Some(&allowed)));
     }
 
     // ===========================================

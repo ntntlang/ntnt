@@ -4558,7 +4558,7 @@ impl TypeContext {
         sig!("patch", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Union(vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::Unit])], Type::Unit, required(2));
         sig!("delete", ["pattern" => Type::String, "handler" => Type::Any, "options" => Type::Union(vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::Unit])], Type::Unit, required(2));
         sig!("listen", ["port" => Type::Int, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(1));
-        sig!("serve_static", ["prefix" => Type::String, "dir" => Type::String], Type::Unit);
+        sig!("serve_static", ["prefix" => Type::String, "dir" => Type::String, "options" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(2));
         sig!("use_middleware", ["handler" => Type::Any], Type::Unit);
         sig!("on_shutdown", ["handler" => Type::Any], Type::Unit);
         sig!("routes", ["dir" => Type::String], Type::Unit);

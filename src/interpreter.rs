@@ -1323,7 +1323,7 @@ impl Interpreter {
         register!(
             "serve_static",
             Some(RuntimeCapability::HttpServer),
-            AritySpec::exact(2),
+            AritySpec::between(2, 3),
             Interpreter::sa_serve_static
         );
         register!(
@@ -1414,6 +1414,11 @@ impl Interpreter {
     fn sa_serve_static(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
         let prefix = interp.eval_expression(&args[0])?;
         let directory = interp.eval_expression(&args[1])?;
+        let options = args
+            .get(2)
+            .map(|expr| interp.eval_expression(expr))
+            .transpose()?;
+        let extensions = crate::stdlib::http_server::parse_static_extensions(options.as_ref())?;
 
         match (&prefix, &directory) {
             (Value::String(prefix_str), Value::String(dir_str)) => {
@@ -1434,11 +1439,11 @@ impl Interpreter {
                 };
                 interp
                     .server_state
-                    .add_static_dir(prefix_str.clone(), resolved_dir);
+                    .add_static_dir_with_extensions(prefix_str.clone(), resolved_dir, extensions);
                 Ok(Value::Unit)
             }
             _ => Err(IntentError::type_error(
-                "serve_static() requires two string arguments: (url_prefix, directory)".to_string(),
+                "serve_static() requires two string arguments: (url_prefix, directory) and an optional options map".to_string(),
             )),
         }
     }
@@ -4103,7 +4108,7 @@ impl Interpreter {
         );
 
         // @ntnt serve_static
-        // @signature serve_static(prefix: String, directory: String) -> Unit
+        // @signature serve_static(prefix: String, directory: String, options?: Map) -> Unit
         // Serve static files from a directory under a URL prefix.
         //
         // Maps a URL path prefix to a local directory. For example,
@@ -4112,20 +4117,30 @@ impl Interpreter {
         // `.tnt` file's location. Must be called before `listen()`.
         //
         // Supports gzip compression and common MIME types automatically.
+        //
+        // Pass `map { "extensions": [...] }` to serve only files whose extension
+        // (case-insensitive, no leading dot) is listed; everything else under the
+        // prefix, including extensionless files and dotfiles, answers 404. Use it
+        // on public asset trees so a stray `.exe`, `.sh` or `.tnt` is never served.
+        // Without the option every file in the directory is served, as before.
         // @param prefix The URL path prefix (e.g. "/assets", "/static")
         // @param directory The local directory to serve files from (e.g. "./public")
+        // @param options Optional `map { "extensions": ["css", "js", "png", ...] }` allowlist
         // @returns Unit
         // @tags #server, #http, #static
         // @see_also listen, get, template
         // @since v0.1.0
         // @example serve_static("/assets", "./public") => Unit ~ "Serve ./public/ at /assets/"
         // @example serve_static("/css", "./styles") => Unit ~ "Serve CSS files"
+        // @example serve_static("/assets", "./public", map { "extensions": ["css", "js", "png", "webp", "svg", "woff2", "pdf"] }) => Unit ~ "Serve only listed asset types; .sh/.exe/.tnt under ./public answer 404"
+        // @error TypeError ~ "invalid serve_static option: foo" fix: "Only the extensions option is supported"
+        // @gotcha With an allowlist, files without an extension and dotfiles are not served even if they exist.
         self.environment.borrow_mut().define(
             "serve_static".to_string(),
             Value::NativeFunction {
                 name: "serve_static".to_string(),
                 arity: 2,
-                max_arity: 2,
+                max_arity: 3,
                 requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
@@ -9490,8 +9505,16 @@ impl Interpreter {
                 self.server_state.static_dirs.len()
             );
             if !is_test_mode {
-                for (prefix, dir) in &self.server_state.static_dirs {
-                    println!("  {} -> {}", prefix, dir);
+                for mount in &self.server_state.static_dirs {
+                    match &mount.extensions {
+                        Some(exts) => println!(
+                            "  {} -> {} ({})",
+                            mount.prefix,
+                            mount.directory,
+                            exts.join(",")
+                        ),
+                        None => println!("  {} -> {}", mount.prefix, mount.directory),
+                    }
                 }
             }
         }
@@ -9961,8 +9984,13 @@ impl Interpreter {
             }
 
             // Copy static directories
-            for (url_prefix, fs_path) in &server_state.static_dirs {
-                async_routes.register_static_dir_blocking(rt, url_prefix, fs_path);
+            for mount in &server_state.static_dirs {
+                async_routes.register_static_dir_blocking(
+                    rt,
+                    &mount.prefix,
+                    &mount.directory,
+                    mount.extensions.clone(),
+                );
             }
         }
 

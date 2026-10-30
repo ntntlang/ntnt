@@ -92,7 +92,7 @@ These functions are available everywhere without importing.
 | [`reduce(arr: Array, initial: Any, fn: Function)`](#reduce) | Reduce an array to a single value by applying a function cumulatively. |
 | [`render(compiled: Map, data: Map)`](#render) | Render a pre-compiled template with data. |
 | [`round(x: Int \| Float, decimals?: Int)`](#round) | Rounds to the nearest integer, or to N decimal places. |
-| [`serve_static(prefix: String, directory: String)`](#serve_static) | Serve static files from a directory under a URL prefix. |
+| [`serve_static(prefix: String, directory: String, options?: Map)`](#serve_static) | Serve static files from a directory under a URL prefix. |
 | [`sign(x: Int \| Float)`](#sign) | Returns the sign of a number: -1, 0, or 1. |
 | [`sort_desc(arr: Array, key_or_fn?: String \| Function)`](#sort_desc) | Sort an array in descending order. |
 | [`sqrt(x: Int \| Float)`](#sqrt) | Returns the square root of a number. |
@@ -1533,7 +1533,7 @@ round(3.14159, 2)  // => 3.14  // Round to 2 decimal places
 #### `serve_static`
 
 ```ntnt
-serve_static(prefix: String, directory: String) -> Unit
+serve_static(prefix: String, directory: String, options?: Map) -> Unit
 ```
 
 Serve static files from a directory under a URL prefix.
@@ -1542,10 +1542,13 @@ Maps a URL path prefix to a local directory. For example, `serve_static("/assets
 
 Supports gzip compression and common MIME types automatically.
 
+Pass `map { "extensions": [...] }` to serve only files whose extension (case-insensitive, no leading dot) is listed; everything else under the prefix, including extensionless files and dotfiles, answers 404. Use it on public asset trees so a stray `.exe`, `.sh` or `.tnt` is never served. Without the option every file in the directory is served, as before.
+
 **Parameters:**
 
 - `prefix` — The URL path prefix (e.g. "/assets", "/static")
 - `directory` — The local directory to serve files from (e.g. "./public")
+- `options` — Optional `map { "extensions": ["css", "js", "png", ...] }` allowlist
 
 **Returns:** Unit
 
@@ -1554,7 +1557,16 @@ Supports gzip compression and common MIME types automatically.
 ```ntnt
 serve_static("/assets", "./public")  // => Unit  // Serve ./public/ at /assets/
 serve_static("/css", "./styles")  // => Unit  // Serve CSS files
+serve_static("/assets", "./public", map { "extensions": ["css", "js", "png", "webp", "svg", "woff2", "pdf"] })  // => Unit  // Serve only listed asset types; .sh/.exe/.tnt under ./public answer 404
 ```
+
+**Errors:**
+
+- **TypeError**: invalid serve_static option: foo — *Fix: Only the extensions option is supported*
+
+**Gotchas:**
+
+- With an allowlist, files without an extension and dotfiles are not served even if they exist.
 
 **See also:** `listen`, `get`, `template`
 
