@@ -33,6 +33,12 @@ pub(super) struct Identity {
 }
 
 fn sql_error(error: rusqlite::Error) -> Diagnostic {
+    if error
+        .sqlite_error()
+        .is_some_and(|e| e.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK)
+    {
+        return Diagnostic::new("DB_SQLITE_RECOVERY_REQUIRED", "SQLite requires rollback-journal recovery that read-only inspection cannot perform. A writer may still be active; details suppressed.");
+    }
     let code = match error.sqlite_error_code() {
         Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => "DB_BUSY",
         Some(rusqlite::ErrorCode::OperationInterrupted) => "DB_TIMEOUT",

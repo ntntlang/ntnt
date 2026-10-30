@@ -742,3 +742,65 @@ fn sqlite_without_rowid_table_trigger_keeps_native_coverage() {
     );
     assert_eq!(f.command("verify", &[])["outcome"], "pass");
 }
+
+#[test]
+fn sqlite_hot_journal_inspection_is_readonly_and_names_the_recovery_action() {
+    use sqlite_fixture::Running;
+    use std::io::Read;
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE a(id INTEGER); CREATE TABLE b(id INTEGER); CREATE TABLE logs(value INTEGER);",
+    );
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target().execute_batch("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000) INSERT INTO a SELECT x FROM n; INSERT INTO b SELECT id FROM a;").unwrap();
+    f.sql(
+        "0002_bulk.sql",
+        "INSERT INTO logs SELECT a.id+b.id FROM a CROSS JOIN b;",
+    );
+    let plan = f.plan("upgrade.json");
+    let mut path = f.target_path.as_os_str().to_os_string();
+    path.push("-journal");
+    let journal = std::path::PathBuf::from(path);
+    let mut child = Running::spawn(&f, "upgrade.json", plan["plan_digest"].as_str().unwrap());
+    child.until(|| {
+        // Wait for SQLite's synced, nonzero journal header, not just creation
+        // of a zero-header file that does not yet require native recovery.
+        let mut header = [0; 8];
+        std::fs::File::open(&journal)
+            .and_then(|mut f| f.read_exact(&mut header))
+            .is_ok()
+            && header == [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]
+    });
+    child.kill();
+    // Do not open a writable fixture handle: that would hide the actual state
+    // an operator sees immediately after an interrupted migration.
+    let before = std::fs::read(&f.target_path).unwrap();
+    let journal_before = std::fs::read(&journal).unwrap();
+    for command in ["status", "plan", "verify"] {
+        let r = f.command(command, &[]);
+        assert!(code(&r, "DB_SQLITE_RECOVERY_REQUIRED"), "{r}");
+        let action = r["diagnostics"][0]["next_action"].as_str().unwrap();
+        assert!(
+            action.contains("approved") && action.contains("migrate"),
+            "{action}"
+        );
+        assert_eq!(std::fs::read(&f.target_path).unwrap(), before);
+        assert_eq!(std::fs::read(&journal).unwrap(), journal_before);
+    }
+    let recovered = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_eq!(recovered["outcome"], "pass", "{recovered}");
+    assert_eq!(recovered["progress"][0]["state"], "already_applied");
+    assert_eq!(recovered["progress"][1]["state"], "committed");
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM logs", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1_000_000
+    );
+    assert_eq!(f.command("verify", &[])["outcome"], "pass");
+}
