@@ -12,8 +12,11 @@ pub struct Fixture {
 impl Fixture {
     pub fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let target_path = root.path().join("deployment.sqlite");
-        let scratch_path = root.path().join("scratch.sqlite");
+        // macOS temp roots commonly pass through /var -> /private/var. The
+        // endpoint contract intentionally rejects aliases; give it native paths.
+        let native_root = root.path().canonicalize().unwrap();
+        let target_path = native_root.join("deployment.sqlite");
+        let scratch_path = native_root.join("scratch.sqlite");
         Connection::open(&target_path).unwrap();
         Connection::open(&scratch_path).unwrap();
         std::fs::create_dir(root.path().join("migrations")).unwrap();

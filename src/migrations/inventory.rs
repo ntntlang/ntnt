@@ -217,10 +217,7 @@ impl CapturedInputs {
                 if identifier(&config.schema)
                     && !["public", "information_schema", "_ntnt"]
                         .contains(&config.schema.as_str())
-                    && !config.schema.starts_with("pg_") =>
-            {
-                ()
-            }
+                    && !config.schema.starts_with("pg_") => {}
             "sqlite" if config.schema == "main" => (),
             _ => return Err(invalid(
                 "Use PostgreSQL with an explicit non-system schema, or SQLite with schema=main.",

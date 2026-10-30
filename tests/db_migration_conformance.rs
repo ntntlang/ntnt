@@ -7,12 +7,12 @@ use serde_json::Value;
 use std::path::Path;
 
 enum Fixture {
-    Postgres(pg_fixture::Fixture),
+    Postgres(Box<pg_fixture::Fixture>),
     Sqlite(sqlite_fixture::Fixture),
 }
 impl Fixture {
     fn pg() -> Self {
-        Self::Postgres(pg_fixture::Fixture::new())
+        Self::Postgres(Box::new(pg_fixture::Fixture::new()))
     }
     fn sqlite() -> Self {
         Self::Sqlite(sqlite_fixture::Fixture::new())

@@ -134,7 +134,7 @@ impl FileBinding {
             let result = unsafe {
                 rusqlite::ffi::sqlite3_file_control(
                     conn.handle(),
-                    b"main\0".as_ptr().cast(),
+                    c"main".as_ptr(),
                     rusqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
                     (&mut moved as *mut i32).cast(),
                 )

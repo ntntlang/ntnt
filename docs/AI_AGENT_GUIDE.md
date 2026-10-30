@@ -1692,9 +1692,9 @@ Type checking strictness is controlled by `NTNT_TYPE_MODE` and `NTNT_LINT_MODE` 
 
 ## Database Pattern
 
-### Read-only catalog/history planning (`ntnt db`, first increment)
+### SQL-first catalog, plans and execution (`ntnt db`)
 
-For an explicitly configured PostgreSQL target, use:
+For an explicitly configured PostgreSQL or SQLite target, use:
 
 ```bash
 ntnt db status --target development --json
@@ -1714,11 +1714,17 @@ catalog to replay at the **applied prefix**, not the pending repository head. Re
 and zero executed SQL assertions is `not_run`, not a business-verification pass.
 Plans are not executable or authorizing; unsupported SQL/metadata stays blocked.
 
-There is no `ntnt db migrate` in this increment. Existing `ntnt migrate` still
-converts source interpolation syntax. SQLite and existing application-owned runners
-are unchanged. See [Database Migrations](DATABASE_MIGRATIONS.md) before configuring
-connections, scratch privileges, or interpreting a plan; its replay subset and
-NoTLS trusted-local-transport restriction are intentional and explicit.
+`ntnt db migrate --database app --target development --plan review.json --json`
+executes only after the separate `approval_secret` provider resolves that exact
+reviewed digest. PostgreSQL and SQLite share one transactional execution/recovery
+core, but retain native SQL, identities, coverage and locking. SQLite uses existing
+local files, a native authorizer, BEGIN IMMEDIATE and an explicit guarded rebuild
+mode. Rehearse populated upgrades through the same executor; empty replay and row
+counts do not prove mappings or deployed-client compatibility. Adoption remains
+unsupported. Existing application-owned runners and the `ntnt migrate` source
+interpolation command are unchanged. See [Database Migrations](DATABASE_MIGRATIONS.md)
+for the precise authority, file/transport, contract and recovery boundaries before
+configuring a deployment.
 
 ### SQLite (bundled, no server needed)
 

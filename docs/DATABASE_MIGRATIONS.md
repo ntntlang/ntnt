@@ -1,6 +1,6 @@
-# PostgreSQL migrations, contracts and catalog evidence
+# PostgreSQL and SQLite migrations, contracts and catalog evidence
 
-`ntnt db` implements the PostgreSQL transactional subset of issue #245: read-only inspection/planning and separately authorized exact-plan execution. It keeps native PostgreSQL SQL and one immutable migration history. It does not implement an ORM or an authored desired-schema DSL.
+`ntnt db` implements the PostgreSQL and SQLite transactional subsets of issue #245: read-only inspection/planning and separately authorized exact-plan execution. Both native adapters use one inventory, plan/approval protocol, history validation and execution/recovery loop. Keep an engine-native immutable SQL history for each logical store; this is portable tooling, **not portable SQL**, an ORM, or an authored desired-schema DSL.
 
 ```sh
 ntnt db status --target development --json
@@ -13,9 +13,11 @@ ntnt db status --target development --object accounts
 
 `status` and `verify` inspect history and compare the observed catalog with replay at the **applied prefix**. `plan` additionally replays pending SQL and captures a non-authorizing review artifact. Pending migrations are not drift. `--object` is a case-sensitive substring filter on displayed catalog keys; it never narrows verification, hides incomplete coverage, or changes the plan binding. Without `--json`, the same result is rendered for humans.
 
-`migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. SQLite, baseline adoption, concurrent indexes/non-transactional operations, DML/backfill orchestration and query lint are not implemented. Existing application-owned migration code is not invoked.
+`migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Baseline adoption, concurrent indexes/non-transactional operations, backfill orchestration and query lint are not implemented. PostgreSQL migration DML remains unsupported; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
 
 ## Explicit configuration and secrets
+
+The example below selects PostgreSQL. See [SQLite](#sqlite-native-files-and-rebuilds) for its file-backed configuration and distinct guarantees.
 
 `--manifest` defaults to `ntnt.toml` in the current directory; there is no implicit ancestor/target selection. The migration directory is relative to that manifest, not the caller's working directory.
 
@@ -59,11 +61,11 @@ required = true
 
 `approval_secret` is optional for inspection but **required for every execution**, including additive changes and reruns. It names a separate top-level secret, never a connection secret. Its resolved value must be exactly the reviewed `plan_digest` (no whitespace trimming). The deployment/operator publishes that value through a separately protected existing `std/secrets` provider after reviewing the plan and migration SQL. The digest binds SQL/metadata, policy, logical store/target and physical identity; **knowing the digest does not authorize execution**. Obtaining its exact value through the protected provider does. There is no `--approve`, `--force`, self-authorizing manifest Boolean, signing server or new approval service.
 
-Use separate application and migrator credentials, and restrict schema DDL/ledger ownership to the migrator. Development fixtures may use the environment provider; protected deployments use the existing Unix-socket provider and separately controlled approval delivery. NTNT cannot protect against someone who already controls that provider or direct database-owner credentials. Never publish resolved connection strings or provider values. Backup/PITR, restore testing, old-client compatibility and maintenance authorization remain separately operated responsibilities; a committed destructive change is not made reversible by transactional rollback.
+For PostgreSQL, use separate application and migrator credentials, and restrict schema DDL/ledger ownership to the migrator. SQLite has no database roles: restrict file/directory access and approval delivery through the operating system and provider, as described below. Development fixtures may use the environment provider; protected deployments use the existing Unix-socket provider and separately controlled approval delivery. NTNT cannot protect against someone who already controls that provider or direct database-owner credentials. Never publish resolved connection strings or provider values. Backup/PITR, restore testing, old-client compatibility and maintenance authorization remain separately operated responsibilities; a committed destructive change is not made reversible by transactional rollback.
 
-Each invocation uses a dedicated physical connection and a session advisory lock on the database-local `_ntnt` namespace (two-key lock `1853124212, 245`). The reserved namespace deliberately owns **one logical store/managed schema per physical database**; separate stores must use separate databases. This is not a multi-tenant ledger. The lock spans all per-migration commits and is bounded by the native lock timeout.
+Each PostgreSQL invocation uses a dedicated physical connection and a session advisory lock on the database-local `_ntnt` namespace (two-key lock `1853124212, 245`). The reserved namespace deliberately owns **one logical store/managed schema per physical database**; separate stores must use separate databases. This is not a multi-tenant ledger. The lock spans all per-migration commits and is bounded by the native lock timeout.
 
-For each migration, the runner:
+For each PostgreSQL migration, the runner:
 
 1. Begins a `READ COMMITTED READ WRITE` transaction and takes `ACCESS EXCLUSIVE` locks on all existing ordinary managed/ledger tables in deterministic order.
 2. Takes fresh identity/history/catalog observations **after acquiring those locks** and validates the exact ordered planned prefix, captured source/policy and mutation-safe ledger.
@@ -152,13 +154,13 @@ no_duplicate_emails = "SELECT NOT EXISTS (SELECT email FROM app.accounts GROUP B
 filled_timezone = "SELECT NOT EXISTS (SELECT 1 FROM app.accounts WHERE timezone IS NULL)"
 ```
 
-Checks run in name order within each phase. Each must return **exactly one row, one Boolean column, and true**. False, NULL, no rows, multiple rows/columns, wrong type, SQL error and timeout fail the transaction. Reports include check name, phase, source and outcome, never returned values. Only actually attempted target/rehearsal checks count as executed assertions; zero checks remains `not_run`. A check pass before later rollback is not a committed schema guarantee.
+Checks run in name order within each phase. Each must return **exactly one row, one Boolean column, and true** (SQLite represents this as integer `1`, not text or a floating-point value). False, NULL, no rows, multiple rows/columns, wrong type, SQL error and timeout fail the transaction. Reports include check name, phase, source and outcome, never returned values. Only actually attempted target/rehearsal checks count as executed assertions; zero checks remains `not_run`. A check pass before later rollback is not a committed schema guarantee.
 
 The closed PostgreSQL AST subset supports Boolean expressions, identifiers/literals, comparisons and arithmetic, `IS NULL`/`IS NOT NULL`, `EXISTS`/`NOT EXISTS`, scalar subqueries, one managed heap table per SELECT, ordinary column GROUP BY/HAVING and builtin `count(*)`. Each query must have only these recognized clauses. Every table reference in a check must be explicitly qualified with the managed schema (for example, `app.accounts`), including nested queries. Unqualified names are rejected rather than resolved through `search_path`, so a managed table named `pg_class` cannot accidentally become a system-catalog read. Checks use `search_path=pg_catalog` for builtin function/operator lookup; this does not change unqualified migration-script names. The adapter verifies live catalog coverage and builtin base types/indexes, and conservatively rejects database-wide custom implicit/assignment casts before DDL or checks. Builtin operators/functions resolve through the trusted PostgreSQL installation, not a `provolatile` assertion on a user routine.
 
 Not supported: arbitrary functions/routines, casts, aliases/joins, SELECT INTO, CTEs, locking clauses, table functions/sampling, windows, wildcard projections, custom types/operators/access methods, session/transaction changes or arbitrary SQL. A SELECT keyword or READ ONLY transaction is **not a purity proof**. Unsupported syntax is rejected before target I/O, never approved by regex. There are at most 64 named checks per migration, each at most 64 KiB; names use simple ASCII identifiers.
 
-`ensures` are transition checks, not permanent invariants: `verify` does not re-execute historical postconditions. Use database constraints for lasting concurrency/future-write enforcement and ordinary native/Intent tests for business behavior. Intent IDs remain traceability, not proof. Execution/transaction modes and other metadata remain rejected.
+`ensures` are transition checks, not permanent invariants: `verify` does not re-execute historical postconditions. Use database constraints for lasting concurrency/future-write enforcement and ordinary native/Intent tests for business behavior. Intent IDs remain traceability, not proof. The SQLite-only `sqlite_rebuild` field below is the sole supported adapter-mode metadata. Other execution/transaction modes remain rejected.
 
 Files use `<positive-decimal-u64>_<ASCII-name>.sql`; names contain letters, digits, `_` or `-`. Ordering is numeric; `01` and `0001` are the same ID and cannot coexist. Gaps are allowed. Sidecars must have the exact SQL stem. The directory contains only SQL and matching TOML files. Orphan sidecars, duplicate IDs, invalid UTF-8, unsafe paths, symlinks, hard links, directories in place of files and nonregular inputs are rejected.
 
@@ -178,7 +180,7 @@ Capture is bounded to 1 MiB per input (including a saved review artifact), 16 Mi
 
 Provision scratch yourself using existing native test/container facilities. NTNT does not create a database/container, copy target rows, reuse target credentials, or reset an existing database.
 
-Scratch must:
+PostgreSQL scratch must:
 
 - have `disposable = true` and a separate secret and role;
 - resolve to a different **cluster-system-identifier/database-OID pair**, not merely a different URL spelling;
@@ -208,7 +210,7 @@ Not accepted as migration scripts: functions/procedures/DO, SELECT or DML, COPY,
 
 ## Inspection coverage and drift
 
-The adapter declares capabilities **per operation and observed engine version** for PostgreSQL 16–18. Other engines/versions are rejected. It reads only fixed catalog queries and a structurally validated ledger, in a dedicated `REPEATABLE READ READ ONLY` target transaction. It never prepares/executes application queries, invokes a user's check/routine, reads live application rows, or initializes target state.
+The PostgreSQL adapter declares capabilities **per operation and observed engine version** for PostgreSQL 16–18. SQLite declares its own coverage below; other engines/versions are rejected. It reads only fixed catalog queries and a structurally validated ledger, in a dedicated `REPEATABLE READ READ ONLY` target transaction. It never prepares/executes application queries, invokes a user's check/routine, reads live application rows, or initializes target state.
 
 Supported catalog fingerprints include:
 
@@ -246,6 +248,76 @@ The relation must be an ordinary heap table with no inheritance, RLS, rewrite ru
 
 **Do not create or seed this ledger to adopt an existing database.** Legacy inspection tests seed v1 explicitly; execution/rehearsal tests use the real runner to create v2. Production baseline adoption is not implemented. An absent ledger plus nonempty managed scope requires deliberate later adoption; no checksum rewriting, fabricated history or automatic repair occurs.
 
+## SQLite native files and rebuilds
+
+```toml
+[databases.local]
+engine = "sqlite"
+schema = "main"
+migrations_dir = "migrations/local"
+approval_secret = "LOCAL_MIGRATION_APPROVAL"
+
+[databases.local.targets.development]
+connection_secret = "LOCAL_DATABASE_FILE"
+
+[databases.local.scratch]
+connection_secret = "LOCAL_REPLAY_FILE"
+disposable = true
+
+[secrets.LOCAL_DATABASE_FILE]
+[secrets.LOCAL_REPLAY_FILE]
+[secrets.LOCAL_MIGRATION_APPROVAL]
+```
+
+Resolve the connection secrets to **absolute native paths of existing regular files**, not URLs, SQLite URIs, `:memory:`, or connection strings. Provision the empty deployment and scratch files yourself with SQLite first. Do not declare `database`/`role` for SQLite; its managed scope is exactly `main`, the entire file except the reserved ledger. There is no ATTACH, temp namespace, multi-store file, implicit creation, baseline adoption or reset.
+
+Files must have one hard link and no symlink path components. Use the native canonical path on macOS (for example `/private/...`, not its `/var` alias). Identity binds native device/inode or Windows volume/file-index plus available creation time, not merely path spelling. Plans also bind the bundled SQLite version, encoding, page size, auto-vacuum and journal mode, with Unix owner/group/mode or Windows readonly metadata. File paths themselves are not disclosed. Replacement/copying changes identity and requires a new plan. The Unix adapter checks SQLite's open-file movement status without opening and closing a second descriptor that could drop SQLite's POSIX locks; Windows retains a non-delete-sharing guard. Filesystem administrators, local directories and OS ACL administration remain trusted. These checks are **not a filesystem sandbox or full ACL attestation**; use local storage with reliable SQLite locking, not network/shared filesystems.
+
+### Transactions, replay and contracts
+
+Support is for the bundled **SQLite 3.45 series**, not an arbitrary separately installed `sqlite3` executable. `status`/`plan`/`verify` open the target readonly and use a deferred snapshot, releasing it before scratch replay. Catalog inspection reads metadata and compiles, but never steps, application programs with a native authorizer to validate their supported effect paths. It does not scan application rows. Scratch uses a distinct physical file, separate secret and matching settings; `BEGIN IMMEDIATE` owns its rollback-only replay. A nonempty scratch file is rejected, never cleared.
+
+Execution opens an existing file only after approval and file-identity checks. It acquires **`BEGIN IMMEDIATE` before inspecting history/catalog for each migration**, revalidating on every acquisition; the writer reservation is not retained between commits. Competing migrators recognize each other's matching committed prefixes instead of applying SQL twice. SQLite's writer lock covers ordinary application writers; it is not an online-DDL guarantee. Dedicated connections enable foreign keys, recursive triggers and CHECK enforcement, `trusted_schema=OFF`, defensive mode, strict quoting, and `synchronous=FULL`. Durable rollback-journal modes and WAL are accepted; journal-off/memory modes are not. The runner does not change the selected persistent journal mode.
+
+The two-second busy timeout, five-second worker/progress deadline, and shared orchestration/reconciliation deadlines bound operations. Timeout/cancellation interrupts and discards the connection, never returns it to a pool. Native I/O still depends on the OS/filesystem. A busy or interrupted COMMIT is reconciled using a fresh connection and writer reservation, without retrying SQL; if the fresh observation cannot establish the prefix, the result stays unknown. Process termination cannot return acknowledgement: rerun the same approved plan to inspect committed truth first.
+
+SQL, named transition checks, the resulting catalog and the success ledger row are one transaction. SQLite contracts use the same closed SELECT expression grammar described above, with every relation qualified as `main.<table>`; the native authorizer additionally denies side-effecting calls and nonmanaged relations. Only **one integer `1`**, in one row/column, passes. Numeric values other than `1`, floating-point `1.0`, text, NULL, incorrect shape, errors and timeouts fail. Historical checks remain `not_run` on verify/rerun.
+
+### Supported SQL and catalog coverage
+
+The SQLite dialect parser accepts ordinary table/index/view/trigger DDL and INSERT/UPDATE/DELETE, while the native authorizer mediates resolved reads, writes and calls. Native SQLite statement boundaries preserve trigger bodies and quoted semicolons; scripts are not split with string operations. Tables, columns/order/type/defaults, PK/UNIQUE/CHECK/FK definitions, ordinary column indexes and builtin collations (`BINARY`, `NOCASE`, `RTRIM`) are fingerprinted. WITHOUT ROWID and STRICT flags are retained. Supported views and table triggers have definition hashes and native compile checks, **not inferred business semantics or complete transitive-effect explanations**. SQL definitions/defaults remain redacted hashes; final catalogs are engine-native, not normalized into PostgreSQL definitions.
+
+Only concrete managed relations are eligible. Eponymous virtual/table functions such as `json_each` or `pragma_*` cannot masquerade as ordinary `main` tables. Builtin `count` is available to checks; migration/definition programs additionally allow the native rename helpers and the small builtin set `like`, `substr`, `length`, `printf`, `quote`, `coalesce`, `ifnull`, `lower`, `upper`, `trim`, `abs`, `typeof`. A known function name is not permission to load extensions or register application functions.
+
+Virtual/shadow tables, generated columns, AUTOINCREMENT/`sqlite_sequence`, expression/partial indexes, custom collations/functions, unsafe/unsupported view or trigger programs, statistics/internal objects, bind parameters, ATTACH/DETACH, authored PRAGMAs, transaction/savepoint/session control and extension loading are unsupported. Unsupported catalog coverage blocks a clean result. DML and trigger effects remain review-required (`SQLITE_EFFECTS_NOT_INFERRED`); metadata never turns an unknown effect into automatic safety. Large transformations belong in separately operated application jobs.
+
+The reserved `_ntnt*` namespace contains only `_ntnt_schema_migrations_v2`, a STRICT table with the same seven ordered scope/history fields as PostgreSQL (`position INTEGER`, the others TEXT). Only the exact native ledger definition is recognized; extra indexes, triggers, views or columns block mutation. A missing ledger is acceptable only at a verified empty base. An empty existing ledger, unknown history or nonempty unadopted file is not a new database. Do not seed this table as an adoption shortcut.
+
+### Explicit one-table rebuild
+
+SQLite schema changes often require **create → explicitly map/copy rows → drop old table → rename replacement → recreate dependencies**. Author the native SQL yourself; NTNT never infers a mapping or translates PostgreSQL DDL. For a supported rebuild, place this in its SQL sidecar:
+
+```toml
+sqlite_rebuild = "accounts"
+
+[requires]
+no_null_email = "SELECT NOT EXISTS (SELECT 1 FROM main.accounts WHERE email IS NULL)"
+
+[ensures]
+no_null_email = "SELECT NOT EXISTS (SELECT 1 FROM main.accounts WHERE email IS NULL)"
+```
+
+The name must be a simple ordinary table identifier. In the already-owned transaction, this mode snapshots table row counts and supported definitions, temporarily disables foreign-key actions through SQLite's **native connection configuration API** (authored `PRAGMA foreign_keys=OFF` is still rejected), and executes the captured mapping. This prevents implicit `ON DELETE CASCADE` during the drop/rebuild from deleting child rows. Before postconditions/ledger/commit, it:
+
+- checks all foreign keys against the rebuilt catalog/data;
+- requires the same set of tables and the same row count in each;
+- preserves every existing named index, view and trigger definition and every other table's definition;
+- restores foreign-key enforcement, including on failure; failure rolls back or discards the session.
+
+Explicitly recreate the selected table's named indexes/triggers and any views dropped to allow the rebuild. The selected table's columns/constraints and autoindexes may change. Definition comparisons are conservative: equivalent SQL written differently may still be rejected. Deliberate dependent-object retirement belongs in a separate reviewed migration, not an accidental omission inside this mode. The mode scans row counts **during authorized execution**, not during production planning.
+
+Counts and FK checks do not prove row identities, correct value mappings, every uniqueness assumption, old-client compatibility or recovery after a committed destructive change. Use named transition checks and the same executor in representative native upgrade tests to assert exact keys/values, preserved children and working dependencies. `tests/db_sqlite.rs` demonstrates an email-lowercasing rebuild with existing rows, indexes, views, audit trigger and cascading foreign keys, plus negative dependency/row-loss/orphan cases. Empty replay alone cannot provide that evidence. Unknown business effects remain review-required even when these guards pass.
+
 ## Results and plan identity
 
 JSON has `format_version: 1`, UTC `observed_at`, stable diagnostic codes, source filenames/object keys and next actions. `pass`, `fail`, `unknown`, and `not_run` are distinct. Exit code 0 means the requested inspection/replay result passed within its declared coverage; other outcomes return nonzero. `status`, `plan` and `verify` report **`not_run`, zero executed** assertions; `migrate` separately counts the contracts actually attempted in that invocation. A catalog/history pass is not evidence of SQL contracts, data correctness, business invariants or deployed-client compatibility.
@@ -253,10 +325,10 @@ JSON has `format_version: 1`, UTC `observed_at`, stable diagnostic codes, source
 Plans bind:
 
 - logical database and target names, captured manifest, ordered source/checksum identities and policy;
-- cluster/database identity, database name, role/authority/memberships, engine and settings;
+- native cluster/database or file identity, engine and settings, and adapter-specific role/authority facts;
 - managed scope, observed base history/catalog, applied prefix and replayed expected base;
 - adapter/canonicalization version, exact pending migration identities and candidate fingerprint;
-- explicit `execution.format = "postgresql-transactional-v1"` and ordered catalog fingerprints for every migration prefix, including the empty prefix. Old/incomplete artifacts cannot authorize execution.
+- explicit `execution.format = "postgresql-transactional-v1"` or `"sqlite-transactional-v1"` and ordered engine-specific catalog fingerprints for every migration prefix, including the empty prefix. Old/incomplete artifacts cannot authorize execution.
 
 `plan_digest` hashes that descriptor. Observation time and display filters are not authority inputs. `--against` checks the saved descriptor's digest, pending descriptors and fresh source/target/base binding. It neither executes nor approves the plan. For `plan --out`, the file contains the compact plan descriptor and result metadata, not duplicate catalog/source display fields; stdout still contains the full report. `status`/`verify --out` save their report. All saved artifacts share the reader's 1 MiB bound: oversized output fails before creating a file rather than producing an unreadable plan. Files are new-only (`--out` cannot replace a source, existing plan or symlink); on Unix, new reports are mode 0600.
 
@@ -270,14 +342,17 @@ Inspection transactions are observations, not deployment locks. ACCESS SHARE pro
 
 ## Native regression tests
 
-Ordinary `cargo nextest run --locked` runs portable inventory, parser, redaction, timeout and CLI tests. Real PostgreSQL tests are explicitly ignored unless selected, and **mandatory CI lanes execute them on PostgreSQL 16, 17 and 18**, with fixture-only control databases and separate randomly named target/scratch roles/databases for each test.
+Ordinary `cargo nextest run --locked` runs portable inventory, parser, redaction, timeout and CLI tests, the real-file SQLite lifecycle/rebuild/failure tests, and SQLite shared conformance. These are not ignored and run on Linux, macOS and Windows CI. Real PostgreSQL tests are explicitly ignored unless selected, and **mandatory CI lanes execute them on PostgreSQL 16, 17 and 18**, with fixture-only control databases and separate randomly named target/scratch roles/databases for each test.
 
 For a disposable local PostgreSQL instance (never production), set `NTNT_DB_TEST_ADMIN` to its administrative connection secret and `NTNT_DB_TEST_HOST` to its host or Unix-socket directory, then run:
 
 ```sh
 cargo test --locked --test db_catalog_postgres -- --ignored --test-threads=2 --nocapture
 cargo test --locked --test db_execution_postgres -- --ignored --test-threads=2 --nocapture
+cargo test --locked --test db_migration_conformance -- --include-ignored --test-threads=2 --nocapture
 cargo test --locked --lib migrations::postgres::tests::target_transaction_is_really_read_only_even_for_superuser -- --ignored --exact --nocapture
 ```
 
-These fixtures create/drop databases and roles. They test real read-only transactions, no target bootstrap, applied-prefix versus pending drift, invalid indexes, constraint validity/grants, immutable SQL/metadata history, malformed/RLS/view ledgers, unknown coverage, physical scratch collisions, low-privilege/empty/matching scratch, redaction, bounded waits, cleanup, source replacement during a blocked inspection, and target/source/authority-bound plans. Execution tests additionally cover fresh construction, populated upgrade preservation, exact authority, stale plans, partial commits and reruns, false/NULL/shape/type/error/timeout checks, native/advisory contention, snapshots after lock acquisition, process cancellation, unsafe/scoped ledgers, unsupported effects and source replacement. A test-only wire proxy drops connections before COMMIT, after durable COMMIT but before acknowledgement, during rollback, and during reconciliation. It is not linked into release code and exposes no authorization bypass. These executed fixture checks are not evidence about arbitrary application business behavior or real deployment compatibility.
+The shared conformance suite executes the same history/drift, approval/stale/wrong-target, contract failure and committed-prefix recovery scenarios on both native adapters. SQLite-only tests also cover physical file aliases/replacement, read-only nonmutation, WAL, bounded busy waits, competing CLI processes, forced process death before commit and after an acknowledged-to-SQLite prefix, busy-COMMIT fresh reconciliation, timeout/discard, ledger tampering, redaction and populated rebuild preservation. Native SQLite fixtures provision disposable local files only; no service is needed.
+
+PostgreSQL fixtures create/drop databases and roles. They test real read-only transactions, no target bootstrap, applied-prefix versus pending drift, invalid indexes, constraint validity/grants, immutable SQL/metadata history, malformed/RLS/view ledgers, unknown coverage, physical scratch collisions, low-privilege/empty/matching scratch, redaction, bounded waits, cleanup, source replacement during a blocked inspection, and target/source/authority-bound plans. Execution tests additionally cover fresh construction, populated upgrade preservation, exact authority, stale plans, partial commits and reruns, false/NULL/shape/type/error/timeout checks, native/advisory contention, snapshots after lock acquisition, process cancellation, unsafe/scoped ledgers, unsupported effects and source replacement. A test-only wire proxy drops connections before COMMIT, after durable COMMIT but before acknowledgement, during rollback, and during reconciliation. It is not linked into release code and exposes no authorization bypass. These executed fixture checks are not evidence about arbitrary application business behavior or real deployment compatibility.

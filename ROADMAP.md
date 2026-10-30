@@ -40,15 +40,17 @@ This document outlines the implementation plan for NTNT, a programming language 
   logical databases/targets/scopes, PostgreSQL catalog/history inspection, disposable restricted
   replay, applied-prefix drift, and non-authorizing target-bound plans through
   `ntnt db status|plan|verify`. See [coverage and limitations](docs/DATABASE_MIGRATIONS.md).
-- [ ] PostgreSQL exact-plan execution, SQL contracts, per-migration commit truth,
+- [x] PostgreSQL exact-plan execution, SQL contracts, per-migration commit truth,
   locking/cancellation/reconciliation, and populated-data rehearsal.
-- [ ] SQLite adapter and shared lifecycle conformance.
+- [x] SQLite adapter and shared lifecycle conformance, including guarded populated
+  rebuilds and native cross-process failure/recovery cases.
 - [ ] Deliberate existing-database adoption and the first complete foundation release.
 - [ ] Narrow non-transactional concurrent-index execution/recovery.
 - [ ] Schema-aware query validation, dependencies and Intent views.
 
-The first increment is read-only on the selected target and does not replace
-application startup migrations or provide `ntnt db migrate`. KV/document-store
+Inspection/planning stays read-only on the selected target; `ntnt db migrate`
+requires an exact reviewed plan plus separately protected approval. This does not
+replace application startup migrations or adopt existing databases. KV/document-store
 evolution remains deferred rather than being forced through the relational adapter.
 
 ## Current Status
