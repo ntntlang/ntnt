@@ -14,9 +14,8 @@ replay or cross-process delivery; clients reconcile state on reconnect.
 `max_payload_bytes` (33554432). Omitted keys preserve those defaults; unknown keys,
 non-positive/non-integer values, an event cap above the payload budget, or a topic
 cap below existing live primary-setup buses fail before readiness. Secondary workers
-set up afterward under the configured caps; allow room for their transient buses
-alongside already-live buses to avoid setup retries. Readiness does not yet wait
-for all workers. Limits are process-wide and fixed at startup; changing them
+set up under the configured caps; allow room for their transient buses alongside
+already-live buses. Limits are process-wide and fixed at startup; changing them
 requires a process restart. A full stream cap
 returns HTTP 503; oversized events and exhausted byte budgets return `Err` from
 `publish`, including from tasks and when there are no subscribers. JSON escaping
@@ -25,6 +24,22 @@ is bounded while encoding, rather than checked only after expansion.
 SSE requires `ntnt run`; `ntnt test` returns an explicit 501. WebSockets remain a
 separate, unimplemented DD-041 Slice B. See the AI guide's Server-Sent Events
 section and `examples/sse_dashboard.tnt`.
+
+### Realtime worker initialization before readiness
+
+With a live setup-time broadcast bus or an explicit `realtime` listen map, the
+async listener now waits for every configured worker to initialize before binding
+or emitting readiness. Initial read/parse/evaluation errors or panics fail startup
+instead of entering an indefinite retry loop while the primary serves alone. A
+shared 10-second deadline bounds the startup decision. For request-time-only bus
+creation, `"realtime": map {}` explicitly selects this behavior.
+
+Buffered-only apps without a realtime map retain listener-first startup. Existing
+post-start worker supervision/backoff is unchanged. Initialization success is not
+a source-generation/endpoint compatibility check or a promise of forced code
+preemption; those remain separate WebSocket lifecycle work. The CLI exits when
+startup fails, but blocked application setup/native work is not forcibly stopped
+for Rust embedders.
 
 ## Markdown parser dependency security update
 

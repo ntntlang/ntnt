@@ -5191,6 +5191,7 @@ pub struct ListenOptions {
     pub fixture: bool,
     pub headers: FixtureHeaders,
     pub(crate) realtime: crate::stdlib::realtime::Limits,
+    pub(crate) realtime_configured: bool,
 }
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FixtureHeaders {
@@ -5217,6 +5218,7 @@ impl ListenOptions {
                     ("fixture", Value::Bool(b)) => options.fixture = *b,
                     ("realtime", value) => {
                         options.realtime = crate::stdlib::realtime::Limits::parse(value)?;
+                        options.realtime_configured = true;
                     }
                     ("suppress_server_header", Value::Bool(b)) => {
                         options.headers.suppress_server = *b

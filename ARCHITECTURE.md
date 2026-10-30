@@ -44,9 +44,14 @@ symlinks before processing dotdot. These operations require trusted ancestors an
 are not a filesystem sandbox or a multi-operation authorization transaction.
 
 HTTP retains the existing Axum/interpreter bridge and tiny_http engines. Immutable
-listener options resolve one effective bind address. A startup handshake propagates
-async startup failure before workers begin; readiness uses the actual post-bind
-address. An outer Axum response filter and a bounded tiny_http serialization writer
+listener options resolve one effective bind address. Buffered-only apps retain the
+listener-first startup handshake. A live setup broadcast bus or explicit realtime
+listen map selects a worker-first path: all secondary interpreters must finish
+initial setup within one 10-second deadline before listener bind/readiness. Initial
+errors/panics are fatal; post-start supervision/backoff is shared and unchanged.
+This initialization barrier does not establish source-generation or endpoint
+compatibility, and cannot preempt blocked user/native setup. Readiness uses the
+actual post-bind address. An outer Axum response filter and a bounded tiny_http serialization writer
 remove selected fixture headers without replacing HTTP parsing or framing.
 
 ## Native database inspection and planning (#245, first increment)
