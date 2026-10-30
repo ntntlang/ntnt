@@ -10514,7 +10514,9 @@ impl Interpreter {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[worker {}] Failed to read source file: {}", worker_id, e);
-                return WorkerExit::StartupFailed(format!("failed to read source file: {e}"));
+                return WorkerExit::StartupFailed(format!(
+                    "failed to read source file '{source_file}': {e}"
+                ));
             }
         };
 
@@ -10529,7 +10531,7 @@ impl Interpreter {
             Ok(ast) => ast,
             Err(e) => {
                 eprintln!("[worker {}] Parse error: {}", worker_id, e);
-                return WorkerExit::StartupFailed(format!("parse error: {e}"));
+                return WorkerExit::StartupFailed(format!("parse error in '{source_file}': {e}"));
             }
         };
 
@@ -10542,7 +10544,7 @@ impl Interpreter {
         // Evaluate the source to register routes, middleware, etc.
         if let Err(e) = interpreter.eval(&ast) {
             eprintln!("[worker {}] Eval error: {}", worker_id, e);
-            return WorkerExit::StartupFailed(format!("eval error: {e}"));
+            return WorkerExit::StartupFailed(format!("eval error in '{source_file}': {e}"));
         }
 
         // Worker mode suppresses once-only side effects during initialization.
@@ -16069,6 +16071,29 @@ c")
         }
         for worker in workers {
             worker.join().expect("startup worker panicked");
+        }
+    }
+
+    #[test]
+    fn test_http_worker_startup_errors_identify_the_source_file() {
+        for (source, expected) in [
+            (None, "failed to read source file"),
+            (Some("let broken ="), "parse error"),
+            (Some("assert(false)"), "eval error"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let source_file = dir.path().join("startup-error.tnt");
+            if let Some(source) = source {
+                std::fs::write(&source_file, source).unwrap();
+            }
+            let (_tx, rx) = flume::unbounded();
+            let path = source_file.to_str().unwrap();
+            let WorkerExit::StartupFailed(error) = Interpreter::run_worker(1, rx, path, &mut None)
+            else {
+                panic!("worker unexpectedly initialized: {source:?}");
+            };
+            assert!(error.contains(expected), "{error}");
+            assert!(error.contains(path), "missing source file in {error}");
         }
     }
 
