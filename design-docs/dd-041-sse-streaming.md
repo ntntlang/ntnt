@@ -11,7 +11,7 @@ Approval accepts the two-slice design direction, not a claim of shipped APIs or 
 
 The [implementation plan](dd-041-implementation-plan.md) records the executed Gate 0 probes and remaining WebSocket acceptance checks. #295 merged the native SSE implementation; #298 merged the interpreter-context function prerequisite. The design below includes proposed Slice B behavior, not a claim that every original invariant has shipped.
 
-### Implemented boundary
+## Implemented boundary
 
 Slice A provides `broadcast`, `publish`, and `sse`, shared encoded frames,
 bounded process-wide resources, heartbeat, lag/stalled-receiver handling,

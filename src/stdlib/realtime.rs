@@ -97,6 +97,21 @@ impl Limits {
         }
         Ok(limits)
     }
+
+    fn check_usage(self, topics: usize, payload_bytes: usize, connections: usize) -> Result<()> {
+        for (name, limit, used) in [
+            ("max_topics", self.max_topics, topics),
+            ("max_payload_bytes", self.max_payload_bytes, payload_bytes),
+            ("max_connections", self.max_connections, connections),
+        ] {
+            if used > limit {
+                return Err(IntentError::runtime_error(format!(
+                    "realtime {name} ({limit}) is below resources already in use ({used})"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 // Operations hold a read guard until admission/publication finishes. The
@@ -117,18 +132,11 @@ pub(crate) fn configure(limits: Limits) -> Result<()> {
     }
     let mut registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     registry.retain(|_, weak| weak.strong_count() > 0);
-    if registry.len() > limits.max_topics {
-        return Err(IntentError::runtime_error(
-            "realtime max_topics is below the number of live setup buses",
-        ));
-    }
-    if PAYLOAD_USED.load(Ordering::Acquire) > limits.max_payload_bytes
-        || OPEN_STREAMS.load(Ordering::Acquire) > limits.max_connections
-    {
-        return Err(IntentError::runtime_error(
-            "realtime limits are below resources already in use",
-        ));
-    }
+    limits.check_usage(
+        registry.len(),
+        PAYLOAD_USED.load(Ordering::Acquire),
+        OPEN_STREAMS.load(Ordering::Acquire),
+    )?;
     *configured = Some(limits);
     Ok(())
 }
@@ -864,6 +872,33 @@ mod tests {
         );
         assert!(Limits::parse(&map(&[("max_payload_bytes", Value::Int(1))])).is_err());
         assert!(Limits::parse(&map(&[("typo", Value::Int(1))])).is_err());
+    }
+
+    #[test]
+    fn startup_usage_errors_report_the_specific_limit_and_both_values() {
+        let limits = Limits {
+            max_topics: 1,
+            max_connections: 1,
+            max_event_bytes: 1,
+            max_payload_bytes: 1,
+        };
+        assert!(limits.check_usage(1, 1, 1).is_ok());
+        for (name, topics, payload, connections) in [
+            ("max_topics", 2, 0, 0),
+            ("max_payload_bytes", 0, 2, 0),
+            ("max_connections", 0, 0, 2),
+        ] {
+            let error = limits
+                .check_usage(topics, payload, connections)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "realtime {name} (1) is below resources already in use (2)"
+                )),
+                "{error}"
+            );
+        }
     }
 
     #[test]
