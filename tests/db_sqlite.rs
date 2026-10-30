@@ -597,3 +597,72 @@ fn sqlite_constraint_errors_do_not_disclose_sql_literals_or_row_values() {
         "retained"
     );
 }
+
+fn reject_ctas_alias(sql: &str) {
+    let f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE existing(id INTEGER);");
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute_batch("INSERT INTO existing VALUES(17)")
+        .unwrap();
+    f.sql("0002_copy.sql", sql);
+    let rejected = f.command("plan", &[]);
+    assert_ne!(rejected["outcome"], "pass", "{rejected}");
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM _ntnt_schema_migrations_v2", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    // The narrow supported copy path separates declaration from row mapping,
+    // so native preparation resolves only already-existing managed relations.
+    f.sql(
+        "0002_copy.sql",
+        "CREATE TABLE copied(id INTEGER); INSERT INTO copied SELECT id FROM existing;",
+    );
+    let allowed = f.plan("allowed.json");
+    let applied = f.apply("allowed.json", allowed["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    assert_eq!(
+        f.target()
+            .query_row("SELECT id FROM copied", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        17
+    );
+}
+#[test]
+fn sqlite_ctas_cannot_promote_a_pending_name_to_virtual_table_read_authority() {
+    reject_ctas_alias("CREATE TABLE json_each AS SELECT value FROM json_each('[1,2]');");
+}
+#[test]
+fn sqlite_ctas_cannot_read_ledger_pages_through_dbstat() {
+    reject_ctas_alias("CREATE TABLE dbstat AS SELECT name,pageno,pagetype,ncell FROM dbstat;");
+}
+#[test]
+fn sqlite_filename_stream_syntax_is_rejected_before_target_access() {
+    let mut f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE existing(id INTEGER);");
+    let plan = f.plan("plan.json");
+    let original = f.target_path.clone();
+    let mut stream = original.as_os_str().to_os_string();
+    stream.push(":other");
+    let stream = std::path::PathBuf::from(stream);
+    // A real NTFS data stream on Windows; a colon filename on Unix. The endpoint
+    // contract rejects stream syntax portably, before metadata/opening SQLite.
+    std::fs::write(&stream, []).unwrap();
+    f.target_path = stream;
+    let inspected = f.command("status", &[]);
+    assert!(code(&inspected, "DB_FILE_IDENTITY"), "{inspected}");
+    let applied = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert!(code(&applied, "DB_FILE_IDENTITY"), "{applied}");
+    f.target_path = original;
+    assert_eq!(
+        f.apply("plan.json", plan["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+}

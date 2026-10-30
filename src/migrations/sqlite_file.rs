@@ -16,7 +16,14 @@ fn bad() -> Diagnostic {
 }
 impl FileBinding {
     pub fn capture(path: &Path) -> Result<Self> {
-        if !path.is_absolute() || path.to_str().is_none_or(|p| p.contains('\0')) {
+        if !path.is_absolute()
+            || path.to_str().is_none_or(|p| p.contains('\0'))
+            // NTFS streams share the file index/timestamps but have independent
+            // contents. Reject stream syntax in filename components portably;
+            // a Windows drive-prefix colon is not a Normal component.
+            || path.components().any(|part| matches!(part,
+                std::path::Component::Normal(name) if name.to_string_lossy().contains(':')))
+        {
             return Err(bad());
         }
         // Resolve directory aliases once; reject linked namespace components.

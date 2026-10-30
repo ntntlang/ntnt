@@ -332,22 +332,27 @@ pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
             // SQLite's native authorizer, not PostgreSQL's AST rules, checks
             // resolved objects/functions before any authored statement executes.
             a.unknowns.push("SQLITE_EFFECTS_NOT_INFERRED".into());
-            matches!(
-                s,
-                Statement::CreateTable(_)
-                    | Statement::AlterTable(_)
-                    | Statement::CreateIndex(_)
-                    | Statement::CreateView { .. }
-                    | Statement::CreateTrigger { .. }
-                    | Statement::DropTrigger { .. }
-                    | Statement::Insert(_)
-                    | Statement::Update(_)
-                    | Statement::Delete(_)
-                    | Statement::Drop {
-                        object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
-                        ..
-                    }
-            )
+            // CREATE authorizes references in its own CHECK/index definitions.
+            // CTAS must not use that newly declared name to authorize an
+            // eponymous virtual-table source during the same preparation. Keep
+            // copies explicit: CREATE ordinary table, then INSERT ... SELECT.
+            !matches!(&s, Statement::CreateTable(table) if table.query.is_some())
+                && matches!(
+                    s,
+                    Statement::CreateTable(_)
+                        | Statement::AlterTable(_)
+                        | Statement::CreateIndex(_)
+                        | Statement::CreateView { .. }
+                        | Statement::CreateTrigger { .. }
+                        | Statement::DropTrigger { .. }
+                        | Statement::Insert(_)
+                        | Statement::Update(_)
+                        | Statement::Delete(_)
+                        | Statement::Drop {
+                            object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
+                            ..
+                        }
+                )
         } else {
             allowed(&s, schema)
         };
