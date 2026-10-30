@@ -3733,8 +3733,15 @@ post("/items", create_item)
 ```ntnt
 import { html } from "std/http/server"
 
-// Serve CSS/JS/images from ./public/ at /assets/
-serve_static("/assets", "./public")
+// Serve CSS/JS/images from ./public/ at /assets/, restricted to known content
+// types. Anything else under the prefix (.sh, .tnt, .exe, .html, dotfiles,
+// extensionless files) answers 404, so a stray or uploaded file can never be
+// served or executed by the site. Use ONE mount per prefix; an earlier
+// unrestricted serve_static("/assets", "./public") would serve files first.
+serve_static("/assets", "./public", map {
+    "extensions": ["css", "js", "mjs", "map", "png", "jpg", "jpeg", "gif", "webp", "avif",
+                   "svg", "ico", "woff", "woff2", "ttf", "pdf", "txt", "xml", "json", "webmanifest"]
+})
 
 fn home(req) {
     // template() loads views/home.html and renders with data
@@ -3892,7 +3899,7 @@ with_header(resp, "X-Custom", "value")                  // Add header
 |----------|-------------|
 | `get/post/put/patch/delete(pattern, handler)` | HTTP routes |
 | `listen(port)` | Start server |
-| `serve_static(prefix, dir)` | Static files |
+| `serve_static(prefix, dir, options?)` | Static files; `map { "extensions": [...] }` serves only listed types |
 | `routes(dir)` | File-based routing |
 | `libs(dir)` | Auto-import all exports from directory (flat injection into scope) |
 | `jobs(dir)` | Auto-discover and register all jobs from directory |

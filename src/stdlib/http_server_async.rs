@@ -136,6 +136,8 @@ pub struct RouteMatch {
 pub struct StaticDir {
     pub url_prefix: String,
     pub fs_path: String,
+    /// Lowercase extensions (no leading dot) this mount may serve. `None` serves every file.
+    pub extensions: Option<Vec<String>>,
 }
 
 /// Async server state - thread-safe route registry
@@ -186,10 +188,22 @@ impl AsyncServerState {
 
     /// Register a static directory
     pub async fn register_static_dir(&self, url_prefix: &str, fs_path: &str) {
+        self.register_static_dir_with_extensions(url_prefix, fs_path, None)
+            .await
+    }
+
+    /// Register a static directory with an optional served-extension allowlist.
+    pub async fn register_static_dir_with_extensions(
+        &self,
+        url_prefix: &str,
+        fs_path: &str,
+        extensions: Option<Vec<String>>,
+    ) {
         let mut dirs = self.static_dirs.write().await;
         dirs.push(StaticDir {
             url_prefix: url_prefix.to_string(),
             fs_path: fs_path.to_string(),
+            extensions,
         });
     }
 
@@ -261,12 +275,27 @@ impl AsyncServerState {
                     return None;
                 }
 
+                // Served-extension allowlist: unlisted, extensionless and dotfile paths are not served.
+                if !crate::stdlib::http_server::static_extension_allowed(
+                    relative,
+                    dir.extensions.as_deref(),
+                ) {
+                    return None;
+                }
+
                 let file_path = PathBuf::from(&dir.fs_path).join(relative);
 
                 // Security: verify canonical path stays within base directory
                 if let Ok(canonical) = file_path.canonicalize() {
                     if let Ok(base_canonical) = std::path::Path::new(&dir.fs_path).canonicalize() {
                         if canonical.starts_with(&base_canonical) && canonical.is_file() {
+                            // The allowlist also governs the resolved target, not just the link name.
+                            if !crate::stdlib::http_server::static_extension_allowed(
+                                &canonical.to_string_lossy(),
+                                dir.extensions.as_deref(),
+                            ) {
+                                return None;
+                            }
                             return Some((
                                 canonical.to_string_lossy().to_string(),
                                 dir.url_prefix.clone(),
@@ -345,8 +374,9 @@ impl AsyncServerState {
         rt: &tokio::runtime::Runtime,
         url_prefix: &str,
         fs_path: &str,
+        extensions: Option<Vec<String>>,
     ) {
-        rt.block_on(self.register_static_dir(url_prefix, fs_path));
+        rt.block_on(self.register_static_dir_with_extensions(url_prefix, fs_path, extensions));
     }
 }
 
@@ -1659,6 +1689,53 @@ mod tests {
 
         state.register_static_dir("/assets", "./public").await;
         assert_eq!(state.static_dir_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_static_extension_allowlist_async_lookup() {
+        let dir =
+            std::env::temp_dir().join(format!("ntnt_async_static_ext_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        for name in [
+            "a.css",
+            "a.sh",
+            "a.tnt",
+            "index.html",
+            "noext",
+            ".hidden.css",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("a.tnt"), dir.join("alias.css")).unwrap();
+        let state = AsyncServerState::new();
+        state
+            .register_static_dir_with_extensions(
+                "/assets",
+                &dir.to_string_lossy(),
+                Some(vec!["css".to_string()]),
+            )
+            .await;
+        assert!(state.find_static_file("/assets/a.css").await.is_some());
+        for denied in [
+            "/assets/a.sh",
+            "/assets/a.tnt",
+            "/assets/index.html",
+            "/assets/noext",
+            "/assets/.hidden.css",
+        ] {
+            assert!(state.find_static_file(denied).await.is_none(), "{denied}");
+        }
+        #[cfg(unix)]
+        assert!(
+            state.find_static_file("/assets/alias.css").await.is_none(),
+            "symlink target must satisfy the allowlist"
+        );
+        let open = AsyncServerState::new();
+        open.register_static_dir("/assets", &dir.to_string_lossy())
+            .await;
+        assert!(open.find_static_file("/assets/a.sh").await.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
