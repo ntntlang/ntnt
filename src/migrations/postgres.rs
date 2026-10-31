@@ -459,8 +459,15 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         {
             return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch public namespace contains unsupported objects or cannot be fully inspected."));
         }
+        // `public` already exists (and was just verified empty); any other
+        // managed schema is created inside this rollback-only transaction.
+        let create = if schema == "public" {
+            String::new()
+        } else {
+            format!("CREATE SCHEMA \"{schema}\"; ")
+        };
         self.batch(&format!(
-            "CREATE SCHEMA \"{schema}\"; SET LOCAL search_path=pg_catalog,\"{schema}\";"
+            "{create}SET LOCAL search_path=pg_catalog,\"{schema}\";"
         ))
         .await?;
         Ok(identity)

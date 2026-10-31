@@ -973,3 +973,38 @@ fn upgrade_reconciliation_preserves_adoption_and_import_counts() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn public_schema_is_a_managed_schema() {
+    // Most applications keep their tables in PostgreSQL's default `public`
+    // schema. It must plan, execute, verify and detect drift like any other.
+    let f = Fixture::with_schema("public");
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE accounts(id INTEGER PRIMARY KEY, email TEXT NOT NULL);",
+    );
+    let p = f.plan("plan.json");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(f
+        .target()
+        .query_one("SELECT to_regclass('public.accounts') IS NOT NULL", &[])
+        .unwrap()
+        .get::<_, bool>(0));
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    f.sql(
+        "0002_name.sql",
+        "ALTER TABLE public.accounts ADD COLUMN name TEXT;",
+    );
+    let p = f.plan("plan2.json");
+    let r = f.apply("plan2.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    f.target()
+        .batch_execute("ALTER TABLE public.accounts ADD COLUMN hotfix TEXT")
+        .unwrap();
+    let drift = f.command("verify");
+    assert_eq!(drift["outcome"], "fail", "{drift}");
+    assert!(code(&drift, "DB_DRIFT"), "{drift}");
+}

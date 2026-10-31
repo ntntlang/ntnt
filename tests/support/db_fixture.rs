@@ -13,6 +13,11 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn new() -> Self {
+        Self::with_schema("app")
+    }
+    /// `public` already exists in every new database; other managed schemas are
+    /// created by the fixture, as an operator would before the first plan.
+    pub fn with_schema(schema: &str) -> Self {
         let url = std::env::var("NTNT_DB_TEST_ADMIN")
             .expect("explicit disposable PostgreSQL fixture URL required");
         let mut admin = Client::connect(&url, NoTls).unwrap();
@@ -42,7 +47,7 @@ impl Fixture {
 [databases.app]
 engine = "postgresql"
 migrations_dir = "migrations"
-schema = "app"
+schema = "{schema}"
 approval_secret = "DB_APPROVAL"
 [databases.app.targets.test]
 connection_secret = "DB_TARGET"
@@ -61,7 +66,10 @@ disposable = true
         )
         .unwrap();
         let mut conn = Client::connect(&target_url, NoTls).unwrap();
-        conn.batch_execute("CREATE SCHEMA app").unwrap();
+        if schema != "public" {
+            conn.batch_execute(&format!("CREATE SCHEMA {schema}"))
+                .unwrap();
+        }
         Self {
             admin,
             root,
