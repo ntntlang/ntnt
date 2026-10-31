@@ -867,6 +867,8 @@ pub struct Interpreter {
     current_result: Option<Value>,
     /// Loaded modules cache
     loaded_modules: HashMap<String, HashMap<String, Value>>,
+    /// Exact parsed inputs, separate from mtime-based reload detection.
+    loaded_sources: crate::source::SourceLedger,
     /// Current file path (for relative imports)
     current_file: Option<String>,
     /// HTTP server state for routing
@@ -1170,6 +1172,7 @@ impl Interpreter {
             current_old_values: None,
             current_result: None,
             loaded_modules: HashMap::new(),
+            loaded_sources: crate::source::SourceLedger::default(),
             current_file: None,
             server_state: crate::stdlib::http_server::ServerState::new(),
             test_mode: None,
@@ -1586,8 +1589,6 @@ impl Interpreter {
     /// files are registered in the global `JOB_RUNTIME`. Tracks file mtimes for
     /// hot-reload support.
     fn load_jobs_from_directory(&mut self, dir_path: &str) -> Result<Value> {
-        use std::fs;
-
         // Resolve the directory path relative to the current .tnt file's location
         let base_dir = if std::path::Path::new(dir_path).is_relative() {
             if let Some(current_file) = &self.current_file {
@@ -1621,7 +1622,7 @@ impl Interpreter {
         let mut file_count = 0;
         let mut eval_error: Option<IntentError> = None;
         for file_path in &tnt_files {
-            let source = match fs::read_to_string(file_path) {
+            let source = match crate::source::SourceFile::read(file_path) {
                 Ok(s) => s,
                 Err(e) => {
                     eval_error = Some(IntentError::runtime_error(format!(
@@ -1633,11 +1634,7 @@ impl Interpreter {
                 }
             };
 
-            let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
-            let ast = match crate::parser::Parser::new(tokens)
-                .with_source_file(&file_path)
-                .parse()
-            {
+            let ast = match source.parse() {
                 Ok(a) => a,
                 Err(e) => {
                     eval_error = Some(IntentError::runtime_error(format!(
@@ -1653,7 +1650,7 @@ impl Interpreter {
             self.set_current_file(&file_path.to_string_lossy());
 
             // Evaluate the file — job declarations register via Statement::Job
-            match self.eval(&ast) {
+            match self.eval_file_source(&ast) {
                 Ok(_) => {}
                 Err(e) => {
                     eval_error = Some(e);
@@ -1900,8 +1897,37 @@ impl Interpreter {
 
     /// Define a variable in the current (global) environment.
     /// Used by the concurrency runtime to inject captured bindings into a fresh interpreter.
+    /// Executable values (including nested callables) invalidate
+    /// [`Self::source_snapshot`] attestation; ordinary data values do not.
     pub fn define_global(&mut self, name: String, value: Value) {
+        self.observe_host_value(&value);
         self.environment.borrow_mut().define(name, value);
+    }
+
+    /// Host-supplied executable values have no bound parser input. Exporting a
+    /// callable is equally conservative: its public closure exposes a mutable
+    /// environment alias which the host may alter outside interpreter APIs.
+    /// Traverse containers without following closure environments or recursion.
+    fn observe_host_value(&self, value: &Value) {
+        let mut pending = vec![value];
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Function { .. }
+                | Value::NativeFunction { .. }
+                | Value::ContextFunction { .. } => {
+                    self.loaded_sources.source_less();
+                    return;
+                }
+                Value::Array(values) | Value::EnumValue { values, .. } => {
+                    pending.extend(values);
+                }
+                Value::Map(values) | Value::Struct { fields: values, .. } => {
+                    pending.extend(values.values());
+                }
+                Value::Return(value) => pending.push(value),
+                _ => {}
+            }
+        }
     }
 
     /// Run a task-starting native function with this interpreter's struct
@@ -1924,8 +1950,15 @@ impl Interpreter {
     }
 
     /// Look up a variable in the global environment (for builtins like len, print, str).
+    /// Returning executable values, including nested ones, conservatively
+    /// invalidates [`Self::source_snapshot`] even through this shared reference:
+    /// exported NTNT callables can expose mutable closure-environment aliases.
     pub fn get_global(&self, name: &str) -> Option<Value> {
-        self.environment.borrow().get(name)
+        let value = self.environment.borrow().get(name);
+        if let Some(value) = &value {
+            self.observe_host_value(value);
+        }
+        value
     }
 
     /// Push a new child scope. Caller must call pop_scope() to restore.
@@ -2003,8 +2036,11 @@ impl Interpreter {
         path.to_string()
     }
 
-    /// Define a variable in the current environment
+    /// Define a variable in the current environment.
+    /// Executable values (including nested callables) invalidate
+    /// [`Self::source_snapshot`] attestation; ordinary data values do not.
     pub fn define_variable(&mut self, name: String, value: Value) {
+        self.observe_host_value(&value);
         self.environment.borrow_mut().define(name, value);
     }
 
@@ -2012,7 +2048,12 @@ impl Interpreter {
     ///
     /// This is useful for external callers (like the IAL test runner) that want
     /// to invoke NTNT functions after loading a module.
+    /// Executable arguments or results, including nested callables, invalidate
+    /// [`Self::source_snapshot`]. Ordinary data arguments/results preserve it.
     pub fn call_function_by_name(&mut self, name: &str, args: Vec<Value>) -> Result<Value> {
+        for arg in &args {
+            self.observe_host_value(arg);
+        }
         // Clear warning dedup state for each request/call
         crate::config::clear_type_warnings();
         // Look up the function in the environment
@@ -2040,7 +2081,9 @@ impl Interpreter {
         }
 
         // Call the function
-        self.call_function(func, args)
+        let result = self.call_function(func, args)?;
+        self.observe_host_value(&result);
+        Ok(result)
     }
 
     /// Set the main source file for hot-reload tracking
@@ -2105,7 +2148,7 @@ impl Interpreter {
         println!("\n[hot-reload] {} changed, reloading...", changed_file);
 
         // Read the main source (we always reload from the main file)
-        let source_code = match std::fs::read_to_string(&file_path) {
+        let source_file = match crate::source::SourceFile::read(&file_path) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[hot-reload] Failed to read file: {}", e);
@@ -2113,15 +2156,7 @@ impl Interpreter {
             }
         };
 
-        // Parse the source
-        use crate::lexer::Lexer;
-        use crate::parser::Parser;
-
-        let lexer = Lexer::new(&source_code);
-        let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens).with_source_file(&file_path);
-
-        let ast = match parser.parse() {
+        let parsed_source = match source_file.parse() {
             Ok(ast) => ast,
             Err(e) => {
                 eprintln!("[hot-reload] Parse error: {}", e);
@@ -2129,8 +2164,9 @@ impl Interpreter {
             }
         };
 
+        let ast = parsed_source.program();
         // Strict type checking: block reload if type errors found
-        if let Some(errors) = crate::typechecker::strict_check(&ast, &source_code) {
+        if let Some(errors) = crate::typechecker::strict_check(ast, source_file.text()) {
             eprintln!(
                 "[hot-reload] Blocked: {} type error(s) found:",
                 errors.len()
@@ -2174,7 +2210,7 @@ impl Interpreter {
         self.execution_mode = ExecutionMode::HotReload;
 
         // Re-evaluate the AST
-        let result = match self.eval(&ast) {
+        let result = match self.eval_file_source(&parsed_source) {
             Ok(_) => {
                 // Update main file mtime
                 self.main_source_mtime = Some(
@@ -4711,9 +4747,8 @@ impl Interpreter {
         } else {
             file_path
         };
-        let canonical_source = Self::canonicalize_path(&file_path)
-            .to_string_lossy()
-            .to_string();
+        let file_path = Self::canonicalize_path(&file_path);
+        let canonical_source = file_path.to_string_lossy().to_string();
         if let Some(module) = self.loaded_modules.get(&canonical_source).cloned() {
             #[cfg(test)]
             {
@@ -4813,24 +4848,17 @@ impl Interpreter {
         alias: Option<&str>,
         wildcard: bool,
     ) -> Result<Value> {
-        use crate::lexer::Lexer;
-        use crate::parser::Parser;
-        use std::fs;
-
         // Read and parse the file
-        let source_code = fs::read_to_string(&file_path).map_err(|e| {
-            IntentError::runtime_error(format!(
-                "Failed to read module '{}': {}",
-                file_path.display(),
-                e
-            ))
-        })?;
+        let source_file =
+            crate::source::SourceFile::read_resolved(file_path.clone()).map_err(|e| {
+                IntentError::runtime_error(format!(
+                    "Failed to read module '{}': {}",
+                    file_path.display(),
+                    e
+                ))
+            })?;
 
-        let lexer = Lexer::new(&source_code);
-        let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens).with_source_file(&file_path);
-        let ast = parser.parse()?;
-
+        let parsed_source = source_file.parse()?;
         // Create a new environment for the module
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
@@ -4844,7 +4872,7 @@ impl Interpreter {
         self.define_prelude();
 
         // Evaluate the module
-        let eval_result = self.eval(&ast);
+        let eval_result = self.eval_file_source(&parsed_source);
         if let Err(e) = eval_result {
             // Restore environment on error
             self.environment = previous_env;
@@ -5083,21 +5111,18 @@ impl Interpreter {
         &mut self,
         file_path: &std::path::Path,
     ) -> Result<HashMap<String, Value>> {
-        use crate::lexer::Lexer;
-        use crate::parser::Parser;
-        use std::fs;
-
         let canonical_path = Self::canonicalize_path(file_path);
 
-        let source_code = fs::read_to_string(file_path).map_err(|e| {
-            IntentError::runtime_error(format!("Failed to read '{}': {}", file_path.display(), e))
-        })?;
+        let source_file = crate::source::SourceFile::read_resolved(canonical_path.clone())
+            .map_err(|e| {
+                IntentError::runtime_error(format!(
+                    "Failed to read '{}': {}",
+                    file_path.display(),
+                    e
+                ))
+            })?;
 
-        let lexer = Lexer::new(&source_code);
-        let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens).with_source_file(&file_path);
-        let ast = parser.parse()?;
-
+        let parsed_source = source_file.parse()?;
         // Create a fresh environment for the module
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
@@ -5113,7 +5138,7 @@ impl Interpreter {
         self.define_prelude();
 
         // Evaluate the module
-        let eval_result = self.eval(&ast);
+        let eval_result = self.eval_file_source(&parsed_source);
         if let Err(e) = eval_result {
             // Restore environment on error
             self.environment = previous_env;
@@ -5194,10 +5219,6 @@ impl Interpreter {
         base_dir: &std::path::Path,
         lib_modules: &HashMap<String, HashMap<String, Value>>,
     ) -> Result<Vec<DiscoveredRoute>> {
-        use crate::lexer::Lexer;
-        use crate::parser::Parser;
-        use std::fs;
-
         let mut routes = Vec::new();
 
         // Convert file path to URL pattern
@@ -5208,14 +5229,12 @@ impl Interpreter {
         let url_pattern = self.file_path_to_url_pattern(relative_path);
 
         // Read and parse the file
-        let source_code = fs::read_to_string(file_path).map_err(|e| {
+        let source_file = crate::source::SourceFile::read(file_path).map_err(|e| {
             IntentError::runtime_error(format!("Failed to read '{}': {}", file_path.display(), e))
         })?;
 
-        let lexer = Lexer::new(&source_code);
-        let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens).with_source_file(&file_path);
-        let ast = parser.parse()?;
+        let parsed_source = source_file.parse()?;
+        let ast = parsed_source.program();
 
         // Create a fresh environment for the route module
         let previous_env = Rc::clone(&self.environment);
@@ -5247,7 +5266,7 @@ impl Interpreter {
         }
 
         // Evaluate the module; restore interpreter state on every error path.
-        if let Err(e) = self.eval(&ast) {
+        if let Err(e) = self.eval_file_source(&parsed_source) {
             self.environment = previous_env;
             self.current_file = previous_file;
             self.imported_files = previous_imports;
@@ -5264,7 +5283,7 @@ impl Interpreter {
         // `export let rate_post = ...` overrides one method; "off" exempts (#294).
         // Only explicitly exported names count, so a lib module or ordinary
         // binding called `rate` is not mistaken for a declaration.
-        let declared = exported_route_rate_names(&ast);
+        let declared = exported_route_rate_names(ast);
         let rates = {
             let env = self.environment.borrow();
             route_rate_exports(&env.values, &declared, &file_path.display().to_string())
@@ -5308,21 +5327,15 @@ impl Interpreter {
         file_path: &str,
         method: &str,
     ) -> Result<(Value, HashMap<String, std::time::SystemTime>)> {
-        use crate::lexer::Lexer;
-        use crate::parser::Parser;
-        use std::fs;
-
         let path = std::path::Path::new(file_path);
 
         // Read and parse the file
-        let source_code = fs::read_to_string(path).map_err(|e| {
+        let source_file = crate::source::SourceFile::read(path).map_err(|e| {
             IntentError::runtime_error(format!("Failed to read '{}': {}", file_path, e))
         })?;
 
-        let lexer = Lexer::new(&source_code);
-        let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens).with_source_file(&file_path);
-        let ast = parser.parse()?;
+        let parsed_source = source_file.parse()?;
+        let ast = parsed_source.program();
 
         // Create a fresh environment and save import state
         let previous_env = Rc::clone(&self.environment);
@@ -5353,7 +5366,7 @@ impl Interpreter {
         }
 
         // Evaluate the module
-        if let Err(e) = self.eval(&ast) {
+        if let Err(e) = self.eval_file_source(&parsed_source) {
             self.environment = previous_env;
             self.current_file = previous_file;
             self.imported_files = previous_imports;
@@ -5368,7 +5381,7 @@ impl Interpreter {
         let env = self.environment.borrow();
         let handler = env.values.get(&method_name).cloned();
         // Rate exports are applied at discovery; a changed rate needs a restart.
-        let declared = exported_route_rate_names(&ast);
+        let declared = exported_route_rate_names(ast);
         let rates = route_rate_exports(&env.values, &declared, file_path);
         drop(env);
 
@@ -5457,8 +5470,41 @@ impl Interpreter {
         }
     }
 
-    /// Evaluate a program
+    /// Observe the exact file inputs evaluated so far. This is not a complete
+    /// program-generation, endpoint-parity or worker-eligibility assertion.
+    /// Source-less entries, mixed versions, and executable values crossing host
+    /// APIs make snapshots unavailable. Exported callable aliases can expose
+    /// mutable closure environments, so these are conservatively untracked.
+    pub fn source_snapshot(&self) -> Result<crate::source::SourceSnapshot> {
+        self.loaded_sources.snapshot()
+    }
+
+    /// Execute an immutable file-backed parse without rereading its input.
+    /// Sets current_file for execution context, not main_source_file: configure
+    /// set_main_source_file separately for reload or HTTP-worker bootstrap.
+    /// Executable results (including nested callables) conservatively invalidate
+    /// [`Self::source_snapshot`] when exported to the host.
+    pub fn eval_source(&mut self, source: &crate::source::ParsedSource<'_>) -> Result<Value> {
+        self.set_current_file(&source.file().path().to_string_lossy());
+        self.loaded_sources.file_entry();
+        let result = self.eval_file_source(source)?;
+        self.observe_host_value(&result);
+        Ok(result)
+    }
+
+    fn eval_file_source(&mut self, source: &crate::source::ParsedSource<'_>) -> Result<Value> {
+        self.loaded_sources.record(source);
+        self.eval_program(source.program())
+    }
+
+    /// Evaluate a source-less AST. Setting a filename independently does not
+    /// attest to the bytes from which a caller constructed this Program.
     pub fn eval(&mut self, program: &Program) -> Result<Value> {
+        self.loaded_sources.source_less();
+        self.eval_program(program)
+    }
+
+    fn eval_program(&mut self, program: &Program) -> Result<Value> {
         // Clear warning dedup state so each eval/request gets fresh warnings
         crate::config::clear_type_warnings();
         let mut result = Value::Unit;
@@ -5779,7 +5825,7 @@ impl Interpreter {
                                     .borrow_mut()
                                     .define("err".to_string(), err_val);
 
-                                let result = self.eval_block(otherwise_block);
+                                let result = self.eval_tracked_block(otherwise_block);
                                 self.environment = previous;
                                 let result = result?;
 
@@ -5830,9 +5876,9 @@ impl Interpreter {
                     }
                 }
                 if cond.is_truthy() {
-                    self.eval_block(then_branch)
+                    self.eval_tracked_block(then_branch)
                 } else if let Some(else_b) = else_branch {
-                    self.eval_block(else_b)
+                    self.eval_tracked_block(else_b)
                 } else {
                     Ok(Value::Unit)
                 }
@@ -6414,7 +6460,15 @@ impl Interpreter {
         self.eval_block_inner(block, true)
     }
 
+    /// Execute an opaque host-provided block; it is not tied to file input.
+    /// This invalidates [`Self::source_snapshot`] attestation.
     pub fn eval_block(&mut self, block: &Block) -> Result<Value> {
+        self.loaded_sources.source_less();
+        self.eval_block_inner(block, false)
+    }
+
+    /// Internal blocks originate in the program/body already being evaluated.
+    fn eval_tracked_block(&mut self, block: &Block) -> Result<Value> {
         self.eval_block_inner(block, false)
     }
 
@@ -6465,6 +6519,7 @@ impl Interpreter {
     /// Evaluate a block with optional contract checking (requires/ensures).
     ///
     /// Used by the job worker path to execute perform blocks that carry contracts.
+    /// The opaque block/contract input invalidates [`Self::source_snapshot`].
     /// Unlike `call_user_function`, this does **not** push a new scope — the caller
     /// (i.e. `execute_in_worker`) is responsible for setting up and tearing down the
     /// execution scope.
@@ -6474,6 +6529,7 @@ impl Interpreter {
         job_name: &str,
         contract: Option<&FunctionContract>,
     ) -> Result<Value> {
+        self.loaded_sources.source_less();
         // Defensive reset — ensure no stale contract state from a prior execution
         self.current_old_values = None;
         self.current_result = None;
@@ -7441,7 +7497,7 @@ impl Interpreter {
                 }
             }
 
-            Expression::Block(block) => self.eval_block(block),
+            Expression::Block(block) => self.eval_tracked_block(block),
 
             Expression::IfExpr {
                 condition,
@@ -7637,7 +7693,7 @@ impl Interpreter {
             }
 
             Expression::TryCatch { body } => {
-                match self.eval_block(body) {
+                match self.eval_tracked_block(body) {
                     Ok(value) => {
                         // If the block returned via explicit `return`, propagate it —
                         // try {} only catches errors, not control flow.
@@ -10538,7 +10594,7 @@ impl Interpreter {
         use crate::stdlib::http_bridge::HandlerRequest;
 
         // Read and parse the source file
-        let source_code = match std::fs::read_to_string(source_file) {
+        let source = match crate::source::SourceFile::read(source_file) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[worker {}] Failed to read source file: {}", worker_id, e);
@@ -10548,14 +10604,7 @@ impl Interpreter {
             }
         };
 
-        use crate::lexer::Lexer;
-        use crate::parser::Parser;
-
-        let lexer = Lexer::new(&source_code);
-        let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens).with_source_file(source_file);
-
-        let ast = match parser.parse() {
+        let ast = match source.parse() {
             Ok(ast) => ast,
             Err(e) => {
                 eprintln!("[worker {}] Parse error: {}", worker_id, e);
@@ -10570,7 +10619,7 @@ impl Interpreter {
         interpreter.set_current_file(source_file);
 
         // Evaluate the source to register routes, middleware, etc.
-        if let Err(e) = interpreter.eval(&ast) {
+        if let Err(e) = interpreter.eval_source(&ast) {
             eprintln!("[worker {}] Eval error: {}", worker_id, e);
             return WorkerExit::StartupFailed(format!("eval error in '{source_file}': {e}"));
         }
@@ -11644,6 +11693,9 @@ mod context_builtins;
 
 #[cfg(test)]
 mod context_builtins_tests;
+
+#[cfg(test)]
+mod source_provenance_tests;
 
 #[cfg(test)]
 mod frame_restore_tests;

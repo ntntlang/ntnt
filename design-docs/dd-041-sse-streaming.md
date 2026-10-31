@@ -1,6 +1,6 @@
 # DD-041: Native SSE and WebSockets
 
-**Status:** Slice A (native SSE) implemented for v0.6.0. Slice B (WebSockets) remains unimplemented.
+**Status:** Slice A (native SSE) shipped in v0.6.0. The v0.6.1 development line adds exact loaded-source provenance; Slice B (WebSockets) remains unimplemented.
 **Author:** Larri
 **Created:** 2026-03-17
 **Revised:** 2026-10-25
@@ -40,6 +40,22 @@ SSE signatures and configuration. Initial worker success is now checked, but
 post-start supervision still uses the previous retry policy. No forced interruption
 of blocked application/native setup is promised; CLI startup failures exit the
 process, while Rust embedding code must account for non-preemptible work.
+
+### Loaded-source prerequisite (v0.6.1 development)
+
+The CLI and file loaders now use one resolved source identity and the exact input
+passed to the parser. Immutable `ParsedSource` binds that AST to its input without
+adding fields to `Program`; interpreter snapshots retain cached input provenance,
+track direct libs/middleware/routes/jobs as well as transitive imports, and reject
+source-less or mixed-source attestation. Existing evaluation and reload continue
+to work; no new public NTNT realtime API is introduced.
+
+This is observed-source provenance only. Lazy imports can add inputs after a
+snapshot, and a fresh task interpreter does not inherit its parent's ledger.
+Runtime/endpoint identity, a corresponding primary/worker setup boundary,
+quarantined respawn, and coordinated source-change/reload transitions still need
+the actual generation protocol. Do not treat a source snapshot as eligibility or
+claim these remaining Slice B requirements are implemented.
 
 ## 1. Decision
 

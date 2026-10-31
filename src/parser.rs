@@ -60,6 +60,13 @@ impl Parser {
         self
     }
 
+    /// File input has already made its resolution decision before reading.
+    /// Do not canonicalize again and possibly stamp a different symlink target.
+    pub(crate) fn with_resolved_source_file(mut self, path: std::path::PathBuf) -> Self {
+        self.source_file = Some(path);
+        self
+    }
+
     /// Interpolation/template expressions may themselves contain function bodies.
     fn child_parser(&self, tokens: Vec<Token>) -> Self {
         let mut parser = Self::new(tokens);

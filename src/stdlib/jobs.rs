@@ -1394,14 +1394,10 @@ fn create_job_interpreter() -> crate::interpreter::Interpreter {
         return crate::interpreter::Interpreter::new();
     };
 
-    let source = std::fs::read_to_string(&source_path)
+    let source = crate::source::SourceFile::read(&source_path)
         .unwrap_or_else(|e| panic!("failed to read '{}' for worker: {}", source_path, e));
 
-    use crate::lexer::Lexer;
-    use crate::parser::Parser;
-    let tokens: Vec<_> = Lexer::new(&source).collect();
-    let ast = Parser::new(tokens)
-        .with_source_file(&source_path)
+    let ast = source
         .parse()
         .unwrap_or_else(|e| panic!("failed to parse '{}' for worker: {}", source_path, e));
 
@@ -1412,7 +1408,7 @@ fn create_job_interpreter() -> crate::interpreter::Interpreter {
     interp.set_current_file(&source_path);
     interp.set_main_source_file(&source_path);
     interp
-        .eval(&ast)
+        .eval_source(&ast)
         .unwrap_or_else(|e| panic!("failed to evaluate '{}' for worker: {}", source_path, e));
     // Switch to Job mode for actual job execution semantics.
     interp.set_execution_mode(crate::interpreter::ExecutionMode::Job);
