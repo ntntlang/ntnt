@@ -1897,6 +1897,8 @@ impl Interpreter {
 
     /// Define a variable in the current (global) environment.
     /// Used by the concurrency runtime to inject captured bindings into a fresh interpreter.
+    /// Executable values (including nested callables) invalidate
+    /// [`Self::source_snapshot`] attestation; ordinary data values do not.
     pub fn define_global(&mut self, name: String, value: Value) {
         self.observe_host_value(&value);
         self.environment.borrow_mut().define(name, value);
@@ -1948,6 +1950,9 @@ impl Interpreter {
     }
 
     /// Look up a variable in the global environment (for builtins like len, print, str).
+    /// Returning executable values, including nested ones, conservatively
+    /// invalidates [`Self::source_snapshot`] even through this shared reference:
+    /// exported NTNT callables can expose mutable closure-environment aliases.
     pub fn get_global(&self, name: &str) -> Option<Value> {
         let value = self.environment.borrow().get(name);
         if let Some(value) = &value {
@@ -2031,7 +2036,9 @@ impl Interpreter {
         path.to_string()
     }
 
-    /// Define a variable in the current environment
+    /// Define a variable in the current environment.
+    /// Executable values (including nested callables) invalidate
+    /// [`Self::source_snapshot`] attestation; ordinary data values do not.
     pub fn define_variable(&mut self, name: String, value: Value) {
         self.observe_host_value(&value);
         self.environment.borrow_mut().define(name, value);
@@ -2041,6 +2048,8 @@ impl Interpreter {
     ///
     /// This is useful for external callers (like the IAL test runner) that want
     /// to invoke NTNT functions after loading a module.
+    /// Executable arguments or results, including nested callables, invalidate
+    /// [`Self::source_snapshot`]. Ordinary data arguments/results preserve it.
     pub fn call_function_by_name(&mut self, name: &str, args: Vec<Value>) -> Result<Value> {
         for arg in &args {
             self.observe_host_value(arg);
@@ -5473,6 +5482,8 @@ impl Interpreter {
     /// Execute an immutable file-backed parse without rereading its input.
     /// Sets current_file for execution context, not main_source_file: configure
     /// set_main_source_file separately for reload or HTTP-worker bootstrap.
+    /// Executable results (including nested callables) conservatively invalidate
+    /// [`Self::source_snapshot`] when exported to the host.
     pub fn eval_source(&mut self, source: &crate::source::ParsedSource<'_>) -> Result<Value> {
         self.set_current_file(&source.file().path().to_string_lossy());
         self.loaded_sources.file_entry();
@@ -6450,6 +6461,7 @@ impl Interpreter {
     }
 
     /// Execute an opaque host-provided block; it is not tied to file input.
+    /// This invalidates [`Self::source_snapshot`] attestation.
     pub fn eval_block(&mut self, block: &Block) -> Result<Value> {
         self.loaded_sources.source_less();
         self.eval_block_inner(block, false)
@@ -6507,6 +6519,7 @@ impl Interpreter {
     /// Evaluate a block with optional contract checking (requires/ensures).
     ///
     /// Used by the job worker path to execute perform blocks that carry contracts.
+    /// The opaque block/contract input invalidates [`Self::source_snapshot`].
     /// Unlike `call_user_function`, this does **not** push a new scope — the caller
     /// (i.e. `execute_in_worker`) is responsible for setting up and tearing down the
     /// execution scope.
