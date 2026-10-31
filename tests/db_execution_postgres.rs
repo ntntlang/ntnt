@@ -1049,3 +1049,194 @@ fn complete_transactional_scripts_replay_and_execute() {
     );
     assert_eq!(f.command("verify")["outcome"], "pass");
 }
+
+/// Object shapes from a real application's history (Jarri): routines,
+/// triggers, forced RLS policies, a partitioned table with a default
+/// partition, partial/expression indexes, a view, an identity sequence and a
+/// trusted extension in the managed schema.
+const REAL_SCHEMA: &str = "CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE TABLE tenants(id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, settings JSONB NOT NULL DEFAULT '{}');
+CREATE TABLE audit(id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, tenant_id UUID NOT NULL REFERENCES tenants(id), note TEXT NOT NULL);
+CREATE FUNCTION reject_audit_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'append only'; END $$;
+CREATE TRIGGER audit_append_only BEFORE UPDATE OR DELETE ON audit FOR EACH ROW EXECUTE FUNCTION reject_audit_change();
+ALTER TABLE audit ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit FORCE ROW LEVEL SECURITY;
+CREATE POLICY audit_tenant ON audit USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+CREATE TABLE observations(tenant_id UUID NOT NULL, observed_at TIMESTAMPTZ NOT NULL, value DOUBLE PRECISION) PARTITION BY RANGE (observed_at);
+CREATE TABLE observations_default PARTITION OF observations DEFAULT;
+CREATE INDEX observations_recent ON observations(tenant_id, observed_at DESC);
+CREATE INDEX tenants_lower_name ON tenants(lower(name)) WHERE name <> '';
+CREATE VIEW tenant_names AS SELECT id, name FROM tenants;";
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn real_application_objects_are_compared_not_left_unknown() {
+    let f = Fixture::with_schema("public");
+    f.sql("0001_initial.sql", REAL_SCHEMA);
+    std::fs::write(
+        f.root.path().join("migrations/0001_initial.toml"),
+        "[ensures]\nno_tenants = 'SELECT NOT EXISTS (SELECT 1 FROM public.tenants)'\n",
+    )
+    .unwrap();
+    let p = f.plan("plan.json");
+    assert_eq!(p["outcome"], "pass", "{p}");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "pass", "{v}");
+    assert_eq!(v["catalog"]["uncovered"], serde_json::json!([]), "{v}");
+    // Each out-of-band change below is drift on a named object, not "unknown".
+    for (change, object) in [
+        ("CREATE OR REPLACE FUNCTION public.reject_audit_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$", "routine:reject_audit_change()"),
+        ("ALTER POLICY audit_tenant ON public.audit USING (true)", "policy:audit.audit_tenant"),
+        ("ALTER TABLE public.audit DISABLE TRIGGER audit_append_only", "trigger:audit.audit_append_only"),
+        ("CREATE OR REPLACE VIEW public.tenant_names AS SELECT id, upper(name) AS name FROM public.tenants", "view:tenant_names"),
+        ("DROP INDEX public.tenants_lower_name; CREATE INDEX tenants_lower_name ON public.tenants(lower(name))", "index:tenants_lower_name"),
+    ] {
+        f.target().batch_execute(change).unwrap();
+        let d = f.command("verify");
+        assert_eq!(d["outcome"], "fail", "{change}: {d}");
+        assert!(code(&d, "DB_DRIFT"), "{change}: {d}");
+        assert!(
+            d["drift"]["differences"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["object"] == object),
+            "{change}: {}",
+            d["drift"]["differences"]
+        );
+        break_and_restore(&f);
+    }
+}
+
+/// Put the applied definitions back so each drift case is isolated.
+fn break_and_restore(f: &Fixture) {
+    let mut c = f.target();
+    c.batch_execute(
+        "CREATE OR REPLACE FUNCTION public.reject_audit_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'append only'; END $$;
+         ALTER POLICY audit_tenant ON public.audit USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+         ALTER TABLE public.audit ENABLE TRIGGER audit_append_only;
+         CREATE OR REPLACE VIEW public.tenant_names AS SELECT id, name FROM public.tenants;
+         DROP INDEX public.tenants_lower_name; CREATE INDEX tenants_lower_name ON public.tenants(lower(name)) WHERE name <> '';",
+    )
+    .unwrap();
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "pass", "restore failed: {v}");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn migration_scripts_run_with_normal_row_security() {
+    // Seed rows into a FORCE ROW LEVEL SECURITY table, as a real application's
+    // second migration does. Inspection still reads with row_security=off.
+    let f = Fixture::with_schema("public");
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE plans(code TEXT PRIMARY KEY);
+         ALTER TABLE plans ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE plans FORCE ROW LEVEL SECURITY;
+         CREATE POLICY plans_all ON plans USING (true) WITH CHECK (true);",
+    );
+    f.sql("0002_seed.sql", "INSERT INTO plans VALUES ('internal');");
+    let p = f.plan("plan.json");
+    assert_eq!(p["outcome"], "pass", "{p}");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    assert_eq!(
+        f.target()
+            .query_one("SELECT count(*) FROM public.plans", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn deferred_constraints_settle_at_each_migration_boundary() {
+    // Replay runs a whole history in one rollback-only transaction. Each
+    // migration must still end as its commit would: deferred checks fire, so
+    // the next migration can ALTER the table.
+    let f = Fixture::with_schema("public");
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE plans(code TEXT PRIMARY KEY);
+         CREATE TABLE tenants(id INTEGER PRIMARY KEY, plan TEXT NOT NULL REFERENCES plans(code) DEFERRABLE);
+         CREATE TABLE notes(id INTEGER PRIMARY KEY, plan TEXT NOT NULL REFERENCES plans(code) DEFERRABLE INITIALLY DEFERRED);",
+    );
+    f.sql(
+        "0002_seed.sql",
+        "SET CONSTRAINTS ALL DEFERRED;
+         INSERT INTO tenants VALUES (1, 'internal');
+         INSERT INTO plans VALUES ('internal');",
+    );
+    // A later migration in the same replay still sees each constraint's own
+    // default: INITIALLY DEFERRED stays deferred without asking for it.
+    f.sql(
+        "0003_alter.sql",
+        "ALTER TABLE tenants ADD COLUMN name TEXT;
+         INSERT INTO notes VALUES (1, 'paid');
+         INSERT INTO plans VALUES ('paid');",
+    );
+    let p = f.plan("plan.json");
+    assert_eq!(p["outcome"], "pass", "{p}");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    // A deferred violation is still the failing migration's error.
+    f.sql(
+        "0004_bad.sql",
+        "SET CONSTRAINTS ALL DEFERRED; INSERT INTO tenants VALUES (2, 'missing', 'x');",
+    );
+    let bad = f.command("plan");
+    assert!(code(&bad, "DB_POSTGRES"), "{bad}");
+    assert!(
+        bad["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["source"] == "0004_bad.sql"),
+        "{bad}"
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn scratch_matches_a_target_role_that_bypasses_row_security() {
+    // Many applications migrate as a role that bypasses row-level security, so
+    // seed rows are not filtered by tenant policies. Scratch must match that,
+    // and only that: it may bypass RLS only when the target role does.
+    let mut f = Fixture::with_schema("public");
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE tenants(id INTEGER PRIMARY KEY);
+         ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE tenants FORCE ROW LEVEL SECURITY;
+         CREATE POLICY tenant_self ON tenants USING (id = NULLIF(current_setting('app.tenant_id', true), '')::integer)
+           WITH CHECK (id = NULLIF(current_setting('app.tenant_id', true), '')::integer);
+         INSERT INTO tenants VALUES (1);",
+    );
+    let r = f.command("plan");
+    assert!(
+        code(&r, "DB_POSTGRES"),
+        "policy applies without bypass: {r}"
+    );
+    f.admin
+        .batch_execute(&format!("ALTER ROLE {} BYPASSRLS", f.scratch))
+        .unwrap();
+    let r = f.command("plan");
+    assert!(
+        code(&r, "DB_SCRATCH_NOT_EMPTY"),
+        "scratch may not exceed target: {r}"
+    );
+    f.admin
+        .batch_execute(&format!("ALTER ROLE {} BYPASSRLS", f.target))
+        .unwrap();
+    let p = f.plan("plan.json");
+    assert_eq!(p["outcome"], "pass", "{p}");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}

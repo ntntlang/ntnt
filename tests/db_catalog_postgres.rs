@@ -572,7 +572,7 @@ fn partial_catalog_coverage_and_nonempty_unadopted_scope_are_not_passes() {
     f.target().batch_execute("DROP TABLE app.legacy").unwrap();
     f.seed_first("CREATE TABLE app.t(id INTEGER);");
     f.target()
-        .batch_execute("CREATE VIEW app.slow AS SELECT 1 AS sleeper FROM pg_sleep(30)")
+        .batch_execute("CREATE MATERIALIZED VIEW app.slow AS SELECT 1 AS sleeper")
         .unwrap();
     let r = f.command("verify");
     assert_eq!(r["drift"]["outcome"], "unknown");
@@ -581,6 +581,13 @@ fn partial_catalog_coverage_and_nonempty_unadopted_scope_are_not_passes() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("view:slow")));
+    // A plain view is compared by definition: unexpected, never "unknown".
+    f.target()
+        .batch_execute("DROP MATERIALIZED VIEW app.slow; CREATE VIEW app.slow AS SELECT 1 AS sleeper FROM pg_sleep(30)")
+        .unwrap();
+    let r = f.command("verify");
+    assert_eq!(r["drift"]["outcome"], "fail", "{r}");
+    assert!(has_code(&r, "DB_DRIFT"));
 }
 
 #[test]

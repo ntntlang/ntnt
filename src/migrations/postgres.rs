@@ -231,6 +231,16 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         }) {
             return Err(bad());
         }
+        // Covered is not the same as expected: the reserved namespace holds only
+        // the ledger heap and its own columns, constraints and indexes.
+        if ledger_scope.objects.iter().any(|(key, object)| {
+            object["external"] != true
+                && !["schema:", "relation:", "column:", "constraint:", "index:"]
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix))
+        }) {
+            return Err(bad());
+        }
         // The ledger is read only after its physical table and every dependent
         // index are known built-in objects. A SELECT on a view/RLS policy/custom
         // access method is not a pure history read.
@@ -436,9 +446,20 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             return Err(Diagnostic::new("DB_SCRATCH_MISMATCH","Scratch engine version, encoding, locale and session settings must exactly match the target."));
         }
         self.rollback().await?;
+        // Scripts must see row-level security as the target role does. Scratch
+        // may bypass RLS only when the target login role bypasses it (directly
+        // or as a superuser); it never gains other elevated attributes.
+        let target_bypasses_rls = target.authority["roles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| {
+                r["role"] == target.role.as_str()
+                    && (r["bypassrls"] == true || r["superuser"] == true)
+            });
         self.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE; SET LOCAL search_path=pg_catalog; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
         let r=bounded(self.client.query_one(r#"
-SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls)
+SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR (r.rolbypassrls AND NOT $1))
  AND d.datdba=r.oid AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members WHERE member=r.oid)
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_event_trigger)
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_extension WHERE extname<>'plpgsql')
@@ -448,7 +469,7 @@ SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication O
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public')
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public')
 FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user AND d.datname=pg_catalog.current_database()
-"#,&[])).await?;
+"#,&[&target_bypasses_rls])).await?;
         if !r.get::<_, bool>(0) {
             return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch must be an empty disposable database owned by an unprivileged, non-member role, with no user objects, event triggers, extensions or default grants."));
         }
@@ -499,9 +520,15 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         let safe = self.rows(r#"SELECT NOT EXISTS (
           SELECT 1 FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
           JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind='r'
-          AND a.attnum>0 AND NOT a.attisdropped AND a.atttypid NOT IN (16,17,20,21,23,25,700,701,1043,1082,1114,1184,1700,2950))
+          AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace WHERE t.oid=a.atttypid AND tn.nspname<>'pg_catalog'))
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast WHERE oid>=16384 AND castcontext IN ('i','a'))
-          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind NOT IN ('r','i'))"#, &[&schema]).await?;
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind NOT IN ('r','p','i','I','S','v'))
+          -- A check may read a view. Views may only use builtin non-volatile
+          -- functions, so reading one cannot write or take advisory locks.
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class v JOIN pg_catalog.pg_namespace n ON n.oid=v.relnamespace
+            JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid
+            JOIN pg_catalog.pg_proc p ON d.refclassid='pg_catalog.pg_proc'::regclass AND p.oid=d.refobjid JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
+            WHERE n.nspname=$1 AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&schema]).await?;
         if !safe[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
@@ -563,13 +590,44 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         self.reject_custom_casts().await?;
         // pg_catalog is implicitly searched first when omitted, while CREATE
         // uses the first explicit namespace. Never let app objects shadow builtins.
-        self.batch(&format!("SET LOCAL search_path=\"{schema}\";"))
-            .await?;
+        // Inspection and checks use row_security=off so a policy can never
+        // silently filter what they read. Authored scripts run as the
+        // application's migrations always have: with normal row security, so
+        // seed rows into FORCE ROW LEVEL SECURITY tables obey their policies.
+        self.batch(&format!(
+            "SET LOCAL search_path=\"{schema}\"; SET LOCAL row_security=on;"
+        ))
+        .await?;
         // Do not split on semicolons: PostgreSQL receives the captured full script.
         self.batch(&migration.sql).await.map_err(|mut d| {
             d.source = Some(migration.name.clone());
             d
-        })
+        })?;
+        // End each migration as its own commit would: fire deferred constraint
+        // checks now, attributed to this migration. Replay runs many migrations
+        // in one transaction, and pending trigger events would otherwise block
+        // the next migration's ALTER TABLE.
+        self.batch("SET CONSTRAINTS ALL IMMEDIATE")
+            .await
+            .map_err(|mut d| {
+                d.source = Some(migration.name.clone());
+                d
+            })?;
+        // PostgreSQL has no "reset to default" for constraint modes. Restore
+        // INITIALLY DEFERRED constraints so the next migration starts as a
+        // new transaction would.
+        let deferred: Vec<String> = self
+            .rows("SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(k.conname) FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_namespace n ON n.oid=k.connamespace WHERE k.condeferred ORDER BY 1", &[])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        if !deferred.is_empty() {
+            self.batch(&format!("SET CONSTRAINTS {} DEFERRED", deferred.join(",")))
+                .await?;
+        }
+        self.batch("SET LOCAL row_security=off; SET LOCAL search_path=pg_catalog;")
+            .await
     }
 }
 
@@ -623,7 +681,7 @@ impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
             "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"reviewed_prefix_checkpoint"},
-            "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_grants":"canonical_role_names", "views_sequences_routines_triggers_policies":"inventoried_opaque", "partitioning_extensions_custom_types_external_dependencies":"unknown"},
+            "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "managed_schema_extensions":"version", "custom_types_external_dependencies_non_sql_routines":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
     async fn catalog(&self, schema: &str, role: &str) -> Result<Catalog> {
