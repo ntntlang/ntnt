@@ -115,6 +115,174 @@ fn opaque_contract_block_entry_does_not_inherit_file_backed_attestation() {
     check_opaque_block_entry(true);
 }
 
+fn opaque_function() -> Value {
+    let mut interpreter = Interpreter::new();
+    let program =
+        ntnt::parser::Parser::new(ntnt::lexer::Lexer::new("fn external() { 73 }").collect())
+            .parse()
+            .unwrap();
+    interpreter.eval(&program).unwrap();
+    interpreter.get_global("external").unwrap()
+}
+
+#[test]
+fn host_callable_bindings_and_nested_values_do_not_inherit_file_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = write(
+        dir.path(),
+        "main.tnt",
+        "fn execute() { external() }\nfn nested() { let f = unwrap(payload)[\"run\"]; f() }",
+    );
+    for global in [false, true] {
+        let mut interpreter = Interpreter::new();
+        run(&mut interpreter, &root);
+        interpreter.source_snapshot().unwrap();
+        if global {
+            interpreter.define_global("external".into(), opaque_function());
+        } else {
+            interpreter.define_variable("external".into(), opaque_function());
+        }
+        assert!(matches!(
+            interpreter
+                .call_function_by_name("execute", vec![])
+                .unwrap(),
+            Value::Int(73)
+        ));
+        assert!(
+            interpreter.source_snapshot().is_err(),
+            "opaque host binding retained provenance"
+        );
+    }
+    let mut interpreter = Interpreter::new();
+    run(&mut interpreter, &root);
+    interpreter.define_global(
+        "payload".into(),
+        Value::ok(Value::Map(std::collections::HashMap::from([(
+            "run".into(),
+            opaque_function(),
+        )]))),
+    );
+    assert!(matches!(
+        interpreter.call_function_by_name("nested", vec![]).unwrap(),
+        Value::Int(73)
+    ));
+    assert!(
+        interpreter.source_snapshot().is_err(),
+        "nested host code retained provenance"
+    );
+}
+
+#[test]
+fn host_callable_arguments_do_not_inherit_file_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = write(
+        dir.path(),
+        "main.tnt",
+        "fn invoke(f) { f() }\nfn nested(p) { let f = p[\"run\"]; f() }",
+    );
+    for name in ["invoke", "nested"] {
+        let mut interpreter = Interpreter::new();
+        run(&mut interpreter, &root);
+        let arg = if name == "invoke" {
+            opaque_function()
+        } else {
+            Value::Map(std::collections::HashMap::from([(
+                "run".into(),
+                opaque_function(),
+            )]))
+        };
+        assert!(matches!(
+            interpreter.call_function_by_name(name, vec![arg]).unwrap(),
+            Value::Int(73)
+        ));
+        assert!(
+            interpreter.source_snapshot().is_err(),
+            "host callback argument retained provenance"
+        );
+    }
+}
+
+#[test]
+fn exported_callable_aliases_cannot_leave_a_trusted_snapshot_after_host_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = write(
+        dir.path(),
+        "main.tnt",
+        "fn known() { 73 }\nlet callbacks = map { \"run\": known }",
+    );
+    for name in ["known", "callbacks"] {
+        let mut interpreter = Interpreter::new();
+        run(&mut interpreter, &root);
+        interpreter.source_snapshot().unwrap();
+        interpreter.get_global(name).unwrap();
+        assert!(
+            interpreter.source_snapshot().is_err(),
+            "host received a live closure environment alias"
+        );
+        assert!(matches!(
+            interpreter.call_function_by_name("known", vec![]).unwrap(),
+            Value::Int(73)
+        ));
+    }
+}
+
+#[test]
+fn callable_results_from_file_eval_and_host_calls_are_unattested() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = write(dir.path(), "main.tnt", "fn known() { 73 }\nknown");
+    let file = SourceFile::read(&root).unwrap();
+    let mut interpreter = Interpreter::new();
+    assert!(matches!(
+        interpreter.eval_source(&file.parse().unwrap()).unwrap(),
+        Value::Function { .. }
+    ));
+    assert!(
+        interpreter.source_snapshot().is_err(),
+        "file result exported mutable callable authority"
+    );
+    let root = write(
+        dir.path(),
+        "second.tnt",
+        "fn expose() { return fn() { 73 } }",
+    );
+    let mut interpreter = Interpreter::new();
+    run(&mut interpreter, &root);
+    assert!(matches!(
+        interpreter.call_function_by_name("expose", vec![]).unwrap(),
+        Value::Function { .. }
+    ));
+    assert!(
+        interpreter.source_snapshot().is_err(),
+        "host call result exported callable authority"
+    );
+}
+
+#[test]
+fn ordinary_host_data_and_file_backed_calls_keep_their_source_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = write(
+        dir.path(),
+        "main.tnt",
+        "let answer = 73\nfn add(n) { answer + n }",
+    );
+    let mut interpreter = Interpreter::new();
+    run(&mut interpreter, &root);
+    let before = interpreter.source_snapshot().unwrap();
+    interpreter.define_variable("data".into(), Value::Array(vec![Value::Int(1)]));
+    interpreter.define_global("other".into(), Value::ok(Value::Int(2)));
+    assert!(matches!(
+        interpreter.get_global("answer").unwrap(),
+        Value::Int(73)
+    ));
+    assert!(matches!(
+        interpreter
+            .call_function_by_name("add", vec![Value::Int(1)])
+            .unwrap(),
+        Value::Int(74)
+    ));
+    assert_eq!(interpreter.source_snapshot().unwrap(), before);
+}
+
 #[test]
 fn file_replacement_after_parse_cannot_relabel_executed_bytes() {
     let dir = tempfile::tempdir().unwrap();

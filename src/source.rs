@@ -12,6 +12,7 @@ use crate::error::{IntentError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -141,7 +142,7 @@ pub(crate) struct SourceLedger {
     // across edits. A reload cannot silently relabel old cached definitions.
     files: BTreeMap<PathBuf, ([u8; 32], bool)>,
     file_entry: bool,
-    source_less: bool,
+    source_less: Cell<bool>,
 }
 
 impl SourceLedger {
@@ -149,13 +150,15 @@ impl SourceLedger {
         self.file_entry = true;
     }
 
-    pub(crate) fn source_less(&mut self) {
-        self.source_less = true;
+    pub(crate) fn source_less(&self) {
+        self.source_less.set(true);
     }
 
     pub(crate) fn record(&mut self, source: &ParsedSource<'_>) {
         let file = source.file;
-        self.source_less |= !file.identity_known;
+        if !file.identity_known {
+            self.source_less();
+        }
         self.files
             .entry(file.path.clone())
             .and_modify(|(first, mixed)| *mixed |= *first != file.digest)
@@ -163,7 +166,7 @@ impl SourceLedger {
     }
 
     pub(crate) fn snapshot(&self) -> Result<SourceSnapshot> {
-        if !self.file_entry || self.source_less {
+        if !self.file_entry || self.source_less.get() {
             return Err(IntentError::runtime_error(
                 "source provenance unavailable: execution includes an untracked/source-less entry",
             ));

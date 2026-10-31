@@ -19,7 +19,12 @@ entries or multiple evaluated versions of one identity make attestation
 unavailable, without disabling evaluation/reload. Readable virtual/pipe inputs
 such as `/dev/stdin` remain executable but are not given regular-file attestation.
 Per-file history retains one digest plus a conflict bit, not unbounded versions
-or application source text.
+or application source text. Host-injected callable values (including nested
+bindings/arguments) also make snapshots unavailable. Callable values exported to
+Rust through getters, file results or named-call results are treated conservatively
+because their public closure environments can be mutated outside the interpreter.
+Ordinary host data and tracked file-backed calls remain supported without losing
+provenance. No existing embedding operation is rejected by this tracking.
 
 This is a prerequisite, **not** WebSocket support, full program-generation
 compatibility, worker quarantine, per-application realtime isolation, or a new

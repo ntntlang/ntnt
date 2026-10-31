@@ -1898,7 +1898,34 @@ impl Interpreter {
     /// Define a variable in the current (global) environment.
     /// Used by the concurrency runtime to inject captured bindings into a fresh interpreter.
     pub fn define_global(&mut self, name: String, value: Value) {
+        self.observe_host_value(&value);
         self.environment.borrow_mut().define(name, value);
+    }
+
+    /// Host-supplied executable values have no bound parser input. Exporting a
+    /// callable is equally conservative: its public closure exposes a mutable
+    /// environment alias which the host may alter outside interpreter APIs.
+    /// Traverse containers without following closure environments or recursion.
+    fn observe_host_value(&self, value: &Value) {
+        let mut pending = vec![value];
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Function { .. }
+                | Value::NativeFunction { .. }
+                | Value::ContextFunction { .. } => {
+                    self.loaded_sources.source_less();
+                    return;
+                }
+                Value::Array(values) | Value::EnumValue { values, .. } => {
+                    pending.extend(values);
+                }
+                Value::Map(values) | Value::Struct { fields: values, .. } => {
+                    pending.extend(values.values());
+                }
+                Value::Return(value) => pending.push(value),
+                _ => {}
+            }
+        }
     }
 
     /// Run a task-starting native function with this interpreter's struct
@@ -1922,7 +1949,11 @@ impl Interpreter {
 
     /// Look up a variable in the global environment (for builtins like len, print, str).
     pub fn get_global(&self, name: &str) -> Option<Value> {
-        self.environment.borrow().get(name)
+        let value = self.environment.borrow().get(name);
+        if let Some(value) = &value {
+            self.observe_host_value(value);
+        }
+        value
     }
 
     /// Push a new child scope. Caller must call pop_scope() to restore.
@@ -2002,6 +2033,7 @@ impl Interpreter {
 
     /// Define a variable in the current environment
     pub fn define_variable(&mut self, name: String, value: Value) {
+        self.observe_host_value(&value);
         self.environment.borrow_mut().define(name, value);
     }
 
@@ -2010,6 +2042,9 @@ impl Interpreter {
     /// This is useful for external callers (like the IAL test runner) that want
     /// to invoke NTNT functions after loading a module.
     pub fn call_function_by_name(&mut self, name: &str, args: Vec<Value>) -> Result<Value> {
+        for arg in &args {
+            self.observe_host_value(arg);
+        }
         // Clear warning dedup state for each request/call
         crate::config::clear_type_warnings();
         // Look up the function in the environment
@@ -2037,7 +2072,9 @@ impl Interpreter {
         }
 
         // Call the function
-        self.call_function(func, args)
+        let result = self.call_function(func, args)?;
+        self.observe_host_value(&result);
+        Ok(result)
     }
 
     /// Set the main source file for hot-reload tracking
@@ -5426,7 +5463,9 @@ impl Interpreter {
 
     /// Observe the exact file inputs evaluated so far. This is not a complete
     /// program-generation, endpoint-parity or worker-eligibility assertion.
-    /// Source-less entries and conflicting versions of a file fail explicitly.
+    /// Source-less entries, mixed versions, and executable values crossing host
+    /// APIs make snapshots unavailable. Exported callable aliases can expose
+    /// mutable closure environments, so these are conservatively untracked.
     pub fn source_snapshot(&self) -> Result<crate::source::SourceSnapshot> {
         self.loaded_sources.snapshot()
     }
@@ -5437,7 +5476,9 @@ impl Interpreter {
     pub fn eval_source(&mut self, source: &crate::source::ParsedSource<'_>) -> Result<Value> {
         self.set_current_file(&source.file().path().to_string_lossy());
         self.loaded_sources.file_entry();
-        self.eval_file_source(source)
+        let result = self.eval_file_source(source)?;
+        self.observe_host_value(&result);
+        Ok(result)
     }
 
     fn eval_file_source(&mut self, source: &crate::source::ParsedSource<'_>) -> Result<Value> {
