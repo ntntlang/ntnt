@@ -4220,6 +4220,13 @@ decision. If buses are created only inside request handlers, use `"realtime": ma
 to opt into this barrier. Buffered-only apps without an explicit realtime map keep
 their existing listener-first startup behavior.
 
+The 0.6.1 development runtime also records the exact file inputs parsed by each
+interpreter, rather than reconstructing source identity from mtimes or rereading
+files later. This is a DD-041 prerequisite, not a new NTNT API or a worker admission
+check. Imports remain lazy, caches retain their original source identity, and
+existing reload behavior is unchanged. See the source-provenance section in
+[ARCHITECTURE.md](../ARCHITECTURE.md) for the Rust embedding boundary.
+
 This checks successful initialization, **not** source/endpoint-generation parity,
 quarantined respawn or callback capacity. Established workers retain their existing
 restart/backoff policy. The startup deadline does not preempt arbitrary application

@@ -17,6 +17,7 @@ pub mod migrations;
 pub mod native_test;
 pub mod parser;
 mod secret;
+pub mod source;
 #[cfg(test)]
 mod std_secrets_tests;
 pub mod stdlib;
