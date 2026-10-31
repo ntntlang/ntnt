@@ -13,7 +13,7 @@ ntnt db status --target development --object accounts
 
 `status` and `verify` inspect history and compare the observed catalog with replay at the **applied prefix**. `plan` additionally replays pending SQL and captures a non-authorizing review artifact. Pending migrations are not drift. `--object` is a case-sensitive substring filter on displayed catalog keys; it never narrows verification, hides incomplete coverage, or changes the plan binding. Without `--json`, the same result is rendered for humans.
 
-`migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Explicit reviewed baseline adoption and recognized PostgreSQL legacy-history import use that same executor; see below. Concurrent indexes/non-transactional operations, backfill orchestration and query lint are not implemented. PostgreSQL migration DML remains unsupported; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
+`migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Explicit reviewed baseline adoption and recognized PostgreSQL legacy-history import use that same executor; see below. Concurrent indexes/non-transactional operations, backfill orchestration and query lint are not implemented. PostgreSQL migrations may include transactional DML such as seed rows; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
 
 ## Explicit configuration and secrets
 
@@ -192,21 +192,21 @@ Identity discovery uses `pg_control_system()` and catalog metadata. Missing perm
 
 Replay owns a dedicated physical connection and a **rollback-only outer transaction**, not a pool handle. It creates the managed scratch schema only after isolation/emptiness checks, replays captured scripts through the native execution primitive, captures the applied-prefix/candidate catalogs, and explicitly rolls back. Success and failure tests verify no scratch schema survives. The authorized per-migration executor reuses that exact captured-SQL primitive. Catalog derivation deliberately skips transition contracts: an empty replay cannot establish data-dependent production assertions. Fresh/populated native rehearsal tests invoke the same `migrate` executor on disposable fixtures with representative rows; they are not a second application-level runner or a claim about production data.
 
-### Supported replay subset
+### What PostgreSQL replay runs
 
-The PostgreSQL dialect parser (`sqlparser`) checks a closed AST subset before SQL reaches scratch. PostgreSQL itself determines the resulting catalog. Scripts are **not split on semicolons**; quoted semicolons remain intact.
+PostgreSQL migrations are complete SQL scripts. Scratch replay and authorized execution both send the captured script, unchanged, inside one transaction per migration. That includes `DO` blocks, functions, triggers, policies, grants, seed `INSERT`s, `SET CONSTRAINTS` and other transactional SQL a real application history contains. PostgreSQL itself determines the resulting catalog.
 
-Supported:
+Before anything runs, the script is tokenized (quoted and dollar-quoted text stays intact) and each top-level statement is checked. These statements are rejected with `DB_REPLAY_UNSUPPORTED`, because they would end or split the migration transaction, change who the session acts as, or act outside the database:
 
-- ordinary `CREATE TABLE` with integer/smallint/bigint, text/varchar, boolean, numeric/decimal, real/double precision, date/timestamp, UUID and bytea built-ins;
-- NULL/NOT NULL, literal defaults, primary/unique keys, managed-scope foreign keys and restricted CHECK expressions using identifiers, literals, comparisons, Boolean operators and basic arithmetic;
-- `ALTER TABLE` add/drop/rename column, add/drop constraint, set/drop NOT NULL or a literal default, and built-in type changes without `USING`;
-- ordinary column-only btree indexes (including uniqueness, ordering, INCLUDE and null-distinctness options);
-- non-cascading managed-scope table/index drops. Explicit CASCADE is rejected, including column/constraint drops.
+- transaction control: `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, `ABORT`, `SAVEPOINT`, `RELEASE`, `PREPARE TRANSACTION`;
+- session identity: `SET [LOCAL|SESSION] ROLE`, `SET SESSION AUTHORIZATION`, `SET session_replication_role`, `RESET ROLE|SESSION|ALL`, `DISCARD`;
+- non-transactional work: `VACUUM`, `CONCURRENTLY` operations, `REINDEX DATABASE|SYSTEM`;
+- server scope: `COPY`, `LOAD`, `CHECKPOINT`, `ALTER SYSTEM`, and creating/altering/dropping databases, tablespaces and roles;
+- explicit `CASCADE` drops, whose transitive effects are not bounded. `ON DELETE CASCADE` and `ON UPDATE CASCADE` foreign-key actions are allowed.
 
-Unqualified names use the managed schema; PostgreSQL's implicit `pg_catalog` lookup precedes it for built-ins. Catalog deparsing uses a fixed `pg_catalog` search path for canonical comparisons. Cross-schema relation references are rejected.
+Text inside `DO` and function bodies is not inspected; it runs inside the same transaction with the migration role's privileges. Keep role creation out of migrations and provision roles separately. Database-wide custom implicit/assignment casts still block execution, because ordinary DDL coercion could run them without appearing in the reviewed script.
 
-Not accepted as migration scripts: functions/procedures/DO, SELECT or DML, COPY, function/default calls (including `now()` and `nextval()`), serial/identity/generated-column creation, casts in expressions, arbitrary queries, custom types/operators/access methods, views, sequences, triggers, grants/RLS changes, extensions, partitions/inheritance, session/transaction/role changes, or concurrent/non-transactional indexes. Even plausible benign unsupported SQL stays `DB_REPLAY_UNSUPPORTED`. This is intentionally narrower than PostgreSQL's full grammar. **Arbitrary SQL is not a sandbox, and READ ONLY alone does not establish purity.**
+Each pending migration's `analysis` lists its statements' `operations`, known lock/effect `hazards`, and `unknowns`. `SQL_NOT_PARSED` means a statement (for example a `DO` block) was not parsed. `EFFECTS_NOT_ANALYZED` means it parsed but falls outside the subset NTNT analyzes in detail: ordinary tables with built-in types and literal defaults, simple constraints, column-only btree indexes, and non-cascading table/index drops. Unknowns are review prompts, not blockers: the replayed catalog and drift comparison still apply. **Scratch replay is not a sandbox.** Use a disposable database with a separate unprivileged owner, as required above.
 
 ## Inspection coverage and drift
 

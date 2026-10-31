@@ -476,6 +476,18 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// check. Names alone and provolatile are not proofs: only builtin base types,
     /// heap tables, builtin indexes/operators and the closed grammar are admitted.
     /// Custom implicit/assignment casts are rejected database-wide, conservatively.
+    async fn reject_custom_casts(&self) -> Result<()> {
+        let safe = self
+            .rows("SELECT NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast WHERE oid>=16384 AND castcontext IN ('i','a'))", &[])
+            .await?;
+        if !safe[0].get::<_, bool>(0) {
+            return Err(Diagnostic::new(
+                "DB_CHECK_UNSUPPORTED",
+                "Custom implicit/assignment casts exist in this database; DDL coercions could run unreviewed code.",
+            ));
+        }
+        Ok(())
+    }
     pub async fn check_purity(&self, schema: &str) -> Result<()> {
         let catalog = self.catalog(schema, "").await?;
         if !catalog.uncovered.is_empty() {
@@ -541,13 +553,14 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// owned transaction. Replay and authorized migration use exactly this primitive.
     pub async fn execute_captured(&self, migration: &Migration, schema: &str) -> Result<()> {
         if !super::analysis::analyze(&migration.sql, schema).replay_supported {
-            let mut d=Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration is outside the supported replay subset; no arbitrary SQL sandbox is claimed.");
+            let mut d=Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration contains a statement that would end the migration transaction, change session identity or act outside this database; see analysis.unknowns.");
             d.source = Some(migration.name.clone());
             return Err(d);
         }
-        // DDL coercions can invoke custom assignment/implicit casts too. Verify
-        // native resolution before both scratch replay and authorized execution.
-        self.check_purity(schema).await?;
+        // Migration SQL may call application routines; that is reviewed SQL.
+        // A custom implicit/assignment cast planted elsewhere could instead run
+        // unreviewed code during ordinary DDL coercion, so it still blocks.
+        self.reject_custom_casts().await?;
         // pg_catalog is implicitly searched first when omitted, while CREATE
         // uses the first explicit namespace. Never let app objects shadow builtins.
         self.batch(&format!("SET LOCAL search_path=\"{schema}\";"))
@@ -609,9 +622,9 @@ fn canonical_roles(value: &mut Value, role: &str) {
 impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
-            "operations": {"catalog_inspection":"supported_subset", "restricted_ddl_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_subset", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"reviewed_prefix_checkpoint"},
+            "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"reviewed_prefix_checkpoint"},
             "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_grants":"canonical_role_names", "views_sequences_routines_triggers_policies":"inventoried_opaque", "partitioning_extensions_custom_types_external_dependencies":"unknown"},
-            "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"restricted_subset_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
+            "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
     async fn catalog(&self, schema: &str, role: &str) -> Result<Catalog> {
         self.batch("SET LOCAL search_path=pg_catalog").await?;

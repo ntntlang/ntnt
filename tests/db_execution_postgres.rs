@@ -1008,3 +1008,44 @@ fn public_schema_is_a_managed_schema() {
     assert_eq!(drift["outcome"], "fail", "{drift}");
     assert!(code(&drift, "DB_DRIFT"), "{drift}");
 }
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn complete_transactional_scripts_replay_and_execute() {
+    // Shapes taken from a real application's history: an idempotent DO block,
+    // deferred constraints with seed rows, and ON DELETE CASCADE actions.
+    let f = Fixture::with_schema("public");
+    f.sql(
+        "0001_initial.sql",
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE relname = 'plans') THEN
+             CREATE TABLE plans(code TEXT PRIMARY KEY, name TEXT NOT NULL);
+         END IF; END $$;
+         CREATE TABLE tenants(id INTEGER PRIMARY KEY, plan TEXT NOT NULL REFERENCES plans(code) ON DELETE CASCADE DEFERRABLE);
+         SET CONSTRAINTS ALL DEFERRED;
+         INSERT INTO tenants VALUES (1, 'internal');
+         INSERT INTO plans VALUES ('internal', 'Internal; with a semicolon');
+         SET CONSTRAINTS ALL IMMEDIATE;",
+    );
+    let p = f.plan("plan.json");
+    assert_eq!(p["outcome"], "pass", "{p}");
+    let ops = &p["plan"]["pending"][0]["analysis"]["operations"];
+    assert_eq!(ops[0], "do", "{ops}");
+    assert!(p["plan"]["pending"][0]["analysis"]["unknowns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u == "SQL_NOT_PARSED"));
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(
+        f.target()
+            .query_one(
+                "SELECT count(*) FROM public.tenants JOIN public.plans ON code = plan",
+                &[]
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}

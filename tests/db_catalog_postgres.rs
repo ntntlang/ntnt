@@ -515,19 +515,22 @@ fn scratch_requires_matching_engine_settings_empty_scope_and_low_privilege() {
 fn unsupported_pending_routines_never_run_and_do_not_hide_applied_verification() {
     let f = Fixture::new();
     f.seed_first("CREATE TABLE app.t(id INTEGER);");
-    for sql in [
-        "SELECT pg_advisory_lock(245)",
-        "CREATE TABLE app.bad(id int DEFAULT pg_sleep(30))",
-        "DO $$ BEGIN RAISE EXCEPTION 'secret_payload'; END $$;",
-        "CREATE INDEX CONCURRENTLY bad ON app.t(id)",
+    for (sql, expected) in [
+        (
+            "CREATE INDEX CONCURRENTLY bad ON app.t(id)",
+            "DB_REPLAY_UNSUPPORTED",
+        ),
+        ("COMMIT; DROP TABLE app.t", "DB_REPLAY_UNSUPPORTED"),
+        ("SET ROLE postgres", "DB_REPLAY_UNSUPPORTED"),
+        // Replayed in scratch; the failure is reported without server text.
+        (
+            "DO $$ BEGIN RAISE EXCEPTION 'secret_payload'; END $$;",
+            "DB_POSTGRES",
+        ),
     ] {
         f.sql("0002_bad.sql", sql);
         let r = f.command("plan");
-        assert!(
-            has_code(&r, "DB_REPLAY_UNSUPPORTED"),
-            "{}",
-            r["diagnostics"]
-        );
+        assert!(has_code(&r, expected), "{sql}: {}", r["diagnostics"]);
         assert_eq!(r["drift"]["outcome"], "pass");
         assert_eq!(r["plan"]["candidate"]["outcome"], "unknown");
         assert_eq!(f.command("verify")["outcome"], "pass");
