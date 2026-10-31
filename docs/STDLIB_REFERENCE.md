@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.5.7
+> Last updated: v0.6.0
 
 ## Table of Contents
 
@@ -78,7 +78,7 @@ These functions are available everywhere without importing.
 | [`jobs(directory: String)`](#jobs) | Auto-discover and register job definitions from .tnt files in a directory. |
 | [`len(x: String \| Array \| Map)`](#len) | Returns the length of a string, array, or map. |
 | [`libs(directory: String)`](#libs) | Auto-import all .tnt files from a directory. |
-| [`listen(port: Int, options?: Map<String, Any>)`](#listen) | Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool, require fixture=true). Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged. JSON readiness is one flushed NTNT_READY line after bind with actual host/port. Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness. Since v0.5.7 `realtime` accepts positive Int max_connections (1024), max_topics (256), max_event_bytes (65536), max_payload_bytes (33554432). Event bytes must not exceed payload bytes. Limits are process-wide, fixed before readiness, and shared by HTTP workers and in-process tasks. Primary setup uses defaults; too many live setup buses fail startup. Secondary setup uses the configured caps: allow space for transient setup buses alongside live ones. With a live setup bus or explicit realtime map, all workers initialize before binding/readiness; errors fail startup and the shared initialization deadline is 10 seconds. An empty realtime map opts in when buses are created only in handlers. This does not verify source/endpoint-generation compatibility. Changing limits requires a process restart, not hot reload. Starts an HTTP server on the given port. |
+| [`listen(port: Int, options?: Map<String, Any>)`](#listen) | Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool, require fixture=true). Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged. JSON readiness is one flushed NTNT_READY line after bind with actual host/port. Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness. Since v0.6.0 `realtime` accepts positive Int max_connections (1024), max_topics (256), max_event_bytes (65536), max_payload_bytes (33554432). Event bytes must not exceed payload bytes. Limits are process-wide, fixed before readiness, and shared by HTTP workers and in-process tasks. Primary setup uses defaults; too many live setup buses fail startup. Secondary setup uses the configured caps: allow space for transient setup buses alongside live ones. With a live setup bus or explicit realtime map, all workers initialize before binding/readiness; errors fail startup and the shared initialization deadline is 10 seconds. An empty realtime map opts in when buses are created only in handlers. This does not verify source/endpoint-generation compatibility. Changing limits requires a process restart, not hot reload. Starts an HTTP server on the given port. |
 | [`max(a: Int \| Float, b: Int \| Float)`](#max) | Returns the larger of two numbers. |
 | [`min(a: Int \| Float, b: Int \| Float)`](#min) | Returns the smaller of two numbers. |
 | [`new_server()`](#new_server) | Resets the server, clearing all registered routes. |
@@ -1124,7 +1124,7 @@ libs("lib/")  // Auto-load all lib files into the current scope
 listen(port: Int, options?: Map<String, Any>) -> Unit
 ```
 
-Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool, require fixture=true). Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged. JSON readiness is one flushed NTNT_READY line after bind with actual host/port. Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness. Since v0.5.7 `realtime` accepts positive Int max_connections (1024), max_topics (256), max_event_bytes (65536), max_payload_bytes (33554432). Event bytes must not exceed payload bytes. Limits are process-wide, fixed before readiness, and shared by HTTP workers and in-process tasks. Primary setup uses defaults; too many live setup buses fail startup. Secondary setup uses the configured caps: allow space for transient setup buses alongside live ones. With a live setup bus or explicit realtime map, all workers initialize before binding/readiness; errors fail startup and the shared initialization deadline is 10 seconds. An empty realtime map opts in when buses are created only in handlers. This does not verify source/endpoint-generation compatibility. Changing limits requires a process restart, not hot reload. Starts an HTTP server on the given port.
+Since v0.5.4 options accept literal host, readiness (none/json), fixture (Bool), suppress_server_header and suppress_cache_control (Bool, require fixture=true). Fixture defaults to loopback and rejects exposed hosts. Security policy is unchanged. JSON readiness is one flushed NTNT_READY line after bind with actual host/port. Port 0 selects an OS-assigned port. Startup errors propagate; no false readiness. Since v0.6.0 `realtime` accepts positive Int max_connections (1024), max_topics (256), max_event_bytes (65536), max_payload_bytes (33554432). Event bytes must not exceed payload bytes. Limits are process-wide, fixed before readiness, and shared by HTTP workers and in-process tasks. Primary setup uses defaults; too many live setup buses fail startup. Secondary setup uses the configured caps: allow space for transient setup buses alongside live ones. With a live setup bus or explicit realtime map, all workers initialize before binding/readiness; errors fail startup and the shared initialization deadline is 10 seconds. An empty realtime map opts in when buses are created only in handlers. This does not verify source/endpoint-generation compatibility. Changing limits requires a process restart, not hot reload. Starts an HTTP server on the given port.
 
 This must be called after registering route handlers with get(), post(), put(), delete(), or patch(). The server blocks and serves requests until the process is terminated.
 
@@ -4764,7 +4764,7 @@ broadcast("metrics")  // => <broadcast metrics>  // Create or get a bus
 
 **See also:** `publish`, `sse`
 
-*Since v0.5.7*
+*Since v0.6.0*
 
 ---
 
@@ -4930,7 +4930,7 @@ publish(bus, map { "cpu": 42 }, map { "event": "metrics" })  // => Ok(())  // Pu
 
 **See also:** `broadcast`, `sse`
 
-*Since v0.5.7*
+*Since v0.6.0*
 
 ---
 
@@ -7837,7 +7837,7 @@ check_limit("login:" + req.client_ip, "5/minute")["remaining"]  // => 4  // Budg
 
 **See also:** `too_many_requests`
 
-*Since v0.5.7*
+*Since v0.6.0*
 
 ---
 
@@ -8420,7 +8420,7 @@ get("/events", fn(req) { sse(bus) })  // => Unit  // Stream a bus to browsers vi
 
 **See also:** `broadcast`, `publish`
 
-*Since v0.5.7*
+*Since v0.6.0*
 
 ---
 
@@ -8556,7 +8556,7 @@ too_many_requests()  // => Response { status: 429, headers: { "retry-after": "60
 
 **See also:** `check_limit`, `status`
 
-*Since v0.5.7*
+*Since v0.6.0*
 
 ---
 

@@ -253,14 +253,23 @@ jobs:
           done
           echo "All artifacts present!"
 
-      - name: Get version from tag
+      - name: Select versioned release announcement
         id: version
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        shell: bash
+        run: |
+          version="${GITHUB_REF#refs/tags/}"
+          notes="docs/release-notes/$version.md"
+          test -s "$notes"
+          IFS= read -r heading < "$notes"
+          [[ "$heading" == "# NTNT $version" || "$heading" == "# NTNT $version "* ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "title=${heading#\# }" >> "$GITHUB_OUTPUT"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: NTNT ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.title }}
+          body_path: docs/release-notes/${{ steps.version.outputs.version }}.md
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
           generate_release_notes: true

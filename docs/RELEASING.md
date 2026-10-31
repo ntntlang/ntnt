@@ -1,5 +1,25 @@
 # Release builds and pinned installation
 
+## Prepare the version and announcement
+
+Prepare a release PR before creating a tag. Set the package version in `Cargo.toml`
+and the root `ntnt` entry in `Cargo.lock`, regenerate the reference docs with that
+binary, and write `docs/release-notes/vX.Y.Z.md`. Its first line must be
+`# NTNT vX.Y.Z` followed by an optional descriptive title. Keep historical version
+references and dependency versions intact. Compare against the last **published**
+release, not merely the previous development package version.
+
+The tag workflow reads the exact versioned file for the GitHub release title/body.
+It refuses missing, empty or mismatched headings before publication; GitHub’s
+automatically generated change list follows the curated announcement. A development
+version bump or a merged preparation PR does not itself create a release.
+
+Review the upgrade guidance, run the ordinary CI and packaging checks, and merge
+only after their results are known. Tag/publish as a separate authorized step.
+The release job remains tag-push-only: PR builds can upload test artifacts but
+cannot publish a release. After tagging, verify the release body, binary versions,
+expected assets and checksums rather than treating a pushed tag as a finished release.
+
 ## Unix installer
 
 `install.sh` downloads release binaries for Linux x86-64, Linux ARMv7 hard-float

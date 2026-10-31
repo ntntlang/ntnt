@@ -1458,7 +1458,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param options Optional map with `heartbeat_ms` and `retry_ms`
     // @returns A streaming response
     // @see_also broadcast, publish
-    // @since v0.5.7
+    // @since v0.6.0
     // @example get("/events", fn(req) { sse(bus) }) => Unit ~ "Stream a bus to browsers via EventSource"
     module.insert(
         "sse".to_string(),
@@ -1756,7 +1756,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param rate "N/second", "N/minute", "N/hour" or "N/day".
     // @returns map { allowed: Bool, limit: Int, remaining: Int, retry_after: Int, reset: Int } (seconds).
     // @see_also too_many_requests
-    // @since v0.5.7
+    // @since v0.6.0
     // @tags #http, #server, #security
     // @example check_limit("contact-email:" + email, "3/day")["allowed"] => true ~ "First submission today"
     // @example check_limit("login:" + req.client_ip, "5/minute")["remaining"] => 4 ~ "Budget left after the first attempt"
@@ -1802,7 +1802,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param result Optional check_limit result.
     // @returns A 429 text/plain Response with Retry-After and no-store.
     // @see_also check_limit, status
-    // @since v0.5.7
+    // @since v0.6.0
     // @tags #http, #server, #security
     // @example too_many_requests(check_limit("k", "1/minute")) => Response { status: 429 } ~ "Return 429 with Retry-After"
     // @example too_many_requests() => Response { status: 429, headers: { "retry-after": "60" } } ~ "Without a result, Retry-After is 60"

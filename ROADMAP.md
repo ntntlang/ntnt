@@ -18,7 +18,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 
 ---
 
-## Native system primitives — v0.5.4 (unreleased)
+## Native system primitives — v0.5.4
 
 - [x] SHA384 text/raw-byte hashing and standard base64 byte encoding.
 - [x] Exclusive initial-mode files, private directories, byte writes, POSIX metadata/access and descriptor sync.
@@ -1617,7 +1617,7 @@ Feature: User Authentication
 
 ## Phase 10: Background Jobs, WebSockets & Real-Time
 
-**Status:** Jobs Complete ✅ (DD-037, DD-051, DD-052) · SSE implemented on the v0.5.7 development line · WebSockets pending (DD-041 Slice B)
+**Status:** Jobs Complete ✅ (DD-037, DD-051, DD-052) · SSE implemented for v0.6.0 · WebSockets pending (DD-041 Slice B)
 
 **Goal:** Production-ready background job system with a declarative Job DSL, pluggable backends, and deep IDD integration — plus WebSocket and SSE support for pushing data to clients. Jobs are first-class language constructs — the `Job` keyword is syntax, not a library import — with the runtime and queue management provided by `std/jobs`.
 
@@ -2573,8 +2573,8 @@ See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) and [PERFORMANCE_AUDIT.md](PERFORMANC
 - [x] PostgreSQL connection error sanitization (prevent credential leakage)
 
 ### Security Hardening (Proposed)
-- [x] Trusted client IP (`req.client_ip`, `NTNT_TRUSTED_PROXIES`) (#294, v0.5.7)
-- [x] Built-in HTTP rate limiting, off by default; per-route `rate`; `check_limit` (#294, v0.5.7)
+- [x] Trusted client IP (`req.client_ip`, `NTNT_TRUSTED_PROXIES`) (#294, v0.6.0)
+- [x] Built-in HTTP rate limiting, off by default; per-route `rate`; `check_limit` (#294, v0.6.0)
 - [ ] Built-in rate limiting on the single-threaded test server (planned: remove that server and run tests on the async server)
 - [x] Interpreter recursion depth limit (default: 256)
 - [ ] Per-request timeout for sync HTTP server
