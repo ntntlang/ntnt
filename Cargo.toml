@@ -110,7 +110,7 @@ redis = "0.27"
 # AWS-LC preserves the supported JWT algorithms without adding the vulnerable rsa crate.
 jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
 # Security floor: avoid RUSTSEC-2026-0414's exponential wikilink event growth.
-pulldown-cmark = "0.13.5"
+pulldown-cmark = "0.13.6"
 hickory-resolver = "0.26.2"
 socket2 = "0.6"
 zeroize = { version = "1.8.2", features = ["serde"] }
