@@ -18,14 +18,17 @@ const MIN_BUDGET: usize = 256;
 struct Collector {
     environments: HashMap<usize, Entry>,
     allocations: usize,
+    releases: usize,
     budget: usize,
     interpreters: usize,
+    external_roots: usize,
     #[cfg(test)]
     collections: usize,
 }
 struct Entry {
     weak: WeakEnv,
     incoming: usize,
+    external_root: bool,
 }
 thread_local! {
     static COLLECTOR: RefCell<Collector> = RefCell::new(Collector::default());
@@ -67,21 +70,27 @@ impl Drop for Closure {
             let key = id(&env);
             let weak = Rc::downgrade(&env);
             drop(env);
-            // Cached incoming counts are only a scheduling hint, never proof
-            // of garbage. A complete fresh trial deletion makes that decision.
+            // Cached root counts are scheduling hints, never proof of garbage.
+            // Charge releases against the tracing budget, just like allocations:
+            // dropping a copied callback array must not trace once per element.
             let force = COLLECTOR
                 .try_with(|cell| {
-                    cell.try_borrow().is_ok_and(|gc| {
-                        gc.interpreters == 0
-                            || gc
-                                .environments
-                                .get(&key)
-                                .is_some_and(|entry| weak.strong_count() <= entry.incoming)
-                    })
+                    let mut gc = cell.try_borrow_mut().ok()?;
+                    let entry = gc.environments.get_mut(&key)?;
+                    if entry.external_root && weak.strong_count() <= entry.incoming {
+                        entry.external_root = false;
+                        gc.external_roots = gc.external_roots.saturating_sub(1);
+                    }
+                    gc.releases = gc.releases.saturating_add(1);
+                    // Coalesce host-owned roots too. When the last cached root
+                    // disappears after all interpreters died, sweep promptly;
+                    // other releases use the ordinary amortized work budget.
+                    Some(gc.interpreters == 0 && gc.external_roots == 0)
                 })
-                .unwrap_or(false);
-            if force {
-                collect(true);
+                .ok()
+                .flatten();
+            if let Some(force) = force {
+                collect(force);
             }
         }
     }
@@ -133,6 +142,7 @@ fn track(env: &Env) {
                 Entry {
                     weak: Rc::downgrade(&env),
                     incoming: 0,
+                    external_root: false,
                 },
             );
             gc.allocations = gc.allocations.saturating_add(1);
@@ -192,7 +202,11 @@ pub(super) fn retire(env: Env) {
     drop(scope);
     let _ = COLLECTOR.try_with(|cell| {
         if let Ok(mut gc) = cell.try_borrow_mut() {
-            gc.environments.remove(&id(&env));
+            if let Some(entry) = gc.environments.remove(&id(&env)) {
+                if entry.external_root {
+                    gc.external_roots = gc.external_roots.saturating_sub(1);
+                }
+            }
         }
     });
     drop(garbage);
@@ -206,10 +220,11 @@ pub(super) fn collect(force: bool) {
         let Ok(mut gc) = cell.try_borrow_mut() else {
             return;
         };
-        if !force && gc.allocations < gc.budget.max(MIN_BUDGET) {
+        if !force && gc.allocations.saturating_add(gc.releases) < gc.budget.max(MIN_BUDGET) {
             return;
         }
         gc.allocations = 0;
+        gc.releases = 0;
         #[cfg(test)]
         {
             gc.collections += 1;
@@ -253,12 +268,17 @@ pub(super) fn collect(force: bool) {
         }
         let mut live = borrowed;
         let mut queue = Vec::new();
+        gc.external_roots = 0;
         for (i, env) in environments.iter().enumerate() {
-            gc.environments
+            let external_root = live[i] || Rc::strong_count(env) > incoming[i] + 1;
+            let entry = gc
+                .environments
                 .get_mut(&id(env))
-                .expect("tracked environment")
-                .incoming = incoming[i];
-            if live[i] || Rc::strong_count(env) > incoming[i] + 1 {
+                .expect("tracked environment");
+            entry.incoming = incoming[i];
+            entry.external_root = external_root;
+            gc.external_roots += usize::from(external_root);
+            if external_root {
                 live[i] = true;
                 queue.push(i);
             }

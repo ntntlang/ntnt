@@ -16,6 +16,11 @@
   `.into()`; borrowing and Rc identity checks continue through `Deref`. NTNT source
   syntax and capture semantics are unchanged.
 
+### Security
+
+- Update `pulldown-cmark` to 0.13.6, fixing nested-wikilink parser denial of service
+  (RUSTSEC-2026-0433).
+
 ## 0.6.0
 
 See the [release announcement and upgrade guidance](docs/release-notes/v0.6.0.md).

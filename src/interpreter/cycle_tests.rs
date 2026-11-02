@@ -164,6 +164,94 @@ fn scalar_calls_do_not_scan_the_live_graph_per_invocation() {
     assert!(tracked <= budget + 10);
 }
 
+#[test]
+fn release_notifications_for_callback_array_aliases_are_coalesced() {
+    let interpreter = Interpreter::new();
+    let mut callbacks = Vec::new();
+    let mut weak = Vec::new();
+    for _ in 0..400 {
+        let env = Environment::shared(Environment::with_parent(Rc::clone(
+            &interpreter.environment,
+        )));
+        weak.push(Rc::downgrade(&env));
+        callbacks.push(callback(&env));
+    }
+    interpreter
+        .environment
+        .borrow_mut()
+        .define("callbacks".into(), Value::Array(callbacks));
+    cycles::collect(true);
+    let before = cycles::stats().2;
+    let copy = interpreter.environment.borrow().get("callbacks").unwrap();
+    drop(copy);
+    assert!(
+        cycles::stats().2 - before <= 1,
+        "dropping aliases swept the entire graph once per captured scope"
+    );
+    cycles::collect(false);
+    assert!(cycles::stats().2 - before <= 1);
+    assert!(weak.iter().all(|env| env.strong_count() != 0));
+    drop(interpreter);
+    assert!(weak.iter().all(|env| env.strong_count() == 0));
+}
+
+#[test]
+fn release_notifications_for_host_aliases_do_not_rescan_live_captures() {
+    let (callback, weak) = {
+        let mut interpreter = Interpreter::new();
+        let callback = run(
+            &mut interpreter,
+            "fn make() { let callback = fn() { 42 }; callback }\nmake()",
+        )
+        .unwrap();
+        let Value::Function { closure, .. } = &callback else {
+            panic!("callback")
+        };
+        (callback.clone(), Rc::downgrade(closure))
+    };
+    let before = cycles::stats().2;
+    for _ in 0..400 {
+        drop(callback.clone());
+    }
+    assert!(
+        cycles::stats().2 - before <= 1,
+        "temporary host aliases repeatedly swept a still-live capture"
+    );
+    assert!(weak.upgrade().is_some());
+    drop(callback);
+    assert!(
+        weak.upgrade().is_none(),
+        "final host release must still reclaim"
+    );
+}
+
+#[test]
+fn release_notifications_coalesce_host_callback_array_roots() {
+    let interpreter = Interpreter::new();
+    let mut callbacks = Vec::new();
+    let mut weak = Vec::new();
+    for _ in 0..400 {
+        let env = Environment::shared(Environment::with_parent(Rc::clone(
+            &interpreter.environment,
+        )));
+        env.borrow_mut().define("self".into(), callback(&env));
+        callbacks.push(callback(&env));
+        weak.push(Rc::downgrade(&env));
+    }
+    drop(interpreter);
+    let before = cycles::stats().2;
+    drop(callbacks.clone());
+    assert!(cycles::stats().2 - before <= 1);
+    assert!(weak.iter().all(|env| env.strong_count() != 0));
+    let before = cycles::stats().2;
+    drop(callbacks);
+    assert!(
+        cycles::stats().2 - before <= 1,
+        "final host array release must not trace once per root"
+    );
+    assert!(weak.iter().all(|env| env.strong_count() == 0));
+}
+
 fn callback(env: &Rc<RefCell<Environment>>) -> Value {
     Value::Function {
         name: "callback".into(),
