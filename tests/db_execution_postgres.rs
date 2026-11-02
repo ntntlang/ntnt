@@ -1086,6 +1086,14 @@ fn real_application_objects_are_compared_not_left_unknown() {
     let v = f.command("verify");
     assert_eq!(v["outcome"], "pass", "{v}");
     assert_eq!(v["catalog"]["uncovered"], serde_json::json!([]), "{v}");
+    // Extension members are compared through the extension's version: their
+    // owner is whoever installed it, which differs between scratch and target.
+    let digest = &v["catalog"]["objects"]["routine:digest(text, text)"];
+    assert_eq!(digest["extension"], "pgcrypto", "{digest}");
+    assert!(
+        digest["owner"].is_null() && digest["grants"].is_null(),
+        "{digest}"
+    );
     // Each out-of-band change below is drift on a named object, not "unknown".
     for (change, object) in [
         ("CREATE OR REPLACE FUNCTION public.reject_audit_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$", "routine:reject_audit_change()"),

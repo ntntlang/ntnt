@@ -100,13 +100,15 @@ FROM pg_catalog.pg_sequence s JOIN pg_catalog.pg_class c ON c.oid=s.seqrelid JOI
 "#,
     ),
     (
+        // Extension members are owned/granted by whoever installed the
+        // extension (often the bootstrap superuser); its version covers them.
         "routine",
         r#"
 SELECT p.proname||'('||pg_get_function_identity_arguments(p.oid)||')',
- jsonb_build_object('kind',p.prokind,'owner',pg_get_userbyid(p.proowner),'language',l.lanname,'volatility',p.provolatile,'security_definer',p.prosecdef,
+ jsonb_build_object('kind',p.prokind,'owner',CASE WHEN ext.oid IS NULL THEN pg_get_userbyid(p.proowner) END,'language',l.lanname,'volatility',p.provolatile,'security_definer',p.prosecdef,
  'extension',ext.extname,'definition_digest',encode(sha256(convert_to(CASE WHEN p.prokind IN ('f','p') THEN pg_get_functiondef(p.oid) ELSE p.prosrc END||coalesce(p.probin,''),'UTF8')),'hex'),
- 'grants',(SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
- FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a)),
+ 'grants',CASE WHEN ext.oid IS NULL THEN (SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
+ FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a) END),
  p.prokind IN ('f','p') AND (l.lanname IN ('sql','plpgsql') OR (ext.extname IS NOT NULL AND en.nspname=$1))
 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace JOIN pg_catalog.pg_language l ON l.oid=p.prolang
 LEFT JOIN pg_catalog.pg_depend xd ON xd.classid='pg_catalog.pg_proc'::regclass AND xd.objid=p.oid AND xd.deptype='e'
