@@ -1315,3 +1315,147 @@ fn migration_scripts_may_run_longer_than_inspection_queries() {
     let r = f.apply("plan.json", plan["plan_digest"].as_str());
     assert_eq!(r["outcome"], "pass", "{r}");
 }
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn checks_on_a_partitioned_table_lock_its_partitions() {
+    // A check reading a partitioned parent must also block writes made
+    // directly to its leaf partitions, or checked rows can change before commit.
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.p(id INTEGER, at DATE NOT NULL) PARTITION BY RANGE (at);
+         CREATE TABLE app.p_default PARTITION OF app.p DEFAULT;
+         CREATE TABLE app.t(id INTEGER);",
+    );
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.sql(
+        "0002_expand.sql",
+        "ALTER TABLE app.t ADD COLUMN label TEXT;",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0002_expand.toml"),
+        "[requires]\nno_negative='SELECT NOT EXISTS (SELECT 1 FROM app.p WHERE id < 0)'\n",
+    )
+    .unwrap();
+    let plan = f.plan("expand.json");
+    let r = f.apply("expand.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let locks = r["progress"][1]["locks"].as_array().unwrap();
+    assert!(
+        locks
+            .iter()
+            .any(|l| l["relation"] == "p_default" && l["mode"] == "ShareLock"),
+        "{locks:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn policies_for_the_migration_role_match_between_scratch_and_target() {
+    // TO CURRENT_USER stores the scratch role while planning and the target
+    // role while executing; both are the managed role.
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.t(id INTEGER);
+         ALTER TABLE app.t ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY own ON app.t TO CURRENT_USER USING (true);",
+    );
+    let plan = f.plan("plan.json");
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn settings_from_one_migration_do_not_reach_the_next() {
+    // On the target each migration commits separately, ending SET LOCAL. One
+    // replay transaction must behave the same, and session SETs must not leak.
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "SET LOCAL app.mode = 'x'; SET app.session_mode = 'y'; CREATE TABLE app.a(id INTEGER);",
+    );
+    f.sql(
+        "0002_branch.sql",
+        "DO $$ BEGIN
+           IF coalesce(current_setting('app.mode', true), '') = 'x'
+              OR coalesce(current_setting('app.session_mode', true), '') = 'y' THEN
+             CREATE TABLE app.leaked(id INTEGER);
+           ELSE
+             CREATE TABLE app.fresh(id INTEGER);
+           END IF;
+         END $$;",
+    );
+    let plan = f.plan("plan.json");
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(f
+        .target()
+        .query_one(
+            "SELECT to_regclass('app.fresh') IS NOT NULL AND to_regclass('app.leaked') IS NULL",
+            &[]
+        )
+        .unwrap()
+        .get::<_, bool>(0));
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn same_named_constraints_with_mixed_deferral_are_reported() {
+    // SET CONSTRAINTS name affects every constraint with that name, so replay
+    // cannot restore one deferred and one immediate. Say so instead of
+    // planning a catalog the target might not produce.
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.parent(id INTEGER PRIMARY KEY);
+         CREATE TABLE app.c1(pid INTEGER, CONSTRAINT shared_fk FOREIGN KEY (pid) REFERENCES app.parent(id) DEFERRABLE INITIALLY DEFERRED);
+         CREATE TABLE app.c2(pid INTEGER, CONSTRAINT shared_fk FOREIGN KEY (pid) REFERENCES app.parent(id) DEFERRABLE INITIALLY IMMEDIATE);",
+    );
+    // A single migration needs no boundary between migrations.
+    assert_eq!(f.command("plan")["outcome"], "pass");
+    f.sql("0002_next.sql", "ALTER TABLE app.c2 ADD COLUMN note TEXT;");
+    let r = f.command("plan");
+    assert!(code(&r, "DB_REPLAY_UNSUPPORTED"), "{r}");
+    assert!(
+        r["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["source"] == "0002_next.sql"),
+        "{r}"
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn partition_bounds_are_not_disclosed_in_reports() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts(email TEXT NOT NULL) PARTITION BY LIST (email);
+         CREATE TABLE app.accounts_vip PARTITION OF app.accounts FOR VALUES IN ('ceo-private@example.com');",
+    );
+    let plan = f.plan("plan.json");
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let saved = std::fs::read_to_string(f.root.path().join("plan.json")).unwrap();
+    assert!(
+        !plan.to_string().contains("ceo-private"),
+        "report leaks bound"
+    );
+    assert!(!saved.contains("ceo-private"), "saved plan leaks bound");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "pass", "{v}");
+    assert!(!v.to_string().contains("ceo-private"));
+}

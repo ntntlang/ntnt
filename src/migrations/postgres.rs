@@ -19,6 +19,9 @@ pub(crate) async fn bounded<T>(
 /// Authored migration scripts may run much longer than catalog queries (index
 /// builds, rewrites). Kept inside migrate's 100-second work deadline for now.
 pub(crate) const SCRIPT_TIMEOUT: Duration = Duration::from_secs(90);
+/// Transaction settings NTNT relies on while inspecting, replaying and
+/// executing. Reapplied after each migration's RESET ALL.
+const MIGRATION_SETTINGS: &str = "SET LOCAL synchronous_commit=on; SET LOCAL search_path=pg_catalog; SET LOCAL row_security=off; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces=''; SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout=5000;";
 async fn bounded_for<T>(
     limit: Duration,
     future: impl Future<Output = std::result::Result<T, tokio_postgres::Error>>,
@@ -351,10 +354,12 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
     /// Tables read by a migration's checks are locked in SHARE mode before the
     /// first check: writers wait, readers do not. READ COMMITTED takes each
     /// check's snapshot after this lock, so checked data cannot change under it.
+    /// Without ONLY, a partitioned table's partitions are locked as well, so
+    /// writes made directly to a partition also wait.
     pub async fn lock_for_checks(&self, tables: &[(String, String)]) -> Result<()> {
         for (schema, table) in tables {
             self.batch(&format!(
-                "LOCK TABLE ONLY {}.{} IN SHARE MODE",
+                "LOCK TABLE {}.{} IN SHARE MODE",
                 quote(schema),
                 quote(table)
             ))
@@ -634,6 +639,18 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             d.source = Some(migration.name.clone());
             return Err(d);
         }
+        // Replay runs several migrations in one transaction. If an earlier one
+        // ran here, constraint modes can only be restored when same-named
+        // constraints agree on their default: SET CONSTRAINTS name affects all.
+        let continues = self
+            .rows("SELECT coalesce(pg_catalog.current_setting('ntnt.migration_boundary', true), '') = 'on'", &[])
+            .await?[0]
+            .get::<_, bool>(0);
+        if continues && self.mixed_deferral().await? {
+            let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", "Constraints sharing a name in one schema have different INITIALLY DEFERRED defaults, so replay cannot reproduce this migration's fresh-transaction constraint modes. Give the constraints distinct names.");
+            d.source = Some(migration.name.clone());
+            return Err(d);
+        }
         // Migration SQL may call application routines; that is reviewed SQL.
         // A custom implicit/assignment cast planted elsewhere could instead run
         // unreviewed code during ordinary DDL coercion, so it still blocks.
@@ -659,7 +676,6 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             d.source = Some(migration.name.clone());
             d
         })?;
-        self.batch("SET LOCAL statement_timeout=5000").await?;
         // End each migration as its own commit would: fire deferred constraint
         // checks now, attributed to this migration. Replay runs many migrations
         // in one transaction, and pending trigger events would otherwise block
@@ -670,11 +686,20 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
                 d.source = Some(migration.name.clone());
                 d
             })?;
+        // On the target a migration's commit ends its SET LOCAL values, and
+        // its plain SETs would carry into the next migration's session. Drop
+        // both here so every migration starts from the connection's settings,
+        // in replay and on the target alike, then restore NTNT's own.
+        self.batch(&format!(
+            "RESET ALL; {MIGRATION_SETTINGS} SET LOCAL ntnt.migration_boundary='on';"
+        ))
+        .await?;
         // PostgreSQL has no "reset to default" for constraint modes. Restore
         // INITIALLY DEFERRED constraints so the next migration starts as a
-        // new transaction would.
+        // new transaction would. Names with mixed defaults are refused when
+        // the next migration starts (see above).
         let deferred: Vec<String> = self
-            .rows("SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(k.conname) FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_namespace n ON n.oid=k.connamespace WHERE k.condeferred ORDER BY 1", &[])
+            .rows("SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(k.conname) FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_namespace n ON n.oid=k.connamespace WHERE k.condeferrable GROUP BY n.nspname,k.conname HAVING pg_catalog.bool_and(k.condeferred) ORDER BY 1", &[])
             .await?
             .iter()
             .map(|r| r.get(0))
@@ -683,8 +708,14 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             self.batch(&format!("SET CONSTRAINTS {} DEFERRED", deferred.join(",")))
                 .await?;
         }
-        self.batch("SET LOCAL row_security=off; SET LOCAL search_path=pg_catalog;")
-            .await
+        Ok(())
+    }
+
+    async fn mixed_deferral(&self) -> Result<bool> {
+        Ok(self
+            .rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint WHERE condeferrable GROUP BY connamespace,conname HAVING pg_catalog.bool_or(condeferred) <> pg_catalog.bool_and(condeferred))", &[])
+            .await?[0]
+            .get(0))
     }
 }
 
@@ -698,7 +729,14 @@ fn protect_definitions(value: &mut Value) {
         for (key, v) in map {
             if matches!(
                 key.as_str(),
-                "definition" | "default" | "using" | "check" | "comment" | "options"
+                "definition"
+                    | "default"
+                    | "using"
+                    | "check"
+                    | "comment"
+                    | "options"
+                    | "partition_key"
+                    | "partition_bound"
             ) && !v.is_null()
             {
                 *v = json!({"sha256":super::inventory::json_digest(v),"redacted":true});
@@ -722,6 +760,19 @@ fn canonical_roles(value: &mut Value, role: &str) {
                 if key == "grants" {
                     if let Value::Array(grants) = v {
                         grants.sort_by_key(Value::to_string);
+                    }
+                }
+                // Policy role lists hold names, not owner/grant objects. A
+                // policy created TO CURRENT_USER names scratch's role in the
+                // plan and the target's role on execution.
+                if key == "roles" {
+                    if let Value::Array(roles) = v {
+                        for r in roles.iter_mut() {
+                            if r.as_str() == Some(role) {
+                                *r = json!({"managed_role":true});
+                            }
+                        }
+                        roles.sort_by_key(Value::to_string);
                     }
                 }
             }
