@@ -552,6 +552,65 @@ pub(crate) fn contract_supported(sql: &str, schema: &str) -> bool {
     matches!(statements.as_slice(), [Statement::Query(q)] if check_query(q, schema, 0))
 }
 
+/// Managed tables a supported check reads, as (schema, table). Only valid for
+/// SQL that `contract_supported` accepts; other input yields no tables.
+pub(crate) fn check_tables(sql: &str, schema: &str) -> Vec<(String, String)> {
+    fn query(q: &Query, out: &mut Vec<(String, String)>) {
+        let SetExpr::Select(s) = &*q.body else { return };
+        for t in &s.from {
+            if let TableFactor::Table { name, .. } = &t.relation {
+                let ids: Vec<_> = name.0.iter().filter_map(|p| p.as_ident()).collect();
+                if let [s, t] = ids.as_slice() {
+                    let schema = if s.quote_style.is_some() {
+                        s.value.clone()
+                    } else {
+                        s.value.to_lowercase()
+                    };
+                    let table = if t.quote_style.is_some() {
+                        t.value.clone()
+                    } else {
+                        t.value.to_lowercase()
+                    };
+                    out.push((schema, table));
+                }
+            }
+        }
+        for item in &s.projection {
+            if let SelectItem::UnnamedExpr(e) = item {
+                expr(e, out);
+            }
+        }
+        for e in s.selection.iter().chain(s.having.iter()) {
+            expr(e, out);
+        }
+    }
+    fn expr(e: &Expr, out: &mut Vec<(String, String)>) {
+        match e {
+            Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => query(subquery, out),
+            Expr::Nested(e)
+            | Expr::IsNull(e)
+            | Expr::IsNotNull(e)
+            | Expr::UnaryOp { expr: e, .. } => expr(e, out),
+            Expr::BinaryOp { left, right, .. } => {
+                expr(left, out);
+                expr(right, out);
+            }
+            _ => (),
+        }
+    }
+    let mut out = vec![];
+    if contract_supported(sql, schema) {
+        if let Some(statements) = parse(sql) {
+            if let [Statement::Query(q)] = statements.as_slice() {
+                query(q, &mut out);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn check_expr(e: &Expr, schema: &str, depth: usize) -> bool {
     if depth > 24 {
         return false;
@@ -828,5 +887,17 @@ mod tests {
         let a = analyze("DO $$ BEGIN RAISE NOTICE 'COMMIT; SET ROLE x'; END $$; INSERT INTO app.t VALUES ('BEGIN;')", "app");
         assert!(a.replay_supported, "{a:?}");
         assert_eq!(a.operations.len(), 2, "{a:?}");
+    }
+    #[test]
+    fn check_tables_lists_every_table_a_check_reads() {
+        assert_eq!(
+            check_tables(
+                "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE (SELECT count(*) FROM APP.\"Items\") > 0) FROM app.orders",
+                "app"
+            ),
+            [("app".to_string(), "Items".to_string()), ("app".to_string(), "orders".to_string())]
+        );
+        assert!(check_tables("SELECT true", "app").is_empty());
+        assert!(check_tables("DELETE FROM app.orders", "app").is_empty());
     }
 }

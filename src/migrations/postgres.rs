@@ -14,8 +14,33 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) async fn bounded<T>(
     future: impl Future<Output = std::result::Result<T, tokio_postgres::Error>>,
 ) -> Result<T> {
-    match tokio::time::timeout(IO_TIMEOUT, future).await {
+    bounded_for(IO_TIMEOUT, future).await
+}
+/// Authored migration scripts may run much longer than catalog queries (index
+/// builds, rewrites). Kept inside migrate's 100-second work deadline for now.
+pub(crate) const SCRIPT_TIMEOUT: Duration = Duration::from_secs(90);
+async fn bounded_for<T>(
+    limit: Duration,
+    future: impl Future<Output = std::result::Result<T, tokio_postgres::Error>>,
+) -> Result<T> {
+    match tokio::time::timeout(limit, future).await {
         Ok(Ok(v)) => Ok(v),
+        // A lock wait that hit lock_timeout, or a deadlock victim. Nothing was
+        // committed; the caller may retry the whole migration transaction.
+        Ok(Err(e))
+            if matches!(
+                e.code().map(|c| c.code()),
+                Some("55P03") | Some("40P01")
+            ) =>
+        {
+            Err(Diagnostic::new(
+                "DB_LOCK_CONFLICT",
+                &format!(
+                    "A lock was not available in time (SQLSTATE {}); the transaction was rolled back.",
+                    e.code().map(|c| c.code()).unwrap_or("unavailable")
+                ),
+            ))
+        }
         Ok(Err(e)) => Err(Diagnostic::new(
             "DB_POSTGRES",
             &format!(
@@ -28,6 +53,10 @@ pub(crate) async fn bounded<T>(
             "Database connect/authentication/query deadline exceeded.",
         )),
     }
+}
+
+fn quote(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 pub(crate) struct Postgres {
@@ -301,26 +330,47 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
     /// Acquire database-local ownership of the single reserved ledger namespace.
     /// This session lock survives per-migration commits. Drop discards the socket;
     /// it cannot leak into a pool. PostgreSQL lock_timeout bounds competing owners.
+    /// A second migrator waits a few seconds for the first, then gives up.
     pub async fn own_migrations(&self) -> Result<()> {
-        self.rows("SELECT pg_catalog.pg_advisory_lock(1853124212, 245)", &[])
-            .await?;
-        Ok(())
+        self.batch("SET lock_timeout = '5s'").await?;
+        let owned = self
+            .rows("SELECT pg_catalog.pg_advisory_lock(1853124212, 245)", &[])
+            .await;
+        self.batch("SET lock_timeout = '2s'").await?;
+        owned.map(|_| ())
     }
 
-    /// Native locks protect data assumptions from ordinary writers, unlike advisory
-    /// ownership. READ COMMITTED takes the validation snapshot *after* these locks.
-    /// Administrators and schema-owner credentials remain trusted, not sandboxed.
-    pub async fn begin_migration(&self, schema: &str) -> Result<()> {
-        self.batch("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE; SET LOCAL synchronous_commit=on; SET LOCAL search_path=pg_catalog; SET LOCAL row_security=off; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
-        let tables = self.rows("SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(c.relname) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE (n.nspname=$1 OR n.nspname='_ntnt') AND c.relkind='r' ORDER BY n.nspname,c.relname", &[&schema]).await?;
-        for row in tables {
+    /// The advisory lock already serializes migrators. Each statement takes only
+    /// the locks PostgreSQL requires for it, and a lock that is not granted
+    /// within one second fails the attempt instead of queueing application
+    /// queries behind it; the caller retries the whole transaction.
+    pub async fn begin_migration(&self, _schema: &str) -> Result<()> {
+        self.batch("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE; SET LOCAL synchronous_commit=on; SET LOCAL search_path=pg_catalog; SET LOCAL row_security=off; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces=''; SET LOCAL lock_timeout='1s';").await
+    }
+
+    /// Tables read by a migration's checks are locked in SHARE mode before the
+    /// first check: writers wait, readers do not. READ COMMITTED takes each
+    /// check's snapshot after this lock, so checked data cannot change under it.
+    pub async fn lock_for_checks(&self, tables: &[(String, String)]) -> Result<()> {
+        for (schema, table) in tables {
             self.batch(&format!(
-                "LOCK TABLE ONLY {} IN ACCESS EXCLUSIVE MODE",
-                row.get::<_, String>(0)
+                "LOCK TABLE ONLY {}.{} IN SHARE MODE",
+                quote(schema),
+                quote(table)
             ))
             .await?;
         }
         Ok(())
+    }
+
+    /// Relation locks this transaction holds on managed tables: what the
+    /// migration actually took, observed on the target before commit.
+    pub async fn relation_locks(&self, schema: &str) -> Result<Value> {
+        let rows = self.rows("SELECT c.relname::text, l.mode FROM pg_catalog.pg_locks l JOIN pg_catalog.pg_class c ON c.oid=l.relation JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE l.pid=pg_catalog.pg_backend_pid() AND l.locktype='relation' AND l.granted AND n.nspname=$1 AND c.relkind IN ('r','p') ORDER BY 1,2", &[&schema]).await?;
+        Ok(json!(rows
+            .iter()
+            .map(|r| json!({"relation":r.get::<_, String>(0),"mode":r.get::<_, String>(1)}))
+            .collect::<Vec<_>>()))
     }
 
     /// A readable legacy ledger is not a writable one. Only our scoped v2 heap,
@@ -595,14 +645,21 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         // application's migrations always have: with normal row security, so
         // seed rows into FORCE ROW LEVEL SECURITY tables obey their policies.
         self.batch(&format!(
-            "SET LOCAL search_path=\"{schema}\"; SET LOCAL row_security=on;"
+            "SET LOCAL search_path=\"{schema}\"; SET LOCAL row_security=on; SET LOCAL statement_timeout='{}s';",
+            SCRIPT_TIMEOUT.as_secs()
         ))
         .await?;
         // Do not split on semicolons: PostgreSQL receives the captured full script.
-        self.batch(&migration.sql).await.map_err(|mut d| {
+        bounded_for(
+            SCRIPT_TIMEOUT + Duration::from_secs(5),
+            self.client.batch_execute(&migration.sql),
+        )
+        .await
+        .map_err(|mut d| {
             d.source = Some(migration.name.clone());
             d
         })?;
+        self.batch("SET LOCAL statement_timeout=5000").await?;
         // End each migration as its own commit would: fire deferred constraint
         // checks now, attributed to this migration. Replay runs many migrations
         // in one transaction, and pending trigger events would otherwise block

@@ -1248,3 +1248,70 @@ fn scratch_matches_a_target_role_that_bypasses_row_security() {
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(f.command("verify")["outcome"], "pass");
 }
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn migrations_do_not_lock_unrelated_tables() {
+    // An application writing to another table must not block (or be blocked
+    // by) a migration that never touches that table.
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.t(id INTEGER); CREATE TABLE app.busy(id INTEGER);",
+    );
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    let mut writer = f.target();
+    writer
+        .batch_execute("BEGIN; INSERT INTO app.busy VALUES (1)")
+        .unwrap();
+    f.sql(
+        "0002_expand.sql",
+        "ALTER TABLE app.t ADD COLUMN label TEXT;",
+    );
+    let plan = f.plan("expand.json");
+    let r = f.apply("expand.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    writer.batch_execute("COMMIT").unwrap();
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn brief_lock_conflicts_are_retried() {
+    // A short lock wait gives up quickly (so queued application writes are not
+    // stalled behind it) and the whole migration transaction is retried.
+    let (mut f, plan) = upgrade_fixture();
+    let mut locker = f.target();
+    locker
+        .batch_execute("BEGIN; LOCK TABLE app.t IN ACCESS EXCLUSIVE MODE")
+        .unwrap();
+    let child = spawn_apply(&f, &plan);
+    wait_locked(&mut f, 1);
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    locker.batch_execute("COMMIT").unwrap();
+    let r = result(child);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["progress"][1]["state"], "committed", "{r}");
+    assert!(
+        r["progress"][1]["lock_retries"].as_u64().unwrap_or(0) >= 1,
+        "{r}"
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn migration_scripts_may_run_longer_than_inspection_queries() {
+    // Index builds and table rewrites take longer than catalog queries.
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.t(id INTEGER); SELECT pg_catalog.pg_sleep(6);",
+    );
+    let plan = f.plan("plan.json");
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+}
