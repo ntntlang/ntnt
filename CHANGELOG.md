@@ -2,7 +2,19 @@
 
 ## Unreleased
 
-No changes recorded after the 0.6.0 release preparation.
+### Fixed
+
+- Automatically reclaim unreachable closure/environment cycles, including imported
+  modules in completed tasks and local closures in persistent interpreters (#183).
+  Escaped callbacks retain their lexical state and are collectible even when their
+  last owner is released after the original interpreter exits.
+
+### Native embedding
+
+- `Value::Function::closure` now uses an Rc-compatible `Closure` release-notification
+  wrapper. Native Rust constructors can convert their existing environment Rc with
+  `.into()`; borrowing and Rc identity checks continue through `Deref`. NTNT source
+  syntax and capture semantics are unchanged.
 
 ## 0.6.0
 

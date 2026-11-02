@@ -94,7 +94,7 @@ fn identifying_handler() -> Value {
         params: vec![],
         contract: None,
         type_params: vec![],
-        closure: std::rc::Rc::new(std::cell::RefCell::new(env)),
+        closure: std::rc::Rc::new(std::cell::RefCell::new(env)).into(),
         body: crate::ast::Block {
             statements: vec![crate::ast::Statement::Expression(
                 crate::ast::Expression::Call {

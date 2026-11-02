@@ -558,6 +558,14 @@ let result = fn(x) { x + 1 }(5)  // 6
 let f = |x| x * 2               // Use fn(x) { x * 2 }
 ```
 
+Closures retain their lexical bindings, including mutable captures and functions
+declared later in the same scope. Unreachable closure/environment cycles are
+reclaimed automatically, both in long-lived interpreters and when a task or
+interpreter exits; no application cleanup call or GC setting is required. Escaped
+callbacks, registered routes and module exports keep their captures alive. General
+cross-scope collection is allocation-budgeted, not an immediate-finalizer promise;
+continue to close resources explicitly when their API requires it.
+
 ### 9. No Semicolons — Use Newlines
 
 NTNT uses newlines as statement separators. **Never use semicolons** — `;` silently corrupts parser state and causes errors on unrelated lines.
