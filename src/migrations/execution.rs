@@ -482,6 +482,12 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
         }
         report["covered_count"] = json!(applied + 1);
         report["applied_count"] = json!(history.counts()["applied_count"].as_u64().unwrap() + 1);
+        // Do not re-lock every managed table only to learn nothing is pending.
+        // That extra lock pass can deadlock with live application writers.
+        if applied + 1 == inputs.migrations.len() {
+            report["outcome"] = json!("pass");
+            return Ok(());
+        }
     }
 }
 
