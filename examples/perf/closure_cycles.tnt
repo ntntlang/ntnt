@@ -1,0 +1,18 @@
+// Disposable allocation/ownership soak: run with the freshly built NTNT binary.
+// Each completed scope owns lambdas inside both an array and a map. Anonymous
+// memory should plateau after warmup rather than growing per completed scope.
+import { repeat } from "std/string"
+
+fn churn(n) {
+    let payload = repeat("x", 8192)
+    let callbacks = [fn() { payload }, map { "callback": fn() { n } }]
+    len(callbacks)
+}
+
+for n in 0..100000 {
+    churn(n)
+    if n % 10000 == 0 {
+        print("cycle_tick #{n}")
+    }
+}
+print("cycle_done")

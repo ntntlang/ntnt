@@ -2282,7 +2282,7 @@ impl CaptureBuilder {
                             type_params,
                             closure_scope,
                         });
-                        pending.push((closure, needed, Some(here)));
+                        pending.push((closure.into_rc(), needed, Some(here)));
                     }
                     other => match SerializedValue::from_value(&other) {
                         Ok(serialized) => {
@@ -2459,7 +2459,6 @@ fn rebuild_scopes(
     capture: &TaskCapture,
 ) -> Vec<EnvRc> {
     use crate::interpreter::Environment;
-    use std::cell::RefCell;
     use std::rc::Rc;
 
     let global = interp.snapshot_env();
@@ -2469,7 +2468,7 @@ fn rebuild_scopes(
             .parent
             .map(|i| Rc::clone(&envs[i]))
             .unwrap_or_else(|| Rc::clone(&global));
-        envs.push(Rc::new(RefCell::new(Environment::with_parent(parent))));
+        envs.push(Environment::shared(Environment::with_parent(parent)));
     }
     for (scope, env) in capture.scopes.iter().zip(&envs) {
         let mut env = env.borrow_mut();
@@ -2524,7 +2523,7 @@ fn rebuild_scopes(
                     name: f.name.clone(),
                     params: f.params.clone(),
                     body: f.body.clone(),
-                    closure: Rc::clone(&envs[f.closure_scope]),
+                    closure: Rc::clone(&envs[f.closure_scope]).into(),
                     contract: f.contract.clone(),
                     type_params: f.type_params.clone(),
                 },
@@ -3840,7 +3839,7 @@ mod tests {
             name: "handler".to_string(),
             params: vec![],
             body,
-            closure: Rc::new(RefCell::new(crate::interpreter::Environment::new())),
+            closure: Rc::new(RefCell::new(crate::interpreter::Environment::new())).into(),
             contract: None,
             type_params: vec![],
         }
@@ -4091,7 +4090,8 @@ mod tests {
             body: crate::ast::Block { statements: vec![] },
             closure: std::rc::Rc::new(std::cell::RefCell::new(
                 crate::interpreter::Environment::new(),
-            )),
+            ))
+            .into(),
             contract: None,
             type_params: vec![],
         };
@@ -4116,7 +4116,8 @@ mod tests {
             body: crate::ast::Block { statements: vec![] },
             closure: std::rc::Rc::new(std::cell::RefCell::new(
                 crate::interpreter::Environment::new(),
-            )),
+            ))
+            .into(),
             contract: None,
             type_params: vec![],
         };
@@ -4566,7 +4567,7 @@ mod tests {
                     uses.to_string(),
                 ))],
             },
-            closure: Rc::clone(&root),
+            closure: Rc::clone(&root).into(),
             contract: None,
             type_params: vec![],
         };
@@ -4590,7 +4591,7 @@ mod tests {
                         arguments: vec![],
                     })],
                 },
-                closure: Rc::clone(&root),
+                closure: Rc::clone(&root).into(),
                 contract: None,
                 type_params: vec![],
             };
@@ -4669,7 +4670,7 @@ mod tests {
                         "BASE".to_string(),
                     ))],
                 },
-                closure: Rc::clone(&root),
+                closure: Rc::clone(&root).into(),
                 contract: None,
                 type_params: vec![],
             },
@@ -4683,7 +4684,7 @@ mod tests {
                     arguments: vec![],
                 })],
             },
-            closure: Rc::clone(&root),
+            closure: Rc::clone(&root).into(),
             contract: None,
             type_params: vec![],
         };
@@ -4740,7 +4741,7 @@ mod tests {
                     arguments: vec![Expression::Integer(42)],
                 })],
             },
-            closure: Rc::clone(&root),
+            closure: Rc::clone(&root).into(),
             contract: None,
             type_params: vec![],
         };
@@ -4781,7 +4782,7 @@ mod tests {
                     body: Block {
                         statements: vec![Statement::Expression(next)],
                     },
-                    closure: Rc::clone(&root),
+                    closure: Rc::clone(&root).into(),
                     contract: None,
                     type_params: vec![],
                 },
@@ -4829,7 +4830,7 @@ mod tests {
                     arguments: vec![],
                 })],
             },
-            closure: Rc::clone(&root),
+            closure: Rc::clone(&root).into(),
             contract: None,
             type_params: vec![],
         };
@@ -4842,7 +4843,7 @@ mod tests {
                     "rec".to_string(),
                 ))],
             },
-            closure: Rc::clone(&root),
+            closure: Rc::clone(&root).into(),
             contract: None,
             type_params: vec![],
         };
@@ -4871,7 +4872,7 @@ mod tests {
                     "used_data".to_string(),
                 ))],
             },
-            closure: Rc::new(RefCell::new(env)),
+            closure: Rc::new(RefCell::new(env)).into(),
             contract: None,
             type_params: vec![],
         };

@@ -20,6 +20,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
+mod cycles;
+pub use cycles::Closure;
+
 /// Opaque sender handle for a concurrent channel.
 ///
 /// Wraps `Arc<crossbeam_channel::Sender<SerializedValue>>` as `Arc<dyn Any + Send + Sync>`
@@ -102,7 +105,7 @@ pub enum Value {
         name: String,
         params: Vec<Parameter>,
         body: Block,
-        closure: Rc<RefCell<Environment>>,
+        closure: Closure,
         contract: Option<FunctionContract>,
         type_params: Vec<TypeParam>,
     },
@@ -415,6 +418,11 @@ pub struct Environment {
 }
 
 impl Environment {
+    /// Allocate and register every runtime lexical scope (including modules).
+    pub(crate) fn shared(environment: Self) -> Rc<RefCell<Self>> {
+        cycles::shared(environment)
+    }
+
     pub fn new() -> Self {
         Environment {
             values: HashMap::new(),
@@ -931,6 +939,8 @@ pub struct Interpreter {
     /// Explicit worker count from `ntnt run --workers N`; overrides the
     /// NTNT_WORKERS env var and mode defaults
     worker_count_override: Option<usize>,
+    // Must remain last: release every interpreter root before collecting cycles.
+    _cycle_lifetime: cycles::InterpreterLifetime,
 }
 
 /// Information about a trait definition
@@ -1101,20 +1111,18 @@ impl Interpreter {
 
     // A native-only lexical proxy gives each function a stable identity without
     // changing Value::Function or the ordinary interpreter's closure semantics.
-    fn native_function_closure(&mut self, name: &str) -> Rc<RefCell<Environment>> {
+    fn native_function_closure(&mut self, name: &str) -> Closure {
         if self.native_test_entry.is_none() {
-            return Rc::clone(&self.environment);
+            return Rc::clone(&self.environment).into();
         }
-        let closure = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(
-            &self.environment,
-        ))));
+        let closure = Environment::shared(Environment::with_parent(Rc::clone(&self.environment)));
         if let Some(source) = &self.current_file {
             self.native_function_sources.insert(
                 (Rc::as_ptr(&closure) as usize, name.to_string()),
                 source.clone(),
             );
         }
-        closure
+        closure.into()
     }
 
     fn native_entry_matches(&self, name: &str, closure: &Rc<RefCell<Environment>>) -> bool {
@@ -1146,7 +1154,7 @@ impl Interpreter {
     }
 
     pub fn new() -> Self {
-        let env = Rc::new(RefCell::new(Environment::new()));
+        let env = Environment::shared(Environment::new());
         let mut interpreter = Interpreter {
             #[cfg(test)]
             fast_path_hits: FastPathHits::default(),
@@ -1199,6 +1207,7 @@ impl Interpreter {
             call_depth: 0,
             suppress_index_warn: std::cell::Cell::new(false),
             worker_count_override: None,
+            _cycle_lifetime: cycles::InterpreterLifetime::new(),
             max_recursion_depth: std::env::var("NTNT_MAX_RECURSION")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
@@ -1931,7 +1940,7 @@ impl Interpreter {
     /// Push a new child scope. Caller must call pop_scope() to restore.
     pub(crate) fn push_scope(&mut self) {
         let parent = Rc::clone(&self.environment);
-        self.environment = Rc::new(RefCell::new(Environment::with_parent(parent)));
+        self.environment = Environment::shared(Environment::with_parent(parent));
     }
 
     /// Snapshot the current environment for later restoration.
@@ -2160,7 +2169,7 @@ impl Interpreter {
         self.imported_files.clear();
 
         // Reset environment but keep builtins
-        self.environment = std::rc::Rc::new(std::cell::RefCell::new(Environment::new()));
+        self.environment = Environment::shared(Environment::new());
         self.define_builtins();
         self.define_builtin_types();
         self.define_stdlib(); // Re-populate stdlib modules after clearing
@@ -4835,7 +4844,7 @@ impl Interpreter {
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
 
-        self.environment = Rc::new(RefCell::new(Environment::new()));
+        self.environment = Environment::shared(Environment::new());
         self.current_file = Some(source_key.clone());
 
         // Define builtins and types in the module environment
@@ -4847,7 +4856,7 @@ impl Interpreter {
         let eval_result = self.eval(&ast);
         if let Err(e) = eval_result {
             // Restore environment on error
-            self.environment = previous_env;
+            cycles::retire(std::mem::replace(&mut self.environment, previous_env));
             self.current_file = previous_file;
             return Err(e);
         }
@@ -4864,7 +4873,7 @@ impl Interpreter {
         drop(env);
 
         // Restore environment
-        self.environment = previous_env;
+        cycles::retire(std::mem::replace(&mut self.environment, previous_env));
         self.current_file = previous_file;
 
         // Cache the module
@@ -5102,7 +5111,7 @@ impl Interpreter {
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
 
-        self.environment = Rc::new(RefCell::new(Environment::new()));
+        self.environment = Environment::shared(Environment::new());
         self.current_file = Some(canonical_path.to_string_lossy().to_string());
 
         // Re-define builtins, types, and stdlib in the new environment
@@ -5116,7 +5125,7 @@ impl Interpreter {
         let eval_result = self.eval(&ast);
         if let Err(e) = eval_result {
             // Restore environment on error
-            self.environment = previous_env;
+            cycles::retire(std::mem::replace(&mut self.environment, previous_env));
             self.current_file = previous_file;
             return Err(e);
         }
@@ -5134,7 +5143,7 @@ impl Interpreter {
         drop(env);
 
         // Restore environment
-        self.environment = previous_env;
+        cycles::retire(std::mem::replace(&mut self.environment, previous_env));
         self.current_file = previous_file;
 
         Ok(exports)
@@ -5222,7 +5231,7 @@ impl Interpreter {
         let previous_file = self.current_file.clone();
         let previous_imports = std::mem::take(&mut self.imported_files);
 
-        self.environment = Rc::new(RefCell::new(Environment::new()));
+        self.environment = Environment::shared(Environment::new());
         self.current_file = Some(file_path.to_string_lossy().to_string());
 
         // Re-define builtins, types, and stdlib modules
@@ -5248,7 +5257,7 @@ impl Interpreter {
 
         // Evaluate the module; restore interpreter state on every error path.
         if let Err(e) = self.eval(&ast) {
-            self.environment = previous_env;
+            cycles::retire(std::mem::replace(&mut self.environment, previous_env));
             self.current_file = previous_file;
             self.imported_files = previous_imports;
             return Err(e);
@@ -5292,7 +5301,7 @@ impl Interpreter {
         drop(env);
 
         // Restore environment and imports
-        self.environment = previous_env;
+        cycles::retire(std::mem::replace(&mut self.environment, previous_env));
         self.current_file = previous_file;
         self.imported_files = previous_imports;
 
@@ -5329,7 +5338,7 @@ impl Interpreter {
         let previous_file = self.current_file.clone();
         let previous_imports = std::mem::take(&mut self.imported_files);
 
-        self.environment = Rc::new(RefCell::new(Environment::new()));
+        self.environment = Environment::shared(Environment::new());
         self.current_file = Some(file_path.to_string());
 
         // Re-define builtins, types, and stdlib modules
@@ -5354,7 +5363,7 @@ impl Interpreter {
 
         // Evaluate the module
         if let Err(e) = self.eval(&ast) {
-            self.environment = previous_env;
+            cycles::retire(std::mem::replace(&mut self.environment, previous_env));
             self.current_file = previous_file;
             self.imported_files = previous_imports;
             return Err(e);
@@ -5373,7 +5382,7 @@ impl Interpreter {
         drop(env);
 
         // Restore environment and imports
-        self.environment = previous_env;
+        cycles::retire(std::mem::replace(&mut self.environment, previous_env));
         self.current_file = previous_file;
         self.imported_files = previous_imports;
 
@@ -5463,7 +5472,9 @@ impl Interpreter {
         crate::config::clear_type_warnings();
         let mut result = Value::Unit;
         for stmt in &program.statements {
-            result = self.eval_statement(stmt)?;
+            let evaluated = self.eval_statement(stmt);
+            cycles::collect(false);
+            result = evaluated?;
             // Unwrap return values at top level
             if let Value::Return(v) = result {
                 return Ok(*v);
@@ -5544,9 +5555,9 @@ impl Interpreter {
 
                                 // Create scope with `err` bound, execute otherwise block
                                 let previous = Rc::clone(&self.environment);
-                                self.environment = Rc::new(RefCell::new(Environment::with_parent(
+                                self.environment = Environment::shared(Environment::with_parent(
                                     Rc::clone(&previous),
-                                )));
+                                ));
                                 self.environment
                                     .borrow_mut()
                                     .define("err".to_string(), err_val);
@@ -5559,7 +5570,7 @@ impl Interpreter {
                                         _ => {}
                                     }
                                 }
-                                self.environment = previous;
+                                cycles::retire(std::mem::replace(&mut self.environment, previous));
 
                                 // Otherwise block must diverge
                                 match result {
@@ -5772,15 +5783,15 @@ impl Interpreter {
                                 let err_val = values.first().cloned().unwrap_or(Value::Unit);
 
                                 let previous = Rc::clone(&self.environment);
-                                self.environment = Rc::new(RefCell::new(Environment::with_parent(
+                                self.environment = Environment::shared(Environment::with_parent(
                                     Rc::clone(&previous),
-                                )));
+                                ));
                                 self.environment
                                     .borrow_mut()
                                     .define("err".to_string(), err_val);
 
                                 let result = self.eval_block(otherwise_block);
-                                self.environment = previous;
+                                cycles::retire(std::mem::replace(&mut self.environment, previous));
                                 let result = result?;
 
                                 match result {
@@ -6101,7 +6112,7 @@ impl Interpreter {
                     // Create new scope for each iteration
                     let previous = Rc::clone(&self.environment);
                     self.environment =
-                        Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+                        Environment::shared(Environment::with_parent(Rc::clone(&previous)));
 
                     // Bind the loop variable (with optional pattern destructuring)
                     let bind_result = if let Some(pat) = pattern {
@@ -6111,7 +6122,7 @@ impl Interpreter {
                         Ok(())
                     };
                     if let Err(err) = bind_result {
-                        self.environment = previous;
+                        cycles::retire(std::mem::replace(&mut self.environment, previous));
                         return Err(err);
                     }
 
@@ -6120,7 +6131,7 @@ impl Interpreter {
                     let body_result = self.eval_block_for_control(body);
 
                     // Restore environment before propagating errors/control flow.
-                    self.environment = previous;
+                    cycles::retire(std::mem::replace(&mut self.environment, previous));
                     result = body_result?;
 
                     // Handle control flow
@@ -6420,7 +6431,7 @@ impl Interpreter {
 
     fn eval_block_inner(&mut self, block: &Block, control_context: bool) -> Result<Value> {
         let previous = Rc::clone(&self.environment);
-        self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+        self.environment = Environment::shared(Environment::with_parent(Rc::clone(&previous)));
 
         let deferred_count_before = self.deferred_statements.len();
         let mut result = Value::Unit;
@@ -6455,7 +6466,8 @@ impl Interpreter {
             let _ = self.eval_expression(&deferred_expr);
         }
 
-        self.environment = previous;
+        cycles::retire(std::mem::replace(&mut self.environment, previous));
+        cycles::collect(false);
         if let Some(err) = error {
             return Err(err);
         }
@@ -7581,9 +7593,8 @@ impl Interpreter {
                         if let Some(guard) = &arm.guard {
                             // Create new scope with pattern bindings
                             let previous = Rc::clone(&self.environment);
-                            self.environment = Rc::new(RefCell::new(Environment::with_parent(
-                                Rc::clone(&previous),
-                            )));
+                            self.environment =
+                                Environment::shared(Environment::with_parent(Rc::clone(&previous)));
 
                             // Bind pattern variables
                             for (name, val) in &bindings {
@@ -7595,20 +7606,19 @@ impl Interpreter {
                             let guard_result = self.eval_expression(guard)?;
 
                             if !guard_result.is_truthy() {
-                                self.environment = previous;
+                                cycles::retire(std::mem::replace(&mut self.environment, previous));
                                 continue; // Guard failed, try next arm
                             }
 
                             // Guard passed, evaluate body
                             let result = self.eval_expression(&arm.body)?;
-                            self.environment = previous;
+                            cycles::retire(std::mem::replace(&mut self.environment, previous));
                             return Ok(result);
                         } else {
                             // No guard, create scope and evaluate body
                             let previous = Rc::clone(&self.environment);
-                            self.environment = Rc::new(RefCell::new(Environment::with_parent(
-                                Rc::clone(&previous),
-                            )));
+                            self.environment =
+                                Environment::shared(Environment::with_parent(Rc::clone(&previous)));
 
                             // Bind pattern variables
                             for (name, val) in &bindings {
@@ -7618,7 +7628,7 @@ impl Interpreter {
                             }
 
                             let result = self.eval_expression(&arm.body)?;
-                            self.environment = previous;
+                            cycles::retire(std::mem::replace(&mut self.environment, previous));
                             return Ok(result);
                         }
                     }
@@ -8048,10 +8058,10 @@ impl Interpreter {
         data: &HashMap<String, Value>,
     ) -> Result<Value> {
         let previous = Rc::clone(&self.environment);
-        let template_env = Rc::new(RefCell::new(Environment::with_parent_and_values(
+        let template_env = Environment::shared(Environment::with_parent_and_values(
             Rc::clone(&previous),
             data.clone(),
-        )));
+        ));
         self.with_template_environment(template_env, |interpreter| {
             interpreter.eval_template_parts(parts)
         })
@@ -8079,7 +8089,7 @@ impl Interpreter {
     {
         let previous = std::mem::replace(&mut self.environment, env);
         let result = f(self);
-        self.environment = previous;
+        cycles::retire(std::mem::replace(&mut self.environment, previous));
         result
     }
 
@@ -8123,7 +8133,7 @@ impl Interpreter {
         I: IntoIterator<Item = Value>,
     {
         let previous = Rc::clone(&self.environment);
-        let loop_env = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+        let loop_env = Environment::shared(Environment::with_parent(Rc::clone(&previous)));
         self.environment = Rc::clone(&loop_env);
 
         let mut render_result = Ok(());
@@ -8138,7 +8148,7 @@ impl Interpreter {
             }
         }
 
-        self.environment = previous;
+        cycles::retire(std::mem::replace(&mut self.environment, previous));
         render_result
     }
 
@@ -9284,7 +9294,7 @@ impl Interpreter {
         name: String,
         params: Vec<Parameter>,
         body: Block,
-        closure: Rc<RefCell<Environment>>,
+        closure: Closure,
         contract: Option<FunctionContract>,
         args: Vec<Value>,
     ) -> Result<Value> {
@@ -9310,7 +9320,7 @@ impl Interpreter {
         // registered above `deferred_base`, and its own old()/result contract
         // context. The caller's frame is moved out here, before anything can
         // fail, and moved back on every exit path below (#183).
-        let func_env = Rc::new(RefCell::new(Environment::with_parent(closure)));
+        let func_env = Environment::shared(Environment::with_parent(closure.into_rc()));
         let caller_env = std::mem::replace(&mut self.environment, func_env);
         let deferred_base = self.deferred_statements.len();
         let caller_old = self.current_old_values.take();
@@ -9329,9 +9339,11 @@ impl Interpreter {
         // example by a failing ensures clause), still in the callee frame.
         self.run_deferred_above(deferred_base);
 
-        self.environment = caller_env;
+        let finished_env = std::mem::replace(&mut self.environment, caller_env);
         self.current_old_values = caller_old;
         self.current_result = caller_result;
+        cycles::retire(finished_env);
+        cycles::collect(false);
         outcome
     }
 
@@ -9404,7 +9416,9 @@ impl Interpreter {
         let body_outcome = (|| {
             let mut result = Value::Unit;
             for stmt in &body.statements {
-                result = self.eval_statement(stmt)?;
+                let evaluated = self.eval_statement(stmt);
+                cycles::collect(false);
+                result = evaluated?;
                 if let Value::Return(v) = result {
                     return Ok(*v);
                 }
@@ -11003,7 +11017,7 @@ impl Interpreter {
 
         // Create a temporary environment with struct fields as variables
         let previous = Rc::clone(&self.environment);
-        let inv_env = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+        let inv_env = Environment::shared(Environment::with_parent(Rc::clone(&previous)));
 
         // Bind struct fields to environment (also bind 'self' to the struct)
         for (field_name, field_val) in fields {
@@ -11022,7 +11036,7 @@ impl Interpreter {
             let condition_str = Self::format_expression(inv_expr);
             let result = match self.eval_expression(inv_expr) {
                 Err(IntentError::UndefinedVariable { name, .. }) if self.task_interpreter => {
-                    self.environment = previous;
+                    cycles::retire(std::mem::replace(&mut self.environment, previous));
                     return Err(IntentError::runtime_error(format!(
                         "Invariant for '{struct_name}' uses '{name}', which isn't available inside a task: \
                          struct rules that call helpers or read constants aren't supported in tasks yet. \
@@ -11035,7 +11049,7 @@ impl Interpreter {
             if !result.is_truthy() {
                 // Field values are read from inv_env before the restore
                 let values = self.collect_clause_values(inv_expr);
-                self.environment = previous;
+                cycles::retire(std::mem::replace(&mut self.environment, previous));
                 return Err(IntentError::ContractViolation {
                     message: format!(
                         "Invariant violated for '{}': {}",
@@ -11050,7 +11064,7 @@ impl Interpreter {
             self.contracts.check_invariant(&condition_str, true, None)?;
         }
 
-        self.environment = previous;
+        cycles::retire(std::mem::replace(&mut self.environment, previous));
         Ok(())
     }
 
@@ -11645,6 +11659,8 @@ mod context_builtins;
 #[cfg(test)]
 mod context_builtins_tests;
 
+#[cfg(test)]
+mod cycle_tests;
 #[cfg(test)]
 mod frame_restore_tests;
 
