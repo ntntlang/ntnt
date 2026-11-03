@@ -270,6 +270,13 @@ async fn checks(
     if checks.is_empty() {
         return Ok(());
     }
+    let mut tables: Vec<_> = checks
+        .values()
+        .flat_map(|sql| super::analysis::check_tables(sql, schema))
+        .collect();
+    tables.sort();
+    tables.dedup();
+    db.lock_for_checks(&tables).await?;
     db.check_purity(schema).await?;
     for (name, sql) in checks {
         let count = report["assertions"]["executed"].as_u64().unwrap_or(0);
@@ -350,12 +357,33 @@ pub(super) async fn migrate(
 }
 
 /// Own the connection inside the cancellable work future, never outside it.
+/// Attempts per migration when a lock is not granted within lock_timeout (or
+/// this session is a deadlock victim). Each attempt rolls back completely.
+const LOCK_ATTEMPTS: u32 = 4;
+
+/// Backoff before a lock retry: 250 ms doubling, plus up to 100 ms of jitter
+/// so competing sessions do not retry in lockstep.
+fn lock_backoff(attempt: u32) -> std::time::Duration {
+    let jitter = rand::random::<u64>() % 100;
+    std::time::Duration::from_millis((250u64 << attempt.min(4)) + jitter)
+}
+
 async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value) -> Result<()> {
     let action = Adoption::from_plan(inputs, saved)?;
     let db = connect(inputs, saved).await?;
     db.own_migrations().await?;
+    let mut lock_retries = 0u32;
     loop {
-        let (applied, history, identity, adopted) = locked_prefix(&db, inputs, saved).await?;
+        let assertions_before = report["assertions"].clone();
+        let (applied, history, identity, adopted) = match locked_prefix(&db, inputs, saved).await {
+            Err(d) if d.code == "DB_LOCK_CONFLICT" && lock_retries + 1 < LOCK_ATTEMPTS => {
+                db.rollback().await?;
+                tokio::time::sleep(lock_backoff(lock_retries)).await;
+                lock_retries += 1;
+                continue;
+            }
+            other => other?,
+        };
         report["capabilities"] = identity.capabilities();
         report["target"]["identity"] = json!(identity);
         if action.is_some() {
@@ -384,6 +412,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
         let progress_index = if action.is_some() { 0 } else { applied };
         let reference = action.as_ref().map_or(applied + 1, |a| a.count);
         report["progress"][progress_index]["state"] = json!("unknown");
+        let mut locks = None;
         let work = async {
             if action.is_some() {
                 checks(
@@ -418,6 +447,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 )
                 .await?;
             }
+            locks = db.relation_locks(&inputs.config.schema).await?;
             let catalog = db
                 .catalog(&inputs.config.schema, &inputs.endpoint.role)
                 .await?;
@@ -461,6 +491,16 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
         .await;
         if let Err(d) = work {
             let cleanup = db.rollback().await;
+            if d.code == "DB_LOCK_CONFLICT" && cleanup.is_ok() && lock_retries + 1 < LOCK_ATTEMPTS {
+                // Nothing committed. Forget this attempt's check results, wait,
+                // and run the whole migration transaction again.
+                report["assertions"] = assertions_before;
+                report["progress"][progress_index]["state"] = json!("not_run");
+                tokio::time::sleep(lock_backoff(lock_retries)).await;
+                lock_retries += 1;
+                report["progress"][progress_index]["lock_retries"] = json!(lock_retries);
+                continue;
+            }
             report["progress"][progress_index]["state"] =
                 json!(if cleanup.is_ok() { "failed" } else { "unknown" });
             report["cleanup"] = json!(if cleanup.is_ok() { "pass" } else { "unknown" });
@@ -475,6 +515,11 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
             return Err(d);
         }
         report["progress"][progress_index]["state"] = json!("committed");
+        report["progress"][progress_index]["lock_retries"] = json!(lock_retries);
+        if let Some(locks) = locks {
+            report["progress"][progress_index]["locks"] = locks;
+        }
+        lock_retries = 0;
         if let Some(action) = &action {
             mark_counts(report, &action.after(inputs)?);
             report["outcome"] = json!("pass");
@@ -482,6 +527,12 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
         }
         report["covered_count"] = json!(applied + 1);
         report["applied_count"] = json!(history.counts()["applied_count"].as_u64().unwrap() + 1);
+        // Do not re-lock every managed table only to learn nothing is pending.
+        // That extra lock pass can deadlock with live application writers.
+        if applied + 1 == inputs.migrations.len() {
+            report["outcome"] = json!("pass");
+            return Ok(());
+        }
     }
 }
 
