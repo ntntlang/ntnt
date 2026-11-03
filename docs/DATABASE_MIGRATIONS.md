@@ -174,7 +174,7 @@ Checksum v1 is lowercase SHA-256 over length-framed byte parts. Each part is pre
 
 Whitespace, comments, filenames, metadata comments, and even absent versus empty metadata matter. No newline or SQL normalization occurs. Applied ledger entries must be the exact ordered inventory prefix: missing/edited files, inserted historical migrations, reordered IDs and dirty attempts fail before any replay can be mistaken for valid history.
 
-Capture is bounded to 1 MiB per input (including a saved review artifact), 16 MiB of migration files, and 1,024 migrations. Parsing is limited to 4,096 tokens per script (including whitespace tokens) and recursion depth 64. Oversized or unsupported SQL is unknown, not automatically safe. Source files and manifest policy are captured once, then replay consumes those captured bytes even if their paths are subsequently replaced. A new command recaptures current inputs and invalidates an old binding if they changed.
+Capture is bounded to 1 MiB per input (including a saved review artifact), 16 MiB of migration files, and 1,024 migrations. For PostgreSQL, a script may have up to 262,144 tokens; each statement is parsed separately, up to 4,096 tokens and recursion depth 64. A larger statement is reported as `SQL_NOT_PARSED` but still replays. SQLite scripts are parsed whole, up to 4,096 tokens (including whitespace tokens) and recursion depth 64; oversized SQLite SQL is unknown, not automatically safe. Source files and manifest policy are captured once, then replay consumes those captured bytes even if their paths are subsequently replaced. A new command recaptures current inputs and invalidates an old binding if they changed.
 
 ## Disposable replay and its boundary
 
@@ -185,9 +185,8 @@ PostgreSQL scratch must:
 - have `disposable = true` and a separate secret and role;
 - resolve to a different **cluster-system-identifier/database-OID pair**, not merely a different URL spelling;
 - exactly match the target's server version number, encoding, locale/provider/version, timezone, DateStyle, IntervalStyle and client/string settings;
-- be owned by a nonsuperuser role with no memberships, `CREATEDB`, `CREATEROLE`, replication, or RLS-bypass authority;
+- be owned by a nonsuperuser role with no memberships, `CREATEDB`, `CREATEROLE` or replication. It may have `BYPASSRLS` only when the target role bypasses row-level security (directly or as a superuser), so seed rows in migrations see the same policies in scratch as on the target;
 - contain only the empty stock public namespace and system objects, with no user routines/types/relations, event triggers, extra extensions or default grants.
-- use a role without superuser, CREATEDB, CREATEROLE or replication attributes. It may have BYPASSRLS only when the target role bypasses row-level security (directly or as a superuser), so seed rows in migrations see the same policies in scratch as on the target.
 
 Identity discovery uses `pg_control_system()` and catalog metadata. Missing permission to establish identity fails closed. Server administrators and the PostgreSQL installation are trusted; this is not protection against a hostile superuser modifying PostgreSQL's own catalogs or concurrent administrators changing scratch after validation. Use an exclusively disposable fixture, preferably network-isolated. Restored/cloned clusters sharing identity can be conservatively rejected.
 

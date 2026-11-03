@@ -39,6 +39,7 @@ impl Diagnostic {
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
             "DB_SECRET" => "Declare the connection secret in ntnt.toml and configure the existing std/secrets provider. Never pass a connection URL on the command line.",
+            "DB_LOCK_CONFLICT" => "Another session held a conflicting lock; nothing was committed for this migration. Retry the same reviewed plan when application or migrator load allows.",
             "DB_TIMEOUT" => "Check endpoint availability and conflicting locks. Preserve committed progress; reconcile unknown migration outcomes with the same reviewed plan before any further SQL.",
             "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_APPROVAL_REQUIRED" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
             "DB_OUTPUT" => "Select a new output filename with a writable parent directory; existing files are never replaced.",
@@ -401,6 +402,15 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lock_conflicts_explain_what_to_do() {
+        let d = super::Diagnostic::new("DB_LOCK_CONFLICT", "x");
+        assert!(
+            d.next_action.contains("nothing was committed"),
+            "{}",
+            d.next_action
+        );
+    }
     #[test]
     fn oversized_artifact_is_rejected_before_creating_output() {
         let dir = tempfile::tempdir().unwrap();

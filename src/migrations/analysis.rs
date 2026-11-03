@@ -398,13 +398,34 @@ fn postgres_script(a: &mut Analysis, sql: &str, schema: &str) {
         }
     };
     let mut statements = vec![];
-    let mut current = vec![];
+    let mut current: Vec<sqlparser::tokenizer::TokenWithSpan> = vec![];
+    // A SQL-standard routine body (`BEGIN ATOMIC ... END`) holds semicolons of
+    // its own; keep it in one statement until the `END` that closes it. A body
+    // whose last statement itself ends in `CASE ... END` closes early.
+    let mut atomic = false;
+    let mut last_words: [Option<String>; 2] = [None, None];
     for t in tokens {
         if t.token == Token::SemiColon {
+            if atomic && last_words[1].as_deref() != Some("END") {
+                current.push(t);
+                continue;
+            }
+            atomic = false;
+            last_words = [None, None];
             statements.push(std::mem::take(&mut current));
-        } else {
-            current.push(t);
+            continue;
         }
+        if !matches!(t.token, Token::Whitespace(_)) {
+            let word = match &t.token {
+                Token::Word(w) if w.quote_style.is_none() => Some(w.value.to_ascii_uppercase()),
+                _ => None,
+            };
+            if word.as_deref() == Some("ATOMIC") && last_words[1].as_deref() == Some("BEGIN") {
+                atomic = true;
+            }
+            last_words = [last_words[1].take(), word];
+        }
+        current.push(t);
     }
     statements.push(current);
     statements.retain(|s| s.iter().any(|t| !matches!(t.token, Token::Whitespace(_))));
@@ -899,5 +920,18 @@ mod tests {
         );
         assert!(check_tables("SELECT true", "app").is_empty());
         assert!(check_tables("DELETE FROM app.orders", "app").is_empty());
+    }
+    #[test]
+    fn sql_standard_routine_bodies_stay_one_statement() {
+        let sql = "CREATE FUNCTION app.f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 2; END; CREATE TABLE app.t(id int);";
+        let a = analyze(sql, "app");
+        assert!(a.replay_supported, "{a:?}");
+        assert_eq!(a.operations.len(), 2, "{a:?}");
+        assert!(
+            !a.unknowns.iter().any(|u| u == "TRANSACTION_CONTROL"),
+            "{a:?}"
+        );
+        // A bare END after the body is still transaction control.
+        assert!(!analyze("CREATE TABLE app.t(id int); END;", "app").replay_supported);
     }
 }

@@ -1459,3 +1459,40 @@ fn partition_bounds_are_not_disclosed_in_reports() {
     assert_eq!(v["outcome"], "pass", "{v}");
     assert!(!v.to_string().contains("ceo-private"));
 }
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn same_name_with_a_non_deferrable_constraint_is_reported() {
+    // SET CONSTRAINTS name DEFERRED fails if any same-named constraint is not
+    // deferrable, so this group cannot be restored either.
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.parent(id INTEGER PRIMARY KEY);
+         CREATE TABLE app.c1(pid INTEGER, CONSTRAINT fk_user FOREIGN KEY (pid) REFERENCES app.parent(id) DEFERRABLE INITIALLY DEFERRED);
+         CREATE TABLE app.c2(pid INTEGER, CONSTRAINT fk_user FOREIGN KEY (pid) REFERENCES app.parent(id));",
+    );
+    f.sql("0002_next.sql", "ALTER TABLE app.c2 ADD COLUMN note TEXT;");
+    let r = f.command("plan");
+    assert!(code(&r, "DB_REPLAY_UNSUPPORTED"), "{r}");
+    assert!(!code(&r, "DB_POSTGRES"), "{r}");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn deferred_checks_get_the_script_time_limit() {
+    // Deferred constraint work runs when NTNT settles the migration, after the
+    // script. It must get the script's limit, not the 5-second query limit.
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.t(id INTEGER);
+         CREATE FUNCTION app.slow_check() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(6); RETURN NULL; END $$;
+         CREATE CONSTRAINT TRIGGER slow AFTER INSERT ON app.t DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION app.slow_check();
+         INSERT INTO app.t VALUES (1);",
+    );
+    let plan = f.plan("plan.json");
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+}

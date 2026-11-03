@@ -30,16 +30,11 @@ async fn bounded_for<T>(
         Ok(Ok(v)) => Ok(v),
         // A lock wait that hit lock_timeout, or a deadlock victim. Nothing was
         // committed; the caller may retry the whole migration transaction.
-        Ok(Err(e))
-            if matches!(
-                e.code().map(|c| c.code()),
-                Some("55P03") | Some("40P01")
-            ) =>
-        {
+        Ok(Err(e)) if matches!(e.code().map(|c| c.code()), Some("55P03") | Some("40P01")) => {
             Err(Diagnostic::new(
                 "DB_LOCK_CONFLICT",
                 &format!(
-                    "A lock was not available in time (SQLSTATE {}); the transaction was rolled back.",
+                    "A lock was not granted in time (SQLSTATE {}).",
                     e.code().map(|c| c.code()).unwrap_or("unavailable")
                 ),
             ))
@@ -680,12 +675,15 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         // checks now, attributed to this migration. Replay runs many migrations
         // in one transaction, and pending trigger events would otherwise block
         // the next migration's ALTER TABLE.
-        self.batch("SET CONSTRAINTS ALL IMMEDIATE")
-            .await
-            .map_err(|mut d| {
-                d.source = Some(migration.name.clone());
-                d
-            })?;
+        bounded_for(
+            SCRIPT_TIMEOUT + Duration::from_secs(5),
+            self.client.batch_execute("SET CONSTRAINTS ALL IMMEDIATE"),
+        )
+        .await
+        .map_err(|mut d| {
+            d.source = Some(migration.name.clone());
+            d
+        })?;
         // On the target a migration's commit ends its SET LOCAL values, and
         // its plain SETs would carry into the next migration's session. Drop
         // both here so every migration starts from the connection's settings,
@@ -699,7 +697,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         // new transaction would. Names with mixed defaults are refused when
         // the next migration starts (see above).
         let deferred: Vec<String> = self
-            .rows("SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(k.conname) FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_namespace n ON n.oid=k.connamespace WHERE k.condeferrable GROUP BY n.nspname,k.conname HAVING pg_catalog.bool_and(k.condeferred) ORDER BY 1", &[])
+            .rows("SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(k.conname) FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_namespace n ON n.oid=k.connamespace GROUP BY n.nspname,k.conname HAVING pg_catalog.bool_and(k.condeferred) ORDER BY 1", &[])
             .await?
             .iter()
             .map(|r| r.get(0))
@@ -713,7 +711,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
 
     async fn mixed_deferral(&self) -> Result<bool> {
         Ok(self
-            .rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint WHERE condeferrable GROUP BY connamespace,conname HAVING pg_catalog.bool_or(condeferred) <> pg_catalog.bool_and(condeferred))", &[])
+            .rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint GROUP BY connamespace,conname HAVING pg_catalog.bool_or(condeferred) <> pg_catalog.bool_and(condeferred))", &[])
             .await?[0]
             .get(0))
     }
