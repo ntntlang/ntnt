@@ -400,17 +400,20 @@ fn postgres_script(a: &mut Analysis, sql: &str, schema: &str) {
     let mut statements = vec![];
     let mut current: Vec<sqlparser::tokenizer::TokenWithSpan> = vec![];
     // A SQL-standard routine body (`BEGIN ATOMIC ... END`) holds semicolons of
-    // its own; keep it in one statement until the `END` that closes it. A body
-    // whose last statement itself ends in `CASE ... END` closes early.
+    // its own; keep it in one statement until the `END` that closes it.
+    // `CASE ... END` expressions inside the body are counted so their `END`
+    // does not close the body.
     let mut atomic = false;
+    let mut case_depth = 0usize;
     let mut last_words: [Option<String>; 2] = [None, None];
     for t in tokens {
         if t.token == Token::SemiColon {
-            if atomic && last_words[1].as_deref() != Some("END") {
+            if atomic && !(case_depth == 0 && last_words[1].as_deref() == Some("END")) {
                 current.push(t);
                 continue;
             }
             atomic = false;
+            case_depth = 0;
             last_words = [None, None];
             statements.push(std::mem::take(&mut current));
             continue;
@@ -422,6 +425,18 @@ fn postgres_script(a: &mut Analysis, sql: &str, schema: &str) {
             };
             if word.as_deref() == Some("ATOMIC") && last_words[1].as_deref() == Some("BEGIN") {
                 atomic = true;
+            } else if atomic {
+                match word.as_deref() {
+                    Some("CASE") => case_depth += 1,
+                    // The END that closes a CASE is an ordinary word here.
+                    Some("END") if case_depth > 0 => {
+                        case_depth -= 1;
+                        last_words = [last_words[1].take(), None];
+                        current.push(t);
+                        continue;
+                    }
+                    _ => (),
+                }
             }
             last_words = [last_words[1].take(), word];
         }
@@ -931,6 +946,11 @@ mod tests {
             !a.unknowns.iter().any(|u| u == "TRANSACTION_CONTROL"),
             "{a:?}"
         );
+        // CASE ... END inside the body does not close it.
+        let case = "CREATE FUNCTION app.f(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN x > 0 THEN 1 ELSE 2 END; SELECT 2; END; CREATE TABLE app.t(id int);";
+        let a = analyze(case, "app");
+        assert!(a.replay_supported, "{a:?}");
+        assert_eq!(a.operations.len(), 2, "{a:?}");
         // A bare END after the body is still transaction control.
         assert!(!analyze("CREATE TABLE app.t(id int); END;", "app").replay_supported);
     }
