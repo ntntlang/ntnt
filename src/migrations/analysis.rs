@@ -463,6 +463,34 @@ fn postgres_script(a: &mut Analysis, sql: &str, schema: &str) {
             a.replay_supported = false;
             a.unknowns.push(escape.into());
         }
+        // A chunk that kept semicolons is a `BEGIN ATOMIC` body, found by a
+        // heuristic. Re-check every piece: none may be transaction or session
+        // control, and the body must close with a bare END. Otherwise the
+        // boundary is uncertain and the script is refused, never replayed.
+        if tokens.iter().any(|t| t.token == Token::SemiColon) {
+            let pieces: Vec<Vec<Option<String>>> = tokens
+                .split(|t| t.token == Token::SemiColon)
+                .map(|piece| {
+                    piece
+                        .iter()
+                        .filter(|t| !matches!(t.token, Token::Whitespace(_)))
+                        .map(|t| match &t.token {
+                            Token::Word(w) if w.quote_style.is_none() => {
+                                Some(w.value.to_ascii_uppercase())
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .collect();
+            let (last, body) = pieces.split_last().expect("split yields a piece");
+            if body.iter().any(|p| escapes_transaction(p).is_some())
+                || last.as_slice() != [Some("END".to_string())]
+            {
+                a.replay_supported = false;
+                a.unknowns.push("STATEMENT_BOUNDARY_UNCERTAIN".into());
+            }
+        }
         // ON DELETE/UPDATE CASCADE is a foreign-key action, not a dependency drop.
         if words.iter().enumerate().any(|(i, w)| {
             w.as_deref() == Some("CASCADE")
@@ -951,6 +979,16 @@ mod tests {
         let a = analyze(case, "app");
         assert!(a.replay_supported, "{a:?}");
         assert_eq!(a.operations.len(), 2, "{a:?}");
+        // Splitting is a heuristic; it must never hide transaction control.
+        // A column named `case` defeats the CASE counter, so these are refused.
+        for hidden in [
+            "CREATE FUNCTION app.f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 AS case; END; COMMIT;",
+            "CREATE FUNCTION app.f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 AS case; END; COMMIT; SELECT CASE WHEN true THEN 1 END; END;",
+        ] {
+            let a = analyze(hidden, "app");
+            assert!(!a.replay_supported, "{hidden}: {a:?}");
+            assert!(a.unknowns.iter().any(|u| u == "STATEMENT_BOUNDARY_UNCERTAIN"), "{a:?}");
+        }
         // A bare END after the body is still transaction control.
         assert!(!analyze("CREATE TABLE app.t(id int); END;", "app").replay_supported);
     }
