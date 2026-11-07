@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## Unreleased (0.6.1)
 
-No changes recorded after the 0.6.0 release preparation.
+See [unreleased notes](docs/release-notes/unreleased.md): `ntnt db` on real PostgreSQL
+applications, narrower migration locks, and `pulldown-cmark` 0.13.6 (RUSTSEC-2026-0433).
 
 ## 0.6.0
 

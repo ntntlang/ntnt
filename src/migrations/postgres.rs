@@ -14,8 +14,31 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) async fn bounded<T>(
     future: impl Future<Output = std::result::Result<T, tokio_postgres::Error>>,
 ) -> Result<T> {
-    match tokio::time::timeout(IO_TIMEOUT, future).await {
+    bounded_for(IO_TIMEOUT, future).await
+}
+/// Authored migration scripts may run much longer than catalog queries (index
+/// builds, rewrites). Kept inside migrate's 100-second work deadline for now.
+pub(crate) const SCRIPT_TIMEOUT: Duration = Duration::from_secs(90);
+/// Transaction settings NTNT relies on while inspecting, replaying and
+/// executing. Reapplied after each migration's RESET ALL.
+const MIGRATION_SETTINGS: &str = "SET LOCAL synchronous_commit=on; SET LOCAL search_path=pg_catalog; SET LOCAL row_security=off; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces=''; SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout=5000;";
+async fn bounded_for<T>(
+    limit: Duration,
+    future: impl Future<Output = std::result::Result<T, tokio_postgres::Error>>,
+) -> Result<T> {
+    match tokio::time::timeout(limit, future).await {
         Ok(Ok(v)) => Ok(v),
+        // A lock wait that hit lock_timeout, or a deadlock victim. Nothing was
+        // committed; the caller may retry the whole migration transaction.
+        Ok(Err(e)) if matches!(e.code().map(|c| c.code()), Some("55P03") | Some("40P01")) => {
+            Err(Diagnostic::new(
+                "DB_LOCK_CONFLICT",
+                &format!(
+                    "A lock was not granted in time (SQLSTATE {}).",
+                    e.code().map(|c| c.code()).unwrap_or("unavailable")
+                ),
+            ))
+        }
         Ok(Err(e)) => Err(Diagnostic::new(
             "DB_POSTGRES",
             &format!(
@@ -28,6 +51,10 @@ pub(crate) async fn bounded<T>(
             "Database connect/authentication/query deadline exceeded.",
         )),
     }
+}
+
+fn quote(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 pub(crate) struct Postgres {
@@ -231,6 +258,16 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         }) {
             return Err(bad());
         }
+        // Covered is not the same as expected: the reserved namespace holds only
+        // the ledger heap and its own columns, constraints and indexes.
+        if ledger_scope.objects.iter().any(|(key, object)| {
+            object["external"] != true
+                && !["schema:", "relation:", "column:", "constraint:", "index:"]
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix))
+        }) {
+            return Err(bad());
+        }
         // The ledger is read only after its physical table and every dependent
         // index are known built-in objects. A SELECT on a view/RLS policy/custom
         // access method is not a pure history read.
@@ -291,26 +328,49 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
     /// Acquire database-local ownership of the single reserved ledger namespace.
     /// This session lock survives per-migration commits. Drop discards the socket;
     /// it cannot leak into a pool. PostgreSQL lock_timeout bounds competing owners.
+    /// A second migrator waits a few seconds for the first, then gives up.
     pub async fn own_migrations(&self) -> Result<()> {
-        self.rows("SELECT pg_catalog.pg_advisory_lock(1853124212, 245)", &[])
-            .await?;
-        Ok(())
+        self.batch("SET lock_timeout = '5s'").await?;
+        let owned = self
+            .rows("SELECT pg_catalog.pg_advisory_lock(1853124212, 245)", &[])
+            .await;
+        self.batch("SET lock_timeout = '2s'").await?;
+        owned.map(|_| ())
     }
 
-    /// Native locks protect data assumptions from ordinary writers, unlike advisory
-    /// ownership. READ COMMITTED takes the validation snapshot *after* these locks.
-    /// Administrators and schema-owner credentials remain trusted, not sandboxed.
-    pub async fn begin_migration(&self, schema: &str) -> Result<()> {
-        self.batch("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE; SET LOCAL synchronous_commit=on; SET LOCAL search_path=pg_catalog; SET LOCAL row_security=off; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
-        let tables = self.rows("SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(c.relname) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE (n.nspname=$1 OR n.nspname='_ntnt') AND c.relkind='r' ORDER BY n.nspname,c.relname", &[&schema]).await?;
-        for row in tables {
+    /// The advisory lock already serializes migrators. Each statement takes only
+    /// the locks PostgreSQL requires for it, and a lock that is not granted
+    /// within one second fails the attempt instead of queueing application
+    /// queries behind it; the caller retries the whole transaction.
+    pub async fn begin_migration(&self, _schema: &str) -> Result<()> {
+        self.batch("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE; SET LOCAL synchronous_commit=on; SET LOCAL search_path=pg_catalog; SET LOCAL row_security=off; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces=''; SET LOCAL lock_timeout='1s';").await
+    }
+
+    /// Tables read by a migration's checks are locked in SHARE mode before the
+    /// first check: writers wait, readers do not. READ COMMITTED takes each
+    /// check's snapshot after this lock, so checked data cannot change under it.
+    /// Without ONLY, a partitioned table's partitions are locked as well, so
+    /// writes made directly to a partition also wait.
+    pub async fn lock_for_checks(&self, tables: &[(String, String)]) -> Result<()> {
+        for (schema, table) in tables {
             self.batch(&format!(
-                "LOCK TABLE ONLY {} IN ACCESS EXCLUSIVE MODE",
-                row.get::<_, String>(0)
+                "LOCK TABLE {}.{} IN SHARE MODE",
+                quote(schema),
+                quote(table)
             ))
             .await?;
         }
         Ok(())
+    }
+
+    /// Relation locks this transaction holds on managed tables: what the
+    /// migration actually took, observed on the target before commit.
+    pub async fn relation_locks(&self, schema: &str) -> Result<Value> {
+        let rows = self.rows("SELECT c.relname::text, l.mode FROM pg_catalog.pg_locks l JOIN pg_catalog.pg_class c ON c.oid=l.relation JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE l.pid=pg_catalog.pg_backend_pid() AND l.locktype='relation' AND l.granted AND n.nspname=$1 AND c.relkind IN ('r','p') ORDER BY 1,2", &[&schema]).await?;
+        Ok(json!(rows
+            .iter()
+            .map(|r| json!({"relation":r.get::<_, String>(0),"mode":r.get::<_, String>(1)}))
+            .collect::<Vec<_>>()))
     }
 
     /// A readable legacy ledger is not a writable one. Only our scoped v2 heap,
@@ -436,9 +496,20 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             return Err(Diagnostic::new("DB_SCRATCH_MISMATCH","Scratch engine version, encoding, locale and session settings must exactly match the target."));
         }
         self.rollback().await?;
+        // Scripts must see row-level security as the target role does. Scratch
+        // may bypass RLS only when the target login role bypasses it (directly
+        // or as a superuser); it never gains other elevated attributes.
+        let target_bypasses_rls = target.authority["roles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| {
+                r["role"] == target.role.as_str()
+                    && (r["bypassrls"] == true || r["superuser"] == true)
+            });
         self.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE; SET LOCAL search_path=pg_catalog; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
         let r=bounded(self.client.query_one(r#"
-SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls)
+SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR (r.rolbypassrls AND NOT $1))
  AND d.datdba=r.oid AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members WHERE member=r.oid)
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_event_trigger)
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_extension WHERE extname<>'plpgsql')
@@ -448,7 +519,7 @@ SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication O
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public')
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public')
 FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user AND d.datname=pg_catalog.current_database()
-"#,&[])).await?;
+"#,&[&target_bypasses_rls])).await?;
         if !r.get::<_, bool>(0) {
             return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch must be an empty disposable database owned by an unprivileged, non-member role, with no user objects, event triggers, extensions or default grants."));
         }
@@ -459,8 +530,15 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         {
             return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch public namespace contains unsupported objects or cannot be fully inspected."));
         }
+        // `public` already exists (and was just verified empty); any other
+        // managed schema is created inside this rollback-only transaction.
+        let create = if schema == "public" {
+            String::new()
+        } else {
+            format!("CREATE SCHEMA \"{schema}\"; ")
+        };
         self.batch(&format!(
-            "CREATE SCHEMA \"{schema}\"; SET LOCAL search_path=pg_catalog,\"{schema}\";"
+            "{create}SET LOCAL search_path=pg_catalog,\"{schema}\";"
         ))
         .await?;
         Ok(identity)
@@ -469,6 +547,18 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// check. Names alone and provolatile are not proofs: only builtin base types,
     /// heap tables, builtin indexes/operators and the closed grammar are admitted.
     /// Custom implicit/assignment casts are rejected database-wide, conservatively.
+    async fn reject_custom_casts(&self) -> Result<()> {
+        let safe = self
+            .rows("SELECT NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast WHERE oid>=16384 AND castcontext IN ('i','a'))", &[])
+            .await?;
+        if !safe[0].get::<_, bool>(0) {
+            return Err(Diagnostic::new(
+                "DB_CHECK_UNSUPPORTED",
+                "Custom implicit/assignment casts exist in this database; DDL coercions could run unreviewed code.",
+            ));
+        }
+        Ok(())
+    }
     pub async fn check_purity(&self, schema: &str) -> Result<()> {
         let catalog = self.catalog(schema, "").await?;
         if !catalog.uncovered.is_empty() {
@@ -480,9 +570,15 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         let safe = self.rows(r#"SELECT NOT EXISTS (
           SELECT 1 FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
           JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind='r'
-          AND a.attnum>0 AND NOT a.attisdropped AND a.atttypid NOT IN (16,17,20,21,23,25,700,701,1043,1082,1114,1184,1700,2950))
+          AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace WHERE t.oid=a.atttypid AND tn.nspname<>'pg_catalog'))
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast WHERE oid>=16384 AND castcontext IN ('i','a'))
-          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind NOT IN ('r','i'))"#, &[&schema]).await?;
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind NOT IN ('r','p','i','I','S','v'))
+          -- A check may read a view. Views may only use builtin non-volatile
+          -- functions, so reading one cannot write or take advisory locks.
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class v JOIN pg_catalog.pg_namespace n ON n.oid=v.relnamespace
+            JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid
+            JOIN pg_catalog.pg_proc p ON d.refclassid='pg_catalog.pg_proc'::regclass AND p.oid=d.refobjid JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
+            WHERE n.nspname=$1 AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&schema]).await?;
         if !safe[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
@@ -534,22 +630,90 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// owned transaction. Replay and authorized migration use exactly this primitive.
     pub async fn execute_captured(&self, migration: &Migration, schema: &str) -> Result<()> {
         if !super::analysis::analyze(&migration.sql, schema).replay_supported {
-            let mut d=Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration is outside the supported replay subset; no arbitrary SQL sandbox is claimed.");
+            let mut d=Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration contains a statement that would end the migration transaction, change session identity or act outside this database; see analysis.unknowns.");
             d.source = Some(migration.name.clone());
             return Err(d);
         }
-        // DDL coercions can invoke custom assignment/implicit casts too. Verify
-        // native resolution before both scratch replay and authorized execution.
-        self.check_purity(schema).await?;
+        // Replay runs several migrations in one transaction. If an earlier one
+        // ran here, constraint modes can only be restored when same-named
+        // constraints agree on their default: SET CONSTRAINTS name affects all.
+        let continues = self
+            .rows("SELECT coalesce(pg_catalog.current_setting('ntnt.migration_boundary', true), '') = 'on'", &[])
+            .await?[0]
+            .get::<_, bool>(0);
+        if continues && self.mixed_deferral().await? {
+            let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", "Constraints sharing a name in one schema have different INITIALLY DEFERRED defaults, so replay cannot reproduce this migration's fresh-transaction constraint modes. Give the constraints distinct names.");
+            d.source = Some(migration.name.clone());
+            return Err(d);
+        }
+        // Migration SQL may call application routines; that is reviewed SQL.
+        // A custom implicit/assignment cast planted elsewhere could instead run
+        // unreviewed code during ordinary DDL coercion, so it still blocks.
+        self.reject_custom_casts().await?;
         // pg_catalog is implicitly searched first when omitted, while CREATE
         // uses the first explicit namespace. Never let app objects shadow builtins.
-        self.batch(&format!("SET LOCAL search_path=\"{schema}\";"))
-            .await?;
+        // Inspection and checks use row_security=off so a policy can never
+        // silently filter what they read. Authored scripts run as the
+        // application's migrations always have: with normal row security, so
+        // seed rows into FORCE ROW LEVEL SECURITY tables obey their policies.
+        self.batch(&format!(
+            "SET LOCAL search_path=\"{schema}\"; SET LOCAL row_security=on; SET LOCAL statement_timeout='{}s';",
+            SCRIPT_TIMEOUT.as_secs()
+        ))
+        .await?;
         // Do not split on semicolons: PostgreSQL receives the captured full script.
-        self.batch(&migration.sql).await.map_err(|mut d| {
+        bounded_for(
+            SCRIPT_TIMEOUT + Duration::from_secs(5),
+            self.client.batch_execute(&migration.sql),
+        )
+        .await
+        .map_err(|mut d| {
             d.source = Some(migration.name.clone());
             d
-        })
+        })?;
+        // End each migration as its own commit would: fire deferred constraint
+        // checks now, attributed to this migration. Replay runs many migrations
+        // in one transaction, and pending trigger events would otherwise block
+        // the next migration's ALTER TABLE.
+        bounded_for(
+            SCRIPT_TIMEOUT + Duration::from_secs(5),
+            self.client.batch_execute("SET CONSTRAINTS ALL IMMEDIATE"),
+        )
+        .await
+        .map_err(|mut d| {
+            d.source = Some(migration.name.clone());
+            d
+        })?;
+        // On the target a migration's commit ends its SET LOCAL values, and
+        // its plain SETs would carry into the next migration's session. Drop
+        // both here so every migration starts from the connection's settings,
+        // in replay and on the target alike, then restore NTNT's own.
+        self.batch(&format!(
+            "RESET ALL; {MIGRATION_SETTINGS} SET LOCAL ntnt.migration_boundary='on';"
+        ))
+        .await?;
+        // PostgreSQL has no "reset to default" for constraint modes. Restore
+        // INITIALLY DEFERRED constraints so the next migration starts as a
+        // new transaction would. Names with mixed defaults are refused when
+        // the next migration starts (see above).
+        let deferred: Vec<String> = self
+            .rows("SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(k.conname) FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_namespace n ON n.oid=k.connamespace GROUP BY n.nspname,k.conname HAVING pg_catalog.bool_and(k.condeferred) ORDER BY 1", &[])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        if !deferred.is_empty() {
+            self.batch(&format!("SET CONSTRAINTS {} DEFERRED", deferred.join(",")))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn mixed_deferral(&self) -> Result<bool> {
+        Ok(self
+            .rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint GROUP BY connamespace,conname HAVING pg_catalog.bool_or(condeferred) <> pg_catalog.bool_and(condeferred))", &[])
+            .await?[0]
+            .get(0))
     }
 }
 
@@ -563,7 +727,14 @@ fn protect_definitions(value: &mut Value) {
         for (key, v) in map {
             if matches!(
                 key.as_str(),
-                "definition" | "default" | "using" | "check" | "comment" | "options"
+                "definition"
+                    | "default"
+                    | "using"
+                    | "check"
+                    | "comment"
+                    | "options"
+                    | "partition_key"
+                    | "partition_bound"
             ) && !v.is_null()
             {
                 *v = json!({"sha256":super::inventory::json_digest(v),"redacted":true});
@@ -589,6 +760,19 @@ fn canonical_roles(value: &mut Value, role: &str) {
                         grants.sort_by_key(Value::to_string);
                     }
                 }
+                // Policy role lists hold names, not owner/grant objects. A
+                // policy created TO CURRENT_USER names scratch's role in the
+                // plan and the target's role on execution.
+                if key == "roles" {
+                    if let Value::Array(roles) = v {
+                        for r in roles.iter_mut() {
+                            if r.as_str() == Some(role) {
+                                *r = json!({"managed_role":true});
+                            }
+                        }
+                        roles.sort_by_key(Value::to_string);
+                    }
+                }
             }
         }
         Value::Array(values) => {
@@ -602,9 +786,9 @@ fn canonical_roles(value: &mut Value, role: &str) {
 impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
-            "operations": {"catalog_inspection":"supported_subset", "restricted_ddl_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_subset", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"reviewed_prefix_checkpoint"},
-            "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_grants":"canonical_role_names", "views_sequences_routines_triggers_policies":"inventoried_opaque", "partitioning_extensions_custom_types_external_dependencies":"unknown"},
-            "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"restricted_subset_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
+            "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"reviewed_prefix_checkpoint"},
+            "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "managed_schema_extensions":"version", "custom_types_external_dependencies_non_sql_routines":"unknown"},
+            "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
     async fn catalog(&self, schema: &str, role: &str) -> Result<Catalog> {
         self.batch("SET LOCAL search_path=pg_catalog").await?;

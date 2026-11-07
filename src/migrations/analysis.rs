@@ -160,8 +160,8 @@ fn column(c: &ColumnDef, schema: &str) -> bool {
             _ => false,
         })
 }
-/// Recognize only the closed AST subset eligible for rollback-only scratch replay.
-/// This predicate does not authorize target writes or establish general SQL purity.
+/// The closed AST subset whose effects NTNT analyzes in detail. PostgreSQL
+/// statements outside it still replay; they are reported as EFFECTS_NOT_ANALYZED.
 fn allowed(statement: &Statement, schema: &str) -> bool {
     match statement {
         Statement::CreateTable(t)
@@ -250,122 +250,361 @@ pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
         hazards: vec![],
         unknowns: vec![],
     };
-    let parsed = if engine == "sqlite" {
-        parse_with(sql, &sqlparser::dialect::SQLiteDialect {})
+    if engine == "sqlite" {
+        sqlite_script(&mut a, sql);
     } else {
-        parse(sql)
-    };
-    let Some(statements) = parsed.filter(|s| !s.is_empty()) else {
-        a.replay_supported = false;
-        a.unknowns.push("SQL_PARSE_EMPTY_OR_LIMIT".into());
-        return a;
-    };
-    for s in statements {
-        let (operation, hazard) = match &s {
-            Statement::CreateTable(_) => ("create_table", "DDL_LOCKS"),
-            Statement::CreateIndex(_) => ("create_index", "INDEX_BUILD_LOCK_SCAN"),
-            Statement::CreateView { .. } if engine == "sqlite" => {
-                ("create_view", "VIEW_DEPENDENCIES")
-            }
-            Statement::CreateTrigger { .. } if engine == "sqlite" => {
-                ("create_trigger", "TRIGGER_EFFECTS")
-            }
-            Statement::DropTrigger { .. } if engine == "sqlite" => {
-                ("drop_trigger", "REMOVED_TRIGGER")
-            }
-            Statement::AlterTable(t) => {
-                for op in &t.operations {
-                    if matches!(
-                        op,
-                        AlterTableOperation::DropColumn {
-                            drop_behavior: Some(DropBehavior::Cascade),
-                            ..
-                        } | AlterTableOperation::DropConstraint {
-                            drop_behavior: Some(DropBehavior::Cascade),
-                            ..
-                        }
-                    ) {
-                        a.hazards.push("CASCADE_DEPENDENCIES".into());
-                    }
-                    match op {
-                        AlterTableOperation::DropColumn { .. } => {
-                            a.hazards.push("DESTRUCTIVE_DROP_COLUMN".into())
-                        }
-                        AlterTableOperation::DropConstraint { .. } => {
-                            a.hazards.push("REMOVED_CONSTRAINT".into())
-                        }
-                        AlterTableOperation::AlterColumn {
-                            op: AlterColumnOperation::SetDataType { .. },
-                            ..
-                        } => a.hazards.push("CAST_DATA_LOSS_OR_REWRITE".into()),
-                        AlterTableOperation::AlterColumn {
-                            op: AlterColumnOperation::DropNotNull,
-                            ..
-                        } => a.hazards.push("REMOVED_CONSTRAINT".into()),
-                        AlterTableOperation::EnableRowLevelSecurity
-                        | AlterTableOperation::DisableRowLevelSecurity => {
-                            a.hazards.push("AUTHORIZATION_CHANGE".into())
-                        }
-                        _ => (),
-                    }
-                }
-                ("alter_table", "EXCLUSIVE_LOCK_AND_POSSIBLE_SCAN")
-            }
-            Statement::Drop { cascade, .. } => {
-                if *cascade {
-                    a.hazards.push("CASCADE_DEPENDENCIES".into());
-                }
-                ("drop", "DESTRUCTIVE_DROP")
-            }
-            Statement::Insert(_)
-            | Statement::Update(_)
-            | Statement::Delete(_)
-            | Statement::Truncate { .. } => ("data_write", "DESTRUCTIVE_OR_OVERWRITING_DML"),
-            Statement::Grant { .. } | Statement::Revoke { .. } => {
-                ("authorization", "AUTHORIZATION_CHANGE")
-            }
-            _ => ("unsupported", "UNANALYZED_EFFECTS"),
-        };
-        a.operations.push(operation.into());
-        a.hazards.push(hazard.into());
-        let supported = if engine == "sqlite" {
-            // SQLite's native authorizer, not PostgreSQL's AST rules, checks
-            // resolved objects/functions before any authored statement executes.
-            a.unknowns.push("SQLITE_EFFECTS_NOT_INFERRED".into());
-            // CREATE authorizes references in its own CHECK/index definitions.
-            // CTAS must not use that newly declared name to authorize an
-            // eponymous virtual-table source during the same preparation. Keep
-            // copies explicit: CREATE ordinary table, then INSERT ... SELECT.
-            !matches!(&s, Statement::CreateTable(table) if table.query.is_some())
-                && matches!(
-                    s,
-                    Statement::CreateTable(_)
-                        | Statement::AlterTable(_)
-                        | Statement::CreateIndex(_)
-                        | Statement::CreateView { .. }
-                        | Statement::CreateTrigger { .. }
-                        | Statement::DropTrigger { .. }
-                        | Statement::Insert(_)
-                        | Statement::Update(_)
-                        | Statement::Delete(_)
-                        | Statement::Drop {
-                            object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
-                            ..
-                        }
-                )
-        } else {
-            allowed(&s, schema)
-        };
-        if !supported || a.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES") {
-            a.replay_supported = false;
-            a.unknowns.push("SQL_UNSUPPORTED".into());
-        }
+        postgres_script(&mut a, sql, schema);
     }
     a.hazards.sort();
     a.hazards.dedup();
     a.unknowns.sort();
     a.unknowns.dedup();
     a
+}
+/// Record one parsed statement's operation and lock/effect hazard.
+/// Returns the operation name, empty when the statement kind is not classified.
+fn classify(a: &mut Analysis, s: &Statement, engine: &str) -> &'static str {
+    let (operation, hazard) = match s {
+        Statement::CreateTable(_) => ("create_table", "DDL_LOCKS"),
+        Statement::CreateIndex(_) => ("create_index", "INDEX_BUILD_LOCK_SCAN"),
+        Statement::CreateView { .. } if engine == "sqlite" => ("create_view", "VIEW_DEPENDENCIES"),
+        Statement::CreateTrigger { .. } if engine == "sqlite" => {
+            ("create_trigger", "TRIGGER_EFFECTS")
+        }
+        Statement::DropTrigger { .. } if engine == "sqlite" => ("drop_trigger", "REMOVED_TRIGGER"),
+        Statement::AlterTable(t) => {
+            for op in &t.operations {
+                if matches!(
+                    op,
+                    AlterTableOperation::DropColumn {
+                        drop_behavior: Some(DropBehavior::Cascade),
+                        ..
+                    } | AlterTableOperation::DropConstraint {
+                        drop_behavior: Some(DropBehavior::Cascade),
+                        ..
+                    }
+                ) {
+                    a.hazards.push("CASCADE_DEPENDENCIES".into());
+                }
+                match op {
+                    AlterTableOperation::DropColumn { .. } => {
+                        a.hazards.push("DESTRUCTIVE_DROP_COLUMN".into())
+                    }
+                    AlterTableOperation::DropConstraint { .. } => {
+                        a.hazards.push("REMOVED_CONSTRAINT".into())
+                    }
+                    AlterTableOperation::AlterColumn {
+                        op: AlterColumnOperation::SetDataType { .. },
+                        ..
+                    } => a.hazards.push("CAST_DATA_LOSS_OR_REWRITE".into()),
+                    AlterTableOperation::AlterColumn {
+                        op: AlterColumnOperation::DropNotNull,
+                        ..
+                    } => a.hazards.push("REMOVED_CONSTRAINT".into()),
+                    AlterTableOperation::EnableRowLevelSecurity
+                    | AlterTableOperation::DisableRowLevelSecurity => {
+                        a.hazards.push("AUTHORIZATION_CHANGE".into())
+                    }
+                    _ => (),
+                }
+            }
+            ("alter_table", "EXCLUSIVE_LOCK_AND_POSSIBLE_SCAN")
+        }
+        Statement::Drop { cascade, .. } => {
+            if *cascade {
+                a.hazards.push("CASCADE_DEPENDENCIES".into());
+            }
+            ("drop", "DESTRUCTIVE_DROP")
+        }
+        Statement::Insert(_)
+        | Statement::Update(_)
+        | Statement::Delete(_)
+        | Statement::Truncate { .. } => ("data_write", "DESTRUCTIVE_OR_OVERWRITING_DML"),
+        Statement::Grant { .. } | Statement::Revoke { .. } => {
+            ("authorization", "AUTHORIZATION_CHANGE")
+        }
+        _ => ("", "UNANALYZED_EFFECTS"),
+    };
+    a.hazards.push(hazard.into());
+    operation
+}
+fn sqlite_script(a: &mut Analysis, sql: &str) {
+    let Some(statements) =
+        parse_with(sql, &sqlparser::dialect::SQLiteDialect {}).filter(|s| !s.is_empty())
+    else {
+        a.replay_supported = false;
+        a.unknowns.push("SQL_PARSE_EMPTY_OR_LIMIT".into());
+        return;
+    };
+    for s in statements {
+        let operation = classify(a, &s, "sqlite");
+        a.operations.push(
+            if operation.is_empty() {
+                "unsupported"
+            } else {
+                operation
+            }
+            .into(),
+        );
+        // SQLite's native authorizer, not PostgreSQL's AST rules, checks
+        // resolved objects/functions before any authored statement executes.
+        a.unknowns.push("SQLITE_EFFECTS_NOT_INFERRED".into());
+        // CREATE authorizes references in its own CHECK/index definitions.
+        // CTAS must not use that newly declared name to authorize an
+        // eponymous virtual-table source during the same preparation. Keep
+        // copies explicit: CREATE ordinary table, then INSERT ... SELECT.
+        let supported = !matches!(&s, Statement::CreateTable(table) if table.query.is_some())
+            && matches!(
+                s,
+                Statement::CreateTable(_)
+                    | Statement::AlterTable(_)
+                    | Statement::CreateIndex(_)
+                    | Statement::CreateView { .. }
+                    | Statement::CreateTrigger { .. }
+                    | Statement::DropTrigger { .. }
+                    | Statement::Insert(_)
+                    | Statement::Update(_)
+                    | Statement::Delete(_)
+                    | Statement::Drop {
+                        object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
+                        ..
+                    }
+            );
+        if !supported || a.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES") {
+            a.replay_supported = false;
+            a.unknowns.push("SQL_UNSUPPORTED".into());
+        }
+    }
+}
+
+/// Whole migration scripts are bounded by the 1 MiB input cap; this bounds
+/// tokenizer output. Individual statements keep the 4,096-token parser bound.
+const MAX_SCRIPT_TOKENS: usize = 262_144;
+
+/// PostgreSQL migrations run as complete scripts inside one transaction: in
+/// disposable scratch for review, then on the target after approval. Analysis
+/// splits on tokenizer-level semicolons (quoted and dollar-quoted text stays
+/// intact), rejects statements that would escape that transaction or session,
+/// and reports which statements it could not analyze. It does not sandbox SQL.
+fn postgres_script(a: &mut Analysis, sql: &str, schema: &str) {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let dialect = PostgreSqlDialect {};
+    let tokens = match Tokenizer::new(&dialect, sql).tokenize_with_location() {
+        Ok(t) if t.len() <= MAX_SCRIPT_TOKENS => t,
+        _ => {
+            a.replay_supported = false;
+            a.unknowns.push("SQL_PARSE_EMPTY_OR_LIMIT".into());
+            return;
+        }
+    };
+    let mut statements = vec![];
+    let mut current: Vec<sqlparser::tokenizer::TokenWithSpan> = vec![];
+    // A SQL-standard routine body (`BEGIN ATOMIC ... END`) holds semicolons of
+    // its own; keep it in one statement until the `END` that closes it.
+    // `CASE ... END` expressions inside the body are counted so their `END`
+    // does not close the body.
+    let mut atomic = false;
+    let mut case_depth = 0usize;
+    let mut last_words: [Option<String>; 2] = [None, None];
+    for t in tokens {
+        if t.token == Token::SemiColon {
+            if atomic && !(case_depth == 0 && last_words[1].as_deref() == Some("END")) {
+                current.push(t);
+                continue;
+            }
+            atomic = false;
+            case_depth = 0;
+            last_words = [None, None];
+            statements.push(std::mem::take(&mut current));
+            continue;
+        }
+        if !matches!(t.token, Token::Whitespace(_)) {
+            let word = match &t.token {
+                Token::Word(w) if w.quote_style.is_none() => Some(w.value.to_ascii_uppercase()),
+                _ => None,
+            };
+            if word.as_deref() == Some("ATOMIC") && last_words[1].as_deref() == Some("BEGIN") {
+                atomic = true;
+            } else if atomic {
+                match word.as_deref() {
+                    Some("CASE") => case_depth += 1,
+                    // The END that closes a CASE is an ordinary word here.
+                    Some("END") if case_depth > 0 => {
+                        case_depth -= 1;
+                        last_words = [last_words[1].take(), None];
+                        current.push(t);
+                        continue;
+                    }
+                    _ => (),
+                }
+            }
+            last_words = [last_words[1].take(), word];
+        }
+        current.push(t);
+    }
+    statements.push(current);
+    statements.retain(|s| s.iter().any(|t| !matches!(t.token, Token::Whitespace(_))));
+    if statements.is_empty() {
+        a.replay_supported = false;
+        a.unknowns.push("SQL_PARSE_EMPTY_OR_LIMIT".into());
+        return;
+    }
+    for tokens in statements {
+        // Significant tokens: unquoted words uppercased; anything else is None.
+        let words: Vec<Option<String>> = tokens
+            .iter()
+            .filter(|t| !matches!(t.token, Token::Whitespace(_)))
+            .map(|t| match &t.token {
+                Token::Word(w) if w.quote_style.is_none() => Some(w.value.to_ascii_uppercase()),
+                _ => None,
+            })
+            .collect();
+        if let Some(escape) = escapes_transaction(&words) {
+            a.replay_supported = false;
+            a.unknowns.push(escape.into());
+        }
+        // A chunk that kept semicolons is a `BEGIN ATOMIC` body, found by a
+        // heuristic. Re-check every piece: none may be transaction or session
+        // control, and the body must close with a bare END. Otherwise the
+        // boundary is uncertain and the script is refused, never replayed.
+        if tokens.iter().any(|t| t.token == Token::SemiColon) {
+            let pieces: Vec<Vec<Option<String>>> = tokens
+                .split(|t| t.token == Token::SemiColon)
+                .map(|piece| {
+                    piece
+                        .iter()
+                        .filter(|t| !matches!(t.token, Token::Whitespace(_)))
+                        .map(|t| match &t.token {
+                            Token::Word(w) if w.quote_style.is_none() => {
+                                Some(w.value.to_ascii_uppercase())
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .collect();
+            let (last, body) = pieces.split_last().expect("split yields a piece");
+            if body.iter().any(|p| escapes_transaction(p).is_some())
+                || last.as_slice() != [Some("END".to_string())]
+            {
+                a.replay_supported = false;
+                a.unknowns.push("STATEMENT_BOUNDARY_UNCERTAIN".into());
+            }
+        }
+        // ON DELETE/UPDATE CASCADE is a foreign-key action, not a dependency drop.
+        if words.iter().enumerate().any(|(i, w)| {
+            w.as_deref() == Some("CASCADE")
+                && !matches!(
+                    i.checked_sub(1).and_then(|p| words[p].as_deref()),
+                    Some("DELETE" | "UPDATE")
+                )
+        }) {
+            a.hazards.push("CASCADE_DEPENDENCIES".into());
+            a.replay_supported = false;
+            a.unknowns.push("SQL_UNSUPPORTED".into());
+        }
+        let parsed = (tokens.len() <= 4096)
+            .then(|| {
+                Parser::new(&dialect)
+                    .with_recursion_limit(64)
+                    .with_tokens_with_locations(tokens)
+                    .parse_statements()
+                    .ok()
+            })
+            .flatten();
+        match parsed.as_deref() {
+            Some([statement]) => {
+                let operation = classify(a, statement, "postgresql");
+                a.operations.push(if operation.is_empty() {
+                    leading(&words)
+                } else {
+                    operation.into()
+                });
+                if a.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES") {
+                    a.replay_supported = false;
+                    a.unknowns.push("SQL_UNSUPPORTED".into());
+                }
+                if !allowed(statement, schema) {
+                    a.unknowns.push("EFFECTS_NOT_ANALYZED".into());
+                }
+            }
+            _ => {
+                a.operations.push(leading(&words));
+                a.hazards.push("UNANALYZED_EFFECTS".into());
+                a.unknowns.push("SQL_NOT_PARSED".into());
+            }
+        }
+    }
+}
+/// Readable operation name from leading keywords, e.g. `create_function`, `do`.
+fn leading(words: &[Option<String>]) -> String {
+    let mut parts = vec![];
+    for w in words.iter().map_while(|w| w.as_deref()) {
+        if parts.is_empty() {
+            parts.push(w.to_ascii_lowercase());
+            if !matches!(w, "CREATE" | "ALTER" | "DROP" | "COMMENT") {
+                break;
+            }
+        } else if !matches!(
+            w,
+            "OR" | "REPLACE" | "UNIQUE" | "CONSTRAINT" | "TEMP" | "TEMPORARY" | "UNLOGGED" | "ON"
+        ) {
+            parts.push(w.to_ascii_lowercase());
+            break;
+        }
+    }
+    if parts.is_empty() {
+        "unknown".into()
+    } else {
+        parts.join("_")
+    }
+}
+/// Top-level statements that would end/split NTNT's migration transaction,
+/// change session identity, or act outside the current database. Text inside
+/// DO/function bodies is opaque here; those run inside the transaction and
+/// with the connecting role's privileges.
+fn escapes_transaction(words: &[Option<String>]) -> Option<&'static str> {
+    let w = |i: usize| words.get(i).and_then(|w| w.as_deref());
+    let concurrently = words.iter().any(|x| x.as_deref() == Some("CONCURRENTLY"));
+    match w(0)? {
+        "BEGIN" | "START" | "COMMIT" | "END" | "ROLLBACK" | "ABORT" | "SAVEPOINT" | "RELEASE" => {
+            Some("TRANSACTION_CONTROL")
+        }
+        "PREPARE" if w(1) == Some("TRANSACTION") => Some("TRANSACTION_CONTROL"),
+        "SET" => {
+            let mut i = 1;
+            while matches!(w(i), Some("LOCAL" | "SESSION")) {
+                i += 1;
+            }
+            matches!(
+                w(i),
+                Some("ROLE" | "AUTHORIZATION" | "SESSION_REPLICATION_ROLE")
+            )
+            .then_some("SESSION_AUTHORIZATION")
+        }
+        "RESET" => matches!(
+            w(1),
+            Some("ROLE" | "SESSION" | "ALL" | "SESSION_REPLICATION_ROLE")
+        )
+        .then_some("SESSION_AUTHORIZATION"),
+        "DISCARD" => Some("SESSION_AUTHORIZATION"),
+        "VACUUM" => Some("NON_TRANSACTIONAL"),
+        "REINDEX" if concurrently || matches!(w(1), Some("DATABASE" | "SYSTEM")) => {
+            Some("NON_TRANSACTIONAL")
+        }
+        "COPY" | "LOAD" | "CHECKPOINT" => Some("SERVER_SCOPE"),
+        "ALTER" if w(1) == Some("SYSTEM") => Some("SERVER_SCOPE"),
+        "CREATE" | "ALTER" | "DROP"
+            if matches!(
+                w(1),
+                Some("DATABASE" | "TABLESPACE" | "ROLE" | "USER" | "GROUP")
+            ) =>
+        {
+            Some("SERVER_SCOPE")
+        }
+        "CREATE" | "DROP" | "ALTER" if concurrently => Some("NON_TRANSACTIONAL"),
+        _ => None,
+    }
 }
 /// Checks use a separate closed query grammar, not a SELECT/volatility heuristic.
 /// Live relation/type/operator resolution still requires the adapter purity gate
@@ -375,6 +614,65 @@ pub(crate) fn contract_supported(sql: &str, schema: &str) -> bool {
         return false;
     };
     matches!(statements.as_slice(), [Statement::Query(q)] if check_query(q, schema, 0))
+}
+
+/// Managed tables a supported check reads, as (schema, table). Only valid for
+/// SQL that `contract_supported` accepts; other input yields no tables.
+pub(crate) fn check_tables(sql: &str, schema: &str) -> Vec<(String, String)> {
+    fn query(q: &Query, out: &mut Vec<(String, String)>) {
+        let SetExpr::Select(s) = &*q.body else { return };
+        for t in &s.from {
+            if let TableFactor::Table { name, .. } = &t.relation {
+                let ids: Vec<_> = name.0.iter().filter_map(|p| p.as_ident()).collect();
+                if let [s, t] = ids.as_slice() {
+                    let schema = if s.quote_style.is_some() {
+                        s.value.clone()
+                    } else {
+                        s.value.to_lowercase()
+                    };
+                    let table = if t.quote_style.is_some() {
+                        t.value.clone()
+                    } else {
+                        t.value.to_lowercase()
+                    };
+                    out.push((schema, table));
+                }
+            }
+        }
+        for item in &s.projection {
+            if let SelectItem::UnnamedExpr(e) = item {
+                expr(e, out);
+            }
+        }
+        for e in s.selection.iter().chain(s.having.iter()) {
+            expr(e, out);
+        }
+    }
+    fn expr(e: &Expr, out: &mut Vec<(String, String)>) {
+        match e {
+            Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => query(subquery, out),
+            Expr::Nested(e)
+            | Expr::IsNull(e)
+            | Expr::IsNotNull(e)
+            | Expr::UnaryOp { expr: e, .. } => expr(e, out),
+            Expr::BinaryOp { left, right, .. } => {
+                expr(left, out);
+                expr(right, out);
+            }
+            _ => (),
+        }
+    }
+    let mut out = vec![];
+    if contract_supported(sql, schema) {
+        if let Some(statements) = parse(sql) {
+            if let [Statement::Query(q)] = statements.as_slice() {
+                query(q, &mut out);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn check_expr(e: &Expr, schema: &str, depth: usize) -> bool {
@@ -533,11 +831,12 @@ mod tests {
         );
         let supported = std::thread::Builder::new()
             .stack_size(1024 * 1024)
-            .spawn(move || analyze(&sql, "app").replay_supported)
+            .spawn(move || analyze(&sql, "app").unknowns)
             .unwrap()
             .join()
             .unwrap();
-        assert!(!supported);
+        // Bounded recursion: reported as not understood, never a stack overflow.
+        assert!(!supported.is_empty(), "{supported:?}");
     }
     #[test]
     fn oversized_token_streams_and_cascade_hazards_are_explicit() {
@@ -563,15 +862,134 @@ mod tests {
         );
         let result = analyze(sql, "app");
         assert!(result.replay_supported, "{result:?}");
+        assert!(result.unknowns.is_empty(), "{result:?}");
+        // Outside the analyzed subset: replayable in scratch, but never silently
+        // presented as understood.
         for sql in [
             "SELECT pg_advisory_lock(1)",
-            "DO $$ BEGIN PERFORM 1; END $$",
             "CREATE TABLE app.bad (id int DEFAULT pg_advisory_lock(1))",
-            "COMMIT",
             "CREATE TABLE app.bad AS SELECT 1",
             "CREATE TABLE app.bad (id custom_type)",
         ] {
-            assert!(!analyze(sql, "app").replay_supported, "{sql}");
+            let a = analyze(sql, "app");
+            assert!(a.replay_supported, "{sql}");
+            assert!(
+                a.unknowns.iter().any(|u| u == "EFFECTS_NOT_ANALYZED"),
+                "{sql}"
+            );
         }
+        assert!(!analyze("COMMIT", "app").replay_supported);
+    }
+
+    #[test]
+    fn postgres_replays_complete_transactional_sql() {
+        // Real applications use DO blocks, SET CONSTRAINTS, seed data, routines
+        // and scripts larger than the AST token budget. Scratch runs them.
+        let long = "INSERT INTO app.t VALUES (1);\n".repeat(700);
+        for sql in [
+            "DO $$ BEGIN IF true THEN CREATE TABLE app.t(id int); END IF; END $$;",
+            "SET CONSTRAINTS ALL DEFERRED; INSERT INTO app.t VALUES (1);",
+            "CREATE FUNCTION app.f() RETURNS int LANGUAGE sql AS $fn$ SELECT 1; $fn$;",
+            "CREATE TABLE app.c(id int REFERENCES app.t(id) ON DELETE CASCADE);",
+            "ALTER TABLE app.c ADD FOREIGN KEY (id) REFERENCES app.t(id) ON UPDATE CASCADE;",
+            "SELECT pg_advisory_xact_lock(1)",
+            long.as_str(),
+        ] {
+            let a = analyze(sql, "app");
+            assert!(a.replay_supported, "{sql}: {a:?}");
+        }
+        let unparsed = analyze("DO $$ BEGIN PERFORM 1; END $$", "app");
+        assert!(unparsed.unknowns.iter().any(|u| u == "SQL_NOT_PARSED"));
+        assert_eq!(unparsed.operations, ["do"]);
+        let outside = analyze(
+            "CREATE FUNCTION app.f() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+            "app",
+        );
+        assert!(
+            outside.unknowns.iter().any(|u| u == "EFFECTS_NOT_ANALYZED"),
+            "{outside:?}"
+        );
+    }
+    #[test]
+    fn postgres_rejects_statements_that_escape_the_replay_transaction() {
+        for (sql, unknown) in [
+            ("COMMIT", "TRANSACTION_CONTROL"),
+            (
+                "CREATE TABLE app.t(id int); BEGIN; DROP TABLE app.t",
+                "TRANSACTION_CONTROL",
+            ),
+            ("end", "TRANSACTION_CONTROL"),
+            ("SAVEPOINT s", "TRANSACTION_CONTROL"),
+            ("PREPARE TRANSACTION 'x'", "TRANSACTION_CONTROL"),
+            ("SET ROLE postgres", "SESSION_AUTHORIZATION"),
+            ("SET LOCAL ROLE postgres", "SESSION_AUTHORIZATION"),
+            (
+                "set session authorization postgres",
+                "SESSION_AUTHORIZATION",
+            ),
+            ("RESET ALL", "SESSION_AUTHORIZATION"),
+            (
+                "CREATE INDEX CONCURRENTLY i ON app.t(id)",
+                "NON_TRANSACTIONAL",
+            ),
+            ("DROP INDEX CONCURRENTLY app.i", "NON_TRANSACTIONAL"),
+            ("VACUUM", "NON_TRANSACTIONAL"),
+            ("COPY app.t FROM PROGRAM 'id'", "SERVER_SCOPE"),
+            ("ALTER SYSTEM SET work_mem = '1GB'", "SERVER_SCOPE"),
+            ("CREATE DATABASE other", "SERVER_SCOPE"),
+            (
+                "DO $$ BEGIN END $$; DROP TABLE app.t CASCADE",
+                "SQL_UNSUPPORTED",
+            ),
+            ("TRUNCATE app.t CASCADE", "SQL_UNSUPPORTED"),
+        ] {
+            let a = analyze(sql, "app");
+            assert!(!a.replay_supported, "{sql}");
+            assert!(a.unknowns.iter().any(|u| u == unknown), "{sql}: {a:?}");
+        }
+        // A quoted or dollar-quoted keyword is data, not a statement boundary.
+        let a = analyze("DO $$ BEGIN RAISE NOTICE 'COMMIT; SET ROLE x'; END $$; INSERT INTO app.t VALUES ('BEGIN;')", "app");
+        assert!(a.replay_supported, "{a:?}");
+        assert_eq!(a.operations.len(), 2, "{a:?}");
+    }
+    #[test]
+    fn check_tables_lists_every_table_a_check_reads() {
+        assert_eq!(
+            check_tables(
+                "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE (SELECT count(*) FROM APP.\"Items\") > 0) FROM app.orders",
+                "app"
+            ),
+            [("app".to_string(), "Items".to_string()), ("app".to_string(), "orders".to_string())]
+        );
+        assert!(check_tables("SELECT true", "app").is_empty());
+        assert!(check_tables("DELETE FROM app.orders", "app").is_empty());
+    }
+    #[test]
+    fn sql_standard_routine_bodies_stay_one_statement() {
+        let sql = "CREATE FUNCTION app.f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 2; END; CREATE TABLE app.t(id int);";
+        let a = analyze(sql, "app");
+        assert!(a.replay_supported, "{a:?}");
+        assert_eq!(a.operations.len(), 2, "{a:?}");
+        assert!(
+            !a.unknowns.iter().any(|u| u == "TRANSACTION_CONTROL"),
+            "{a:?}"
+        );
+        // CASE ... END inside the body does not close it.
+        let case = "CREATE FUNCTION app.f(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN x > 0 THEN 1 ELSE 2 END; SELECT 2; END; CREATE TABLE app.t(id int);";
+        let a = analyze(case, "app");
+        assert!(a.replay_supported, "{a:?}");
+        assert_eq!(a.operations.len(), 2, "{a:?}");
+        // Splitting is a heuristic; it must never hide transaction control.
+        // A column named `case` defeats the CASE counter, so these are refused.
+        for hidden in [
+            "CREATE FUNCTION app.f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 AS case; END; COMMIT;",
+            "CREATE FUNCTION app.f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1 AS case; END; COMMIT; SELECT CASE WHEN true THEN 1 END; END;",
+        ] {
+            let a = analyze(hidden, "app");
+            assert!(!a.replay_supported, "{hidden}: {a:?}");
+            assert!(a.unknowns.iter().any(|u| u == "STATEMENT_BOUNDARY_UNCERTAIN"), "{a:?}");
+        }
+        // A bare END after the body is still transaction control.
+        assert!(!analyze("CREATE TABLE app.t(id int); END;", "app").replay_supported);
     }
 }
