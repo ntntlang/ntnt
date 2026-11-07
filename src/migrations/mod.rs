@@ -367,9 +367,13 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 .into_iter()
                 .flatten()
             {
+                let statements = match lock["through"].as_u64() {
+                    Some(end) => format!("statements {}-{end}", lock["statement"]),
+                    None => format!("statement {}", lock["statement"]),
+                };
                 println!(
-                    "  Lock: statement {} takes {} on {}",
-                    lock["statement"], lock["mode"], lock["relation"]
+                    "  Lock: {statements} take {} on {}",
+                    lock["mode"], lock["relation"]
                 );
             }
             for warning in migration["analysis"]["lock_warnings"]

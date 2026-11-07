@@ -19,6 +19,10 @@ pub(crate) struct Analysis {
 pub(crate) struct PredictedLock {
     /// 1-based statement number within the migration script.
     pub statement: usize,
+    /// Last statement of a run of consecutive statements that take exactly
+    /// the same locks (for example, many seed INSERTs). Omitted for one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub through: Option<usize>,
     pub relation: String,
     /// pg_locks mode name, as reported in migrate's progress[].locks.
     pub mode: &'static str,
@@ -562,6 +566,48 @@ fn postgres_script(a: &mut Analysis, sql: &str, schema: &str) {
             }
         }
     }
+    compact_locks(&mut a.locks);
+}
+/// Merge runs of consecutive statements that take exactly the same locks into
+/// one entry per lock, recording the run's last statement in `through`.
+type LockSet = Vec<(String, &'static str)>;
+/// A run of statements (first, last) taking the same lock set.
+type LockRun = (usize, usize, LockSet);
+fn compact_locks(locks: &mut Vec<PredictedLock>) {
+    let mut by_statement: Vec<(usize, LockSet)> = vec![];
+    for l in locks.iter() {
+        match by_statement.last_mut() {
+            Some((n, set)) if *n == l.statement => set.push((l.relation.clone(), l.mode)),
+            _ => by_statement.push((l.statement, vec![(l.relation.clone(), l.mode)])),
+        }
+    }
+    let mut out: Vec<PredictedLock> = vec![];
+    let mut run: Option<LockRun> = None;
+    let flush = |run: Option<LockRun>, out: &mut Vec<PredictedLock>| {
+        if let Some((start, end, set)) = run {
+            for (relation, mode) in set {
+                out.push(PredictedLock {
+                    statement: start,
+                    through: (end > start).then_some(end),
+                    relation,
+                    mode,
+                });
+            }
+        }
+    };
+    for (n, set) in by_statement {
+        run = match run {
+            Some((start, end, current)) if end + 1 == n && current == set => {
+                Some((start, n, current))
+            }
+            previous => {
+                flush(previous, &mut out);
+                Some((n, n, set))
+            }
+        };
+    }
+    flush(run, &mut out);
+    *locks = out;
 }
 const ACCESS_EXCLUSIVE: &str = "AccessExclusiveLock";
 const SHARE_ROW_EXCLUSIVE: &str = "ShareRowExclusiveLock";
@@ -641,6 +687,7 @@ fn predict_locks(
             Some(_) => (),
             None => a.locks.push(PredictedLock {
                 statement: number,
+                through: None,
                 relation: table.clone(),
                 mode,
             }),
@@ -683,7 +730,8 @@ fn predict_locks(
                     }
                 }
             }
-            if let Some(table) = managed_table(&t.name, schema) {
+            // IF NOT EXISTS may find an existing, populated table.
+            if let Some(table) = managed_table(&t.name, schema).filter(|_| !t.if_not_exists) {
                 created.insert(table);
             }
         }
@@ -764,7 +812,18 @@ fn predict_locks(
                             _ => false,
                         });
                         if rewrites {
-                            warn(a, table, "MAY_REWRITE_TABLE", "A volatile default, identity or stored generated column rewrites the whole table while holding an exclusive lock.");
+                            warn(a, table.clone(), "MAY_REWRITE_TABLE", "A volatile default, identity or stored generated column rewrites the whole table while holding an exclusive lock.");
+                        }
+                        for o in &column_def.options {
+                            match &o.option {
+                                ColumnOption::Unique(_) | ColumnOption::PrimaryKey(_) => {
+                                    warn(a, table.clone(), "SCANS_TABLE_UNDER_LOCK", UNIQUE)
+                                }
+                                ColumnOption::Check(_) => {
+                                    warn(a, table.clone(), "SCANS_TABLE_UNDER_LOCK", SCAN)
+                                }
+                                _ => (),
+                            }
                         }
                         for o in &column_def.options {
                             if let ColumnOption::ForeignKey(fk) = &o.option {
@@ -846,8 +905,9 @@ fn predict_locks(
         | Statement::CreateView(_)
         | Statement::CreateSchema { .. }
         | Statement::CreateExtension(_)
-        | Statement::CreateSequence { .. }
-        | Statement::Query(_) => (),
+        | Statement::CreateSequence { .. } => (),
+        // Row locks (FOR UPDATE) and called functions can take any lock.
+        Statement::Query(_) => a.unknowns.push("LOCKS_NOT_PREDICTED".into()),
         _ => a.unknowns.push("LOCKS_NOT_PREDICTED".into()),
     }
 }
@@ -1345,6 +1405,26 @@ mod tests {
             assert_eq!(locks(sql), expected, "{sql}");
             assert!(!analyze(sql, "app").unknowns.iter().any(|u| u == "LOCKS_NOT_PREDICTED"), "{sql}");
         }
+        // Queries can lock rows or call functions that take any lock.
+        for sql in [
+            "SELECT * FROM app.t FOR UPDATE",
+            "SELECT pg_advisory_lock(1)",
+        ] {
+            assert!(
+                analyze(sql, "app")
+                    .unknowns
+                    .iter()
+                    .any(|u| u == "LOCKS_NOT_PREDICTED"),
+                "{sql}"
+            );
+        }
+        // Consecutive statements with the same lock collapse into one range,
+        // so large seed migrations stay within the plan size limit.
+        let seed = "INSERT INTO app.t(id) VALUES (1);".repeat(5000);
+        let a = analyze(&seed, "app");
+        assert_eq!(a.locks.len(), 1, "{:?}", &a.locks[..3.min(a.locks.len())]);
+        assert_eq!((a.locks[0].statement, a.locks[0].through), (1, Some(5000)));
+        assert!(serde_json::to_string(&a).unwrap().len() < 200_000);
         let unknown = analyze("DO $$ BEGIN PERFORM 1; END $$", "app");
         assert!(
             unknown.unknowns.iter().any(|u| u == "LOCKS_NOT_PREDICTED"),
@@ -1369,6 +1449,23 @@ mod tests {
             ("CREATE TABLE app.n(id int); CREATE INDEX i ON app.n(id); ALTER TABLE app.n ALTER COLUMN id SET NOT NULL", vec![]),
         ] {
             assert_eq!(warnings(sql), expected, "{sql}");
+        }
+        // IF NOT EXISTS may find an existing, populated table.
+        assert_eq!(
+            warnings("CREATE TABLE IF NOT EXISTS app.t(id int); CREATE INDEX i ON app.t(id)"),
+            vec![pair("t", "BLOCKS_WRITES_WHILE_INDEXING")]
+        );
+        // Inline constraints on a new column still do work under the lock.
+        for sql in [
+            "ALTER TABLE app.t ADD COLUMN x int UNIQUE",
+            "ALTER TABLE app.t ADD COLUMN x int CHECK (x > 0)",
+            "ALTER TABLE app.t ADD COLUMN x int PRIMARY KEY",
+        ] {
+            assert_eq!(
+                warnings(sql),
+                vec![pair("t", "SCANS_TABLE_UNDER_LOCK")],
+                "{sql}"
+            );
         }
         let a = analyze(
             "CREATE TABLE app.n(id int); CREATE INDEX i ON app.n(id)",
