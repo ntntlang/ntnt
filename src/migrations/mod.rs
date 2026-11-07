@@ -362,6 +362,26 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 migration["analysis"]["hazards"],
                 migration["analysis"]["unknowns"]
             );
+            for lock in migration["analysis"]["locks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                println!(
+                    "  Lock: statement {} takes {} on {}",
+                    lock["statement"], lock["mode"], lock["relation"]
+                );
+            }
+            for warning in migration["analysis"]["lock_warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                println!(
+                    "  Warning {} on {} (statement {}): {}",
+                    warning["code"], warning["relation"], warning["statement"], warning["message"]
+                );
+            }
         }
         for d in report["diagnostics"].as_array().into_iter().flatten() {
             println!(

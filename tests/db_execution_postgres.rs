@@ -1496,3 +1496,86 @@ fn deferred_checks_get_the_script_time_limit() {
     let r = f.apply("plan.json", plan["plan_digest"].as_str());
     assert_eq!(r["outcome"], "pass", "{r}");
 }
+
+fn lock_strength(mode: &str) -> usize {
+    [
+        "AccessShareLock",
+        "RowShareLock",
+        "RowExclusiveLock",
+        "ShareUpdateExclusiveLock",
+        "ShareLock",
+        "ShareRowExclusiveLock",
+        "ExclusiveLock",
+        "AccessExclusiveLock",
+    ]
+    .iter()
+    .position(|m| *m == mode)
+    .unwrap_or_else(|| panic!("unknown lock mode {mode}"))
+}
+fn strongest(locks: &Value) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::<String, String>::new();
+    for l in locks.as_array().unwrap() {
+        let (r, m) = (l["relation"].as_str().unwrap(), l["mode"].as_str().unwrap());
+        if out
+            .get(r)
+            .is_none_or(|old| lock_strength(m) > lock_strength(old))
+        {
+            out.insert(r.to_string(), m.to_string());
+        }
+    }
+    out
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn planned_locks_match_the_locks_migrate_takes() {
+    // The plan predicts locks from SQL; migrate reports what PostgreSQL held.
+    // For every predicted table, the strongest modes must agree.
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.p(id INTEGER PRIMARY KEY);
+         CREATE TABLE app.t(id INTEGER);
+         CREATE TABLE app.c(pid INTEGER);",
+    );
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .batch_execute("INSERT INTO app.p VALUES (1); INSERT INTO app.t VALUES (1); INSERT INTO app.c VALUES (1)")
+        .unwrap();
+    f.sql(
+        "0002_expand.sql",
+        "ALTER TABLE app.t ADD CONSTRAINT t_positive CHECK (id > 0) NOT VALID;
+         ALTER TABLE app.t VALIDATE CONSTRAINT t_positive;
+         CREATE INDEX t_id ON app.t(id);
+         ALTER TABLE app.c ADD CONSTRAINT c_fk FOREIGN KEY (pid) REFERENCES app.p(id) NOT VALID;
+         INSERT INTO app.p VALUES (5);",
+    );
+    let plan = f.plan("expand.json");
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let analysis = &plan["plan"]["pending"][0]["analysis"];
+    let predicted = strongest(&analysis["locks"]);
+    assert_eq!(
+        predicted.keys().collect::<Vec<_>>(),
+        ["c", "p", "t"],
+        "{analysis}"
+    );
+    assert!(analysis["lock_warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w["code"] == "BLOCKS_WRITES_WHILE_INDEXING" && w["relation"] == "t"));
+    let r = f.apply("expand.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let actual = strongest(&r["progress"][1]["locks"]);
+    for (relation, mode) in &predicted {
+        assert_eq!(
+            actual.get(relation),
+            Some(mode),
+            "{relation}: predicted {predicted:?}, held {actual:?}"
+        );
+    }
+}

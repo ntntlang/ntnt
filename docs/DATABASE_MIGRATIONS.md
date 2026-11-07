@@ -210,6 +210,17 @@ Text inside `DO` and function bodies is not inspected; it runs inside the same t
 
 Each pending migration's `analysis` lists its statements' `operations`, known lock/effect `hazards`, and `unknowns`. `SQL_NOT_PARSED` means a statement (for example a `DO` block) was not parsed. `EFFECTS_NOT_ANALYZED` means it parsed but falls outside the subset NTNT analyzes in detail: ordinary tables with built-in types and literal defaults, simple constraints, column-only btree indexes, and non-cascading table/index drops. Unknowns are review prompts, not blockers: the replayed catalog and drift comparison still apply. **Scratch replay is not a sandbox.** Use a disposable database with a separate unprivileged owner, as required above.
 
+For PostgreSQL, `analysis.locks` predicts the table locks each statement takes (`statement` is its 1-based position in the script; `mode` uses the same `pg_locks` names as `progress[].locks` after `migrate`). Predictions come from the SQL and PostgreSQL's documented lock levels, not from replay: replay holds every lock until its single transaction ends and runs on empty tables, so it cannot show which migration took a lock or how long it would block. Statements NTNT cannot parse, `DO` blocks and `DROP INDEX` add `LOCKS_NOT_PREDICTED` to `unknowns`. Tables created earlier in the same migration are omitted.
+
+`analysis.lock_warnings` flags locks that block or scan an existing table:
+
+- `BLOCKS_WRITES_WHILE_INDEXING`: `CREATE INDEX` without `CONCURRENTLY`.
+- `SCANS_TABLE_UNDER_LOCK`: `SET NOT NULL`, a `CHECK` or foreign key added without `NOT VALID`, or a primary key/unique constraint built without an existing index.
+- `REWRITES_TABLE`: a column type change.
+- `MAY_REWRITE_TABLE`: a new column with a volatile default, identity or stored generated value.
+
+Warnings are review prompts and do not block a plan. The safer forms are `ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT` in a later migration, and a `CHECK (column IS NOT NULL) NOT VALID` validated before `SET NOT NULL`. `CREATE INDEX CONCURRENTLY` cannot run inside a migration transaction and is not supported yet.
+
 ## Inspection coverage and drift
 
 The PostgreSQL adapter declares capabilities **per operation and observed engine version** for PostgreSQL 16–18. SQLite declares its own coverage below; other engines/versions are rejected. It reads only fixed catalog queries and a structurally validated ledger, in a dedicated `REPEATABLE READ READ ONLY` target transaction. It never prepares/executes application queries, invokes a user's check/routine, reads live application rows, or initializes target state.
