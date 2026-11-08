@@ -108,6 +108,75 @@ impl Adapter {
             Self::Sqlite(db) => db.begin_migration().await,
         }
     }
+    /// PostgreSQL: SHARE-lock tables that checks read. SQLite already holds
+    /// the database writer lock from BEGIN IMMEDIATE.
+    pub async fn lock_for_checks(&self, tables: &[(String, String)]) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.lock_for_checks(tables).await,
+            Self::Sqlite(_) => Ok(()),
+        }
+    }
+    pub async fn index_validity(&self, schema: &str, name: &str) -> Result<Option<bool>> {
+        match self {
+            Self::Postgres(pg) => pg.index_validity(schema, name).await,
+            Self::Sqlite(_) => Ok(None),
+        }
+    }
+    pub async fn build_concurrent_index(&self, migration: &Migration, schema: &str) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.build_concurrent_index(migration, schema).await,
+            Self::Sqlite(_) => Err(Diagnostic::new(
+                "DB_REPLAY_UNSUPPORTED",
+                "SQLite has no concurrent index builds.",
+            )),
+        }
+    }
+    pub async fn index_building(&self, schema: &str, name: &str) -> Result<bool> {
+        match self {
+            Self::Postgres(pg) => pg.index_building(schema, name).await,
+            Self::Sqlite(_) => Ok(false),
+        }
+    }
+    /// Record a non-transactional migration as `running` before it starts.
+    pub async fn record_attempt(
+        &self,
+        migration: &Migration,
+        position: usize,
+        database: &str,
+        schema: &str,
+        present: bool,
+    ) -> Result<()> {
+        let entry = super::model::HistoryEntry {
+            position: position as i64,
+            id: migration.id.to_string(),
+            name: migration.name.clone(),
+            checksum: migration.checksum.clone(),
+            state: "running".into(),
+        };
+        match self {
+            Self::Postgres(pg) => pg.record_entry(&entry, database, schema, present).await,
+            Self::Sqlite(_) => Err(unsupported_attempt()),
+        }
+    }
+    pub async fn resolve_attempt(&self, position: usize, applied: bool) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.resolve_attempt(position, applied).await,
+            Self::Sqlite(_) => Err(unsupported_attempt()),
+        }
+    }
+    pub async fn drop_invalid_index(&self, schema: &str, name: &str) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.drop_invalid_index(schema, name).await,
+            Self::Sqlite(_) => Ok(()),
+        }
+    }
+    /// Locks the current migration transaction holds on managed tables.
+    pub async fn relation_locks(&self, schema: &str) -> Result<Option<Value>> {
+        match self {
+            Self::Postgres(pg) => pg.relation_locks(schema).await.map(Some),
+            Self::Sqlite(_) => Ok(None),
+        }
+    }
     pub async fn validate_execution_scope(&self, schema: &str) -> Result<()> {
         match self {
             Self::Postgres(pg) => pg.validate_execution_scope(schema).await,
@@ -203,4 +272,11 @@ impl Adapter {
             }
         }
     }
+}
+
+fn unsupported_attempt() -> Diagnostic {
+    Diagnostic::new(
+        "DB_REPLAY_UNSUPPORTED",
+        "SQLite has no non-transactional migrations.",
+    )
 }
