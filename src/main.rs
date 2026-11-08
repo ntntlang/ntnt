@@ -2802,38 +2802,35 @@ fn test_http_server(
             let mut response_data = None;
 
             while attempts < max_attempts {
-                match TcpStream::connect(format!("127.0.0.1:{}", port)) {
-                    Ok(mut stream) => {
-                        stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+                if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
-                        if stream.write_all(request.as_bytes()).is_ok() {
-                            let mut response = Vec::new();
-                            let _ = stream.read_to_end(&mut response);
+                    if stream.write_all(request.as_bytes()).is_ok() {
+                        let mut response = Vec::new();
+                        let _ = stream.read_to_end(&mut response);
 
-                            if !response.is_empty() {
-                                let response_str = String::from_utf8_lossy(&response).to_string();
-                                let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
-                                let headers = parts.get(0).unwrap_or(&"");
-                                let body = parts.get(1).unwrap_or(&"").to_string();
+                        if !response.is_empty() {
+                            let response_str = String::from_utf8_lossy(&response).to_string();
+                            let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
+                            let headers = parts.first().unwrap_or(&"");
+                            let body = parts.get(1).unwrap_or(&"").to_string();
 
-                                let status_code = headers
-                                    .lines()
-                                    .next()
-                                    .unwrap_or("")
-                                    .split_whitespace()
-                                    .nth(1)
-                                    .unwrap_or("0")
-                                    .parse::<u16>()
-                                    .unwrap_or(0);
+                            let status_code = headers
+                                .lines()
+                                .next()
+                                .unwrap_or("")
+                                .split_whitespace()
+                                .nth(1)
+                                .unwrap_or("0")
+                                .parse::<u16>()
+                                .unwrap_or(0);
 
-                                response_data =
-                                    Some((method.clone(), req_path.clone(), status_code, body));
-                                break;
-                            }
+                            response_data =
+                                Some((method.clone(), req_path.clone(), status_code, body));
+                            break;
                         }
                     }
-                    Err(_) => {}
                 }
                 attempts += 1;
                 thread::sleep(Duration::from_millis(100));
@@ -3072,8 +3069,8 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
                         "name": name,
                         "file": relative_path,
                         "line": line,
-                        "params": params.iter().map(|p| param_to_json(p)).collect::<Vec<_>>(),
-                        "return_type": return_type.as_ref().map(|t| type_to_string(t)),
+                        "params": params.iter().map(param_to_json).collect::<Vec<_>>(),
+                        "return_type": return_type.as_ref().map(type_to_string),
                         "contracts": contract_to_json(contract),
                         "attributes": attributes.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
                     });
@@ -4167,7 +4164,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
         // Find line numbers for each import by searching for the module source string
         fn find_import_line(source_lines: &[&str], module: &str, after_line: usize) -> usize {
             for (i, line) in source_lines.iter().enumerate() {
-                if i + 1 <= after_line {
+                if i < after_line {
                     continue;
                 }
                 if line.contains("import") && line.contains(module) {
@@ -4585,7 +4582,7 @@ fn run_intent_check_command(
         use std::process::Command;
         let mut app_process = Command::new(&current_exe)
             .arg("run")
-            .arg(&ntnt_path)
+            .arg(ntnt_path)
             .env("NTNT_LISTEN_PORT", port.to_string())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -5305,7 +5302,7 @@ fn param_to_json(param: &ntnt::ast::Parameter) -> serde_json::Value {
     use serde_json::json;
     json!({
         "name": param.name,
-        "type": param.type_annotation.as_ref().map(|t| type_to_string(t)),
+        "type": param.type_annotation.as_ref().map(type_to_string),
         "has_default": param.default.is_some(),
     })
 }
@@ -6985,7 +6982,7 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             if let Some(note) = truthy.get("note").and_then(|v| v.as_str()) {
                 md.push_str(&format!("\n**Note:** {}\n", note));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         if let Some(falsy) = tf.get("falsy") {
@@ -6997,7 +6994,7 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                     }
                 }
             }
-            md.push_str("\n");
+            md.push('\n');
         }
         md.push_str("---\n\n");
     }
@@ -7086,7 +7083,7 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                                 func.get("example").and_then(|v| v.as_str()).unwrap_or("");
                             md.push_str(&format!("| `{}` | {} | `{}` |\n", name, desc, example));
                         }
-                        md.push_str("\n");
+                        md.push('\n');
                     }
                 }
             }
@@ -7200,7 +7197,7 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                 ));
             }
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     // Write to file
@@ -7333,7 +7330,7 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                         md.push_str(&format!("| `{}` | {} |\n", op, d));
                     }
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
         md.push_str("---\n\n");
@@ -7381,7 +7378,7 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                         md.push_str(&format!("| `{}` | `{}` |\n", term, resolves));
                     }
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
         md.push_str("---\n\n");
@@ -7405,7 +7402,7 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                         md.push_str(&format!("| `{}` | {} |\n", path, d));
                     }
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
         md.push_str("---\n\n");
@@ -7466,7 +7463,7 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                         md.push_str(&format!("| `{}` | {} | `{}` |\n", keyword, desc, example));
                     }
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
 
             if let Some(usage) = keywords.get("usage") {
@@ -7494,7 +7491,7 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                         ));
                     }
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
         md.push_str("---\n\n");
@@ -7527,7 +7524,7 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                         md.push_str(&format!("- `{}`\n", e));
                     }
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
 
@@ -7546,7 +7543,7 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                     md.push_str(&format!("| `{}` | {} |\n", ann, p));
                 }
             }
-            md.push_str("\n");
+            md.push('\n');
         }
         md.push_str("---\n\n");
     }
@@ -7634,7 +7631,7 @@ fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                 md.push_str(&format!("| `{}` | {} |\n", command, desc));
             }
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     // Write to file
@@ -7787,7 +7784,7 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                         md.push_str(&format!("- {}\n", f));
                     }
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
 
@@ -7802,7 +7799,7 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             if let Some(output) = behavior.get("output").and_then(|v| v.as_str()) {
                 md.push_str(&format!("- **Output:** `{}`\n", output));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
         md.push_str("---\n\n");
     }
@@ -7824,7 +7821,7 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                         md.push_str(&format!("| `req.{}` | {} |\n", name, d));
                     }
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
 
@@ -7835,7 +7832,7 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                     md.push_str(&format!("- **{}:** {}\n", name, v));
                 }
             }
-            md.push_str("\n");
+            md.push('\n');
         }
         md.push_str("---\n\n");
     }
@@ -7856,7 +7853,7 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                     md.push_str(&format!("| `{}` | {} |\n", name, v));
                 }
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         if let Some(handlers) = fbr.get("handler_functions") {
@@ -7888,7 +7885,7 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             if let Some(func) = mw.get("function").and_then(|v| v.as_str()) {
                 md.push_str(&format!("- **Function:** {}\n", func));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
         md.push_str("---\n\n");
     }
@@ -7919,7 +7916,7 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             if let Some(rec) = intent.get("recommendation").and_then(|v| v.as_str()) {
                 md.push_str(&format!("- **Recommendation:** {}\n", rec));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
         md.push_str("---\n\n");
     }
@@ -8001,7 +7998,7 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                                 opt_str, typ, default, desc
                             ));
                         }
-                        md.push_str("\n");
+                        md.push('\n');
                     }
                 }
 
@@ -8299,7 +8296,7 @@ fn collect_tnt_files_recursive_migrate(
         let path = entry.path();
         if path.is_dir() {
             collect_tnt_files_recursive_migrate(&path, files)?;
-        } else if path.extension().map_or(false, |ext| ext == "tnt") {
+        } else if path.extension().is_some_and(|ext| ext == "tnt") {
             files.push(path);
         }
     }

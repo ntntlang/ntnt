@@ -141,10 +141,8 @@ fn main() {
         let native_fns = extract_native_functions(&content);
 
         // Only validate coverage if the file has at least one @ntnt block
-        if !docs.is_empty() {
-            if !validate_coverage(&docs, &native_fns, file) {
-                had_errors = true;
-            }
+        if !docs.is_empty() && !validate_coverage(&docs, &native_fns, file) {
+            had_errors = true;
         }
 
         all_docs.extend(docs);

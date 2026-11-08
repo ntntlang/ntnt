@@ -296,11 +296,7 @@ impl Glossary {
             }
 
             // Convert invariant assertions to IAL terms
-            let terms: Vec<Term> = invariant
-                .assertions
-                .iter()
-                .map(|assertion| Term::new(assertion))
-                .collect();
+            let terms: Vec<Term> = invariant.assertions.iter().map(Term::new).collect();
 
             // Add both with and without "invariant." prefix
             vocab.add_terms(&invariant.id, terms.clone());
@@ -1119,117 +1115,114 @@ impl Glossary {
         primitive: &ial::Primitive,
         params: &HashMap<String, ial::Value>,
     ) -> Option<Assertion> {
-        match primitive {
-            ial::Primitive::Check { op, path, expected } => {
-                // Handle code quality assertions first (they use Bool/Number values directly)
-                match (op, path.as_str()) {
-                    (ial::CheckOp::Equals, "code.quality.passed") => {
-                        if let ial::Value::Bool(true) = expected {
-                            return Some(Assertion::CodeQualityPassed);
-                        }
-                        return None;
+        if let ial::Primitive::Check { op, path, expected } = primitive {
+            // Handle code quality assertions first (they use Bool/Number values directly)
+            match (op, path.as_str()) {
+                (ial::CheckOp::Equals, "code.quality.passed") => {
+                    if let ial::Value::Bool(true) = expected {
+                        return Some(Assertion::CodeQualityPassed);
                     }
-                    (ial::CheckOp::Equals, "code.quality.error_count") => {
-                        if let ial::Value::Number(n) = expected {
-                            if *n == 0.0 {
-                                return Some(Assertion::CodeQualityNoErrors);
-                            } else {
-                                return Some(Assertion::CodeQualityErrorCount(*n as u32));
-                            }
-                        }
-                        return None;
-                    }
-                    (ial::CheckOp::Equals, "code.quality.warning_count") => {
-                        if let ial::Value::Number(n) = expected {
-                            if *n == 0.0 {
-                                return Some(Assertion::CodeQualityNoWarnings);
-                            }
-                        }
-                        return None;
-                    }
-                    _ => {}
+                    return None;
                 }
+                (ial::CheckOp::Equals, "code.quality.error_count") => {
+                    if let ial::Value::Number(n) = expected {
+                        if *n == 0.0 {
+                            return Some(Assertion::CodeQualityNoErrors);
+                        } else {
+                            return Some(Assertion::CodeQualityErrorCount(*n as u32));
+                        }
+                    }
+                    return None;
+                }
+                (ial::CheckOp::Equals, "code.quality.warning_count") => {
+                    if let ial::Value::Number(n) = expected {
+                        if *n == 0.0 {
+                            return Some(Assertion::CodeQualityNoWarnings);
+                        }
+                    }
+                    return None;
+                }
+                _ => {}
+            }
 
-                // Substitute params in path (for patterns like response.headers.{name})
-                let substituted_path = {
-                    let mut result = path.clone();
+            // Substitute params in path (for patterns like response.headers.{name})
+            let substituted_path = {
+                let mut result = path.clone();
+                for (name, value) in params {
+                    if let ial::Value::String(v) = value {
+                        result = result.replace(&format!("{{{}}}", name), v);
+                    }
+                }
+                result
+            };
+
+            // Header existence has no expected value; the name lives in the path.
+            if let (ial::CheckOp::Exists, Some(header_name)) =
+                (op, substituted_path.strip_prefix("response.headers."))
+            {
+                if !header_name.is_empty() && !header_name.contains('{') {
+                    return Some(Assertion::HeaderExists(header_name.to_string()));
+                }
+                return None;
+            }
+
+            // Substitute params in expected value for HTTP assertions
+            let expected_str = match expected {
+                ial::Value::String(s) => {
+                    let mut result = s.clone();
                     for (name, value) in params {
                         if let ial::Value::String(v) = value {
                             result = result.replace(&format!("{{{}}}", name), v);
                         }
                     }
                     result
-                };
-
-                // Header existence has no expected value; the name lives in the path.
-                if let (ial::CheckOp::Exists, Some(header_name)) =
-                    (op, substituted_path.strip_prefix("response.headers."))
-                {
-                    if !header_name.is_empty() && !header_name.contains('{') {
-                        return Some(Assertion::HeaderExists(header_name.to_string()));
-                    }
-                    return None;
                 }
+                ial::Value::Number(n) => format!("{}", n),
+                ial::Value::Range(start, end) => format!("{}-{}", start, end),
+                _ => return None,
+            };
 
-                // Substitute params in expected value for HTTP assertions
-                let expected_str = match expected {
-                    ial::Value::String(s) => {
-                        let mut result = s.clone();
-                        for (name, value) in params {
-                            if let ial::Value::String(v) = value {
-                                result = result.replace(&format!("{{{}}}", name), v);
-                            }
-                        }
-                        result
+            match (op, substituted_path.as_str()) {
+                (ial::CheckOp::Equals, "response.status") => {
+                    if let Ok(code) = expected_str.parse::<u16>() {
+                        return Some(Assertion::Status(code));
                     }
-                    ial::Value::Number(n) => format!("{}", n),
-                    ial::Value::Range(start, end) => format!("{}-{}", start, end),
-                    _ => return None,
-                };
-
-                match (op, substituted_path.as_str()) {
-                    (ial::CheckOp::Equals, "response.status") => {
-                        if let Ok(code) = expected_str.parse::<u16>() {
-                            return Some(Assertion::Status(code));
-                        }
-                    }
-                    (ial::CheckOp::InRange, "response.status") => {
-                        // Status range like 2xx
-                        if let ial::Value::Range(start, _) = expected {
-                            return Some(Assertion::Status(*start as u16));
-                        }
-                    }
-                    (ial::CheckOp::Contains, "response.body") => {
-                        return Some(Assertion::BodyContains(expected_str));
-                    }
-                    (ial::CheckOp::NotContains, "response.body") => {
-                        return Some(Assertion::BodyNotContains(expected_str));
-                    }
-                    (ial::CheckOp::Contains, p) if p.starts_with("response.headers.") => {
-                        let header_name = p.trim_start_matches("response.headers.");
-                        return Some(Assertion::HeaderContains(
-                            header_name.to_string(),
-                            expected_str,
-                        ));
-                    }
-                    (ial::CheckOp::Equals, p) if p.starts_with("response.headers.") => {
-                        let header_name = p.trim_start_matches("response.headers.");
-                        return Some(Assertion::HeaderEquals(
-                            header_name.to_string(),
-                            expected_str,
-                        ));
-                    }
-                    (ial::CheckOp::Exists, p) if p.contains("json") || p.contains("id") => {
-                        return Some(Assertion::JsonPathExists(expected_str));
-                    }
-                    // Unit test result assertions
-                    (ial::CheckOp::Equals, "result") => {
-                        return Some(Assertion::ResultEquals(expected_str));
-                    }
-                    _ => {}
                 }
+                (ial::CheckOp::InRange, "response.status") => {
+                    // Status range like 2xx
+                    if let ial::Value::Range(start, _) = expected {
+                        return Some(Assertion::Status(*start as u16));
+                    }
+                }
+                (ial::CheckOp::Contains, "response.body") => {
+                    return Some(Assertion::BodyContains(expected_str));
+                }
+                (ial::CheckOp::NotContains, "response.body") => {
+                    return Some(Assertion::BodyNotContains(expected_str));
+                }
+                (ial::CheckOp::Contains, p) if p.starts_with("response.headers.") => {
+                    let header_name = p.trim_start_matches("response.headers.");
+                    return Some(Assertion::HeaderContains(
+                        header_name.to_string(),
+                        expected_str,
+                    ));
+                }
+                (ial::CheckOp::Equals, p) if p.starts_with("response.headers.") => {
+                    let header_name = p.trim_start_matches("response.headers.");
+                    return Some(Assertion::HeaderEquals(
+                        header_name.to_string(),
+                        expected_str,
+                    ));
+                }
+                (ial::CheckOp::Exists, p) if p.contains("json") || p.contains("id") => {
+                    return Some(Assertion::JsonPathExists(expected_str));
+                }
+                // Unit test result assertions
+                (ial::CheckOp::Equals, "result") => {
+                    return Some(Assertion::ResultEquals(expected_str));
+                }
+                _ => {}
             }
-            _ => {}
         }
         None
     }
@@ -1862,7 +1855,7 @@ impl Glossary {
             let term_pattern = Self::strip_param_placeholders(&term.term);
             let term_lower = term_pattern.to_lowercase();
 
-            if when_lower.contains(&term_lower.trim()) {
+            if when_lower.contains(term_lower.trim()) {
                 // Check if this term has keyword syntax with input:
                 if KeywordSyntax::is_keyword_syntax(&term.meaning) {
                     if let Some(syntax) = KeywordSyntax::parse(&term.meaning) {
@@ -2205,7 +2198,7 @@ impl Glossary {
             if ch == '"' || ch == '\'' || ch == '"' {
                 let quote = ch;
                 let mut param = String::new();
-                while let Some(next) = chars.next() {
+                for next in chars.by_ref() {
                     if next == quote || next == '"' || next == '\'' {
                         break;
                     }
@@ -2540,7 +2533,7 @@ pub fn run_assertions_ial(
     // Add headers to context
     for (name, value) in headers {
         ctx.set(
-            &format!("response.headers.{}", name.to_lowercase()),
+            format!("response.headers.{}", name.to_lowercase()),
             ial::Value::String(value.clone()),
         );
     }
@@ -2995,7 +2988,7 @@ impl IntentFile {
     pub fn get_test_data_for_feature(&self, feature_id: &str) -> Vec<&TestDataSection> {
         self.test_data
             .iter()
-            .filter(|td| td.for_feature.as_ref().map_or(false, |f| f == feature_id))
+            .filter(|td| td.for_feature.as_ref().is_some_and(|f| f == feature_id))
             .collect()
     }
 
@@ -3454,16 +3447,15 @@ impl IntentFile {
                 }
 
                 // Assertion lines (→ assertion or - assertion)
-                if in_invariant_assertions {
-                    if trimmed.starts_with('→') || trimmed.starts_with('-') {
-                        let assertion = trimmed
-                            .trim_start_matches('→')
-                            .trim_start_matches('-')
-                            .trim()
-                            .to_string();
-                        invariant.assertions.push(assertion);
-                        continue;
-                    }
+                if in_invariant_assertions && (trimmed.starts_with('→') || trimmed.starts_with('-'))
+                {
+                    let assertion = trimmed
+                        .trim_start_matches('→')
+                        .trim_start_matches('-')
+                        .trim()
+                        .to_string();
+                    invariant.assertions.push(assertion);
+                    continue;
                 }
             }
 
@@ -3650,16 +3642,15 @@ impl IntentFile {
                 }
 
                 // Inherent behavior outcomes
-                if in_component_inherent {
-                    if trimmed.starts_with("→") || trimmed.starts_with("->") {
-                        let outcome = trimmed
-                            .trim_start_matches("→")
-                            .trim_start_matches("->")
-                            .trim()
-                            .to_string();
-                        component.inherent_behavior.push(outcome);
-                        continue;
-                    }
+                if in_component_inherent && (trimmed.starts_with("→") || trimmed.starts_with("->"))
+                {
+                    let outcome = trimmed
+                        .trim_start_matches("→")
+                        .trim_start_matches("->")
+                        .trim()
+                        .to_string();
+                    component.inherent_behavior.push(outcome);
+                    continue;
                 }
 
                 continue;
@@ -4002,7 +3993,7 @@ pub fn run_intent_check(
 
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
-    let mut parser = IntentParser::new(tokens).with_source_file(&ntnt_path);
+    let mut parser = IntentParser::new(tokens).with_source_file(ntnt_path);
     let ast = parser.parse()?;
 
     // Run (will exit when shutdown_flag is set)
@@ -4159,7 +4150,7 @@ fn evaluate_code_quality_assertion(
         Assertion::CodeQualityPassed => {
             let passed = ctx
                 .get("code.quality.passed")
-                .map_or(false, |v| matches!(v, Value::Bool(true)));
+                .is_some_and(|v| matches!(v, Value::Bool(true)));
 
             let actual = ctx.get("code.quality.passed").map(|v| format!("{:?}", v));
 
@@ -4175,7 +4166,7 @@ fn evaluate_code_quality_assertion(
         }
 
         Assertion::CodeQualityNoErrors => {
-            let passed = ctx.get("code.quality.error_count").map_or(false, |v| {
+            let passed = ctx.get("code.quality.error_count").is_some_and(|v| {
                 if let Value::Number(n) = v {
                     *n == 0.0
                 } else {
@@ -4209,7 +4200,7 @@ fn evaluate_code_quality_assertion(
         }
 
         Assertion::CodeQualityNoWarnings => {
-            let passed = ctx.get("code.quality.warning_count").map_or(true, |v| {
+            let passed = ctx.get("code.quality.warning_count").is_none_or(|v| {
                 if let Value::Number(n) = v {
                     *n == 0.0
                 } else {
@@ -4274,11 +4265,11 @@ fn evaluate_code_quality_assertion(
             let passed = if *expected == 0 {
                 // Exit code 0 means lint passed
                 ctx.get("code.quality.passed")
-                    .map_or(false, |v| matches!(v, Value::Bool(true)))
+                    .is_some_and(|v| matches!(v, Value::Bool(true)))
             } else {
                 // Non-zero exit code means lint failed
                 ctx.get("code.quality.passed")
-                    .map_or(false, |v| matches!(v, Value::Bool(false)))
+                    .is_some_and(|v| matches!(v, Value::Bool(false)))
             };
 
             let actual = ctx.get("code.quality.passed").map(|v| format!("{:?}", v));
@@ -4301,7 +4292,7 @@ fn evaluate_code_quality_assertion(
         Assertion::CliOutputContains(text) => {
             // Check if error messages contain the text
             let errors = ctx.get("code.quality.errors");
-            let passed = errors.map_or(false, |v| {
+            let passed = errors.is_some_and(|v| {
                 if let Value::Array(arr) = v {
                     arr.iter().any(|e| {
                         if let Value::String(s) = e {
@@ -4329,7 +4320,7 @@ fn evaluate_code_quality_assertion(
         Assertion::CliOutputNotContains(text) => {
             // Check that error messages don't contain the text
             let errors = ctx.get("code.quality.errors");
-            let passed = errors.map_or(true, |v| {
+            let passed = errors.is_none_or(|v| {
                 if let Value::Array(arr) = v {
                     !arr.iter().any(|e| {
                         if let Value::String(s) = e {

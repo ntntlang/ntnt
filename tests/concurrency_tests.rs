@@ -48,7 +48,7 @@ fn run_ntnt_code_with_env(code: &str, env: &[(&str, &str)]) -> (String, String, 
     // wrapper needed to prevent zombie processes. This also makes tests portable
     // across Linux, macOS, and Windows (no dependency on `timeout` from GNU coreutils).
     let output = Command::new(binary)
-        .args(&["run", &test_file])
+        .args(["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
         .envs(env.iter().copied())
@@ -1505,7 +1505,7 @@ print("status: " + status["status"])
     let binary = env!("CARGO_BIN_EXE_ntnt");
 
     let output = std::process::Command::new(binary)
-        .args(&["run", &test_file])
+        .args(["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
         .env("NTNT_TASK_REMOVAL_TTL", "1") // 1 second removal TTL
@@ -1554,7 +1554,7 @@ print("no_limit")
     let binary = env!("CARGO_BIN_EXE_ntnt");
 
     let output = std::process::Command::new(binary)
-        .args(&["run", &test_file])
+        .args(["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
         .env("NTNT_MAX_TASKS", "3")

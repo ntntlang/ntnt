@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(c.read_burst, 600);
         assert_eq!(c.exempt, vec!["/health", "/ready"]);
         assert_eq!(c.ipv6_prefix, 64);
-        assert!(cfg(&[("NTNT_RATE_LIMIT", "off")]).unwrap().enabled == false);
+        assert!(!cfg(&[("NTNT_RATE_LIMIT", "off")]).unwrap().enabled);
         assert!(cfg(&[("NTNT_RATE_LIMIT", "on")]).unwrap().enabled);
     }
 

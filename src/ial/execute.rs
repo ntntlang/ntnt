@@ -503,14 +503,14 @@ fn execute_read_file(path: &str, ctx: &mut Context) -> ExecuteResult {
             let file_path = format!("file.{}.content", path.replace(['/', '\\', '.'], "_"));
             ctx.set(&file_path, Value::String(content));
             ctx.set(
-                &format!("file.{}.exists", path.replace(['/', '\\', '.'], "_")),
+                format!("file.{}.exists", path.replace(['/', '\\', '.'], "_")),
                 Value::Bool(true),
             );
             ExecuteResult::pass(format!("Read file: {}", path))
         }
         Err(e) => {
             ctx.set(
-                &format!("file.{}.exists", path.replace(['/', '\\', '.'], "_")),
+                format!("file.{}.exists", path.replace(['/', '\\', '.'], "_")),
                 Value::Bool(false),
             );
             ExecuteResult::fail(format!("Read file: {}", path), e.to_string())

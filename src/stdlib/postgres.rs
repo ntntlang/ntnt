@@ -919,7 +919,7 @@ fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
                 let registry = TXN_REGISTRY.lock().map_err(|e| {
                     IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
                 })?;
-                registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
+                registry.get(&conn_id).cloned().ok_or_else(|| {
                     IntentError::runtime_error("Transaction connection lost".to_string())
                 })
             }?;
@@ -970,7 +970,7 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
                 let registry = TXN_REGISTRY.lock().map_err(|e| {
                     IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
                 })?;
-                registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
+                registry.get(&conn_id).cloned().ok_or_else(|| {
                     IntentError::runtime_error("Transaction connection lost".to_string())
                 })
             }?;
@@ -1017,7 +1017,7 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
                 let registry = TXN_REGISTRY.lock().map_err(|e| {
                     IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
                 })?;
-                registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
+                registry.get(&conn_id).cloned().ok_or_else(|| {
                     IntentError::runtime_error("Transaction connection lost".to_string())
                 })
             }?;
@@ -1157,7 +1157,7 @@ fn pg_commit(conn: &Value) -> Result<Value> {
             let registry = TXN_REGISTRY.lock().map_err(|e| {
                 IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
             })?;
-            registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
+            registry.get(&conn_id).cloned().ok_or_else(|| {
                 IntentError::runtime_error("No active transaction to commit".to_string())
             })
         }?;
@@ -1187,7 +1187,7 @@ fn pg_rollback(conn: &Value) -> Result<Value> {
             let registry = TXN_REGISTRY.lock().map_err(|e| {
                 IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
             })?;
-            registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
+            registry.get(&conn_id).cloned().ok_or_else(|| {
                 IntentError::runtime_error("No active transaction to rollback".to_string())
             })
         }?;

@@ -473,10 +473,8 @@ mod tests {
                             match stream.read(&mut len) {
                                 Ok(n) if n > 0 => {
                                     b.fetch_add(n, Ordering::SeqCst);
-                                    if n < 2 {
-                                        if stream.read_exact(&mut len[n..]).is_err() {
-                                            continue;
-                                        }
+                                    if n < 2 && stream.read_exact(&mut len[n..]).is_err() {
+                                        continue;
                                     }
                                 }
                                 _ => continue,

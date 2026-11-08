@@ -103,6 +103,12 @@ impl CancelState {
     }
 }
 
+impl Default for CancelToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CancelToken {
     pub fn new() -> Self {
         CancelToken {
@@ -2782,7 +2788,7 @@ fn is_task_failure(val: &Value) -> bool {
             enum_name,
             variant,
             values,
-        } if enum_name == "Result" && variant == "Ok" => values.first().map_or(false, |inner| {
+        } if enum_name == "Result" && variant == "Ok" => values.first().is_some_and(|inner| {
             matches!(inner, Value::EnumValue { enum_name, variant, .. }
                 if enum_name == "Result" && variant == "Err")
         }),

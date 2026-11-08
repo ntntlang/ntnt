@@ -1008,10 +1008,9 @@ fn run_magic_link_request_flow(
     if delivery
         .as_ref()
         .map_or(true, |value| !delivery_result_is_ok(value.clone()))
+        && discard_magic_link_record(&token).is_err()
     {
-        if discard_magic_link_record(&token).is_err() {
-            eprintln!("[auth] magic-link delivery cleanup failed");
-        }
+        eprintln!("[auth] magic-link delivery cleanup failed");
     }
 
     Ok(generic_magic_link_response_started(

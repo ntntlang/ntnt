@@ -580,7 +580,7 @@ impl<'a> Lexer<'a> {
                 }
                 let mut expr = String::new();
                 let mut brace_depth = 1;
-                while let Some(c) = chars.next() {
+                for c in chars.by_ref() {
                     if c == '{' {
                         brace_depth += 1;
                         expr.push(c);

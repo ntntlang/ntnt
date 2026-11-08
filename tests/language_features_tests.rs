@@ -257,7 +257,7 @@ fn run_ntnt_code(code: &str) -> (String, String, i32) {
     };
 
     let output = Command::new(binary)
-        .args(&["run", &test_file])
+        .args(["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Failed to execute ntnt");
@@ -293,7 +293,7 @@ fn run_ntnt_code_with_env(code: &str, env_vars: &[(&str, &str)]) -> (String, Str
     };
 
     let mut cmd = Command::new(binary);
-    cmd.args(&["run", &test_file])
+    cmd.args(["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"));
     for (k, v) in env_vars {
         cmd.env(k, v);
@@ -332,7 +332,7 @@ fn run_ntnt_parse(code: &str) -> (String, String, i32) {
     };
 
     let output = Command::new(binary)
-        .args(&["parse", &test_file, "--json"])
+        .args(["parse", &test_file, "--json"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Failed to execute ntnt");
@@ -6028,7 +6028,7 @@ print(result)
     };
 
     let output = Command::new(binary)
-        .args(&["run", main_tnt.to_str().unwrap()])
+        .args(["run", main_tnt.to_str().unwrap()])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Failed to execute ntnt");
@@ -6090,7 +6090,7 @@ print(result)
     };
 
     let output = Command::new(binary)
-        .args(&["run", main_tnt.to_str().unwrap()])
+        .args(["run", main_tnt.to_str().unwrap()])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Failed to execute ntnt");

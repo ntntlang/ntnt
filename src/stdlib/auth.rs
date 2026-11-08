@@ -195,7 +195,7 @@ fn make_err(value: Value) -> Value {
 // ============================================================================
 
 /// Configuration for an OAuth provider
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProviderConfig {
     pub name: String,
     pub client_id: String,
@@ -209,25 +209,6 @@ pub struct ProviderConfig {
     pub extra_params: HashMap<String, String>,
     pub use_pkce: bool,      // Enable PKCE
     pub supports_oidc: bool, // Provider supports OIDC
-}
-
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        ProviderConfig {
-            name: String::new(),
-            client_id: String::new(),
-            client_secret: String::new(),
-            authorize_url: String::new(),
-            token_url: String::new(),
-            userinfo_url: String::new(),
-            issuer: None,
-            jwks_uri: None,
-            scopes: Vec::new(),
-            extra_params: HashMap::new(),
-            use_pkce: false,
-            supports_oidc: false,
-        }
-    }
 }
 
 /// Token response from OAuth provider
@@ -294,18 +275,13 @@ pub struct OAuthState {
 }
 
 /// Session storage backend type
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum SessionStore {
+    #[default]
     Memory,
     Sqlite(String),   // Path to SQLite database
     Postgres(String), // Connection URL
     Redis(String),    // Redis/Valkey URL (redis:// or valkey://)
-}
-
-impl Default for SessionStore {
-    fn default() -> Self {
-        SessionStore::Memory
-    }
 }
 
 /// Full auth configuration
@@ -5003,7 +4979,7 @@ pub fn init() -> HashMap<String, Value> {
             arity: 1,
             max_arity: 1,
             requires: None,
-            func: |args| handle_auth_start(&args),
+            func: |args| handle_auth_start(args),
         },
     );
 
@@ -5052,7 +5028,7 @@ pub fn init() -> HashMap<String, Value> {
             arity: 1,
             max_arity: 1,
             requires: None,
-            func: |args| handle_auth_callback(&args),
+            func: |args| handle_auth_callback(args),
         },
     );
 
@@ -5076,7 +5052,7 @@ pub fn init() -> HashMap<String, Value> {
             arity: 1,
             max_arity: 1,
             requires: None,
-            func: |args| handle_auth_logout(&args),
+            func: |args| handle_auth_logout(args),
         },
     );
 

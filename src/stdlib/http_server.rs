@@ -650,7 +650,7 @@ pub fn static_extension_allowed(relative: &str, extensions: Option<&[String]>) -
     match file_name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
             let ext = ext.to_ascii_lowercase();
-            allowed.iter().any(|a| *a == ext)
+            allowed.contains(&ext)
         }
         _ => false,
     }
@@ -1177,10 +1177,10 @@ pub fn parse_pattern_with_types(
                 // Look up type from the typed_params or use inline annotation
                 let param_type = if let Some(Some(t)) = type_map.get(name) {
                     Some((*t).to_string())
-                } else if let Some(colon_pos) = inner.find(':') {
-                    Some(inner[colon_pos + 1..].trim().to_string())
                 } else {
-                    None
+                    inner
+                        .find(':')
+                        .map(|colon_pos| inner[colon_pos + 1..].trim().to_string())
                 };
 
                 RouteSegment::Param {
@@ -3191,11 +3191,8 @@ fn validate_upload_path(path: &str) -> std::result::Result<(), String> {
     // Normalize the path and check for traversal attempts
     let path_obj = std::path::Path::new(path);
     for component in path_obj.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                return Err("Path traversal ('..') not allowed for security".to_string());
-            }
-            _ => {}
+        if component == std::path::Component::ParentDir {
+            return Err("Path traversal ('..') not allowed for security".to_string());
         }
     }
 
@@ -5189,7 +5186,7 @@ mod tests {
         let (value, _request) = process_request(request.into(), HashMap::new()).unwrap();
         match value {
             Value::Map(map) => match map.get("body_bytes") {
-                Some(Value::Array(bytes)) => assert_eq!(bytes.len(), body.as_bytes().len()),
+                Some(Value::Array(bytes)) => assert_eq!(bytes.len(), body.len()),
                 other => panic!("Expected populated body_bytes array, got {:?}", other),
             },
             other => panic!("Expected request map, got {:?}", other),
