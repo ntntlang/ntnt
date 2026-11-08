@@ -1577,3 +1577,184 @@ fn planned_locks_match_the_locks_migrate_takes() {
         }
     }
 }
+
+fn concurrent_fixture(index_sql: &str) -> (Fixture, Value) {
+    let f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .batch_execute("INSERT INTO app.t VALUES (1), (2)")
+        .unwrap();
+    f.sql("0002_index.sql", index_sql);
+    let plan = f.plan("upgrade.json");
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    assert_eq!(
+        plan["plan"]["pending"][0]["analysis"]["non_transactional"], true,
+        "{plan}"
+    );
+    (f, plan)
+}
+fn index_state(f: &Fixture, name: &str) -> Option<bool> {
+    f.target()
+        .query_opt(
+            "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE c.relname=$1",
+            &[&name],
+        )
+        .unwrap()
+        .map(|r| r.get(0))
+}
+fn ledger_rows(f: &Fixture) -> i64 {
+    f.target()
+        .query_one("SELECT count(*) FROM _ntnt.schema_migrations_v2", &[])
+        .unwrap()
+        .get(0)
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn concurrent_index_builds_while_writes_continue() {
+    let (mut f, plan) = concurrent_fixture("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
+    // An open writer makes the build wait. A plain CREATE INDEX would queue
+    // new writes behind it; a concurrent build must not.
+    let mut writer = f.target();
+    writer
+        .batch_execute("BEGIN; INSERT INTO app.t VALUES (3)")
+        .unwrap();
+    let child = spawn_apply(&f, &plan);
+    wait_locked(&mut f, 1);
+    f.target()
+        .batch_execute("SET statement_timeout='3s'; INSERT INTO app.t VALUES (4)")
+        .expect("writes must continue while the index builds");
+    writer.batch_execute("COMMIT").unwrap();
+    let r = result(child);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["progress"][1]["state"], "committed", "{r}");
+    assert_eq!(r["progress"][1]["non_transactional"], true, "{r}");
+    assert_eq!(index_state(&f, "t_id"), Some(true));
+    assert_eq!(ledger_rows(&f), 2);
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn failed_concurrent_build_removes_its_invalid_index() {
+    let (f, plan) = concurrent_fixture("CREATE UNIQUE INDEX CONCURRENTLY t_id ON app.t(id);");
+    f.target()
+        .batch_execute("INSERT INTO app.t VALUES (1)")
+        .unwrap();
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_ne!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+    assert_eq!(r["progress"][1]["cleanup"], "dropped_invalid_index", "{r}");
+    assert_eq!(index_state(&f, "t_id"), None, "invalid index left behind");
+    assert_eq!(ledger_rows(&f), 1);
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    // Fix the data and rerun the same reviewed plan.
+    f.target()
+        .batch_execute("DELETE FROM app.t WHERE ctid = (SELECT max(ctid) FROM app.t WHERE id = 1)")
+        .unwrap();
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(index_state(&f, "t_id"), Some(true));
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn interrupted_concurrent_builds_recover_on_rerun() {
+    // A crash during the build leaves an invalid index: drop it and rebuild.
+    let (f, plan) = concurrent_fixture("CREATE UNIQUE INDEX CONCURRENTLY t_id ON app.t(id);");
+    f.target()
+        .batch_execute("INSERT INTO app.t VALUES (1)")
+        .unwrap();
+    assert!(f
+        .target()
+        .batch_execute("CREATE UNIQUE INDEX CONCURRENTLY t_id ON app.t(id)")
+        .is_err());
+    assert_eq!(index_state(&f, "t_id"), Some(false));
+    f.target()
+        .batch_execute("DELETE FROM app.t WHERE ctid = (SELECT max(ctid) FROM app.t WHERE id = 1)")
+        .unwrap();
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["progress"][1]["dropped_invalid_index"], true, "{r}");
+    assert_eq!(index_state(&f, "t_id"), Some(true));
+    assert_eq!(ledger_rows(&f), 2);
+
+    // A crash after the build but before recording: record, do not rebuild.
+    let (f, plan) = concurrent_fixture("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
+    f.target()
+        .batch_execute("CREATE INDEX CONCURRENTLY t_id ON app.t(id)")
+        .unwrap();
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["progress"][1]["state"], "committed", "{r}");
+    assert_eq!(r["progress"][1]["index_already_built"], true, "{r}");
+    assert_eq!(ledger_rows(&f), 2);
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn concurrent_index_migrations_cannot_have_checks() {
+    // Checks need a transaction around the change; there is none here.
+    let f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
+    f.sql(
+        "0002_index.sql",
+        "CREATE INDEX CONCURRENTLY t_id ON app.t(id);",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0002_index.toml"),
+        "[ensures]\nok='SELECT true'\n",
+    )
+    .unwrap();
+    let r = f.command("plan");
+    assert!(code(&r, "DB_REPLAY_UNSUPPORTED"), "{r}");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn recovery_never_drops_an_invalid_index_it_did_not_plan() {
+    // Same name, different definition: not ours to drop.
+    let (f, plan) = concurrent_fixture("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
+    f.target()
+        .batch_execute("INSERT INTO app.t VALUES (1)")
+        .unwrap();
+    assert!(f
+        .target()
+        .batch_execute("CREATE UNIQUE INDEX CONCURRENTLY t_id ON app.t((id * 0))")
+        .is_err());
+    assert_eq!(index_state(&f, "t_id"), Some(false));
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_ne!(r["outcome"], "pass", "{r}");
+    assert_eq!(
+        index_state(&f, "t_id"),
+        Some(false),
+        "unplanned index was dropped"
+    );
+    assert_eq!(ledger_rows(&f), 1);
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn concurrent_builds_refuse_custom_casts() {
+    // Index expressions coerce values; a custom implicit cast on the target
+    // could run code that replay never ran.
+    let (f, plan) = concurrent_fixture("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
+    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    config.dbname(&f.target);
+    let mut admin = config.connect(postgres::NoTls).unwrap();
+    admin
+        .batch_execute("CREATE FUNCTION public.escape(integer) RETURNS text LANGUAGE sql AS $$ SELECT 'x' $$; CREATE CAST (integer AS text) WITH FUNCTION public.escape(integer) AS ASSIGNMENT")
+        .unwrap();
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert!(code(&r, "DB_CHECK_UNSUPPORTED"), "{r}");
+    assert_eq!(index_state(&f, "t_id"), None);
+}

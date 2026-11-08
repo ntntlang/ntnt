@@ -517,7 +517,7 @@ fn unsupported_pending_routines_never_run_and_do_not_hide_applied_verification()
     f.seed_first("CREATE TABLE app.t(id INTEGER);");
     for (sql, expected) in [
         (
-            "CREATE INDEX CONCURRENTLY bad ON app.t(id)",
+            "CREATE INDEX CONCURRENTLY ON app.t(id)",
             "DB_REPLAY_UNSUPPORTED",
         ),
         ("COMMIT; DROP TABLE app.t", "DB_REPLAY_UNSUPPORTED"),

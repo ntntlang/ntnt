@@ -363,6 +363,64 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         Ok(())
     }
 
+    /// Validity of an index in the managed schema, or None if absent.
+    pub async fn index_validity(&self, schema: &str, name: &str) -> Result<Option<bool>> {
+        Ok(self
+            .rows("SELECT i.indisvalid FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid=i.indexrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2", &[&schema, &name])
+            .await?
+            .first()
+            .map(|r| r.get(0)))
+    }
+    /// Run statements outside any transaction. The session is read-only by
+    /// default; lift that only for this call. Uses replay's storage settings
+    /// so the result matches the plan's catalog. Settings are restored on
+    /// every path, and a build error is reported in preference to a restore
+    /// error.
+    async fn outside_transaction(&self, sql: &str, schema: &str) -> Result<()> {
+        let result = async {
+            self.batch(&format!(
+                "SET default_transaction_read_only=off; SET search_path=pg_catalog,{}; SET default_tablespace=''; SET temp_tablespaces=''; SET lock_timeout=0; SET statement_timeout='{}s';",
+                quote(schema),
+                SCRIPT_TIMEOUT.as_secs()
+            ))
+            .await?;
+            bounded_for(
+                SCRIPT_TIMEOUT + Duration::from_secs(5),
+                self.client.batch_execute(sql),
+            )
+            .await
+        }
+        .await;
+        let restored = self
+            .batch("RESET default_tablespace; RESET temp_tablespaces; SET default_transaction_read_only=on; SET search_path=pg_catalog; SET lock_timeout='2s'; SET statement_timeout=5000;")
+            .await;
+        result.and(restored)
+    }
+    /// Build a reviewed CREATE INDEX CONCURRENTLY. It takes only SHARE UPDATE
+    /// EXCLUSIVE, which does not block reads or writes, and waits (up to the
+    /// script limit) for earlier transactions instead of timing out on them.
+    pub async fn build_concurrent_index(&self, migration: &Migration, schema: &str) -> Result<()> {
+        // Index expressions coerce values like any DDL; see execute_captured.
+        self.reject_custom_casts().await?;
+        self.outside_transaction(&migration.sql, schema)
+            .await
+            .map_err(|mut d| {
+                d.source = Some(migration.name.clone());
+                d
+            })
+    }
+    /// A failed or interrupted concurrent build leaves an invalid index.
+    pub async fn drop_invalid_index(&self, schema: &str, name: &str) -> Result<()> {
+        self.outside_transaction(
+            &format!(
+                "DROP INDEX CONCURRENTLY IF EXISTS {}.{}",
+                quote(schema),
+                quote(name)
+            ),
+            schema,
+        )
+        .await
+    }
     /// Relation locks this transaction holds on managed tables: what the
     /// migration actually took, observed on the target before commit.
     pub async fn relation_locks(&self, schema: &str) -> Result<Value> {
@@ -629,6 +687,18 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// Shared execution primitive: consumes captured bytes only, within a caller-
     /// owned transaction. Replay and authorized migration use exactly this primitive.
     pub async fn execute_captured(&self, migration: &Migration, schema: &str) -> Result<()> {
+        // A lone CREATE INDEX CONCURRENTLY replays as the equivalent plain
+        // CREATE INDEX inside this transaction; the target runs it outside one.
+        let concurrent = super::analysis::concurrent_index(&migration.sql, schema);
+        if concurrent.is_some() && (!migration.requires.is_empty() || !migration.ensures.is_empty())
+        {
+            let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", "A CREATE INDEX CONCURRENTLY migration runs outside a transaction, so it cannot have requires/ensures checks. Put checks in a neighbouring migration.");
+            d.source = Some(migration.name.clone());
+            return Err(d);
+        }
+        let script = concurrent
+            .as_ref()
+            .map_or(migration.sql.as_str(), |c| c.replay_sql.as_str());
         if !super::analysis::analyze(&migration.sql, schema).replay_supported {
             let mut d=Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration contains a statement that would end the migration transaction, change session identity or act outside this database; see analysis.unknowns.");
             d.source = Some(migration.name.clone());
@@ -664,7 +734,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         // Do not split on semicolons: PostgreSQL receives the captured full script.
         bounded_for(
             SCRIPT_TIMEOUT + Duration::from_secs(5),
-            self.client.batch_execute(&migration.sql),
+            self.client.batch_execute(script),
         )
         .await
         .map_err(|mut d| {
