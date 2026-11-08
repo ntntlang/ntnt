@@ -15,7 +15,25 @@ pub(super) fn failure(command: &str, d: Diagnostic) -> Value {
 }
 /// Verify that applied entries are the exact immutable prefix of captured source history.
 /// Dirty, missing, reordered or edited entries require reconciliation; none are repaired.
+/// Applied prefix; refuses history that ends in an unresolved attempt.
 pub(super) fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize> {
+    let (covered, attempt) = prefix_with_attempt(history, inputs)?;
+    if let Some(position) = attempt {
+        let mut d = Diagnostic::new(
+            "DB_ATTEMPT_UNRESOLVED",
+            "A non-transactional migration was started but never recorded as applied or rolled back.",
+        );
+        d.source = inputs.migrations.get(position - 1).map(|m| m.name.clone());
+        return Err(d);
+    }
+    Ok(covered)
+}
+/// Applied prefix plus the position of a trailing `running` attempt, which is
+/// only valid as the last scoped entry for the next captured migration.
+pub(super) fn prefix_with_attempt(
+    history: &History,
+    inputs: &CapturedInputs,
+) -> Result<(usize, Option<usize>)> {
     if history.scope.as_ref().is_some_and(|scope| {
         *scope != json!({"database":inputs.database_name,"schema":inputs.config.schema})
     }) {
@@ -36,7 +54,14 @@ pub(super) fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize
         .entries
         .first()
         .is_some_and(|e| e.state == "adopted");
+    let mut attempt = None;
     for (i, entry) in history.entries.iter().enumerate() {
+        if attempt.is_some() {
+            return Err(Diagnostic::new(
+                "DB_HISTORY_DIRTY",
+                "Ledger records work after an unresolved attempt; explicit reconciliation is required.",
+            ));
+        }
         if i == 0 && entry.state == "adopted" {
             if history.scope.is_none() {
                 return Err(Diagnostic::new(
@@ -81,6 +106,13 @@ pub(super) fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize
             }
         } else if entry.state == "applied" {
             applied_started = true;
+        } else if entry.state == "running"
+            && history.scope.is_some()
+            && inputs.config.engine == "postgresql"
+            && super::analysis::concurrent_index(&migration.sql, &inputs.config.schema).is_some()
+        {
+            // Only a lone CREATE INDEX CONCURRENTLY commits an attempt first.
+            attempt = Some(covered + 1);
         } else {
             return Err(Diagnostic::new(
                 "DB_HISTORY_DIRTY",
@@ -99,9 +131,11 @@ pub(super) fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize
                 "Applied SQL or metadata bytes have changed.",
             ));
         }
-        covered += 1;
+        if attempt.is_none() {
+            covered += 1;
+        }
     }
-    Ok(covered)
+    Ok((covered, attempt))
 }
 /// Report object-level differences, keeping the verdict unknown if either catalog is partial.
 fn compare(observed: &Catalog, expected: &Catalog) -> Value {

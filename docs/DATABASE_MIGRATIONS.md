@@ -13,7 +13,7 @@ ntnt db status --target development --object accounts
 
 `status` and `verify` inspect history and compare the observed catalog with replay at the **applied prefix**. `plan` additionally replays pending SQL and captures a non-authorizing review artifact. Pending migrations are not drift. `--object` is a case-sensitive substring filter on displayed catalog keys; it never narrows verification, hides incomplete coverage, or changes the plan binding. Without `--json`, the same result is rendered for humans.
 
-`migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Explicit reviewed baseline adoption and recognized PostgreSQL legacy-history import use that same executor; see below. Concurrent indexes/non-transactional operations, backfill orchestration and query lint are not implemented. PostgreSQL migrations may include transactional DML such as seed rows; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
+`migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Explicit reviewed baseline adoption and recognized PostgreSQL legacy-history import use that same executor; see below. The only non-transactional operation is a lone PostgreSQL `CREATE INDEX CONCURRENTLY` (see [Concurrent index builds](#concurrent-index-builds)); backfill orchestration and query lint are not implemented. PostgreSQL migrations may include transactional DML such as seed rows; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
 
 ## Explicit configuration and secrets
 
@@ -225,13 +225,30 @@ Warnings are review prompts and do not block a plan. The safer forms are `ADD CO
 
 A migration whose entire script is one named `CREATE [UNIQUE] INDEX CONCURRENTLY` on a managed table runs outside a transaction (`analysis.non_transactional`). It takes only `SHARE UPDATE EXCLUSIVE` on the table, so reads and writes continue while the index builds. The build waits for transactions already running on the table rather than failing on the 1-second lock timeout. The 90-second script limit covers the whole build, waits and table scan included; a build that exceeds it fails and its invalid index is dropped, so very large tables need a manual build for now. Comments around the statement are allowed; any other statement, an unnamed index or a table outside the managed schema is rejected as before. Such a migration cannot have `requires` or `ensures` checks, because no transaction surrounds the change. Custom implicit/assignment casts block the build as they block other DDL, and the build uses replay's storage settings (`default_tablespace=''`).
 
-Replay builds the same index without `CONCURRENTLY` inside its rollback-only transaction, so the plan's expected catalog is identical. On the target, `migrate` validates the planned prefix, releases its snapshot, builds the index while still holding the migrator advisory lock, then records the migration in a separate short transaction that rechecks the catalog.
+Replay builds the same index without `CONCURRENTLY` inside its rollback-only transaction, so the plan's expected catalog is identical. On the target, `migrate`:
 
-Failures leave no invalid index behind:
+1. validates the planned prefix, then inserts a ledger row in state `running` for the migration and **commits it before the build starts**;
+2. builds the index outside any transaction, still holding the migrator advisory lock;
+3. in a short transaction, checks that history still ends in that attempt and that the catalog is exactly the plan's state after the migration, then marks the row `applied`.
 
-- If the build fails (for example, duplicate values for a unique index), the invalid index is dropped with `DROP INDEX CONCURRENTLY`, the migration is reported `failed` with `cleanup: dropped_invalid_index`, and the ledger is unchanged. Fix the data and rerun the same plan.
-- If an earlier run was interrupted and left an invalid index of that name, the next run drops it (`dropped_invalid_index: true`) and builds again. It does so only when that index, treated as finished, makes the database match the plan's expected state exactly; any other invalid index of that name, and any other difference, fail as a stale plan and nothing is dropped.
-- If an earlier run built the index but stopped before recording it, the next run finds the valid index, does not rebuild it, and records the migration (`index_already_built: true`).
+If the build fails (for example, duplicate values for a unique index), `migrate` drops the invalid index with `DROP INDEX CONCURRENTLY`, deletes the `running` row and reports the migration `failed` with `cleanup: dropped_invalid_index`. Fix the data and rerun the same plan.
+
+If `migrate` stops between steps 1 and 3 (killed, disconnected, timed out), the `running` row stays. `status`, `verify`, `plan` and `migrate` then fail with `DB_ATTEMPT_UNRESOLVED` and run nothing until it is resolved with the same approved plan:
+
+```sh
+ntnt db reconcile --database app --target production --plan review.json --json
+```
+
+`reconcile` takes the migrator advisory lock, so it waits for (and then refuses to run alongside) a `migrate` that still holds it. It never runs migration SQL. It reports the index it observed (`reconciliation.observed_index`) and one resolution:
+
+- `completed`: the index exists, is valid, and the catalog is exactly the plan's state after the migration. The row becomes `applied`.
+- `rolled_back`: the index is invalid, and, treated as finished, it would make the catalog exactly the planned state. It is dropped, the catalog is rechecked against the state before the migration, and the row is deleted.
+- `not_started`: no index of that name exists and the catalog is exactly the state before the migration. The row is deleted.
+- `none`: there was no attempt to resolve.
+
+Anything else fails with `DB_RECONCILE_MISMATCH` (for example, an index of the planned name with another definition) and changes nothing. `DB_ATTEMPT_ACTIVE` means a session is still building that index; wait for it or cancel that backend, then reconcile again. After `rolled_back` or `not_started`, rerun `migrate` with the same plan.
+
+An index of the planned name that exists without a `running` row is not treated as progress: `migrate` reports a stale plan, because nothing records that this migration built it.
 
 ## Inspection coverage and drift
 

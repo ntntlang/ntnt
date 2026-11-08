@@ -1651,7 +1651,7 @@ fn failed_concurrent_build_removes_its_invalid_index() {
     assert_eq!(r["progress"][1]["state"], "failed", "{r}");
     assert_eq!(r["progress"][1]["cleanup"], "dropped_invalid_index", "{r}");
     assert_eq!(index_state(&f, "t_id"), None, "invalid index left behind");
-    assert_eq!(ledger_rows(&f), 1);
+    assert_eq!(ledger_rows(&f), 1, "the failed attempt is removed");
     assert_eq!(f.command("verify")["outcome"], "pass");
     // Fix the data and rerun the same reviewed plan.
     f.target()
@@ -1662,39 +1662,176 @@ fn failed_concurrent_build_removes_its_invalid_index() {
     assert_eq!(index_state(&f, "t_id"), Some(true));
 }
 
+fn reconcile(f: &Fixture, plan: &Value) -> Value {
+    let output = f
+        .process("reconcile")
+        .args(["--plan", "upgrade.json"])
+        .env("DB_APPROVAL", plan["plan_digest"].as_str().unwrap())
+        .output()
+        .unwrap();
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+}
+fn attempt_state(f: &Fixture) -> Option<String> {
+    f.target()
+        .query_opt(
+            "SELECT state FROM _ntnt.schema_migrations_v2 WHERE position=2",
+            &[],
+        )
+        .unwrap()
+        .map(|r| r.get(0))
+}
+/// Kill `migrate` while its build waits on an open writer. The orphaned
+/// backend keeps the session (and the migrator lock) until it ends.
+fn interrupted_build(index_sql: &str) -> (Fixture, Value, postgres::Client) {
+    let (mut f, plan) = concurrent_fixture(index_sql);
+    let mut writer = f.target();
+    writer
+        .batch_execute("BEGIN; INSERT INTO app.t VALUES (3)")
+        .unwrap();
+    let mut child = spawn_apply(&f, &plan);
+    wait_locked(&mut f, 1);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(attempt_state(&f).as_deref(), Some("running"));
+    (f, plan, writer)
+}
+fn build_backends(f: &mut Fixture) -> i64 {
+    f.admin
+        .query_one(
+            "SELECT count(*) FROM pg_stat_activity WHERE usename=$1 AND query ILIKE 'CREATE%INDEX%'",
+            &[&f.target],
+        )
+        .unwrap()
+        .get(0)
+}
+
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
-fn interrupted_concurrent_builds_recover_on_rerun() {
-    // A crash during the build leaves an invalid index: drop it and rebuild.
-    let (f, plan) = concurrent_fixture("CREATE UNIQUE INDEX CONCURRENTLY t_id ON app.t(id);");
-    f.target()
-        .batch_execute("INSERT INTO app.t VALUES (1)")
+fn interrupted_build_blocks_later_work_until_reconciled() {
+    let (mut f, plan, writer) = interrupted_build("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
+    // The build's session still owns the migrators' lock: no second run starts.
+    let r = reconcile(&f, &plan);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    f.admin
+        .batch_execute(&format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='{}' AND query ILIKE 'CREATE%INDEX%'", f.target))
         .unwrap();
-    assert!(f
-        .target()
-        .batch_execute("CREATE UNIQUE INDEX CONCURRENTLY t_id ON app.t(id)")
-        .is_err());
+    drop(writer);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while build_backends(&mut f) > 0 {
+        assert!(
+            std::time::Instant::now() < until,
+            "build backend did not end"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert_eq!(index_state(&f, "t_id"), Some(false));
-    f.target()
-        .batch_execute("DELETE FROM app.t WHERE ctid = (SELECT max(ctid) FROM app.t WHERE id = 1)")
+
+    // Inspection, planning and the same plan all refuse to continue.
+    assert!(code(&f.command("status"), "DB_ATTEMPT_UNRESOLVED"));
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert!(code(&r, "DB_ATTEMPT_UNRESOLVED"), "{r}");
+    assert_eq!(
+        index_state(&f, "t_id"),
+        Some(false),
+        "migrate must not drop it"
+    );
+    f.sql("0003_more.sql", "CREATE TABLE app.u(id INTEGER);");
+    assert!(code(&f.command("plan"), "DB_ATTEMPT_UNRESOLVED"));
+    std::fs::remove_file(f.root.path().join("migrations/0003_more.sql")).unwrap();
+
+    // Reconciliation needs the same approval, then rolls the attempt back.
+    let unapproved = f
+        .process("reconcile")
+        .args(["--plan", "upgrade.json"])
+        .output()
         .unwrap();
+    let unapproved: Value = serde_json::from_slice(&unapproved.stdout).unwrap();
+    assert!(code(&unapproved, "DB_APPROVAL_REQUIRED"), "{unapproved}");
+    let r = reconcile(&f, &plan);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["reconciliation"]["resolution"], "rolled_back", "{r}");
+    assert_eq!(r["reconciliation"]["observed_index"], "invalid", "{r}");
+    assert_eq!(index_state(&f, "t_id"), None);
+    assert_eq!(attempt_state(&f), None);
+    assert_eq!(f.command("verify")["outcome"], "pass");
     let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
     assert_eq!(r["outcome"], "pass", "{r}");
-    assert_eq!(r["progress"][1]["dropped_invalid_index"], true, "{r}");
     assert_eq!(index_state(&f, "t_id"), Some(true));
-    assert_eq!(ledger_rows(&f), 2);
+}
 
-    // A crash after the build but before recording: record, do not rebuild.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn interrupted_build_that_finished_reconciles_as_completed() {
+    let (mut f, plan, writer) = interrupted_build("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
+    // Let the orphaned build finish on its own after migrate died.
+    writer.close().unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while build_backends(&mut f) > 0 || index_state(&f, "t_id") != Some(true) {
+        assert!(
+            std::time::Instant::now() < until,
+            "orphaned build did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert!(
+        code(&r, "DB_ATTEMPT_UNRESOLVED"),
+        "a valid index is not recorded silently: {r}"
+    );
+    let r = reconcile(&f, &plan);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["reconciliation"]["resolution"], "completed", "{r}");
+    assert_eq!(attempt_state(&f).as_deref(), Some("applied"));
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["progress"][1]["state"], "already_applied", "{r}");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn reconciliation_refuses_what_it_cannot_explain() {
+    // A crash after recording the attempt but before the build started.
+    let (f, plan) = concurrent_fixture("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
+    let checksum = plan["plan"]["pending"][0]["checksum"].as_str().unwrap();
+    f.target()
+        .execute(
+            "INSERT INTO _ntnt.schema_migrations_v2 VALUES(2,'2','0002_index.sql',$1,'running','app','app')",
+            &[&checksum],
+        )
+        .unwrap();
+    // An index of the planned name with another definition is not explained
+    // by the attempt: nothing is changed.
+    f.target()
+        .batch_execute("CREATE INDEX t_id ON app.t((id + 1))")
+        .unwrap();
+    let r = reconcile(&f, &plan);
+    assert!(code(&r, "DB_RECONCILE_MISMATCH"), "{r}");
+    assert_eq!(attempt_state(&f).as_deref(), Some("running"));
+    assert_eq!(index_state(&f, "t_id"), Some(true));
+    f.target().batch_execute("DROP INDEX app.t_id").unwrap();
+    let r = reconcile(&f, &plan);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["reconciliation"]["resolution"], "not_started", "{r}");
+    assert_eq!(attempt_state(&f), None);
+    // Nothing left to reconcile.
+    let r = reconcile(&f, &plan);
+    assert_eq!(r["reconciliation"]["resolution"], "none", "{r}");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn unrecorded_index_of_the_planned_name_is_drift_not_progress() {
+    // Without a running attempt, an index nobody recorded is not evidence
+    // that this migration ran.
     let (f, plan) = concurrent_fixture("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
     f.target()
         .batch_execute("CREATE INDEX CONCURRENTLY t_id ON app.t(id)")
         .unwrap();
     let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
-    assert_eq!(r["outcome"], "pass", "{r}");
-    assert_eq!(r["progress"][1]["state"], "committed", "{r}");
-    assert_eq!(r["progress"][1]["index_already_built"], true, "{r}");
-    assert_eq!(ledger_rows(&f), 2);
-    assert_eq!(f.command("verify")["outcome"], "pass");
+    assert!(code(&r, "DB_PLAN_STALE"), "{r}");
+    assert_eq!(ledger_rows(&f), 1);
 }
 
 #[test]

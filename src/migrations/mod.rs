@@ -32,13 +32,16 @@ impl Diagnostic {
             "DB_REFERENCE_UNAVAILABLE" => "Configure [databases.<name>.scratch] for the selected database with a distinct disposable database and secret, then rerun inspection.",
             "DB_DATABASE_REQUIRED" | "DB_DATABASE_UNKNOWN" => "Select a declared [databases.<name>] with --database <name>. --database may be omitted only when exactly one logical database is declared; --target is always required.",
             "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty engine-matching scratch database/file. PostgreSQL requires a separate unprivileged owner role. Do not reset the selected target.",
-            "DB_REPLAY_UNSUPPORTED" => "Review the named migration's analysis.unknowns against docs/DATABASE_MIGRATIONS.md. Remove transaction control, role/session changes and non-transactional statements from migration files; concurrent index builds are not yet supported.",
+            "DB_REPLAY_UNSUPPORTED" => "Review the named migration's analysis.unknowns against docs/DATABASE_MIGRATIONS.md. Remove transaction control, role/session changes and other non-transactional statements from migration files. The one supported non-transactional migration is a lone named CREATE INDEX CONCURRENTLY without checks.",
             "DB_COVERAGE_INCOMPLETE" | "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
             "DB_DRIFT" => "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.",
             "DB_UNRECOGNIZED_HISTORY" => "Review the existing managed scope. To adopt a matching captured prefix, declare named adoption_checks and create an explicit plan --adopt-through <migration-id>; obtain separate exact-plan approval before migrate. Never insert fictional applied rows.",
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
             "DB_SECRET" => "Declare the connection secret in ntnt.toml and configure the existing std/secrets provider. Never pass a connection URL on the command line.",
+            "DB_ATTEMPT_UNRESOLVED" => "An earlier migrate stopped during a non-transactional migration. Make sure no migrate or index build is still running, then run `ntnt db reconcile --plan <the same approved plan>`; it records the outcome it observes or rolls the attempt back. Nothing else runs until then.",
+            "DB_ATTEMPT_ACTIVE" => "The index build is still running in another session. Wait for it to finish or cancel that backend, then reconcile again.",
+            "DB_RECONCILE_MISMATCH" => "The database does not match either outcome the plan predicts for this attempt. Nothing was changed. Inspect the named object with an operator; never edit the ledger to force a state.",
             "DB_LOCK_CONFLICT" => "Another session held a conflicting lock; nothing was committed for this migration. Retry the same reviewed plan when application or migrator load allows.",
             "DB_TIMEOUT" => "Check endpoint availability and conflicting locks. Preserve committed progress; reconcile unknown migration outcomes with the same reviewed plan before any further SQL.",
             "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_APPROVAL_REQUIRED" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
@@ -79,6 +82,13 @@ pub enum DbCommand {
     Verify(Options),
     /// Execute an externally authorized exact plan, one transaction per migration.
     Migrate {
+        #[command(flatten)]
+        options: Options,
+        #[arg(long)]
+        plan: PathBuf,
+    },
+    /// Resolve an interrupted non-transactional migration under the same approved plan.
+    Reconcile {
         #[command(flatten)]
         options: Options,
         #[arg(long)]
@@ -188,6 +198,7 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         DbCommand::Plan(o) => ("plan", o, None),
         DbCommand::Verify(o) => ("verify", o, None),
         DbCommand::Migrate { options, plan } => ("migrate", options, Some(plan)),
+        DbCommand::Reconcile { options, plan } => ("reconcile", options, Some(plan)),
     };
     // Capture a review artifact before database I/O; never reopen it later.
     let prior = options.against.as_ref().map(|p| {
@@ -202,21 +213,25 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         options.database.as_deref(),
     );
     let mut report = if let Some(path) = execution_plan {
-        let mut progress = serde_json::json!({"format_version":1,"command":"migrate",
+        let mut progress = serde_json::json!({"format_version":1,"command":command,
             "observed_at":chrono::Utc::now().to_rfc3339(),"outcome":"unknown","diagnostics":[],
             "progress":[],"assertions":{"outcome":"not_run","executed":0}});
         let work = inputs.and_then(|inputs| {
             if options.against.is_some() || options.adopt_through.is_some() {
                 return Err(Diagnostic::new(
                     "DB_CONFIG",
-                    "migrate uses only --plan; --adopt-through belongs to plan.",
+                    "migrate and reconcile use only --plan; --adopt-through belongs to plan.",
                 ));
             }
             let bytes = inventory::file_bytes(&path)?;
             let saved = serde_json::from_slice(&bytes).map_err(|_| {
                 Diagnostic::new("DB_PLAN_INVALID", "Invalid saved execution plan JSON.")
             })?;
-            database_runtime(execution::migrate(&inputs, &saved, &mut progress))
+            if command == "reconcile" {
+                database_runtime(execution::reconcile_attempt(&inputs, &saved, &mut progress))
+            } else {
+                database_runtime(execution::migrate(&inputs, &saved, &mut progress))
+            }
         });
         if let Err(d) = work {
             progress["diagnostics"]
@@ -391,6 +406,16 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             println!(
                 "{}: {}\n  Next: {}",
                 d["code"], d["message"], d["next_action"]
+            );
+        }
+        if let Some(r) = report
+            .get("reconciliation")
+            .filter(|r| r.get("resolution").is_some())
+        {
+            println!(
+                "Reconciliation: {} (index {})",
+                r["resolution"].as_str().unwrap_or("unknown"),
+                r["observed_index"].as_str().unwrap_or("not inspected")
             );
         }
         if let Some(d) = report.get("plan_digest") {
