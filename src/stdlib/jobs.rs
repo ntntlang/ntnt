@@ -638,7 +638,7 @@ pub(crate) static BATCH_RUNTIME: LazyLock<BatchRuntime> = LazyLock::new(BatchRun
 // Thread-local batch ID context for batch_id() — set by worker loop before
 // execute_in_worker(), read by batch_id() stdlib function.
 thread_local! {
-    static CURRENT_BATCH_ID: RefCell<Option<String>> = RefCell::new(None);
+    static CURRENT_BATCH_ID: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// RAII guard that unconditionally clears CURRENT_BATCH_ID on drop.
@@ -1997,7 +1997,7 @@ const WORKER_PRIVATE_FAST_TIMEOUT: std::time::Duration = std::time::Duration::fr
 const WORKER_PRIVATE_LONG_RETRY_EVERY: u64 = 6;
 
 fn worker_private_retry_timeout(attempt: u64) -> std::time::Duration {
-    if attempt % WORKER_PRIVATE_LONG_RETRY_EVERY == 0 {
+    if attempt.is_multiple_of(WORKER_PRIVATE_LONG_RETRY_EVERY) {
         WORKER_PRIVATE_STARTUP_TIMEOUT
     } else {
         WORKER_PRIVATE_FAST_TIMEOUT
@@ -2032,7 +2032,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         retry_worker_resource(
             WORKER_CONNECTION_ATTEMPTS,
             || kv::open_owned_kv(&kv_info.url, WORKER_PRIVATE_STARTUP_TIMEOUT),
-            |delay| sleep_cancellable(delay),
+            sleep_cancellable,
         )
     } else {
         None
@@ -2424,7 +2424,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         // Concurrency limit: atomic counter semaphore via kv_incr.
         let has_concurrency_limit =
             if let Some(JobOptionValue::Int(max_slots)) = def.options.get("concurrency") {
-                let max = (*max_slots).max(1) as i64;
+                let max = (*max_slots).max(1);
                 let counter_key = format!("jobs:concurrency:{}", job_type);
                 match kv::kv_incr(&kv_handle, &counter_key, 1) {
                     Ok(new_count) => {
@@ -3828,14 +3828,11 @@ pub fn get_batch_detail(batch_id: &str) -> Result<HashMap<String, Value>> {
     let fired_prefix = format!("jobs:batch:{}:fired:", batch_id);
     for cb in &["on_death", "on_complete", "on_success"] {
         let fired_key = format!("{}{}", fired_prefix, cb);
-        match kv::kv_get(&kv_handle, &fired_key) {
-            Ok(Value::Bool(true)) => {
-                m.insert(
-                    format!("fired_{}", cb.replace("on_", "")),
-                    Value::Bool(true),
-                );
-            }
-            _ => {}
+        if let Ok(Value::Bool(true)) = kv::kv_get(&kv_handle, &fired_key) {
+            m.insert(
+                format!("fired_{}", cb.replace("on_", "")),
+                Value::Bool(true),
+            );
         }
     }
 
@@ -8764,7 +8761,7 @@ pub(crate) mod tests {
                         ));
                     }
                     worker = Some(std::thread::spawn(move || {
-                        activation.map_or(true, |gate| gate.recv().is_ok())
+                        activation.is_none_or(|gate| gate.recv().is_ok())
                     }));
                     Ok((Value::TaskHandle(888), Arc::new(CancelToken::new())))
                 },

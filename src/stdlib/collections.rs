@@ -352,7 +352,7 @@ pub fn init() -> HashMap<String, Value> {
                                 _ => std::cmp::Ordering::Equal,
                             });
                         } else {
-                            new_arr.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                            new_arr.sort_by_key(|a| a.to_string());
                         }
 
                         Ok(Value::Array(new_arr))
@@ -1096,7 +1096,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Map(a), Value::Map(b)) => {
             a.len() == b.len()
                 && a.iter()
-                    .all(|(k, v)| b.get(k).map_or(false, |bv| values_equal(v, bv)))
+                    .all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, bv)))
         }
         // Struct deep equality: same name with equal fields
         (
@@ -1113,7 +1113,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
                 && f1.len() == f2.len()
                 && f1
                     .iter()
-                    .all(|(k, v)| f2.get(k).map_or(false, |fv| values_equal(v, fv)))
+                    .all(|(k, v)| f2.get(k).is_some_and(|fv| values_equal(v, fv)))
         }
         // Handle equality: same variant + same id
         (Value::TaskHandle(a), Value::TaskHandle(b)) => a == b,

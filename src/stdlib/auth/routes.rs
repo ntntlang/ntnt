@@ -286,16 +286,17 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
     );
 
     let mut provider_for_url = provider.clone();
-    if config.store_tokens && !provider_for_url.extra_params.contains_key("access_type") {
-        if provider_for_url.authorize_url.contains("google") {
+    if config.store_tokens
+        && !provider_for_url.extra_params.contains_key("access_type")
+        && provider_for_url.authorize_url.contains("google")
+    {
+        provider_for_url
+            .extra_params
+            .insert("access_type".to_string(), "offline".to_string());
+        if !provider_for_url.extra_params.contains_key("prompt") {
             provider_for_url
                 .extra_params
-                .insert("access_type".to_string(), "offline".to_string());
-            if !provider_for_url.extra_params.contains_key("prompt") {
-                provider_for_url
-                    .extra_params
-                    .insert("prompt".to_string(), "consent".to_string());
-            }
+                .insert("prompt".to_string(), "consent".to_string());
         }
     }
 

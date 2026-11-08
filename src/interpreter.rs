@@ -1073,7 +1073,7 @@ fn auto_unwrap_index(inner_val: Value, idx: Value) -> Result<Value> {
             } else {
                 i as usize
             };
-            Ok(arr.get(index).cloned().unwrap_or_else(|| Value::none()))
+            Ok(arr.get(index).cloned().unwrap_or_else(Value::none))
         }
         (Value::String(s), Value::Int(i)) => {
             let index = if i < 0 {
@@ -1088,10 +1088,10 @@ fn auto_unwrap_index(inner_val: Value, idx: Value) -> Result<Value> {
             Ok(s.chars()
                 .nth(index)
                 .map(|c| Value::String(c.to_string()))
-                .unwrap_or_else(|| Value::none()))
+                .unwrap_or_else(Value::none))
         }
         (Value::Map(map), Value::String(key)) => {
-            Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
+            Ok(map.get(&key).cloned().unwrap_or_else(Value::none))
         }
         (Value::Struct { fields, .. }, Value::String(key)) => fields
             .get(&key)
@@ -1105,7 +1105,7 @@ fn auto_unwrap_index(inner_val: Value, idx: Value) -> Result<Value> {
 /// Used by both Warn and Forgiving TypeModes to avoid code duplication.
 fn auto_unwrap_field(inner_val: Value, field: &str) -> Result<Value> {
     match inner_val {
-        Value::Map(ref map) => Ok(map.get(field).cloned().unwrap_or_else(|| Value::none())),
+        Value::Map(ref map) => Ok(map.get(field).cloned().unwrap_or_else(Value::none)),
         Value::Struct { fields: ref f, .. } => f
             .get(field)
             .cloned()
@@ -2414,7 +2414,7 @@ impl Interpreter {
 
         // Clear stale lib exports from the environment before re-injecting.
         // This ensures deleted modules' exports don't remain callable.
-        for (_file_path, exports) in &self.lib_injected_names {
+        for exports in self.lib_injected_names.values() {
             for name in exports {
                 self.environment.borrow_mut().undefine(name);
             }
@@ -5560,14 +5560,14 @@ impl Interpreter {
             Statement::Located { line, col, stmt } => {
                 self.current_line = *line;
                 self.current_col = *col;
-                return self.eval_statement(stmt).map_err(|e| {
+                self.eval_statement(stmt).map_err(|e| {
                     // Annotate errors with line info if they don't already have it
                     if e.line().is_none() {
                         e.at_line(*line)
                     } else {
                         e
                     }
-                });
+                })
             }
             Statement::Let {
                 name,
@@ -7052,7 +7052,7 @@ impl Interpreter {
                     // Map access with string key: map["key"]
                     // Returns None for missing keys instead of throwing (DX improvement)
                     (Value::Map(map), Value::String(key)) => {
-                        Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
+                        Ok(map.get(&key).cloned().unwrap_or_else(Value::none))
                     }
                     // Struct access with string key: struct["field"]
                     (Value::Struct { fields, .. }, Value::String(key)) => {
@@ -7171,7 +7171,7 @@ impl Interpreter {
                     Value::Struct { fields, .. } => fields.get(field).cloned().ok_or_else(|| {
                         IntentError::runtime_error(format!("Unknown field: {}", field))
                     }),
-                    Value::Map(map) => Ok(map.get(field).cloned().unwrap_or_else(|| Value::none())),
+                    Value::Map(map) => Ok(map.get(field).cloned().unwrap_or_else(Value::none)),
                     // Result/Option field access: helpful error instead of silent None
                     Value::EnumValue {
                         enum_name,
@@ -8222,7 +8222,7 @@ impl Interpreter {
         env.define("@first".to_string(), Value::Bool(index == 0));
         env.define("@last".to_string(), Value::Bool(index + 1 == length));
         env.define("@length".to_string(), Value::Int(length as i64));
-        env.define("@even".to_string(), Value::Bool(index % 2 == 0));
+        env.define("@even".to_string(), Value::Bool(index.is_multiple_of(2)));
         env.define("@odd".to_string(), Value::Bool(index % 2 == 1));
     }
 
@@ -11484,10 +11484,10 @@ impl Interpreter {
                 };
                 let hint = match (&op, lhs.type_name(), rhs.type_name()) {
                     (BinaryOp::Add, "String", _) => {
-                        Some(format!("Convert to string first: \"...\" + string(value)"))
+                        Some("Convert to string first: \"...\" + string(value)".to_string())
                     }
                     (BinaryOp::Add, _, "String") => {
-                        Some(format!("Convert to string first: string(value) + \"...\""))
+                        Some("Convert to string first: string(value) + \"...\"".to_string())
                     }
                     _ => None,
                 };

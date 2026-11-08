@@ -176,7 +176,7 @@ pub fn generate_pkce_challenge(verifier: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
     let hash = hasher.finalize();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&hash)
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash)
 }
 
 // ============================================================================

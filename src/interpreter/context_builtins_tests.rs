@@ -89,7 +89,7 @@ fn kv_get_import_is_the_kv_function_not_a_route() {
     // The KV function rejects a non-store first argument; a route
     // registration would have silently returned Unit.
     assert!(
-        matches!(&out, Err(_)) || matches!(&out, Ok(Value::String(s)) if s == "KV_ERR"),
+        out.is_err() || matches!(&out, Ok(Value::String(s)) if s == "KV_ERR"),
         "{out:?}"
     );
 }

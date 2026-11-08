@@ -210,7 +210,7 @@ fn normalize_phone_identifier(identifier: &str) -> std::result::Result<String, S
     }
 
     let digit_count = normalized.chars().filter(|ch| ch.is_ascii_digit()).count();
-    if digit_count < 7 || digit_count > 15 {
+    if !(7..=15).contains(&digit_count) {
         return Err("[auth] local phone identifier must contain 7 to 15 digits".to_string());
     }
     if normalized == "+" || normalized.is_empty() {

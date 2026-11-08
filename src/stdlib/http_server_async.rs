@@ -794,7 +794,7 @@ async fn dispatch_dynamic(
                 error_response(
                     500,
                     &error_msg,
-                    &method.to_string(),
+                    method.as_ref(),
                     path,
                     handler_name,
                     state.is_production,
@@ -811,7 +811,7 @@ async fn dispatch_dynamic(
             error_response(
                 400,
                 &error_msg,
-                &method.to_string(),
+                method.as_ref(),
                 path,
                 "",
                 state.is_production,
@@ -994,7 +994,7 @@ async fn handle_request(
                 return error_response(
                     404,
                     "Not Found",
-                    &method.to_string(),
+                    method.as_ref(),
                     &path,
                     "",
                     state.is_production,
@@ -1022,7 +1022,7 @@ async fn handle_request(
                         error_response(
                             500,
                             &error_msg,
-                            &method.to_string(),
+                            method.as_ref(),
                             &path,
                             "",
                             state.is_production,
@@ -1039,7 +1039,7 @@ async fn handle_request(
                     error_response(
                         400,
                         &error_msg,
-                        &method.to_string(),
+                        method.as_ref(),
                         &path,
                         "",
                         state.is_production,

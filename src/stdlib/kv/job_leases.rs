@@ -1099,9 +1099,9 @@ fn transition(
     };
     let lease = store.lease(id)?;
     if require_lease
-        && !lease
+        && lease
             .as_ref()
-            .is_some_and(|l| Some(l.token.as_str()) == expected_token)
+            .is_none_or(|l| Some(l.token.as_str()) != expected_token)
     {
         return Ok(false);
     }
@@ -1135,6 +1135,85 @@ fn transition(
             _ => store.remove_lease(id, &lease)?,
         }
     }
+    Ok(true)
+}
+
+pub(super) fn sql_transition(
+    conn: &Connection,
+    key: &str,
+    expected: Option<&Snapshot>,
+    next: &Snapshot,
+    require_lease: bool,
+) -> Result<bool> {
+    transition(&mut Store::sql(conn), key, expected, next, require_lease)
+        .map_err(conditional::error)
+}
+/// Redis side of `conditional::write`: one read round trip, then one commit
+/// script that re-checks every value read and applies all writes or none.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn redis_write(
+    conn: &mut redis::Connection,
+    key: &str,
+    expected: Option<&Snapshot>,
+    next: &Snapshot,
+    ttl: Option<i64>,
+    owner: &str,
+    remove: &[String],
+    pending: Option<&str>,
+    require_lease: bool,
+    receipt: impl Fn(&Snapshot) -> bool,
+) -> R<bool> {
+    let mut store = Store::redis(conn);
+    let mut keys = vec![key.to_owned(), format!("{key}:__type")];
+    keys.extend(remove.iter().cloned());
+    keys.extend(pending.map(str::to_owned));
+    if let Some(id) = key.strip_prefix("jobs:data:") {
+        keys.extend(job_keys(id, None));
+    }
+    store.prefetch(&keys, key.starts_with("jobs:data:"))?;
+    if pending.is_some() || remove.iter().any(|key| is_pending_key(key)) {
+        store.ready_index()?;
+    }
+    let current = store.read(key)?;
+    if current.as_ref() == Some(next) {
+        if require_lease && receipt(next) {
+            if !transition(&mut store, key, expected, next, true)? {
+                return Ok(false);
+            }
+            // A receipt must not replay writes, but it still runs the commit
+            // so expiry or a changed snapshot since the reads rejects it.
+            store.writes.clear();
+            store.fence = true;
+            store.commit()?;
+        }
+        return Ok(true);
+    }
+    if current.as_ref() != expected {
+        return Ok(false);
+    }
+    if !transition(&mut store, key, expected, next, require_lease)? {
+        return Ok(false);
+    }
+    store.writes.cmd("SET").arg(key).arg(&next.raw);
+    if let Some(ttl) = ttl {
+        store.writes.arg("EX").arg(ttl);
+    }
+    store.writes.del(format!("{key}:__type"));
+    for key in remove {
+        if store.raw(key)?.as_deref() == Some(owner) {
+            store
+                .writes
+                .cmd("DEL")
+                .arg(key)
+                .arg(format!("{key}:__type"));
+            remove_ready(&mut store.writes, key);
+        }
+    }
+    if let Some(key) = pending {
+        store.writes.set(key, owner);
+        add_ready(&mut store.writes, key);
+    }
+    store.commit()?;
     Ok(true)
 }
 #[cfg(test)]
@@ -2843,83 +2922,4 @@ mod tests {
         drop(guard);
         conditional::check_redis_reconnect(&handle);
     }
-}
-
-pub(super) fn sql_transition(
-    conn: &Connection,
-    key: &str,
-    expected: Option<&Snapshot>,
-    next: &Snapshot,
-    require_lease: bool,
-) -> Result<bool> {
-    transition(&mut Store::sql(conn), key, expected, next, require_lease)
-        .map_err(conditional::error)
-}
-/// Redis side of `conditional::write`: one read round trip, then one commit
-/// script that re-checks every value read and applies all writes or none.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn redis_write(
-    conn: &mut redis::Connection,
-    key: &str,
-    expected: Option<&Snapshot>,
-    next: &Snapshot,
-    ttl: Option<i64>,
-    owner: &str,
-    remove: &[String],
-    pending: Option<&str>,
-    require_lease: bool,
-    receipt: impl Fn(&Snapshot) -> bool,
-) -> R<bool> {
-    let mut store = Store::redis(conn);
-    let mut keys = vec![key.to_owned(), format!("{key}:__type")];
-    keys.extend(remove.iter().cloned());
-    keys.extend(pending.map(str::to_owned));
-    if let Some(id) = key.strip_prefix("jobs:data:") {
-        keys.extend(job_keys(id, None));
-    }
-    store.prefetch(&keys, key.starts_with("jobs:data:"))?;
-    if pending.is_some() || remove.iter().any(|key| is_pending_key(key)) {
-        store.ready_index()?;
-    }
-    let current = store.read(key)?;
-    if current.as_ref() == Some(next) {
-        if require_lease && receipt(next) {
-            if !transition(&mut store, key, expected, next, true)? {
-                return Ok(false);
-            }
-            // A receipt must not replay writes, but it still runs the commit
-            // so expiry or a changed snapshot since the reads rejects it.
-            store.writes.clear();
-            store.fence = true;
-            store.commit()?;
-        }
-        return Ok(true);
-    }
-    if current.as_ref() != expected {
-        return Ok(false);
-    }
-    if !transition(&mut store, key, expected, next, require_lease)? {
-        return Ok(false);
-    }
-    store.writes.cmd("SET").arg(key).arg(&next.raw);
-    if let Some(ttl) = ttl {
-        store.writes.arg("EX").arg(ttl);
-    }
-    store.writes.del(format!("{key}:__type"));
-    for key in remove {
-        if store.raw(key)?.as_deref() == Some(owner) {
-            store
-                .writes
-                .cmd("DEL")
-                .arg(key)
-                .arg(format!("{key}:__type"));
-            remove_ready(&mut store.writes, key);
-        }
-    }
-    if let Some(key) = pending {
-        store.writes.set(key, owner);
-        add_ready(&mut store.writes, key);
-    }
-    store.commit()?;
-    Ok(true)
 }

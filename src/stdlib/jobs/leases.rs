@@ -111,7 +111,7 @@ impl Keeper {
                         }
                         // Contention is momentary: retry soon instead of losing a
                         // whole renewal interval (three misses expire the lease).
-                        Err(error) if kv::conditional::is_contention_error(&error) => {
+                        Err(error) if kv::conditional::is_contention_error(error) => {
                             CONTENTION_RETRY
                         }
                         // Other failures: the independent monotonic deadline

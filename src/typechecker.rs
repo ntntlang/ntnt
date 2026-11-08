@@ -161,7 +161,7 @@ pub fn is_strict_mode() -> bool {
     use std::sync::Once;
     static DEPRECATION_WARNED: Once = Once::new();
 
-    let is_set = std::env::var("NTNT_STRICT").map_or(false, |v| v == "1" || v == "true");
+    let is_set = std::env::var("NTNT_STRICT").is_ok_and(|v| v == "1" || v == "true");
     if is_set {
         DEPRECATION_WARNED.call_once(|| {
             eprintln!("[DEPRECATED] NTNT_STRICT is deprecated. Use NTNT_LINT_MODE=strict instead.");
@@ -656,9 +656,7 @@ fn comparison_type_hint(left_type: &Type, right_type: &Type, left_expr: &Express
             || matches!(right_type, Type::Any)
             || !left_type.is_compatible(right_type))
     {
-        return format!(
-            "Map values may have mixed types. Use int(value) ?? default, str(value), or another explicit conversion before comparing"
-        );
+        return "Map values may have mixed types. Use int(value) ?? default, str(value), or another explicit conversion before comparing".to_string();
     }
 
     match (left_type, right_type) {
@@ -2533,13 +2531,10 @@ impl TypeContext {
             Type::Generic { name, .. } if name == "Result" => {
                 Some(vec!["Ok".to_string(), "Err".to_string()])
             }
-            Type::Named(name) => {
-                if let Some(variants) = self.enums.get(name) {
-                    Some(variants.iter().map(|(v, _)| v.clone()).collect())
-                } else {
-                    None
-                }
-            }
+            Type::Named(name) => self
+                .enums
+                .get(name)
+                .map(|variants| variants.iter().map(|(v, _)| v.clone()).collect()),
             _ => None,
         };
 
@@ -2657,34 +2652,33 @@ impl TypeContext {
                         | BinaryOp::Le
                         | BinaryOp::Gt
                         | BinaryOp::Ge
-                ) {
-                    if !left_type.is_compatible(&right_type) {
-                        let is_eq_ne = matches!(operator, BinaryOp::Eq | BinaryOp::Ne);
-                        let either_optional = matches!(&left_type, Type::Optional(_))
-                            || matches!(&right_type, Type::Optional(_));
+                ) && !left_type.is_compatible(&right_type)
+                {
+                    let is_eq_ne = matches!(operator, BinaryOp::Eq | BinaryOp::Ne);
+                    let either_optional = matches!(&left_type, Type::Optional(_))
+                        || matches!(&right_type, Type::Optional(_));
 
-                        // For ==/!=, allow comparing with Optional (None checks are valid)
-                        if !(is_eq_ne && either_optional) {
-                            let op_str = binary_op_str(operator);
-                            let search_hint = expr_search_hint(left);
-                            let needle = if search_hint.is_empty() {
-                                op_str.to_string()
-                            } else {
-                                format!("{} {}", search_hint, op_str)
-                            };
-                            let line = self.find_line_near(&needle);
-                            let hint = comparison_type_hint(&left_type, &right_type, left);
-                            self.warning(
-                                format!(
-                                    "Comparison '{}' between incompatible types {} and {}",
-                                    op_str,
-                                    left_type.name(),
-                                    right_type.name()
-                                ),
-                                line,
-                                Some(hint),
-                            );
-                        }
+                    // For ==/!=, allow comparing with Optional (None checks are valid)
+                    if !(is_eq_ne && either_optional) {
+                        let op_str = binary_op_str(operator);
+                        let search_hint = expr_search_hint(left);
+                        let needle = if search_hint.is_empty() {
+                            op_str.to_string()
+                        } else {
+                            format!("{} {}", search_hint, op_str)
+                        };
+                        let line = self.find_line_near(&needle);
+                        let hint = comparison_type_hint(&left_type, &right_type, left);
+                        self.warning(
+                            format!(
+                                "Comparison '{}' between incompatible types {} and {}",
+                                op_str,
+                                left_type.name(),
+                                right_type.name()
+                            ),
+                            line,
+                            Some(hint),
+                        );
                     }
                 }
 
@@ -3688,7 +3682,7 @@ impl TypeContext {
                     }
                 }
                 // Collection functions that preserve Array<T> element type
-                "sort" | "sort_desc" | "reverse" if arguments.len() >= 1 => {
+                "sort" | "sort_desc" | "reverse" if !arguments.is_empty() => {
                     if let Type::Array(_) = &arg_types[0] {
                         return arg_types[0].clone();
                     }

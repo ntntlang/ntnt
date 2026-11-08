@@ -2850,7 +2850,7 @@ fn pow2_decimal(exp: u32) -> String {
 fn reverse_zone(network: &Network) -> Option<String> {
     match network.family {
         Family::V4 => {
-            if network.prefix % 8 != 0 {
+            if !network.prefix.is_multiple_of(8) {
                 return None;
             }
             let octets = Ipv4Addr::from(network.network as u32).octets();
@@ -2867,7 +2867,7 @@ fn reverse_zone(network: &Network) -> Option<String> {
             })
         }
         Family::V6 => {
-            if network.prefix % 4 != 0 {
+            if !network.prefix.is_multiple_of(4) {
                 return None;
             }
             let nibbles = (network.prefix / 4) as usize;

@@ -245,7 +245,7 @@ fn start_intent_studio(intent_file: &str, studio_port: u16, app_port: u16) -> Ch
     });
 
     let mut cmd = Command::new(binary);
-    cmd.args(&[
+    cmd.args([
         "intent",
         "studio",
         intent_file,
@@ -585,7 +585,7 @@ listen(8080)
     });
 
     let mut cmd = Command::new(&binary);
-    cmd.args(&["run", &test_file])
+    cmd.args(["run", &test_file])
         .env("NTNT_LISTEN_PORT", test_port.to_string())
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdout(Stdio::piped())

@@ -106,7 +106,7 @@ fn inspect_get_request(bytes: &[u8]) -> Option<RequestLayout> {
 
     let mut message_offset = outer.start;
     let (version_tag, _, version) = read_tlv(bytes, &mut message_offset)?;
-    if version_tag != 0x02 || &bytes[version.clone()] != [1] {
+    if version_tag != 0x02 || bytes[version.clone()] != [1] {
         return None;
     }
     let (community_tag, _, community) = read_tlv(bytes, &mut message_offset)?;
@@ -126,7 +126,7 @@ fn inspect_get_request(bytes: &[u8]) -> Option<RequestLayout> {
     if request_id_tag != 0x02
         || request_id.is_empty()
         || error_status_tag != 0x02
-        || &bytes[error_status] != [0]
+        || bytes[error_status] != [0]
         || error_index_tag != 0x02
         || bytes[error_index.clone()] != [0]
         || varbind_list_tag != 0x30
