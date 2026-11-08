@@ -2059,7 +2059,7 @@ fn run_jobs_list_command(
             };
             let queue_col = format!("{:<15}", queue_trunc);
             let status = jobs_str_field(job, "status");
-            let status_padded = format!("{:<12}", &status);
+            let status_padded = format!("{:<12}", status);
             let status_col = match status.as_str() {
                 "pending" => status_padded.yellow().to_string(),
                 "scheduled" => status_padded.blue().to_string(),
@@ -2404,7 +2404,7 @@ fn run_jobs_batches_command(
                 name.clone()
             };
             let status = jobs_str_field(batch, "status");
-            let status_padded = format!("{:<10}", &status);
+            let status_padded = format!("{:<10}", status);
             let status_col = match status.as_str() {
                 "sealing" => status_padded.yellow().to_string(),
                 "sealed" => status_padded.cyan().to_string(),

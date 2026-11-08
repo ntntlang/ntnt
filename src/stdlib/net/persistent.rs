@@ -58,7 +58,7 @@ impl Drop for ContextGuard {
 struct Permit;
 impl Permit {
     fn reserve() -> R<Self> {
-        LIVE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        LIVE.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n < LIMIT).then_some(n + 1)
         })
         .map_err(|_| "capacity: persistent ICMP socket limit (128)".to_string())?;

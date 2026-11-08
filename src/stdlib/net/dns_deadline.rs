@@ -710,11 +710,7 @@ mod tests {
 
     #[test]
     fn dns_deadline_pending_readiness_does_not_latch() {
-        use std::task::{Wake, Waker};
-        struct Noop;
-        impl Wake for Noop {
-            fn wake(self: Arc<Self>) {}
-        }
+        use std::task::Waker;
         let fixture = Fixture::new(false, 0, false);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -729,8 +725,7 @@ mod tests {
             guard: guard.clone(),
             pause: Duration::ZERO,
         };
-        let waker = Waker::from(Arc::new(Noop));
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         assert!(socket
             .poll_send_to(&mut cx, b"query", fixture.udp_addr)
             .is_pending());

@@ -3139,7 +3139,7 @@ fn get_sessions_for_user_redis(
         }
     }
 
-    sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
 
     Ok(sessions)
 }

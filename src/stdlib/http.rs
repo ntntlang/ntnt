@@ -3115,10 +3115,7 @@ mod tests {
     fn read_fixture_request(stream: &mut impl Read) -> String {
         let mut bytes = Vec::new();
         let mut buffer = [0; 4096];
-        loop {
-            let Ok(n) = stream.read(&mut buffer) else {
-                break;
-            };
+        while let Ok(n) = stream.read(&mut buffer) {
             if n == 0 {
                 break;
             }

@@ -461,10 +461,9 @@ fn normalize_magic_link_flow_base_url(value: &str) -> Option<String> {
     }
     let (scheme, host_port) = if let Some(rest) = trimmed.strip_prefix("https://") {
         ("https", rest)
-    } else if let Some(rest) = trimmed.strip_prefix("http://") {
-        ("http", rest)
     } else {
-        return None;
+        let rest = trimmed.strip_prefix("http://")?;
+        ("http", rest)
     };
     if host_port.is_empty()
         || host_port.contains('/')

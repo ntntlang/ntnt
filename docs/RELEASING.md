@@ -66,7 +66,7 @@ The separate `armv7` release job uses these pins from
 `scripts/release/armv7.env`:
 
 - Target: `armv7-unknown-linux-gnueabihf` (32-bit ARMv7, hard-float GNU/Linux).
-- Rust: **1.94.0**; cross: **0.2.5**; Cargo uses `--release --locked`.
+- Rust: **1.99.1** (from `rust-toolchain.toml`, mirrored in `scripts/release/armv7.env`); cross: **0.2.5**; Cargo uses `--release --locked`.
 - Base image:
   `ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf@sha256:4a08bebb60f08d52c1885b643a768f163c7318c05f91cf119f6c02855ea52699`.
 - OpenSSL **3.5.6**, official source archive SHA256

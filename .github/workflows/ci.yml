@@ -40,7 +40,8 @@ jobs:
               - 'build.rs'
               - '.github/workflows/ci.yml'
               - '.config/nextest.toml'
-              # Pins the Rust used by the clippy gate.
+              # The Rust toolchain for every job, and its release mirror.
+              - 'rust-toolchain.toml'
               - 'scripts/release/armv7.env'
             examples:
               - 'examples/**'
@@ -70,8 +71,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup toolchain install && rustc --version
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -93,8 +95,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup toolchain install && rustc --version
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -154,8 +157,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup toolchain install && rustc --version
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -219,8 +223,9 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup toolchain install && rustc --version
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -265,37 +270,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      # rust-toolchain.toml pins Rust (with rustfmt and clippy) for every job,
+      # so a new Rust release cannot add lints that fail main by itself.
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup toolchain install && rustc --version && cargo clippy --version
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      # Clippy uses the release build's pinned Rust, not floating stable, so a
-      # new Rust release cannot add lints that fail main without a code change.
-      # Bump ARMV7_RUST_VERSION (and fix any new lints) in one deliberate PR.
-      - name: Read pinned Rust version
-        id: pins
-        shell: bash
-        run: |
-          source scripts/release/armv7.env
-          echo "rust=$ARMV7_RUST_VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Install pinned Rust for clippy
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # pinned action; toolchain pinned below
-        with:
-          toolchain: ${{ steps.pins.outputs.rust }}
-          components: clippy
-
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: clippy-${{ steps.pins.outputs.rust }}
+          key: clippy
 
       - name: Clippy (warnings are errors)
-        run: cargo +${{ steps.pins.outputs.rust }} clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   # One release build serves both example linting and doc validation.
   # The release target/ gets its own cache key so it never collides with
@@ -308,8 +298,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup toolchain install && rustc --version
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

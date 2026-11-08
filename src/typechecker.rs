@@ -1687,12 +1687,7 @@ impl TypeContext {
                     .collect();
                 self.structs.insert(name.clone(), field_types);
             }
-            Statement::Enum {
-                name,
-                variants,
-                type_params: _,
-                ..
-            } => {
+            Statement::Enum { name, variants, .. } => {
                 if name == "Secret" {
                     let line = self.find_line_near("enum Secret");
                     self.error(
@@ -1920,7 +1915,6 @@ impl TypeContext {
                 return_type,
                 contract,
                 body,
-                type_params: _,
                 ..
             } => {
                 self.function_depth += 1;

@@ -91,11 +91,11 @@ pub(crate) fn probe_attempt_budget(
 /// RFC 1071 one's-complement Internet checksum over `data`.
 pub(super) fn internet_checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
-    let mut chunks = data.chunks_exact(2);
-    for chunk in &mut chunks {
-        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    let (pairs, remainder) = data.as_chunks::<2>();
+    for &pair in pairs {
+        sum += u16::from_be_bytes(pair) as u32;
     }
-    if let Some(&byte) = chunks.remainder().first() {
+    if let Some(&byte) = remainder.first() {
         sum += u16::from_be_bytes([byte, 0]) as u32;
     }
     while (sum >> 16) != 0 {

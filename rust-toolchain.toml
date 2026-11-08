@@ -1,0 +1,7 @@
+# The one Rust toolchain for local builds, every CI job, clippy and releases.
+# Bump it (with any new lint fixes) in one deliberate PR; keep
+# scripts/release/armv7.env ARMV7_RUST_VERSION equal (tests/release checks).
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
