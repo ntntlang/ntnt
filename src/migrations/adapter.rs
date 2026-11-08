@@ -131,6 +131,39 @@ impl Adapter {
             )),
         }
     }
+    pub async fn index_building(&self, schema: &str, name: &str) -> Result<bool> {
+        match self {
+            Self::Postgres(pg) => pg.index_building(schema, name).await,
+            Self::Sqlite(_) => Ok(false),
+        }
+    }
+    /// Record a non-transactional migration as `running` before it starts.
+    pub async fn record_attempt(
+        &self,
+        migration: &Migration,
+        position: usize,
+        database: &str,
+        schema: &str,
+        present: bool,
+    ) -> Result<()> {
+        let entry = super::model::HistoryEntry {
+            position: position as i64,
+            id: migration.id.to_string(),
+            name: migration.name.clone(),
+            checksum: migration.checksum.clone(),
+            state: "running".into(),
+        };
+        match self {
+            Self::Postgres(pg) => pg.record_entry(&entry, database, schema, present).await,
+            Self::Sqlite(_) => Err(unsupported_attempt()),
+        }
+    }
+    pub async fn resolve_attempt(&self, position: usize, applied: bool) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.resolve_attempt(position, applied).await,
+            Self::Sqlite(_) => Err(unsupported_attempt()),
+        }
+    }
     pub async fn drop_invalid_index(&self, schema: &str, name: &str) -> Result<()> {
         match self {
             Self::Postgres(pg) => pg.drop_invalid_index(schema, name).await,
@@ -239,4 +272,11 @@ impl Adapter {
             }
         }
     }
+}
+
+fn unsupported_attempt() -> Diagnostic {
+    Diagnostic::new(
+        "DB_REPLAY_UNSUPPORTED",
+        "SQLite has no non-transactional migrations.",
+    )
 }

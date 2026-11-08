@@ -1723,6 +1723,8 @@ and zero executed SQL assertions is `not_run`, not a business-verification pass.
 Plans are not executable or authorizing; unsupported SQL/metadata stays blocked.
 
 `ntnt db migrate --database app --target development --plan review.json --json`
+(and `ntnt db reconcile` with the same plan after an interrupted
+`CREATE INDEX CONCURRENTLY`, reported as `DB_ATTEMPT_UNRESOLVED`)
 executes only after the separate `approval_secret` provider resolves that exact
 reviewed digest. PostgreSQL and SQLite share one transactional execution/recovery
 core, but retain native SQL, identities, coverage and locking. SQLite uses existing

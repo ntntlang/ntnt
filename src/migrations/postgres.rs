@@ -409,6 +409,30 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 d
             })
     }
+    /// Whether a CREATE INDEX of this name is running in any session now.
+    pub async fn index_building(&self, schema: &str, name: &str) -> Result<bool> {
+        Ok(self
+            .rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_progress_create_index p JOIN pg_catalog.pg_class c ON c.oid=p.index_relid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2)", &[&schema, &name])
+            .await?[0]
+            .get(0))
+    }
+    /// Move a recorded `running` attempt to `applied`, or delete it. Exactly
+    /// one row must change; anything else leaves the transaction to roll back.
+    pub async fn resolve_attempt(&self, position: usize, applied: bool) -> Result<()> {
+        let position = position as i64;
+        let sql = if applied {
+            "UPDATE _ntnt.schema_migrations_v2 SET state='applied' WHERE position=$1 AND state='running' RETURNING position"
+        } else {
+            "DELETE FROM _ntnt.schema_migrations_v2 WHERE position=$1 AND state='running' RETURNING position"
+        };
+        if self.rows(sql, &[&position]).await?.len() != 1 {
+            return Err(Diagnostic::new(
+                "DB_RECONCILE_MISMATCH",
+                "The running attempt changed while it was being resolved; nothing was changed.",
+            ));
+        }
+        Ok(())
+    }
     /// A failed or interrupted concurrent build leaves an invalid index.
     pub async fn drop_invalid_index(&self, schema: &str, name: &str) -> Result<()> {
         self.outside_transaction(

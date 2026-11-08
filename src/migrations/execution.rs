@@ -124,10 +124,8 @@ fn pending_concurrent_index(
     super::analysis::concurrent_index(&migration.sql, &inputs.config.schema)
 }
 
-/// Validation result: applied count, history, identity, adoption already
-/// recorded, and whether the next concurrent index already exists and is valid
-/// (built by an earlier run that stopped before recording it).
-type Prefix = (usize, History, Identity, bool, bool);
+/// Validation result: applied count, history, identity, adoption already recorded.
+type Prefix = (usize, History, Identity, bool);
 
 async fn locked_prefix(db: &Adapter, inputs: &CapturedInputs, saved: &Value) -> Result<Prefix> {
     let base = validate(inputs, saved)?;
@@ -150,7 +148,6 @@ async fn locked_prefix(db: &Adapter, inputs: &CapturedInputs, saved: &Value) -> 
             .await?
     };
     let applied = super::report::prefix(&history, inputs)?;
-    let mut prebuilt = false;
     let catalog = db
         .catalog(&inputs.config.schema, &inputs.endpoint.role)
         .await?;
@@ -171,58 +168,19 @@ async fn locked_prefix(db: &Adapter, inputs: &CapturedInputs, saved: &Value) -> 
             false
         }
     } else {
-        // A concurrent build that failed or was interrupted leaves an invalid
-        // index; one that finished but was not recorded leaves a valid one.
-        let mut reference = applied;
-        let mut compared = catalog.clone();
-        let mut leftover = None;
-        if let Some(index) = pending_concurrent_index(inputs, applied) {
-            match db
-                .index_validity(&inputs.config.schema, &index.name)
-                .await?
-            {
-                Some(false) => {
-                    // Treat the invalid index as if its build had finished. Only
-                    // if that equals the plan's expected state after this
-                    // migration exactly (definition, table and every other
-                    // object) is it the planned index and safe to drop.
-                    if let Some(object) = compared.objects.get_mut(&format!("index:{}", index.name))
-                    {
-                        for flag in ["valid", "ready", "live"] {
-                            object[flag] = json!(true);
-                        }
-                    }
-                    reference = applied + 1;
-                    leftover = Some(index.name);
-                }
-                Some(true) => {
-                    prebuilt = true;
-                    reference = applied + 1;
-                }
-                None => (),
-            }
-        }
-        if !compared.uncovered.is_empty()
+        // An index nobody recorded an attempt for is drift, not progress.
+        if !catalog.uncovered.is_empty()
             || applied < base
-            || json_digest(&compared)
-                != saved["plan"]["execution"]["prefix_fingerprints"][reference]
+            || json_digest(&catalog) != saved["plan"]["execution"]["prefix_fingerprints"][applied]
             || (applied == base
                 && json_digest(&history) != saved["plan"]["binding"]["base_history_digest"])
         {
             return Err(stale());
         }
-        if let Some(name) = leftover {
-            let mut d = Diagnostic::new(
-                "DB_INVALID_INDEX",
-                "An earlier concurrent build of this migration's index left it invalid.",
-            );
-            d.source = Some(name);
-            return Err(d);
-        }
         false
     };
     db.validate_execution_scope(&inputs.config.schema).await?;
-    Ok((applied, history, identity, adopted, prebuilt))
+    Ok((applied, history, identity, adopted))
 }
 
 fn mark_counts(report: &mut Value, history: &History) {
@@ -265,7 +223,7 @@ async fn reconcile(
 ) -> Result<()> {
     let db = connect(inputs, saved).await?;
     db.own_migrations().await?;
-    let (count, history, identity, adopted, _) = locked_prefix(&db, inputs, saved).await?;
+    let (count, history, identity, adopted) = locked_prefix(&db, inputs, saved).await?;
     db.rollback().await?;
     report["target"]["identity"] = json!(identity);
     if Adoption::from_plan(inputs, saved)?.is_some() {
@@ -427,29 +385,17 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
     let db = connect(inputs, saved).await?;
     db.own_migrations().await?;
     let mut lock_retries = 0u32;
-    // Set when this run built a concurrent index, so the recording pass that
-    // follows reports it as built here rather than by an earlier run.
-    let mut built_here = false;
-    let mut dropped_invalid = false;
     loop {
         let assertions_before = report["assertions"].clone();
-        let (applied, history, identity, adopted, prebuilt) =
-            match locked_prefix(&db, inputs, saved).await {
-                Err(d) if d.code == "DB_LOCK_CONFLICT" && lock_retries + 1 < LOCK_ATTEMPTS => {
-                    db.rollback().await?;
-                    tokio::time::sleep(lock_backoff(lock_retries)).await;
-                    lock_retries += 1;
-                    continue;
-                }
-                Err(d) if d.code == "DB_INVALID_INDEX" && !dropped_invalid => {
-                    db.rollback().await?;
-                    let name = d.source.clone().unwrap_or_default();
-                    db.drop_invalid_index(&inputs.config.schema, &name).await?;
-                    dropped_invalid = true;
-                    continue;
-                }
-                other => other?,
-            };
+        let (applied, history, identity, adopted) = match locked_prefix(&db, inputs, saved).await {
+            Err(d) if d.code == "DB_LOCK_CONFLICT" && lock_retries + 1 < LOCK_ATTEMPTS => {
+                db.rollback().await?;
+                tokio::time::sleep(lock_backoff(lock_retries)).await;
+                lock_retries += 1;
+                continue;
+            }
+            other => other?,
+        };
         report["capabilities"] = identity.capabilities();
         report["target"]["identity"] = json!(identity);
         if action.is_some() {
@@ -483,41 +429,17 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
             pending_concurrent_index(inputs, applied)
         };
         if let Some(index) = &concurrent {
-            report["progress"][progress_index]["non_transactional"] = json!(true);
-            if dropped_invalid {
-                report["progress"][progress_index]["dropped_invalid_index"] = json!(true);
+            build_concurrent(&db, inputs, saved, report, applied, &history, index).await?;
+            report["progress"][progress_index]["lock_retries"] = json!(lock_retries);
+            lock_retries = 0;
+            report["covered_count"] = json!(applied + 1);
+            report["applied_count"] =
+                json!(history.counts()["applied_count"].as_u64().unwrap() + 1);
+            if applied + 1 == inputs.migrations.len() {
+                report["outcome"] = json!("pass");
+                return Ok(());
             }
-            if !prebuilt {
-                // CREATE INDEX CONCURRENTLY cannot run in a transaction. Release
-                // the validation snapshot; the advisory lock still excludes
-                // other migrators. A crash after the build is recovered by the
-                // next run, which finds the valid index and records it.
-                db.rollback().await?;
-                report["progress"][progress_index]["state"] = json!("unknown");
-                if let Err(d) = db
-                    .build_concurrent_index(&inputs.migrations[applied], &inputs.config.schema)
-                    .await
-                {
-                    let invalid = db.index_validity(&inputs.config.schema, &index.name).await;
-                    let cleanup = match invalid {
-                        Ok(Some(false)) => db
-                            .drop_invalid_index(&inputs.config.schema, &index.name)
-                            .await
-                            .map(|_| "dropped_invalid_index"),
-                        Ok(_) => Ok("pass"),
-                        Err(e) => Err(e),
-                    };
-                    report["progress"][progress_index]["state"] = json!("failed");
-                    report["progress"][progress_index]["cleanup"] =
-                        json!(cleanup.unwrap_or("unknown"));
-                    return Err(d);
-                }
-                built_here = true;
-                continue;
-            }
-            if !built_here {
-                report["progress"][progress_index]["index_already_built"] = json!(true);
-            }
+            continue;
         }
         report["progress"][progress_index]["state"] = json!("unknown");
         let mut locks = None;
@@ -532,7 +454,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                     report,
                 )
                 .await?;
-            } else if concurrent.is_none() {
+            } else {
                 let migration = &inputs.migrations[applied];
                 checks(
                     &db,
@@ -555,9 +477,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 )
                 .await?;
             }
-            if concurrent.is_none() {
-                locks = db.relation_locks(&inputs.config.schema).await?;
-            }
+            locks = db.relation_locks(&inputs.config.schema).await?;
             let catalog = db
                 .catalog(&inputs.config.schema, &inputs.endpoint.role)
                 .await?;
@@ -630,8 +550,6 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
             report["progress"][progress_index]["locks"] = locks;
         }
         lock_retries = 0;
-        built_here = false;
-        dropped_invalid = false;
         if let Some(action) = &action {
             mark_counts(report, &action.after(inputs)?);
             report["outcome"] = json!("pass");
@@ -646,6 +564,274 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
             return Ok(());
         }
     }
+}
+
+/// Run one lone CREATE INDEX CONCURRENTLY. The attempt is committed as
+/// `running` before the build; the build runs outside any transaction while
+/// the advisory lock excludes other migrators; a short transaction then
+/// verifies the planned catalog and marks the attempt `applied`. A failed
+/// build drops its invalid index and deletes the attempt. Anything this run
+/// cannot finish leaves the attempt for `ntnt db reconcile`.
+async fn build_concurrent(
+    db: &Adapter,
+    inputs: &CapturedInputs,
+    saved: &Value,
+    report: &mut Value,
+    applied: usize,
+    history: &History,
+    index: &super::analysis::ConcurrentIndex,
+) -> Result<()> {
+    let schema = &inputs.config.schema;
+    let migration = &inputs.migrations[applied];
+    let progress = &mut report["progress"][applied];
+    progress["non_transactional"] = json!(true);
+    if let Err(d) = db
+        .record_attempt(
+            migration,
+            applied + 1,
+            &inputs.database_name,
+            schema,
+            history.present,
+        )
+        .await
+    {
+        progress["state"] = json!("failed");
+        return Err(d);
+    }
+    progress["state"] = json!("unknown");
+    progress["phase"] = json!("record_attempt");
+    db.commit().await?;
+    progress["attempt_recorded"] = json!(true);
+    progress["phase"] = json!("build");
+    if let Err(d) = db.build_concurrent_index(migration, schema).await {
+        // Delete the attempt only once the index is confirmed absent. A build
+        // can succeed and still return an error (e.g. restoring settings
+        // failed); a valid or unknown index keeps the attempt for reconcile.
+        let cleanup = async {
+            let mut dropped = false;
+            if db.index_validity(schema, &index.name).await? == Some(false) {
+                db.drop_invalid_index(schema, &index.name).await?;
+                dropped = true;
+            }
+            if db.index_validity(schema, &index.name).await?.is_some() {
+                return Ok::<_, Diagnostic>(None);
+            }
+            db.begin_migration(schema).await?;
+            db.resolve_attempt(applied + 1, false).await?;
+            db.commit().await?;
+            Ok(Some(if dropped {
+                "dropped_invalid_index"
+            } else {
+                "pass"
+            }))
+        }
+        .await;
+        match cleanup {
+            Ok(Some(done)) => {
+                progress["state"] = json!("failed");
+                progress["cleanup"] = json!(done);
+            }
+            Ok(None) => progress["cleanup"] = json!("attempt_retained"),
+            Err(_) => progress["cleanup"] = json!("unknown"),
+        }
+        return Err(d);
+    }
+    progress["phase"] = json!("record");
+    let (position, catalog) = locked_attempt(db, inputs, saved).await?;
+    if position != applied + 1
+        || !catalog.uncovered.is_empty()
+        || json_digest(&catalog) != saved["plan"]["execution"]["prefix_fingerprints"][applied + 1]
+    {
+        return Err(stale());
+    }
+    db.resolve_attempt(position, true).await?;
+    progress["phase"] = json!("commit");
+    db.commit().await?;
+    progress["state"] = json!("committed");
+    Ok(())
+}
+
+/// Open a migration transaction and require history to end in exactly one
+/// `running` attempt for the next captured migration, within this plan.
+/// Returns its 1-based position and the observed catalog.
+async fn locked_attempt(
+    db: &Adapter,
+    inputs: &CapturedInputs,
+    saved: &Value,
+) -> Result<(usize, super::model::Catalog)> {
+    let base = validate(inputs, saved)?;
+    db.begin_migration(&inputs.config.schema).await?;
+    let identity = db.identity(&inputs.endpoint).await?;
+    if json!(&identity) != saved["plan"]["binding"]["target"] {
+        return Err(stale());
+    }
+    let history = db
+        .writable_history(&inputs.database_name, &inputs.config.schema)
+        .await?;
+    let (applied, attempt) = super::report::prefix_with_attempt(&history, inputs)?;
+    let position = attempt.ok_or_else(|| {
+        Diagnostic::new(
+            "DB_RECONCILE_MISMATCH",
+            "The running attempt disappeared while it was being resolved; nothing was changed.",
+        )
+    })?;
+    if applied < base || applied + 1 != position {
+        return Err(stale());
+    }
+    let catalog = db
+        .catalog(&inputs.config.schema, &inputs.endpoint.role)
+        .await?;
+    Ok((position, catalog))
+}
+
+/// `ntnt db reconcile`: resolve a `running` attempt left by an interrupted
+/// non-transactional migration. It never runs migration SQL. It records the
+/// attempt only if the planned index exists and is valid, rolls it back
+/// (dropping an invalid index) only if the database is exactly the plan's
+/// state before or after it, and otherwise changes nothing.
+pub(super) async fn reconcile_attempt(
+    inputs: &CapturedInputs,
+    saved: &Value,
+    report: &mut Value,
+) -> Result<()> {
+    validate(inputs, saved)?;
+    if Adoption::from_plan(inputs, saved)?.is_some() {
+        return Err(Diagnostic::new(
+            "DB_CONFIG",
+            "Adoption plans have no non-transactional attempts to reconcile.",
+        ));
+    }
+    authorize(inputs, saved)?;
+    report["database"] = json!(inputs.database_name);
+    report["target"] = json!({"name":inputs.target_name,"schema":inputs.config.schema});
+    report["plan_digest"] = saved["plan_digest"].clone();
+    work_deadline(
+        reconcile_owned(inputs, saved, report),
+        std::time::Duration::from_secs(100),
+    )
+    .await
+}
+
+async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value) -> Result<()> {
+    let schema = &inputs.config.schema;
+    let fingerprints = &saved["plan"]["execution"]["prefix_fingerprints"];
+    let db = connect(inputs, saved).await?;
+    db.own_migrations().await?;
+    db.begin_migration(schema).await?;
+    let identity = db.identity(&inputs.endpoint).await?;
+    if json!(&identity) != saved["plan"]["binding"]["target"] {
+        return Err(stale());
+    }
+    report["target"]["identity"] = json!(identity);
+    let history = db.writable_history(&inputs.database_name, schema).await?;
+    let (applied, attempt) = super::report::prefix_with_attempt(&history, inputs)?;
+    if attempt.is_none() {
+        db.rollback().await?;
+        report["reconciliation"] = json!({"outcome":"pass","resolution":"none"});
+        report["outcome"] = json!("pass");
+        return Ok(());
+    }
+    // Only an attempt this plan can explain is resolved.
+    let mismatch = |name: &str| {
+        let mut d = Diagnostic::new(
+            "DB_RECONCILE_MISMATCH",
+            "The database matches neither the plan's state before this migration nor after it.",
+        );
+        d.source = Some(name.to_string());
+        d
+    };
+    let source = inputs.migrations[applied].name.clone();
+    let index = pending_concurrent_index(inputs, applied).ok_or_else(|| mismatch(&source))?;
+    locked_attempt_scope(applied, inputs, saved)?;
+    if db.index_building(schema, &index.name).await? {
+        let mut d = Diagnostic::new(
+            "DB_ATTEMPT_ACTIVE",
+            "The attempt's index is still being built by another session.",
+        );
+        d.source = Some(index.name.clone());
+        return Err(d);
+    }
+    let mut catalog = db.catalog(schema, &inputs.endpoint.role).await?;
+    if !catalog.uncovered.is_empty() {
+        return Err(mismatch(&index.name));
+    }
+    let validity = db.index_validity(schema, &index.name).await?;
+    report["reconciliation"] = json!({
+        "source": source,
+        "observed_index": match validity { Some(true) => "valid", Some(false) => "invalid", None => "absent" },
+    });
+    let resolution = match validity {
+        Some(true) => {
+            if json_digest(&catalog) != fingerprints[applied + 1] {
+                return Err(mismatch(&index.name));
+            }
+            db.resolve_attempt(applied + 1, true).await?;
+            pending_write(report, "completed");
+            db.commit().await?;
+            "completed"
+        }
+        Some(false) => {
+            // Treated as finished, the invalid index must make the catalog
+            // exactly the planned one; only then is it ours to drop.
+            if let Some(object) = catalog.objects.get_mut(&format!("index:{}", index.name)) {
+                for flag in ["valid", "ready", "live"] {
+                    object[flag] = json!(true);
+                }
+            }
+            if json_digest(&catalog) != fingerprints[applied + 1] {
+                return Err(mismatch(&index.name));
+            }
+            db.rollback().await?;
+            pending_write(report, "dropped_invalid_index");
+            db.drop_invalid_index(schema, &index.name).await?;
+            report["reconciliation"]["dropped_invalid_index"] = json!(true);
+            report["reconciliation"]["outcome"] = json!("fail");
+            let (position, after) = locked_attempt(&db, inputs, saved).await?;
+            if position != applied + 1 || json_digest(&after) != fingerprints[applied] {
+                let mut d = Diagnostic::new(
+                    "DB_RECONCILE_INCOMPLETE",
+                    "The invalid index was dropped, but the database then differed from the plan's state before this migration; the attempt was kept.",
+                );
+                d.source = Some(index.name.clone());
+                return Err(d);
+            }
+            db.resolve_attempt(position, false).await?;
+            pending_write(report, "rolled_back");
+            db.commit().await?;
+            "rolled_back"
+        }
+        None => {
+            if json_digest(&catalog) != fingerprints[applied] {
+                return Err(mismatch(&index.name));
+            }
+            db.resolve_attempt(applied + 1, false).await?;
+            pending_write(report, "not_started");
+            db.commit().await?;
+            "not_started"
+        }
+    };
+    report["reconciliation"]["resolution"] = json!(resolution);
+    report["reconciliation"]["outcome"] = json!("pass");
+    if let Some(r) = report["reconciliation"].as_object_mut() {
+        r.remove("pending_write");
+    }
+    report["outcome"] = json!("pass");
+    Ok(())
+}
+
+/// Mark a reconciliation write whose outcome is not yet acknowledged. A lost
+/// commit or interrupted DROP then reports `unknown`, not `fail`.
+fn pending_write(report: &mut Value, write: &str) {
+    report["reconciliation"]["pending_write"] = json!(write);
+    report["reconciliation"]["outcome"] = json!("unknown");
+}
+
+/// The attempt must lie inside the plan's pending range.
+fn locked_attempt_scope(applied: usize, inputs: &CapturedInputs, saved: &Value) -> Result<()> {
+    if applied < validate(inputs, saved)? {
+        return Err(stale());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
