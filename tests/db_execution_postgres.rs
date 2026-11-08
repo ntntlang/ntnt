@@ -1820,6 +1820,7 @@ fn reconciliation_refuses_what_it_cannot_explain() {
     assert_eq!(r["reconciliation"]["resolution"], "none", "{r}");
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn lost_reconcile_commit_is_unknown_not_failed() {
