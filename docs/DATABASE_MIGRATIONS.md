@@ -202,7 +202,7 @@ Before anything runs, the script is tokenized (quoted and dollar-quoted text sta
 
 - transaction control: `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, `ABORT`, `SAVEPOINT`, `RELEASE`, `PREPARE TRANSACTION`;
 - session identity: `SET [LOCAL|SESSION] ROLE`, `SET SESSION AUTHORIZATION`, `SET session_replication_role`, `RESET ROLE|SESSION|ALL`, `DISCARD`;
-- non-transactional work: `VACUUM`, `CONCURRENTLY` operations, `REINDEX DATABASE|SYSTEM`;
+- non-transactional work: `VACUUM`, `CONCURRENTLY` operations (except the single-statement index migration described below), `REINDEX DATABASE|SYSTEM`;
 - server scope: `COPY`, `LOAD`, `CHECKPOINT`, `ALTER SYSTEM`, and creating/altering/dropping databases, tablespaces and roles;
 - explicit `CASCADE` drops, whose transitive effects are not bounded. `ON DELETE CASCADE` and `ON UPDATE CASCADE` foreign-key actions are allowed.
 
@@ -219,7 +219,17 @@ For PostgreSQL, `analysis.locks` predicts the table locks each statement takes (
 - `REWRITES_TABLE`: a column type change.
 - `MAY_REWRITE_TABLE`: a new column with a volatile default, identity or stored generated value.
 
-Warnings are review prompts and do not block a plan. The safer forms are `ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT` in a later migration, and a `CHECK (column IS NOT NULL) NOT VALID` validated before `SET NOT NULL`. `CREATE INDEX CONCURRENTLY` cannot run inside a migration transaction and is not supported yet.
+Warnings are review prompts and do not block a plan. The safer forms are `ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT` in a later migration, and a `CHECK (column IS NOT NULL) NOT VALID` validated before `SET NOT NULL`. ### Concurrent index builds
+
+A migration whose entire script is one named `CREATE [UNIQUE] INDEX CONCURRENTLY` on a managed table runs outside a transaction (`analysis.non_transactional`). It takes only `SHARE UPDATE EXCLUSIVE` on the table, so reads and writes continue while the index builds. The build waits for transactions already running on the table rather than failing on the 1-second lock timeout, up to the 90-second script limit. Comments around the statement are allowed; any other statement, an unnamed index or a table outside the managed schema is rejected as before. Such a migration cannot have `requires` or `ensures` checks, because no transaction surrounds the change.
+
+Replay builds the same index without `CONCURRENTLY` inside its rollback-only transaction, so the plan's expected catalog is identical. On the target, `migrate` validates the planned prefix, releases its snapshot, builds the index while still holding the migrator advisory lock, then records the migration in a separate short transaction that rechecks the catalog.
+
+Failures leave no invalid index behind:
+
+- If the build fails (for example, duplicate values for a unique index), the invalid index is dropped with `DROP INDEX CONCURRENTLY`, the migration is reported `failed` with `cleanup: dropped_invalid_index`, and the ledger is unchanged. Fix the data and rerun the same plan.
+- If an earlier run was interrupted and left an invalid index of that name, the next run drops it (`dropped_invalid_index: true`) and builds again.
+- If an earlier run built the index but stopped before recording it, the next run finds the valid index, does not rebuild it, and records the migration (`index_already_built: true`).
 
 ## Inspection coverage and drift
 

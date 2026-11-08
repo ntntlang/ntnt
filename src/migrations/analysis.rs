@@ -14,6 +14,44 @@ pub(crate) struct Analysis {
     /// PostgreSQL only: locks that block or scan an existing table.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lock_warnings: Vec<LockWarning>,
+    /// PostgreSQL only: the migration is a single `CREATE INDEX CONCURRENTLY`,
+    /// which `migrate` runs outside a transaction.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub non_transactional: bool,
+}
+/// A migration whose whole script is one named `CREATE INDEX CONCURRENTLY` on
+/// a managed table. Replay builds the same index without CONCURRENTLY, inside
+/// its rollback-only transaction; the catalog result is identical.
+#[derive(Clone, Debug)]
+pub(crate) struct ConcurrentIndex {
+    pub name: String,
+    pub replay_sql: String,
+}
+pub(crate) fn concurrent_index(sql: &str, schema: &str) -> Option<ConcurrentIndex> {
+    let statements = parse(sql)?;
+    let [Statement::CreateIndex(index)] = statements.as_slice() else {
+        return None;
+    };
+    if !index.concurrently {
+        return None;
+    }
+    let index_name = index.name.as_ref()?;
+    if !name(index_name, schema) {
+        return None;
+    }
+    managed_table(&index.table_name, schema)?;
+    let last = index_name.0.last()?.as_ident()?;
+    let folded = if last.quote_style.is_some() {
+        last.value.clone()
+    } else {
+        last.value.to_lowercase()
+    };
+    let mut replay = index.clone();
+    replay.concurrently = false;
+    Some(ConcurrentIndex {
+        name: folded,
+        replay_sql: Statement::CreateIndex(replay).to_string(),
+    })
 }
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub(crate) struct PredictedLock {
@@ -276,11 +314,22 @@ pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
         unknowns: vec![],
         locks: vec![],
         lock_warnings: vec![],
+        non_transactional: false,
     };
     if engine == "sqlite" {
         sqlite_script(&mut a, sql);
     } else {
-        postgres_script(&mut a, sql, schema);
+        if let Some(index) = concurrent_index(sql, schema) {
+            postgres_script(&mut a, &index.replay_sql, schema);
+            a.non_transactional = true;
+            for lock in &mut a.locks {
+                lock.mode = SHARE_UPDATE_EXCLUSIVE;
+            }
+            a.lock_warnings
+                .retain(|w| w.code != "BLOCKS_WRITES_WHILE_INDEXING");
+        } else {
+            postgres_script(&mut a, sql, schema);
+        }
     }
     a.hazards.sort();
     a.hazards.dedup();
@@ -1304,7 +1353,7 @@ mod tests {
             ),
             ("RESET ALL", "SESSION_AUTHORIZATION"),
             (
-                "CREATE INDEX CONCURRENTLY i ON app.t(id)",
+                "CREATE INDEX CONCURRENTLY i ON app.t(id); CREATE TABLE app.x(id int)",
                 "NON_TRANSACTIONAL",
             ),
             ("DROP INDEX CONCURRENTLY app.i", "NON_TRANSACTIONAL"),
@@ -1476,5 +1525,33 @@ mod tests {
             analyze("SELECT 1; CREATE INDEX i ON app.t(id)", "app").lock_warnings[0].statement,
             2
         );
+    }
+    #[test]
+    fn a_lone_named_concurrent_index_runs_outside_the_transaction() {
+        let sql =
+            "-- build without blocking writes\nCREATE INDEX CONCURRENTLY t_id ON app.t (id);\n";
+        let a = analyze(sql, "app");
+        assert!(a.replay_supported, "{a:?}");
+        assert!(a.non_transactional, "{a:?}");
+        assert_eq!(locks(sql), vec![pair("t", "ShareUpdateExclusiveLock")]);
+        assert!(a.lock_warnings.is_empty(), "{a:?}");
+        let ci = concurrent_index(sql, "app").unwrap();
+        assert_eq!(ci.name, "t_id");
+        assert!(
+            !ci.replay_sql.to_uppercase().contains("CONCURRENTLY"),
+            "{}",
+            ci.replay_sql
+        );
+        assert!(ci.replay_sql.contains("CREATE INDEX"), "{}", ci.replay_sql);
+        // Anything else stays rejected: other statements, no name, another schema.
+        for sql in [
+            "CREATE INDEX CONCURRENTLY t_id ON app.t(id); CREATE TABLE app.x(id int);",
+            "CREATE INDEX CONCURRENTLY ON app.t(id);",
+            "CREATE INDEX CONCURRENTLY t_id ON other.t(id);",
+        ] {
+            assert!(concurrent_index(sql, "app").is_none(), "{sql}");
+            assert!(!analyze(sql, "app").replay_supported, "{sql}");
+        }
+        assert!(!analyze("CREATE INDEX t_id ON app.t(id)", "app").non_transactional);
     }
 }
