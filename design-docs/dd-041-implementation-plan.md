@@ -1,9 +1,29 @@
 # DD-041 implementation plan: native SSE, then WebSockets
 
-**Status:** Gate 0 executed on 2026-10-26; Slice A (SSE) merged in #295, with configurable process resource caps added as a follow-up. Not yet released. Slice B remains unimplemented and gated on its own acceptance checks.
-**Target baseline:** `58710b9b9b9468575257ccc141dcbaed639d468b` (DD-041 merged); runtime/Cargo remain identical to v0.5.6.
+**Status:** Gate 0 executed on 2026-10-26; Slice A (SSE), process resource caps and initial worker readiness shipped in v0.6.0. Exact loaded-source provenance is the next v0.6.1 development prerequisite. Slice B remains unimplemented and gated on its own acceptance checks.
+**Gate 0 baseline (historical):** `58710b9b9b9468575257ccc141dcbaed639d468b` (DD-041 merged); the runtime/Cargo at that baseline matched v0.5.6, not current main.
 **Design:** [DD-041](dd-041-sse-streaming.md).
 **Publication:** Historical implementation plan plus Gate 0 evidence. The task lists below describe the accepted target, not a claim that every planned invariant landed in Slice A. See DD-041's implemented boundary for process scope, missing finite leases and deferred generation work. Initial worker setup now gates realtime bind/readiness with fail-fast errors and a shared 10-second deadline; this is not program-generation/endpoint parity or quarantined rejoin. #298 has merged the interpreter-context function prerequisite; it is no longer a blocker to Slice B.
+
+### Current provenance boundary and next generation work
+
+`source::SourceFile` resolves once and keeps the exact parser input;
+`ParsedSource` binds that input to an immutable AST. CLI/HTTP/job bootstrap,
+ordinary imports and direct libs/middleware/routes/jobs loaders record those
+digests, independent of reload mtimes. Cached modules keep their original digest;
+different evaluated bytes for one identity are marked mixed rather than silently
+replacing it. Source-less AST execution remains supported, but cannot be blessed
+by setting a filename. Snapshot encoding is deterministic and length-delimited
+within the running platform; it is not a runtime-build/release fingerprint.
+
+This prerequisite deliberately does **not** enforce setup-source parity. Lazy
+imports are supported behavior, task captures have independent source-less
+interpreter entry, and primary `listen` blocks while secondary setup continues
+after its suppressed `listen`. Freezing manifests at eval completion would break
+valid programs or misstate coverage. The next generation protocol must define
+corresponding setup boundaries, late-load validation, task provenance transfer,
+and reload/rejoin coordination before using snapshots for admission. No endpoint
+placeholder, application namespace or callback queue is added in this step.
 
 ## Outcome and limits
 
@@ -35,7 +55,7 @@ Callback invocation must use ordinary `call_function`/caller-frame cleanup and t
 
 ### D. Worker capability and setup semantics need an explicit check
 
-`call_function`'s native arm has no generic `&mut Interpreter` native-function argument; imported `ws_endpoint` therefore needs a narrow interpreter-aware registration hook (`interpreter.rs:9480–9584`). Resolve the actual native callee first and recognize the canonical stdlib function identity, not a raw identifier spelling. Named import, module-qualified call and alias must agree; a user function with the same name must remain a user function. Do not add a name-only global action shortcut that steals shadowed calls.
+The `ContextFunction` prerequisite has landed in #298 and supplies `&mut Interpreter` through ordinary resolved-value dispatch. Implement `ws_endpoint` using that existing primitive, not another registration dispatcher or a spelling-keyed special case. Named import, module-qualified call and alias must agree; a user function with the same name must remain a user function.
 
 Registration occurs before serving in primary and Worker initialization. `http_worker_request_tasks` currently distinguishes task availability after worker initialization (`interpreter.rs:1218–1225,10850–10864`); a Worker mode test alone does not prove a call is setup-time. Freeze the endpoint registry explicitly at the setup/serving transition and reject later registration, including aliases, callbacks and task-created interpreters. Do not return Unit on denial.
 

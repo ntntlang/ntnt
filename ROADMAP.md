@@ -1714,13 +1714,14 @@ ProcessPayment.enqueue_in(3600, map { "order_id": "456", "amount": 29.99 })
 
 ### 10.5 Native SSE and WebSockets
 
-**Status:** Slice A (SSE) implemented in #295, with configurable process resource caps. Not yet in an official release. Slice B (WebSockets) remains unimplemented. [DD-041](design-docs/dd-041-sse-streaming.md) records the design and remaining gates.
+**Status:** Slice A (SSE), configurable process resource caps and initial worker readiness shipped in v0.6.0. The v0.6.1 development line adds exact loaded-source provenance as a generation prerequisite. Slice B (WebSockets) remains unimplemented. [DD-041](design-docs/dd-041-sse-streaming.md) records the design and remaining gates.
 
 **Scope:** Support both protocols through the existing Axum/Tokio server, with SSE first and WebSockets second. Ordinary routes and middleware return typed streaming/upgrade responses; idle connections do not retain an interpreter or OS thread.
 
 - [x] Gate 0 feasibility probes and SSE ownership/shutdown checks (#292, #289, #290); WebSocket-specific upgrade/generation/fairness checks remain in Slice B.
 - [x] Slice A: bounded native broadcast/publish, ordinary `sse()` response builder, auth/header handling, configurable process connection/topic/byte caps, lag handling and lifecycle cleanup.
 - [x] Initial realtime worker setup completes before bind/readiness; fail-fast initial errors and a shared startup deadline. Source-generation/endpoint compatibility and quarantined rejoin remain separate Slice B work.
+- [x] Exact file-input provenance: main, imports and direct application loaders; source-aware AST handoff, cache identity and mixed/source-less detection. Observed inputs are not a frozen full-program generation; lazy-load/reload coordination and worker admission remain open.
 - [ ] Slice B: setup-registered WebSocket endpoints, `websocket()` response builder, text/binary send/close, explicit connection state, bounded fair worker callbacks and exact-Origin policy.
 - [ ] Prove multi-worker fan-out, slow-client bounds, cancellation/reload/shutdown behavior, and ordinary HTTP performance with real protocol clients.
 

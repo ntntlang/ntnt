@@ -11,6 +11,7 @@ use ntnt::{
     interpreter::{ExecutionMode, Interpreter},
     lexer::Lexer,
     parser::Parser as IntentParser,
+    source::SourceFile,
 };
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -1343,11 +1344,12 @@ fn run_file_with_workers(
     timeout: u64,
     workers: Option<usize>,
 ) -> anyhow::Result<()> {
-    let source = fs::read_to_string(path)?;
+    let source_file = SourceFile::read(path)?;
+    let source = source_file.text();
     let mut interpreter = Interpreter::new();
 
     // Set the current file path for imports and hot-reload
-    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let canonical_path = source_file.path().to_path_buf();
     let path_str = canonical_path.to_string_lossy();
     interpreter.set_current_file(&path_str);
     interpreter.set_main_source_file(&path_str);
@@ -1360,15 +1362,11 @@ fn run_file_with_workers(
         interpreter.set_worker_count(workers);
     }
 
-    let lexer = Lexer::new(&source);
-    let tokens: Vec<_> = lexer.collect();
-
-    let mut parser = IntentParser::new(tokens).with_source_file(path);
-    let ast = parser.parse()?;
+    let parsed_source = source_file.parse()?;
+    let ast = parsed_source.program();
 
     // Strict type checking: block execution if type errors found
-    if let Some(errors) = ntnt::typechecker::strict_check_with_file(&ast, &source, Some(&path_str))
-    {
+    if let Some(errors) = ntnt::typechecker::strict_check_with_file(ast, source, Some(&path_str)) {
         for diag in &errors {
             let location = if diag.line > 0 {
                 format!(" (line {})", diag.line)
@@ -1393,7 +1391,7 @@ fn run_file_with_workers(
         exit_with_runtime_cleanup(1);
     }
 
-    let result = interpreter.eval(&ast);
+    let result = interpreter.eval_source(&parsed_source);
 
     // Shutdown concurrency runtime unconditionally — cancel all tasks and schedules
     // even on eval error, so schedules/tasks don't outlive the program (rule 28)
@@ -1415,10 +1413,11 @@ fn run_worker_command(
     if concurrency == 0 {
         anyhow::bail!("--concurrency must be at least 1");
     }
-    let source = fs::read_to_string(path)?;
+    let source_file = SourceFile::read(path)?;
+    let source = source_file.text();
     let mut interpreter = Interpreter::new();
 
-    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let canonical_path = source_file.path().to_path_buf();
     let path_str = canonical_path.to_string_lossy();
     interpreter.set_current_file(&path_str);
     interpreter.set_main_source_file(&path_str);
@@ -1427,14 +1426,11 @@ fn run_worker_command(
     // also start workers, which would cause duplicate/recursive worker spawning.
     interpreter.set_execution_mode(ExecutionMode::Worker);
 
-    let lexer = Lexer::new(&source);
-    let tokens: Vec<_> = lexer.collect();
-    let mut parser = IntentParser::new(tokens).with_source_file(path);
-    let ast = parser.parse()?;
+    let parsed_source = source_file.parse()?;
+    let ast = parsed_source.program();
 
     // Strict type checking (same gate as run_file)
-    if let Some(errors) = ntnt::typechecker::strict_check_with_file(&ast, &source, Some(&path_str))
-    {
+    if let Some(errors) = ntnt::typechecker::strict_check_with_file(ast, source, Some(&path_str)) {
         for diag in &errors {
             let location = if diag.line > 0 {
                 format!(" (line {})", diag.line)
@@ -1479,7 +1475,7 @@ fn run_worker_command(
     }
 
     // Evaluate the file to register all job definitions
-    interpreter.eval(&ast)?;
+    interpreter.eval_source(&parsed_source)?;
 
     // Build opts map
     let mut opts = std::collections::HashMap::new();
