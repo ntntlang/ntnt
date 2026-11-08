@@ -166,14 +166,15 @@ impl SourceLedger {
     }
 
     /// Record an executed non-NTNT input (an external template or partial)
-    /// by the exact bytes that were parsed. Unresolvable paths are untracked.
-    pub(crate) fn record_bytes(&mut self, path: &Path, digest: [u8; 32]) {
-        let Ok(resolved) = path.canonicalize() else {
+    /// under the identity it was read through and the exact bytes parsed.
+    /// `None` means no regular-file identity was established: untracked.
+    pub(crate) fn record_bytes(&mut self, identity: Option<&Path>, digest: [u8; 32]) {
+        let Some(resolved) = identity else {
             self.source_less();
             return;
         };
         self.files
-            .entry(resolved)
+            .entry(resolved.to_path_buf())
             .and_modify(|(first, mixed)| *mixed |= *first != digest)
             .or_insert((digest, false));
     }

@@ -828,8 +828,11 @@ struct ServerAction {
 struct CachedExternalTemplate {
     parts: Rc<Vec<TemplatePart>>,
     mtime: Option<std::time::SystemTime>,
-    /// Digest of the bytes these parts were parsed from (source provenance).
+    /// Digest of the bytes these parts were parsed from, and the resolved
+    /// identity they were read through (source provenance). A later symlink
+    /// change cannot relabel cached bytes with a new target.
     digest: [u8; 32],
+    identity: Option<std::path::PathBuf>,
 }
 
 fn convert_to_int(value: &Value) -> std::result::Result<Value, String> {
@@ -8037,22 +8040,38 @@ impl Interpreter {
             .filter(|cached| {
                 is_production || Self::cached_template_is_fresh(cached.mtime, current_mtime)
             })
-            .map(|cached| (Rc::clone(&cached.parts), cached.digest));
-        if let Some((parts, digest)) = cached {
-            self.loaded_sources.record_bytes(&resolved_path, digest);
+            .map(|cached| {
+                (
+                    Rc::clone(&cached.parts),
+                    cached.digest,
+                    cached.identity.clone(),
+                )
+            });
+        if let Some((parts, digest, identity)) = cached {
+            self.loaded_sources
+                .record_bytes(identity.as_deref(), digest);
             return Ok(parts);
         }
 
-        let content = Self::read_external_template_file(&resolved_path)?;
+        // Resolve once and read that resolved file, so the recorded identity
+        // is the one the bytes actually came from.
+        let identity = resolved_path
+            .canonicalize()
+            .ok()
+            .filter(|path| path.is_file());
+        let read_path = identity.as_deref().unwrap_or(&resolved_path);
+        let content = Self::read_external_template_file(read_path)?;
         let digest = crate::source::digest_bytes(content.as_bytes());
         let parts = Rc::new(Self::parse_template_content(&content, &resolved_path)?);
-        self.loaded_sources.record_bytes(&resolved_path, digest);
+        self.loaded_sources
+            .record_bytes(identity.as_deref(), digest);
         self.external_template_cache.insert(
             cache_key,
             CachedExternalTemplate {
                 parts: Rc::clone(&parts),
                 mtime: current_mtime,
                 digest,
+                identity,
             },
         );
         Ok(parts)

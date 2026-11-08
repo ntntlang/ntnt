@@ -651,3 +651,50 @@ fn executed_templates_and_partials_are_recorded_in_the_snapshot() {
     );
     assert_ne!(after.digest(), before.digest());
 }
+
+#[cfg(unix)]
+#[test]
+fn cached_template_keeps_the_identity_it_was_read_through() {
+    // Retargeting a template symlink after a cached read must not relabel the
+    // cached bytes as the new target's.
+    let dir = tempfile::tempdir().unwrap();
+    let old = write(dir.path(), "views/old.html", "<p>{{ 1 }}</p>");
+    let new = write(dir.path(), "views/new.html", "<p>{{ 2 }}</p>");
+    let link = dir.path().join("views/page.html");
+    std::os::unix::fs::symlink(&old, &link).unwrap();
+    let root = write(
+        dir.path(),
+        "main.tnt",
+        "fn page() { template(\"views/page.html\", map {}) }",
+    );
+    // Keep the cached entry fresh in development: the target is older.
+    let old_time = std::fs::metadata(&old).unwrap().modified().unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&new)
+        .unwrap()
+        .set_modified(old_time - std::time::Duration::from_secs(60))
+        .unwrap();
+    let mut interpreter = Interpreter::new();
+    run(&mut interpreter, &root);
+    interpreter.call_function_by_name("page", vec![]).unwrap();
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&new, &link).unwrap();
+    interpreter.call_function_by_name("page", vec![]).unwrap();
+    let snapshot = interpreter.source_snapshot().unwrap();
+    let old_id = old.canonicalize().unwrap();
+    let new_id = new.canonicalize().unwrap();
+    if snapshot.files().contains_key(&new_id) {
+        // A fresh read of the new target is fine, but only with its own bytes.
+        assert_eq!(
+            snapshot.files().get(&new_id),
+            Some(&digest(&std::fs::read_to_string(&new).unwrap()))
+        );
+    }
+    assert_eq!(
+        snapshot.files().get(&old_id),
+        Some(&digest(&std::fs::read_to_string(&old).unwrap())),
+        "{:?}",
+        snapshot.files().keys().collect::<Vec<_>>()
+    );
+}
