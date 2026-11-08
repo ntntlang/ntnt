@@ -273,10 +273,10 @@ impl BandStats {
 ///   2. `band_cancel_arcs`
 ///   3. `active_bands`
 ///   4. `active_queues`
-/// Startup and scaling hold these together to publish a coherent pool. Status
-/// snapshots task IDs and bands together, then releases them before reading stats.
-/// Prefer acquiring one lock at a time (release before acquiring another).
-/// When two locks must be held simultaneously (e.g., scale_workers), follow the order above.
+///      Startup and scaling hold these together to publish a coherent pool. Status
+///      snapshots task IDs and bands together, then releases them before reading stats.
+///      Prefer acquiring one lock at a time (release before acquiring another).
+///      When two locks must be held simultaneously (e.g., scale_workers), follow the order above.
 pub struct JobRuntime {
     /// Registered job definitions: name -> definition.
     job_registry: RwLock<HashMap<String, JobDefinition>>,
@@ -7203,9 +7203,10 @@ pub(crate) mod tests {
         let mut opts = HashMap::new();
         opts.insert("poll_interval".to_string(), Value::Int(500));
         opts.insert("concurrency".to_string(), Value::Int(4));
-        let mut queues_arr = Vec::new();
-        queues_arr.push(Value::String("emails".to_string()));
-        queues_arr.push(Value::String("payments".to_string()));
+        let queues_arr = vec![
+            Value::String("emails".to_string()),
+            Value::String("payments".to_string()),
+        ];
         opts.insert("queues".to_string(), Value::Array(queues_arr));
 
         let (poll, concurrency, queues) = parse_work_opts(&[Value::Map(opts)]).unwrap();
@@ -9345,7 +9346,7 @@ pub(crate) mod tests {
                 .unwrap();
             }
 
-            let seal_result = seal_fn(&[handle.clone()]).unwrap();
+            let seal_result = seal_fn(std::slice::from_ref(&handle)).unwrap();
             assert!(
                 matches!(seal_result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
                 "seal() must return Ok"
@@ -9406,7 +9407,7 @@ pub(crate) mod tests {
             let seal_fn = get_fn(&module, "seal");
 
             let handle = batch_fn(&[Value::String("empty-batch".to_string())]).unwrap();
-            let seal_result = seal_fn(&[handle.clone()]).unwrap();
+            let seal_result = seal_fn(std::slice::from_ref(&handle)).unwrap();
             assert!(
                 matches!(seal_result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
                 "seal() on empty batch must return Ok"
@@ -9465,10 +9466,10 @@ pub(crate) mod tests {
                 Value::Map(payload),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             // Query via handle
-            let result = status_fn(&[handle.clone()]).unwrap();
+            let result = status_fn(std::slice::from_ref(&handle)).unwrap();
             let meta = match result {
                 Value::EnumValue {
                     ref variant,
@@ -9520,9 +9521,9 @@ pub(crate) mod tests {
 
             let handle = batch_fn(&[Value::String("idempotent-batch".to_string())]).unwrap();
             // First seal
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
             // Second seal — must be no-op (Ok, not an error)
-            let result = seal_fn(&[handle.clone()]).unwrap();
+            let result = seal_fn(std::slice::from_ref(&handle)).unwrap();
             assert!(
                 matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
                 "second seal must return Ok (no-op)"
@@ -9542,7 +9543,7 @@ pub(crate) mod tests {
             let seal_fn = get_fn(&module, "seal");
 
             let handle = batch_fn(&[Value::String("sealed-batch".to_string())]).unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             // Try to enqueue after seal — must return an error
             let mut payload = HashMap::new();
@@ -9584,7 +9585,7 @@ pub(crate) mod tests {
                 Value::Map(payload),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             // Verify each job's data map contains batch_id
             let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
@@ -9762,7 +9763,7 @@ pub(crate) mod tests {
                 "status must be 'complete'"
             );
             assert!(
-                final_meta.get("completed_at").is_some(),
+                final_meta.contains_key("completed_at"),
                 "completed_at must be set"
             );
         });
@@ -9993,7 +9994,7 @@ pub(crate) mod tests {
             .unwrap();
 
             // Now seal — should skip the already-flushed first job
-            let seal_result = seal_fn(&[handle.clone()]).unwrap();
+            let seal_result = seal_fn(std::slice::from_ref(&handle)).unwrap();
             assert!(
                 matches!(seal_result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
                 "seal() must return Ok even with pre-flushed jobs"
@@ -10113,7 +10114,7 @@ pub(crate) mod tests {
                 ])
                 .unwrap();
             }
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             // Verify counter keys were initialized by seal().
             let cp = format!("jobs:batch:{}:counter:pending", bid);
@@ -10324,7 +10325,7 @@ pub(crate) mod tests {
                 ])
                 .unwrap();
             }
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -10366,9 +10367,9 @@ pub(crate) mod tests {
                 ])
                 .unwrap();
             }
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
-            let status = status_fn(&[handle.clone()]).unwrap();
+            let status = status_fn(std::slice::from_ref(&handle)).unwrap();
             let status_map = match status {
                 Value::EnumValue { ref values, .. } => match values.first() {
                     Some(Value::Map(m)) => m.clone(),
@@ -10404,7 +10405,7 @@ pub(crate) mod tests {
                 Value::Map(payload),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -10457,7 +10458,7 @@ pub(crate) mod tests {
                 Value::Map(payload),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -10500,7 +10501,7 @@ pub(crate) mod tests {
                 Value::Map(payload),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -10546,7 +10547,7 @@ pub(crate) mod tests {
                 Value::Map(payload),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -10613,7 +10614,7 @@ pub(crate) mod tests {
                 Value::Map(payload),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -10654,7 +10655,7 @@ pub(crate) mod tests {
             let seal_fn = get_fn(&module, "seal");
 
             let handle = batch_fn(&[Value::String("empty-ttl-test".to_string())]).unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -10699,7 +10700,7 @@ pub(crate) mod tests {
                 ])
                 .unwrap();
             }
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -10788,7 +10789,7 @@ pub(crate) mod tests {
                 Value::Map(p),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -10831,7 +10832,7 @@ pub(crate) mod tests {
                 Value::Map(payload),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -10904,7 +10905,7 @@ pub(crate) mod tests {
                 Value::Map(p),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -10959,7 +10960,7 @@ pub(crate) mod tests {
                 Value::Map(p),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -11014,7 +11015,7 @@ pub(crate) mod tests {
                 Value::Map(p),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -11110,7 +11111,7 @@ pub(crate) mod tests {
                 Value::Map(p),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -11159,7 +11160,7 @@ pub(crate) mod tests {
                 Value::Map(p),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -11241,7 +11242,7 @@ pub(crate) mod tests {
                 Value::Map(p),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -11334,7 +11335,7 @@ pub(crate) mod tests {
                 Value::Map(p),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -11394,7 +11395,7 @@ pub(crate) mod tests {
                 Value::Map(p),
             ])
             .unwrap();
-            seal_fn(&[handle.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle)).unwrap();
 
             let bid = match &handle {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -11447,7 +11448,7 @@ pub(crate) mod tests {
                 Value::Map(p),
             ])
             .unwrap();
-            seal_fn(&[handle_a.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle_a)).unwrap();
 
             let bid_a = match &handle_a {
                 Value::Map(m) => match m.get("_batch_id") {
@@ -11477,7 +11478,7 @@ pub(crate) mod tests {
                 Value::Map(pb),
             ])
             .unwrap();
-            seal_fn(&[handle_b.clone()]).unwrap();
+            seal_fn(std::slice::from_ref(&handle_b)).unwrap();
 
             let bid_b = match &handle_b {
                 Value::Map(m) => match m.get("_batch_id") {

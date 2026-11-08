@@ -641,14 +641,14 @@ mod tests {
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn pair() -> (Value, TcpStream) {
         let listener = listen(&[Value::Int(0)]).unwrap();
-        let Value::Map(addr) = local_addr(&[listener.clone()]).unwrap() else {
+        let Value::Map(addr) = local_addr(std::slice::from_ref(&listener)).unwrap() else {
             panic!()
         };
         let Value::Int(port) = addr["port"] else {
             panic!()
         };
         let client = TcpStream::connect(("127.0.0.1", port as u16)).unwrap();
-        let stream = accept(&[listener.clone()]).unwrap();
+        let stream = accept(std::slice::from_ref(&listener)).unwrap();
         close(&[listener]).unwrap();
         (stream, client)
     }
@@ -657,7 +657,7 @@ mod tests {
         let _serial = TEST_LOCK.lock().unwrap();
         let (stream, mut client) = pair();
         let all = Permit::reserve(&BUFFERS, BUFFER_LIMIT, BUFFER_LIMIT).unwrap();
-        assert!(reader(&[stream.clone()])
+        assert!(reader(std::slice::from_ref(&stream))
             .unwrap_err()
             .starts_with("capacity:"));
         drop(all);
@@ -696,7 +696,7 @@ mod tests {
     fn reader_global_shutdown_and_write_failure_dispose_framing() {
         let _serial = TEST_LOCK.lock().unwrap();
         let (stream, client) = pair();
-        let reader = reader(&[stream.clone()]).unwrap();
+        let reader = reader(std::slice::from_ref(&stream)).unwrap();
         // Force the OS write side closed without the public preflight flag, reproducing fatal write cleanup.
         let state = stream_owner(&stream).unwrap().lock().unwrap();
         let Socket::Stream(s) = &state.as_ref().unwrap().socket else {
@@ -713,7 +713,7 @@ mod tests {
             .starts_with("closed:"));
         drop(client);
         let (stream, _client) = pair();
-        let reader = super::reader(&[stream.clone()]).unwrap();
+        let reader = super::reader(std::slice::from_ref(&stream)).unwrap();
         shutdown().unwrap();
         assert_eq!(BUFFERS.load(Ordering::Acquire), 0);
         assert!(read_exact(&[reader, Value::Int(1)])
@@ -725,7 +725,7 @@ mod tests {
     fn native_observer_denies_reader_callbacks_without_consuming_socket_bytes() {
         let _serial = TEST_LOCK.lock().unwrap();
         let (stream, mut client) = pair();
-        let reader = reader(&[stream.clone()]).unwrap();
+        let reader = reader(std::slice::from_ref(&stream)).unwrap();
         client.write_all(b"x").unwrap();
         for name in ["tcp_reader", "tcp_read_exact", "tcp_read_until"] {
             for expression in [
@@ -766,8 +766,9 @@ mod tests {
             let _guard = registry.lock().unwrap();
             panic!("injected registry poison");
         });
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| close(&[listener.clone()])));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            close(std::slice::from_ref(&listener))
+        }));
         // Restore only this test's deliberately poisoned registry before assertions/drop.
         registry.clear_poison();
         assert!(
@@ -792,7 +793,7 @@ mod tests {
         };
         let client = TcpStream::connect(l.local_addr().unwrap()).unwrap();
         drop(state);
-        let stream = accept(&[listener.clone()]).unwrap();
+        let stream = accept(std::slice::from_ref(&listener)).unwrap();
         let arc = stream_owner(&stream).unwrap().clone();
         std::thread::scope(|scope| {
             let worker = scope.spawn(move || {
@@ -808,7 +809,9 @@ mod tests {
             }
             let other = listen(&[Value::Int(0)]).unwrap();
             close(&[other]).unwrap();
-            assert!(close(&[stream.clone()]).unwrap_err().starts_with("busy:"));
+            assert!(close(std::slice::from_ref(&stream))
+                .unwrap_err()
+                .starts_with("busy:"));
             assert!(worker.join().unwrap().starts_with("timeout:"));
         });
         drop(client);
@@ -825,7 +828,9 @@ mod tests {
         let listener = listen(&[Value::Int(0)]).unwrap();
         let own = owner(&listener).unwrap();
         let guard = own.lock().unwrap();
-        assert!(close(&[listener.clone()]).unwrap_err().starts_with("busy:"));
+        assert!(close(std::slice::from_ref(&listener))
+            .unwrap_err()
+            .starts_with("busy:"));
         let independent = listen(&[Value::Int(0)]).unwrap();
         close(&[independent]).unwrap();
         drop(guard);
@@ -836,7 +841,7 @@ mod tests {
         let _serial = TEST_LOCK.lock().unwrap();
         let listener = listen(&[Value::Int(0)]).unwrap();
         shutdown().unwrap();
-        assert!(local_addr(&[listener.clone()])
+        assert!(local_addr(std::slice::from_ref(&listener))
             .unwrap_err()
             .starts_with("closed:"));
         close(&[listener]).unwrap();

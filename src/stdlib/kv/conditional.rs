@@ -266,6 +266,8 @@ fn execution_receipt(next: &Snapshot) -> bool {
 /// Publish state and related queue changes in one transaction. A repeat of the
 /// same prepared write is acknowledged without refreshing TTL or republishing
 /// a pending key that another worker may already have claimed.
+// Each argument is a distinct input to the single commit script.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write(
     handle: &Value,
     key: &str,

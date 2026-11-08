@@ -1426,7 +1426,7 @@ mod tests {
                     &next,
                     Some(60),
                     &id,
-                    &[unique.clone()],
+                    std::slice::from_ref(&unique),
                     ready,
                     true,
                 )
@@ -1532,7 +1532,7 @@ mod tests {
             &completed,
             Some(60),
             &id,
-            &[unique.clone()],
+            std::slice::from_ref(&unique),
             None,
             true
         )

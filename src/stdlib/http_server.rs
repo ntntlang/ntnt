@@ -3029,10 +3029,10 @@ fn parse_multipart_part(
             let disposition = &line["content-disposition:".len()..];
             for part in disposition.split(';') {
                 let part = part.trim();
-                if part.starts_with("name=") {
-                    name = Some(part["name=".len()..].trim_matches('"').to_string());
-                } else if part.starts_with("filename=") {
-                    let raw_filename = part["filename=".len()..].trim_matches('"');
+                if let Some(value) = part.strip_prefix("name=") {
+                    name = Some(value.trim_matches('"').to_string());
+                } else if let Some(value) = part.strip_prefix("filename=") {
+                    let raw_filename = value.trim_matches('"');
                     filename = Some(sanitize_filename(raw_filename));
                 }
             }
@@ -3680,7 +3680,7 @@ pub fn create_error_response_with_context(
 /// Returns true for:
 /// - Relative paths (/foo, ./bar, ../baz)
 /// - Same-origin URLs (protocol-relative URLs are rejected for safety)
-/// Returns false for:
+///   Returns false for:
 /// - Absolute URLs to external domains
 /// - Protocol-relative URLs (//evil.com)
 /// - javascript:, data:, and other dangerous schemes

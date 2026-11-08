@@ -189,10 +189,9 @@ fn sqlite_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
 
     let rows_result = stmt.query_map(rusqlite::params_from_iter(sqlite_params.iter()), |row| {
         let mut map = HashMap::new();
-        for idx in 0..column_count {
-            let name = column_names[idx].clone();
+        for (idx, name) in column_names.iter().enumerate().take(column_count) {
             let value = sqlite_to_value(row.get_ref(idx)?);
-            map.insert(name, value);
+            map.insert(name.clone(), value);
         }
         Ok(Value::Map(map))
     });
@@ -231,10 +230,9 @@ fn sqlite_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> 
 
     match stmt.query_row(rusqlite::params_from_iter(sqlite_params.iter()), |row| {
         let mut map = HashMap::new();
-        for idx in 0..column_count {
-            let name = column_names[idx].clone();
+        for (idx, name) in column_names.iter().enumerate().take(column_count) {
             let value = sqlite_to_value(row.get_ref(idx)?);
-            map.insert(name, value);
+            map.insert(name.clone(), value);
         }
         Ok(Value::Map(map))
     }) {

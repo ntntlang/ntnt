@@ -383,23 +383,23 @@ mod tests {
         assert!(create_temp(&[invalid], false).is_err());
         assert_eq!(LIVE.load(Ordering::Acquire), 0);
         let resources = (0..128)
-            .map(|_| create_temp(&[options.clone()], false).unwrap())
+            .map(|_| create_temp(std::slice::from_ref(&options), false).unwrap())
             .collect::<Vec<_>>();
-        assert!(create_temp(&[options.clone()], true)
+        assert!(create_temp(std::slice::from_ref(&options), true)
             .unwrap_err()
             .starts_with("capacity:"));
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 128);
         drop(resources);
         assert_eq!(LIVE.load(Ordering::Acquire), 0);
         let resource = create_temp(&[options], false).unwrap();
-        let Value::String(path) = temp_path(&[resource.clone()]).unwrap() else {
+        let Value::String(path) = temp_path(std::slice::from_ref(&resource)).unwrap() else {
             panic!()
         };
         // Deliberately violate trusted-path ownership to force a portable consuming close error.
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        let first = temp_close(&[resource.clone()]).unwrap_err();
-        let second = temp_close(&[resource.clone()]).unwrap_err();
+        let first = temp_close(std::slice::from_ref(&resource)).unwrap_err();
+        let second = temp_close(std::slice::from_ref(&resource)).unwrap_err();
         assert!(first.contains("may remain"));
         assert_eq!(first, second);
         assert!(temp_path(&[resource]).is_err());
@@ -431,7 +431,7 @@ mod tests {
                 )),
             });
             let value = Value::TempFile(owner);
-            assert!(temp_path(&[value.clone()])
+            assert!(temp_path(std::slice::from_ref(&value))
                 .unwrap_err()
                 .contains("non-UTF8"));
             temp_close(&[value]).unwrap();

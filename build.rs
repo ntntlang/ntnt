@@ -264,8 +264,8 @@ fn parse_doc_block(
                 ml_example_expected = Some(val.trim().to_string());
                 continue;
             }
-            if line.starts_with("  ") {
-                ml_example_lines.push(line[2..].to_string());
+            if let Some(rest) = line.strip_prefix("  ") {
+                ml_example_lines.push(rest.to_string());
                 continue;
             }
             // Non-indented, non-@expected line ends the multi-line block
@@ -310,10 +310,10 @@ fn parse_doc_block(
             in_multiline_example = true;
         } else if let Some(val) = line.strip_prefix("@example ") {
             let val = val.trim();
-            if val.starts_with("~ \"") {
+            if let Some(rest) = val.strip_prefix("~ \"") {
                 // @example ~ "description" — multi-line with description
-                if let Some(end) = val[3..].rfind('"') {
-                    ml_example_desc = Some(val[3..3 + end].to_string());
+                if let Some(end) = rest.rfind('"') {
+                    ml_example_desc = Some(rest[..end].to_string());
                 }
                 in_multiline_example = true;
             } else {

@@ -30,7 +30,8 @@ fn temporary_prefix_cannot_select_a_drive_or_stream() {
                 ])],
             )
             .unwrap());
-            let Value::String(name) = ok(call("fs", "temp_path", &[resource.clone()]).unwrap())
+            let Value::String(name) =
+                ok(call("fs", "temp_path", std::slice::from_ref(&resource)).unwrap())
             else {
                 panic!("path")
             };
@@ -154,7 +155,12 @@ fn equal(a: Value, b: Value) {
 fn binary_codecs_preserve_exact_bytes_and_reject_invalid_inputs() {
     let raw = bytes(&[0, 255, 254]);
     equal(
-        call("crypto", "base64url_encode_bytes", &[raw.clone()]).unwrap(),
+        call(
+            "crypto",
+            "base64url_encode_bytes",
+            std::slice::from_ref(&raw),
+        )
+        .unwrap(),
         string("AP_-"),
     );
     equal(
@@ -204,16 +210,16 @@ fn binary_codecs_preserve_exact_bytes_and_reject_invalid_inputs() {
 fn binary_hashes_and_hmac_verify_rfc_vectors() {
     let data = bytes(b"abc");
     equal(
-        call("crypto", "sha256_bytes", &[data.clone()]).unwrap(),
+        call("crypto", "sha256_bytes", std::slice::from_ref(&data)).unwrap(),
         bytes(
             &hex::decode("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
                 .unwrap(),
         ),
     );
-    equal(call("crypto", "sha512", &[data.clone()]).unwrap(), string("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"));
+    equal(call("crypto", "sha512", std::slice::from_ref(&data)).unwrap(), string("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"));
     for name in ["sha256", "sha256_bytes", "sha512", "sha512_bytes"] {
         equal(
-            call("crypto", name, &[data.clone()]).unwrap(),
+            call("crypto", name, std::slice::from_ref(&data)).unwrap(),
             call("crypto", name, &[string("abc")]).unwrap(),
         );
         assert!(call("crypto", name, &[Value::Array(vec![Value::Int(256)])]).is_err());
@@ -279,7 +285,8 @@ fn binary_hashes_and_hmac_verify_rfc_vectors() {
 fn monotonic_clock_checked_process_local_arithmetic() {
     let start = call("time", "monotonic_now", &[]).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(3));
-    let Value::Int(elapsed) = ok(call("time", "monotonic_elapsed", &[start.clone()]).unwrap())
+    let Value::Int(elapsed) =
+        ok(call("time", "monotonic_elapsed", std::slice::from_ref(&start)).unwrap())
     else {
         panic!()
     };
@@ -503,9 +510,11 @@ fn owned_temporary_resources_share_identity_cleanup_and_reject_transfer() {
     let root = tempfile::tempdir().unwrap();
     let opts = map(&[("parent", path(root.path())), ("prefix", string("owned-"))]);
     for name in ["temp_file", "temp_dir"] {
-        let resource = ok(call("fs", name, &[opts.clone()]).unwrap());
+        let resource = ok(call("fs", name, std::slice::from_ref(&opts)).unwrap());
         let alias = resource.clone();
-        let Value::String(p) = ok(call("fs", "temp_path", &[resource.clone()]).unwrap()) else {
+        let Value::String(p) =
+            ok(call("fs", "temp_path", std::slice::from_ref(&resource)).unwrap())
+        else {
             panic!()
         };
         assert!(std::path::Path::new(&p).exists());
@@ -534,7 +543,7 @@ fn owned_temporary_resources_share_identity_cleanup_and_reject_transfer() {
         }
         ok(call("fs", "temp_close", &[resource]).unwrap());
         assert!(!std::path::Path::new(&p).exists());
-        ok(call("fs", "temp_close", &[alias.clone()]).unwrap());
+        ok(call("fs", "temp_close", std::slice::from_ref(&alias)).unwrap());
         assert!(is_err(call("fs", "temp_path", &[alias]).unwrap()));
     }
     #[cfg(unix)]
@@ -556,7 +565,8 @@ fn owned_temporary_resources_share_identity_cleanup_and_reject_transfer() {
         call("fs", "temp_close", &[map(&[("path", string("forged"))])]).unwrap()
     ));
     let resource = ok(call("fs", "temp_dir", &[opts]).unwrap());
-    let Value::String(p) = ok(call("fs", "temp_path", &[resource.clone()]).unwrap()) else {
+    let Value::String(p) = ok(call("fs", "temp_path", std::slice::from_ref(&resource)).unwrap())
+    else {
         panic!()
     };
     drop(resource);
@@ -637,14 +647,16 @@ fn symlink_inspection_preserves_target_and_does_not_follow() {
 
 fn tcp_pair() -> (Value, std::net::TcpStream) {
     let listener = ok(call("net", "tcp_listen", &[Value::Int(0)]).unwrap());
-    let Value::Map(addr) = ok(call("net", "tcp_local_addr", &[listener.clone()]).unwrap()) else {
+    let Value::Map(addr) =
+        ok(call("net", "tcp_local_addr", std::slice::from_ref(&listener)).unwrap())
+    else {
         panic!()
     };
     let Value::Int(port) = addr["port"] else {
         panic!()
     };
     let client = std::net::TcpStream::connect(("127.0.0.1", port as u16)).unwrap();
-    let stream = ok(call("net", "tcp_accept", &[listener.clone()]).unwrap());
+    let stream = ok(call("net", "tcp_accept", std::slice::from_ref(&listener)).unwrap());
     ok(call("net", "tcp_close", &[listener]).unwrap());
     (stream, client)
 }
@@ -659,7 +671,7 @@ fn tcp_reader_coalesced_binary_frames_share_socket_ownership() {
     )
     .unwrap());
     assert!(is_err(
-        call("net", "tcp_reader", &[stream.clone()]).unwrap()
+        call("net", "tcp_reader", std::slice::from_ref(&stream)).unwrap()
     ));
     assert!(is_err(
         call(
@@ -806,7 +818,7 @@ fn tcp_reader_errors_preserve_frames_and_shutdown_is_local_eof() {
         .unwrap()),
         bytes(b"def!"),
     );
-    ok(call("net", "tcp_close", &[reader.clone()]).unwrap());
+    ok(call("net", "tcp_close", std::slice::from_ref(&reader)).unwrap());
     assert!(is_err(
         call("net", "tcp_read_exact", &[reader, Value::Int(1)]).unwrap()
     ));
@@ -890,7 +902,7 @@ fn tcp_local_read_shutdown_does_not_admit_unbuffered_socket_bytes() {
     use std::io::Write;
     for how in ["read", "both"] {
         let (stream, mut client) = tcp_pair();
-        let reader = ok(call("net", "tcp_reader", &[stream.clone()]).unwrap());
+        let reader = ok(call("net", "tcp_reader", std::slice::from_ref(&stream)).unwrap());
         client.write_all(b"unbuffered").unwrap();
         // All bytes are queued in the socket, none have entered the reader.
         ok(call("net", "tcp_shutdown", &[stream, string(how)]).unwrap());
@@ -970,7 +982,7 @@ fn reader_capability_checks_precede_direct_alias_and_nested_callbacks() {
     use ntnt::interpreter::{ExecutionMode, Interpreter};
     let (stream, mut client) = tcp_pair();
     use std::io::Write;
-    let reader = ok(call("net", "tcp_reader", &[stream.clone()]).unwrap());
+    let reader = ok(call("net", "tcp_reader", std::slice::from_ref(&stream)).unwrap());
     client.write_all(b"untouched").unwrap();
     for observer in [false] {
         for mode in [
@@ -1023,7 +1035,10 @@ fn reader_capability_checks_precede_direct_alias_and_nested_callbacks() {
 fn binary_decoder_rejects_oversized_padding_before_decode_allocation() {
     let encoded = string(&"=".repeat(22_369_625));
     for name in ["base64_decode_bytes", "base64url_decode_bytes"] {
-        assert!(error(call("crypto", name, &[encoded.clone()]).unwrap()).starts_with("capacity:"));
+        assert!(
+            error(call("crypto", name, std::slice::from_ref(&encoded)).unwrap())
+                .starts_with("capacity:")
+        );
     }
 }
 
@@ -1083,7 +1098,8 @@ fn unix_private_creation_and_atomic_mode_honor_umask_in_isolated_process() {
         libc::umask(0);
     }
     let resource = ok(call("fs", "temp_dir", &[]).unwrap());
-    let Value::String(p) = ok(call("fs", "temp_path", &[resource.clone()]).unwrap()) else {
+    let Value::String(p) = ok(call("fs", "temp_path", std::slice::from_ref(&resource)).unwrap())
+    else {
         panic!()
     };
     assert_eq!(
@@ -1114,7 +1130,7 @@ fn unix_private_creation_and_atomic_mode_honor_umask_in_isolated_process() {
 #[test]
 fn opaque_identity_and_nested_task_capture_cover_each_resource_kind() {
     let (stream, _peer) = tcp_pair();
-    let reader = ok(call("net", "tcp_reader", &[stream.clone()]).unwrap());
+    let reader = ok(call("net", "tcp_reader", std::slice::from_ref(&stream)).unwrap());
     let file = ok(call("fs", "temp_file", &[]).unwrap());
     let directory = ok(call("fs", "temp_dir", &[]).unwrap());
     for resource in [&reader, &file, &directory] {

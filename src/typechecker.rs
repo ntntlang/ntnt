@@ -72,12 +72,19 @@ pub struct FunctionSig {
     pub type_params: Vec<String>,
 }
 
+/// An enum variant and its field types (None for a unit variant).
+type EnumVariantSig = (String, Option<Vec<Type>>);
+/// Variable bindings narrowed by a condition.
+type Narrowings = Vec<(String, Type)>;
+/// A type variable bound to two incompatible types.
+type TypeConflict = (String, Type, Type);
+
 /// Exported type definitions from a parsed file (functions, structs, enums, aliases)
 #[derive(Debug, Clone, Default)]
 struct FileExports {
     functions: HashMap<String, FunctionSig>,
     structs: HashMap<String, Vec<(String, Type)>>,
-    enums: HashMap<String, Vec<(String, Option<Vec<Type>>)>>,
+    enums: HashMap<String, Vec<EnumVariantSig>>,
     type_aliases: HashMap<String, Type>,
     struct_type_params: HashMap<String, Vec<String>>,
 }
@@ -93,7 +100,7 @@ pub struct TypeContext {
     /// Struct field types
     structs: HashMap<String, Vec<(String, Type)>>,
     /// Enum variants: enum_name -> [(variant_name, Option<field_types>)]
-    enums: HashMap<String, Vec<(String, Option<Vec<Type>>)>>,
+    enums: HashMap<String, Vec<EnumVariantSig>>,
     /// Type aliases
     type_aliases: HashMap<String, Type>,
     /// Generic struct type parameters: struct_name -> [param_names]
@@ -2361,10 +2368,7 @@ impl TypeContext {
     /// Extract narrowing facts from a condition expression.
     /// Returns (true_branch_facts, false_branch_facts) where each fact
     /// maps a variable name to its narrowed type.
-    fn extract_narrowing_facts(
-        &self,
-        condition: &Expression,
-    ) -> (Vec<(String, Type)>, Vec<(String, Type)>) {
+    fn extract_narrowing_facts(&self, condition: &Expression) -> (Narrowings, Narrowings) {
         match condition {
             // x == None → true: x is None, false: x is unwrapped
             Expression::Binary {
@@ -2376,13 +2380,11 @@ impl TypeContext {
                     (left.as_ref(), right.as_ref())
                 {
                     if rhs == "None" {
-                        if let Some(typ) = self.lookup(name) {
-                            if let Type::Optional(inner) = typ {
-                                return (
-                                    vec![],                                  // true: x is None (no useful narrowing)
-                                    vec![(name.clone(), (**inner).clone())], // false: x is T
-                                );
-                            }
+                        if let Some(Type::Optional(inner)) = self.lookup(name) {
+                            return (
+                                vec![],                                  // true: x is None (no useful narrowing)
+                                vec![(name.clone(), (**inner).clone())], // false: x is T
+                            );
                         }
                     }
                 }
@@ -2391,10 +2393,8 @@ impl TypeContext {
                     (left.as_ref(), right.as_ref())
                 {
                     if lhs == "None" {
-                        if let Some(typ) = self.lookup(name) {
-                            if let Type::Optional(inner) = typ {
-                                return (vec![], vec![(name.clone(), (**inner).clone())]);
-                            }
+                        if let Some(Type::Optional(inner)) = self.lookup(name) {
+                            return (vec![], vec![(name.clone(), (**inner).clone())]);
                         }
                     }
                 }
@@ -2410,13 +2410,11 @@ impl TypeContext {
                     (left.as_ref(), right.as_ref())
                 {
                     if rhs == "None" {
-                        if let Some(typ) = self.lookup(name) {
-                            if let Type::Optional(inner) = typ {
-                                return (
-                                    vec![(name.clone(), (**inner).clone())], // true: x is T
-                                    vec![],                                  // false: x is None
-                                );
-                            }
+                        if let Some(Type::Optional(inner)) = self.lookup(name) {
+                            return (
+                                vec![(name.clone(), (**inner).clone())], // true: x is T
+                                vec![],                                  // false: x is None
+                            );
                         }
                     }
                 }
@@ -2425,10 +2423,8 @@ impl TypeContext {
                     (left.as_ref(), right.as_ref())
                 {
                     if lhs == "None" {
-                        if let Some(typ) = self.lookup(name) {
-                            if let Type::Optional(inner) = typ {
-                                return (vec![(name.clone(), (**inner).clone())], vec![]);
-                            }
+                        if let Some(Type::Optional(inner)) = self.lookup(name) {
+                            return (vec![(name.clone(), (**inner).clone())], vec![]);
                         }
                     }
                 }
@@ -3016,43 +3012,39 @@ impl TypeContext {
             } => {
                 // Check variant argument types
                 if let Some(variants) = self.enums.get(enum_name).cloned() {
-                    if let Some((_, expected_fields)) = variants.iter().find(|(v, _)| v == variant)
-                    {
-                        if let Some(expected) = expected_fields {
-                            if arguments.len() != expected.len() {
-                                let line =
-                                    self.find_line_near(&format!("{}::{}", enum_name, variant));
-                                self.error(
-                                    format!(
-                                        "Enum variant {}::{} expects {} argument(s), got {}",
-                                        enum_name,
-                                        variant,
-                                        expected.len(),
-                                        arguments.len()
-                                    ),
-                                    line,
-                                    None,
-                                );
-                            } else {
-                                for (arg, exp_type) in arguments.iter().zip(expected.iter()) {
-                                    let actual = self.infer_expression(arg);
-                                    if !self.compatible(&actual, exp_type)
-                                        && !matches!(actual, Type::Any)
-                                    {
-                                        let line = self
-                                            .find_line_near(&format!("{}::{}", enum_name, variant));
-                                        self.error(
-                                            format!(
-                                                "Enum variant {}::{}: expected {} but got {}",
-                                                enum_name,
-                                                variant,
-                                                exp_type.name(),
-                                                actual.name()
-                                            ),
-                                            line,
-                                            None,
-                                        );
-                                    }
+                    if let Some((_, Some(expected))) = variants.iter().find(|(v, _)| v == variant) {
+                        if arguments.len() != expected.len() {
+                            let line = self.find_line_near(&format!("{}::{}", enum_name, variant));
+                            self.error(
+                                format!(
+                                    "Enum variant {}::{} expects {} argument(s), got {}",
+                                    enum_name,
+                                    variant,
+                                    expected.len(),
+                                    arguments.len()
+                                ),
+                                line,
+                                None,
+                            );
+                        } else {
+                            for (arg, exp_type) in arguments.iter().zip(expected.iter()) {
+                                let actual = self.infer_expression(arg);
+                                if !self.compatible(&actual, exp_type)
+                                    && !matches!(actual, Type::Any)
+                                {
+                                    let line =
+                                        self.find_line_near(&format!("{}::{}", enum_name, variant));
+                                    self.error(
+                                        format!(
+                                            "Enum variant {}::{}: expected {} but got {}",
+                                            enum_name,
+                                            variant,
+                                            exp_type.name(),
+                                            actual.name()
+                                        ),
+                                        line,
+                                        None,
+                                    );
                                 }
                             }
                         }
@@ -3159,9 +3151,7 @@ impl TypeContext {
 
                 // Compute return type from collected returns + trailing expression
                 let mut returns = std::mem::take(&mut self.collected_returns);
-                if !matches!(body_type, Type::Unit | Type::Any) {
-                    returns.push(body_type.clone());
-                } else if returns.is_empty() {
+                if !matches!(body_type, Type::Unit | Type::Any) || returns.is_empty() {
                     returns.push(body_type.clone());
                 }
                 let ret = if returns.is_empty() {
@@ -3399,9 +3389,7 @@ impl TypeContext {
 
         // Compute return type from collected returns + trailing expression
         let mut returns = std::mem::take(&mut self.collected_returns);
-        if !matches!(body_type, Type::Unit | Type::Any) {
-            returns.push(body_type.clone());
-        } else if returns.is_empty() {
+        if !matches!(body_type, Type::Unit | Type::Any) || returns.is_empty() {
             returns.push(body_type.clone());
         }
         let ret = if returns.is_empty() {
@@ -3951,7 +3939,7 @@ impl TypeContext {
         type_params: &[String],
         param_sigs: &[(String, Type)],
         arg_types: &[Type],
-    ) -> (HashMap<String, Type>, Vec<(String, Type, Type)>) {
+    ) -> (HashMap<String, Type>, Vec<TypeConflict>) {
         let mut bindings: HashMap<String, Type> = HashMap::new();
         let mut conflicts: Vec<(String, Type, Type)> = Vec::new();
         for ((_param_name, param_type), arg_type) in param_sigs.iter().zip(arg_types.iter()) {

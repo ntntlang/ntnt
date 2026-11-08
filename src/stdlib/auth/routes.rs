@@ -322,7 +322,7 @@ pub fn handle_auth_protect(args: &[Value]) -> Result<Value> {
             Ok(Value::Map(response))
         }
         Ok(None) => Ok(Value::Unit),
-        Err(response) => Ok(response),
+        Err(response) => Ok(*response),
     }
 }
 

@@ -198,9 +198,7 @@ fn normalize_phone_identifier(identifier: &str) -> std::result::Result<String, S
 
     let mut normalized = String::with_capacity(trimmed.len());
     for (index, ch) in trimmed.chars().enumerate() {
-        if ch.is_ascii_digit() {
-            normalized.push(ch);
-        } else if ch == '+' && index == 0 {
+        if ch.is_ascii_digit() || (ch == '+' && index == 0) {
             normalized.push(ch);
         } else if matches!(ch, ' ' | '\t' | '\n' | '\r' | '-' | '.' | '(' | ')') {
             continue;
@@ -2576,6 +2574,8 @@ fn store_local_one_time_token_redis(
     }
 }
 
+// Parameters map one-to-one onto the Lua script's KEYS and ARGV.
+#[allow(clippy::too_many_arguments)]
 fn invoke_redis_password_reset_consume_script(
     conn: &mut redis::Connection,
     token_key: &str,

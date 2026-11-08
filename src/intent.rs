@@ -229,6 +229,10 @@ impl KeywordSyntax {
     }
 }
 
+/// Expanded scenario: test cases, unresolved outcomes, component references
+/// and an optional input reference.
+type ExpandedScenario = (Vec<TestCase>, Vec<String>, Vec<String>, Option<String>);
+
 impl Glossary {
     pub fn new() -> Self {
         Self {
@@ -434,6 +438,9 @@ impl Glossary {
             for part in meaning_parts {
                 let part_lower = part.to_lowercase();
 
+                // Separate branches document each recognized assertion form;
+                // "body not contains" must stay ahead of "body contains".
+                #[allow(clippy::if_same_then_else)]
                 // status N or status: N
                 if part_lower.starts_with("status") {
                     sub_terms.push(Term::new(part));
@@ -574,7 +581,6 @@ impl Glossary {
 
         // Fallback: identify action verb and path separately
         let mut method = "GET".to_string();
-        let mut found_action = false;
 
         for term in self.terms.values() {
             let term_lower = term.term.to_lowercase();
@@ -590,7 +596,6 @@ impl Glossary {
                             || action_upper == "PATCH"
                         {
                             method = action_upper;
-                            found_action = true;
                             continue;
                         }
                     }
@@ -602,24 +607,19 @@ impl Glossary {
                 // Check if this term defines an HTTP method
                 if meaning_lower.contains("get request") || meaning_lower.contains("get ") {
                     method = "GET".to_string();
-                    found_action = true;
                 } else if meaning_lower.contains("post request") || meaning_lower.contains("post ")
                 {
                     method = "POST".to_string();
-                    found_action = true;
                 } else if meaning_lower.contains("put request") || meaning_lower.contains("put ") {
                     method = "PUT".to_string();
-                    found_action = true;
                 } else if meaning_lower.contains("delete request")
                     || meaning_lower.contains("delete ")
                 {
                     method = "DELETE".to_string();
-                    found_action = true;
                 } else if meaning_lower.contains("patch request")
                     || meaning_lower.contains("patch ")
                 {
                     method = "PATCH".to_string();
-                    found_action = true;
                 }
             }
         }
@@ -655,22 +655,8 @@ impl Glossary {
         // Check for body content (e.g., "creates a task with title "Buy groceries"")
         let body = Self::extract_body_from_clause(when_clause);
 
-        if found_action && path.is_some() {
-            Some(WhenAction::Http {
-                method,
-                path: path.unwrap(),
-                body,
-            })
-        } else if path.is_some() {
-            // Default to GET if we found a path but no explicit action
-            Some(WhenAction::Http {
-                method,
-                path: path.unwrap(),
-                body,
-            })
-        } else {
-            None
-        }
+        // Without an explicit action, `method` keeps its GET default.
+        path.map(|path| WhenAction::Http { method, path, body })
     }
 
     /// Match a parameterized glossary term against a when clause
@@ -1757,7 +1743,7 @@ impl Glossary {
         invariants: &[Invariant],
         test_data: &[TestDataSection],
         base_dir: Option<&str>,
-    ) -> Option<(Vec<TestCase>, Vec<String>, Vec<String>, Option<String>)> {
+    ) -> Option<ExpandedScenario> {
         // First, get the base resolution to understand the scenario structure
         let (base_test, unresolved, component_refs) =
             self.resolve_scenario_with_base_dir(scenario, components, invariants, base_dir)?;
@@ -2195,7 +2181,7 @@ impl Glossary {
         // Extract all quoted strings as parameters
         let mut chars = outcome.chars().peekable();
         while let Some(ch) = chars.next() {
-            if ch == '"' || ch == '\'' || ch == '"' {
+            if ch == '"' || ch == '\'' {
                 let quote = ch;
                 let mut param = String::new();
                 for next in chars.by_ref() {
@@ -2789,15 +2775,12 @@ fn run_assertion_legacy(
 /// appending "..." if truncated. Never panics on multi-byte UTF-8.
 /// Single-pass: only iterates up to max_chars+1, avoids scanning the entire string.
 fn safe_truncate(s: &str, max_chars: usize) -> String {
-    let mut chars = s.chars();
-    let mut count = 0;
     let mut end_byte = 0;
-    for ch in chars.by_ref() {
+    for (count, ch) in s.chars().enumerate() {
         if count >= max_chars {
             // There's at least one more char — needs truncation
             return format!("{}...", &s[..end_byte]);
         }
-        count += 1;
         end_byte += ch.len_utf8();
     }
     // Reached the end without exceeding max_chars

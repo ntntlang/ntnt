@@ -2419,14 +2419,8 @@ fn run_jobs_batches_command(
             let total = jobs_int_field(batch, "total");
             let created_at = format_ns_timestamp(&jobs_str_field(batch, "created_at"));
             println!(
-                "{}  {}  {}  {}  {}  {}  {}",
-                format!("{:<10}", id_short),
-                format!("{:<15}", name_trunc),
-                status_col,
-                format!("{:<8}", pending),
-                format!("{:<8}", done),
-                format!("{:<8}", total),
-                created_at,
+                "{:<10}  {:<15}  {}  {:<8}  {:<8}  {:<8}  {}",
+                id_short, name_trunc, status_col, pending, done, total, created_at,
             );
         }
         println!("{}", "─".repeat(80).dimmed());
@@ -2530,22 +2524,10 @@ fn run_jobs_batch_command(
         }
 
         // Callback status
-        let closed = match batch.get("closed") {
-            Some(Value::Bool(true)) => true,
-            _ => false,
-        };
-        let fired_death = match batch.get("fired_death") {
-            Some(Value::Bool(true)) => true,
-            _ => false,
-        };
-        let fired_complete = match batch.get("fired_complete") {
-            Some(Value::Bool(true)) => true,
-            _ => false,
-        };
-        let fired_success = match batch.get("fired_success") {
-            Some(Value::Bool(true)) => true,
-            _ => false,
-        };
+        let closed = matches!(batch.get("closed"), Some(Value::Bool(true)));
+        let fired_death = matches!(batch.get("fired_death"), Some(Value::Bool(true)));
+        let fired_complete = matches!(batch.get("fired_complete"), Some(Value::Bool(true)));
+        let fired_success = matches!(batch.get("fired_success"), Some(Value::Bool(true)));
         if closed || fired_death || fired_complete || fired_success {
             println!();
             println!("  {}", "Callbacks".cyan().bold());
@@ -2715,6 +2697,8 @@ fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
 }
 
 /// Test mode: runs an HTTP server, makes requests, then exits
+// One parameter per `ntnt test` CLI flag.
+#[allow(clippy::too_many_arguments)]
 fn test_http_server(
     path: &PathBuf,
     get_requests: Vec<String>,
@@ -2763,8 +2747,9 @@ fn test_http_server(
     let shutdown_flag = Arc::new(AtomicBool::new(false));
 
     // Prepare results storage
-    let results: Arc<std::sync::Mutex<Vec<(String, String, u16, String)>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
+    // (method, path, status, body) per completed test request.
+    type RequestResults = Arc<std::sync::Mutex<Vec<(String, String, u16, String)>>>;
+    let results: RequestResults = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     // Clone for request thread
     let requests_completed_clone = requests_completed.clone();
@@ -3227,31 +3212,25 @@ fn build_line_number_map(source: &str) -> std::collections::HashMap<String, usiz
         let trimmed = line.trim();
 
         // Match function declarations: "fn name(" or "fn name<"
-        if trimmed.starts_with("fn ") {
-            if let Some(name_end) =
-                trimmed[3..].find(|c: char| c == '(' || c == '<' || c.is_whitespace())
-            {
-                let name = &trimmed[3..3 + name_end];
+        if let Some(rest) = trimmed.strip_prefix("fn ") {
+            if let Some(name_end) = rest.find(|c: char| c == '(' || c == '<' || c.is_whitespace()) {
+                let name = &rest[..name_end];
                 map.insert(format!("fn {}", name), line_num + 1);
             }
         }
 
         // Match struct declarations
-        if trimmed.starts_with("struct ") {
-            if let Some(name_end) =
-                trimmed[7..].find(|c: char| c == '{' || c == '<' || c.is_whitespace())
-            {
-                let name = &trimmed[7..7 + name_end];
+        if let Some(rest) = trimmed.strip_prefix("struct ") {
+            if let Some(name_end) = rest.find(|c: char| c == '{' || c == '<' || c.is_whitespace()) {
+                let name = &rest[..name_end];
                 map.insert(format!("struct {}", name), line_num + 1);
             }
         }
 
         // Match enum declarations
-        if trimmed.starts_with("enum ") {
-            if let Some(name_end) =
-                trimmed[5..].find(|c: char| c == '{' || c == '<' || c.is_whitespace())
-            {
-                let name = &trimmed[5..5 + name_end];
+        if let Some(rest) = trimmed.strip_prefix("enum ") {
+            if let Some(name_end) = rest.find(|c: char| c == '{' || c == '<' || c.is_whitespace()) {
+                let name = &rest[..name_end];
                 map.insert(format!("enum {}", name), line_num + 1);
             }
         }
@@ -4056,10 +4035,10 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
             Statement::Expression(expr) => {
                 check_expr_for_issues(expr, source_lines, issues, http_route_functions);
             }
-            Statement::Let { value, .. } => {
-                if let Some(expr) = value {
-                    check_expr_for_issues(expr, source_lines, issues, http_route_functions);
-                }
+            Statement::Let {
+                value: Some(expr), ..
+            } => {
+                check_expr_for_issues(expr, source_lines, issues, http_route_functions);
             }
             Statement::Function {
                 body,
@@ -4145,10 +4124,10 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                     check_stmt_for_issues(s, source_lines, issues, http_route_functions);
                 }
             }
-            Statement::Export { statement, .. } => {
-                if let Some(s) = statement {
-                    check_stmt_for_issues(s, source_lines, issues, http_route_functions);
-                }
+            Statement::Export {
+                statement: Some(s), ..
+            } => {
+                check_stmt_for_issues(s, source_lines, issues, http_route_functions);
             }
             _ => {}
         }
@@ -4374,10 +4353,10 @@ fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
 
 /// Run the intent lint command: static glossary/scenario validation with
 /// no server startup and no primitive execution
-fn run_intent_lint_command(input_path: &PathBuf, json_output: bool) -> anyhow::Result<()> {
+fn run_intent_lint_command(input_path: &Path, json_output: bool) -> anyhow::Result<()> {
     // Accept either a .intent file or a .tnt file with a paired .intent
     let intent_path = if input_path.extension().and_then(|e| e.to_str()) == Some("intent") {
-        input_path.clone()
+        input_path.to_path_buf()
     } else {
         let (intent, _tnt) = ntnt::intent::resolve_intent_tnt_pair(input_path);
         match intent.filter(|p| p.exists()) {
@@ -4467,7 +4446,7 @@ fn run_intent_lint_command(input_path: &PathBuf, json_output: bool) -> anyhow::R
 /// - 1: Show scenarios (current default behavior)
 /// - 2+: Show assertions and term resolution
 fn run_intent_check_command(
-    input_path: &PathBuf,
+    input_path: &Path,
     explicit_intent_path: Option<&PathBuf>,
     port: u16,
     verbosity: usize,
@@ -4493,7 +4472,7 @@ fn run_intent_check_command(
     // Resolve both .intent and .tnt paths from either input
     let (intent_path_opt, tnt_path_opt) = if let Some(explicit) = explicit_intent_path {
         // User explicitly provided intent file
-        (Some(explicit.clone()), Some(input_path.clone()))
+        (Some(explicit.clone()), Some(input_path.to_path_buf()))
     } else {
         intent::resolve_intent_tnt_pair(input_path)
     };
@@ -4884,7 +4863,7 @@ fn run_intent_check_command(
 
 /// Run the intent coverage command
 fn run_intent_coverage_command(
-    input_path: &PathBuf,
+    input_path: &Path,
     explicit_intent_path: Option<&PathBuf>,
 ) -> anyhow::Result<()> {
     // Verify file exists
@@ -4895,7 +4874,7 @@ fn run_intent_coverage_command(
     // Resolve both .intent and .tnt paths from either input
     let (intent_path_opt, tnt_path_opt) = if let Some(explicit) = explicit_intent_path {
         // User explicitly provided intent file
-        (Some(explicit.clone()), Some(input_path.clone()))
+        (Some(explicit.clone()), Some(input_path.to_path_buf()))
     } else {
         intent::resolve_intent_tnt_pair(input_path)
     };
@@ -4976,10 +4955,7 @@ fn run_intent_coverage_command(
 }
 
 /// Run the intent init command
-fn run_intent_init_command(
-    input_path: &PathBuf,
-    output_path: Option<&PathBuf>,
-) -> anyhow::Result<()> {
+fn run_intent_init_command(input_path: &Path, output_path: Option<&PathBuf>) -> anyhow::Result<()> {
     // Verify file exists
     if !input_path.exists() {
         anyhow::bail!("File not found: {}", input_path.display());
@@ -5030,7 +5006,7 @@ fn run_intent_init_command(
 
 /// Run the intent studio command - starts a visual preview server AND the app server
 fn run_intent_studio_command(
-    input_path: &PathBuf,
+    input_path: &Path,
     port: u16,
     app_port: u16,
     no_open: bool,
@@ -5218,7 +5194,7 @@ fn run_intent_studio_command(
 }
 /// Collect all .tnt files from a path (file or directory)
 /// Read project config from ntnt.toml (searches path's directory and ancestors)
-fn read_project_config_strict(path: &PathBuf) -> bool {
+fn read_project_config_strict(path: &Path) -> bool {
     // Start from the path (or its parent if it's a file) and walk up
     let start_dir = if path.is_file() {
         path.parent().unwrap_or(path).to_path_buf()

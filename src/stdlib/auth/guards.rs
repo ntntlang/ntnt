@@ -273,10 +273,11 @@ fn path_requires_auth(path: &str) -> bool {
     })
 }
 
+/// `Err` carries the ready-made denial response, boxed to keep the result small.
 pub fn enforce_auth_for_request(
     request: &Value,
     force_auth: bool,
-) -> std::result::Result<Option<String>, Value> {
+) -> std::result::Result<Option<String>, Box<Value>> {
     let path = request_path(request);
 
     if is_auth_exempt_path(&path) {
@@ -288,10 +289,10 @@ pub fn enforce_auth_for_request(
     }
 
     let Some(_config) = get_auth_config() else {
-        return Err(crate::stdlib::http_server::create_error_response(
+        return Err(Box::new(crate::stdlib::http_server::create_error_response(
             500,
             "Auth not initialized. Call enable_auth() before require_auth().",
-        ));
+        )));
     };
 
     if let Some(session_id) = get_session_id_from_request(request) {
@@ -374,5 +375,5 @@ pub fn enforce_auth_for_request(
         }
     }
 
-    Err(auth_required_response(request))
+    Err(Box::new(auth_required_response(request)))
 }

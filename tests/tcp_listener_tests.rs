@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 fn port(value: &Value) -> SocketAddr {
-    let Value::Map(m) = tcp::local_addr(&[value.clone()]).unwrap() else {
+    let Value::Map(m) = tcp::local_addr(std::slice::from_ref(value)).unwrap() else {
         panic!()
     };
     SocketAddr::new(
@@ -63,13 +63,13 @@ fn tcp_bytes_eof_timeout_alias_and_independent_progress() {
             "none"
         );
     }
-    tcp::close(&[listener.clone()]).unwrap();
+    tcp::close(std::slice::from_ref(&listener)).unwrap();
     tcp::close(&[listener]).unwrap();
-    assert!(tcp::peer_addr(&[stream.clone()]).is_ok());
+    assert!(tcp::peer_addr(std::slice::from_ref(&stream)).is_ok());
     tcp::shutdown_stream(&[stream.clone(), Value::String("write".into())]).unwrap();
     assert!(tcp::write(&[stream.clone(), Value::String(String::new())]).is_err());
     tcp::close(&[stream]).unwrap();
-    assert!(tcp::local_addr(&[alias.clone()])
+    assert!(tcp::local_addr(std::slice::from_ref(&alias))
         .unwrap_err()
         .starts_with("closed:"));
     tcp::close(&[alias]).unwrap();
@@ -264,7 +264,7 @@ fn stalled_reader_write_timeout_closes_stream_with_prefix_count() {
     socket2::SockRef::from(&client)
         .set_recv_buffer_size(1024)
         .unwrap();
-    let stream = tcp::accept(&[listener.clone()]).unwrap();
+    let stream = tcp::accept(std::slice::from_ref(&listener)).unwrap();
     let data = Value::String("x".repeat(65536));
     let end = Instant::now() + Duration::from_secs(3);
     let mut failed = false;

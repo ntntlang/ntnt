@@ -11,7 +11,11 @@ use ntnt::parser::Parser;
 use std::time::{Duration, Instant};
 
 fn timed_eval(name: &str, source: &str, ceiling: Duration) -> Value {
-    assert!(!cfg!(debug_assertions), "run timing guards with --release");
+    // Deliberate: a debug build would make these timing ceilings meaningless.
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(!cfg!(debug_assertions), "run timing guards with --release");
+    }
     let program = Parser::new(Lexer::new(source).collect()).parse().unwrap();
     let mut interpreter = Interpreter::new();
     let start = Instant::now();
@@ -69,7 +73,11 @@ rows
 #[test]
 #[ignore = "release-profile timing guard; explicitly run on Linux in CI"]
 fn cached_template_2000_expressions() {
-    assert!(!cfg!(debug_assertions), "run timing guards with --release");
+    // Deliberate: a debug build would make these timing ceilings meaningless.
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(!cfg!(debug_assertions), "run timing guards with --release");
+    }
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("page.html"), "{{title}}".repeat(2000)).unwrap();
     let source = r#"template("page.html", map { "title": "<&>" })"#;

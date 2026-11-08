@@ -348,8 +348,10 @@ impl Default for AuthConfig {
 
 fn auth_preset_config(name: &str) -> std::result::Result<AuthConfig, String> {
     let preset = name.trim().to_ascii_lowercase();
-    let mut config = AuthConfig::default();
-    config.auth_preset = Some(preset.clone());
+    let mut config = AuthConfig {
+        auth_preset: Some(preset.clone()),
+        ..AuthConfig::default()
+    };
 
     match preset.as_str() {
         "consumer" => {
@@ -3413,7 +3415,7 @@ pub fn init() -> HashMap<String, Value> {
                                     Ok(Value::Map(response))
                                 },
                                 Ok(None) => Ok(Value::Unit),
-                                Err(response) => Ok(response),
+                                Err(response) => Ok(*response),
                             };
                         }
                     }
@@ -3475,7 +3477,7 @@ pub fn init() -> HashMap<String, Value> {
                             Ok(Value::Map(response))
                         },
                         Ok(None) => Ok(Value::Unit),
-                        Err(response) => Ok(response),
+                        Err(response) => Ok(*response),
                     },
                 })
             },
@@ -7137,12 +7139,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_exchange_token_ttl_constant() {
-        // Ensure the TTL constant is sensible (between 10s and 300s)
-        assert!(EXCHANGE_TOKEN_TTL >= 10);
-        assert!(EXCHANGE_TOKEN_TTL <= 300);
-    }
+    // The exchange-token TTL must stay between 10 s and 300 s.
+    const _: () = assert!(EXCHANGE_TOKEN_TTL >= 10 && EXCHANGE_TOKEN_TTL <= 300);
 
     #[test]
     fn test_path_matches_protected_pattern_exact_and_subtree() {
@@ -7201,7 +7199,7 @@ mod tests {
         assert!(cookie.starts_with("ntnt_session_challenge="));
         let req = request_with_cookie(&cookie);
 
-        let challenge = current_auth_challenge(&[req.clone()]).unwrap();
+        let challenge = current_auth_challenge(std::slice::from_ref(&req)).unwrap();
         match challenge {
             Value::EnumValue {
                 variant, values, ..
@@ -7315,7 +7313,7 @@ mod tests {
         .unwrap();
         let req = request_with_cookie(&cookie_header_from_response(&started));
 
-        let challenge = current_auth_challenge(&[req.clone()]).unwrap();
+        let challenge = current_auth_challenge(std::slice::from_ref(&req)).unwrap();
         let Value::EnumValue {
             variant, values, ..
         } = challenge
@@ -11354,7 +11352,7 @@ mod tests {
         let req = request_with_cookie(&challenge_cookie);
 
         assert!(
-            matches!(current_auth_challenge(&[req.clone()]).unwrap(), Value::EnumValue { ref variant, .. } if variant == "Some")
+            matches!(current_auth_challenge(std::slice::from_ref(&req)).unwrap(), Value::EnumValue { ref variant, .. } if variant == "Some")
         );
 
         let completed = complete_auth_challenge(&[
@@ -12063,7 +12061,7 @@ mod tests {
         let cookie = cookie_header_from_response(&signed_in);
         let req = request_with_cookie(&cookie);
 
-        let session = current_session(&[req.clone()]).unwrap();
+        let session = current_session(std::slice::from_ref(&req)).unwrap();
         let user = current_user(&[req]).unwrap();
 
         match session {
@@ -13438,7 +13436,7 @@ response.status
         .unwrap();
         let old_cookie = cookie_header_from_response(&signed_in);
         let old_req = request_with_cookie(&old_cookie);
-        let old_session = current_session(&[old_req.clone()]).unwrap();
+        let old_session = current_session(std::slice::from_ref(&old_req)).unwrap();
         let old_id = match old_session {
             Value::EnumValue { values, .. } => match values.first() {
                 Some(Value::Map(map)) => match map.get("id") {
@@ -13509,7 +13507,7 @@ response.status
         .unwrap();
         let cookie = cookie_header_from_response(&signed_in);
         let req = request_with_cookie(&cookie);
-        let before = current_session(&[req.clone()]).unwrap();
+        let before = current_session(std::slice::from_ref(&req)).unwrap();
 
         let err = rotate_session(&[Value::String("not-a-response".to_string()), req.clone()])
             .unwrap_err();
@@ -14015,7 +14013,7 @@ response.status
             ),
         ]));
 
-        let response = enforce_auth_for_request(&req, false).unwrap_err();
+        let response = *enforce_auth_for_request(&req, false).unwrap_err();
         if let Value::Map(map) = response {
             assert!(matches!(map.get("status"), Some(Value::Int(302))));
         } else {
@@ -14047,7 +14045,7 @@ response.status
             ),
         ]));
 
-        let response = enforce_auth_for_request(&req, false).unwrap_err();
+        let response = *enforce_auth_for_request(&req, false).unwrap_err();
         if let Value::Map(map) = response {
             assert!(matches!(map.get("status"), Some(Value::Int(401))));
             match map.get("body") {

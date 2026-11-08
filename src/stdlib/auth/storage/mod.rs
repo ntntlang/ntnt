@@ -544,6 +544,8 @@ fn cleanup_expired_rate_limits_redis(_now: i64) -> std::result::Result<u64, Stri
 }
 
 /// Store OAuth state
+// One parameter per stored OAuthState field.
+#[allow(clippy::too_many_arguments)]
 pub fn store_oauth_state(
     state: &str,
     provider: &str,

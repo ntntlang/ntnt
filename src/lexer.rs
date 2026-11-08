@@ -225,6 +225,13 @@ pub struct Lexer<'a> {
     current_lexeme: String,
 }
 
+/// Parsed `{{#if}}` block: then parts, `elif` chains and else parts.
+type IfBlockParts = (
+    Vec<TemplatePart>,
+    Vec<(String, Vec<TemplatePart>)>,
+    Vec<TemplatePart>,
+);
+
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a str) -> Self {
         Lexer {
@@ -898,14 +905,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Parse if block content to extract then_parts, elif_chains, and else_parts
-    fn parse_if_block_content(
-        &self,
-        content: &str,
-    ) -> (
-        Vec<TemplatePart>,
-        Vec<(String, Vec<TemplatePart>)>,
-        Vec<TemplatePart>,
-    ) {
+    fn parse_if_block_content(&self, content: &str) -> IfBlockParts {
         let then_parts;
         let mut elif_chains: Vec<(String, Vec<TemplatePart>)> = Vec::new();
         let mut else_parts = Vec::new();
