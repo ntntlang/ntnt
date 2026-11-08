@@ -40,6 +40,8 @@ jobs:
               - 'build.rs'
               - '.github/workflows/ci.yml'
               - '.config/nextest.toml'
+              # Pins the Rust used by the clippy gate.
+              - 'scripts/release/armv7.env'
             examples:
               - 'examples/**'
               - 'tests/performance_guard.rs'
