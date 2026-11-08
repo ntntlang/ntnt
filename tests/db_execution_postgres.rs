@@ -1715,3 +1715,46 @@ fn concurrent_index_migrations_cannot_have_checks() {
     let r = f.command("plan");
     assert!(code(&r, "DB_REPLAY_UNSUPPORTED"), "{r}");
 }
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn recovery_never_drops_an_invalid_index_it_did_not_plan() {
+    // Same name, different definition: not ours to drop.
+    let (f, plan) = concurrent_fixture("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
+    f.target()
+        .batch_execute("INSERT INTO app.t VALUES (1)")
+        .unwrap();
+    assert!(f
+        .target()
+        .batch_execute("CREATE UNIQUE INDEX CONCURRENTLY t_id ON app.t((id * 0))")
+        .is_err());
+    assert_eq!(index_state(&f, "t_id"), Some(false));
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_ne!(r["outcome"], "pass", "{r}");
+    assert_eq!(
+        index_state(&f, "t_id"),
+        Some(false),
+        "unplanned index was dropped"
+    );
+    assert_eq!(ledger_rows(&f), 1);
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn concurrent_builds_refuse_custom_casts() {
+    // Index expressions coerce values; a custom implicit cast on the target
+    // could run code that replay never ran.
+    let (f, plan) = concurrent_fixture("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
+    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    config.dbname(&f.target);
+    let mut admin = config.connect(postgres::NoTls).unwrap();
+    admin
+        .batch_execute("CREATE FUNCTION public.escape(integer) RETURNS text LANGUAGE sql AS $$ SELECT 'x' $$; CREATE CAST (integer AS text) WITH FUNCTION public.escape(integer) AS ASSIGNMENT")
+        .unwrap();
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert!(code(&r, "DB_CHECK_UNSUPPORTED"), "{r}");
+    assert_eq!(index_state(&f, "t_id"), None);
+}

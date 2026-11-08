@@ -372,27 +372,36 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             .map(|r| r.get(0)))
     }
     /// Run statements outside any transaction. The session is read-only by
-    /// default; lift that only for this call.
+    /// default; lift that only for this call. Uses replay's storage settings
+    /// so the result matches the plan's catalog. Settings are restored on
+    /// every path, and a build error is reported in preference to a restore
+    /// error.
     async fn outside_transaction(&self, sql: &str, schema: &str) -> Result<()> {
-        self.batch(&format!(
-            "SET default_transaction_read_only=off; SET search_path=pg_catalog,{}; SET lock_timeout=0; SET statement_timeout='{}s';",
-            quote(schema),
-            SCRIPT_TIMEOUT.as_secs()
-        ))
-        .await?;
-        let result = bounded_for(
-            SCRIPT_TIMEOUT + Duration::from_secs(5),
-            self.client.batch_execute(sql),
-        )
-        .await;
-        self.batch("SET default_transaction_read_only=on; SET search_path=pg_catalog; SET lock_timeout='2s'; SET statement_timeout=5000;")
+        let result = async {
+            self.batch(&format!(
+                "SET default_transaction_read_only=off; SET search_path=pg_catalog,{}; SET default_tablespace=''; SET temp_tablespaces=''; SET lock_timeout=0; SET statement_timeout='{}s';",
+                quote(schema),
+                SCRIPT_TIMEOUT.as_secs()
+            ))
             .await?;
-        result
+            bounded_for(
+                SCRIPT_TIMEOUT + Duration::from_secs(5),
+                self.client.batch_execute(sql),
+            )
+            .await
+        }
+        .await;
+        let restored = self
+            .batch("RESET default_tablespace; RESET temp_tablespaces; SET default_transaction_read_only=on; SET search_path=pg_catalog; SET lock_timeout='2s'; SET statement_timeout=5000;")
+            .await;
+        result.and(restored)
     }
     /// Build a reviewed CREATE INDEX CONCURRENTLY. It takes only SHARE UPDATE
     /// EXCLUSIVE, which does not block reads or writes, and waits (up to the
     /// script limit) for earlier transactions instead of timing out on them.
     pub async fn build_concurrent_index(&self, migration: &Migration, schema: &str) -> Result<()> {
+        // Index expressions coerce values like any DDL; see execute_captured.
+        self.reject_custom_casts().await?;
         self.outside_transaction(&migration.sql, schema)
             .await
             .map_err(|mut d| {

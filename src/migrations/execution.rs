@@ -174,18 +174,26 @@ async fn locked_prefix(db: &Adapter, inputs: &CapturedInputs, saved: &Value) -> 
         // A concurrent build that failed or was interrupted leaves an invalid
         // index; one that finished but was not recorded leaves a valid one.
         let mut reference = applied;
+        let mut compared = catalog.clone();
+        let mut leftover = None;
         if let Some(index) = pending_concurrent_index(inputs, applied) {
             match db
                 .index_validity(&inputs.config.schema, &index.name)
                 .await?
             {
                 Some(false) => {
-                    let mut d = Diagnostic::new(
-                        "DB_INVALID_INDEX",
-                        "An earlier concurrent build left an invalid index.",
-                    );
-                    d.source = Some(index.name);
-                    return Err(d);
+                    // Treat the invalid index as if its build had finished. Only
+                    // if that equals the plan's expected state after this
+                    // migration exactly (definition, table and every other
+                    // object) is it the planned index and safe to drop.
+                    if let Some(object) = compared.objects.get_mut(&format!("index:{}", index.name))
+                    {
+                        for flag in ["valid", "ready", "live"] {
+                            object[flag] = json!(true);
+                        }
+                    }
+                    reference = applied + 1;
+                    leftover = Some(index.name);
                 }
                 Some(true) => {
                     prebuilt = true;
@@ -194,13 +202,22 @@ async fn locked_prefix(db: &Adapter, inputs: &CapturedInputs, saved: &Value) -> 
                 None => (),
             }
         }
-        if !catalog.uncovered.is_empty()
+        if !compared.uncovered.is_empty()
             || applied < base
-            || json_digest(&catalog) != saved["plan"]["execution"]["prefix_fingerprints"][reference]
+            || json_digest(&compared)
+                != saved["plan"]["execution"]["prefix_fingerprints"][reference]
             || (applied == base
                 && json_digest(&history) != saved["plan"]["binding"]["base_history_digest"])
         {
             return Err(stale());
+        }
+        if let Some(name) = leftover {
+            let mut d = Diagnostic::new(
+                "DB_INVALID_INDEX",
+                "An earlier concurrent build of this migration's index left it invalid.",
+            );
+            d.source = Some(name);
+            return Err(d);
         }
         false
     };
