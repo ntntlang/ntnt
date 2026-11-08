@@ -4,6 +4,19 @@ See [NTNT v0.6.0](v0.6.0.md) for the curated announcement, upgrade guidance and
 retained implementation measurement notes. The 0.5.7 development cycle is included
 in 0.6.0; there was no separately published 0.5.7 release.
 
+## Runtime memory lifetime
+
+The runtime automatically collects unreachable closure/environment cycles. This
+addresses memory retained by function-bearing imports in completed scheduled
+callbacks, and by local closures in long-running interpreters. Escaped callbacks
+keep their captured bindings while they remain reachable. NTNT applications need
+no new syntax, cleanup calls or garbage-collector settings.
+
+Native Rust embedders constructing `Value::Function` must convert the environment
+`Rc` into the Rc-compatible `Closure` wrapper with `.into()`. Strong capture and
+shared-binding semantics are unchanged. This is automatic memory reclamation,
+not a new deterministic resource-close API.
+
 ## Database migrations (`ntnt db`) on real PostgreSQL applications
 
 Tested by adopting and migrating Jarri's staging database (33 migrations, about 11 GB).
