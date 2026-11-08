@@ -828,6 +828,8 @@ struct ServerAction {
 struct CachedExternalTemplate {
     parts: Rc<Vec<TemplatePart>>,
     mtime: Option<std::time::SystemTime>,
+    /// Digest of the bytes these parts were parsed from (source provenance).
+    digest: [u8; 32],
 }
 
 fn convert_to_int(value: &Value) -> std::result::Result<Value, String> {
@@ -8027,23 +8029,30 @@ impl Interpreter {
                 .and_then(|m| m.modified().ok())
         };
 
-        if is_production {
-            if let Some(cached) = self.external_template_cache.get(&cache_key) {
-                return Ok(Rc::clone(&cached.parts));
-            }
-        } else if let Some(cached) = self.external_template_cache.get(&cache_key) {
-            if Self::cached_template_is_fresh(cached.mtime, current_mtime) {
-                return Ok(Rc::clone(&cached.parts));
-            }
+        // Template expressions execute, so the parsed bytes are recorded in the
+        // source ledger. A cache hit records its original digest.
+        let cached = self
+            .external_template_cache
+            .get(&cache_key)
+            .filter(|cached| {
+                is_production || Self::cached_template_is_fresh(cached.mtime, current_mtime)
+            })
+            .map(|cached| (Rc::clone(&cached.parts), cached.digest));
+        if let Some((parts, digest)) = cached {
+            self.loaded_sources.record_bytes(&resolved_path, digest);
+            return Ok(parts);
         }
 
         let content = Self::read_external_template_file(&resolved_path)?;
+        let digest = crate::source::digest_bytes(content.as_bytes());
         let parts = Rc::new(Self::parse_template_content(&content, &resolved_path)?);
+        self.loaded_sources.record_bytes(&resolved_path, digest);
         self.external_template_cache.insert(
             cache_key,
             CachedExternalTemplate {
                 parts: Rc::clone(&parts),
                 mtime: current_mtime,
+                digest,
             },
         );
         Ok(parts)

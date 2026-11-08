@@ -165,6 +165,19 @@ impl SourceLedger {
             .or_insert((file.digest, false));
     }
 
+    /// Record an executed non-NTNT input (an external template or partial)
+    /// by the exact bytes that were parsed. Unresolvable paths are untracked.
+    pub(crate) fn record_bytes(&mut self, path: &Path, digest: [u8; 32]) {
+        let Ok(resolved) = path.canonicalize() else {
+            self.source_less();
+            return;
+        };
+        self.files
+            .entry(resolved)
+            .and_modify(|(first, mixed)| *mixed |= *first != digest)
+            .or_insert((digest, false));
+    }
+
     pub(crate) fn snapshot(&self) -> Result<SourceSnapshot> {
         if !self.file_entry || self.source_less.get() {
             return Err(IntentError::runtime_error(
@@ -193,6 +206,10 @@ impl SourceLedger {
             digest: hash.finalize().into(),
         })
     }
+}
+
+pub(crate) fn digest_bytes(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
 }
 
 fn frame(hash: &mut Sha256, bytes: &[u8]) {

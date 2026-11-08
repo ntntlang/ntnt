@@ -612,3 +612,42 @@ fn source_identity_does_not_roundtrip_non_utf8_paths_through_display_strings() {
         .files()
         .contains_key(&helper.canonicalize().unwrap()));
 }
+
+#[test]
+fn executed_templates_and_partials_are_recorded_in_the_snapshot() {
+    // Template expressions run code, so their bytes belong in the snapshot,
+    // including a cached original and a partial.
+    let dir = tempfile::tempdir().unwrap();
+    let page = write(
+        dir.path(),
+        "views/page.html",
+        "<p>{{ 1 + 2 }}</p>{{> part }}",
+    );
+    let part = write(dir.path(), "views/partials/part.html", "<b>{{ 4 }}</b>");
+    let root = write(
+        dir.path(),
+        "main.tnt",
+        "fn page() { template(\"views/page.html\", map {}) }",
+    );
+    let mut interpreter = Interpreter::new();
+    run(&mut interpreter, &root);
+    let before = interpreter.source_snapshot().unwrap();
+    assert_eq!(before.files().len(), 1);
+    for _ in 0..2 {
+        interpreter.call_function_by_name("page", vec![]).unwrap();
+    }
+    let after = interpreter.source_snapshot().unwrap();
+    let page_bytes = std::fs::read_to_string(&page).unwrap();
+    let part_bytes = std::fs::read_to_string(&part).unwrap();
+    assert_eq!(
+        after.files().get(&page.canonicalize().unwrap()),
+        Some(&digest(&page_bytes)),
+        "{:?}",
+        after.files().keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        after.files().get(&part.canonicalize().unwrap()),
+        Some(&digest(&part_bytes))
+    );
+    assert_ne!(after.digest(), before.digest());
+}
