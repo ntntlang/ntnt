@@ -451,10 +451,17 @@ impl Environment {
     }
 
     pub fn define(&mut self, name: String, value: Value) {
+        let _mutation = cycles::bindings_changed(
+            self as *const Self as usize,
+            self.values.get(&name),
+            Some(&value),
+        );
         self.values.insert(name, value);
     }
 
     pub fn undefine(&mut self, name: &str) {
+        let _mutation =
+            cycles::bindings_changed(self as *const Self as usize, self.values.get(name), None);
         self.values.remove(name);
         self.mutable_vars.remove(name);
     }
@@ -491,12 +498,19 @@ impl Environment {
     /// break the scope -> function -> closure -> scope cycles that rebuilt
     /// helper functions form, so the task's scopes are freed.
     pub(crate) fn tear_down(&mut self) {
+        let _mutation =
+            cycles::bindings_changed(self as *const Self as usize, self.values.values(), None);
         self.values.clear();
         self.mutable_vars.clear();
         self.parent = None;
     }
 
     pub fn define_mutable(&mut self, name: String, value: Value) {
+        let _mutation = cycles::bindings_changed(
+            self as *const Self as usize,
+            self.values.get(&name),
+            Some(&value),
+        );
         self.values.insert(name.clone(), value);
         self.mutable_vars.insert(name);
     }
@@ -593,6 +607,11 @@ impl Environment {
 
     pub fn set(&mut self, name: &str, value: Value) -> bool {
         if self.values.contains_key(name) {
+            let _mutation = cycles::bindings_changed(
+                self as *const Self as usize,
+                self.values.get(name),
+                Some(&value),
+            );
             self.values.insert(name.to_string(), value);
             true
         } else if let Some(ref parent) = self.parent {
@@ -623,8 +642,10 @@ impl Environment {
     }
 
     fn append_to_array_binding(&mut self, name: &str, mut items: Vec<Value>) -> bool {
+        let scope = self as *const Self as usize;
         if let Some(value) = self.values.get_mut(name) {
             if let Value::Array(arr) = value {
+                let _mutation = cycles::bindings_changed(scope, None, &items);
                 arr.append(&mut items);
                 true
             } else {

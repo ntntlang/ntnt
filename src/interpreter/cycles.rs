@@ -20,8 +20,12 @@ struct Collector {
     allocations: usize,
     releases: usize,
     budget: usize,
+    weak_budget: usize,
     interpreters: usize,
     external_roots: usize,
+    roots_dirty: bool,
+    mutations: usize,
+    blocked: Vec<WeakEnv>,
     #[cfg(test)]
     collections: usize,
 }
@@ -34,7 +38,9 @@ thread_local! {
     static COLLECTOR: RefCell<Collector> = RefCell::new(Collector::default());
 }
 fn id(env: &Env) -> usize {
-    Rc::as_ptr(env) as usize
+    // Use the stable inner address so Environment mutators can identify their
+    // registered source without borrowing its RefCell or changing its layout.
+    env.as_ref().as_ptr() as usize
 }
 
 /// An Rc-compatible lexical capture with a last-release notification.
@@ -67,9 +73,16 @@ impl Closure {
 impl Drop for Closure {
     fn drop(&mut self) {
         if let Some(env) = self.env.take() {
+            // Releasing aliases of a mutably borrowed capture cannot make it
+            // collectible yet. Leave dirty hints pending for a later release,
+            // rather than charging/tracing the same blocked scope repeatedly.
+            let borrowed = env.try_borrow().is_err();
             let key = id(&env);
             let weak = Rc::downgrade(&env);
             drop(env);
+            if borrowed {
+                return;
+            }
             // Cached root counts are scheduling hints, never proof of garbage.
             // Charge releases against the tracing budget, just like allocations:
             // dropping a copied callback array must not trace once per element.
@@ -85,13 +98,76 @@ impl Drop for Closure {
                     // Coalesce host-owned roots too. When the last cached root
                     // disappears after all interpreters died, sweep promptly;
                     // other releases use the ordinary amortized work budget.
-                    Some(gc.interpreters == 0 && gc.external_roots == 0)
+                    Some(gc.interpreters == 0 && (gc.roots_dirty || gc.external_roots == 0))
                 })
                 .ok()
                 .flatten();
             if let Some(force) = force {
                 collect(force);
             }
+        }
+    }
+}
+
+/// Refresh incoming scheduling hints using only the replaced/added Values, not
+/// the live graph (or the existing array on append). Unnotified scope/parent
+/// drops can leave overcounts, which only schedule an earlier conservative
+/// trace. A partial borrowed trace stays dirty until it can be retried.
+pub(super) fn bindings_changed<'a>(
+    scope: usize,
+    removed: impl IntoIterator<Item = &'a Value>,
+    added: impl IntoIterator<Item = &'a Value>,
+) -> BindingMutation {
+    let releases = COLLECTOR.with(|cell| {
+        let mut gc = cell.borrow_mut();
+        gc.mutations += 1;
+        let releases = gc.releases;
+        // Stack/clone/native Environment values are external owners, not edges
+        // subtracted by the graph trace. Their mutations must not change hints.
+        if !gc.environments.contains_key(&scope) {
+            return releases;
+        }
+        for (value, add) in removed
+            .into_iter()
+            .map(|value| (value, false))
+            .chain(added.into_iter().map(|value| (value, true)))
+        {
+            let mut targets = Vec::new();
+            let mut work = 0;
+            edges(value, &mut targets, &mut work);
+            for target in targets {
+                if let Some(entry) = gc.environments.get_mut(&target) {
+                    entry.incoming = if add {
+                        entry.incoming.saturating_add(1)
+                    } else {
+                        entry.incoming.saturating_sub(1)
+                    };
+                }
+            }
+        }
+        releases
+    });
+    BindingMutation { releases }
+}
+pub(super) struct BindingMutation {
+    releases: usize,
+}
+impl Drop for BindingMutation {
+    fn drop(&mut self) {
+        let force = COLLECTOR
+            .try_with(|cell| {
+                let mut gc = cell.try_borrow_mut().ok()?;
+                gc.mutations -= 1;
+                (gc.mutations == 0 && gc.releases != self.releases)
+                    .then_some(gc.interpreters == 0 && (gc.roots_dirty || gc.external_roots == 0))
+            })
+            .ok()
+            .flatten();
+        // Coalesce internal Value drops into one safe-point after the binding
+        // update is complete. The source may still be borrowed, so the normal
+        // conservative trace protects it; unrelated final owners can release.
+        if let Some(force) = force {
+            collect(force);
         }
     }
 }
@@ -146,9 +222,27 @@ fn track(env: &Env) {
                 },
             );
             gc.allocations = gc.allocations.saturating_add(1);
+            gc.roots_dirty = true;
             current = env.try_borrow().ok().and_then(|env| env.parent.clone());
         }
+        if gc.environments.len() >= gc.weak_budget.max(MIN_BUDGET) {
+            purge_dead(&mut gc);
+        }
     });
+}
+
+/// Weak metadata has its own geometric budget: a large live Value collection
+/// must not permit an equally large backlog of dead Rc allocation headers.
+/// This pass never upgrades an Rc or visits a binding/parent edge.
+fn purge_dead(gc: &mut Collector) {
+    let mut removed_roots = 0;
+    gc.environments.retain(|_, entry| {
+        let live = entry.weak.strong_count() != 0;
+        removed_roots += usize::from(!live && entry.external_root);
+        live
+    });
+    gc.external_roots = gc.external_roots.saturating_sub(removed_roots);
+    gc.weak_budget = gc.environments.len().saturating_mul(2).max(MIN_BUDGET);
 }
 
 fn edges(value: &Value, output: &mut Vec<usize>, work: &mut usize) {
@@ -220,11 +314,28 @@ pub(super) fn collect(force: bool) {
         let Ok(mut gc) = cell.try_borrow_mut() else {
             return;
         };
+        if gc.mutations != 0 {
+            return;
+        }
+        // A blocked native borrow defers forced hint refreshes, not ordinary
+        // budgeted collection of unrelated cycles. Resolved blockers are
+        // popped once; a full trace replaces the list with fresh blockers.
+        let mut force = force;
+        if gc.interpreters == 0 {
+            while let Some(weak) = gc.blocked.last() {
+                if weak.upgrade().is_some_and(|env| env.try_borrow().is_err()) {
+                    force = false;
+                    break;
+                }
+                gc.blocked.pop();
+            }
+        }
         if !force && gc.allocations.saturating_add(gc.releases) < gc.budget.max(MIN_BUDGET) {
             return;
         }
         gc.allocations = 0;
         gc.releases = 0;
+        gc.blocked.clear();
         #[cfg(test)]
         {
             gc.collections += 1;
@@ -250,6 +361,7 @@ pub(super) fn collect(force: bool) {
         for (i, env) in environments.iter().enumerate() {
             let Ok(env) = env.try_borrow() else {
                 borrowed[i] = true;
+                gc.blocked.push(Rc::downgrade(&environments[i]));
                 continue;
             };
             let mut targets = Vec::new();
@@ -266,6 +378,7 @@ pub(super) fn collect(force: bool) {
                 }
             }
         }
+        gc.roots_dirty = !gc.blocked.is_empty();
         let mut live = borrowed;
         let mut queue = Vec::new();
         gc.external_roots = 0;
@@ -312,8 +425,7 @@ pub(super) fn collect(force: bool) {
             .sum();
         drop(garbage);
         drop(environments);
-        gc.environments
-            .retain(|_, entry| entry.weak.strong_count() != 0);
+        purge_dead(&mut gc);
         // Charge for values/edges too: a large live module or callback array
         // must not be rescanned on every ordinary scalar function invocation.
         gc.budget = live_work.saturating_mul(2).max(MIN_BUDGET);

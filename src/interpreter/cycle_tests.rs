@@ -51,6 +51,210 @@ fn escaped_callback_survives_owner_then_reclaims_on_last_release() {
     );
 }
 
+fn resource_callback(
+    interpreter: &Interpreter,
+) -> (
+    Value,
+    std::rc::Weak<RefCell<Environment>>,
+    std::sync::mpsc::Receiver<()>,
+) {
+    let env = &interpreter.environment;
+    let (sender, receiver) = std::sync::mpsc::channel::<()>();
+    env.borrow_mut().define(
+        "resource".into(),
+        Value::TxChannelHandle(0, ChannelSender(std::sync::Arc::new(sender))),
+    );
+    let value = callback(env);
+    env.borrow_mut().define("self".into(), value.clone());
+    env.borrow_mut().define("slot".into(), Value::Unit);
+    env.borrow_mut()
+        .define("array".into(), Value::Array(vec![]));
+    (value, Rc::downgrade(env), receiver)
+}
+
+fn escaped_resource_callback() -> (
+    Value,
+    std::rc::Weak<RefCell<Environment>>,
+    std::sync::mpsc::Receiver<()>,
+) {
+    resource_callback(&Interpreter::new())
+}
+
+#[test]
+fn mutated_escaped_capture_reclaims_on_final_host_release() {
+    let (callback, weak, receiver) = escaped_resource_callback();
+    let Value::Function { closure, .. } = &callback else {
+        panic!("callback")
+    };
+    closure
+        .borrow_mut()
+        .define("another".into(), callback.clone());
+    assert!(
+        weak.strong_count() != 0,
+        "live host callback lost its capture"
+    );
+    drop(callback);
+    assert!(weak.upgrade().is_none(), "mutated capture cycle leaked");
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+}
+
+#[test]
+fn escaped_capture_binding_mutators_invalidate_release_hints() {
+    for operation in ["mutable", "set", "append", "parent_set", "parent_append"] {
+        let (callback, weak, receiver) = escaped_resource_callback();
+        let Value::Function { closure, .. } = &callback else {
+            panic!("callback")
+        };
+        match operation {
+            "mutable" => closure
+                .borrow_mut()
+                .define_mutable("another".into(), Value::some(callback.clone())),
+            "set" => assert!(closure.borrow_mut().set("slot", callback.clone())),
+            "append" => assert!(closure
+                .borrow_mut()
+                .append_to_array_binding("array", vec![callback.clone()])),
+            // Exercise recursive binding resolution without registering a new
+            // scope (registration itself would invalidate the cached hints).
+            "parent_set" | "parent_append" => {
+                let mut child = Environment::with_parent(Rc::clone(closure));
+                if operation == "parent_set" {
+                    assert!(child.set("slot", callback.clone()));
+                } else {
+                    assert!(child.append_to_array_binding("array", vec![callback.clone()]));
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        drop(callback);
+        assert!(weak.upgrade().is_none(), "{operation} leaked its capture");
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Disconnected)
+            ),
+            "{operation} retained its resource"
+        );
+    }
+}
+
+#[test]
+fn borrowed_mutation_defers_tracing_until_a_later_final_release() {
+    let interpreter = Interpreter::new();
+    let (callback, weak, receiver) = resource_callback(&interpreter);
+    let alias = callback.clone();
+    let Value::Function { closure, .. } = &alias else {
+        panic!("callback")
+    };
+    let mut scope = closure.borrow_mut();
+    drop(interpreter); // The lifetime sweep cannot inspect this borrowed scope.
+    let before = cycles::stats().2;
+    scope.define("another".into(), callback.clone());
+    scope.define("removed".into(), callback.clone());
+    scope.undefine("removed");
+    assert_eq!(
+        cycles::stats().2,
+        before,
+        "mutators traced partial bindings"
+    );
+    drop(callback);
+    let before = cycles::stats().2;
+    for _ in 0..400 {
+        drop(alias.clone());
+    }
+    assert_eq!(
+        cycles::stats().2,
+        before,
+        "borrowed aliases retraced the graph"
+    );
+    assert!(scope.get("self").is_some(), "borrowed capture was cleared");
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    drop(scope);
+    drop(alias);
+    assert!(weak.upgrade().is_none(), "borrowed trace prevented retry");
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+}
+
+#[test]
+fn borrowed_scope_does_not_suspend_unrelated_budgeted_collection() {
+    let interpreter = Interpreter::new();
+    let env = Rc::clone(&interpreter.environment);
+    env.borrow_mut().define("self".into(), callback(&env));
+    let borrow = env.borrow_mut();
+    drop(interpreter);
+    let mut weak = Vec::new();
+    for _ in 0..1000 {
+        let parent = Environment::shared(Environment::new());
+        let child = Environment::shared(Environment::with_parent(Rc::clone(&parent)));
+        parent.borrow_mut().define("child".into(), callback(&child));
+        weak.push(Rc::downgrade(&child));
+        drop((parent, child));
+        cycles::collect(false);
+    }
+    let retained = weak.iter().filter(|env| env.strong_count() != 0).count();
+    assert!(
+        retained < 256,
+        "native borrow blocked {retained} unrelated cycles"
+    );
+    assert!(
+        borrow.get("self").is_some(),
+        "native borrow lost its capture"
+    );
+    drop(borrow);
+    drop(env);
+    cycles::collect(true);
+    assert!(weak.iter().all(|env| env.strong_count() == 0));
+}
+
+#[test]
+fn untracked_native_bindings_do_not_subtract_traced_incoming_edges() {
+    let interpreter = Interpreter::new();
+    let (callback, weak, receiver) = resource_callback(&interpreter);
+    let mut native = Environment::new();
+    native.define("host_copy".into(), callback.clone());
+    drop(interpreter);
+    native.undefine("host_copy");
+    drop(callback);
+    assert!(
+        weak.upgrade().is_none(),
+        "untracked binding corrupted incoming hints"
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+}
+
+#[test]
+fn removing_final_native_binding_releases_its_callback_cycle() {
+    let interpreter = Interpreter::new();
+    let (callback, weak, receiver) = resource_callback(&interpreter);
+    let mut native = Environment::new();
+    native.define("last_host_owner".into(), callback);
+    drop(interpreter);
+    native.undefine("last_host_owner");
+    assert!(
+        weak.upgrade().is_none(),
+        "final native binding release was deferred forever"
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+}
+
 #[test]
 fn imported_module_cycle_is_reclaimed_on_interpreter_drop() {
     let dir = tempfile::tempdir().unwrap();
@@ -165,6 +369,52 @@ fn scalar_calls_do_not_scan_the_live_graph_per_invocation() {
 }
 
 #[test]
+fn dead_scope_metadata_is_bounded_independently_of_live_value_work() {
+    let interpreter = Interpreter::new();
+    interpreter
+        .environment
+        .borrow_mut()
+        .define("large".into(), Value::Array(vec![Value::Int(42); 100_000]));
+    let env = Environment::shared(Environment::with_parent(Rc::clone(
+        &interpreter.environment,
+    )));
+    let escaped = callback(&env);
+    env.borrow_mut().define("self".into(), escaped.clone());
+    let weak = Rc::downgrade(&env);
+    drop(env);
+    cycles::collect(true);
+    let (live, budget, before) = cycles::stats();
+    assert!(budget > 100_000);
+    for i in 0..8000 {
+        let scope = Environment::shared(Environment::with_parent(Rc::clone(
+            &interpreter.environment,
+        )));
+        scope.borrow_mut().define("scalar".into(), Value::Int(i));
+        if i % 2 == 0 {
+            cycles::retire(scope);
+        }
+        // The other scopes deliberately bypass retire (e.g. native owners).
+        if i % 127 == 0 {
+            assert!(
+                cycles::stats().0 <= live * 2 + 256,
+                "dead Weak registry entries grew with the large value budget: {:?}",
+                cycles::stats()
+            );
+        }
+    }
+    assert!(cycles::stats().0 <= live * 2 + 256);
+    assert_eq!(cycles::stats().2, before, "metadata cleanup traced Values");
+    assert!(
+        weak.upgrade().is_some(),
+        "metadata cleanup removed live capture"
+    );
+    drop(interpreter);
+    assert!(weak.upgrade().is_some(), "escaped root was lost");
+    drop(escaped);
+    assert!(weak.upgrade().is_none(), "root release accounting was lost");
+}
+
+#[test]
 fn release_notifications_for_callback_array_aliases_are_coalesced() {
     let interpreter = Interpreter::new();
     let mut callbacks = Vec::new();
@@ -248,6 +498,51 @@ fn release_notifications_coalesce_host_callback_array_roots() {
     assert!(
         cycles::stats().2 - before <= 1,
         "final host array release must not trace once per root"
+    );
+    assert!(weak.iter().all(|env| env.strong_count() == 0));
+}
+
+#[test]
+fn mutated_host_callback_array_keeps_release_traces_coalesced() {
+    let interpreter = Interpreter::new();
+    let mut callbacks = Vec::new();
+    let mut weak = Vec::new();
+    for _ in 0..400 {
+        let env = Environment::shared(Environment::with_parent(Rc::clone(
+            &interpreter.environment,
+        )));
+        env.borrow_mut().define("self".into(), callback(&env));
+        callbacks.push(callback(&env));
+        weak.push(Rc::downgrade(&env));
+    }
+    drop(interpreter);
+    let before = cycles::stats().2;
+    for callback in &callbacks {
+        let Value::Function { closure, .. } = callback else {
+            panic!("callback")
+        };
+        let before_mutation = cycles::stats().2;
+        closure
+            .borrow_mut()
+            .define("another".into(), callback.clone());
+        assert_eq!(cycles::stats().2, before_mutation, "binding change traced");
+        drop(callback.clone());
+    }
+    assert!(
+        cycles::stats().2 - before <= 1,
+        "binding changes and temporary aliases traced per element"
+    );
+    drop(callbacks.clone());
+    assert!(
+        cycles::stats().2 - before <= 1,
+        "dirty aliases traced per element"
+    );
+    assert!(weak.iter().all(|env| env.strong_count() != 0));
+    let before = cycles::stats().2;
+    drop(callbacks);
+    assert!(
+        cycles::stats().2 - before <= 1,
+        "final roots traced per element"
     );
     assert!(weak.iter().all(|env| env.strong_count() == 0));
 }
