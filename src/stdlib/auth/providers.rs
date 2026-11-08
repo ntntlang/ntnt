@@ -149,8 +149,8 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     for (i, item) in dp.iter_mut().enumerate().take(a.len() + 1) {
         item[0] = i;
     }
-    for j in 0..=b.len() {
-        dp[0][j] = j;
+    for (j, item) in dp[0].iter_mut().enumerate().take(b.len() + 1) {
+        *item = j;
     }
 
     for i in 1..=a.len() {

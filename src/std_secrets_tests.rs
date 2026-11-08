@@ -166,7 +166,7 @@ fn stringify_and_server_json_reject_secret_values() {
     let secret = Value::Secret(SecretValue::new("API_KEY", SECRET_CANARY).expect("valid secret"));
 
     let json_module = crate::stdlib::json::init();
-    let stringify_err = native_fn(&json_module, "stringify")(&[secret.clone()])
+    let stringify_err = native_fn(&json_module, "stringify")(std::slice::from_ref(&secret))
         .expect_err("stringify must reject secrets");
     assert!(!stringify_err.to_string().contains(SECRET_CANARY));
 

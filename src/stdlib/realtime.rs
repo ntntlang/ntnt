@@ -337,8 +337,8 @@ pub fn publish_value(args: &[Value]) -> Result<Value> {
                     .checked_add(len)
                     .is_some_and(|n| n <= limits.max_payload_bytes)
             };
-            if !reserve_payload(len, limits.max_payload_bytes)
-                && !(evict_stalled(fits) > 0 && reserve_payload(len, limits.max_payload_bytes))
+            if !(reserve_payload(len, limits.max_payload_bytes)
+                || evict_stalled(fits) > 0 && reserve_payload(len, limits.max_payload_bytes))
             {
                 return Ok(Value::err(Value::String(
                     "realtime payload budget exhausted".into(),
@@ -816,8 +816,9 @@ mod tests {
     use super::*;
 
     /// Stream and budget counters are process-global; tests that assert on
-    /// them run one at a time.
-    static COUNTERS: Mutex<()> = Mutex::new(());
+    /// them run one at a time. An async-aware lock, because async tests hold
+    /// it across awaits. Sync tests (no runtime) take it with blocking_lock.
+    static COUNTERS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn map(entries: &[(&str, Value)]) -> Value {
         Value::Map(
@@ -926,7 +927,7 @@ mod tests {
 
     #[test]
     fn configured_budget_stays_charged_until_the_last_frame_reference_drops() {
-        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = COUNTERS.blocking_lock();
         let before = stats().1;
         assert!(reserve_payload(32, before + 32));
         let event = Arc::new(EncodedEvent { bytes: vec![0; 32] });
@@ -994,7 +995,7 @@ mod tests {
 
     #[test]
     fn publish_validates_with_zero_subscribers_and_budget_is_released() {
-        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = COUNTERS.blocking_lock();
         let bus = bus("test.publish");
         let (_, before) = stats();
         let ok = publish_value(&[Value::Broadcast(bus.clone()), Value::Int(1)]).unwrap();
@@ -1009,7 +1010,7 @@ mod tests {
     #[tokio::test]
     async fn stream_yields_shared_frames_and_releases_permit_and_budget_on_drop() {
         use futures_util::StreamExt;
-        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = COUNTERS.lock().await;
         let bus = bus("test.stream");
         let spec = SseSpec {
             bus: bus.clone(),
@@ -1046,7 +1047,7 @@ mod tests {
     #[tokio::test]
     async fn stream_keeps_a_request_created_bus_alive() {
         use futures_util::StreamExt;
-        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = COUNTERS.lock().await;
         let spec = SseSpec {
             bus: bus("test.ephemeral"),
             heartbeat: Duration::from_secs(60),
@@ -1064,7 +1065,7 @@ mod tests {
     #[tokio::test]
     async fn budget_pressure_evicts_stalled_subscribers_on_any_bus() {
         use futures_util::StreamExt;
-        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = COUNTERS.lock().await;
         let stalled_bus = match broadcast_value(&[
             Value::String("test.stalled".into()),
             map(&[("capacity", Value::Int(1024))]),
@@ -1108,7 +1109,7 @@ mod tests {
     #[tokio::test]
     async fn eviction_spares_progressing_streams_and_stops_when_enough() {
         use futures_util::StreamExt;
-        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = COUNTERS.lock().await;
         let open = |name: &str| {
             let spec = SseSpec {
                 bus: bus(name),
@@ -1156,7 +1157,7 @@ mod tests {
     #[tokio::test]
     async fn long_idle_stream_that_just_received_is_not_stalled() {
         use futures_util::StreamExt;
-        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = COUNTERS.lock().await;
         let spec = SseSpec {
             bus: bus("test.idle"),
             heartbeat: Duration::from_secs(60),
@@ -1195,7 +1196,7 @@ mod tests {
     #[tokio::test]
     async fn slow_subscriber_is_closed_after_lag() {
         use futures_util::StreamExt;
-        let _serial = COUNTERS.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = COUNTERS.lock().await;
         let bus = match broadcast_value(&[
             Value::String("test.lag".into()),
             map(&[("capacity", Value::Int(2))]),

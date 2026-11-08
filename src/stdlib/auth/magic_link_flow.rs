@@ -997,7 +997,7 @@ fn run_magic_link_request_flow(
             ("url".to_string(), Value::String(url)),
             (
                 "expires_in".to_string(),
-                Value::Int(options.link_ttl_seconds.min(3600).max(0)),
+                Value::Int(options.link_ttl_seconds.clamp(0, 3600)),
             ),
             (
                 "budget_hint_seconds".to_string(),

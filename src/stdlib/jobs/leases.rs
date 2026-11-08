@@ -27,7 +27,7 @@ impl Policy {
         }
     }
     fn renewal_interval(self) -> Duration {
-        Duration::from_millis((self.duration_ms / 3).min(30_000).max(1) as u64)
+        Duration::from_millis((self.duration_ms / 3).clamp(1, 30_000) as u64)
     }
 }
 

@@ -2849,6 +2849,9 @@ mod tests {
                 Ok(())
             });
         }
+        // Deliberately never waited on: the parent test checks that cleanup
+        // reaches a descendant that left this process group.
+        #[allow(clippy::zombie_processes)]
         let _detached = command.spawn().expect("spawn detached descendant fixture");
         let deadline = Instant::now() + Duration::from_secs(1);
         while !Path::new(&marker).is_file() && Instant::now() < deadline {

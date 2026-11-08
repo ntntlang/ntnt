@@ -1819,7 +1819,10 @@ fn asn1_time_to_rfc3339(timestamp: i64) -> String {
         .unwrap_or_else(|| timestamp.to_string())
 }
 
-fn dns_lookup_args(args: &[Value]) -> Result<(&str, Option<&HashMap<String, Value>>), IntentError> {
+/// DNS record type and optional options map.
+type DnsLookupArgs<'a> = (&'a str, Option<&'a HashMap<String, Value>>);
+
+fn dns_lookup_args(args: &[Value]) -> Result<DnsLookupArgs<'_>, IntentError> {
     if args.len() <= 1 {
         return Ok(("A", None));
     }

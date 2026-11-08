@@ -1029,7 +1029,7 @@ fn is_production_mode() -> bool {
 /// - Non-String + String concatenation (`"hi" + 42`) — same three-tier behavior
 /// - Non-Bool condition in `if`/`while` (`if 1 { ... }`) — same three-tier behavior
 /// - Non-Bool operand for `!`, `&&`, `||` — same three-tier behavior
-/// Note: mixed Int↔Float **comparisons** (`3 == 3.0`) are always allowed in all modes.
+///   Note: mixed Int↔Float **comparisons** (`3 == 3.0`) are always allowed in all modes.
 ///
 /// ## Hard Errors — Code Bugs (always crash, TypeMode does NOT apply)
 /// These indicate a bug in the source code, not a data mismatch:
@@ -1057,11 +1057,10 @@ fn is_production_mode() -> bool {
 /// - Calling a non-function value
 /// - Pattern match exhaustiveness failures
 /// - `break`/`continue` outside a loop
-
-/// Auto-unwrap a Result/Option inner value for bracket indexing.
-/// Used by both Warn and Forgiving TypeModes to avoid code duplication.
-/// Mirrors all supported indexing cases from Expression::Index so behavior
-/// matches `unwrap(result)[idx]` exactly.
+///   Auto-unwrap a Result/Option inner value for bracket indexing.
+///   Used by both Warn and Forgiving TypeModes to avoid code duplication.
+///   Mirrors all supported indexing cases from Expression::Index so behavior
+///   matches `unwrap(result)[idx]` exactly.
 fn auto_unwrap_index(inner_val: Value, idx: Value) -> Result<Value> {
     match (inner_val, idx) {
         (Value::Array(arr), Value::Int(i)) => {

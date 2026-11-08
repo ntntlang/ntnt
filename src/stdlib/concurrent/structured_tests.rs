@@ -29,10 +29,12 @@ fn native_handler(operation: fn(&[Value]) -> Result<Value>) -> Value {
     }
 }
 
+type StartedTask = (u64, TaskArcs, Arc<CancelToken>);
+
 struct RaceProbe {
     started: (
-        crossbeam::Sender<(u64, TaskArcs, Arc<CancelToken>)>,
-        crossbeam::Receiver<(u64, TaskArcs, Arc<CancelToken>)>,
+        crossbeam::Sender<StartedTask>,
+        crossbeam::Receiver<StartedTask>,
     ),
     both_started: std::sync::Barrier,
     release: (crossbeam::Sender<()>, crossbeam::Receiver<()>),
