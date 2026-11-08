@@ -32,13 +32,14 @@ impl Diagnostic {
             "DB_REFERENCE_UNAVAILABLE" => "Configure [databases.<name>.scratch] for the selected database with a distinct disposable database and secret, then rerun inspection.",
             "DB_DATABASE_REQUIRED" | "DB_DATABASE_UNKNOWN" => "Select a declared [databases.<name>] with --database <name>. --database may be omitted only when exactly one logical database is declared; --target is always required.",
             "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty engine-matching scratch database/file. PostgreSQL requires a separate unprivileged owner role. Do not reset the selected target.",
-            "DB_REPLAY_UNSUPPORTED" => "Review the named migration against docs/DATABASE_MIGRATIONS.md. Unsupported SQL needs adapter support or separate manual review; do not replay it on the target.",
+            "DB_REPLAY_UNSUPPORTED" => "Review the named migration's analysis.unknowns against docs/DATABASE_MIGRATIONS.md. Remove transaction control, role/session changes and non-transactional statements from migration files; concurrent index builds are not yet supported.",
             "DB_COVERAGE_INCOMPLETE" | "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
             "DB_DRIFT" => "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.",
             "DB_UNRECOGNIZED_HISTORY" => "Review the existing managed scope. To adopt a matching captured prefix, declare named adoption_checks and create an explicit plan --adopt-through <migration-id>; obtain separate exact-plan approval before migrate. Never insert fictional applied rows.",
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
             "DB_SECRET" => "Declare the connection secret in ntnt.toml and configure the existing std/secrets provider. Never pass a connection URL on the command line.",
+            "DB_LOCK_CONFLICT" => "Another session held a conflicting lock; nothing was committed for this migration. Retry the same reviewed plan when application or migrator load allows.",
             "DB_TIMEOUT" => "Check endpoint availability and conflicting locks. Preserve committed progress; reconcile unknown migration outcomes with the same reviewed plan before any further SQL.",
             "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_APPROVAL_REQUIRED" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
             "DB_OUTPUT" => "Select a new output filename with a writable parent directory; existing files are never replaced.",
@@ -361,6 +362,30 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 migration["analysis"]["hazards"],
                 migration["analysis"]["unknowns"]
             );
+            for lock in migration["analysis"]["locks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let statements = match lock["through"].as_u64() {
+                    Some(end) => format!("statements {}-{end}", lock["statement"]),
+                    None => format!("statement {}", lock["statement"]),
+                };
+                println!(
+                    "  Lock: {statements} take {} on {}",
+                    lock["mode"], lock["relation"]
+                );
+            }
+            for warning in migration["analysis"]["lock_warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                println!(
+                    "  Warning {} on {} (statement {}): {}",
+                    warning["code"], warning["relation"], warning["statement"], warning["message"]
+                );
+            }
         }
         for d in report["diagnostics"].as_array().into_iter().flatten() {
             println!(
@@ -401,6 +426,15 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lock_conflicts_explain_what_to_do() {
+        let d = super::Diagnostic::new("DB_LOCK_CONFLICT", "x");
+        assert!(
+            d.next_action.contains("nothing was committed"),
+            "{}",
+            d.next_action
+        );
+    }
     #[test]
     fn oversized_artifact_is_rejected_before_creating_output() {
         let dir = tempfile::tempdir().unwrap();

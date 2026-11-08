@@ -515,19 +515,22 @@ fn scratch_requires_matching_engine_settings_empty_scope_and_low_privilege() {
 fn unsupported_pending_routines_never_run_and_do_not_hide_applied_verification() {
     let f = Fixture::new();
     f.seed_first("CREATE TABLE app.t(id INTEGER);");
-    for sql in [
-        "SELECT pg_advisory_lock(245)",
-        "CREATE TABLE app.bad(id int DEFAULT pg_sleep(30))",
-        "DO $$ BEGIN RAISE EXCEPTION 'secret_payload'; END $$;",
-        "CREATE INDEX CONCURRENTLY bad ON app.t(id)",
+    for (sql, expected) in [
+        (
+            "CREATE INDEX CONCURRENTLY ON app.t(id)",
+            "DB_REPLAY_UNSUPPORTED",
+        ),
+        ("COMMIT; DROP TABLE app.t", "DB_REPLAY_UNSUPPORTED"),
+        ("SET ROLE postgres", "DB_REPLAY_UNSUPPORTED"),
+        // Replayed in scratch; the failure is reported without server text.
+        (
+            "DO $$ BEGIN RAISE EXCEPTION 'secret_payload'; END $$;",
+            "DB_POSTGRES",
+        ),
     ] {
         f.sql("0002_bad.sql", sql);
         let r = f.command("plan");
-        assert!(
-            has_code(&r, "DB_REPLAY_UNSUPPORTED"),
-            "{}",
-            r["diagnostics"]
-        );
+        assert!(has_code(&r, expected), "{sql}: {}", r["diagnostics"]);
         assert_eq!(r["drift"]["outcome"], "pass");
         assert_eq!(r["plan"]["candidate"]["outcome"], "unknown");
         assert_eq!(f.command("verify")["outcome"], "pass");
@@ -569,7 +572,7 @@ fn partial_catalog_coverage_and_nonempty_unadopted_scope_are_not_passes() {
     f.target().batch_execute("DROP TABLE app.legacy").unwrap();
     f.seed_first("CREATE TABLE app.t(id INTEGER);");
     f.target()
-        .batch_execute("CREATE VIEW app.slow AS SELECT 1 AS sleeper FROM pg_sleep(30)")
+        .batch_execute("CREATE MATERIALIZED VIEW app.slow AS SELECT 1 AS sleeper")
         .unwrap();
     let r = f.command("verify");
     assert_eq!(r["drift"]["outcome"], "unknown");
@@ -578,6 +581,13 @@ fn partial_catalog_coverage_and_nonempty_unadopted_scope_are_not_passes() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("view:slow")));
+    // A plain view is compared by definition: unexpected, never "unknown".
+    f.target()
+        .batch_execute("DROP MATERIALIZED VIEW app.slow; CREATE VIEW app.slow AS SELECT 1 AS sleeper FROM pg_sleep(30)")
+        .unwrap();
+    let r = f.command("verify");
+    assert_eq!(r["drift"]["outcome"], "fail", "{r}");
+    assert!(has_code(&r, "DB_DRIFT"));
 }
 
 #[test]

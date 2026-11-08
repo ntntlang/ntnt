@@ -13,7 +13,7 @@ ntnt db status --target development --object accounts
 
 `status` and `verify` inspect history and compare the observed catalog with replay at the **applied prefix**. `plan` additionally replays pending SQL and captures a non-authorizing review artifact. Pending migrations are not drift. `--object` is a case-sensitive substring filter on displayed catalog keys; it never narrows verification, hides incomplete coverage, or changes the plan binding. Without `--json`, the same result is rendered for humans.
 
-`migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Explicit reviewed baseline adoption and recognized PostgreSQL legacy-history import use that same executor; see below. Concurrent indexes/non-transactional operations, backfill orchestration and query lint are not implemented. PostgreSQL migration DML remains unsupported; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
+`migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Explicit reviewed baseline adoption and recognized PostgreSQL legacy-history import use that same executor; see below. Concurrent indexes/non-transactional operations, backfill orchestration and query lint are not implemented. PostgreSQL migrations may include transactional DML such as seed rows; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
 
 ## Explicit configuration and secrets
 
@@ -53,7 +53,7 @@ required = true
 - Select a named deployment target with `--target`; it is always required, even for a single database or target. There is no fallback connection, URL argument, `url_env` alias, plaintext manifest credential, or `--force` bypass. Unknown fields in the selected database definition are errors.
 - Connections reuse the existing **`std/secrets` providers and declaration validation**. Development's environment provider reads the exact logical name. Production uses the configured Unix-socket provider; the environment provider remains disabled in production. See [Secrets Agent Protocol](secrets-agent-protocol.md). Declarations are read from the captured manifest, not reopened during replay.
 - A connection secret must specify exactly one host, the declared `user`/`dbname`, and **`sslmode=disable`**, with no startup `options`. This initial adapter reuses the existing NoTLS driver. Use a trusted local Unix socket or a separately secured local transport; do not send credentials over an untrusted plaintext network. TLS transport is not implemented and there is no silent TLS downgrade.
-- Physical database, role and managed-schema names use ASCII letters/digits/underscores, start with a letter, and are at most 63 bytes. SQL object identifiers may be quoted. System schemas, `_ntnt`, and `public` cannot be the managed schema.
+- Physical database, role and managed-schema names use ASCII letters/digits/underscores, start with a letter, and are at most 63 bytes. SQL object identifiers may be quoted. System schemas and `_ntnt` cannot be the managed schema; `public` is supported and is where most applications keep their tables.
 - The **target managed schema must already exist**. Read-only commands never create it or `_ntnt`. Authorized `migrate` bootstraps its scoped ledger only inside the first migration transaction, after locked validation of an empty recognized base. A nonempty unrecognized scope is never assumed to have empty history.
 - The declared target role is the logical owner for expected owner/grant canonicalization. Scratch uses its separate owner role. Other owners/grantees remain distinct; ownership and grants are never stripped wholesale. Multi-owner histories or additional grants that cannot be reproduced by the supported history will not receive a clean comparison. Target authority/membership facts are also bound into plans.
 
@@ -63,17 +63,17 @@ required = true
 
 For PostgreSQL, use separate application and migrator credentials, and restrict schema DDL/ledger ownership to the migrator. SQLite has no database roles: restrict file/directory access and approval delivery through the operating system and provider, as described below. Development fixtures may use the environment provider; protected deployments use the existing Unix-socket provider and separately controlled approval delivery. NTNT cannot protect against someone who already controls that provider or direct database-owner credentials. Never publish resolved connection strings or provider values. Backup/PITR, restore testing, old-client compatibility and maintenance authorization remain separately operated responsibilities; a committed destructive change is not made reversible by transactional rollback.
 
-Each PostgreSQL invocation uses a dedicated physical connection and a session advisory lock on the database-local `_ntnt` namespace (two-key lock `1853124212, 245`). The reserved namespace deliberately owns **one logical store/managed schema per physical database**; separate stores must use separate databases. This is not a multi-tenant ledger. The lock spans all per-migration commits and is bounded by the native lock timeout.
+Each PostgreSQL invocation uses a dedicated physical connection and a session advisory lock on the database-local `_ntnt` namespace (two-key lock `1853124212, 245`). The advisory lock serializes migrators; a second migrator waits up to 5 seconds and then fails. The reserved namespace deliberately owns **one logical store/managed schema per physical database**; separate stores must use separate databases. This is not a multi-tenant ledger. The lock spans all per-migration commits.
 
 For each PostgreSQL migration, the runner:
 
-1. Begins a `READ COMMITTED READ WRITE` transaction and takes `ACCESS EXCLUSIVE` locks on all existing ordinary managed/ledger tables in deterministic order.
-2. Takes fresh identity/history/catalog observations **after acquiring those locks** and validates the exact ordered planned prefix, captured source/policy and mutation-safe ledger.
-3. Runs named `requires`, executes the captured full SQL script, then runs `ensures`.
-4. Verifies the resulting catalog against that exact prefix fingerprint and inserts the success ledger entry in the same transaction.
+1. Begins a `READ COMMITTED READ WRITE` transaction with `lock_timeout = 1s`. It does not lock tables up front: each statement takes only the locks PostgreSQL requires for it.
+2. Takes fresh identity/history/catalog observations and validates the exact ordered planned prefix, captured source/policy and mutation-safe ledger.
+3. Locks the tables that the migration's `requires`/`ensures` checks read in `SHARE` mode (writers wait, readers do not), runs `requires`, executes the captured full SQL script with a 90-second statement limit, then runs `ensures`.
+4. Verifies the resulting catalog against that exact prefix fingerprint, records the relation locks the transaction holds in `progress[].locks`, and inserts the success ledger entry in the same transaction.
 5. Commits that migration before starting the next. Failure never rolls back an earlier committed migration.
 
-These intentionally strong native locks protect data checks against ordinary concurrent writers. They can block readers too; this is **not online migration tooling**. Advisory locks alone only coordinate cooperating migrators. No lock protocol promises to stop administrators or actors with direct DDL privileges. Incoming foreign keys from outside the managed schema and all explicit cascading DDL are refused rather than claiming complete dependency/effect mediation.
+If a lock is not granted within one second, or the session is chosen as a deadlock victim, the whole migration transaction rolls back and is retried after a backoff (250 ms doubling, with jitter), up to 4 attempts; `progress[].lock_retries` counts them. A short lock timeout keeps application queries from queueing behind a migration that is waiting for a lock. Statements that need strong locks (most `ALTER TABLE`, `DROP`, `CREATE INDEX` without `CONCURRENTLY`) still block other access to their table while the migration transaction is open; this is **not online migration tooling** for long rewrites. Advisory locks alone only coordinate cooperating migrators. No lock protocol promises to stop administrators or actors with direct DDL privileges. Incoming foreign keys from outside the managed schema and all explicit cascading DDL are refused rather than claiming complete dependency/effect mediation.
 
 Every source/plan is captured before I/O; no validated filename is reopened during execution. A new invocation recaptures it. Same-plan reruns after partial/all commits recognize matching immutable history and the expected catalog at each ordered prefix, without reapplying SQL or rerunning already-applied transition checks. Edited SQL/checks, missing/reordered history, catalog drift, other stores/targets, changed policy/authority or extra unsupported extensions fail closed.
 
@@ -174,7 +174,7 @@ Checksum v1 is lowercase SHA-256 over length-framed byte parts. Each part is pre
 
 Whitespace, comments, filenames, metadata comments, and even absent versus empty metadata matter. No newline or SQL normalization occurs. Applied ledger entries must be the exact ordered inventory prefix: missing/edited files, inserted historical migrations, reordered IDs and dirty attempts fail before any replay can be mistaken for valid history.
 
-Capture is bounded to 1 MiB per input (including a saved review artifact), 16 MiB of migration files, and 1,024 migrations. Parsing is limited to 4,096 tokens per script (including whitespace tokens) and recursion depth 64. Oversized or unsupported SQL is unknown, not automatically safe. Source files and manifest policy are captured once, then replay consumes those captured bytes even if their paths are subsequently replaced. A new command recaptures current inputs and invalidates an old binding if they changed.
+Capture is bounded to 1 MiB per input (including a saved review artifact), 16 MiB of migration files, and 1,024 migrations. For PostgreSQL, a script may have up to 262,144 tokens; each statement is parsed separately, up to 4,096 tokens and recursion depth 64. A larger statement is reported as `SQL_NOT_PARSED` but still replays. SQLite scripts are parsed whole, up to 4,096 tokens (including whitespace tokens) and recursion depth 64; oversized SQLite SQL is unknown, not automatically safe. Source files and manifest policy are captured once, then replay consumes those captured bytes even if their paths are subsequently replaced. A new command recaptures current inputs and invalidates an old binding if they changed.
 
 ## Disposable replay and its boundary
 
@@ -185,28 +185,53 @@ PostgreSQL scratch must:
 - have `disposable = true` and a separate secret and role;
 - resolve to a different **cluster-system-identifier/database-OID pair**, not merely a different URL spelling;
 - exactly match the target's server version number, encoding, locale/provider/version, timezone, DateStyle, IntervalStyle and client/string settings;
-- be owned by a nonsuperuser role with no memberships, `CREATEDB`, `CREATEROLE`, replication, or RLS-bypass authority;
+- be owned by a nonsuperuser role with no memberships, `CREATEDB`, `CREATEROLE` or replication. It may have `BYPASSRLS` only when the target role bypasses row-level security (directly or as a superuser), so seed rows in migrations see the same policies in scratch as on the target;
 - contain only the empty stock public namespace and system objects, with no user routines/types/relations, event triggers, extra extensions or default grants.
 
 Identity discovery uses `pg_control_system()` and catalog metadata. Missing permission to establish identity fails closed. Server administrators and the PostgreSQL installation are trusted; this is not protection against a hostile superuser modifying PostgreSQL's own catalogs or concurrent administrators changing scratch after validation. Use an exclusively disposable fixture, preferably network-isolated. Restored/cloned clusters sharing identity can be conservatively rejected.
 
+Each migration runs with normal row-level security and ends as its own commit would: deferred constraints are checked and attributed to that migration, then `INITIALLY DEFERRED` constraints are restored for the next one. Inspection and checks still read with `row_security=off`.
+
 Replay owns a dedicated physical connection and a **rollback-only outer transaction**, not a pool handle. It creates the managed scratch schema only after isolation/emptiness checks, replays captured scripts through the native execution primitive, captures the applied-prefix/candidate catalogs, and explicitly rolls back. Success and failure tests verify no scratch schema survives. The authorized per-migration executor reuses that exact captured-SQL primitive. Catalog derivation deliberately skips transition contracts: an empty replay cannot establish data-dependent production assertions. Fresh/populated native rehearsal tests invoke the same `migrate` executor on disposable fixtures with representative rows; they are not a second application-level runner or a claim about production data.
 
-### Supported replay subset
+### What PostgreSQL replay runs
 
-The PostgreSQL dialect parser (`sqlparser`) checks a closed AST subset before SQL reaches scratch. PostgreSQL itself determines the resulting catalog. Scripts are **not split on semicolons**; quoted semicolons remain intact.
+PostgreSQL migrations are complete SQL scripts. Scratch replay and authorized execution both send the captured script, unchanged, inside one transaction per migration. That includes `DO` blocks, functions, triggers, policies, grants, seed `INSERT`s, `SET CONSTRAINTS` and other transactional SQL a real application history contains. PostgreSQL itself determines the resulting catalog.
 
-Supported:
+Before anything runs, the script is tokenized (quoted and dollar-quoted text stays intact) and each top-level statement is checked. These statements are rejected with `DB_REPLAY_UNSUPPORTED`, because they would end or split the migration transaction, change who the session acts as, or act outside the database:
 
-- ordinary `CREATE TABLE` with integer/smallint/bigint, text/varchar, boolean, numeric/decimal, real/double precision, date/timestamp, UUID and bytea built-ins;
-- NULL/NOT NULL, literal defaults, primary/unique keys, managed-scope foreign keys and restricted CHECK expressions using identifiers, literals, comparisons, Boolean operators and basic arithmetic;
-- `ALTER TABLE` add/drop/rename column, add/drop constraint, set/drop NOT NULL or a literal default, and built-in type changes without `USING`;
-- ordinary column-only btree indexes (including uniqueness, ordering, INCLUDE and null-distinctness options);
-- non-cascading managed-scope table/index drops. Explicit CASCADE is rejected, including column/constraint drops.
+- transaction control: `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, `ABORT`, `SAVEPOINT`, `RELEASE`, `PREPARE TRANSACTION`;
+- session identity: `SET [LOCAL|SESSION] ROLE`, `SET SESSION AUTHORIZATION`, `SET session_replication_role`, `RESET ROLE|SESSION|ALL`, `DISCARD`;
+- non-transactional work: `VACUUM`, `CONCURRENTLY` operations (except the single-statement index migration described below), `REINDEX DATABASE|SYSTEM`;
+- server scope: `COPY`, `LOAD`, `CHECKPOINT`, `ALTER SYSTEM`, and creating/altering/dropping databases, tablespaces and roles;
+- explicit `CASCADE` drops, whose transitive effects are not bounded. `ON DELETE CASCADE` and `ON UPDATE CASCADE` foreign-key actions are allowed.
 
-Unqualified names use the managed schema; PostgreSQL's implicit `pg_catalog` lookup precedes it for built-ins. Catalog deparsing uses a fixed `pg_catalog` search path for canonical comparisons. Cross-schema relation references are rejected.
+Text inside `DO` and function bodies is not inspected; it runs inside the same transaction with the migration role's privileges. Keep role creation out of migrations and provision roles separately. Database-wide custom implicit/assignment casts still block execution, because ordinary DDL coercion could run them without appearing in the reviewed script.
 
-Not accepted as migration scripts: functions/procedures/DO, SELECT or DML, COPY, function/default calls (including `now()` and `nextval()`), serial/identity/generated-column creation, casts in expressions, arbitrary queries, custom types/operators/access methods, views, sequences, triggers, grants/RLS changes, extensions, partitions/inheritance, session/transaction/role changes, or concurrent/non-transactional indexes. Even plausible benign unsupported SQL stays `DB_REPLAY_UNSUPPORTED`. This is intentionally narrower than PostgreSQL's full grammar. **Arbitrary SQL is not a sandbox, and READ ONLY alone does not establish purity.**
+Each pending migration's `analysis` lists its statements' `operations`, known lock/effect `hazards`, and `unknowns`. `SQL_NOT_PARSED` means a statement (for example a `DO` block) was not parsed. `EFFECTS_NOT_ANALYZED` means it parsed but falls outside the subset NTNT analyzes in detail: ordinary tables with built-in types and literal defaults, simple constraints, column-only btree indexes, and non-cascading table/index drops. Unknowns are review prompts, not blockers: the replayed catalog and drift comparison still apply. **Scratch replay is not a sandbox.** Use a disposable database with a separate unprivileged owner, as required above.
+
+For PostgreSQL, `analysis.locks` predicts the table locks each statement takes (`statement` is its 1-based position in the script, and `through` ends a run of consecutive statements that take exactly the same locks, such as many seed `INSERT`s; `mode` uses the same `pg_locks` names as `progress[].locks` after `migrate`). Predictions come from the SQL and PostgreSQL's documented lock levels, not from replay: replay holds every lock until its single transaction ends and runs on empty tables, so it cannot show which migration took a lock or how long it would block. Statements NTNT cannot parse, `DO` blocks, `DROP INDEX` and queries (which can lock rows or call functions) add `LOCKS_NOT_PREDICTED` to `unknowns`. Tables created earlier in the same migration are omitted, except after `CREATE TABLE IF NOT EXISTS`, which may find an existing table.
+
+`analysis.lock_warnings` flags locks that block or scan an existing table:
+
+- `BLOCKS_WRITES_WHILE_INDEXING`: `CREATE INDEX` without `CONCURRENTLY`.
+- `SCANS_TABLE_UNDER_LOCK`: `SET NOT NULL`, a `CHECK` or foreign key added without `NOT VALID`, or a primary key/unique constraint built without an existing index.
+- `REWRITES_TABLE`: a column type change.
+- `MAY_REWRITE_TABLE`: a new column with a volatile default, identity or stored generated value.
+
+Warnings are review prompts and do not block a plan. The safer forms are `ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT` in a later migration, and a `CHECK (column IS NOT NULL) NOT VALID` validated before `SET NOT NULL`.
+
+### Concurrent index builds
+
+A migration whose entire script is one named `CREATE [UNIQUE] INDEX CONCURRENTLY` on a managed table runs outside a transaction (`analysis.non_transactional`). It takes only `SHARE UPDATE EXCLUSIVE` on the table, so reads and writes continue while the index builds. The build waits for transactions already running on the table rather than failing on the 1-second lock timeout. The 90-second script limit covers the whole build, waits and table scan included; a build that exceeds it fails and its invalid index is dropped, so very large tables need a manual build for now. Comments around the statement are allowed; any other statement, an unnamed index or a table outside the managed schema is rejected as before. Such a migration cannot have `requires` or `ensures` checks, because no transaction surrounds the change. Custom implicit/assignment casts block the build as they block other DDL, and the build uses replay's storage settings (`default_tablespace=''`).
+
+Replay builds the same index without `CONCURRENTLY` inside its rollback-only transaction, so the plan's expected catalog is identical. On the target, `migrate` validates the planned prefix, releases its snapshot, builds the index while still holding the migrator advisory lock, then records the migration in a separate short transaction that rechecks the catalog.
+
+Failures leave no invalid index behind:
+
+- If the build fails (for example, duplicate values for a unique index), the invalid index is dropped with `DROP INDEX CONCURRENTLY`, the migration is reported `failed` with `cleanup: dropped_invalid_index`, and the ledger is unchanged. Fix the data and rerun the same plan.
+- If an earlier run was interrupted and left an invalid index of that name, the next run drops it (`dropped_invalid_index: true`) and builds again. It does so only when that index, treated as finished, makes the database match the plan's expected state exactly; any other invalid index of that name, and any other difference, fail as a stale plan and nothing is dropped.
+- If an earlier run built the index but stopped before recording it, the next run finds the valid index, does not rebuild it, and records the migration (`index_already_built: true`).
 
 ## Inspection coverage and drift
 
@@ -222,7 +247,7 @@ Supported catalog fingerprints include:
 
 Quoted identifier components are unambiguously quoted in composite object keys. OIDs and ACL array order do not become semantic differences. The declared owner role maps to a typed managed-role marker in target/scratch, while every other role and the PUBLIC grantee remain distinct. Sequence counters are never read or fingerprinted.
 
-Views/materialized views, sequences, routines, user triggers and RLS policies are inventoried but **opaque/unverified**. Partitioning/inheritance (including children outside the managed scope), foreign/custom types, non-btree or expression/partial indexes, custom collations/operator classes, extensions, event triggers, security labels, other namespace objects and external function/FK dependencies expose incomplete coverage. Unreadable objects or unknown ledger shape also block a clean result. This is not complete PostgreSQL semantic coverage, dependency closure, security-policy verification or replication/publication configuration auditing.
+Plain views, sequences, SQL and PL/pgSQL functions/procedures (full definition, owner and grants), user triggers, RLS policies, declarative partitions in the managed schema, expression/partial indexes on built-in access methods, and extensions installed in the managed schema (by version) are compared like tables: an out-of-band change is reported as drift on the named object. Materialized views, functions in other languages, non-partition inheritance or partitions outside the managed scope, foreign/custom types, custom collations/operator classes/access methods, extensions in other schemas, event triggers, security labels, other namespace objects and references to routines outside `pg_catalog` and the managed schema expose incomplete coverage. Unreadable objects or unknown ledger shape also block a clean result. Comparison is by definition, not behavior: NTNT does not analyze what a function body or policy expression does. This is not dependency closure, security-policy verification or replication/publication configuration auditing.
 
 Engine-deparsed SQL, defaults, expressions, comments and storage option payloads are represented by **definition hashes**, not printed literals: schema definitions can themselves contain credentials. Object names, structural fields, owner/grant facts and object-level differences remain visible. This avoids echoing connection credentials, SQL error payloads or live row samples. It is not an SQL dump; review source SQL separately through appropriately authorized tooling.
 

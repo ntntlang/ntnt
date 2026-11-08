@@ -108,6 +108,42 @@ impl Adapter {
             Self::Sqlite(db) => db.begin_migration().await,
         }
     }
+    /// PostgreSQL: SHARE-lock tables that checks read. SQLite already holds
+    /// the database writer lock from BEGIN IMMEDIATE.
+    pub async fn lock_for_checks(&self, tables: &[(String, String)]) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.lock_for_checks(tables).await,
+            Self::Sqlite(_) => Ok(()),
+        }
+    }
+    pub async fn index_validity(&self, schema: &str, name: &str) -> Result<Option<bool>> {
+        match self {
+            Self::Postgres(pg) => pg.index_validity(schema, name).await,
+            Self::Sqlite(_) => Ok(None),
+        }
+    }
+    pub async fn build_concurrent_index(&self, migration: &Migration, schema: &str) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.build_concurrent_index(migration, schema).await,
+            Self::Sqlite(_) => Err(Diagnostic::new(
+                "DB_REPLAY_UNSUPPORTED",
+                "SQLite has no concurrent index builds.",
+            )),
+        }
+    }
+    pub async fn drop_invalid_index(&self, schema: &str, name: &str) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.drop_invalid_index(schema, name).await,
+            Self::Sqlite(_) => Ok(()),
+        }
+    }
+    /// Locks the current migration transaction holds on managed tables.
+    pub async fn relation_locks(&self, schema: &str) -> Result<Option<Value>> {
+        match self {
+            Self::Postgres(pg) => pg.relation_locks(schema).await.map(Some),
+            Self::Sqlite(_) => Ok(None),
+        }
+    }
     pub async fn validate_execution_scope(&self, schema: &str) -> Result<()> {
         match self {
             Self::Postgres(pg) => pg.validate_execution_scope(schema).await,
