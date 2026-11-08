@@ -1496,3 +1496,84 @@ fn deferred_checks_get_the_script_time_limit() {
     let r = f.apply("plan.json", plan["plan_digest"].as_str());
     assert_eq!(r["outcome"], "pass", "{r}");
 }
+
+fn lock_strength(mode: &str) -> usize {
+    [
+        "AccessShareLock",
+        "RowShareLock",
+        "RowExclusiveLock",
+        "ShareUpdateExclusiveLock",
+        "ShareLock",
+        "ShareRowExclusiveLock",
+        "ExclusiveLock",
+        "AccessExclusiveLock",
+    ]
+    .iter()
+    .position(|m| *m == mode)
+    .unwrap_or_else(|| panic!("unknown lock mode {mode}"))
+}
+fn strongest(locks: &Value) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::<String, String>::new();
+    for l in locks.as_array().unwrap() {
+        let (r, m) = (l["relation"].as_str().unwrap(), l["mode"].as_str().unwrap());
+        if out
+            .get(r)
+            .is_none_or(|old| lock_strength(m) > lock_strength(old))
+        {
+            out.insert(r.to_string(), m.to_string());
+        }
+    }
+    out
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn planned_locks_match_the_locks_migrate_takes() {
+    // The plan predicts locks from SQL; migrate reports what PostgreSQL held.
+    // One statement per migration, so a stronger lock from an earlier
+    // statement cannot hide a wrong prediction for a later one.
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.p(id INTEGER PRIMARY KEY);
+         CREATE TABLE app.t(id INTEGER, n TEXT);
+         CREATE TABLE app.c(pid INTEGER);
+         ALTER TABLE app.t ADD CONSTRAINT t_positive CHECK (id > 0) NOT VALID;
+         CREATE FUNCTION app.noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;",
+    );
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .batch_execute("INSERT INTO app.p VALUES (1); INSERT INTO app.t VALUES (1, 'a'); INSERT INTO app.c VALUES (1)")
+        .unwrap();
+    let forms = [
+        "ALTER TABLE app.t VALIDATE CONSTRAINT t_positive;",
+        "CREATE INDEX t_id ON app.t(id);",
+        "ALTER TABLE app.c ADD CONSTRAINT c_fk FOREIGN KEY (pid) REFERENCES app.p(id) NOT VALID;",
+        "CREATE TRIGGER t_noop BEFORE INSERT ON app.t FOR EACH ROW EXECUTE FUNCTION app.noop();",
+        "INSERT INTO app.p VALUES (5);",
+        "ALTER TABLE app.t ADD CONSTRAINT t_short CHECK (length(n) < 100) NOT VALID;",
+        "CREATE POLICY t_all ON app.t USING (true);",
+    ];
+    for (i, sql) in forms.iter().enumerate() {
+        f.sql(&format!("{:04}_form.sql", i + 2), sql);
+        let plan_file = format!("form{i}.json");
+        let plan = f.plan(&plan_file);
+        assert_eq!(plan["outcome"], "pass", "{sql}: {plan}");
+        let predicted = strongest(&plan["plan"]["pending"][0]["analysis"]["locks"]);
+        assert!(!predicted.is_empty(), "{sql}: no prediction");
+        let r = f.apply(&plan_file, plan["plan_digest"].as_str());
+        assert_eq!(r["outcome"], "pass", "{sql}: {r}");
+        let actual = strongest(&r["progress"][i + 1]["locks"]);
+        for (relation, mode) in &predicted {
+            assert_eq!(
+                actual.get(relation),
+                Some(mode),
+                "{sql}: predicted {predicted:?}, held {actual:?}"
+            );
+        }
+    }
+}
