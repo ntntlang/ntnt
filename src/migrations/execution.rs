@@ -604,26 +604,34 @@ async fn build_concurrent(
     progress["attempt_recorded"] = json!(true);
     progress["phase"] = json!("build");
     if let Err(d) = db.build_concurrent_index(migration, schema).await {
+        // Delete the attempt only once the index is confirmed absent. A build
+        // can succeed and still return an error (e.g. restoring settings
+        // failed); a valid or unknown index keeps the attempt for reconcile.
         let cleanup = async {
-            let dropped = db.index_validity(schema, &index.name).await? == Some(false);
-            if dropped {
+            let mut dropped = false;
+            if db.index_validity(schema, &index.name).await? == Some(false) {
                 db.drop_invalid_index(schema, &index.name).await?;
+                dropped = true;
+            }
+            if db.index_validity(schema, &index.name).await?.is_some() {
+                return Ok::<_, Diagnostic>(None);
             }
             db.begin_migration(schema).await?;
             db.resolve_attempt(applied + 1, false).await?;
             db.commit().await?;
-            Ok::<_, Diagnostic>(if dropped {
+            Ok(Some(if dropped {
                 "dropped_invalid_index"
             } else {
                 "pass"
-            })
+            }))
         }
         .await;
         match cleanup {
-            Ok(done) => {
+            Ok(Some(done)) => {
                 progress["state"] = json!("failed");
                 progress["cleanup"] = json!(done);
             }
+            Ok(None) => progress["cleanup"] = json!("attempt_retained"),
             Err(_) => progress["cleanup"] = json!("unknown"),
         }
         return Err(d);
@@ -758,6 +766,7 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
                 return Err(mismatch(&index.name));
             }
             db.resolve_attempt(applied + 1, true).await?;
+            pending_write(report, "completed");
             db.commit().await?;
             "completed"
         }
@@ -773,12 +782,21 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
                 return Err(mismatch(&index.name));
             }
             db.rollback().await?;
+            pending_write(report, "dropped_invalid_index");
             db.drop_invalid_index(schema, &index.name).await?;
+            report["reconciliation"]["dropped_invalid_index"] = json!(true);
+            report["reconciliation"]["outcome"] = json!("fail");
             let (position, after) = locked_attempt(&db, inputs, saved).await?;
             if position != applied + 1 || json_digest(&after) != fingerprints[applied] {
-                return Err(mismatch(&index.name));
+                let mut d = Diagnostic::new(
+                    "DB_RECONCILE_INCOMPLETE",
+                    "The invalid index was dropped, but the database then differed from the plan's state before this migration; the attempt was kept.",
+                );
+                d.source = Some(index.name.clone());
+                return Err(d);
             }
             db.resolve_attempt(position, false).await?;
+            pending_write(report, "rolled_back");
             db.commit().await?;
             "rolled_back"
         }
@@ -787,14 +805,25 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
                 return Err(mismatch(&index.name));
             }
             db.resolve_attempt(applied + 1, false).await?;
+            pending_write(report, "not_started");
             db.commit().await?;
             "not_started"
         }
     };
     report["reconciliation"]["resolution"] = json!(resolution);
     report["reconciliation"]["outcome"] = json!("pass");
+    if let Some(r) = report["reconciliation"].as_object_mut() {
+        r.remove("pending_write");
+    }
     report["outcome"] = json!("pass");
     Ok(())
+}
+
+/// Mark a reconciliation write whose outcome is not yet acknowledged. A lost
+/// commit or interrupted DROP then reports `unknown`, not `fail`.
+fn pending_write(report: &mut Value, write: &str) {
+    report["reconciliation"]["pending_write"] = json!(write);
+    report["reconciliation"]["outcome"] = json!("unknown");
 }
 
 /// The attempt must lie inside the plan's pending range.

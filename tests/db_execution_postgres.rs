@@ -1822,6 +1822,31 @@ fn reconciliation_refuses_what_it_cannot_explain() {
 
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn lost_reconcile_commit_is_unknown_not_failed() {
+    use db_proxy::{Fault, Proxy};
+    let (mut f, plan) = concurrent_fixture("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
+    let checksum = plan["plan"]["pending"][0]["checksum"].as_str().unwrap();
+    f.target()
+        .execute(
+            "INSERT INTO _ntnt.schema_migrations_v2 VALUES(2,'2','0002_index.sql',$1,'running','app','app')",
+            &[&checksum],
+        )
+        .unwrap();
+    let proxy = Proxy::new(Fault::AfterCommitUnavailable, 1);
+    let direct = f.target_url.clone();
+    f.target_url = direct.replace(&std::env::var("NTNT_DB_TEST_HOST").unwrap(), proxy.host());
+    let r = reconcile(&f, &plan);
+    assert!(proxy.fired.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(r["outcome"], "unknown", "{r}");
+    assert_eq!(r["reconciliation"]["pending_write"], "not_started", "{r}");
+    f.target_url = direct;
+    // The commit did land; a fresh reconcile sees nothing left to do.
+    assert_eq!(attempt_state(&f), None);
+    assert_eq!(reconcile(&f, &plan)["reconciliation"]["resolution"], "none");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn unrecorded_index_of_the_planned_name_is_drift_not_progress() {
     // Without a running attempt, an index nobody recorded is not evidence
     // that this migration ran.
