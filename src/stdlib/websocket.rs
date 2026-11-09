@@ -1,4 +1,4 @@
-//! Native WebSocket transport (DD-041 Slice B).
+//! Native WebSocket transport and application endpoints (DD-041 Slice B).
 //!
 //! The async server takes the HTTP upgrade before the request is converted
 //! for the interpreter, then runs the normal pipeline. The connection is
@@ -11,23 +11,39 @@
 //! no caller can block on a socket or keep a closed connection alive. The
 //! connection permit is released only when that task ends.
 //!
-//! No NTNT API produces a `WsSpec` yet. The internal echo handler exercises
-//! the transport until endpoint registration lands.
+//! Applications register endpoints during setup with `ws_endpoint`; the
+//! callback functions stay in each worker's interpreter. The owner sends one
+//! callback job at a time per connection to the shared worker pool, carrying
+//! explicit JSON state and a weak send handle, and commits the returned state.
+//! An internal echo handler tests the transport without an interpreter.
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use futures_util::StreamExt;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch, Notify, Semaphore};
 use tokio::time::Instant;
 
+use crate::error::{IntentError, Result};
+use crate::interpreter::Value;
 use crate::stdlib::realtime::{PayloadCharge, StreamPermit};
 
 /// Most messages queued for one connection.
 pub const OUTBOX_MESSAGES: usize = 16;
 /// Most payload bytes queued for one connection.
 pub const OUTBOX_BYTES: usize = 256 * 1024;
+/// Most messages waiting for a callback on one connection.
+pub const INBOX_MESSAGES: usize = 4;
+/// Most bytes waiting for a callback on one connection.
+pub const INBOX_BYTES: usize = 256 * 1024;
+/// Largest encoded per-connection state.
+pub const MAX_STATE_BYTES: usize = 16 * 1024;
+/// Callback jobs admitted (queued or running) across the process.
+pub const MAX_CALLBACK_JOBS: usize = 64;
+/// How long a connection waits for one callback before closing.
+pub const CALLBACK_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Live connection owners, including admitted upgrades not yet completed.
 /// Server exit waits for these so close frames are sent before the runtime
@@ -77,8 +93,12 @@ pub mod close_code {
     pub const NORMAL: u16 = 1000;
     pub const GOING_AWAY: u16 = 1001;
     pub const PROTOCOL: u16 = 1002;
+    /// Reported to `on_close` when the connection ended without a close frame.
+    pub const ABNORMAL: u16 = 1006;
     pub const INVALID_DATA: u16 = 1007;
+    pub const POLICY: u16 = 1008;
     pub const TOO_BIG: u16 = 1009;
+    pub const INTERNAL: u16 = 1011;
     pub const TRY_AGAIN_LATER: u16 = 1013;
 }
 
@@ -113,6 +133,8 @@ pub struct OriginPolicy {
     pub allowed: Vec<String>,
     /// Allow requests without an `Origin` header (non-browser clients).
     pub allow_missing: bool,
+    /// Development default: any `http(s)://localhost|127.0.0.1|[::1]` port.
+    pub allow_loopback: bool,
 }
 
 impl OriginPolicy {
@@ -121,15 +143,206 @@ impl OriginPolicy {
         match origin {
             None => self.allow_missing,
             Some("null") => false,
-            Some(origin) => self.allowed.iter().any(|allowed| allowed == origin),
+            Some(origin) => {
+                let origin = origin.to_ascii_lowercase();
+                self.allowed.contains(&origin)
+                    || (self.allow_loopback && is_loopback_origin(&origin))
+            }
+        }
+    }
+
+    /// Policy from endpoint options, else `SITE_URL`, else (development
+    /// only) loopback. Never derived from request Host or forwarded headers.
+    pub(crate) fn configure(
+        origins: Option<Vec<String>>,
+        allow_missing: bool,
+        site_url: Option<&str>,
+        production: bool,
+    ) -> Result<Self> {
+        let allowed = match origins {
+            Some(list) => list
+                .iter()
+                .map(|origin| canonical_origin(origin))
+                .collect::<Result<Vec<_>>>()?,
+            None => match site_url.filter(|url| !url.trim().is_empty()) {
+                Some(url) => vec![canonical_origin(site_origin(url))?],
+                None if production => {
+                    return Err(IntentError::runtime_error(
+                        "ws_endpoint needs trusted origins in production: set SITE_URL or pass the `origins` option",
+                    ))
+                }
+                None => {
+                    return Ok(Self {
+                        allowed: Vec::new(),
+                        allow_missing,
+                        allow_loopback: true,
+                    })
+                }
+            },
+        };
+        Ok(Self {
+            allowed,
+            allow_missing,
+            allow_loopback: false,
+        })
+    }
+}
+
+/// `https://app.example.com/path` -> `https://app.example.com`.
+fn site_origin(url: &str) -> &str {
+    let url = url.trim();
+    match url.find("://") {
+        Some(i) => {
+            let rest = &url[i + 3..];
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            &url[..i + 3 + end]
+        }
+        None => url,
+    }
+}
+
+/// Validate and lowercase an origin: `scheme://host[:port]`, http(s) only.
+fn canonical_origin(origin: &str) -> Result<String> {
+    let invalid = || {
+        IntentError::type_error(format!(
+            "invalid WebSocket origin {origin:?}: expected scheme://host[:port], e.g. https://app.example.com"
+        ))
+    };
+    let origin = origin.trim();
+    let (scheme, rest) = origin.split_once("://").ok_or_else(invalid)?;
+    let scheme = scheme.to_ascii_lowercase();
+    if !(scheme == "http" || scheme == "https")
+        || rest.is_empty()
+        || rest.contains(['/', '?', '#', '@', ' '])
+    {
+        return Err(invalid());
+    }
+    Ok(format!("{scheme}://{}", rest.to_ascii_lowercase()))
+}
+
+fn is_loopback_origin(origin: &str) -> bool {
+    let Some((scheme, rest)) = origin.split_once("://") else {
+        return false;
+    };
+    if !(scheme == "http" || scheme == "https") {
+        return false;
+    }
+    let (host, port) = if let Some(v6) = rest.strip_prefix('[') {
+        match v6.split_once(']') {
+            Some((host, port)) => (host, port),
+            None => return false,
+        }
+    } else {
+        match rest.split_once(':') {
+            Some((host, port)) => (host, &rest[host.len()..][..port.len() + 1]),
+            None => (rest, ""),
+        }
+    };
+    let port_ok = port.is_empty()
+        || port
+            .strip_prefix(':')
+            .is_some_and(|p| !p.is_empty() && p.parse::<u16>().is_ok());
+    port_ok && matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Handler {
+    /// Internal transport check: every data message is sent back.
+    Echo,
+    /// An application endpoint registered with `ws_endpoint`.
+    Endpoint(String),
+}
+
+/// Setup-time endpoint configuration, identical in every worker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndpointConfig {
+    pub origins: OriginPolicy,
+    pub has_open: bool,
+    pub has_close: bool,
+}
+
+lazy_static::lazy_static! {
+    static ref ENDPOINTS: Mutex<HashMap<String, EndpointConfig>> = Mutex::new(HashMap::new());
+    static ref ADMISSION: Arc<Semaphore> = Arc::new(Semaphore::new(MAX_CALLBACK_JOBS));
+    static ref CALLBACKS: Mutex<Option<CallbackSender>> = Mutex::new(None);
+}
+
+/// Register an endpoint's configuration. Every worker registers the same
+/// name; a different configuration is a startup error. `replace` is for
+/// development hot reload, which re-evaluates setup with new code.
+pub(crate) fn register_endpoint(name: &str, config: EndpointConfig, replace: bool) -> Result<()> {
+    let mut endpoints = ENDPOINTS.lock().unwrap_or_else(|e| e.into_inner());
+    match endpoints.get(name) {
+        Some(existing) if *existing != config && !replace => Err(IntentError::runtime_error(
+            format!("ws_endpoint {name:?} is already registered with a different configuration"),
+        )),
+        _ => {
+            endpoints.insert(name.to_string(), config);
+            Ok(())
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Handler {
-    /// Internal transport check: every data message is sent back.
-    Echo,
+/// Whether any endpoint is registered; such apps use the realtime startup path.
+pub(crate) fn has_endpoints() -> bool {
+    !ENDPOINTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty()
+}
+
+fn endpoint_config(name: &str) -> Option<EndpointConfig> {
+    ENDPOINTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(name)
+        .cloned()
+}
+
+/// Workers allowed to run callbacks at once. With more than one worker, one
+/// is always left for HTTP so callbacks cannot starve requests.
+static CALLBACK_SLOTS: AtomicUsize = AtomicUsize::new(1);
+static CALLBACKS_RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn set_callback_workers(workers: usize) {
+    CALLBACK_SLOTS.store(workers.saturating_sub(1).max(1), Ordering::Release);
+}
+
+/// Held by a worker while it may take or run a callback.
+pub(crate) struct CallbackSlot(());
+
+impl Drop for CallbackSlot {
+    fn drop(&mut self) {
+        CALLBACKS_RUNNING.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+pub(crate) fn try_callback_slot() -> Option<CallbackSlot> {
+    let limit = CALLBACK_SLOTS.load(Ordering::Acquire);
+    let mut running = CALLBACKS_RUNNING.load(Ordering::Acquire);
+    loop {
+        if running >= limit {
+            return None;
+        }
+        match CALLBACKS_RUNNING.compare_exchange_weak(
+            running,
+            running + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Some(CallbackSlot(())),
+            Err(actual) => running = actual,
+        }
+    }
+}
+
+/// Install the queue that connection owners send callback jobs to.
+pub(crate) fn install_callbacks(tx: CallbackSender) {
+    *CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+}
+
+fn callbacks() -> Option<CallbackSender> {
+    CALLBACKS.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// A WebSocket accepted by the final response. Only a description: the
@@ -139,6 +352,10 @@ pub struct WsSpec {
     handler: Handler,
     origins: OriginPolicy,
     timings: Timings,
+    /// Initial state, encoded JSON.
+    state: String,
+    has_open: bool,
+    has_close: bool,
 }
 
 impl WsSpec {
@@ -149,6 +366,18 @@ impl WsSpec {
             handler: Handler::Echo,
             origins,
             timings: Timings::default(),
+            state: "null".into(),
+            has_open: false,
+            has_close: false,
+        }
+    }
+
+    /// Callback endpoints need workers to run them; refuse the upgrade
+    /// rather than accept a socket nothing will serve.
+    pub(crate) fn ready(&self) -> bool {
+        match self.handler {
+            Handler::Echo => true,
+            Handler::Endpoint(_) => callbacks().is_some(),
         }
     }
 
@@ -186,6 +415,290 @@ impl WsData {
     }
 }
 
+/// Callback work sent from a connection owner to the worker pool.
+pub struct CallbackJob {
+    pub endpoint: String,
+    pub conn: WsHandle,
+    /// Current state, encoded JSON.
+    pub state: String,
+    pub event: CallbackEvent,
+    /// The outcome; dropped unanswered if the owner has gone.
+    pub reply: oneshot::Sender<CallbackOutcome>,
+    _admission: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl CallbackJob {
+    /// Skip work for a connection that has already ended.
+    pub fn is_stale(&self) -> bool {
+        self.reply.is_closed()
+    }
+}
+
+pub enum CallbackEvent {
+    Open,
+    Message(WsData),
+    Close { code: u16, reason: String },
+}
+
+/// `Ok(state)`: commit this encoded state. `Err`: the callback failed.
+pub type CallbackOutcome = std::result::Result<String, String>;
+pub type CallbackSender = flume::Sender<CallbackJob>;
+pub type CallbackReceiver = flume::Receiver<CallbackJob>;
+
+/// The callback queue shared by the async server and every worker. Bounded
+/// by admission permits, so sends never wait.
+pub fn callback_channel() -> (CallbackSender, CallbackReceiver) {
+    flume::bounded(MAX_CALLBACK_JOBS)
+}
+
+/// Encode application state: JSON data only (no functions, handles or
+/// secrets), at most `MAX_STATE_BYTES`.
+pub fn encode_state(value: &Value) -> std::result::Result<String, String> {
+    fn data_only(value: &Value, depth: usize) -> std::result::Result<(), String> {
+        if depth > 64 {
+            return Err("WebSocket state is nested too deeply".into());
+        }
+        match value {
+            Value::Unit | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_) => {
+                Ok(())
+            }
+            Value::Array(items) => items.iter().try_for_each(|v| data_only(v, depth + 1)),
+            Value::Map(map) => map.values().try_for_each(|v| data_only(v, depth + 1)),
+            Value::EnumValue {
+                enum_name, values, ..
+            } if enum_name == "Option" => values.iter().try_for_each(|v| data_only(v, depth + 1)),
+            Value::Secret(_) => Err("WebSocket state cannot contain secrets".into()),
+            other => Err(format!(
+                "WebSocket state must be JSON data (Map, Array, String, Int, Float, Bool, None); found {}",
+                other.type_name()
+            )),
+        }
+    }
+    data_only(value, 0)?;
+    let json =
+        crate::stdlib::json::intent_value_to_json_reject(value).map_err(|e| e.to_string())?;
+    let text = json.to_string();
+    if text.len() > MAX_STATE_BYTES {
+        return Err(format!(
+            "WebSocket state is {} bytes; the limit is {MAX_STATE_BYTES}",
+            text.len()
+        ));
+    }
+    Ok(text)
+}
+
+pub fn decode_state(text: &str) -> Value {
+    serde_json::from_str::<serde_json::Value>(text)
+        .map(|json| crate::stdlib::json::json_to_intent_value(&json))
+        .unwrap_or(Value::Unit)
+}
+
+/// NTNT values for the WebSocket API. Opaque: no ID or socket is exposed.
+#[derive(Clone, Debug)]
+pub enum WsValue {
+    Endpoint(String),
+    Conn(WsHandle),
+}
+
+impl WsValue {
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            WsValue::Endpoint(_) => "WebSocketEndpoint",
+            WsValue::Conn(_) => "WebSocket",
+        }
+    }
+
+    pub fn same(&self, other: &WsValue) -> bool {
+        match (self, other) {
+            (WsValue::Endpoint(a), WsValue::Endpoint(b)) => a == b,
+            (WsValue::Conn(a), WsValue::Conn(b)) => Weak::ptr_eq(&a.control, &b.control),
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for WsValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WsValue::Endpoint(name) => write!(f, "<websocket endpoint {name}>"),
+            WsValue::Conn(_) => f.write_str("<websocket>"),
+        }
+    }
+}
+
+/// Response-envelope key carrying a `websocket()` description.
+pub const WS_KEY: &str = "_ws";
+
+/// Build a `WsSpec` from a response map. `Some(Err)` means the map asked for
+/// a WebSocket but the description is invalid.
+pub fn spec_from_response(
+    map: &HashMap<String, Value>,
+) -> Option<std::result::Result<WsSpec, String>> {
+    let invalid = || Err("invalid websocket() response".to_string());
+    let Value::Map(ws) = map.get(WS_KEY)? else {
+        return Some(invalid());
+    };
+    let Some(Value::WebSocket(value)) = ws.get("endpoint") else {
+        return Some(invalid());
+    };
+    let WsValue::Endpoint(name) = value.as_ref() else {
+        return Some(invalid());
+    };
+    let Some(config) = endpoint_config(name) else {
+        return Some(Err(format!("ws_endpoint {name:?} is not registered")));
+    };
+    let state = match encode_state(ws.get("state").unwrap_or(&Value::Unit)) {
+        Ok(state) => state,
+        Err(error) => return Some(Err(error)),
+    };
+    Some(Ok(WsSpec {
+        handler: Handler::Endpoint(name.clone()),
+        origins: config.origins,
+        timings: Timings::default(),
+        state,
+        has_open: config.has_open,
+        has_close: config.has_close,
+    }))
+}
+
+/// `websocket(endpoint, options?)`: upgrade response builder. Opens nothing.
+pub fn websocket_response(args: &[Value]) -> Result<Value> {
+    let endpoint = match args.first() {
+        Some(endpoint @ Value::WebSocket(value))
+            if matches!(value.as_ref(), WsValue::Endpoint(_)) =>
+        {
+            endpoint.clone()
+        }
+        _ => {
+            return Err(IntentError::type_error(
+                "websocket() requires an endpoint from ws_endpoint() as its first argument",
+            ))
+        }
+    };
+    let mut state = Value::Unit;
+    match args.get(1) {
+        None | Some(Value::Unit) => {}
+        Some(Value::Map(options)) => {
+            for (key, value) in options {
+                match key.as_str() {
+                    "state" => {
+                        encode_state(value).map_err(IntentError::type_error)?;
+                        state = value.clone();
+                    }
+                    _ => {
+                        return Err(IntentError::type_error(format!(
+                            "unknown websocket() option: {key} (supported: state)"
+                        )))
+                    }
+                }
+            }
+        }
+        Some(_) => return Err(IntentError::type_error("websocket() options must be a Map")),
+    }
+    let mut ws = HashMap::new();
+    ws.insert("endpoint".to_string(), endpoint);
+    ws.insert("state".to_string(), state);
+    let mut response = HashMap::new();
+    response.insert("status".to_string(), Value::Int(200));
+    response.insert("headers".to_string(), Value::Map(HashMap::new()));
+    response.insert("body".to_string(), Value::String(String::new()));
+    response.insert(WS_KEY.to_string(), Value::Map(ws));
+    Ok(Value::Map(response))
+}
+
+fn conn_arg<'a>(name: &str, args: &'a [Value]) -> Result<&'a WsHandle> {
+    match args.first() {
+        Some(Value::WebSocket(value)) => match value.as_ref() {
+            WsValue::Conn(handle) => Ok(handle),
+            WsValue::Endpoint(_) => Err(IntentError::type_error(format!(
+                "{name}() requires a connection (the conn callback argument), not an endpoint"
+            ))),
+        },
+        _ => Err(IntentError::type_error(format!(
+            "{name}() requires a WebSocket connection as its first argument"
+        ))),
+    }
+}
+
+fn send_error(error: SendError) -> Value {
+    let message = match error {
+        SendError::Closed => "connection closed",
+        SendError::QueueFull => "send queue full",
+        SendError::TooLarge => "message too large",
+        SendError::OverBudget => "realtime payload budget exhausted",
+    };
+    Value::err(Value::String(message.into()))
+}
+
+/// `ws_send(conn, data)`: queue one text (String) or binary (Array of 0-255)
+/// message. `Ok` means queued, not delivered.
+pub fn ws_send_value(args: &[Value]) -> Result<Value> {
+    let handle = conn_arg("ws_send", args)?;
+    let data = match args.get(1) {
+        Some(Value::String(text)) => WsData::Text(text.clone()),
+        Some(Value::Array(items)) => {
+            let mut bytes = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Int(n) if (0..=255).contains(n) => bytes.push(*n as u8),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "ws_send() binary data must be an Array of Ints from 0 to 255",
+                        ))
+                    }
+                }
+            }
+            WsData::Binary(bytes)
+        }
+        Some(Value::Secret(_)) => {
+            return Err(IntentError::type_error(
+                "ws_send() cannot send a Secret value",
+            ))
+        }
+        _ => {
+            return Err(IntentError::type_error(
+                "ws_send() data must be a String (text) or Array of 0-255 Ints (binary)",
+            ))
+        }
+    };
+    Ok(match handle.send(data) {
+        Ok(()) => Value::ok(Value::Unit),
+        Err(error) => send_error(error),
+    })
+}
+
+/// `ws_close(conn, code?, reason?)`: close after queued messages are written.
+pub fn ws_close_value(args: &[Value]) -> Result<Value> {
+    let handle = conn_arg("ws_close", args)?;
+    let code = match args.get(1) {
+        None | Some(Value::Unit) => close_code::NORMAL,
+        Some(Value::Int(n)) if *n == 1000 || (3000..=4999).contains(n) => *n as u16,
+        Some(_) => {
+            return Err(IntentError::type_error(
+                "ws_close() code must be 1000 or an application code from 3000 to 4999",
+            ))
+        }
+    };
+    let reason = match args.get(2) {
+        None | Some(Value::Unit) => String::new(),
+        Some(Value::String(reason)) if reason.len() <= 123 => reason.clone(),
+        Some(Value::String(_)) => {
+            return Err(IntentError::type_error(
+                "ws_close() reason must be at most 123 bytes",
+            ))
+        }
+        Some(_) => {
+            return Err(IntentError::type_error(
+                "ws_close() reason must be a String",
+            ))
+        }
+    };
+    Ok(match handle.close(code, reason) {
+        Ok(()) => Value::ok(Value::Unit),
+        Err(error) => send_error(error),
+    })
+}
+
 /// Why a message was not queued. Success only ever means "queued".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendError {
@@ -218,17 +731,44 @@ struct Queued {
     _charge: Charge,
 }
 
+/// Close requests from `ws_close`, read by the owner.
+#[derive(Default)]
+struct Control {
+    close: Mutex<Option<(u16, String)>>,
+    notify: Notify,
+}
+
 /// Weak send authority for one connection. It never keeps the connection,
 /// its queue or its socket alive, and it never waits.
 #[derive(Clone)]
 pub struct WsHandle {
     tx: mpsc::WeakSender<Queued>,
     queued: Weak<AtomicUsize>,
+    control: Weak<Control>,
     max_message: usize,
 }
 
+impl std::fmt::Debug for WsHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WsHandle")
+    }
+}
+
 impl WsHandle {
-    pub fn send(&self, data: WsData) -> Result<(), SendError> {
+    /// Ask the owner to close after queued messages are written. Idempotent;
+    /// the first request wins.
+    pub fn close(&self, code: u16, reason: String) -> std::result::Result<(), SendError> {
+        let control = self.control.upgrade().ok_or(SendError::Closed)?;
+        let mut close = control.close.lock().unwrap_or_else(|e| e.into_inner());
+        if close.is_none() {
+            *close = Some((code, reason));
+        }
+        drop(close);
+        control.notify.notify_one();
+        Ok(())
+    }
+
+    pub fn send(&self, data: WsData) -> std::result::Result<(), SendError> {
         let len = data.len();
         if len > self.max_message {
             return Err(SendError::TooLarge);
@@ -265,9 +805,9 @@ impl WsHandle {
 /// How the connection loop ended.
 enum End {
     /// Send this close frame, then wait briefly for the peer's reply.
-    Close(u16, &'static str),
+    Close(u16, String),
     /// The peer started the close handshake; flush the automatic reply.
-    PeerClosed,
+    PeerClosed(u16, String),
     /// The transport is gone or unresponsive; drop it.
     Drop,
 }
@@ -275,9 +815,9 @@ enum End {
 fn error_end(error: axum::Error) -> End {
     use tokio_tungstenite::tungstenite::Error;
     match error.into_inner().downcast::<Error>().map(|error| *error) {
-        Ok(Error::Capacity(_)) => End::Close(close_code::TOO_BIG, "message too large"),
-        Ok(Error::Utf8) => End::Close(close_code::INVALID_DATA, "invalid UTF-8"),
-        Ok(Error::Protocol(_)) => End::Close(close_code::PROTOCOL, "protocol error"),
+        Ok(Error::Capacity(_)) => End::Close(close_code::TOO_BIG, "message too large".into()),
+        Ok(Error::Utf8) => End::Close(close_code::INVALID_DATA, "invalid UTF-8".into()),
+        Ok(Error::Protocol(_)) => End::Close(close_code::PROTOCOL, "protocol error".into()),
         _ => End::Drop,
     }
 }
@@ -289,11 +829,93 @@ async fn write(socket: &mut WebSocket, message: Message, timeout: Duration) -> b
     )
 }
 
-fn dispatch(handler: Handler, handle: &WsHandle, data: WsData) -> Result<(), End> {
-    match handler {
-        Handler::Echo => handle
-            .send(data)
-            .map_err(|_| End::Close(close_code::TRY_AGAIN_LATER, "server is overloaded")),
+fn overloaded() -> End {
+    End::Close(close_code::TRY_AGAIN_LATER, "server is overloaded".into())
+}
+
+/// Messages waiting for the connection's callback, bounded by count and bytes.
+#[derive(Default)]
+struct Inbox {
+    items: VecDeque<WsData>,
+    bytes: usize,
+}
+
+impl Inbox {
+    fn push(&mut self, data: WsData) -> bool {
+        let len = data.len();
+        if self.items.len() >= INBOX_MESSAGES || self.bytes + len > INBOX_BYTES {
+            return false;
+        }
+        self.bytes += len;
+        self.items.push_back(data);
+        true
+    }
+
+    fn pop(&mut self) -> Option<WsData> {
+        let data = self.items.pop_front()?;
+        self.bytes -= data.len();
+        Some(data)
+    }
+}
+
+/// Per-connection application state and the one callback in flight.
+struct Session {
+    endpoint: String,
+    state: String,
+    has_close: bool,
+    inbox: Inbox,
+    pending: Option<(oneshot::Receiver<CallbackOutcome>, Instant)>,
+}
+
+impl Session {
+    /// Admit one callback job without waiting. `false`: the pool is full.
+    fn start(&mut self, handle: &WsHandle, event: CallbackEvent) -> bool {
+        let Some(tx) = callbacks() else {
+            return false;
+        };
+        let Ok(admission) = ADMISSION.clone().try_acquire_owned() else {
+            return false;
+        };
+        let (reply, rx) = oneshot::channel();
+        let job = CallbackJob {
+            endpoint: self.endpoint.clone(),
+            conn: handle.clone(),
+            state: self.state.clone(),
+            event,
+            reply,
+            _admission: admission,
+        };
+        if tx.try_send(job).is_err() {
+            return false;
+        }
+        self.pending = Some((rx, Instant::now() + CALLBACK_DEADLINE));
+        true
+    }
+
+    /// Start the next queued message if idle.
+    fn advance(&mut self, handle: &WsHandle) -> std::result::Result<(), End> {
+        if self.pending.is_none() {
+            if let Some(data) = self.inbox.pop() {
+                if !self.start(handle, CallbackEvent::Message(data)) {
+                    return Err(overloaded());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+async fn wait_pending(
+    pending: &mut Option<(oneshot::Receiver<CallbackOutcome>, Instant)>,
+) -> Option<CallbackOutcome> {
+    match pending {
+        Some((rx, deadline)) => match tokio::time::timeout_at(*deadline, rx).await {
+            Ok(Ok(outcome)) => Some(outcome),
+            // The worker dropped the job (shutdown or a crash).
+            Ok(Err(_)) => Some(Err("callback was not run".into())),
+            Err(_) => None,
+        },
+        None => std::future::pending().await,
     }
 }
 
@@ -309,10 +931,22 @@ pub(crate) async fn run(
     let timings = spec.timings;
     let (tx, mut rx) = mpsc::channel::<Queued>(OUTBOX_MESSAGES);
     let queued = Arc::new(AtomicUsize::new(0));
+    let control = Arc::new(Control::default());
     let handle = WsHandle {
         tx: tx.downgrade(),
         queued: Arc::downgrade(&queued),
+        control: Arc::downgrade(&control),
         max_message,
+    };
+    let mut session = match &spec.handler {
+        Handler::Echo => None,
+        Handler::Endpoint(name) => Some(Session {
+            endpoint: name.clone(),
+            state: spec.state.clone(),
+            has_close: spec.has_close,
+            inbox: Inbox::default(),
+            pending: None,
+        }),
     };
     let mut ping = tokio::time::interval_at(
         Instant::now() + timings.ping_interval,
@@ -320,53 +954,120 @@ pub(crate) async fn run(
     );
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut pong_deadline: Option<Instant> = None;
+    // A close requested by the application, applied once queued messages are written.
+    let mut requested_close: Option<(u16, String)> = None;
 
-    let end = loop {
-        let pong_wait = pong_deadline;
-        tokio::select! {
-            biased;
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    break End::Close(close_code::GOING_AWAY, "server shutting down");
-                }
+    let end = 'run: {
+        if let Some(session) = session.as_mut() {
+            if spec.has_open && !session.start(&handle, CallbackEvent::Open) {
+                break 'run overloaded();
             }
-            _ = tokio::time::sleep_until(pong_wait.unwrap_or_else(Instant::now)), if pong_wait.is_some() => {
-                break End::Drop;
-            }
-            // Write queued messages before reading more, so one connection's
-            // echo cannot outrun its own socket.
-            Some(out) = rx.recv() => {
-                let Queued { data, _charge } = out;
-                if !write(&mut socket, data.into_message(), timings.write_timeout).await {
-                    break End::Drop;
+        }
+        loop {
+            if let Some((code, reason)) = requested_close.take() {
+                if rx.is_empty() {
+                    break 'run End::Close(code, reason);
                 }
+                requested_close = Some((code, reason));
             }
-            _ = ping.tick() => {
-                if pong_deadline.is_none() {
-                    pong_deadline = Some(Instant::now() + timings.pong_timeout);
-                }
-                if !write(&mut socket, Message::Ping(Vec::new()), timings.write_timeout).await {
-                    break End::Drop;
-                }
-            }
-            incoming = socket.next() => match incoming {
-                None => break End::Drop,
-                Some(Ok(Message::Text(text))) => {
-                    if let Err(end) = dispatch(spec.handler, &handle, WsData::Text(text)) {
-                        break end;
+            let pong_wait = pong_deadline;
+            let pending = session.as_mut().map(|s| &mut s.pending);
+            let has_pending = pending.as_ref().is_some_and(|p| p.is_some());
+            let mut no_pending = None;
+            let pending = pending.unwrap_or(&mut no_pending);
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break 'run End::Close(close_code::GOING_AWAY, "server shutting down".into());
                     }
                 }
-                Some(Ok(Message::Binary(bytes))) => {
-                    if let Err(end) = dispatch(spec.handler, &handle, WsData::Binary(bytes)) {
-                        break end;
+                _ = tokio::time::sleep_until(pong_wait.unwrap_or_else(Instant::now)), if pong_wait.is_some() => {
+                    break 'run End::Drop;
+                }
+                _ = control.notify.notified(), if requested_close.is_none() => {
+                    let close = control.close.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if let Some(close) = close {
+                        requested_close = Some(close);
                     }
                 }
-                // The protocol library queues the pong reply itself.
-                Some(Ok(Message::Ping(_))) => {}
-                Some(Ok(Message::Pong(_))) => pong_deadline = None,
-                Some(Ok(Message::Close(_))) => break End::PeerClosed,
-                Some(Err(error)) => break error_end(error),
-            },
+                // Write queued messages before reading more, so one connection
+                // cannot outrun its own socket.
+                Some(out) = rx.recv() => {
+                    let Queued { data, _charge } = out;
+                    if !write(&mut socket, data.into_message(), timings.write_timeout).await {
+                        break 'run End::Drop;
+                    }
+                }
+                outcome = wait_pending(pending), if has_pending => {
+                    let session = session.as_mut().expect("pending implies a session");
+                    session.pending = None;
+                    match outcome {
+                        Some(Ok(state)) => session.state = state,
+                        Some(Err(error)) => {
+                            eprintln!("[websocket {}] callback failed: {error}", session.endpoint);
+                            break 'run End::Close(close_code::INTERNAL, "callback failed".into());
+                        }
+                        None => {
+                            eprintln!(
+                                "[websocket {}] callback exceeded {}s",
+                                session.endpoint,
+                                CALLBACK_DEADLINE.as_secs()
+                            );
+                            break 'run End::Close(close_code::INTERNAL, "callback timed out".into());
+                        }
+                    }
+                    if let Err(end) = session.advance(&handle) {
+                        break 'run end;
+                    }
+                }
+                _ = ping.tick() => {
+                    if pong_deadline.is_none() {
+                        pong_deadline = Some(Instant::now() + timings.pong_timeout);
+                    }
+                    if !write(&mut socket, Message::Ping(Vec::new()), timings.write_timeout).await {
+                        break 'run End::Drop;
+                    }
+                }
+                incoming = socket.next(), if requested_close.is_none() => {
+                    let data = match incoming {
+                        None => break 'run End::Drop,
+                        Some(Ok(Message::Text(text))) => WsData::Text(text),
+                        Some(Ok(Message::Binary(bytes))) => WsData::Binary(bytes),
+                        // The protocol library queues the pong reply itself.
+                        Some(Ok(Message::Ping(_))) => continue,
+                        Some(Ok(Message::Pong(_))) => {
+                            pong_deadline = None;
+                            continue;
+                        }
+                        Some(Ok(Message::Close(frame))) => {
+                            let (code, reason) = frame
+                                .map(|f| (f.code, f.reason.into_owned()))
+                                .unwrap_or((close_code::NORMAL, String::new()));
+                            break 'run End::PeerClosed(code, reason);
+                        }
+                        Some(Err(error)) => break 'run error_end(error),
+                    };
+                    match session.as_mut() {
+                        None => {
+                            if handle.send(data).is_err() {
+                                break 'run overloaded();
+                            }
+                        }
+                        Some(session) => {
+                            if !session.inbox.push(data) {
+                                break 'run End::Close(
+                                    close_code::POLICY,
+                                    "too many unprocessed messages".into(),
+                                );
+                            }
+                            if let Err(end) = session.advance(&handle) {
+                                break 'run end;
+                            }
+                        }
+                    }
+                }
+            }
         }
     };
 
@@ -376,6 +1077,10 @@ pub(crate) async fn run(
     rx.close();
     while rx.try_recv().is_ok() {}
 
+    let info = match &end {
+        End::Close(code, reason) | End::PeerClosed(code, reason) => (*code, reason.clone()),
+        End::Drop => (close_code::ABNORMAL, String::new()),
+    };
     match end {
         End::Close(code, reason) => {
             let frame = Message::Close(Some(CloseFrame {
@@ -386,12 +1091,34 @@ pub(crate) async fn run(
                 drain(&mut socket, timings.close_drain).await;
             }
         }
-        End::PeerClosed => drain(&mut socket, timings.close_drain).await,
+        End::PeerClosed(..) => drain(&mut socket, timings.close_drain).await,
         End::Drop => {}
     }
     drop(socket);
     drop(rx);
     drop(permit);
+
+    // `on_close` is best effort after the socket is gone; it never holds the
+    // connection permit and is skipped if the pool is full or shutting down.
+    if let Some(mut session) = session {
+        if session.has_close && !*shutdown.borrow() {
+            if let Some((rx, deadline)) = session.pending.take() {
+                let _ = tokio::time::timeout_at(deadline, rx).await;
+            }
+            let dead = WsHandle {
+                tx: mpsc::channel::<Queued>(1).0.downgrade(),
+                queued: Weak::new(),
+                control: Weak::new(),
+                max_message,
+            };
+            let (code, reason) = info;
+            if session.start(&dead, CallbackEvent::Close { code, reason }) {
+                if let Some((rx, deadline)) = session.pending.take() {
+                    let _ = tokio::time::timeout_at(deadline, rx).await;
+                }
+            }
+        }
+    }
     drop(owner);
 }
 
@@ -413,6 +1140,7 @@ mod tests {
         let policy = OriginPolicy {
             allowed: vec!["https://app.example.com".into()],
             allow_missing: false,
+            allow_loopback: false,
         };
         assert!(policy.allows(Some("https://app.example.com")));
         assert!(!policy.allows(Some("https://app.example.com.evil.test")));
@@ -425,6 +1153,103 @@ mod tests {
         };
         assert!(open.allows(None));
         assert!(!open.allows(Some("null")));
+    }
+
+    #[test]
+    fn origin_configuration_prefers_options_then_site_url_and_fails_closed() {
+        let explicit = OriginPolicy::configure(
+            Some(vec!["HTTPS://App.Example.com".into()]),
+            false,
+            Some("https://ignored.test"),
+            true,
+        )
+        .unwrap();
+        assert!(explicit.allows(Some("https://app.example.com")));
+        assert!(!explicit.allows(Some("https://ignored.test")));
+        let site =
+            OriginPolicy::configure(None, false, Some("https://site.test/app?x"), true).unwrap();
+        assert_eq!(site.allowed, vec!["https://site.test".to_string()]);
+        assert!(OriginPolicy::configure(None, false, None, true).is_err());
+        assert!(OriginPolicy::configure(None, false, Some("  "), true).is_err());
+        let dev = OriginPolicy::configure(None, false, None, false).unwrap();
+        for origin in [
+            "http://localhost:3000",
+            "http://127.0.0.1:8080",
+            "http://[::1]:9000",
+            "https://localhost",
+        ] {
+            assert!(dev.allows(Some(origin)), "{origin}");
+        }
+        for origin in [
+            "http://localhost.evil.test",
+            "http://evil.test",
+            "http://127.0.0.1.evil.test:80",
+            "http://localhost:99999",
+            "ftp://localhost",
+        ] {
+            assert!(!dev.allows(Some(origin)), "{origin}");
+        }
+        for bad in [
+            "app.example.com",
+            "https://a.test/path",
+            "javascript://x",
+            "https://",
+        ] {
+            assert!(
+                OriginPolicy::configure(Some(vec![bad.into()]), false, None, false).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn state_must_be_bounded_json_data() {
+        let mut map = HashMap::new();
+        map.insert("n".to_string(), Value::Int(1));
+        assert_eq!(encode_state(&Value::Map(map)).unwrap(), r#"{"n":1}"#);
+        assert!(encode_state(&Value::String("x".repeat(MAX_STATE_BYTES))).is_err());
+        let handle = Value::ScheduleHandle(1);
+        assert!(encode_state(&Value::Array(vec![handle])).is_err());
+        assert_eq!(
+            decode_state(r#"{"n":1}"#).to_string(),
+            Value::Map({
+                let mut m = HashMap::new();
+                m.insert("n".to_string(), Value::Int(1));
+                m
+            })
+            .to_string()
+        );
+    }
+
+    #[test]
+    fn inbox_is_bounded_by_count_and_bytes() {
+        let mut inbox = Inbox::default();
+        for _ in 0..INBOX_MESSAGES {
+            assert!(inbox.push(WsData::Text("x".into())));
+        }
+        assert!(!inbox.push(WsData::Text("x".into())));
+        let mut big = Inbox::default();
+        assert!(big.push(WsData::Binary(vec![0; INBOX_BYTES])));
+        assert!(!big.push(WsData::Binary(vec![0; 1])));
+        assert_eq!(big.pop().map(|d| d.len()), Some(INBOX_BYTES));
+        assert!(big.push(WsData::Binary(vec![0; 1])));
+    }
+
+    #[test]
+    fn endpoint_registration_rejects_conflicting_configuration() {
+        let config = EndpointConfig {
+            origins: OriginPolicy::default(),
+            has_open: false,
+            has_close: false,
+        };
+        register_endpoint("unit-conflict", config.clone(), false).unwrap();
+        register_endpoint("unit-conflict", config.clone(), false).unwrap();
+        let other = EndpointConfig {
+            has_open: true,
+            ..config.clone()
+        };
+        assert!(register_endpoint("unit-conflict", other.clone(), false).is_err());
+        register_endpoint("unit-conflict", other, true).unwrap();
     }
 
     #[tokio::test]
@@ -460,9 +1285,11 @@ mod tests {
         let _serial = crate::stdlib::realtime::tests::COUNTERS.lock().await;
         let (tx, mut rx) = mpsc::channel::<Queued>(OUTBOX_MESSAGES);
         let queued = Arc::new(AtomicUsize::new(0));
+        let control = Arc::new(Control::default());
         let handle = WsHandle {
             tx: tx.downgrade(),
             queued: Arc::downgrade(&queued),
+            control: Arc::downgrade(&control),
             max_message: 64 * 1024,
         };
         assert_eq!(

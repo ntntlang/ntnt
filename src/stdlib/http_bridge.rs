@@ -201,12 +201,20 @@ impl BridgeResponse {
                     }
                 }
 
+                let ws = match crate::stdlib::websocket::spec_from_response(map) {
+                    None => None,
+                    Some(Ok(spec)) => Some(spec),
+                    Some(Err(error)) => {
+                        eprintln!("[ERROR] websocket() response: {error}");
+                        return BridgeResponse::error(500, "Internal Server Error");
+                    }
+                };
                 BridgeResponse {
                     status,
                     headers,
                     body,
                     sse: crate::stdlib::realtime::spec_from_response(map),
-                    ws: None,
+                    ws,
                 }
             }
             _ => BridgeResponse {

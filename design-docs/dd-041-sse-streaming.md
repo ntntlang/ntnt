@@ -1,6 +1,6 @@
 # DD-041: Native SSE and WebSockets
 
-**Status:** Slice A (native SSE) shipped in v0.6.0. The v0.6.1 development line adds exact loaded-source provenance; Slice B (WebSockets) has its internal transport (upgrade and per-connection owner); no WebSocket API is available to applications yet.
+**Status:** Slice A (native SSE) shipped in v0.6.0. The v0.6.1 development line adds exact loaded-source provenance; Slice B (WebSockets) is partly implemented: `ws_endpoint`, `websocket`, `ws_send` and `ws_close` with worker callbacks; broadcast `source`, connection lifetime limits and reload closing remain.
 **Author:** Larri
 **Created:** 2026-03-17
 **Revised:** 2026-10-25

@@ -25,6 +25,7 @@ async fn shutdown_closes_open_sockets_with_going_away_and_refuses_new_ones() {
                 ws: Some(WsSpec::echo(OriginPolicy {
                     allowed: vec![],
                     allow_missing: true,
+                    allow_loopback: false,
                 })),
             });
         }

@@ -7775,7 +7775,7 @@ Perform a fresh direct HTTP/1.1 GET monitoring sample; never follow redirects, u
 HTTP response builders for server route handlers
 
 ```ntnt
-import { sse, text, html } from "std/http/server"
+import { sse, ws_endpoint, websocket } from "std/http/server"
 ```
 
 ### Functions
@@ -7804,7 +7804,11 @@ import { sse, text, html } from "std/http/server"
 | [`status`](#status) | Create a plain-text HTTP response with an explicit status code. |
 | [`text`](#text) | Create a plain-text HTTP response with status 200. |
 | [`too_many_requests`](#too_many_requests) | Create a 429 Too Many Requests response. |
+| [`websocket`](#websocket) | Accept a WebSocket from a GET handler. |
 | [`with_cookie`](#with_cookie) | Add a Set-Cookie header to a response. |
+| [`ws_close`](#ws_close) | Close a WebSocket after its queued messages are written. |
+| [`ws_endpoint`](#ws_endpoint) | Register a WebSocket endpoint during application setup. |
+| [`ws_send`](#ws_send) | Queue one message on a WebSocket connection. |
 
 #### `check_limit`
 
@@ -8560,6 +8564,35 @@ too_many_requests()  // => Response { status: 429, headers: { "retry-after": "60
 
 ---
 
+#### `websocket`
+
+```ntnt
+websocket(endpoint: WebSocketEndpoint, options?: Map) -> Response
+```
+
+Accept a WebSocket from a GET handler.
+
+Middleware and your own authorization run first; the connection is upgraded only if this is the final, successful response. Denials and redirects are sent as ordinary HTTP. `state` is the connection's initial state: JSON data only (no functions, handles or secrets), at most 16 KiB. It is passed to each callback and replaced by its return value. Requires the async server (`ntnt run`); `ntnt test` returns 501.
+
+**Parameters:**
+
+- `endpoint` — A WebSocketEndpoint from ws_endpoint()
+- `options` — Optional map with `state`
+
+**Returns:** An upgrade response
+
+**Examples:**
+
+```ntnt
+get("/ws", fn(req) { websocket(echo, map { "state": map { "count": 0 } }) })  // => Unit  // Accept a WebSocket
+```
+
+**See also:** `ws_endpoint`, `ws_send`, `ws_close`
+
+*Since v0.6.1*
+
+---
+
 #### `with_cookie`
 
 ```ntnt
@@ -8593,6 +8626,95 @@ with_cookie(html(page), "theme", "dark", map { "max_age": 86400 })  // Cookie wi
 **See also:** `set_cookie`, `delete_cookie`, `get_cookie`
 
 *Since v0.3.11*
+
+---
+
+#### `ws_close`
+
+```ntnt
+ws_close(conn: WebSocket, code?: Int, reason?: String) -> Result<Unit, String>
+```
+
+Close a WebSocket after its queued messages are written.
+
+`code` is 1000 (default) or an application code from 3000 to 4999; `reason` is at most 123 bytes. Calling it again, or after the connection has closed, is harmless.
+
+**Parameters:**
+
+- `conn` — The connection passed to a callback
+- `code` — Optional close code
+- `reason` — Optional close reason
+
+**Returns:** Ok(()) if the connection was open, Err otherwise
+
+**Examples:**
+
+```ntnt
+ws_close(conn, 4000, "done")  // => Ok(())  // Close with an application code
+```
+
+**See also:** `ws_endpoint`, `ws_send`
+
+*Since v0.6.1*
+
+---
+
+#### `ws_endpoint`
+
+```ntnt
+ws_endpoint(name: String, on_message: Function, options?: Map) -> WebSocketEndpoint
+```
+
+Register a WebSocket endpoint during application setup.
+
+Call it at the top level of your app, like a route; calling it while the server is serving is an error. `on_message(conn, message, state)` runs on an HTTP worker for each message, one at a time per connection, and returns the next state (a plain value or `Ok(state)`; `Err` or a runtime error closes the connection with 1011). `message` is `map { "kind": "text"|"binary", "data": String|Array<Int> }`. Options: `on_open(conn, state) -> state`, `on_close(state, info)` (best effort after the socket is gone; info has `code` and `reason`), `origins` (exact allowed Origins), `allow_missing_origin` (for non-browser clients). Without `origins`, the origin of `SITE_URL` is allowed; in development, localhost origins are allowed; in production with neither, registration fails. Request Host headers are never trusted.
+
+**Parameters:**
+
+- `name` — Stable endpoint name (letters, digits, `_`, `-`, `.`)
+- `on_message` — Function(conn, message, state) returning the next state
+- `options` — Optional map: on_open, on_close, origins, allow_missing_origin
+
+**Returns:** A WebSocketEndpoint for websocket()
+
+**Examples:**
+
+```ntnt
+let echo = ws_endpoint("echo", fn(conn, message, state) { ws_send(conn, message["data"]); state })  // => WebSocketEndpoint  // Echo every message
+```
+
+**See also:** `websocket`, `ws_send`, `ws_close`
+
+*Since v0.6.1*
+
+---
+
+#### `ws_send`
+
+```ntnt
+ws_send(conn: WebSocket, data: String | Array<Int>) -> Result<Unit, String>
+```
+
+Queue one message on a WebSocket connection.
+
+A String is sent as text; an Array of Ints from 0 to 255 as binary. `Ok` means the message was queued, not that the client received it. Each connection queues at most 16 messages / 256 KiB; beyond that, or after the connection closes, the result is `Err`. Never waits for the socket.
+
+**Parameters:**
+
+- `conn` — The connection passed to a callback
+- `data` — A String (text) or Array of 0-255 Ints (binary)
+
+**Returns:** Ok(()) when queued, Err(reason) otherwise
+
+**Examples:**
+
+```ntnt
+ws_send(conn, "hello")  // => Ok(())  // Send a text message
+```
+
+**See also:** `ws_endpoint`, `ws_close`
+
+*Since v0.6.1*
 
 ---
 

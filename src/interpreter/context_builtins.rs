@@ -445,4 +445,9 @@ pub(crate) fn install_module_overrides(modules: &mut HashMap<String, HashMap<Str
     wrap("std/collections", "sort_by", sort_by);
     wrap("std/validate", "validate", validate);
     wrap("std/auth", "magic_link_flow", magic_link_flow);
+    wrap("std/http/server", "ws_endpoint", ws_endpoint);
+}
+
+pub(crate) fn ws_endpoint(interp: &mut Interpreter, args: &[Value]) -> Result<Value> {
+    interp.register_ws_endpoint(args)
 }

@@ -17,17 +17,28 @@ Native Rust embedders constructing `Value::Function` must convert the environmen
 shared-binding semantics are unchanged. This is automatic memory reclamation,
 not a new deterministic resource-close API.
 
-## DD-041: WebSocket transport (internal)
+## DD-041: WebSockets
 
-The async server can now upgrade a request to a WebSocket after the normal
-request pipeline, using Axum's `ws` support. Only a successful final response
-upgrades; middleware denials, auth redirects and errors are sent as ordinary
-HTTP and open nothing. Origins are matched exactly. Each connection has bounded
-queues charged to the realtime payload budget, server pings, protocol close
-codes and a close on shutdown, and counts against `max_connections`.
+Applications can accept WebSockets. Register an endpoint during setup with
+`ws_endpoint(name, on_message, options?)`, then return `websocket(endpoint,
+map { "state": ... })` from an ordinary GET handler. Middleware and your own
+authorization run first; only a successful final response upgrades, so denials,
+auth redirects and errors are sent as ordinary HTTP.
 
-There is no application API yet: `ws_endpoint` and message callbacks are the
-next step. Existing HTTP and SSE behavior is unchanged.
+Callbacks run on the existing HTTP workers, one message at a time per connection,
+with explicit JSON state (16 KiB) passed in and returned. `ws_send` queues a text
+or binary message (`Ok` means queued, not delivered); `ws_close` closes after
+queued messages. Optional `on_open` and `on_close` hooks are supported.
+
+Origins are matched exactly: the `origins` option, else the origin of `SITE_URL`,
+else localhost in development. Production startup fails without one of them.
+Each connection has bounded send and receive queues charged to the realtime
+payload budget; a process-wide callback queue (64) and one worker kept free for
+HTTP stop sockets from starving requests. Shutdown closes sockets with 1001.
+`ntnt test` returns 501 for `websocket()`.
+
+Not yet: broadcast fan-out to WebSockets, a connection lifetime limit, closing
+sockets on development hot reload. Existing HTTP and SSE behavior is unchanged.
 
 ## DD-041: exact loaded-source provenance
 

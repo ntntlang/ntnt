@@ -72,6 +72,9 @@ pub(crate) fn reject_runtime_authority(value: &Value) -> crate::error::Result<()
         Value::TempFile(_) | Value::TempDir(_) => Err(IntentError::type_error(
             "Temporary handles cannot be serialized to JSON",
         )),
+        Value::WebSocket(_) => Err(IntentError::type_error(
+            "WebSocket values cannot be serialized to JSON",
+        )),
         Value::Array(values) | Value::EnumValue { values, .. } => {
             values.iter().try_for_each(reject_runtime_authority)
         }
