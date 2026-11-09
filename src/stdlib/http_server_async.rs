@@ -539,8 +539,17 @@ fn bridge_to_axum_response(
     resp: BridgeResponse,
     csp_header: Option<(&str, &str)>,
     is_head: bool,
+    upgrade: Option<PendingUpgrade>,
 ) -> Response<Body> {
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    if let Some(spec) = resp.ws.as_ref() {
+        // Same rule as SSE: only a successful final response upgrades.
+        // Denials, redirects and errors are sent as ordinary HTTP and the
+        // held upgrade is dropped without opening a connection.
+        if status.is_success() {
+            return ws_to_axum_response(spec, resp.headers, upgrade, csp_header);
+        }
+    }
     if let Some(spec) = resp.sse.as_ref() {
         // The stream opens only for a successful, final, non-HEAD response.
         // Denials, redirects and errors from middleware/handlers carry no
@@ -570,6 +579,144 @@ fn bridge_to_axum_response(
             .unwrap()
     });
     apply_async_security_headers(&mut resp, csp_header);
+    resp
+}
+
+/// The WebSocket upgrade taken from a request before the interpreter sees it.
+/// Reconstructed headers are not upgrade authority; this is.
+pub(crate) struct PendingUpgrade {
+    upgrade: Option<axum::extract::ws::WebSocketUpgrade>,
+    /// `None`: no Origin header. `Some(None)`: present but not valid text.
+    origin: Option<Option<String>>,
+}
+
+/// Take the upgrade from a request that asks for one, leaving every other
+/// request untouched. A malformed upgrade is remembered as `upgrade: None`.
+async fn take_ws_upgrade(req: Request<Body>) -> (Request<Body>, Option<PendingUpgrade>) {
+    use axum::extract::FromRequestParts;
+    let asks = req
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    if !asks {
+        return (req, None);
+    }
+    let origin = req
+        .headers()
+        .get(header::ORIGIN)
+        .map(|v| v.to_str().ok().map(str::to_string));
+    let (mut parts, body) = req.into_parts();
+    let upgrade = axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &())
+        .await
+        .ok();
+    (
+        Request::from_parts(parts, body),
+        Some(PendingUpgrade { upgrade, origin }),
+    )
+}
+
+/// Headers the WebSocket handshake owns; application headers may not set them.
+const WS_FIXED_HEADERS: [&str; 9] = [
+    "connection",
+    "upgrade",
+    "sec-websocket-accept",
+    "sec-websocket-protocol",
+    "sec-websocket-extensions",
+    "content-length",
+    "content-encoding",
+    "content-type",
+    "transfer-encoding",
+];
+
+/// A refused handshake: plain text, no upgrade, no connection opened.
+fn ws_refusal(
+    status: StatusCode,
+    message: &'static str,
+    csp: Option<(&str, &str)>,
+) -> Response<Body> {
+    let mut builder = Response::builder()
+        .status(status)
+        .header("content-type", "text/plain; charset=utf-8")
+        .header("cache-control", "no-store")
+        .header("server", "ntnt-async");
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        builder = builder.header("retry-after", "5");
+    }
+    let mut resp = builder.body(Body::from(message)).expect("static response");
+    apply_async_security_headers(&mut resp, csp);
+    resp
+}
+
+/// Upgrade an admitted WebSocket. Application headers (cookies, custom) go on
+/// the 101 response; handshake headers are fixed by the protocol.
+fn ws_to_axum_response(
+    spec: &crate::stdlib::websocket::WsSpec,
+    headers: Vec<(String, String)>,
+    pending: Option<PendingUpgrade>,
+    csp: Option<(&str, &str)>,
+) -> Response<Body> {
+    use crate::stdlib::realtime::{admit_connection, OpenError};
+    let Some(PendingUpgrade {
+        upgrade: Some(upgrade),
+        origin,
+    }) = pending
+    else {
+        return ws_refusal(StatusCode::BAD_REQUEST, "WebSocket upgrade required", csp);
+    };
+    let origin = match origin {
+        None => None,
+        Some(Some(origin)) => Some(origin),
+        Some(None) => return ws_refusal(StatusCode::FORBIDDEN, "Origin not allowed", csp),
+    };
+    if !spec.origins().allows(origin.as_deref()) {
+        return ws_refusal(StatusCode::FORBIDDEN, "Origin not allowed", csp);
+    }
+    let (permit, shutdown, max_message) = match admit_connection() {
+        Ok(admitted) => admitted,
+        Err(OpenError::ShuttingDown) => {
+            return ws_refusal(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Server is shutting down",
+                csp,
+            )
+        }
+        Err(OpenError::TooManyStreams) => {
+            return ws_refusal(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Too many open realtime connections",
+                csp,
+            )
+        }
+    };
+    let spec = spec.clone();
+    // Explicit codec limits instead of the 64 MiB defaults. Writes go out
+    // eagerly; one message plus control frames may wait in the codec.
+    let upgrade = upgrade
+        .max_message_size(max_message)
+        .max_frame_size(max_message)
+        .write_buffer_size(0)
+        .max_write_buffer_size(max_message.saturating_add(16 * 1024));
+    // If the upgrade never completes, the callback is dropped with the permit.
+    let mut resp = upgrade.on_upgrade(move |socket| {
+        crate::stdlib::websocket::run(socket, spec, permit, shutdown, max_message)
+    });
+    for (key, value) in headers {
+        if WS_FIXED_HEADERS.contains(&key.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        if let (Ok(name), Ok(val)) = (
+            header::HeaderName::try_from(key.as_str()),
+            header::HeaderValue::from_str(&value),
+        ) {
+            resp.headers_mut().append(name, val);
+        }
+    }
+    resp.headers_mut().insert(
+        header::SERVER,
+        header::HeaderValue::from_static("ntnt-async"),
+    );
+    apply_async_security_headers(&mut resp, csp);
     resp
 }
 
@@ -778,12 +925,17 @@ async fn dispatch_dynamic(
     handler_name: &str,
     csp_ref: Option<(&str, &str)>,
 ) -> Response<Body> {
+    // Hold any WebSocket upgrade before conversion consumes the request.
+    let (req, upgrade) = take_ws_upgrade(req).await;
     // Convert request and send to interpreter
     let mut response = match axum_to_bridge_request(req, params, peer_addr).await {
         Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
-            Ok(response) => {
-                bridge_to_axum_response(response, csp_ref, *method == axum::http::Method::HEAD)
-            }
+            Ok(response) => bridge_to_axum_response(
+                response,
+                csp_ref,
+                *method == axum::http::Method::HEAD,
+                upgrade,
+            ),
             Err(e) => {
                 let error_msg = format!("{}", e);
                 // Structured error log — always printed regardless of mode
@@ -1012,6 +1164,7 @@ async fn handle_request(
                         response,
                         csp_ref,
                         method == axum::http::Method::HEAD,
+                        None,
                     ),
                     Err(e) => {
                         let error_msg = format!("{}", e);
@@ -1297,6 +1450,55 @@ pub async fn start_server_with_bridge(
         .map(|v| v == "production" || v == "prod")
         .unwrap_or(false);
 
+    let app = build_app(&config, interpreter_handle, routes, is_production);
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| IntentError::runtime_error(format!("Failed to bind: {e}")))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|e| IntentError::runtime_error(format!("Failed to inspect listener: {e}")))?;
+    if config.readiness {
+        super::http_server::emit_readiness(addr)?;
+    }
+    if let Some(startup) = &config.startup {
+        startup
+            .send(())
+            .map_err(|_| IntentError::runtime_error("HTTP startup receiver closed"))?;
+    }
+    // Show user-friendly URL (0.0.0.0 means all interfaces, so use localhost for display)
+    let display_url = if addr.ip().is_unspecified() {
+        format!("http://localhost:{}", addr.port())
+    } else {
+        format!("http://{}", addr)
+    };
+
+    let hot_reload_status = if is_production { "disabled" } else { "enabled" };
+
+    println!();
+    println!("🚀 Server running — visit {}", display_url);
+    println!(
+        "   Routes: {}  |  Static: {}  |  Workers: {}  |  Hot-reload: {}",
+        route_count, static_count, config.num_workers, hot_reload_status
+    );
+    println!();
+    println!("Press Ctrl+C to stop");
+
+    // Serve connections with our own accept loop (instead of axum::serve) so
+    // HTTP/2 buffering can be bounded explicitly: a stalled SSE client must not
+    // let hyper buffer megabytes per stream. Graceful shutdown waits for open
+    // connections, bounded by the request timeout; connections still open at
+    // the deadline are spawned tasks that the caller cancels by shutting the
+    // runtime down (see `run_async_http_server`).
+    serve_connections(listener, app, config.request_timeout_secs).await
+}
+
+/// The router with every middleware layer, shared by the real server and tests.
+fn build_app(
+    config: &AsyncServerConfig,
+    interpreter_handle: SharedHandle,
+    routes: Arc<AsyncServerState>,
+    is_production: bool,
+) -> Router {
     // Pre-compute CSP header value for AppState
     let csp_header = config
         .csp_config
@@ -1344,44 +1546,19 @@ pub async fn start_server_with_bridge(
             response
         },
     ));
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| IntentError::runtime_error(format!("Failed to bind: {e}")))?;
-    let addr = listener
-        .local_addr()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to inspect listener: {e}")))?;
-    if config.readiness {
-        super::http_server::emit_readiness(addr)?;
-    }
-    if let Some(startup) = &config.startup {
-        startup
-            .send(())
-            .map_err(|_| IntentError::runtime_error("HTTP startup receiver closed"))?;
-    }
-    // Show user-friendly URL (0.0.0.0 means all interfaces, so use localhost for display)
-    let display_url = if addr.ip().is_unspecified() {
-        format!("http://localhost:{}", addr.port())
-    } else {
-        format!("http://{}", addr)
-    };
+    app
+}
 
-    let hot_reload_status = if is_production { "disabled" } else { "enabled" };
-
-    println!();
-    println!("🚀 Server running — visit {}", display_url);
-    println!(
-        "   Routes: {}  |  Static: {}  |  Workers: {}  |  Hot-reload: {}",
-        route_count, static_count, config.num_workers, hot_reload_status
-    );
-    println!();
-    println!("Press Ctrl+C to stop");
-
-    // Serve connections with our own accept loop (instead of axum::serve) so
-    // HTTP/2 buffering can be bounded explicitly: a stalled SSE client must not
-    // let hyper buffer megabytes per stream. Graceful shutdown waits for open
-    // connections, bounded by the request timeout; connections still open at
-    // the deadline are spawned tasks that the caller cancels by shutting the
-    // runtime down (see `run_async_http_server`).
+/// Serve on an already-bound listener with the production router and
+/// connection settings. For integration tests that need the bound address.
+#[doc(hidden)]
+pub async fn serve_on_listener(
+    listener: tokio::net::TcpListener,
+    config: AsyncServerConfig,
+    interpreter_handle: SharedHandle,
+    routes: Arc<AsyncServerState>,
+) -> Result<()> {
+    let app = build_app(&config, interpreter_handle, routes, false);
     serve_connections(listener, app, config.request_timeout_secs).await
 }
 
