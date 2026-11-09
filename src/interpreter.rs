@@ -731,7 +731,15 @@ enum WorkerExit {
     StartupFailed(String),
 }
 
-type HttpWorkerStartup = std::sync::mpsc::Sender<(usize, std::result::Result<(), String>)>;
+type HttpWorkerStartup = std::sync::mpsc::Sender<(usize, std::result::Result<[u8; 32], String>)>;
+
+/// Source fingerprint the realtime workers agreed on at startup. A restarted
+/// worker serves again only after loading the same source.
+type CommittedGeneration = std::sync::Arc<std::sync::OnceLock<[u8; 32]>>;
+
+fn short_digest(digest: &[u8; 32]) -> String {
+    digest[..6].iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// Execution mode controls how server-related functions behave
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -903,6 +911,10 @@ pub struct Interpreter {
     loaded_modules: HashMap<String, HashMap<String, Value>>,
     /// Exact parsed inputs, separate from mtime-based reload detection.
     loaded_sources: crate::source::SourceLedger,
+    /// Source fingerprint where setup first reached `listen`. The primary
+    /// blocks there while workers continue, so realtime workers are compared
+    /// at this point rather than after setup ends.
+    listen_source: Option<std::result::Result<[u8; 32], String>>,
     /// Current file path (for relative imports)
     current_file: Option<String>,
     /// HTTP server state for routing
@@ -1206,6 +1218,7 @@ impl Interpreter {
             current_result: None,
             loaded_modules: HashMap::new(),
             loaded_sources: crate::source::SourceLedger::default(),
+            listen_source: None,
             current_file: None,
             server_state: crate::stdlib::http_server::ServerState::new(),
             test_mode: None,
@@ -1424,6 +1437,14 @@ impl Interpreter {
     // --- Server action handlers (associated functions, not methods) ---
 
     fn sa_listen(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        if interp.listen_source.is_none() {
+            interp.listen_source = Some(
+                interp
+                    .source_snapshot()
+                    .map(|snapshot| snapshot.digest())
+                    .map_err(|error| error.to_string()),
+            );
+        }
         // listen() only runs in Normal mode (no server in Worker/HotReload/Job/UnitTest)
         if interp.execution_mode != ExecutionMode::Normal {
             return Ok(Value::Unit);
@@ -10189,16 +10210,40 @@ impl Interpreter {
             options.realtime_configured || crate::stdlib::realtime::has_live_buses();
         let source_file = self.main_source_file.clone().unwrap_or_default();
         let mut worker_handles = Vec::new();
+        let generation = CommittedGeneration::default();
         if realtime_startup {
+            // Every realtime worker must have loaded exactly the primary's
+            // source where setup reached listen; mixed code never serves.
+            let primary =
+                match self.listen_source.clone() {
+                    Some(Ok(digest)) => digest,
+                    Some(Err(error)) => {
+                        return Err(IntentError::runtime_error(format!(
+                            "realtime startup requires a source fingerprint: {error}"
+                        )))
+                    }
+                    None => return Err(IntentError::runtime_error(
+                        "realtime startup requires a source fingerprint: listen was not reached",
+                    )),
+                };
             let (worker_startup_tx, worker_startup_rx) = std::sync::mpsc::channel();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            worker_handles =
-                Self::spawn_http_workers(num_workers, &rx, &source_file, Some(worker_startup_tx));
+            worker_handles = Self::spawn_http_workers(
+                num_workers,
+                &rx,
+                &source_file,
+                Some(worker_startup_tx),
+                generation.clone(),
+            );
             for initialized in 1..num_workers {
                 match worker_startup_rx.recv_timeout(
                     deadline.saturating_duration_since(std::time::Instant::now()),
                 ) {
-                    Ok((_, Ok(()))) => {}
+                    Ok((_, Ok(digest))) if digest == primary => {}
+                    Ok((worker, Ok(digest))) => return Err(IntentError::runtime_error(format!(
+                        "realtime worker {worker} loaded different source than the primary (worker {}, primary {}); restart once the application files stop changing",
+                        short_digest(&digest), short_digest(&primary),
+                    ))),
                     Ok((worker, Err(error))) => return Err(IntentError::runtime_error(format!(
                         "realtime worker {worker} failed initialization: {error}"
                     ))),
@@ -10211,6 +10256,7 @@ impl Interpreter {
                     )),
                 }
             }
+            let _ = generation.set(primary);
         }
 
         // Spawn async server in a separate thread
@@ -10242,7 +10288,8 @@ impl Interpreter {
         }
 
         if !realtime_startup {
-            worker_handles = Self::spawn_http_workers(num_workers, &rx, &source_file, None);
+            worker_handles =
+                Self::spawn_http_workers(num_workers, &rx, &source_file, None, generation);
         }
 
         // Main thread (worker 0): process requests with hot-reload support
@@ -10604,19 +10651,27 @@ impl Interpreter {
         rx: &flume::Receiver<crate::stdlib::http_bridge::HandlerRequest>,
         source_file: &str,
         startup: Option<HttpWorkerStartup>,
+        generation: CommittedGeneration,
     ) -> Vec<std::thread::JoinHandle<()>> {
         (1..num_workers)
             .map(|worker_id| {
                 let worker_rx = rx.clone();
                 let source = source_file.to_string();
                 let mut startup = startup.clone();
+                let generation = generation.clone();
                 std::thread::spawn(move || {
                     let mut backoff = std::time::Duration::from_secs(1);
                     const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
                     loop {
                         let started = std::time::Instant::now();
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            Self::run_worker(worker_id, worker_rx.clone(), &source, &mut startup)
+                            Self::run_worker(
+                                worker_id,
+                                worker_rx.clone(),
+                                &source,
+                                &mut startup,
+                                &generation,
+                            )
                         }));
                         let error = match result {
                             Ok(WorkerExit::Shutdown) => break,
@@ -10652,6 +10707,7 @@ impl Interpreter {
         rx: flume::Receiver<crate::stdlib::http_bridge::HandlerRequest>,
         source_file: &str,
         startup: &mut Option<HttpWorkerStartup>,
+        generation: &std::sync::OnceLock<[u8; 32]>,
     ) -> WorkerExit {
         use crate::stdlib::http_bridge::HandlerRequest;
 
@@ -10690,9 +10746,36 @@ impl Interpreter {
         // Requests need task APIs, not Normal-mode server lifecycle authority.
         interpreter.http_worker_request_tasks = true;
 
-        if let Some(startup) = startup.take() {
-            if startup.send((worker_id, Ok(()))).is_err() {
-                return WorkerExit::Shutdown;
+        // Realtime workers report the source they loaded where setup reached
+        // listen. After startup, a restarted worker that loaded different
+        // source stays out of service (retried with backoff) until it matches.
+        if startup.is_some() || generation.get().is_some() {
+            let loaded = interpreter.listen_source.clone().unwrap_or_else(|| {
+                interpreter
+                    .source_snapshot()
+                    .map(|snapshot| snapshot.digest())
+                    .map_err(|error| error.to_string())
+            });
+            if let Some(startup) = startup.take() {
+                if startup.send((worker_id, loaded)).is_err() {
+                    return WorkerExit::Shutdown;
+                }
+            } else if let Some(committed) = generation.get() {
+                match loaded {
+                    Ok(digest) if digest == *committed => {}
+                    Ok(digest) => {
+                        return WorkerExit::StartupFailed(format!(
+                            "loaded different source than the running generation (worker {}, running {}); not serving until it matches",
+                            short_digest(&digest),
+                            short_digest(committed),
+                        ))
+                    }
+                    Err(error) => {
+                        return WorkerExit::StartupFailed(format!(
+                            "source fingerprint unavailable; not serving: {error}"
+                        ))
+                    }
+                }
             }
         }
 
@@ -16233,13 +16316,53 @@ c")
             }
             let (_tx, rx) = flume::unbounded();
             let path = source_file.to_str().unwrap();
-            let WorkerExit::StartupFailed(error) = Interpreter::run_worker(1, rx, path, &mut None)
+            let WorkerExit::StartupFailed(error) =
+                Interpreter::run_worker(1, rx, path, &mut None, &Default::default())
             else {
                 panic!("worker unexpectedly initialized: {source:?}");
             };
             assert!(error.contains(expected), "{error}");
             assert!(error.contains(path), "missing source file in {error}");
         }
+    }
+
+    #[test]
+    fn test_restarted_realtime_worker_with_changed_source_does_not_serve() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_file = dir.path().join("worker.tnt");
+        std::fs::write(&source_file, "let initialized = true\nlisten(0)\n").unwrap();
+        let path = source_file.to_str().unwrap();
+        // Startup committed a generation; this restart loads different bytes.
+        let committed = std::sync::OnceLock::new();
+        committed.set([7u8; 32]).unwrap();
+        let (_tx, rx) = flume::unbounded();
+        let WorkerExit::StartupFailed(error) =
+            Interpreter::run_worker(1, rx, path, &mut None, &committed)
+        else {
+            panic!("worker with changed source entered service");
+        };
+        assert!(error.contains("loaded different source"), "{error}");
+
+        // The same source as the committed generation serves normally.
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let (_tx, rx) = flume::unbounded();
+        let mut startup = Some(probe_tx);
+        let _ = std::thread::spawn({
+            let path = path.to_string();
+            move || Interpreter::run_worker(1, rx, &path, &mut startup, &Default::default())
+        });
+        let (_, loaded) = probe_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let matching = std::sync::OnceLock::new();
+        matching.set(loaded.unwrap()).unwrap();
+        let (tx, rx) = flume::unbounded::<crate::stdlib::http_bridge::HandlerRequest>();
+        let worker = std::thread::spawn({
+            let path = path.to_string();
+            move || Interpreter::run_worker(1, rx, &path, &mut None, &matching)
+        });
+        drop(tx);
+        assert!(matches!(worker.join().unwrap(), WorkerExit::Shutdown));
     }
 
     #[test]
@@ -16254,13 +16377,14 @@ c")
             &rx,
             source_file.to_str().unwrap(),
             Some(startup_tx),
+            Default::default(),
         );
-        assert_eq!(
+        assert!(matches!(
             startup_rx
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap(),
-            (1, Ok(()))
-        );
+            (1, Ok(_))
+        ));
         assert!(
             !workers[0].is_finished(),
             "initialized worker should be waiting for requests"
@@ -16299,6 +16423,7 @@ while !exists({}) {{ sleep_ms(10) }}
             &rx,
             source_file.to_str().unwrap(),
             Some(startup_tx),
+            Default::default(),
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !started.exists() {
@@ -16433,7 +16558,13 @@ listen(0)
         drop(tx);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let exit = Interpreter::run_worker(1, rx, source_file.to_str().unwrap(), &mut None);
+            let exit = Interpreter::run_worker(
+                1,
+                rx,
+                source_file.to_str().unwrap(),
+                &mut None,
+                &Default::default(),
+            );
             done_tx.send(exit).unwrap();
         });
         let exit = done_rx

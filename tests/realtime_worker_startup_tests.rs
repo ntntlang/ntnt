@@ -229,3 +229,64 @@ fn bind_failure_after_realtime_worker_initialization_exits_without_readiness() {
         server.stderr()
     );
 }
+
+fn app_in(dir: &std::path::Path, setup: &str, realtime: &str) -> String {
+    let marker = serde_json::to_string(dir.join("main-loaded").to_str().unwrap()).unwrap();
+    let helper = serde_json::to_string(dir.join("helper.tnt").to_str().unwrap()).unwrap();
+    std::fs::write(dir.join("helper.tnt"), "fn tag() { \"v1\" }\n").unwrap();
+    app(
+        &setup
+            .replace("MARKER", &marker)
+            .replace("HELPER_PATH", &helper)
+            .replace("HELPER_IMPORT", &format!("import {{ tag }} from {helper}")),
+        realtime,
+    )
+}
+
+#[test]
+fn realtime_workers_that_loaded_different_code_fail_startup() {
+    // The first interpreter (the primary) leaves a marker; every later one
+    // (the secondary workers) rewrites the helper before importing it.
+    let dir = tempfile::tempdir().unwrap();
+    let source = app_in(
+        dir.path(),
+        r#"
+import { exists, write_file } from "std/fs"
+if exists(MARKER) { write_file(HELPER_PATH, "fn tag() { \"v2\" }\n") } else { write_file(MARKER, "1") }
+HELPER_IMPORT
+let bus = broadcast("ready")
+"#,
+        "",
+    );
+    let mut server = fixture::Fixture::start(
+        &source,
+        &["run"],
+        &[("NTNT_ENV", "production"), ("NTNT_WORKERS", "2")],
+    );
+    assert!(!server.wait().success());
+    assert!(!server.stdout().contains("NTNT_READY"));
+    let error = server.stderr();
+    assert!(error.contains("realtime worker 1"), "{error}");
+    assert!(error.contains("loaded different source"), "{error}");
+    assert!(!error.contains("retrying"), "{error}");
+}
+
+#[test]
+fn realtime_source_is_compared_where_setup_reaches_listen() {
+    // The primary blocks in listen; workers continue past it. Code that runs
+    // only after listen must not make identical workers look different.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("late.tnt"), "fn late() { 1 }\n").unwrap();
+    let late = serde_json::to_string(dir.path().join("late.tnt").to_str().unwrap()).unwrap();
+    let source = format!(
+        "{}\nimport {{ late }} from {late}\n",
+        app("let bus = broadcast(\"ready\")", "")
+    );
+    let mut server = fixture::Fixture::start(
+        &source,
+        &["run"],
+        &[("NTNT_ENV", "production"), ("NTNT_WORKERS", "2")],
+    );
+    server.ready();
+    assert_eq!(setups_before_readiness(&server), 2, "{}", server.stderr());
+}
