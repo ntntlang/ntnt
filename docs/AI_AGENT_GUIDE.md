@@ -4230,6 +4230,14 @@ decision. If buses are created only inside request handlers, use `"realtime": ma
 to opt into this barrier. Buffered-only apps without an explicit realtime map keep
 their existing listener-first startup behavior.
 
+On this realtime path every worker must also have loaded **the same source** as the
+primary, compared where setup first reaches `listen` (imports, routes, libs and
+middleware included). A mismatch, for example files edited while workers start,
+fails startup with `realtime worker N loaded different source`; restart once the
+files stop changing. A worker that crashes and restarts after files changed on disk
+stays out of service until its source matches the running generation again (or the
+process restarts), instead of serving new code next to old.
+
 The 0.6.1 development runtime also records the exact file inputs parsed by each
 interpreter, rather than reconstructing source identity from mtimes or rereading
 files later. This is a DD-041 prerequisite, not a new NTNT API or a worker admission
