@@ -4290,7 +4290,8 @@ get("/ws", fn(req) {
 - Limits: messages up to `max_event_bytes` (64 KiB default, at most 256 KiB); at most
   4 unprocessed messages / 256 KiB per connection (more closes with 1008); 64 queued
   callbacks per process (more closes with 1013). With several configured workers,
-  at most all but one run callbacks at once. With one worker (the development
+  at most all but one run callbacks at once (counted from the configured workers,
+  so not while one is restarting). With one worker (the development
   default), a long callback delays HTTP requests. Callbacks over 30 seconds close
   the connection. The receive backlog is a per-connection limit, not part of the
   realtime payload budget. Server pings

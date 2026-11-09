@@ -35,8 +35,10 @@ else localhost in development. Production startup fails without one of them.
 Each connection has a bounded send queue charged to the realtime payload budget
 and a separately bounded receive backlog (4 messages / 256 KiB). A process-wide
 callback queue (64) and, with more than one configured worker, a limit of all but
-one worker running callbacks keep sockets from starving requests. With a single
-worker, a long callback still delays HTTP. Shutdown closes sockets with 1001.
+one worker running callbacks limit how far sockets can delay requests. The limit
+uses the configured worker count: while a worker is down and restarting, the
+remaining workers can all be running callbacks. With a single worker, a long
+callback still delays HTTP. Shutdown closes sockets with 1001.
 `ntnt test` returns 501 for `websocket()`.
 
 Not yet: broadcast fan-out to WebSockets, a connection lifetime limit, closing
