@@ -3936,11 +3936,7 @@ pub(crate) fn worker_status_impl() -> crate::error::Result<Value> {
                 .total_duration_ms
                 .load(std::sync::atomic::Ordering::Relaxed);
             let completed = stats.completed.load(std::sync::atomic::Ordering::Relaxed);
-            let avg_ms = if completed > 0 {
-                total_ms / completed
-            } else {
-                0
-            };
+            let avg_ms = total_ms.checked_div(completed).unwrap_or(0);
             entry.insert("avg_duration_ms".to_string(), Value::Int(avg_ms as i64));
         } else {
             entry.insert("completed".to_string(), Value::Int(0));

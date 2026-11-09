@@ -112,7 +112,7 @@ static OWNERS: OnceLock<Mutex<Vec<Weak<TempOwner>>>> = OnceLock::new();
 struct TempPermit;
 impl TempPermit {
     fn reserve() -> R<Self> {
-        LIVE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        LIVE.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n < 128).then_some(n + 1)
         })
         .map_err(|_| "capacity: at most 128 live temporary resources".to_string())?;

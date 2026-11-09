@@ -11,6 +11,7 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - '.config/nextest.toml'
+      - 'rust-toolchain.toml'
       - 'scripts/release/**'
       - 'tests/release/**'
       - 'install.sh'
@@ -30,8 +31,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup toolchain install && rustc --version
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -87,10 +89,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+          rustc --version
 
       - name: Cache cargo
         uses: actions/cache@v4

@@ -29,7 +29,7 @@ impl ProbeSlot {
         use std::sync::atomic::Ordering;
 
         counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < limit).then_some(n + 1)
             })
             .map_err(|_| "HTTP probe worker busy")?;
@@ -227,7 +227,7 @@ impl Drop for ResolverSlot {
 fn resolve_target(url: &str, expires: std::time::Instant) -> ProbeResult<std::net::SocketAddr> {
     use std::sync::atomic::Ordering;
     RESOLVERS
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n < 16).then_some(n + 1)
         })
         .map_err(|_| "HTTP probe resolver busy")?;

@@ -6944,7 +6944,7 @@ impl Interpreter {
 
                     if name == "old" && arguments.len() == 1 {
                         // Look up the pre-execution value
-                        let key = format!("{:?}", &arguments[0]);
+                        let key = format!("{:?}", arguments[0]);
                         if let Some(ref old_values) = self.current_old_values {
                             if let Some(stored) = old_values.get(&key) {
                                 return Ok(self.stored_to_value(stored));

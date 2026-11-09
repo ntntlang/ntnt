@@ -1337,13 +1337,13 @@ impl ConcurrencyRuntime {
     pub fn shutdown(&self) {
         // Cancel all tasks
         if let Ok(tasks) = self.tasks.lock() {
-            for (_id, entry) in tasks.entries.iter() {
+            for entry in tasks.entries.values() {
                 entry.cancelled.cancel();
             }
         }
         // Cancel all schedules and remove them
         if let Ok(mut schedules) = self.schedules.lock() {
-            for (_id, entry) in schedules.iter() {
+            for entry in schedules.values() {
                 entry.cancelled.cancel();
             }
             schedules.clear();

@@ -102,7 +102,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("sha256sum -c -", dockerfile)
         self.assertIn("no-shared", dockerfile)
         self.assertIn("OPENSSL_STATIC=1", dockerfile)
-        self.assertEqual(env["ARMV7_RUST_VERSION"], "1.94.0")
+        # The ARMv7 cross build uses the same Rust as every other job.
+        toolchain = (ROOT / "rust-toolchain.toml").read_text()
+        channel = next(line.split("=", 1)[1].strip().strip('"')
+                       for line in toolchain.splitlines() if line.startswith("channel"))
+        self.assertEqual(env["ARMV7_RUST_VERSION"], channel)
         self.assertEqual(env["ARMV7_CROSS_VERSION"], "0.2.5")
 
     def test_build_smoke_precedes_package_and_is_unprivileged(self):
@@ -130,7 +134,7 @@ class BuildDriverTests(unittest.TestCase):
             tools.mkdir()
             commands = {
                 "docker": '#!/bin/sh\nif [ "$1" = image ]; then printf "sha256:fixture\\n"; fi\n',
-                "rustc": '#!/bin/sh\nprintf "rustc 1.94.0 fixture\\n"\n',
+                "rustc": '#!/bin/sh\nprintf "rustc 1.99.1 fixture\\n"\n',
                 "python3": '#!/bin/sh\nexit 0\n',
                 "cross": '#!/bin/sh\nif [ "$1" = --version ]; then printf "cross 0.2.5 fixture\\n"; else printf "%s" "$CARGO_TARGET_DIR" > "$CAPTURE"; fi\n',
             }
@@ -165,7 +169,7 @@ class PackageTests(unittest.TestCase):
         (self.root / "dist").mkdir()
         (self.root / "dist/armv7-elf.txt").write_text(" 0x (NEEDED) Shared library: [libc.so.6]\n")
         self.env = dict(os.environ, **pins(), ARMV7_BUILD_IMAGE_ID="sha256:" + "a" * 64,
-                        ARMV7_RUSTC="fixture rustc 1.94.0", GITHUB_REF="refs/tags/v0.5.4")
+                        ARMV7_RUSTC="fixture rustc 1.99.1", GITHUB_REF="refs/tags/v0.5.4")
 
     def git(self, *args):
         return subprocess.check_output(["git", "-C", str(self.root), *args], text=True).strip()

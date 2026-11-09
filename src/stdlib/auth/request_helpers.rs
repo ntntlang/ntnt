@@ -260,10 +260,9 @@ fn parse_canonical_site_url(site_url: &str) -> Option<(String, String)> {
     let trimmed = site_url.trim();
     let (proto, remainder) = if let Some(rest) = trimmed.strip_prefix("https://") {
         ("https".to_string(), rest)
-    } else if let Some(rest) = trimmed.strip_prefix("http://") {
-        ("http".to_string(), rest)
     } else {
-        return None;
+        let rest = trimmed.strip_prefix("http://")?;
+        ("http".to_string(), rest)
     };
 
     let host = remainder.split('/').next()?.trim();

@@ -20,7 +20,7 @@ struct Permit {
 impl Permit {
     fn reserve(counter: &'static AtomicUsize, amount: usize, limit: usize) -> R<Self> {
         counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 n.checked_add(amount).filter(|n| *n <= limit)
             })
             .map_err(|_| "capacity: TCP resource limit".to_string())?;

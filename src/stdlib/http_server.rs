@@ -1238,14 +1238,12 @@ pub fn match_route_typed(path: &str, route: &Route) -> MatchResult {
                                 };
                             }
                         }
-                        "Float" => {
-                            if path_seg.parse::<f64>().is_err() {
-                                return MatchResult::TypeMismatch {
-                                    param_name: name.clone(),
-                                    expected: "Float".to_string(),
-                                    got: path_seg.to_string(),
-                                };
-                            }
+                        "Float" if path_seg.parse::<f64>().is_err() => {
+                            return MatchResult::TypeMismatch {
+                                param_name: name.clone(),
+                                expected: "Float".to_string(),
+                                got: path_seg.to_string(),
+                            };
                         }
                         // String type (or unknown) - always matches
                         _ => {}
