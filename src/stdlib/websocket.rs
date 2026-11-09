@@ -448,6 +448,7 @@ mod tests {
 
     #[test]
     fn failed_payload_charge_leaves_the_budget_unchanged() {
+        let _serial = crate::stdlib::realtime::tests::COUNTERS.blocking_lock();
         let before = crate::stdlib::realtime::stats().1;
         assert!(crate::stdlib::realtime::charge_payload(usize::MAX).is_none());
         assert_eq!(crate::stdlib::realtime::stats().1, before);
@@ -455,6 +456,8 @@ mod tests {
 
     #[tokio::test]
     async fn handle_bounds_queue_and_fails_closed_after_owner_drops() {
+        // Sends charge the shared payload budget.
+        let _serial = crate::stdlib::realtime::tests::COUNTERS.lock().await;
         let (tx, mut rx) = mpsc::channel::<Queued>(OUTBOX_MESSAGES);
         let queued = Arc::new(AtomicUsize::new(0));
         let handle = WsHandle {

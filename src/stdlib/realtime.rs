@@ -843,13 +843,14 @@ pub fn subscribers(bus: &Bus) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Stream and budget counters are process-global; tests that assert on
-    /// them run one at a time. An async-aware lock, because async tests hold
-    /// it across awaits. Sync tests (no runtime) take it with blocking_lock.
-    static COUNTERS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// or change them (here and in `websocket`) run one at a time. An
+    /// async-aware lock, because async tests hold it across awaits. Sync
+    /// tests (no runtime) take it with blocking_lock.
+    pub(crate) static COUNTERS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn map(entries: &[(&str, Value)]) -> Value {
         Value::Map(
