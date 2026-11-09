@@ -1493,6 +1493,11 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also websocket, ws_send, ws_close
     // @since v0.6.1
     // @example let echo = ws_endpoint("echo", fn(conn, message, state) { ws_send(conn, message["data"]); state }) => WebSocketEndpoint ~ "Echo every message"
+    // @example let chat = ws_endpoint("chat", on_message, map { "origins": ["https://app.example.com"], "on_open": on_open }) => WebSocketEndpoint ~ "Explicit trusted origin and an open hook"
+    // @error RuntimeError ~ "ws_endpoint() can only be called during application setup, before the server starts serving" fix: "Call ws_endpoint at the top level of the app, before listen()"
+    // @error RuntimeError ~ "ws_endpoint needs trusted origins in production: set SITE_URL or pass the `origins` option" fix: "Set SITE_URL or pass the origins option"
+    // @error TypeError ~ "ws_endpoint() name must be 1-64 characters of letters, digits, '_', '-' or '.'" fix: "Use a short stable name such as chat"
+    // @error TypeError ~ "unknown ws_endpoint() option" fix: "Use on_open, on_close, origins or allow_missing_origin"
     module.insert(
         "ws_endpoint".to_string(),
         Value::NativeFunction {
@@ -1525,6 +1530,10 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also ws_endpoint, ws_send, ws_close
     // @since v0.6.1
     // @example get("/ws", fn(req) { websocket(echo, map { "state": map { "count": 0 } }) }) => Unit ~ "Accept a WebSocket"
+    // @example websocket(chat, map { "state": map { "user": user["id"] } }) => Response ~ "Store the authenticated user's ID in state"
+    // @error TypeError ~ "websocket() requires an endpoint from ws_endpoint() as its first argument" fix: "Pass the value returned by ws_endpoint()"
+    // @error TypeError ~ "WebSocket state must be JSON data" fix: "Store only Maps, Arrays, Strings, numbers, Bools or None"
+    // @error TypeError ~ "WebSocket state is N bytes; the limit is 16384" fix: "Keep state small; store IDs and look records up in callbacks"
     module.insert(
         "websocket".to_string(),
         Value::NativeFunction {
@@ -1551,6 +1560,9 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also ws_endpoint, ws_close
     // @since v0.6.1
     // @example ws_send(conn, "hello") => Ok(()) ~ "Send a text message"
+    // @example ws_send(conn, [0, 1, 255]) => Ok(()) ~ "Send a binary message"
+    // @error TypeError ~ "ws_send() data must be a String (text) or Array of 0-255 Ints (binary)" fix: "Convert the value with stringify() or send bytes as Ints from 0 to 255"
+    // @error TypeError ~ "ws_send() requires a WebSocket connection as its first argument" fix: "Pass the conn argument your callback received"
     module.insert(
         "ws_send".to_string(),
         Value::NativeFunction {
@@ -1577,6 +1589,9 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also ws_endpoint, ws_send
     // @since v0.6.1
     // @example ws_close(conn, 4000, "done") => Ok(()) ~ "Close with an application code"
+    // @example ws_close(conn) => Ok(()) ~ "Normal close (1000)"
+    // @error TypeError ~ "ws_close() code must be 1000 or an application code from 3000 to 4999" fix: "Use 1000 or a code from 3000 to 4999"
+    // @error TypeError ~ "ws_close() reason must be at most 123 bytes" fix: "Shorten the reason"
     module.insert(
         "ws_close".to_string(),
         Value::NativeFunction {

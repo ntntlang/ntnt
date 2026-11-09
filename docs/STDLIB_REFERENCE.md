@@ -8585,7 +8585,14 @@ Middleware and your own authorization run first; the connection is upgraded only
 
 ```ntnt
 get("/ws", fn(req) { websocket(echo, map { "state": map { "count": 0 } }) })  // => Unit  // Accept a WebSocket
+websocket(chat, map { "state": map { "user": user["id"] } })  // => Response  // Store the authenticated user's ID in state
 ```
+
+**Errors:**
+
+- **TypeError**: websocket() requires an endpoint from ws_endpoint() as its first argument — *Fix: Pass the value returned by ws_endpoint()*
+- **TypeError**: WebSocket state must be JSON data — *Fix: Store only Maps, Arrays, Strings, numbers, Bools or None*
+- **TypeError**: WebSocket state is N bytes; the limit is 16384 — *Fix: Keep state small; store IDs and look records up in callbacks*
 
 **See also:** `ws_endpoint`, `ws_send`, `ws_close`
 
@@ -8651,7 +8658,13 @@ Close a WebSocket after its queued messages are written.
 
 ```ntnt
 ws_close(conn, 4000, "done")  // => Ok(())  // Close with an application code
+ws_close(conn)  // => Ok(())  // Normal close (1000)
 ```
+
+**Errors:**
+
+- **TypeError**: ws_close() code must be 1000 or an application code from 3000 to 4999 — *Fix: Use 1000 or a code from 3000 to 4999*
+- **TypeError**: ws_close() reason must be at most 123 bytes — *Fix: Shorten the reason*
 
 **See also:** `ws_endpoint`, `ws_send`
 
@@ -8681,7 +8694,15 @@ Call it at the top level of your app, like a route; calling it while the server 
 
 ```ntnt
 let echo = ws_endpoint("echo", fn(conn, message, state) { ws_send(conn, message["data"]); state })  // => WebSocketEndpoint  // Echo every message
+let chat = ws_endpoint("chat", on_message, map { "origins": ["https://app.example.com"], "on_open": on_open })  // => WebSocketEndpoint  // Explicit trusted origin and an open hook
 ```
+
+**Errors:**
+
+- **RuntimeError**: ws_endpoint() can only be called during application setup, before the server starts serving — *Fix: Call ws_endpoint at the top level of the app, before listen()*
+- **RuntimeError**: ws_endpoint needs trusted origins in production: set SITE_URL or pass the `origins` option — *Fix: Set SITE_URL or pass the origins option*
+- **TypeError**: ws_endpoint() name must be 1-64 characters of letters, digits, '_', '-' or '.' — *Fix: Use a short stable name such as chat*
+- **TypeError**: unknown ws_endpoint() option — *Fix: Use on_open, on_close, origins or allow_missing_origin*
 
 **See also:** `websocket`, `ws_send`, `ws_close`
 
@@ -8710,7 +8731,13 @@ A String is sent as text; an Array of Ints from 0 to 255 as binary. `Ok` means t
 
 ```ntnt
 ws_send(conn, "hello")  // => Ok(())  // Send a text message
+ws_send(conn, [0, 1, 255])  // => Ok(())  // Send a binary message
 ```
+
+**Errors:**
+
+- **TypeError**: ws_send() data must be a String (text) or Array of 0-255 Ints (binary) — *Fix: Convert the value with stringify() or send bytes as Ints from 0 to 255*
+- **TypeError**: ws_send() requires a WebSocket connection as its first argument — *Fix: Pass the conn argument your callback received*
 
 **See also:** `ws_endpoint`, `ws_close`
 
