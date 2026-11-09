@@ -55,7 +55,8 @@ Apps using realtime (a setup `broadcast` bus or an explicit `realtime` map) now
 check that every HTTP worker loaded exactly the primary's source, compared where
 setup first reaches `listen`. Workers that loaded different files fail startup
 before the listener binds. A worker that restarts later with changed files on
-disk stays out of service until the process restarts. Buffered-only apps are
+disk stays out of service until its source matches the running generation again.
+Buffered-only apps are
 unchanged. Endpoint configuration and lazy imports after `listen` are not yet
 part of the check.
 

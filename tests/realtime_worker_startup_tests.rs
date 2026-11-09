@@ -290,3 +290,87 @@ fn realtime_source_is_compared_where_setup_reaches_listen() {
     server.ready();
     assert_eq!(setups_before_readiness(&server), 2, "{}", server.stderr());
 }
+
+#[test]
+fn server_block_realtime_app_starts_with_matching_workers() {
+    // `server { }` starts the server without calling listen; it is the same
+    // setup point and must not fail the source check.
+    let source = r#"
+import { text } from "std/http/server"
+import { broadcast } from "std/concurrent"
+fn health(req) { text("ready") }
+let bus = broadcast("ready")
+print("SETUP_DONE")
+server 0 {
+    GET /health -> health
+}
+"#;
+    let mut server = fixture::Fixture::start(
+        source,
+        &["run"],
+        &[("NTNT_ENV", "production"), ("NTNT_WORKERS", "2")],
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let err = server.stderr();
+        assert!(
+            !err.contains("requires a source fingerprint")
+                && !err.contains("loaded different source"),
+            "{err}"
+        );
+        if server.stdout().matches("SETUP_DONE").count() >= 2
+            && std::time::Instant::now() + Duration::from_secs(6) < deadline
+        {
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(
+                server.child.try_wait().unwrap().is_none(),
+                "{}",
+                server.stderr()
+            );
+            break;
+        }
+        assert!(
+            server.child.try_wait().unwrap().is_none(),
+            "{}",
+            server.stderr()
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "server block app did not start"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn realtime_worker_that_skips_listen_fails_the_source_check() {
+    // The primary reaches listen; workers take a branch that never does.
+    let dir = tempfile::tempdir().unwrap();
+    let marker = serde_json::to_string(dir.path().join("primary").to_str().unwrap()).unwrap();
+    let source = format!(
+        r#"
+import {{ text }} from "std/http/server"
+import {{ broadcast }} from "std/concurrent"
+import {{ exists, write_file }} from "std/fs"
+let bus = broadcast("ready")
+print("SETUP_DONE")
+get("/health", fn(req) {{ text("ready") }})
+if !exists({marker}) {{
+    write_file({marker}, "1")
+    listen(0, map {{ "host": "127.0.0.1", "readiness": "json" }})
+}}
+"#
+    );
+    let mut server = fixture::Fixture::start(
+        &source,
+        &["run"],
+        &[("NTNT_ENV", "production"), ("NTNT_WORKERS", "2")],
+    );
+    assert!(!server.wait().success());
+    assert!(!server.stdout().contains("NTNT_READY"));
+    let error = server.stderr();
+    assert!(
+        error.contains("did not reach listen or a server block"),
+        "{error}"
+    );
+}

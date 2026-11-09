@@ -18,7 +18,8 @@ within the running platform; it is not a runtime-build/release fingerprint.
 
 Source parity for realtime startup (Slice B step 2, first part) now uses that
 snapshot at a **corresponding setup boundary**: each interpreter records its
-fingerprint the first time setup reaches `listen`. The primary blocks there and
+fingerprint the first time setup reaches `listen` or a `server { }` block. A
+worker that never reaches one fails the check; it is not fingerprinted later. The primary blocks there and
 workers continue past their suppressed `listen`, so this is the one point both
 sides share; comparing after evaluation would differ for valid programs that
 import after `listen`. With realtime startup, every configured worker reports
@@ -27,8 +28,8 @@ missing/unavailable fingerprint, is a fatal startup error before bind or
 readiness. The matching fingerprint becomes the committed generation. A worker
 that restarts later and loads different bytes (for example, files replaced on
 disk without restarting the process) stays out of service, retried with the
-existing backoff, until it matches; files must not be relabeled as the running
-generation. Buffered-only apps are unchanged.
+existing backoff, until its source matches the committed generation again; files
+must not be relabeled as the running generation. Buffered-only apps are unchanged.
 
 Not covered yet, and still Slice B acceptance work: frozen endpoint/callback
 configuration (WebSocket endpoints do not exist yet), validation of lazy imports

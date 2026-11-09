@@ -1436,15 +1436,20 @@ impl Interpreter {
 
     // --- Server action handlers (associated functions, not methods) ---
 
-    fn sa_listen(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
-        if interp.listen_source.is_none() {
-            interp.listen_source = Some(
-                interp
-                    .source_snapshot()
+    /// Record the source fingerprint the first time setup reaches a server
+    /// start (`listen` or a `server { }` block), in every execution mode.
+    fn record_listen_source(&mut self) {
+        if self.listen_source.is_none() {
+            self.listen_source = Some(
+                self.source_snapshot()
                     .map(|snapshot| snapshot.digest())
                     .map_err(|error| error.to_string()),
             );
         }
+    }
+
+    fn sa_listen(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        interp.record_listen_source();
         // listen() only runs in Normal mode (no server in Worker/HotReload/Job/UnitTest)
         if interp.execution_mode != ExecutionMode::Normal {
             return Ok(Value::Unit);
@@ -10223,7 +10228,7 @@ impl Interpreter {
                         )))
                     }
                     None => return Err(IntentError::runtime_error(
-                        "realtime startup requires a source fingerprint: listen was not reached",
+                        "realtime startup requires a source fingerprint: setup did not reach listen or a server block",
                     )),
                 };
             let (worker_startup_tx, worker_startup_rx) = std::sync::mpsc::channel();
@@ -10750,12 +10755,12 @@ impl Interpreter {
         // listen. After startup, a restarted worker that loaded different
         // source stays out of service (retried with backoff) until it matches.
         if startup.is_some() || generation.get().is_some() {
-            let loaded = interpreter.listen_source.clone().unwrap_or_else(|| {
-                interpreter
-                    .source_snapshot()
-                    .map(|snapshot| snapshot.digest())
-                    .map_err(|error| error.to_string())
-            });
+            // No fallback snapshot: a worker that never reached a server
+            // start was not compared at the same point as the primary.
+            let loaded = interpreter
+                .listen_source
+                .clone()
+                .unwrap_or_else(|| Err("setup did not reach listen or a server block".to_string()));
             if let Some(startup) = startup.take() {
                 if startup.send((worker_id, loaded)).is_err() {
                     return WorkerExit::Shutdown;
@@ -11626,6 +11631,9 @@ impl Interpreter {
     ) -> Result<Value> {
         use crate::ast::ServerDirective;
 
+        // A server block is a server start like listen: fingerprint it in
+        // every mode so realtime workers compare the same setup point.
+        self.record_listen_source();
         // Skip server block evaluation when not in Normal mode (listen() would also skip)
         if self.execution_mode != ExecutionMode::Normal {
             return Ok(Value::Unit);
@@ -11801,6 +11809,7 @@ impl Interpreter {
 
     /// Start the HTTP server (delegates to existing mechanism)
     fn start_http_server(&mut self, port: u16) -> Result<Value> {
+        self.record_listen_source();
         // Check execution mode
         if self.execution_mode == ExecutionMode::HotReload {
             // In hot-reload mode, skip re-binding the port
@@ -16326,50 +16335,112 @@ c")
         }
     }
 
-    #[test]
-    fn test_restarted_realtime_worker_with_changed_source_does_not_serve() {
-        let dir = tempfile::tempdir().unwrap();
-        let source_file = dir.path().join("worker.tnt");
-        std::fs::write(&source_file, "let initialized = true\nlisten(0)\n").unwrap();
-        let path = source_file.to_str().unwrap();
-        // Startup committed a generation; this restart loads different bytes.
-        let committed = std::sync::OnceLock::new();
-        committed.set([7u8; 32]).unwrap();
-        let (_tx, rx) = flume::unbounded();
-        let WorkerExit::StartupFailed(error) =
-            Interpreter::run_worker(1, rx, path, &mut None, &committed)
-        else {
-            panic!("worker with changed source entered service");
-        };
-        assert!(error.contains("loaded different source"), "{error}");
+    fn worker_get(
+        tx: &flume::Sender<crate::stdlib::http_bridge::HandlerRequest>,
+        path: &str,
+        timeout: std::time::Duration,
+    ) -> Option<crate::stdlib::http_bridge::BridgeResponse> {
+        use crate::stdlib::http_bridge::{BridgeRequest, HandlerRequest};
+        let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(HandlerRequest {
+            request: BridgeRequest {
+                method: "GET".into(),
+                path: path.into(),
+                url: format!("http://localhost{path}"),
+                query: String::new(),
+                query_params: HashMap::new(),
+                params: HashMap::new(),
+                headers: HashMap::new(),
+                body: String::new(),
+                body_bytes: Vec::new(),
+                id: path.into(),
+                ip: "127.0.0.1".into(),
+                peer_ip: "127.0.0.1".into(),
+                client_ip: "127.0.0.1".into(),
+                protocol: "http".into(),
+            },
+            reply_tx,
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match reply_rx.try_recv() {
+                Ok(response) => return Some(response),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => return None,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 
-        // The same source as the committed generation serves normally.
+    #[test]
+    fn test_supervised_realtime_worker_restart_serves_only_the_committed_source() {
+        // A restarted supervisor attempt has no startup channel and a committed
+        // generation. Start one in exactly that state through the real
+        // supervisor: changed source must not answer across retries, and the
+        // committed source must answer again once restored.
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("helper.tnt");
+        std::fs::write(&helper, "fn tag() { \"v1\" }\n").unwrap();
+        let source_file = dir.path().join("worker.tnt");
+        std::fs::write(
+            &source_file,
+            format!(
+                "import {{ text }} from \"std/http/server\"\nimport {{ tag }} from {}\nget(\"/tag\", fn(req) {{ text(tag()) }})\nlisten(0)\n",
+                serde_json::to_string(helper.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+        let path = source_file.to_str().unwrap().to_string();
+
+        // Commit the generation from a real startup report for v1.
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
-        let (_tx, rx) = flume::unbounded();
-        let mut startup = Some(probe_tx);
-        let _ = std::thread::spawn({
-            let path = path.to_string();
-            move || Interpreter::run_worker(1, rx, &path, &mut startup, &Default::default())
+        let (probe_requests, probe_rx_requests) = flume::unbounded();
+        let probe = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                Interpreter::run_worker(
+                    1,
+                    probe_rx_requests,
+                    &path,
+                    &mut Some(probe_tx),
+                    &Default::default(),
+                )
+            }
         });
         let (_, loaded) = probe_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
-        let matching = std::sync::OnceLock::new();
-        matching.set(loaded.unwrap()).unwrap();
-        let (tx, rx) = flume::unbounded::<crate::stdlib::http_bridge::HandlerRequest>();
-        let worker = std::thread::spawn({
-            let path = path.to_string();
-            move || Interpreter::run_worker(1, rx, &path, &mut None, &matching)
-        });
+        drop(probe_requests);
+        assert_eq!(probe.join().unwrap(), WorkerExit::Shutdown);
+        let generation = CommittedGeneration::default();
+        generation.set(loaded.unwrap()).unwrap();
+
+        std::fs::write(&helper, "fn tag() { \"v2\" }\n").unwrap();
+        let (tx, rx) = flume::unbounded();
+        let workers = Interpreter::spawn_http_workers(2, &rx, &path, None, generation);
+        assert!(
+            worker_get(&tx, "/tag", std::time::Duration::from_millis(1500)).is_none(),
+            "a worker with changed source answered"
+        );
+        std::fs::write(&helper, "fn tag() { \"v1\" }\n").unwrap();
+        let response = worker_get(&tx, "/tag", std::time::Duration::from_secs(10))
+            .expect("worker with the committed source must serve again");
+        assert_eq!(response.body, "v1");
         drop(tx);
-        assert!(matches!(worker.join().unwrap(), WorkerExit::Shutdown));
+        drop(rx);
+        assert_http_workers_exit(workers);
     }
 
     #[test]
     fn test_acknowledged_http_worker_exits_when_startup_aborts() {
         let dir = tempfile::tempdir().unwrap();
         let source_file = dir.path().join("worker.tnt");
-        std::fs::write(&source_file, "let initialized = true").unwrap();
+        // A real HTTP app reaches listen; that is where workers report source.
+        std::fs::write(&source_file, "let initialized = true\nlisten(0)\n").unwrap();
         let (tx, rx) = flume::unbounded();
         let (startup_tx, startup_rx) = std::sync::mpsc::channel();
         let workers = Interpreter::spawn_http_workers(
