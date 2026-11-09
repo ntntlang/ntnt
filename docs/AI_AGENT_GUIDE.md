@@ -4245,7 +4245,8 @@ Two-way messages with `ws_endpoint()` and `websocket()`. Requires the async serv
 POST requests unless clients really send frequent messages.
 
 ```ntnt
-import { text, status, ws_endpoint, websocket, ws_send, ws_close } from "std/http/server"
+import { redirect, ws_endpoint, websocket, ws_send, ws_close } from "std/http/server"
+import { get_user } from "std/auth"
 
 fn on_message(conn, message, state) {
     if message["kind"] != "text" {
@@ -4262,9 +4263,9 @@ let chat = ws_endpoint("chat", on_message)
 
 get("/ws", fn(req) {
     // Middleware/auth run first; a denial or redirect opens nothing.
-    let user = req.headers["x-user"] ?? ""
-    if user == "" { return status(401, "sign in") }
-    return websocket(chat, map { "state": map { "user": user, "count": 0 } })
+    // Take identity from the authenticated session, never a client header.
+    let user = get_user(req) otherwise { return redirect("/login") }
+    return websocket(chat, map { "state": map { "user": user["id"], "count": 0 } })
 })
 ```
 
@@ -4288,8 +4289,11 @@ get("/ws", fn(req) {
   are always refused; requests without an Origin need `allow_missing_origin: true`.
 - Limits: messages up to `max_event_bytes` (64 KiB default, at most 256 KiB); at most
   4 unprocessed messages / 256 KiB per connection (more closes with 1008); 64 queued
-  callbacks per process (more closes with 1013). With several workers, one is always
-  kept free for HTTP. Callbacks over 30 seconds close the connection. Server pings
+  callbacks per process (more closes with 1013). With several configured workers,
+  at most all but one run callbacks at once. With one worker (the development
+  default), a long callback delays HTTP requests. Callbacks over 30 seconds close
+  the connection. The receive backlog is a per-connection limit, not part of the
+  realtime payload budget. Server pings
   every 30 s; WebSocket connections count against `max_connections`.
 - **Handshake auth is not ongoing authorization.** Recheck permissions inside
   `on_message` for sensitive commands; `state["user"]` is only what you stored.

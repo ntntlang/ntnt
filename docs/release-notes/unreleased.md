@@ -32,9 +32,11 @@ queued messages. Optional `on_open` and `on_close` hooks are supported.
 
 Origins are matched exactly: the `origins` option, else the origin of `SITE_URL`,
 else localhost in development. Production startup fails without one of them.
-Each connection has bounded send and receive queues charged to the realtime
-payload budget; a process-wide callback queue (64) and one worker kept free for
-HTTP stop sockets from starving requests. Shutdown closes sockets with 1001.
+Each connection has a bounded send queue charged to the realtime payload budget
+and a separately bounded receive backlog (4 messages / 256 KiB). A process-wide
+callback queue (64) and, with more than one configured worker, a limit of all but
+one worker running callbacks keep sockets from starving requests. With a single
+worker, a long callback still delays HTTP. Shutdown closes sockets with 1001.
 `ntnt test` returns 501 for `websocket()`.
 
 Not yet: broadcast fan-out to WebSockets, a connection lifetime limit, closing

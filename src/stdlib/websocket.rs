@@ -217,7 +217,34 @@ fn canonical_origin(origin: &str) -> Result<String> {
     {
         return Err(invalid());
     }
-    Ok(format!("{scheme}://{}", rest.to_ascii_lowercase()))
+    let rest = rest.to_ascii_lowercase();
+    // Split off a port after the host (an IPv6 host is bracketed).
+    let host_end = if rest.starts_with('[') {
+        rest.find(']').map(|i| i + 1).ok_or_else(invalid)?
+    } else {
+        rest.find(':').unwrap_or(rest.len())
+    };
+    let (host, port) = rest.split_at(host_end);
+    if host.is_empty() || host == "[]" {
+        return Err(invalid());
+    }
+    match port {
+        "" => Ok(format!("{scheme}://{host}")),
+        port => {
+            let number = port
+                .strip_prefix(':')
+                .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|p| p.parse::<u16>().ok())
+                .ok_or_else(invalid)?;
+            // Browsers omit the default port from Origin; so must we.
+            let default = if scheme == "https" { 443 } else { 80 };
+            if number == default {
+                Ok(format!("{scheme}://{host}"))
+            } else {
+                Ok(format!("{scheme}://{host}:{number}"))
+            }
+        }
+    }
 }
 
 fn is_loopback_origin(origin: &str) -> bool {
@@ -1169,6 +1196,33 @@ mod tests {
         let site =
             OriginPolicy::configure(None, false, Some("https://site.test/app?x"), true).unwrap();
         assert_eq!(site.allowed, vec!["https://site.test".to_string()]);
+        let default_port =
+            OriginPolicy::configure(None, false, Some("https://app.example.com:443/"), true)
+                .unwrap();
+        assert!(default_port.allows(Some("https://app.example.com")));
+        let http_default =
+            OriginPolicy::configure(Some(vec!["http://x.test:80".into()]), false, None, true)
+                .unwrap();
+        assert!(http_default.allows(Some("http://x.test")));
+        let custom =
+            OriginPolicy::configure(Some(vec!["https://x.test:8443".into()]), false, None, true)
+                .unwrap();
+        assert!(custom.allows(Some("https://x.test:8443")));
+        assert!(!custom.allows(Some("https://x.test")));
+        let v6 = OriginPolicy::configure(Some(vec!["http://[::1]:80".into()]), false, None, true)
+            .unwrap();
+        assert!(v6.allows(Some("http://[::1]")));
+        for bad in [
+            "https://a.test:",
+            "https://a.test:abc",
+            "https://a.test:99999",
+            "https://[::1",
+        ] {
+            assert!(
+                OriginPolicy::configure(Some(vec![bad.into()]), false, None, true).is_err(),
+                "{bad}"
+            );
+        }
         assert!(OriginPolicy::configure(None, false, None, true).is_err());
         assert!(OriginPolicy::configure(None, false, Some("  "), true).is_err());
         let dev = OriginPolicy::configure(None, false, None, false).unwrap();
