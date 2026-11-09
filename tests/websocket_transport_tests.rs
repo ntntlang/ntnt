@@ -322,25 +322,69 @@ async fn application_cannot_override_handshake_headers() {
     open_count_is(base).await;
 }
 
-#[tokio::test]
-async fn oversized_message_closes_with_1009_and_releases_the_connection() {
-    let _serial = COUNTER.lock().await;
-    let addr = start().await;
-    let base = realtime::stats().0;
-    let (mut socket, _) = tokio_tungstenite::connect_async(request(addr, "/ws", Some(ORIGIN)))
-        .await
-        .unwrap();
-    socket
-        .send(Message::Binary(vec![7; 64 * 1024 + 1]))
-        .await
-        .unwrap();
+async fn close_code(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Option<CloseCode> {
     let mut code = None;
     while let Some(Ok(message)) = socket.next().await {
         if let Message::Close(Some(frame)) = message {
             code = Some(frame.code);
         }
     }
-    assert_eq!(code, Some(CloseCode::Size));
+    code
+}
+
+#[tokio::test]
+async fn oversized_fragmented_message_closes_with_1009_and_releases_the_connection() {
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
+    use tokio_tungstenite::tungstenite::protocol::frame::Frame;
+    let _serial = COUNTER.lock().await;
+    let addr = start().await;
+    let base = realtime::stats().0;
+    let (mut socket, _) = tokio_tungstenite::connect_async(request(addr, "/ws", Some(ORIGIN)))
+        .await
+        .unwrap();
+    // Each frame is under the limit; the assembled message is not. Every
+    // byte is read by the server, so the close frame arrives on all platforms.
+    let half = 32 * 1024 + 1;
+    socket
+        .send(Message::Frame(Frame::message(
+            vec![7; half],
+            OpCode::Data(Data::Binary),
+            false,
+        )))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Frame(Frame::message(
+            vec![7; half],
+            OpCode::Data(Data::Continue),
+            true,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(close_code(&mut socket).await, Some(CloseCode::Size));
+    open_count_is(base).await;
+}
+
+#[tokio::test]
+async fn oversized_single_frame_ends_the_connection() {
+    let _serial = COUNTER.lock().await;
+    let addr = start().await;
+    let base = realtime::stats().0;
+    let (mut socket, _) = tokio_tungstenite::connect_async(request(addr, "/ws", Some(ORIGIN)))
+        .await
+        .unwrap();
+    // The server refuses at the frame header without reading the payload.
+    // Unread bytes may turn the close into a TCP reset (Windows does), so
+    // only the outcome is asserted: the connection ends and is released.
+    let _ = socket.send(Message::Binary(vec![7; 64 * 1024 + 1])).await;
+    let code = tokio::time::timeout(Duration::from_secs(5), close_code(&mut socket))
+        .await
+        .expect("connection stayed open");
+    assert!(matches!(code, None | Some(CloseCode::Size)), "{code:?}");
     open_count_is(base).await;
 }
 
@@ -349,19 +393,18 @@ async fn server_pings_and_drops_a_peer_that_never_answers() {
     let _serial = COUNTER.lock().await;
     let addr = start().await;
     let base = realtime::stats().0;
-    // A polled client answers pings automatically and stays open.
-    let (mut live, _) = tokio_tungstenite::connect_async(request(addr, "/ws", Some(ORIGIN)))
+    // A polled client answers pings automatically and stays open. Keep it
+    // polled for the whole test so it never misses a pong deadline.
+    let (live, _) = tokio_tungstenite::connect_async(request(addr, "/ws", Some(ORIGIN)))
         .await
         .unwrap();
-    let mut pings = 0;
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(1200);
-    while let Ok(Some(message)) = tokio::time::timeout_at(deadline, live.next()).await {
-        if let Message::Ping(_) = message.unwrap() {
-            pings += 1;
+    let (mut live_tx, mut live_rx) = live.split();
+    let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+    let reader = tokio::spawn(async move {
+        while let Some(Ok(message)) = live_rx.next().await {
+            let _ = seen_tx.send(message);
         }
-    }
-    assert!(pings >= 3, "expected repeated pings, saw {pings}");
-    live.send(Message::Text("still open".into())).await.unwrap();
+    });
     // A client that never reads never sends a pong.
     let (silent, _) = tokio_tungstenite::connect_async(request(addr, "/ws", Some(ORIGIN)))
         .await
@@ -369,17 +412,31 @@ async fn server_pings_and_drops_a_peer_that_never_answers() {
     open_count_is(base + 2).await;
     open_count_is(base + 1).await;
     drop(silent);
+
+    live_tx
+        .send(Message::Text("still open".into()))
+        .await
+        .unwrap();
+    let mut pings = 0;
     loop {
-        match live.next().await.unwrap().unwrap() {
+        match tokio::time::timeout(Duration::from_secs(5), seen_rx.recv())
+            .await
+            .expect("live client went quiet")
+            .expect("live client closed")
+        {
+            Message::Ping(_) => pings += 1,
             Message::Text(text) => {
                 assert_eq!(text, "still open");
                 break;
             }
-            Message::Ping(_) => {}
             other => panic!("unexpected {other:?}"),
         }
     }
-    drop(live);
+    assert!(pings >= 1, "the live client was never pinged");
+    assert_eq!(realtime::stats().0, base + 1);
+    drop(live_tx);
+    reader.abort();
+    let _ = reader.await;
     open_count_is(base).await;
 }
 

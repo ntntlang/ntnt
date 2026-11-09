@@ -29,6 +29,49 @@ pub const OUTBOX_MESSAGES: usize = 16;
 /// Most payload bytes queued for one connection.
 pub const OUTBOX_BYTES: usize = 256 * 1024;
 
+/// Live connection owners, including admitted upgrades not yet completed.
+/// Server exit waits for these so close frames are sent before the runtime
+/// is dropped.
+static OWNERS: AtomicUsize = AtomicUsize::new(0);
+static OWNERS_IDLE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Held by one admitted connection until its owner task ends.
+pub(crate) struct OwnerGuard(());
+
+impl OwnerGuard {
+    pub(crate) fn new() -> Self {
+        OWNERS.fetch_add(1, Ordering::AcqRel);
+        Self(())
+    }
+}
+
+impl Drop for OwnerGuard {
+    fn drop(&mut self) {
+        if OWNERS.fetch_sub(1, Ordering::AcqRel) == 1 {
+            OWNERS_IDLE.notify_waiters();
+        }
+    }
+}
+
+/// Wait until every connection owner has finished. Callers bound this.
+pub(crate) async fn wait_for_owners() {
+    loop {
+        let idle = OWNERS_IDLE.notified();
+        tokio::pin!(idle);
+        idle.as_mut().enable();
+        if OWNERS.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        idle.await;
+    }
+}
+
+/// Largest message one connection can queue; inbound messages above it are
+/// refused by the codec with 1009 instead of failing later as overload.
+pub(crate) fn effective_max_message(max_event_bytes: usize) -> usize {
+    max_event_bytes.min(OUTBOX_BYTES)
+}
+
 /// Close codes used by the runtime (RFC 6455 §7.4.1).
 pub mod close_code {
     pub const NORMAL: u16 = 1000;
@@ -259,6 +302,7 @@ pub(crate) async fn run(
     mut socket: WebSocket,
     spec: WsSpec,
     permit: StreamPermit,
+    owner: OwnerGuard,
     mut shutdown: watch::Receiver<bool>,
     max_message: usize,
 ) {
@@ -348,6 +392,7 @@ pub(crate) async fn run(
     drop(socket);
     drop(rx);
     drop(permit);
+    drop(owner);
 }
 
 /// Poll until the peer finishes closing, which also flushes an automatic
@@ -380,6 +425,32 @@ mod tests {
         };
         assert!(open.allows(None));
         assert!(!open.allows(Some("null")));
+    }
+
+    #[tokio::test]
+    async fn owner_wait_returns_when_the_last_owner_ends() {
+        let guard = OwnerGuard::new();
+        let waiter = tokio::spawn(wait_for_owners());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "returned with an owner still live");
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("owner wait did not wake")
+            .unwrap();
+    }
+
+    #[test]
+    fn effective_message_limit_never_exceeds_the_outbox() {
+        assert_eq!(effective_max_message(1024), 1024);
+        assert_eq!(effective_max_message(32 * 1024 * 1024), OUTBOX_BYTES);
+    }
+
+    #[test]
+    fn failed_payload_charge_leaves_the_budget_unchanged() {
+        let before = crate::stdlib::realtime::stats().1;
+        assert!(crate::stdlib::realtime::charge_payload(usize::MAX).is_none());
+        assert_eq!(crate::stdlib::realtime::stats().1, before);
     }
 
     #[tokio::test]

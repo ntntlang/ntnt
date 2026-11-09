@@ -807,7 +807,7 @@ impl Drop for PayloadCharge {
 pub(crate) fn charge_payload(len: usize) -> Option<PayloadCharge> {
     let configuration = LIMITS.read().unwrap_or_else(|e| e.into_inner());
     let limits = configuration.unwrap_or_default();
-    reserve_payload(len, limits.max_payload_bytes).then_some(PayloadCharge(len))
+    reserve_payload(len, limits.max_payload_bytes).then(|| PayloadCharge(len))
 }
 
 /// Admission for a non-SSE realtime connection: the shared connection

@@ -672,7 +672,7 @@ fn ws_to_axum_response(
     if !spec.origins().allows(origin.as_deref()) {
         return ws_refusal(StatusCode::FORBIDDEN, "Origin not allowed", csp);
     }
-    let (permit, shutdown, max_message) = match admit_connection() {
+    let (permit, shutdown, max_event_bytes) = match admit_connection() {
         Ok(admitted) => admitted,
         Err(OpenError::ShuttingDown) => {
             return ws_refusal(
@@ -689,6 +689,8 @@ fn ws_to_axum_response(
             )
         }
     };
+    let max_message = crate::stdlib::websocket::effective_max_message(max_event_bytes);
+    let owner = crate::stdlib::websocket::OwnerGuard::new();
     let spec = spec.clone();
     // Explicit codec limits instead of the 64 MiB defaults. Writes go out
     // eagerly; one message plus control frames may wait in the codec.
@@ -699,7 +701,7 @@ fn ws_to_axum_response(
         .max_write_buffer_size(max_message.saturating_add(16 * 1024));
     // If the upgrade never completes, the callback is dropped with the permit.
     let mut resp = upgrade.on_upgrade(move |socket| {
-        crate::stdlib::websocket::run(socket, spec, permit, shutdown, max_message)
+        crate::stdlib::websocket::run(socket, spec, permit, owner, shutdown, max_message)
     });
     for (key, value) in headers {
         if WS_FIXED_HEADERS.contains(&key.to_ascii_lowercase().as_str()) {
@@ -1614,8 +1616,14 @@ async fn serve_connections(
     }
     drop(listener);
     let drain = shutdown_drain_limit(request_timeout_secs);
+    // Upgraded sockets leave Hyper's connection tracking, so also wait for
+    // their owners to send close frames (shutdown already signalled them).
+    let drained = async {
+        graceful.shutdown().await;
+        crate::stdlib::websocket::wait_for_owners().await;
+    };
     tokio::select! {
-        _ = graceful.shutdown() => {}
+        _ = drained => {}
         _ = tokio::time::sleep(drain) => {
             eprintln!(
                 "[WARN] shutdown drain exceeded {}s; closing remaining connections",
