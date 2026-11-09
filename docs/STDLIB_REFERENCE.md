@@ -8736,7 +8736,7 @@ ws_send(conn, [0, 1, 255])  // => Ok(())  // Send a binary message
 
 **Errors:**
 
-- **TypeError**: ws_send() data must be a String (text) or Array of 0-255 Ints (binary) — *Fix: Convert the value with stringify() or send bytes as Ints from 0 to 255*
+- **TypeError**: ws_send() data must be a String (text) or Array of 0-255 Ints (binary) — *Fix: Convert the value with str() (or JSON-encode it) or send bytes as Ints from 0 to 255*
 - **TypeError**: ws_send() requires a WebSocket connection as its first argument — *Fix: Pass the conn argument your callback received*
 
 **See also:** `ws_endpoint`, `ws_close`

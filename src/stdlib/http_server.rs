@@ -1561,7 +1561,7 @@ pub fn init() -> HashMap<String, Value> {
     // @since v0.6.1
     // @example ws_send(conn, "hello") => Ok(()) ~ "Send a text message"
     // @example ws_send(conn, [0, 1, 255]) => Ok(()) ~ "Send a binary message"
-    // @error TypeError ~ "ws_send() data must be a String (text) or Array of 0-255 Ints (binary)" fix: "Convert the value with stringify() or send bytes as Ints from 0 to 255"
+    // @error TypeError ~ "ws_send() data must be a String (text) or Array of 0-255 Ints (binary)" fix: "Convert the value with str() (or JSON-encode it) or send bytes as Ints from 0 to 255"
     // @error TypeError ~ "ws_send() requires a WebSocket connection as its first argument" fix: "Pass the conn argument your callback received"
     module.insert(
         "ws_send".to_string(),
