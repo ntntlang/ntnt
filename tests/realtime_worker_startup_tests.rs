@@ -318,9 +318,7 @@ server 0 {
                 && !err.contains("loaded different source"),
             "{err}"
         );
-        if server.stdout().matches("SETUP_DONE").count() >= 2
-            && std::time::Instant::now() + Duration::from_secs(6) < deadline
-        {
+        if server.stdout().matches("SETUP_DONE").count() >= 2 {
             std::thread::sleep(Duration::from_millis(300));
             assert!(
                 server.child.try_wait().unwrap().is_none(),
