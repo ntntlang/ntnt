@@ -3115,10 +3115,13 @@ mod tests {
     fn read_fixture_request(stream: &mut impl Read) -> String {
         let mut bytes = Vec::new();
         let mut buffer = [0; 4096];
-        while let Ok(n) = stream.read(&mut buffer) {
-            if n == 0 {
-                break;
-            }
+        loop {
+            let n = match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
             bytes.extend_from_slice(&buffer[..n]);
             if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
                 let headers = String::from_utf8_lossy(&bytes[..end]);

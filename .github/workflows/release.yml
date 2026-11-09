@@ -11,6 +11,7 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - '.config/nextest.toml'
+      - 'rust-toolchain.toml'
       - 'scripts/release/**'
       - 'tests/release/**'
       - 'install.sh'
