@@ -17,6 +17,18 @@ Native Rust embedders constructing `Value::Function` must convert the environmen
 shared-binding semantics are unchanged. This is automatic memory reclamation,
 not a new deterministic resource-close API.
 
+## DD-041: WebSocket transport (internal)
+
+The async server can now upgrade a request to a WebSocket after the normal
+request pipeline, using Axum's `ws` support. Only a successful final response
+upgrades; middleware denials, auth redirects and errors are sent as ordinary
+HTTP and open nothing. Origins are matched exactly. Each connection has bounded
+queues charged to the realtime payload budget, server pings, protocol close
+codes and a close on shutdown, and counts against `max_connections`.
+
+There is no application API yet: `ws_endpoint` and message callbacks are the
+next step. Existing HTTP and SSE behavior is unchanged.
+
 ## DD-041: exact loaded-source provenance
 
 The runtime records the actual file input parsed by each

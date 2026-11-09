@@ -793,6 +793,37 @@ async fn next_frame(
 
 const OVERFLOW: &[u8] = b"event: ntnt.overflow\ndata: null\n\n";
 
+/// Payload bytes held outside a bus (for example a queued WebSocket
+/// message), charged to the same process budget as retained events.
+pub struct PayloadCharge(usize);
+
+impl Drop for PayloadCharge {
+    fn drop(&mut self) {
+        PAYLOAD_USED.fetch_sub(self.0, Ordering::AcqRel);
+    }
+}
+
+/// Charge `len` bytes to the realtime payload budget, or `None` if full.
+pub(crate) fn charge_payload(len: usize) -> Option<PayloadCharge> {
+    let configuration = LIMITS.read().unwrap_or_else(|e| e.into_inner());
+    let limits = configuration.unwrap_or_default();
+    reserve_payload(len, limits.max_payload_bytes).then(|| PayloadCharge(len))
+}
+
+/// Admission for a non-SSE realtime connection: the shared connection
+/// permit, the shutdown signal and the per-message byte limit.
+pub(crate) fn admit_connection(
+) -> std::result::Result<(StreamPermit, watch::Receiver<bool>, usize), OpenError> {
+    let shutdown = SHUTDOWN.subscribe();
+    if *shutdown.borrow() {
+        return Err(OpenError::ShuttingDown);
+    }
+    let configuration = LIMITS.read().unwrap_or_else(|e| e.into_inner());
+    let limits = configuration.unwrap_or_default();
+    let permit = acquire_stream_permit(limits.max_connections).ok_or(OpenError::TooManyStreams)?;
+    Ok((permit, shutdown, limits.max_event_bytes))
+}
+
 /// End all open streams and refuse new ones. Called on process shutdown.
 pub fn shutdown() {
     SHUTDOWN.send_replace(true);
@@ -812,13 +843,14 @@ pub fn subscribers(bus: &Bus) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Stream and budget counters are process-global; tests that assert on
-    /// them run one at a time. An async-aware lock, because async tests hold
-    /// it across awaits. Sync tests (no runtime) take it with blocking_lock.
-    static COUNTERS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// or change them (here and in `websocket`) run one at a time. An
+    /// async-aware lock, because async tests hold it across awaits. Sync
+    /// tests (no runtime) take it with blocking_lock.
+    pub(crate) static COUNTERS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn map(entries: &[(&str, Value)]) -> Value {
         Value::Map(

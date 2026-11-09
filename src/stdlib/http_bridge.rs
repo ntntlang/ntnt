@@ -160,6 +160,9 @@ pub struct BridgeResponse {
     /// Server-Sent Events stream requested by `sse()`. Only a description:
     /// the subscription is created on the async side if this response is sent.
     pub sse: Option<crate::stdlib::realtime::SseSpec>,
+    /// WebSocket accepted by this response. Only a description: the async
+    /// side upgrades the connection if this response is sent and succeeds.
+    pub ws: Option<crate::stdlib::websocket::WsSpec>,
 }
 
 impl BridgeResponse {
@@ -203,6 +206,7 @@ impl BridgeResponse {
                     headers,
                     body,
                     sse: crate::stdlib::realtime::spec_from_response(map),
+                    ws: None,
                 }
             }
             _ => BridgeResponse {
@@ -210,6 +214,7 @@ impl BridgeResponse {
                 headers: Vec::new(),
                 body: "Handler did not return a valid response".to_string(),
                 sse: None,
+                ws: None,
             },
         }
     }
@@ -224,6 +229,7 @@ impl BridgeResponse {
             )],
             body: message.to_string(),
             sse: None,
+            ws: None,
         }
     }
 
@@ -486,6 +492,7 @@ mod tests {
                     headers: Vec::new(),
                     body: format!("Echo: {}", req.request.path),
                     sse: None,
+                    ws: None,
                 };
                 let _ = req.reply_tx.send(response);
             }

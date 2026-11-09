@@ -1,6 +1,6 @@
 # DD-041: Native SSE and WebSockets
 
-**Status:** Slice A (native SSE) shipped in v0.6.0. The v0.6.1 development line adds exact loaded-source provenance; Slice B (WebSockets) remains unimplemented.
+**Status:** Slice A (native SSE) shipped in v0.6.0. The v0.6.1 development line adds exact loaded-source provenance; Slice B (WebSockets) has its internal transport (upgrade and per-connection owner); no WebSocket API is available to applications yet.
 **Author:** Larri
 **Created:** 2026-03-17
 **Revised:** 2026-10-25

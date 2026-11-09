@@ -69,14 +69,16 @@ x509-parser = "0.18"
 # Security floor: avoid the AsyncFd I/O-safety advisory's affected Tokio lines.
 tokio = { version = "1.53.3", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "compression-gzip", "trace", "fs", "timeout"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 # Shared immutable SSE frames and the streaming body adapter (DD-041).
 bytes = "1.9"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+# Same version Axum's `ws` feature uses; named directly to classify protocol errors.
+tokio-tungstenite = "0.24"
 # Bounded monitoring HTTP transport; ordinary fetch remains on reqwest.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
