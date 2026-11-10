@@ -1484,8 +1484,9 @@ pub fn init() -> HashMap<String, Value> {
     // effort after the socket is gone; info has `code` and `reason`; skipped
     // if an earlier callback is still running), `origins` (exact allowed
     // Origins), `allow_missing_origin` (for non-browser clients),
-    // `callback_timeout_ms` (100-300000, default 30000: a callback slower than
-    // this closes the connection with 1011; the callback itself keeps running). Without `origins`, the origin of `SITE_URL` is
+    // `callback_timeout_ms` (100-300000, default 30000, counted from when the
+    // message is queued: past it the connection closes with 1011; a callback
+    // already running is not interrupted). Without `origins`, the origin of `SITE_URL` is
     // allowed; in development, localhost origins are allowed; in production
     // with neither, registration fails. Request Host headers are never trusted.
     // @param name Stable endpoint name (letters, digits, `_`, `-`, `.`)

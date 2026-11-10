@@ -4284,10 +4284,12 @@ get("/ws", fn(req) {
 - Options: `on_open(conn, state) -> state`, `on_close(state, info)` (best effort,
   after the socket is gone), `origins`, `allow_missing_origin`,
   `callback_timeout_ms` (default 30000).
-- A callback slower than `callback_timeout_ms` closes the connection with 1011,
-  but it is not interrupted: it runs to completion. `on_close` never runs at the
-  same time as another callback for that connection; it is skipped if one is
-  still running.
+- `callback_timeout_ms` counts from when the message is queued, so under load a
+  callback can time out before it starts (it is then skipped). Past the limit the
+  connection closes with 1011; a callback already running is not interrupted and
+  runs to completion. `on_close` never runs at the same time as another callback
+  for that connection: it is skipped if an earlier callback is still running when
+  the connection has finished closing.
 - **Origins** are matched exactly; CORS does not apply. Default: the origin of
   `SITE_URL`. In development without `SITE_URL`, localhost origins are allowed. In
   production with neither `SITE_URL` nor `origins`, startup fails. `null` origins

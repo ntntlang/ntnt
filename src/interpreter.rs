@@ -2575,7 +2575,9 @@ impl Interpreter {
 
         // Clear current state (routes, middleware, etc.) but keep server running
         self.server_state.clear();
-        self.ws_endpoints.clear();
+        // Kept until the new code evaluates: a failed reload keeps serving the
+        // old callbacks, like the old routes.
+        let previous_ws_endpoints = std::mem::take(&mut self.ws_endpoints);
 
         // Clear loaded modules and imported file tracking to force reimport
         self.loaded_modules.clear();
@@ -2614,6 +2616,7 @@ impl Interpreter {
             }
             Err(e) => {
                 eprintln!("[hot-reload] Evaluation error: {}", e);
+                self.ws_endpoints = previous_ws_endpoints;
                 false
             }
         };

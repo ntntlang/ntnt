@@ -302,12 +302,8 @@ async fn sigterm_closes_open_sockets_with_going_away() {
     assert!(status.success(), "server did not exit cleanly: {status:?}");
 }
 
-/// `ntnt test` always serves on port 18080, so these tests run one at a time.
-static NTNT_TEST_PORT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[test]
 fn ntnt_test_reports_websocket_as_unsupported() {
-    let _port = NTNT_TEST_PORT.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let app = dir.path().join("app.tnt");
     std::fs::write(
@@ -323,7 +319,7 @@ listen(8080)
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
         .args(["test"])
         .arg(&app)
-        .args(["--get", "/ws"])
+        .args(["--get", "/ws", "--port", "18197"])
         .env_remove("NTNT_ENV")
         .output()
         .unwrap();
@@ -342,7 +338,6 @@ listen(8080)
 #[test]
 fn ntnt_test_rejects_request_time_registration() {
     // Same setup-only rule as the async server, including through an alias.
-    let _port = NTNT_TEST_PORT.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let app = dir.path().join("app.tnt");
     std::fs::write(
@@ -366,7 +361,7 @@ listen(8080)
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
             .args(["test"])
             .arg(&app)
-            .args(["--get", path])
+            .args(["--get", path, "--port", "18198"])
             .env_remove("NTNT_ENV")
             .output()
             .unwrap();
