@@ -29,6 +29,9 @@ Callbacks run on the existing HTTP workers, one message at a time per connection
 with explicit JSON state (16 KiB) passed in and returned. `ws_send` queues a text
 or binary message (`Ok` means queued, not delivered); `ws_close` closes after
 queued messages. Optional `on_open` and `on_close` hooks are supported.
+A callback slower than `callback_timeout_ms` (default 30 s) closes the
+connection with 1011; it is not interrupted, and `on_close` is skipped rather
+than run alongside it. Registration is setup-only in `ntnt run` and `ntnt test`.
 
 Origins are matched exactly: the `origins` option, else the origin of `SITE_URL`,
 else localhost in development. Production startup fails without one of them.

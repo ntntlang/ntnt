@@ -791,15 +791,36 @@ fn next_serve_work(
     callbacks: Option<&crate::stdlib::websocket::CallbackReceiver>,
     http_in_row: &mut usize,
 ) -> ServeWork {
-    let http_only = |http: &flume::Receiver<_>| match http.recv() {
-        Ok(request) => ServeWork::Http(Box::new(request)),
-        Err(_) => ServeWork::Closed,
+    use crate::stdlib::websocket::{claimed_slot, slot_tokens, try_callback_slot};
+    let Some(callbacks) = callbacks else {
+        return match http.recv() {
+            Ok(request) => ServeWork::Http(Box::new(request)),
+            Err(_) => ServeWork::Closed,
+        };
     };
-    // Without a callback slot this worker serves HTTP only, which keeps one
-    // worker free for requests when there are several.
-    let Some((callbacks, slot)) = callbacks.zip(crate::stdlib::websocket::try_callback_slot())
-    else {
-        return http_only(http);
+    // Without a callback slot, wait for HTTP or for a slot to be returned.
+    // Waiting on the slot too means capacity released by another worker
+    // wakes this one instead of leaving queued callbacks unserved.
+    let slot = match try_callback_slot() {
+        Some(slot) => slot,
+        None => {
+            enum Wait {
+                Http(Option<Box<crate::stdlib::http_bridge::HandlerRequest>>),
+                Slot,
+            }
+            let wait = flume::Selector::new()
+                .recv(http, |r| Wait::Http(r.ok().map(Box::new)))
+                .recv(slot_tokens(), |_| Wait::Slot)
+                .wait();
+            match wait {
+                Wait::Http(Some(request)) => {
+                    *http_in_row += 1;
+                    return ServeWork::Http(request);
+                }
+                Wait::Http(None) => return ServeWork::Closed,
+                Wait::Slot => claimed_slot(),
+            }
+        }
     };
     if *http_in_row >= HTTP_PER_CALLBACK {
         if let Ok(job) = callbacks.try_recv() {
@@ -824,6 +845,7 @@ fn next_serve_work(
         .recv(callbacks, |r| Ready::Callback(r.ok()))
         .wait();
     match ready {
+        // Taking HTTP returns the slot (dropped here), waking a waiting worker.
         Ready::Http(Some(request)) => {
             *http_in_row += 1;
             ServeWork::Http(request)
@@ -836,7 +858,10 @@ fn next_serve_work(
         // The callback queue never closes before HTTP; fall back to HTTP.
         Ready::Callback(None) => {
             drop(slot);
-            http_only(http)
+            match http.recv() {
+                Ok(request) => ServeWork::Http(Box::new(request)),
+                Err(_) => ServeWork::Closed,
+            }
         }
     }
 }
@@ -1590,6 +1615,7 @@ impl Interpreter {
         };
         let mut origins = None;
         let mut allow_missing = false;
+        let mut callback_deadline = crate::stdlib::websocket::CALLBACK_DEADLINE;
         match args.get(2) {
             None | Some(Value::Unit) => {}
             Some(Value::Map(options)) => {
@@ -1610,6 +1636,14 @@ impl Interpreter {
                             origins = Some(list);
                         }
                         ("allow_missing_origin", Value::Bool(b)) => allow_missing = *b,
+                        ("callback_timeout_ms", Value::Int(ms)) if (100..=300_000).contains(ms) => {
+                            callback_deadline = std::time::Duration::from_millis(*ms as u64)
+                        }
+                        ("callback_timeout_ms", _) => {
+                            return Err(IntentError::type_error(
+                                "ws_endpoint() callback_timeout_ms must be an Int from 100 to 300000",
+                            ))
+                        }
                         ("on_open" | "on_close", _) => {
                             return Err(IntentError::type_error(format!(
                                 "ws_endpoint() {key} must be a function"
@@ -1627,7 +1661,7 @@ impl Interpreter {
                         }
                         _ => {
                             return Err(IntentError::type_error(format!(
-                                "unknown ws_endpoint() option: {key} (supported: on_open, on_close, origins, allow_missing_origin)"
+                                "unknown ws_endpoint() option: {key} (supported: on_open, on_close, origins, allow_missing_origin, callback_timeout_ms)"
                             )))
                         }
                     }
@@ -1646,14 +1680,19 @@ impl Interpreter {
         }
         let site_url = std::env::var("SITE_URL").ok();
         let config = EndpointConfig {
+            // Read the environment now: `load_env` may have set production
+            // after `is_production_mode()` cached an earlier answer.
             origins: OriginPolicy::configure(
                 origins,
                 allow_missing,
                 site_url.as_deref(),
-                is_production_mode(),
+                std::env::var("NTNT_ENV")
+                    .map(|v| v == "production" || v == "prod")
+                    .unwrap_or(false),
             )?,
             has_open: fns.on_open.is_some(),
             has_close: fns.on_close.is_some(),
+            callback_deadline,
         };
         register_endpoint(&name, config, hot_reload)?;
         self.ws_endpoints.insert(name.clone(), fns);
@@ -1672,7 +1711,7 @@ impl Interpreter {
         }
         let reply = job.reply;
         let Some(fns) = self.ws_endpoints.get(&job.endpoint).cloned() else {
-            let _ = reply.send(Err(format!(
+            reply.send(Err(format!(
                 "ws_endpoint {:?} is not registered in this worker",
                 job.endpoint
             )));
@@ -1711,7 +1750,7 @@ impl Interpreter {
                         eprintln!("[websocket {}] on_close failed: {error}", job.endpoint);
                     }
                 }
-                let _ = reply.send(Ok(job.state));
+                reply.send(Ok(job.state));
                 return;
             }
         };
@@ -1719,7 +1758,7 @@ impl Interpreter {
             Ok(value) => ws_next_state(value).and_then(|state| encode_state(&state)),
             Err(error) => Err(error.to_string()),
         };
-        let _ = reply.send(outcome);
+        reply.send(outcome);
     }
 
     /// Record the source fingerprint the first time setup reaches a server
@@ -9981,6 +10020,9 @@ impl Interpreter {
         }
         println!();
 
+        // Serving starts: setup-only calls (ws_endpoint) now fail, as in the
+        // async server.
+        self.setup_frozen = true;
         // Handle requests in a loop
         // In test mode, use recv_timeout and check shutdown flag
         loop {

@@ -302,8 +302,12 @@ async fn sigterm_closes_open_sockets_with_going_away() {
     assert!(status.success(), "server did not exit cleanly: {status:?}");
 }
 
+/// `ntnt test` always serves on port 18080, so these tests run one at a time.
+static NTNT_TEST_PORT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn ntnt_test_reports_websocket_as_unsupported() {
+    let _port = NTNT_TEST_PORT.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let app = dir.path().join("app.tnt");
     std::fs::write(
@@ -332,5 +336,238 @@ listen(8080)
     assert!(
         stdout.contains("websocket() requires the async HTTP server"),
         "{stdout}"
+    );
+}
+
+#[test]
+fn ntnt_test_rejects_request_time_registration() {
+    // Same setup-only rule as the async server, including through an alias.
+    let _port = NTNT_TEST_PORT.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app.tnt");
+    std::fs::write(
+        &app,
+        r#"
+import { text, ws_endpoint } from "std/http/server"
+import { ws_endpoint as register } from "std/http/server"
+get("/late", fn(req) {
+    ws_endpoint("late", fn(conn, message, state) { state })
+    return text("registered")
+})
+get("/alias", fn(req) {
+    register("alias", fn(conn, message, state) { state })
+    return text("registered")
+})
+listen(8080)
+"#,
+    )
+    .unwrap();
+    for path in ["/late", "/alias"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .args(["test"])
+            .arg(&app)
+            .args(["--get", path])
+            .env_remove("NTNT_ENV")
+            .output()
+            .unwrap();
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(all.contains("[RESPONSE] 500"), "{path}: {all}");
+        assert!(
+            all.contains("can only be called during application setup"),
+            "{path}: {all}"
+        );
+    }
+}
+
+#[test]
+fn production_set_by_load_env_after_caching_dev_mode_still_requires_origins() {
+    // An `otherwise` that catches an error caches the mode before load_env
+    // sets production.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("mode.env"), "NTNT_ENV=production\n").unwrap();
+    std::fs::write(
+        dir.path().join("app.tnt"),
+        r#"
+import { text, ws_endpoint } from "std/http/server"
+import { load_env } from "std/env"
+fn warm() {
+    let z = (1 / 0) otherwise { return 0 }
+    return z
+}
+let w = warm()
+load_env("mode.env")
+let chat = ws_endpoint("chat", fn(conn, message, state) { state })
+get("/", fn(req) { text("ok") })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#,
+    )
+    .unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .current_dir(dir.path())
+        .args(["run", "app.tnt"])
+        .env_remove("NTNT_ENV")
+        .env_remove("SITE_URL")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The fix makes startup fail at once; the bug lets the server run. Never
+    // wait on a server that started.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("server started without trusted origins in production");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+    assert!(!status.success(), "{stderr}");
+    assert!(
+        stderr.contains("set SITE_URL or pass the `origins` option"),
+        "{stderr}"
+    );
+}
+
+const SCHEDULING_APP: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+import { sleep_ms } from "std/concurrent"
+fn echo(conn, message, state) {
+    ws_send(conn, message["data"])
+    return state
+}
+let fast = ws_endpoint("fast", echo)
+get("/ws", fn(req) { websocket(fast) })
+get("/slow", fn(req) {
+    sleep_ms(1200)
+    return text("slow done")
+})
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+#[tokio::test]
+async fn released_callback_slot_wakes_an_idle_worker() {
+    // Two workers, one callback slot. When the slot holder takes a long HTTP
+    // request it must hand the slot to the idle worker, so a callback runs
+    // while that request is still in progress, without any other request.
+    // Which worker takes the request is up to the scheduler, so repeat:
+    // without the wakeup, each round has about an even chance of stalling.
+    let mut server = fixture::Fixture::start(SCHEDULING_APP, &["run"], &[("NTNT_WORKERS", "2")]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    socket.send(Message::Text("warm".into())).await.unwrap();
+    assert_eq!(next_data(&mut socket).await, Message::Text("warm".into()));
+    for round in 0..8 {
+        let slow = tokio::spawn(async move {
+            reqwest::get(format!("http://{addr}/slow"))
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let started = std::time::Instant::now();
+        socket
+            .send(Message::Text(format!("r{round}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_data(&mut socket).await,
+            Message::Text(format!("r{round}"))
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(600),
+            "round {round}: callback waited {:?} behind the slow request",
+            started.elapsed()
+        );
+        assert_eq!(slow.await.unwrap(), "slow done");
+    }
+}
+
+const CLOSE_OVERLAP_APP: &str = r#"
+import { ws_endpoint, websocket } from "std/http/server"
+import { sleep_ms } from "std/concurrent"
+fn slow_message(conn, message, state) {
+    print("MESSAGE_BEGIN")
+    sleep_ms(int(message["data"]) ?? 0)
+    print("MESSAGE_END")
+    return state
+}
+fn closed(state, info) {
+    print("CLOSE_BEGIN")
+}
+let ep = ws_endpoint("slow", slow_message, map {
+    "on_close": closed,
+    "callback_timeout_ms": 400
+})
+get("/ws", fn(req) { websocket(ep) })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+fn markers(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter(|l| matches!(*l, "MESSAGE_BEGIN" | "MESSAGE_END" | "CLOSE_BEGIN"))
+        .collect()
+}
+
+#[tokio::test]
+async fn on_close_never_overlaps_a_callback_that_outlived_its_deadline() {
+    let mut server = fixture::Fixture::start(CLOSE_OVERLAP_APP, &["run"], &[("NTNT_WORKERS", "3")]);
+    let addr = server.ready();
+    let origin = origin(addr);
+
+    // Past the deadline: the socket closes with 1011 promptly, and on_close
+    // is skipped because the message callback is still running.
+    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    socket.send(Message::Text("1500".into())).await.unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        close_frame(&mut socket).await.map(|(code, _)| code),
+        Some(CloseCode::Error)
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(1200),
+        "{:?}",
+        started.elapsed()
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !server.stdout().contains("MESSAGE_END") {
+        assert!(std::time::Instant::now() < deadline, "{}", server.stdout());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(markers(&server.stdout()), ["MESSAGE_BEGIN", "MESSAGE_END"]);
+    assert!(
+        server.stderr().contains("on_close skipped"),
+        "{}",
+        server.stderr()
+    );
+
+    // Peer closes while a callback runs within its deadline: on_close starts
+    // only after the message callback finished.
+    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    socket.send(Message::Text("250".into())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    socket.close(None).await.unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while markers(&server.stdout()).len() < 5 {
+        assert!(std::time::Instant::now() < deadline, "{}", server.stdout());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        markers(&server.stdout())[2..],
+        ["MESSAGE_BEGIN", "MESSAGE_END", "CLOSE_BEGIN"]
     );
 }

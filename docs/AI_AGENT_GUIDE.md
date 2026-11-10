@@ -4282,7 +4282,12 @@ get("/ws", fn(req) {
 - `ws_close(conn, code?, reason?)` closes after queued messages are written. Codes:
   1000 or 3000-4999.
 - Options: `on_open(conn, state) -> state`, `on_close(state, info)` (best effort,
-  after the socket is gone), `origins`, `allow_missing_origin`.
+  after the socket is gone), `origins`, `allow_missing_origin`,
+  `callback_timeout_ms` (default 30000).
+- A callback slower than `callback_timeout_ms` closes the connection with 1011,
+  but it is not interrupted: it runs to completion. `on_close` never runs at the
+  same time as another callback for that connection; it is skipped if one is
+  still running.
 - **Origins** are matched exactly; CORS does not apply. Default: the origin of
   `SITE_URL`. In development without `SITE_URL`, localhost origins are allowed. In
   production with neither `SITE_URL` nor `origins`, startup fails. `null` origins
@@ -4292,8 +4297,7 @@ get("/ws", fn(req) {
   callbacks per process (more closes with 1013). With several configured workers,
   at most all but one run callbacks at once (counted from the configured workers,
   so not while one is restarting). With one worker (the development
-  default), a long callback delays HTTP requests. Callbacks over 30 seconds close
-  the connection. The receive backlog is a per-connection limit, not part of the
+  default), a long callback delays HTTP requests. The receive backlog is a per-connection limit, not part of the
   realtime payload budget. Server pings
   every 30 s; WebSocket connections count against `max_connections`.
 - **Handshake auth is not ongoing authorization.** Recheck permissions inside

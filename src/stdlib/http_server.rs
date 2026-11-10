@@ -1481,14 +1481,16 @@ pub fn init() -> HashMap<String, Value> {
     // closes the connection with 1011). `message` is
     // `map { "kind": "text"|"binary", "data": String|Array<Int> }`.
     // Options: `on_open(conn, state) -> state`, `on_close(state, info)` (best
-    // effort after the socket is gone; info has `code` and `reason`),
-    // `origins` (exact allowed Origins), `allow_missing_origin` (for
-    // non-browser clients). Without `origins`, the origin of `SITE_URL` is
+    // effort after the socket is gone; info has `code` and `reason`; skipped
+    // if an earlier callback is still running), `origins` (exact allowed
+    // Origins), `allow_missing_origin` (for non-browser clients),
+    // `callback_timeout_ms` (100-300000, default 30000: a callback slower than
+    // this closes the connection with 1011; the callback itself keeps running). Without `origins`, the origin of `SITE_URL` is
     // allowed; in development, localhost origins are allowed; in production
     // with neither, registration fails. Request Host headers are never trusted.
     // @param name Stable endpoint name (letters, digits, `_`, `-`, `.`)
     // @param on_message Function(conn, message, state) returning the next state
-    // @param options Optional map: on_open, on_close, origins, allow_missing_origin
+    // @param options Optional map: on_open, on_close, origins, allow_missing_origin, callback_timeout_ms
     // @returns A WebSocketEndpoint for websocket()
     // @see_also websocket, ws_send, ws_close
     // @since v0.6.1
@@ -1497,7 +1499,7 @@ pub fn init() -> HashMap<String, Value> {
     // @error RuntimeError ~ "ws_endpoint() can only be called during application setup, before the server starts serving" fix: "Call ws_endpoint at the top level of the app, before listen()"
     // @error RuntimeError ~ "ws_endpoint needs trusted origins in production: set SITE_URL or pass the `origins` option" fix: "Set SITE_URL or pass the origins option"
     // @error TypeError ~ "ws_endpoint() name must be 1-64 characters of letters, digits, '_', '-' or '.'" fix: "Use a short stable name such as chat"
-    // @error TypeError ~ "unknown ws_endpoint() option" fix: "Use on_open, on_close, origins or allow_missing_origin"
+    // @error TypeError ~ "unknown ws_endpoint() option" fix: "Use on_open, on_close, origins, allow_missing_origin or callback_timeout_ms"
     module.insert(
         "ws_endpoint".to_string(),
         Value::NativeFunction {

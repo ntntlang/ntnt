@@ -42,7 +42,8 @@ pub const INBOX_BYTES: usize = 256 * 1024;
 pub const MAX_STATE_BYTES: usize = 16 * 1024;
 /// Callback jobs admitted (queued or running) across the process.
 pub const MAX_CALLBACK_JOBS: usize = 64;
-/// How long a connection waits for one callback before closing.
+/// Default time a connection waits for one callback before closing
+/// (`callback_timeout_ms` overrides it per endpoint).
 pub const CALLBACK_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Live connection owners, including admitted upgrades not yet completed.
@@ -286,6 +287,8 @@ pub struct EndpointConfig {
     pub origins: OriginPolicy,
     pub has_open: bool,
     pub has_close: bool,
+    /// How long the connection waits for one callback.
+    pub callback_deadline: Duration,
 }
 
 lazy_static::lazy_static! {
@@ -326,41 +329,45 @@ fn endpoint_config(name: &str) -> Option<EndpointConfig> {
         .cloned()
 }
 
-/// Workers allowed to run callbacks at once. With more than one worker, one
-/// is always left for HTTP so callbacks cannot starve requests.
-static CALLBACK_SLOTS: AtomicUsize = AtomicUsize::new(1);
-static CALLBACKS_RUNNING: AtomicUsize = AtomicUsize::new(0);
-
-pub(crate) fn set_callback_workers(workers: usize) {
-    CALLBACK_SLOTS.store(workers.saturating_sub(1).max(1), Ordering::Release);
+lazy_static::lazy_static! {
+    /// Callback slots as tokens. A worker may take or run a callback only
+    /// while it holds one. Returning a token wakes a worker waiting for one,
+    /// so released capacity is never missed by an idle worker.
+    static ref SLOT_TOKENS: (flume::Sender<()>, flume::Receiver<()>) = flume::unbounded();
 }
 
-/// Held by a worker while it may take or run a callback.
+/// With more than one worker, one is always left for HTTP so callbacks
+/// cannot occupy every worker.
+pub(crate) fn set_callback_workers(workers: usize) {
+    let (tx, rx) = &*SLOT_TOKENS;
+    while rx.try_recv().is_ok() {}
+    for _ in 0..workers.saturating_sub(1).max(1) {
+        let _ = tx.send(());
+    }
+}
+
+/// Held by a worker while it may take or run a callback; dropping it
+/// returns the token.
 pub(crate) struct CallbackSlot(());
 
 impl Drop for CallbackSlot {
     fn drop(&mut self) {
-        CALLBACKS_RUNNING.fetch_sub(1, Ordering::AcqRel);
+        let _ = SLOT_TOKENS.0.send(());
     }
 }
 
 pub(crate) fn try_callback_slot() -> Option<CallbackSlot> {
-    let limit = CALLBACK_SLOTS.load(Ordering::Acquire);
-    let mut running = CALLBACKS_RUNNING.load(Ordering::Acquire);
-    loop {
-        if running >= limit {
-            return None;
-        }
-        match CALLBACKS_RUNNING.compare_exchange_weak(
-            running,
-            running + 1,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => return Some(CallbackSlot(())),
-            Err(actual) => running = actual,
-        }
-    }
+    SLOT_TOKENS.1.try_recv().ok().map(|()| CallbackSlot(()))
+}
+
+/// Receiver workers select on to wait for a slot.
+pub(crate) fn slot_tokens() -> &'static flume::Receiver<()> {
+    &SLOT_TOKENS.1
+}
+
+/// Wrap a token already received from [`slot_tokens`].
+pub(crate) fn claimed_slot() -> CallbackSlot {
+    CallbackSlot(())
 }
 
 /// Install the queue that connection owners send callback jobs to.
@@ -383,6 +390,7 @@ pub struct WsSpec {
     state: String,
     has_open: bool,
     has_close: bool,
+    callback_deadline: Duration,
 }
 
 impl WsSpec {
@@ -396,6 +404,7 @@ impl WsSpec {
             state: "null".into(),
             has_open: false,
             has_close: false,
+            callback_deadline: CALLBACK_DEADLINE,
         }
     }
 
@@ -449,9 +458,39 @@ pub struct CallbackJob {
     /// Current state, encoded JSON.
     pub state: String,
     pub event: CallbackEvent,
-    /// The outcome; dropped unanswered if the owner has gone.
-    pub reply: oneshot::Sender<CallbackOutcome>,
+    /// Where the outcome goes; dropped unanswered if the owner has gone.
+    pub reply: Reply,
     _admission: tokio::sync::OwnedSemaphorePermit,
+}
+
+/// Sends a callback's outcome. Also marks the callback finished, which a
+/// reply deadline cannot do: interpreter code is not preempted.
+pub struct Reply {
+    tx: oneshot::Sender<CallbackOutcome>,
+    running: Running,
+}
+
+impl Reply {
+    /// Mark the callback finished, then deliver the outcome, so the owner
+    /// never sees a reply while the callback still counts as running.
+    pub fn send(self, outcome: CallbackOutcome) {
+        let Reply { tx, running } = self;
+        drop(running);
+        let _ = tx.send(outcome);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+}
+
+/// Marks a callback as still executing until it is dropped.
+struct Running(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl CallbackJob {
@@ -585,6 +624,7 @@ pub fn spec_from_response(
         state,
         has_open: config.has_open,
         has_close: config.has_close,
+        callback_deadline: config.callback_deadline,
     }))
 }
 
@@ -892,6 +932,9 @@ struct Session {
     has_close: bool,
     inbox: Inbox,
     pending: Option<(oneshot::Receiver<CallbackOutcome>, Instant)>,
+    /// True while the last started callback may still be executing.
+    running: Arc<std::sync::atomic::AtomicBool>,
+    deadline: Duration,
 }
 
 impl Session {
@@ -904,18 +947,22 @@ impl Session {
             return false;
         };
         let (reply, rx) = oneshot::channel();
+        self.running.store(true, Ordering::Release);
         let job = CallbackJob {
             endpoint: self.endpoint.clone(),
             conn: handle.clone(),
             state: self.state.clone(),
             event,
-            reply,
+            reply: Reply {
+                tx: reply,
+                running: Running(Arc::clone(&self.running)),
+            },
             _admission: admission,
         };
         if tx.try_send(job).is_err() {
             return false;
         }
-        self.pending = Some((rx, Instant::now() + CALLBACK_DEADLINE));
+        self.pending = Some((rx, Instant::now() + self.deadline));
         true
     }
 
@@ -973,6 +1020,8 @@ pub(crate) async fn run(
             has_close: spec.has_close,
             inbox: Inbox::default(),
             pending: None,
+            running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deadline: spec.callback_deadline,
         }),
     };
     let mut ping = tokio::time::interval_at(
@@ -1037,9 +1086,9 @@ pub(crate) async fn run(
                         }
                         None => {
                             eprintln!(
-                                "[websocket {}] callback exceeded {}s",
+                                "[websocket {}] callback exceeded {}ms",
                                 session.endpoint,
-                                CALLBACK_DEADLINE.as_secs()
+                                session.deadline.as_millis()
                             );
                             break 'run End::Close(close_code::INTERNAL, "callback timed out".into());
                         }
@@ -1127,10 +1176,20 @@ pub(crate) async fn run(
 
     // `on_close` is best effort after the socket is gone; it never holds the
     // connection permit and is skipped if the pool is full or shutting down.
+    // It never runs alongside an earlier callback for the same connection: a
+    // callback past its deadline may still be executing, so then it is skipped.
     if let Some(mut session) = session {
         if session.has_close && !*shutdown.borrow() {
             if let Some((rx, deadline)) = session.pending.take() {
                 let _ = tokio::time::timeout_at(deadline, rx).await;
+            }
+            if session.running.load(Ordering::Acquire) {
+                eprintln!(
+                    "[websocket {}] on_close skipped: an earlier callback is still running",
+                    session.endpoint
+                );
+                drop(owner);
+                return;
             }
             let dead = WsHandle {
                 tx: mpsc::channel::<Queued>(1).0.downgrade(),
@@ -1295,6 +1354,7 @@ mod tests {
             origins: OriginPolicy::default(),
             has_open: false,
             has_close: false,
+            callback_deadline: CALLBACK_DEADLINE,
         };
         register_endpoint("unit-conflict", config.clone(), false).unwrap();
         register_endpoint("unit-conflict", config.clone(), false).unwrap();

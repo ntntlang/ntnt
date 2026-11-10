@@ -8680,13 +8680,13 @@ ws_endpoint(name: String, on_message: Function, options?: Map) -> WebSocketEndpo
 
 Register a WebSocket endpoint during application setup.
 
-Call it at the top level of your app, like a route; calling it while the server is serving is an error. `on_message(conn, message, state)` runs on an HTTP worker for each message, one at a time per connection, and returns the next state (a plain value or `Ok(state)`; `Err` or a runtime error closes the connection with 1011). `message` is `map { "kind": "text"|"binary", "data": String|Array<Int> }`. Options: `on_open(conn, state) -> state`, `on_close(state, info)` (best effort after the socket is gone; info has `code` and `reason`), `origins` (exact allowed Origins), `allow_missing_origin` (for non-browser clients). Without `origins`, the origin of `SITE_URL` is allowed; in development, localhost origins are allowed; in production with neither, registration fails. Request Host headers are never trusted.
+Call it at the top level of your app, like a route; calling it while the server is serving is an error. `on_message(conn, message, state)` runs on an HTTP worker for each message, one at a time per connection, and returns the next state (a plain value or `Ok(state)`; `Err` or a runtime error closes the connection with 1011). `message` is `map { "kind": "text"|"binary", "data": String|Array<Int> }`. Options: `on_open(conn, state) -> state`, `on_close(state, info)` (best effort after the socket is gone; info has `code` and `reason`; skipped if an earlier callback is still running), `origins` (exact allowed Origins), `allow_missing_origin` (for non-browser clients), `callback_timeout_ms` (100-300000, default 30000: a callback slower than this closes the connection with 1011; the callback itself keeps running). Without `origins`, the origin of `SITE_URL` is allowed; in development, localhost origins are allowed; in production with neither, registration fails. Request Host headers are never trusted.
 
 **Parameters:**
 
 - `name` — Stable endpoint name (letters, digits, `_`, `-`, `.`)
 - `on_message` — Function(conn, message, state) returning the next state
-- `options` — Optional map: on_open, on_close, origins, allow_missing_origin
+- `options` — Optional map: on_open, on_close, origins, allow_missing_origin, callback_timeout_ms
 
 **Returns:** A WebSocketEndpoint for websocket()
 
@@ -8702,7 +8702,7 @@ let chat = ws_endpoint("chat", on_message, map { "origins": ["https://app.exampl
 - **RuntimeError**: ws_endpoint() can only be called during application setup, before the server starts serving — *Fix: Call ws_endpoint at the top level of the app, before listen()*
 - **RuntimeError**: ws_endpoint needs trusted origins in production: set SITE_URL or pass the `origins` option — *Fix: Set SITE_URL or pass the origins option*
 - **TypeError**: ws_endpoint() name must be 1-64 characters of letters, digits, '_', '-' or '.' — *Fix: Use a short stable name such as chat*
-- **TypeError**: unknown ws_endpoint() option — *Fix: Use on_open, on_close, origins or allow_missing_origin*
+- **TypeError**: unknown ws_endpoint() option — *Fix: Use on_open, on_close, origins, allow_missing_origin or callback_timeout_ms*
 
 **See also:** `websocket`, `ws_send`, `ws_close`
 
