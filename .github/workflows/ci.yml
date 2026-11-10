@@ -261,7 +261,9 @@ jobs:
       - name: Check the committed lockfile against RustSec
         # Stay outside the checkout so Cargo cannot read project-local config.
         working-directory: ${{ runner.temp }}
-        run: cargo audit --file "$GITHUB_WORKSPACE/Cargo.lock"
+        # RUSTSEC-2026-0459 (bundled SQLite < 3.54, crafted -wal files): accepted
+        # until the rusqlite 0.41 upgrade, tracked in #336. Remove with that change.
+        run: cargo audit --file "$GITHUB_WORKSPACE/Cargo.lock" --ignore RUSTSEC-2026-0459
 
   lint:
     name: Lint
