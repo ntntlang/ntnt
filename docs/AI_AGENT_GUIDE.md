@@ -2191,6 +2191,28 @@ Boundary rule: use `std/auth` for auth flows, sessions, CSRF, current-user helpe
 
 Full OAuth, session management, CSRF, JWT, TOTP, and local credential bootstrap, setup completion, password reset, and verification support.
 
+### PostgreSQL auth bootstrap and runtime privileges
+
+Initialize a new or older PostgreSQL auth store once through `enable_auth` using
+its schema/table owner (or a controlled bootstrap identity with equivalent DDL
+authority). Then run the application with a separate login granted `CONNECT`,
+schema `USAGE`, and `SELECT, INSERT, UPDATE, DELETE` on the auth tables. Auth's
+current tables use text keys and do not require sequence privileges. The runtime
+login does **not** need schema `CREATE`, table ownership, owner-role membership,
+or superuser privileges.
+
+On an already-current store, initialization checks the resolved auth tables,
+columns/types/defaults, required constraints and indexes through PostgreSQL's
+catalogs without issuing DDL or changing auth records, ownership or ACLs. Schema
+lookup follows the connection's search path, like the auth queries themselves.
+Missing tables, supported legacy columns/indexes, and legacy password-reset-token
+migration still require bootstrap authority. Initialization reports the affected
+object and PostgreSQL permission error rather than silently choosing memory.
+Bootstrap and token migration are serialized and transactional; a failed upgrade
+is rolled back. Unsupported schema shapes fail with an incompatible-schema error
+and must be repaired by the schema owner before runtime startup. No public API,
+SQLite or Redis bootstrap contract is changed by this PostgreSQL separation.
+
 ### Local Auth Quickstart
 
 The local-auth path is intentionally explicit: `std/auth` owns credentials, reset and magic-link tokens, TOTP state, sessions, cookies, CSRF, and route protection; the app owns forms, email delivery, request throttling, roles, and policy copy. Local credentials and one-time tokens are stored by the configured auth backend: memory, SQLite, PostgreSQL, or Redis/Valkey.
