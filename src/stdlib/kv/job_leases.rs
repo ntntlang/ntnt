@@ -805,10 +805,11 @@ fn transaction<T>(handle: &Value, mut call: impl FnMut(&mut Store<'_>) -> R<T>) 
                 }
                 Err(error) => return Err(conditional::error(error)),
             };
-            let timeout: u64 = guard
+            let timeout: i64 = guard
                 .conn
                 .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
                 .map_err(conditional::error)?;
+            let timeout = u64::try_from(timeout).unwrap_or(0);
             guard
                 .conn
                 .busy_timeout(Duration::ZERO)

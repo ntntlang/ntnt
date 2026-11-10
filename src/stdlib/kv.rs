@@ -326,16 +326,18 @@ impl SQLiteKV {
     /// Bounded, indexed deletion in one statement keeps renewed keys safe.
     fn delete_expired(&self, now: i64) -> rusqlite::Result<usize> {
         // A lock held by another connection must not stall all other stores.
-        let timeout: u64 = self
+        // SQLite reports the timeout as a non-negative integer (milliseconds).
+        let timeout: i64 = self
             .conn
             .query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+        let timeout = u64::try_from(timeout).unwrap_or(0);
         self.conn.busy_timeout(Duration::ZERO)?;
         let deleted = self.conn.execute(
             "DELETE FROM _kv WHERE key IN (
                 SELECT key FROM _kv WHERE expires_at <= ?
                 ORDER BY expires_at LIMIT ?
             )",
-            params![now, SQLITE_TTL_BATCH_SIZE],
+            params![now, SQLITE_TTL_BATCH_SIZE as i64],
         );
         self.conn.busy_timeout(Duration::from_millis(timeout))?;
         deleted
@@ -2748,7 +2750,8 @@ mod tests {
             .unwrap();
         let count = || {
             kv.conn
-                .query_row("SELECT COUNT(*) FROM _kv", [], |row| row.get::<_, usize>(0))
+                .query_row("SELECT COUNT(*) FROM _kv", [], |row| row.get::<_, i64>(0))
+                .map(|n| usize::try_from(n).unwrap())
                 .unwrap()
         };
         assert_eq!(count(), SQLITE_TTL_BATCH_SIZE + 6);
@@ -2778,7 +2781,7 @@ mod tests {
             Some(rusqlite::ErrorCode::DatabaseBusy)
         );
         assert!(start.elapsed() < Duration::from_secs(1));
-        let timeout: u64 = kv
+        let timeout: i64 = kv
             .conn
             .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
             .unwrap();
