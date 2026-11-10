@@ -171,6 +171,8 @@ pub enum Value {
     /// Process-local broadcast bus (from std/concurrent broadcast()).
     /// Shared authority: publishing/subscribing requires this handle.
     Broadcast(std::sync::Arc<crate::stdlib::realtime::Bus>),
+    /// Opaque WebSocket endpoint or connection (DD-041 Slice B).
+    WebSocket(std::sync::Arc<crate::stdlib::websocket::WsValue>),
 
     /// Return value (for control flow)
     Return(Box<Value>),
@@ -282,6 +284,7 @@ impl Value {
             Value::RxChannelHandle(_) => "RxChannel",
             Value::ScheduleHandle(_) => "Schedule",
             Value::Broadcast(_) => "Broadcast",
+            Value::WebSocket(value) => value.type_name(),
             Value::Return(_) => "Return",
             Value::Break => "Break",
             Value::Continue => "Continue",
@@ -402,6 +405,7 @@ impl fmt::Display for Value {
             Value::RxChannelHandle(id) => write!(f, "RxChannel({})", id),
             Value::ScheduleHandle(id) => write!(f, "Schedule({})", id),
             Value::Broadcast(bus) => write!(f, "<broadcast {}>", bus.name()),
+            Value::WebSocket(value) => write!(f, "{value}"),
             Value::Return(v) => write!(f, "{}", v),
             Value::Break => write!(f, "<break>"),
             Value::Continue => write!(f, "<continue>"),
@@ -737,6 +741,131 @@ type HttpWorkerStartup = std::sync::mpsc::Sender<(usize, std::result::Result<[u8
 /// worker serves again only after loading the same source.
 type CommittedGeneration = std::sync::Arc<std::sync::OnceLock<[u8; 32]>>;
 
+/// Callbacks of one `ws_endpoint`, local to the interpreter that registered it.
+#[derive(Clone)]
+struct WsEndpointFns {
+    on_message: Value,
+    on_open: Option<Value>,
+    on_close: Option<Value>,
+}
+
+/// Next state from a callback's return value: a plain value or `Ok(state)`
+/// commits; `Err(..)` is a failure.
+fn ws_next_state(value: Value) -> std::result::Result<Value, String> {
+    match value {
+        Value::EnumValue {
+            enum_name,
+            variant,
+            values,
+        } if enum_name == "Result" => {
+            let inner = values.into_iter().next().unwrap_or(Value::Unit);
+            if variant == "Ok" {
+                Ok(inner)
+            } else if inner.contains_secret() {
+                Err("callback returned Err".to_string())
+            } else {
+                Err(format!("callback returned Err({inner})"))
+            }
+        }
+        other => Ok(other),
+    }
+}
+
+/// Work a serving interpreter picks up: an HTTP request or a WebSocket callback.
+enum ServeWork {
+    Http(Box<crate::stdlib::http_bridge::HandlerRequest>),
+    Callback(
+        crate::stdlib::websocket::CallbackJob,
+        crate::stdlib::websocket::CallbackSlot,
+    ),
+    Closed,
+}
+
+/// HTTP requests served in a row before a waiting callback is preferred.
+const HTTP_PER_CALLBACK: usize = 4;
+
+/// Next unit of work. HTTP is preferred, but a waiting callback runs at
+/// least once every `HTTP_PER_CALLBACK` requests so neither starves.
+fn next_serve_work(
+    http: &flume::Receiver<crate::stdlib::http_bridge::HandlerRequest>,
+    callbacks: Option<&crate::stdlib::websocket::CallbackReceiver>,
+    http_in_row: &mut usize,
+) -> ServeWork {
+    use crate::stdlib::websocket::{claimed_slot, slot_tokens, try_callback_slot};
+    let Some(callbacks) = callbacks else {
+        return match http.recv() {
+            Ok(request) => ServeWork::Http(Box::new(request)),
+            Err(_) => ServeWork::Closed,
+        };
+    };
+    // Without a callback slot, wait for HTTP or for a slot to be returned.
+    // Waiting on the slot too means capacity released by another worker
+    // wakes this one instead of leaving queued callbacks unserved.
+    let slot = match try_callback_slot() {
+        Some(slot) => slot,
+        None => {
+            enum Wait {
+                Http(Option<Box<crate::stdlib::http_bridge::HandlerRequest>>),
+                Slot,
+            }
+            let wait = flume::Selector::new()
+                .recv(http, |r| Wait::Http(r.ok().map(Box::new)))
+                .recv(slot_tokens(), |_| Wait::Slot)
+                .wait();
+            match wait {
+                Wait::Http(Some(request)) => {
+                    *http_in_row += 1;
+                    return ServeWork::Http(request);
+                }
+                Wait::Http(None) => return ServeWork::Closed,
+                Wait::Slot => claimed_slot(),
+            }
+        }
+    };
+    if *http_in_row >= HTTP_PER_CALLBACK {
+        if let Ok(job) = callbacks.try_recv() {
+            *http_in_row = 0;
+            return ServeWork::Callback(job, slot);
+        }
+    }
+    match http.try_recv() {
+        Ok(request) => {
+            *http_in_row += 1;
+            return ServeWork::Http(Box::new(request));
+        }
+        Err(flume::TryRecvError::Disconnected) => return ServeWork::Closed,
+        Err(flume::TryRecvError::Empty) => {}
+    }
+    enum Ready {
+        Http(Option<Box<crate::stdlib::http_bridge::HandlerRequest>>),
+        Callback(Option<crate::stdlib::websocket::CallbackJob>),
+    }
+    let ready = flume::Selector::new()
+        .recv(http, |r| Ready::Http(r.ok().map(Box::new)))
+        .recv(callbacks, |r| Ready::Callback(r.ok()))
+        .wait();
+    match ready {
+        // Taking HTTP returns the slot (dropped here), waking a waiting worker.
+        Ready::Http(Some(request)) => {
+            *http_in_row += 1;
+            ServeWork::Http(request)
+        }
+        Ready::Callback(Some(job)) => {
+            *http_in_row = 0;
+            ServeWork::Callback(job, slot)
+        }
+        Ready::Http(None) => ServeWork::Closed,
+        // The callback queue never closes before HTTP; fall back to HTTP.
+        Ready::Callback(None) => {
+            drop(slot);
+            match http.recv() {
+                Ok(request) => ServeWork::Http(Box::new(request)),
+                Err(_) => ServeWork::Closed,
+            }
+        }
+    }
+}
+
 fn short_digest(digest: &[u8; 32]) -> String {
     digest[..6].iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -915,6 +1044,11 @@ pub struct Interpreter {
     /// blocks there while workers continue, so realtime workers are compared
     /// at this point rather than after setup ends.
     listen_source: Option<std::result::Result<[u8; 32], String>>,
+    /// WebSocket endpoints registered by this interpreter's setup. Callback
+    /// values stay here; only the endpoint name crosses threads.
+    ws_endpoints: HashMap<String, WsEndpointFns>,
+    /// Set when this interpreter starts serving; later setup-only calls fail.
+    setup_frozen: bool,
     /// Current file path (for relative imports)
     current_file: Option<String>,
     /// HTTP server state for routing
@@ -1219,6 +1353,8 @@ impl Interpreter {
             loaded_modules: HashMap::new(),
             loaded_sources: crate::source::SourceLedger::default(),
             listen_source: None,
+            ws_endpoints: HashMap::new(),
+            setup_frozen: false,
             current_file: None,
             server_state: crate::stdlib::http_server::ServerState::new(),
             test_mode: None,
@@ -1435,6 +1571,195 @@ impl Interpreter {
     }
 
     // --- Server action handlers (associated functions, not methods) ---
+
+    /// `ws_endpoint(name, on_message, options?)`: setup-only registration.
+    fn register_ws_endpoint(&mut self, args: &[Value]) -> Result<Value> {
+        use crate::stdlib::websocket::{register_endpoint, EndpointConfig, OriginPolicy, WsValue};
+        let hot_reload = self.execution_mode == ExecutionMode::HotReload;
+        if self.task_interpreter || (self.setup_frozen && !hot_reload) {
+            return Err(IntentError::runtime_error(
+                "ws_endpoint() can only be called during application setup, before the server starts serving",
+            ));
+        }
+        let name = match &args[0] {
+            Value::String(name)
+                if !name.is_empty()
+                    && name.len() <= 64
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) =>
+            {
+                name.clone()
+            }
+            _ => return Err(IntentError::type_error(
+                "ws_endpoint() name must be 1-64 characters of letters, digits, '_', '-' or '.'",
+            )),
+        };
+        let callable = |value: &Value| {
+            matches!(
+                value,
+                Value::Function { .. }
+                    | Value::NativeFunction { .. }
+                    | Value::ContextFunction { .. }
+            )
+        };
+        if !callable(&args[1]) {
+            return Err(IntentError::type_error(
+                "ws_endpoint() on_message must be a function(conn, message, state)",
+            ));
+        }
+        let mut fns = WsEndpointFns {
+            on_message: args[1].clone(),
+            on_open: None,
+            on_close: None,
+        };
+        let mut origins = None;
+        let mut allow_missing = false;
+        let mut callback_deadline = crate::stdlib::websocket::CALLBACK_DEADLINE;
+        match args.get(2) {
+            None | Some(Value::Unit) => {}
+            Some(Value::Map(options)) => {
+                for (key, value) in options {
+                    match (key.as_str(), value) {
+                        ("on_open", f) if callable(f) => fns.on_open = Some(f.clone()),
+                        ("on_close", f) if callable(f) => fns.on_close = Some(f.clone()),
+                        ("origins", Value::Array(items)) => {
+                            let mut list = Vec::with_capacity(items.len());
+                            for item in items {
+                                let Value::String(origin) = item else {
+                                    return Err(IntentError::type_error(
+                                        "ws_endpoint() origins must be an Array of Strings",
+                                    ));
+                                };
+                                list.push(origin.clone());
+                            }
+                            origins = Some(list);
+                        }
+                        ("allow_missing_origin", Value::Bool(b)) => allow_missing = *b,
+                        ("callback_timeout_ms", Value::Int(ms)) if (100..=300_000).contains(ms) => {
+                            callback_deadline = std::time::Duration::from_millis(*ms as u64)
+                        }
+                        ("callback_timeout_ms", _) => {
+                            return Err(IntentError::type_error(
+                                "ws_endpoint() callback_timeout_ms must be an Int from 100 to 300000",
+                            ))
+                        }
+                        ("on_open" | "on_close", _) => {
+                            return Err(IntentError::type_error(format!(
+                                "ws_endpoint() {key} must be a function"
+                            )))
+                        }
+                        ("origins", _) => {
+                            return Err(IntentError::type_error(
+                                "ws_endpoint() origins must be an Array of Strings",
+                            ))
+                        }
+                        ("allow_missing_origin", _) => {
+                            return Err(IntentError::type_error(
+                                "ws_endpoint() allow_missing_origin must be a Bool",
+                            ))
+                        }
+                        _ => {
+                            return Err(IntentError::type_error(format!(
+                                "unknown ws_endpoint() option: {key} (supported: on_open, on_close, origins, allow_missing_origin, callback_timeout_ms)"
+                            )))
+                        }
+                    }
+                }
+            }
+            Some(_) => {
+                return Err(IntentError::type_error(
+                    "ws_endpoint() options must be a Map",
+                ))
+            }
+        }
+        if self.ws_endpoints.contains_key(&name) && !hot_reload {
+            return Err(IntentError::runtime_error(format!(
+                "ws_endpoint {name:?} is registered twice"
+            )));
+        }
+        let site_url = std::env::var("SITE_URL").ok();
+        let config = EndpointConfig {
+            // Read the environment now: `load_env` may have set production
+            // after `is_production_mode()` cached an earlier answer.
+            origins: OriginPolicy::configure(
+                origins,
+                allow_missing,
+                site_url.as_deref(),
+                std::env::var("NTNT_ENV")
+                    .map(|v| v == "production" || v == "prod")
+                    .unwrap_or(false),
+            )?,
+            has_open: fns.on_open.is_some(),
+            has_close: fns.on_close.is_some(),
+            callback_deadline,
+        };
+        register_endpoint(&name, config, hot_reload)?;
+        self.ws_endpoints.insert(name.clone(), fns);
+        Ok(Value::WebSocket(std::sync::Arc::new(WsValue::Endpoint(
+            name,
+        ))))
+    }
+
+    /// Run one WebSocket callback job and report its outcome to the owner.
+    fn run_ws_callback(&mut self, job: crate::stdlib::websocket::CallbackJob) {
+        use crate::stdlib::websocket::{
+            decode_state, encode_state, CallbackEvent, WsData, WsValue,
+        };
+        if job.is_stale() {
+            return;
+        }
+        let reply = job.reply;
+        let Some(fns) = self.ws_endpoints.get(&job.endpoint).cloned() else {
+            reply.send(Err(format!(
+                "ws_endpoint {:?} is not registered in this worker",
+                job.endpoint
+            )));
+            return;
+        };
+        let conn = Value::WebSocket(std::sync::Arc::new(WsValue::Conn(job.conn.clone())));
+        let state = decode_state(&job.state);
+        let result = match job.event {
+            CallbackEvent::Open => match fns.on_open {
+                Some(on_open) => self.call_function(on_open, vec![conn, state]),
+                None => Ok(state),
+            },
+            CallbackEvent::Message(data) => {
+                let (kind, data) = match data {
+                    WsData::Text(text) => ("text", Value::String(text)),
+                    WsData::Binary(bytes) => (
+                        "binary",
+                        Value::Array(bytes.into_iter().map(|b| Value::Int(b.into())).collect()),
+                    ),
+                };
+                let mut message = HashMap::new();
+                message.insert("kind".to_string(), Value::String(kind.to_string()));
+                message.insert("data".to_string(), data);
+                self.call_function(fns.on_message, vec![conn, Value::Map(message), state])
+            }
+            CallbackEvent::Close { code, reason } => {
+                if let Some(on_close) = fns.on_close {
+                    let mut info = HashMap::new();
+                    info.insert("code".to_string(), Value::Int(code.into()));
+                    info.insert("reason".to_string(), Value::String(reason));
+                    if let Err(error) = self
+                        .call_function(on_close, vec![state, Value::Map(info)])
+                        .map_err(|e| e.to_string())
+                        .and_then(ws_next_state)
+                    {
+                        eprintln!("[websocket {}] on_close failed: {error}", job.endpoint);
+                    }
+                }
+                reply.send(Ok(job.state));
+                return;
+            }
+        };
+        let outcome = match result {
+            Ok(value) => ws_next_state(value).and_then(|state| encode_state(&state)),
+            Err(error) => Err(error.to_string()),
+        };
+        reply.send(outcome);
+    }
 
     /// Record the source fingerprint the first time setup reaches a server
     /// start (`listen` or a `server { }` block), in every execution mode.
@@ -2250,6 +2575,9 @@ impl Interpreter {
 
         // Clear current state (routes, middleware, etc.) but keep server running
         self.server_state.clear();
+        // Kept until the new code evaluates: a failed reload keeps serving the
+        // old callbacks, like the old routes.
+        let previous_ws_endpoints = std::mem::take(&mut self.ws_endpoints);
 
         // Clear loaded modules and imported file tracking to force reimport
         self.loaded_modules.clear();
@@ -2288,6 +2616,7 @@ impl Interpreter {
             }
             Err(e) => {
                 eprintln!("[hot-reload] Evaluation error: {}", e);
+                self.ws_endpoints = previous_ws_endpoints;
                 false
             }
         };
@@ -9694,6 +10023,9 @@ impl Interpreter {
         }
         println!();
 
+        // Serving starts: setup-only calls (ws_endpoint) now fail, as in the
+        // async server.
+        self.setup_frozen = true;
         // Handle requests in a loop
         // In test mode, use recv_timeout and check shutdown flag
         loop {
@@ -10211,8 +10543,16 @@ impl Interpreter {
         // Existing buffered-only apps keep listener-first startup. Realtime
         // registration (or an explicit realtime map for lazy bus creation)
         // requires every secondary interpreter to initialize before binding.
-        let realtime_startup =
-            options.realtime_configured || crate::stdlib::realtime::has_live_buses();
+        let realtime_startup = options.realtime_configured
+            || crate::stdlib::realtime::has_live_buses()
+            || crate::stdlib::websocket::has_endpoints();
+        // WebSocket callbacks share the HTTP workers through one bounded queue.
+        let callback_rx = crate::stdlib::websocket::has_endpoints().then(|| {
+            let (tx, rx) = crate::stdlib::websocket::callback_channel();
+            crate::stdlib::websocket::install_callbacks(tx);
+            crate::stdlib::websocket::set_callback_workers(num_workers);
+            rx
+        });
         let source_file = self.main_source_file.clone().unwrap_or_default();
         let mut worker_handles = Vec::new();
         let generation = CommittedGeneration::default();
@@ -10236,6 +10576,7 @@ impl Interpreter {
             worker_handles = Self::spawn_http_workers(
                 num_workers,
                 &rx,
+                callback_rx.as_ref(),
                 &source_file,
                 Some(worker_startup_tx),
                 generation.clone(),
@@ -10293,16 +10634,25 @@ impl Interpreter {
         }
 
         if !realtime_startup {
-            worker_handles =
-                Self::spawn_http_workers(num_workers, &rx, &source_file, None, generation);
+            worker_handles = Self::spawn_http_workers(
+                num_workers,
+                &rx,
+                callback_rx.as_ref(),
+                &source_file,
+                None,
+                generation,
+            );
         }
 
         // Main thread (worker 0): process requests with hot-reload support
+        self.setup_frozen = true;
+        let mut http_in_row = 0;
         loop {
-            // Block waiting for requests
-            match rx.recv() {
-                Ok(handler_request) => {
-                    let HandlerRequest { request, reply_tx } = handler_request;
+            // Block waiting for requests or WebSocket callbacks
+            match next_serve_work(&rx, callback_rx.as_ref(), &mut http_in_row) {
+                ServeWork::Callback(job, _slot) => self.run_ws_callback(job),
+                ServeWork::Http(handler_request) => {
+                    let HandlerRequest { request, reply_tx } = *handler_request;
 
                     // Hot-reload check: if main source file changed, reload it
                     if self.check_and_reload_main_source() {
@@ -10330,7 +10680,7 @@ impl Interpreter {
                     let bridge_response = self.process_request(request, lib_modules_changed);
                     let _ = reply_tx.send(bridge_response);
                 }
-                Err(_) => {
+                ServeWork::Closed => {
                     // Channel closed, server shutting down
                     println!("\n🛑 Server shutting down...");
                     break;
@@ -10654,6 +11004,7 @@ impl Interpreter {
     fn spawn_http_workers(
         num_workers: usize,
         rx: &flume::Receiver<crate::stdlib::http_bridge::HandlerRequest>,
+        callbacks: Option<&crate::stdlib::websocket::CallbackReceiver>,
         source_file: &str,
         startup: Option<HttpWorkerStartup>,
         generation: CommittedGeneration,
@@ -10661,6 +11012,7 @@ impl Interpreter {
         (1..num_workers)
             .map(|worker_id| {
                 let worker_rx = rx.clone();
+                let worker_callbacks = callbacks.cloned();
                 let source = source_file.to_string();
                 let mut startup = startup.clone();
                 let generation = generation.clone();
@@ -10673,6 +11025,7 @@ impl Interpreter {
                             Self::run_worker(
                                 worker_id,
                                 worker_rx.clone(),
+                                worker_callbacks.clone(),
                                 &source,
                                 &mut startup,
                                 &generation,
@@ -10710,6 +11063,7 @@ impl Interpreter {
     fn run_worker(
         worker_id: usize,
         rx: flume::Receiver<crate::stdlib::http_bridge::HandlerRequest>,
+        callbacks: Option<crate::stdlib::websocket::CallbackReceiver>,
         source_file: &str,
         startup: &mut Option<HttpWorkerStartup>,
         generation: &std::sync::OnceLock<[u8; 32]>,
@@ -10785,14 +11139,17 @@ impl Interpreter {
         }
 
         // Worker request loop — no hot-reload, just process requests
+        interpreter.setup_frozen = true;
+        let mut http_in_row = 0;
         loop {
-            match rx.recv() {
-                Ok(handler_request) => {
-                    let HandlerRequest { request, reply_tx } = handler_request;
+            match next_serve_work(&rx, callbacks.as_ref(), &mut http_in_row) {
+                ServeWork::Http(handler_request) => {
+                    let HandlerRequest { request, reply_tx } = *handler_request;
                     let bridge_response = interpreter.process_request(request, false);
                     let _ = reply_tx.send(bridge_response);
                 }
-                Err(_) => return WorkerExit::Shutdown, // Channel closed
+                ServeWork::Callback(job, _slot) => interpreter.run_ws_callback(job),
+                ServeWork::Closed => return WorkerExit::Shutdown, // Channel closed
             }
         }
     }
@@ -11302,6 +11659,7 @@ impl Interpreter {
             (Value::RxChannelHandle(a), Value::RxChannelHandle(b)) => a == b,
             (Value::ScheduleHandle(a), Value::ScheduleHandle(b)) => a == b,
             (Value::Broadcast(a), Value::Broadcast(b)) => std::sync::Arc::ptr_eq(a, b),
+            (Value::WebSocket(a), Value::WebSocket(b)) => a.same(b),
             _ => false, // Different types → not equal
         }
     }
@@ -11331,6 +11689,7 @@ impl Interpreter {
                     | Value::RxChannelHandle(_)
                     | Value::ScheduleHandle(_)
                     | Value::Broadcast(_)
+                    | Value::WebSocket(_)
             );
             let rhs_is_handle = matches!(
                 &rhs,
@@ -11346,6 +11705,7 @@ impl Interpreter {
                     | Value::RxChannelHandle(_)
                     | Value::ScheduleHandle(_)
                     | Value::Broadcast(_)
+                    | Value::WebSocket(_)
             );
 
             if lhs_is_enum || rhs_is_enum || lhs_is_handle || rhs_is_handle {
@@ -16326,7 +16686,7 @@ c")
             let (_tx, rx) = flume::unbounded();
             let path = source_file.to_str().unwrap();
             let WorkerExit::StartupFailed(error) =
-                Interpreter::run_worker(1, rx, path, &mut None, &Default::default())
+                Interpreter::run_worker(1, rx, None, path, &mut None, &Default::default())
             else {
                 panic!("worker unexpectedly initialized: {source:?}");
             };
@@ -16405,6 +16765,7 @@ c")
                 Interpreter::run_worker(
                     1,
                     probe_rx_requests,
+                    None,
                     &path,
                     &mut Some(probe_tx),
                     &Default::default(),
@@ -16421,7 +16782,7 @@ c")
 
         std::fs::write(&helper, "fn tag() { \"v2\" }\n").unwrap();
         let (tx, rx) = flume::unbounded();
-        let workers = Interpreter::spawn_http_workers(2, &rx, &path, None, generation);
+        let workers = Interpreter::spawn_http_workers(2, &rx, None, &path, None, generation);
         assert!(
             worker_get(&tx, "/tag", std::time::Duration::from_millis(1500)).is_none(),
             "a worker with changed source answered"
@@ -16446,6 +16807,7 @@ c")
         let workers = Interpreter::spawn_http_workers(
             2,
             &rx,
+            None,
             source_file.to_str().unwrap(),
             Some(startup_tx),
             Default::default(),
@@ -16492,6 +16854,7 @@ while !exists({}) {{ sleep_ms(10) }}
         let workers = Interpreter::spawn_http_workers(
             2,
             &rx,
+            None,
             source_file.to_str().unwrap(),
             Some(startup_tx),
             Default::default(),
@@ -16632,6 +16995,7 @@ listen(0)
             let exit = Interpreter::run_worker(
                 1,
                 rx,
+                None,
                 source_file.to_str().unwrap(),
                 &mut None,
                 &Default::default(),

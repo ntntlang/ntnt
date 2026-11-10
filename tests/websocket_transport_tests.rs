@@ -34,6 +34,7 @@ fn echo() -> WsSpec {
     WsSpec::echo(OriginPolicy {
         allowed: vec![ORIGIN.into()],
         allow_missing: false,
+        allow_loopback: false,
     })
     .with_timings(fast())
 }
@@ -84,6 +85,7 @@ fn final_response(path: &str) -> BridgeResponse {
                 WsSpec::echo(OriginPolicy {
                     allowed: vec![],
                     allow_missing: true,
+                    allow_loopback: false,
                 })
                 .with_timings(fast()),
             ),

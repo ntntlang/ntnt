@@ -1469,6 +1469,143 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt ws_endpoint
+    // @module std/http/server
+    // @signature ws_endpoint(name: String, on_message: Function, options?: Map) -> WebSocketEndpoint
+    // Register a WebSocket endpoint during application setup.
+    //
+    // Call it at the top level of your app, like a route; calling it while the
+    // server is serving is an error. `on_message(conn, message, state)` runs on
+    // an HTTP worker for each message, one at a time per connection, and returns
+    // the next state (a plain value or `Ok(state)`; `Err` or a runtime error
+    // closes the connection with 1011). `message` is
+    // `map { "kind": "text"|"binary", "data": String|Array<Int> }`.
+    // Options: `on_open(conn, state) -> state`, `on_close(state, info)` (best
+    // effort after the socket is gone; info has `code` and `reason`; skipped
+    // if an earlier callback is still running), `origins` (exact allowed
+    // Origins), `allow_missing_origin` (for non-browser clients),
+    // `callback_timeout_ms` (100-300000, default 30000, counted from when the
+    // message is queued: past it the connection closes with 1011; a callback
+    // already running is not interrupted). Without `origins`, the origin of `SITE_URL` is
+    // allowed; in development, localhost origins are allowed; in production
+    // with neither, registration fails. Request Host headers are never trusted.
+    // @param name Stable endpoint name (letters, digits, `_`, `-`, `.`)
+    // @param on_message Function(conn, message, state) returning the next state
+    // @param options Optional map: on_open, on_close, origins, allow_missing_origin, callback_timeout_ms
+    // @returns A WebSocketEndpoint for websocket()
+    // @see_also websocket, ws_send, ws_close
+    // @since v0.6.1
+    // @example let echo = ws_endpoint("echo", fn(conn, message, state) { ws_send(conn, message["data"]); state }) => WebSocketEndpoint ~ "Echo every message"
+    // @example let chat = ws_endpoint("chat", on_message, map { "origins": ["https://app.example.com"], "on_open": on_open }) => WebSocketEndpoint ~ "Explicit trusted origin and an open hook"
+    // @error RuntimeError ~ "ws_endpoint() can only be called during application setup, before the server starts serving" fix: "Call ws_endpoint at the top level of the app, before listen()"
+    // @error RuntimeError ~ "ws_endpoint needs trusted origins in production: set SITE_URL or pass the `origins` option" fix: "Set SITE_URL or pass the origins option"
+    // @error TypeError ~ "ws_endpoint() name must be 1-64 characters of letters, digits, '_', '-' or '.'" fix: "Use a short stable name such as chat"
+    // @error TypeError ~ "unknown ws_endpoint() option" fix: "Use on_open, on_close, origins, allow_missing_origin or callback_timeout_ms"
+    module.insert(
+        "ws_endpoint".to_string(),
+        Value::NativeFunction {
+            name: "ws_endpoint".to_string(),
+            arity: 2,
+            max_arity: 3,
+            requires: Some(crate::interpreter::RuntimeCapability::HttpServer),
+            func: |_| {
+                Err(crate::error::IntentError::runtime_error(
+                    "ws_endpoint() requires interpreter context",
+                ))
+            },
+        },
+    );
+
+    // @ntnt websocket
+    // @module std/http/server
+    // @signature websocket(endpoint: WebSocketEndpoint, options?: Map) -> Response
+    // Accept a WebSocket from a GET handler.
+    //
+    // Middleware and your own authorization run first; the connection is
+    // upgraded only if this is the final, successful response. Denials and
+    // redirects are sent as ordinary HTTP. `state` is the connection's initial
+    // state: JSON data only (no functions, handles or secrets), at most 16 KiB.
+    // It is passed to each callback and replaced by its return value. Requires
+    // the async server (`ntnt run`); `ntnt test` returns 501.
+    // @param endpoint A WebSocketEndpoint from ws_endpoint()
+    // @param options Optional map with `state`
+    // @returns An upgrade response
+    // @see_also ws_endpoint, ws_send, ws_close
+    // @since v0.6.1
+    // @example get("/ws", fn(req) { websocket(echo, map { "state": map { "count": 0 } }) }) => Unit ~ "Accept a WebSocket"
+    // @example websocket(chat, map { "state": map { "user": user["id"] } }) => Response ~ "Store the authenticated user's ID in state"
+    // @error TypeError ~ "websocket() requires an endpoint from ws_endpoint() as its first argument" fix: "Pass the value returned by ws_endpoint()"
+    // @error TypeError ~ "WebSocket state must be JSON data" fix: "Store only Maps, Arrays, Strings, numbers, Bools or None"
+    // @error TypeError ~ "WebSocket state is N bytes; the limit is 16384" fix: "Keep state small; store IDs and look records up in callbacks"
+    module.insert(
+        "websocket".to_string(),
+        Value::NativeFunction {
+            name: "websocket".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: None,
+            func: crate::stdlib::websocket::websocket_response,
+        },
+    );
+
+    // @ntnt ws_send
+    // @module std/http/server
+    // @signature ws_send(conn: WebSocket, data: String | Array<Int>) -> Result<Unit, String>
+    // Queue one message on a WebSocket connection.
+    //
+    // A String is sent as text; an Array of Ints from 0 to 255 as binary.
+    // `Ok` means the message was queued, not that the client received it. Each
+    // connection queues at most 16 messages / 256 KiB; beyond that, or after
+    // the connection closes, the result is `Err`. Never waits for the socket.
+    // @param conn The connection passed to a callback
+    // @param data A String (text) or Array of 0-255 Ints (binary)
+    // @returns Ok(()) when queued, Err(reason) otherwise
+    // @see_also ws_endpoint, ws_close
+    // @since v0.6.1
+    // @example ws_send(conn, "hello") => Ok(()) ~ "Send a text message"
+    // @example ws_send(conn, [0, 1, 255]) => Ok(()) ~ "Send a binary message"
+    // @error TypeError ~ "ws_send() data must be a String (text) or Array of 0-255 Ints (binary)" fix: "Convert the value with str() (or JSON-encode it) or send bytes as Ints from 0 to 255"
+    // @error TypeError ~ "ws_send() requires a WebSocket connection as its first argument" fix: "Pass the conn argument your callback received"
+    module.insert(
+        "ws_send".to_string(),
+        Value::NativeFunction {
+            name: "ws_send".to_string(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: crate::stdlib::websocket::ws_send_value,
+        },
+    );
+
+    // @ntnt ws_close
+    // @module std/http/server
+    // @signature ws_close(conn: WebSocket, code?: Int, reason?: String) -> Result<Unit, String>
+    // Close a WebSocket after its queued messages are written.
+    //
+    // `code` is 1000 (default) or an application code from 3000 to 4999;
+    // `reason` is at most 123 bytes. Calling it again, or after the connection
+    // has closed, is harmless.
+    // @param conn The connection passed to a callback
+    // @param code Optional close code
+    // @param reason Optional close reason
+    // @returns Ok(()) if the connection was open, Err otherwise
+    // @see_also ws_endpoint, ws_send
+    // @since v0.6.1
+    // @example ws_close(conn, 4000, "done") => Ok(()) ~ "Close with an application code"
+    // @example ws_close(conn) => Ok(()) ~ "Normal close (1000)"
+    // @error TypeError ~ "ws_close() code must be 1000 or an application code from 3000 to 4999" fix: "Use 1000 or a code from 3000 to 4999"
+    // @error TypeError ~ "ws_close() reason must be at most 123 bytes" fix: "Shorten the reason"
+    module.insert(
+        "ws_close".to_string(),
+        Value::NativeFunction {
+            name: "ws_close".to_string(),
+            arity: 1,
+            max_arity: 3,
+            requires: None,
+            func: crate::stdlib::websocket::ws_close_value,
+        },
+    );
+
     // @ntnt text
     // @module std/http/server
     // @module_description HTTP response builders for server route handlers
@@ -3473,6 +3610,12 @@ pub fn send_response_with_options(
             501,
             HashMap::new(),
             "sse() requires the async HTTP server (ntnt run); it is unavailable in ntnt test"
+                .to_string(),
+        ),
+        Value::Map(map) if map.contains_key(crate::stdlib::websocket::WS_KEY) => (
+            501,
+            HashMap::new(),
+            "websocket() requires the async HTTP server (ntnt run); it is unavailable in ntnt test"
                 .to_string(),
         ),
         Value::Map(map) => {

@@ -672,6 +672,13 @@ fn ws_to_axum_response(
     if !spec.origins().allows(origin.as_deref()) {
         return ws_refusal(StatusCode::FORBIDDEN, "Origin not allowed", csp);
     }
+    if !spec.ready() {
+        return ws_refusal(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "WebSocket callbacks are not available",
+            csp,
+        );
+    }
     let (permit, shutdown, max_event_bytes) = match admit_connection() {
         Ok(admitted) => admitted,
         Err(OpenError::ShuttingDown) => {
@@ -1560,7 +1567,10 @@ pub async fn serve_on_listener(
     interpreter_handle: SharedHandle,
     routes: Arc<AsyncServerState>,
 ) -> Result<()> {
-    let app = build_app(&config, interpreter_handle, routes, false);
+    let is_production = std::env::var("NTNT_ENV")
+        .map(|v| v == "production" || v == "prod")
+        .unwrap_or(false);
+    let app = build_app(&config, interpreter_handle, routes, is_production);
     serve_connections(listener, app, config.request_timeout_secs).await
 }
 
