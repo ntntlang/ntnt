@@ -8572,12 +8572,12 @@ websocket(endpoint: WebSocketEndpoint, options?: Map) -> Response
 
 Accept a WebSocket from a GET handler.
 
-Middleware and your own authorization run first; the connection is upgraded only if this is the final, successful response. Denials and redirects are sent as ordinary HTTP. `state` is the connection's initial state: JSON data only (no functions, handles or secrets), at most 16 KiB. It is passed to each callback and replaced by its return value. Requires the async server (`ntnt run`); `ntnt test` returns 501.
+Middleware and your own authorization run first; the connection is upgraded only if this is the final, successful response. Denials and redirects are sent as ordinary HTTP. `state` is the connection's initial state: JSON data only (no functions, handles or secrets), at most 16 KiB. It is passed to each callback and replaced by its return value. `source` forwards a broadcast: each `publish()` after the upgrade is sent as one text message holding the published JSON value (SSE `event`/`id` are not added). A connection that falls behind the bus capacity is closed with 1013; reconnect and refetch state. Requires the async server (`ntnt run`); `ntnt test` returns 501.
 
 **Parameters:**
 
 - `endpoint` — A WebSocketEndpoint from ws_endpoint()
-- `options` — Optional map with `state`
+- `options` — Optional map with `state` and `source` (a Broadcast)
 
 **Returns:** An upgrade response
 
@@ -8586,10 +8586,12 @@ Middleware and your own authorization run first; the connection is upgraded only
 ```ntnt
 get("/ws", fn(req) { websocket(echo, map { "state": map { "count": 0 } }) })  // => Unit  // Accept a WebSocket
 websocket(chat, map { "state": map { "user": user["id"] } })  // => Response  // Store the authenticated user's ID in state
+websocket(live, map { "source": feed })  // => Response  // Forward a broadcast to the socket
 ```
 
 **Errors:**
 
+- **TypeError**: websocket() source must be a Broadcast from broadcast() — *Fix: Pass the value returned by broadcast()*
 - **TypeError**: websocket() requires an endpoint from ws_endpoint() as its first argument — *Fix: Pass the value returned by ws_endpoint()*
 - **TypeError**: WebSocket state must be JSON data — *Fix: Store only Maps, Arrays, Strings, numbers, Bools or None*
 - **TypeError**: WebSocket state is N bytes; the limit is 16384 — *Fix: Keep state small; store IDs and look records up in callbacks*

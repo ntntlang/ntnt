@@ -45,7 +45,11 @@ remaining workers can all be running callbacks. With a single worker, a long
 callback still delays HTTP. Shutdown closes sockets with 1001.
 `ntnt test` returns 501 for `websocket()`.
 
-Not yet: broadcast fan-out to WebSockets, a connection lifetime limit, closing
+`websocket(endpoint, map { "source": bus })` forwards each later `publish()` as a
+text message with the published JSON value, encoded once and shared with SSE.
+A socket that falls behind the bus capacity is closed with 1013.
+
+Not yet: a connection lifetime limit, closing
 sockets on development hot reload. Existing HTTP and SSE behavior is unchanged.
 
 ## DD-041: exact loaded-source provenance

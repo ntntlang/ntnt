@@ -566,3 +566,121 @@ async fn on_close_never_overlaps_a_callback_that_outlived_its_deadline() {
         ["MESSAGE_BEGIN", "MESSAGE_END", "CLOSE_BEGIN"]
     );
 }
+
+const BROADCAST_APP: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+import { broadcast, publish } from "std/concurrent"
+let feed = broadcast("feed", map { "capacity": 4 })
+fn on_message(conn, message, state) {
+    ws_send(conn, "echo:" + message["data"])
+    return state
+}
+let live = ws_endpoint("live", on_message)
+get("/ws", fn(req) { websocket(live, map { "source": feed }) })
+get("/pub", fn(req) {
+    let n = int(req.query_params["n"] ?? "0") ?? 0
+    let pad = req.query_params["pad"] ?? ""
+    let res = publish(feed, map { "n": n, "pad": pad }, map { "event": "tick", "id": n })
+    return text(str(is_ok(res)))
+})
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+async fn publish_n(addr: SocketAddr, n: usize, pad: usize) {
+    let body = reqwest::get(format!("http://{addr}/pub?n={n}&pad={}", "x".repeat(pad)))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(body, "true");
+}
+
+#[tokio::test]
+async fn broadcast_source_reaches_every_socket_across_workers() {
+    let mut server = fixture::Fixture::start(BROADCAST_APP, &["run"], &[("NTNT_WORKERS", "2")]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let mut sockets = Vec::new();
+    for _ in 0..4 {
+        sockets.push(connect(addr, "/ws", Some(&origin)).await.unwrap());
+    }
+    // A round trip proves each owner is running (and subscribed) first.
+    for socket in &mut sockets {
+        socket.send(Message::Text("hi".into())).await.unwrap();
+        assert_eq!(next_data(socket).await, Message::Text("echo:hi".into()));
+    }
+    for n in 1..=3 {
+        publish_n(addr, n, 0).await;
+    }
+    for socket in &mut sockets {
+        for n in 1..=3 {
+            // The published JSON value only; SSE event/id metadata is not added.
+            assert_eq!(
+                next_data(socket).await,
+                Message::Text(format!(r#"{{"n":{n},"pad":""}}"#))
+            );
+        }
+    }
+    // Callbacks and the source share one ordered connection.
+    sockets[0]
+        .send(Message::Text("after".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_data(&mut sockets[0]).await,
+        Message::Text("echo:after".into())
+    );
+}
+
+#[tokio::test]
+async fn socket_that_falls_behind_the_broadcast_is_closed_with_1013() {
+    let mut server = fixture::Fixture::start(BROADCAST_APP, &["run"], &[("NTNT_WORKERS", "2")]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let mut healthy = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    let mut slow = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    for socket in [&mut healthy, &mut slow] {
+        socket.send(Message::Text("hi".into())).await.unwrap();
+        assert_eq!(next_data(socket).await, Message::Text("echo:hi".into()));
+    }
+    // Keep the healthy socket read in the background.
+    let (_tx, mut rx) = healthy.split();
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    let reader = tokio::spawn(async move {
+        while let Some(Ok(message)) = rx.next().await {
+            if let Message::Text(text) = message {
+                let _ = seen_tx.send(text);
+            }
+        }
+    });
+    // The slow socket reads nothing while many large events are published, so
+    // its owner blocks writing and the capacity-4 bus overtakes it.
+    let total = 120;
+    for n in 1..=total {
+        publish_n(addr, n, 48 * 1024).await;
+    }
+    let mut code = None;
+    let _ = tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(Ok(message)) = slow.next().await {
+            if let Message::Close(Some(frame)) = message {
+                code = Some(frame.code);
+            }
+        }
+    })
+    .await;
+    assert_eq!(code, Some(CloseCode::Again), "{}", server.stderr());
+    // The healthy socket received every event in order.
+    for n in 1..=total {
+        let text = tokio::time::timeout(Duration::from_secs(10), seen.recv())
+            .await
+            .expect("healthy socket stalled")
+            .expect("healthy socket closed");
+        assert!(
+            text.starts_with(&format!(r#"{{"n":{n},"#)),
+            "{n}: {}",
+            &text[..20]
+        );
+    }
+    reader.abort();
+}

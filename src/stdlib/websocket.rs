@@ -381,7 +381,7 @@ fn callbacks() -> Option<CallbackSender> {
 
 /// A WebSocket accepted by the final response. Only a description: the
 /// connection is admitted and upgraded on the async side.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct WsSpec {
     handler: Handler,
     origins: OriginPolicy,
@@ -391,6 +391,8 @@ pub struct WsSpec {
     has_open: bool,
     has_close: bool,
     callback_deadline: Duration,
+    /// Broadcast forwarded to this connection as text messages.
+    source: Option<Arc<crate::stdlib::realtime::Bus>>,
 }
 
 impl WsSpec {
@@ -405,7 +407,15 @@ impl WsSpec {
             has_open: false,
             has_close: false,
             callback_deadline: CALLBACK_DEADLINE,
+            source: None,
         }
+    }
+
+    /// Forward a broadcast to the connection (internal tests).
+    #[doc(hidden)]
+    pub fn with_source(mut self, bus: Arc<crate::stdlib::realtime::Bus>) -> Self {
+        self.source = Some(bus);
+        self
     }
 
     /// Callback endpoints need workers to run them; refuse the upgrade
@@ -617,6 +627,11 @@ pub fn spec_from_response(
         Ok(state) => state,
         Err(error) => return Some(Err(error)),
     };
+    let source = match ws.get("source") {
+        None | Some(Value::Unit) => None,
+        Some(Value::Broadcast(bus)) => Some(Arc::clone(bus)),
+        Some(_) => return Some(invalid()),
+    };
     Some(Ok(WsSpec {
         handler: Handler::Endpoint(name.clone()),
         origins: config.origins,
@@ -625,6 +640,7 @@ pub fn spec_from_response(
         has_open: config.has_open,
         has_close: config.has_close,
         callback_deadline: config.callback_deadline,
+        source,
     }))
 }
 
@@ -643,6 +659,7 @@ pub fn websocket_response(args: &[Value]) -> Result<Value> {
         }
     };
     let mut state = Value::Unit;
+    let mut source = Value::Unit;
     match args.get(1) {
         None | Some(Value::Unit) => {}
         Some(Value::Map(options)) => {
@@ -652,9 +669,17 @@ pub fn websocket_response(args: &[Value]) -> Result<Value> {
                         encode_state(value).map_err(IntentError::type_error)?;
                         state = value.clone();
                     }
+                    "source" => match value {
+                        Value::Broadcast(_) => source = value.clone(),
+                        _ => {
+                            return Err(IntentError::type_error(
+                                "websocket() source must be a Broadcast from broadcast()",
+                            ))
+                        }
+                    },
                     _ => {
                         return Err(IntentError::type_error(format!(
-                            "unknown websocket() option: {key} (supported: state)"
+                            "unknown websocket() option: {key} (supported: state, source)"
                         )))
                     }
                 }
@@ -665,6 +690,7 @@ pub fn websocket_response(args: &[Value]) -> Result<Value> {
     let mut ws = HashMap::new();
     ws.insert("endpoint".to_string(), endpoint);
     ws.insert("state".to_string(), state);
+    ws.insert("source".to_string(), source);
     let mut response = HashMap::new();
     response.insert("status".to_string(), Value::Int(200));
     response.insert("headers".to_string(), Value::Map(HashMap::new()));
@@ -1030,6 +1056,9 @@ pub(crate) async fn run(
     );
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut pong_deadline: Option<Instant> = None;
+    // Subscribe before the first message is read: only events published after
+    // the upgrade are delivered, as with SSE. The receiver keeps the bus alive.
+    let mut source = spec.source.as_ref().map(|bus| bus.subscribe());
     // A close requested by the application, applied once queued messages are written.
     let mut requested_close: Option<(u16, String)> = None;
 
@@ -1095,6 +1124,29 @@ pub(crate) async fn run(
                     }
                     if let Err(end) = session.advance(&handle) {
                         break 'run end;
+                    }
+                }
+                // One encoding per publish; each connection writes the shared
+                // JSON as a text message. A connection that falls behind the
+                // bus capacity is closed rather than skipping events.
+                received = async { source.as_mut().expect("guarded").recv().await }, if source.is_some() => {
+                    use tokio::sync::broadcast::error::RecvError;
+                    match received {
+                        Ok(event) => {
+                            let text = event.json().to_owned();
+                            drop(event);
+                            if !write(&mut socket, Message::Text(text), timings.write_timeout).await {
+                                break 'run End::Drop;
+                            }
+                        }
+                        Err(RecvError::Lagged(_)) => {
+                            break 'run End::Close(
+                                close_code::TRY_AGAIN_LATER,
+                                "fell behind the broadcast".into(),
+                            );
+                        }
+                        // Every handle to the bus is gone: nothing more will arrive.
+                        Err(RecvError::Closed) => source = None,
                     }
                 }
                 _ = ping.tick() => {
