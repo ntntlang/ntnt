@@ -139,6 +139,12 @@ disposable = true
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        // Bound cleanup in the server: a stuck lock or statement errors out
+        // instead of holding the test. An unresponsive server is bounded by
+        // the CI job timeout.
+        let _ = self
+            .admin
+            .batch_execute("SET lock_timeout = '10s'; SET statement_timeout = '30s'");
         for name in [&self.target, &self.scratch] {
             let _ = self
                 .admin
