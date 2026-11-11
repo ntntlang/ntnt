@@ -8,6 +8,10 @@ use std::process::Command;
 mod db_fixture;
 use db_fixture::Fixture;
 
+/// Longest a test waits for a spawned `ntnt db` process to block on a
+/// test-held lock.
+const LOCK_WAIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn logical_database_and_target_selection_are_bound_into_plans() {
@@ -642,10 +646,25 @@ fn replay_consumes_captured_files_even_if_paths_are_replaced_during_inspection()
         if waiting > 0 {
             break;
         }
-        if start.elapsed() > std::time::Duration::from_secs(10) {
+        // The child must reach the lock: fail fast (with its output) if it
+        // exits first. The deadline only bounds a hang; a loaded CI runner can
+        // take well over 10 s to start, inspect the target and connect.
+        if let Some(status) = child.try_wait().unwrap() {
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "inspector did not reach the history lock: exited with {status}\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if start.elapsed() > LOCK_WAIT_DEADLINE {
             let _ = child.kill();
-            let _ = child.wait();
-            panic!("inspector did not reach the history lock");
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "inspector did not reach the history lock within {LOCK_WAIT_DEADLINE:?}\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -698,10 +717,25 @@ fn review_target_snapshot_is_released_before_scratch_replay() {
         if waiting > 0 {
             break;
         }
-        if start.elapsed() > std::time::Duration::from_secs(10) {
+        // The child must reach the lock: fail fast (with its output) if it
+        // exits first. The deadline only bounds a hang; a loaded CI runner can
+        // take well over 10 s to start, inspect the target and connect.
+        if let Some(status) = child.try_wait().unwrap() {
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "replay did not reach the controlled scratch lock: exited with {status}\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if start.elapsed() > LOCK_WAIT_DEADLINE {
             let _ = child.kill();
-            let _ = child.wait();
-            panic!("replay did not reach the controlled scratch lock");
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "replay did not reach the controlled scratch lock within {LOCK_WAIT_DEADLINE:?}\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
