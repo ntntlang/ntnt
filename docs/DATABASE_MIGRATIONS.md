@@ -15,6 +15,139 @@ ntnt db status --target development --object accounts
 
 `migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Explicit reviewed baseline adoption and recognized PostgreSQL legacy-history import use that same executor; see below. The only non-transactional operation is a lone PostgreSQL `CREATE INDEX CONCURRENTLY` (see [Concurrent index builds](#concurrent-index-builds)); backfill orchestration and query lint are not implemented. PostgreSQL migrations may include transactional DML such as seed rows; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
 
+## Quick start
+
+Both paths use the development environment secrets provider. Run them from the
+project directory that holds `ntnt.toml`. They are for local development only.
+Production uses the Unix-socket secrets provider and a separately protected
+approval; see the rest of this document before deploying.
+
+### SQLite
+
+```toml
+# ntnt.toml
+[databases.app]
+engine = "sqlite"
+schema = "main"
+migrations_dir = "migrations"
+approval_secret = "APP_MIGRATION_APPROVAL"
+
+[databases.app.targets.development]
+connection_secret = "APP_DATABASE_FILE"
+
+[databases.app.scratch]
+connection_secret = "APP_REPLAY_FILE"
+disposable = true
+
+[secrets.APP_DATABASE_FILE]
+[secrets.APP_REPLAY_FILE]
+[secrets.APP_MIGRATION_APPROVAL]
+```
+
+```sql
+-- migrations/0001_initial.sql
+CREATE TABLE accounts (
+    id INTEGER PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE
+);
+```
+
+`ntnt db` never creates database files. Create an empty target file and a separate
+empty scratch file (an empty file is a valid SQLite database). Then point the secrets
+at their **absolute** paths:
+
+```sh
+mkdir -p data && touch data/app.sqlite data/replay.sqlite
+export NTNT_ENV=development NTNT_SECRETS_PROVIDER=env
+export APP_DATABASE_FILE="$PWD/data/app.sqlite"
+export APP_REPLAY_FILE="$PWD/data/replay.sqlite"
+
+ntnt db status --target development
+ntnt db plan --target development --out review.json
+# Review review.json and the SQL. Then approve exactly this plan:
+export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review.json)"
+ntnt db migrate --target development --plan review.json
+ntnt db verify --target development
+```
+
+`migrate` without `APP_MIGRATION_APPROVAL` fails with `DB_APPROVAL_REQUIRED` and
+writes nothing. Rerunning the same plan reports `already_applied`. For the next
+change, add `migrations/0002_<name>.sql` and plan, approve and migrate again. Each
+new plan has a new digest.
+
+### PostgreSQL
+
+Provision a target database and a separate, disposable scratch database, each owned
+by its own unprivileged login role. Run this as a local administrator (for
+example `psql -U postgres -h /path/to/socket-dir -f provision.sql`):
+
+```sql
+-- provision.sql (local development only)
+CREATE ROLE app_owner LOGIN PASSWORD 'dev-only-owner';
+CREATE DATABASE app_development OWNER app_owner TEMPLATE template0;
+CREATE ROLE app_replay_owner LOGIN PASSWORD 'dev-only-replay';
+CREATE DATABASE app_replay OWNER app_replay_owner TEMPLATE template0;
+```
+
+The managed schema must already exist on the target. Create it as the owner role,
+for example `psql -h /path/to/socket-dir -U app_owner -d app_development -c 'CREATE SCHEMA app'`.
+Skip this if you use `schema = "public"`. Leave the scratch database empty.
+
+```toml
+# ntnt.toml
+[databases.app]
+engine = "postgresql"
+schema = "app"
+migrations_dir = "migrations"
+approval_secret = "APP_MIGRATION_APPROVAL"
+
+[databases.app.targets.development]
+connection_secret = "APP_DATABASE"
+database = "app_development"
+role = "app_owner"
+
+[databases.app.scratch]
+connection_secret = "APP_REPLAY_DATABASE"
+database = "app_replay"
+role = "app_replay_owner"
+disposable = true
+
+[secrets.APP_DATABASE]
+[secrets.APP_REPLAY_DATABASE]
+[secrets.APP_MIGRATION_APPROVAL]
+```
+
+```sql
+-- migrations/0001_initial.sql
+CREATE TABLE app.accounts (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE
+);
+```
+
+Connection secrets are libpq key/value strings with exactly one `host`, the declared
+`user` and `dbname`, and **`sslmode=disable`**, with no `options`. For now, use a
+trusted local transport such as a Unix-socket directory. TLS is not yet supported;
+it is tracked in [#344](https://github.com/ntntlang/ntnt/issues/344).
+
+```sh
+export NTNT_ENV=development NTNT_SECRETS_PROVIDER=env
+export APP_DATABASE="host=/path/to/socket-dir user=app_owner dbname=app_development password=dev-only-owner sslmode=disable"
+export APP_REPLAY_DATABASE="host=/path/to/socket-dir user=app_replay_owner dbname=app_replay password=dev-only-replay sslmode=disable"
+
+ntnt db status --target development
+ntnt db plan --target development --out review.json
+export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review.json)"
+ntnt db migrate --target development --plan review.json
+ntnt db verify --target development
+```
+
+A secret without `sslmode=disable` (or with a different user, database or several
+hosts) fails with `DB_CONNECTION_CONFIG`. An unset or undeclared secret fails with
+`DB_SECRET`. Add `--json` to any command for the machine-readable report. If the
+manifest declares only one database, `--database` is optional; `--target` is
+always required.
+
 ## Explicit configuration and secrets
 
 The example below selects PostgreSQL. See [SQLite](#sqlite-native-files-and-rebuilds) for its file-backed configuration and distinct guarantees.
@@ -426,8 +559,9 @@ published inspection/SQL coverage**. It is not blanket production rollout approv
 automatic baseline generation, full schema coverage, proof of arbitrary business
 mappings or a backup/restore system. Archive reviewed artifacts, arrange a tested
 recovery path and retire conflicting old writers; actual application deployment
-requires its own authorization. Concurrent/nontransactional DDL and schema-aware
-query analysis remain later work.
+requires its own authorization. The only supported non-transactional DDL is a lone
+PostgreSQL `CREATE INDEX CONCURRENTLY` (see [Concurrent index builds](#concurrent-index-builds));
+other non-transactional DDL and schema-aware query analysis remain later work.
 
 ## SQLite native files and rebuilds
 

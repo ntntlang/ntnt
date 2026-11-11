@@ -38,7 +38,9 @@ impl Diagnostic {
             "DB_UNRECOGNIZED_HISTORY" => "Review the existing managed scope. To adopt a matching captured prefix, declare named adoption_checks and create an explicit plan --adopt-through <migration-id>; obtain separate exact-plan approval before migrate. Never insert fictional applied rows.",
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
-            "DB_SECRET" => "Declare the connection secret in ntnt.toml and configure the existing std/secrets provider. Never pass a connection URL on the command line.",
+            "DB_SECRET" => "Declare the named connection secret under [secrets.<NAME>] in ntnt.toml and make it resolvable through the configured std/secrets provider (development: an environment variable with that exact name; production: NTNT_SECRETS_PROVIDER=unix-socket). Never pass a connection URL on the command line.",
+            "DB_CONNECTION_CONFIG" => "Make the PostgreSQL connection secret name exactly one explicit host, the user and dbname declared as the target's role and database, and sslmode=disable on a trusted local transport (for example a Unix socket), with no startup options. TLS is not yet supported (see #344); never send credentials over an untrusted network.",
+            "DB_CONFIG" => "Fix ntnt.toml or the command line as the message describes: declare [databases.<name>] with engine, schema, a confined relative migrations_dir and named targets, use logical secret references (a separate disposable scratch secret and a separate approval_secret), and pass --adopt-through only to plan. See docs/DATABASE_MIGRATIONS.md#quick-start.",
             "DB_ATTEMPT_UNRESOLVED" => "An earlier migrate stopped during a non-transactional migration. Make sure no migrate or index build is still running, then run `ntnt db reconcile --plan <the same approved plan>`; it records the outcome it observes or rolls the attempt back. Nothing else runs until then.",
             "DB_ATTEMPT_ACTIVE" => "The index build is still running in another session. Wait for it to finish or cancel that backend, then reconcile again.",
             "DB_RECONCILE_INCOMPLETE" => "The planned invalid index was dropped, so the database has changed, but the result did not match the plan's state before the migration and the attempt was kept. Inspect drift with an operator, then reconcile again.",
@@ -453,6 +455,45 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configuration_diagnostics_have_specific_next_actions() {
+        let generic = super::Diagnostic::new("DB_NOT_A_REAL_CODE", "x").next_action;
+        for (code, expected) in [
+            (
+                "DB_CONNECTION_CONFIG",
+                [
+                    "one explicit host",
+                    "sslmode=disable",
+                    "no startup options",
+                    "#344",
+                ]
+                .as_slice(),
+            ),
+            (
+                "DB_CONFIG",
+                [
+                    "[databases.<name>]",
+                    "migrations_dir",
+                    "approval_secret",
+                    "--adopt-through",
+                ]
+                .as_slice(),
+            ),
+            (
+                "DB_SECRET",
+                ["[secrets.<NAME>]", "std/secrets provider", "exact name"].as_slice(),
+            ),
+        ] {
+            let action = super::Diagnostic::new(code, "x").next_action;
+            assert_ne!(action, generic, "{code} uses the generic next action");
+            for fragment in expected {
+                assert!(
+                    action.contains(fragment),
+                    "{code}: {fragment:?} missing from {action}"
+                );
+            }
+        }
+    }
     #[test]
     fn lock_conflicts_explain_what_to_do() {
         let d = super::Diagnostic::new("DB_LOCK_CONFLICT", "x");

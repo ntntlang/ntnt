@@ -46,7 +46,7 @@ This document outlines the implementation plan for NTNT, a programming language 
   rebuilds and native cross-process failure/recovery cases.
 - [x] Deliberate existing-database adoption, recognized legacy import and the
   complete transactional foundation, with a populated application rehearsal.
-- [ ] Narrow non-transactional concurrent-index execution/recovery.
+- [x] Narrow non-transactional concurrent-index execution/recovery (`ntnt db reconcile`).
 - [ ] Schema-aware query validation, dependencies and Intent views.
 
 Inspection/planning stays read-only on the selected target; `ntnt db migrate`

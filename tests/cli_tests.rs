@@ -1275,3 +1275,16 @@ fn provider_named_health_starts_oauth_instead_of_health_route() {
     // OAuth start redirects to the provider (302); the health route would be 200.
     assert!(stdout.contains("[RESPONSE] 302"), "{stdout}");
 }
+
+/// #245: an empty test selection is never success. `ntnt test` with no
+/// requests must fail rather than report a zero-request pass.
+#[test]
+fn ntnt_test_without_requests_is_not_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = dir.path().join("server.tnt");
+    std::fs::write(&server, "get(\"/\", fn(req) { return text(\"ok\") })\n").unwrap();
+    let (stdout, stderr, code) = run_ntnt(&["test", server.to_str().unwrap()]);
+    assert_ne!(code, 0, "zero requests must not pass: {stdout}");
+    assert!(stderr.contains("No requests specified"), "{stderr}");
+    assert!(!stdout.contains("passed"), "{stdout}");
+}
