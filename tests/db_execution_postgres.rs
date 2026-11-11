@@ -1673,30 +1673,51 @@ fn reconcile(f: &Fixture, plan: &Value) -> Value {
         .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
 }
 /// Block until the target database has no session other than this one, so
-/// work a disconnected client started has finished. Fails after 30 s.
+/// work a disconnected client started has finished. The whole wait runs on a
+/// helper thread and is bounded from outside: a PostgreSQL call that never
+/// returns fails the test after 30 s instead of hanging it. Each query is
+/// also bounded in the server by `statement_timeout`.
 fn wait_for_other_target_sessions_to_end(f: &Fixture) {
-    let mut client = f.target();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        let others: Vec<String> = client
-            .query(
-                "SELECT format('%s %s %s', pid, state, left(query, 60)) FROM pg_stat_activity
-                 WHERE datname = current_database() AND pid <> pg_backend_pid()
-                   AND backend_type = 'client backend'",
-                &[],
-            )
-            .unwrap()
-            .iter()
-            .map(|r| r.get(0))
-            .collect();
-        if others.is_empty() {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "target sessions still open after 30s: {others:?}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+    let url = f.target_url.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<(), String> {
+            let mut client =
+                postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+            client
+                .batch_execute("SET statement_timeout = '5s'")
+                .map_err(|e| e.to_string())?;
+            let deadline = std::time::Instant::now() + LIMIT;
+            loop {
+                let others: Vec<String> = client
+                    .query(
+                        "SELECT format('%s %s %s', pid, state, left(query, 60)) FROM pg_stat_activity
+                         WHERE datname = current_database() AND pid <> pg_backend_pid()
+                           AND backend_type = 'client backend'",
+                        &[],
+                    )
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .map(|r| r.get(0))
+                    .collect();
+                if others.is_empty() {
+                    return Ok(());
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "target sessions still open after {LIMIT:?}: {others:?}"
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        })();
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(LIMIT + std::time::Duration::from_secs(5)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("{error}"),
+        Err(_) => panic!("waiting for target sessions did not return within {LIMIT:?}"),
     }
 }
 fn attempt_state(f: &Fixture) -> Option<String> {
