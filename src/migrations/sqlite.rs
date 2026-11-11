@@ -7,6 +7,7 @@ use super::sqlite_file::FileBinding;
 use super::{Diagnostic, Result};
 use rusqlite::{
     config::DbConfig,
+    fallible_iterator::FallibleIterator,
     hooks::{AuthAction, AuthContext, Authorization},
     types::ValueRef,
     Connection, OpenFlags,
@@ -194,18 +195,59 @@ fn authorize(
         Authorization::Deny
     }
 }
+type AuthScope = Option<(Policy, std::collections::HashSet<String>)>;
+
+/// One native authorizer is installed per connection (rusqlite requires
+/// `&mut Connection` to change it, which cannot coexist with a live `Batch`).
+/// It reads a shared scope: `None` admits adapter-owned SQL only while no
+/// authored program is being compiled; `Some` applies the authored policy.
+/// A poisoned scope fails closed for every statement.
+#[derive(Clone, Default)]
+struct Authorizer(Arc<Mutex<AuthScope>>);
+impl Authorizer {
+    fn install(conn: &mut Connection) -> Result<Self> {
+        let authorizer = Self::default();
+        let scope = authorizer.0.clone();
+        conn.authorizer(Some(move |context: AuthContext<'_>| match scope.lock() {
+            Ok(mut scope) => match scope.as_mut() {
+                None => Authorization::Allow,
+                Some((policy, tables)) => authorize(context, *policy, tables),
+            },
+            Err(_) => Authorization::Deny,
+        }))
+        .map_err(sql_error)?;
+        Ok(authorizer)
+    }
+    fn set(&self, scope: AuthScope) -> Result<()> {
+        *self.0.lock().map_err(|_| {
+            Diagnostic::new("DB_RUNTIME", "SQLite authorizer state is unavailable.")
+        })? = scope;
+        Ok(())
+    }
+    /// Resolve the allowlist with the policy inactive (it is adapter SQL), then
+    /// enforce `policy` until the returned guard drops.
+    fn activate(&self, conn: &Connection, policy: Policy) -> Result<AuthGuard<'_>> {
+        self.set(None)?;
+        let tables = known_tables(conn)?;
+        self.set(Some((policy, tables)))?;
+        Ok(AuthGuard(self))
+    }
+}
+struct AuthGuard<'a>(&'a Authorizer);
+impl Drop for AuthGuard<'_> {
+    fn drop(&mut self) {
+        // A poisoned scope already denies everything; nothing else to restore.
+        let _ = self.0.set(None);
+    }
+}
+
 fn authored<T>(
-    conn: &Connection,
+    state: &State,
     policy: Policy,
     operation: impl FnOnce(&Connection) -> Result<T>,
 ) -> Result<T> {
-    let mut tables = known_tables(conn)?;
-    conn.authorizer(Some(move |context: AuthContext<'_>| {
-        authorize(context, policy, &mut tables)
-    }));
-    let result = operation(conn);
-    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
-    result
+    let _active = state.auth.activate(&state.conn, policy)?;
+    operation(&state.conn)
 }
 
 /// Eponymous virtual tables can report database=main without appearing in the
@@ -229,13 +271,11 @@ fn known_tables(conn: &Connection) -> Result<std::collections::HashSet<String>> 
 /// SQLite finds native statement boundaries (including trigger bodies and quoted
 /// semicolons). Refresh the resolved-relation allowlist after each statement, so
 /// a dropped name cannot fall through to an eponymous virtual table later.
-fn execute_script(conn: &Connection, sql: &str) -> Result<()> {
+fn execute_script(state: &State, sql: &str) -> Result<()> {
+    let conn = &state.conn;
     let mut batch = rusqlite::Batch::new(conn, sql);
     loop {
-        let mut tables = known_tables(conn)?;
-        conn.authorizer(Some(move |context: AuthContext<'_>| {
-            authorize(context, Policy::Migration, &mut tables)
-        }));
+        let active = state.auth.activate(conn, Policy::Migration)?;
         let result = (|| {
             let Some(mut statement) = batch.next().map_err(sql_error)? else {
                 return Ok(false);
@@ -250,7 +290,7 @@ fn execute_script(conn: &Connection, sql: &str) -> Result<()> {
             while output.next().map_err(sql_error)?.is_some() {}
             Ok(true)
         })();
-        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        drop(active);
         if !result? {
             return Ok(());
         }
@@ -303,6 +343,7 @@ struct State {
     conn: Connection,
     file: FileBinding,
     writable: bool,
+    auth: Authorizer,
 }
 impl State {
     fn identity(&self) -> Result<Identity> {
@@ -471,7 +512,7 @@ impl State {
             // Native authorization covers trigger/view/default programs as well
             // as their resolved base relations; SQL definitions remain opaque.
             for (key, sql) in programs {
-                if authored(&self.conn, Policy::Definition, |conn| {
+                if authored(self, Policy::Definition, |conn| {
                     conn.prepare(&sql).map_err(sql_error)?;
                     Ok(())
                 })
@@ -652,7 +693,7 @@ impl Sqlite {
     pub async fn connect(secret: &crate::interpreter::SecretValue, access: Access) -> Result<Self> {
         let path = std::path::PathBuf::from(secret.expose());
         let state=tokio::time::timeout(IO_TIMEOUT,tokio::task::spawn_blocking(move || {
-            if rusqlite::version_number()/1000!=3045 {return Err(Diagnostic::new("DB_ENGINE_VERSION","SQLite adapter supports the bundled SQLite 3.45 series."));}
+            if rusqlite::version_number()/1000!=3054 {return Err(Diagnostic::new("DB_ENGINE_VERSION","SQLite adapter supports the bundled SQLite 3.54 series."));}
             let file=FileBinding::capture(&path)?;
             let writable=!matches!(access,Access::Inspect);
             match &access {
@@ -661,17 +702,18 @@ impl Sqlite {
                 _=>(),
             }
             let flags=if writable {OpenFlags::SQLITE_OPEN_READ_WRITE} else {OpenFlags::SQLITE_OPEN_READ_ONLY};
-            let conn=Connection::open_with_flags(file.path(),flags|OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(sql_error)?;
+            let mut conn=Connection::open_with_flags(file.path(),flags|OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(sql_error)?;
             file.check_connection(&conn)?;
             conn.busy_timeout(Duration::from_secs(2)).map_err(sql_error)?;
-            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_SQL_LENGTH,1_048_576);
-            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,16*1_048_576);
-            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_EXPR_DEPTH,64);
+            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_SQL_LENGTH,1_048_576).map_err(sql_error)?;
+            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,16*1_048_576).map_err(sql_error)?;
+            conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_EXPR_DEPTH,64).map_err(sql_error)?;
             conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE,true).map_err(sql_error)?;
             conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL,false).map_err(sql_error)?;
             conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML,false).map_err(sql_error)?;
             conn.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON; PRAGMA ignore_check_constraints=OFF; PRAGMA legacy_alter_table=OFF; PRAGMA synchronous=FULL;").map_err(sql_error)?;
-            Ok::<_,Diagnostic>(State{conn,file,writable})
+            let auth=Authorizer::install(&mut conn)?;
+            Ok::<_,Diagnostic>(State{conn,file,writable,auth})
         })).await.map_err(|_|Diagnostic::new("DB_TIMEOUT","SQLite connection deadline exceeded."))?
             .map_err(|_|Diagnostic::new("DB_RUNTIME","SQLite connection worker failed."))??;
         let interrupt = state.conn.get_interrupt_handle();
@@ -701,10 +743,13 @@ impl Sqlite {
                 ));
             }
             let deadline = Instant::now() + IO_TIMEOUT;
-            state.conn.progress_handler(
-                1000,
-                Some(move || cancelled.load(Ordering::Acquire) || Instant::now() >= deadline),
-            );
+            state
+                .conn
+                .progress_handler(
+                    1000,
+                    Some(move || cancelled.load(Ordering::Acquire) || Instant::now() >= deadline),
+                )
+                .map_err(sql_error)?;
             operation(&mut state)
         });
         match tokio::time::timeout(IO_TIMEOUT, work).await {
@@ -806,7 +851,7 @@ impl Sqlite {
                 }
             }
             let outcome = (|| {
-                execute_script(&s.conn, &migration.sql)?;
+                execute_script(s, &migration.sql)?;
                 s.history(None)?;
                 s.foreign_keys()?;
                 if let Some(guard) = guard {
@@ -848,7 +893,7 @@ impl Sqlite {
     }
     pub async fn check(&self, sql: &str) -> Result<()> {
         let sql = sql.to_owned();
-        self.run(move|s|authored(&s.conn,Policy::Check,|conn|{
+        self.run(move|s|authored(s,Policy::Check,|conn|{
             if !super::analysis::contract_supported(&sql,"main") {return Err(Diagnostic::new("DB_CHECK_UNSUPPORTED","Unsupported SQLite contract syntax."));}
             let mut batch=rusqlite::Batch::new(conn,&sql);
             let mut stmt=batch.next().map_err(sql_error)?.ok_or_else(||Diagnostic::new("DB_CHECK_FAILED","Empty SQLite contract."))?;
