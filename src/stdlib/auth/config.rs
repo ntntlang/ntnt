@@ -1,5 +1,7 @@
 use super::*;
 
+mod postgres_schema;
+
 pub(super) fn initialize_session_store(store: &SessionStore) -> std::result::Result<(), String> {
     match store {
         SessionStore::Sqlite(path) => init_sqlite_sessions(path),
@@ -193,14 +195,69 @@ fn ignore_duplicate_column_sqlite(
     }
 }
 
-fn run_postgres_migration(
-    client: &mut postgres::Client,
+fn postgres_schema_error(action: &str, error: &postgres::Error) -> String {
+    let detail = error
+        .as_db_error()
+        .map(|e| format!("{} (SQLSTATE {})", e.message(), e.code().code()))
+        .unwrap_or_else(|| error.to_string());
+    format!("PostgreSQL auth schema: {action}: {detail}. Bootstrap/migrate with the schema owner, then restart with the runtime DML role")
+}
+
+fn ensure_postgres_table(
+    client: &mut impl postgres::GenericClient,
+    table: &str,
     sql: &str,
 ) -> std::result::Result<(), String> {
-    client
-        .execute(sql, &[])
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    let exists: bool = client
+        .query_one("SELECT to_regclass($1) IS NOT NULL", &[&table])
+        .map_err(|e| postgres_schema_error(table, &e))?
+        .get(0);
+    if !exists {
+        client
+            .batch_execute(sql)
+            .map_err(|e| postgres_schema_error(table, &e))?;
+    }
+    Ok(())
+}
+
+fn ensure_postgres_column(
+    client: &mut impl postgres::GenericClient,
+    table: &str,
+    column: &str,
+    sql: &str,
+) -> std::result::Result<(), String> {
+    let exists: bool = client.query_one(
+        "SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname = $2 AND NOT attisdropped)",
+        &[&table, &column]
+    ).map_err(|e| postgres_schema_error(table, &e))?.get(0);
+    if !exists {
+        client
+            .batch_execute(sql)
+            .map_err(|e| postgres_schema_error(&format!("{table}.{column}"), &e))?;
+    }
+    Ok(())
+}
+
+fn ensure_postgres_index(
+    client: &mut impl postgres::GenericClient,
+    table: &str,
+    index: &str,
+    sql: &str,
+) -> std::result::Result<(), String> {
+    let exists: bool = client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_class i JOIN pg_class t ON t.oid = to_regclass($1)
+          WHERE i.relnamespace = t.relnamespace AND i.relname = $2)",
+            &[&table, &index],
+        )
+        .map_err(|e| postgres_schema_error(index, &e))?
+        .get(0);
+    if !exists {
+        client
+            .batch_execute(sql)
+            .map_err(|e| postgres_schema_error(index, &e))?;
+    }
+    Ok(())
 }
 
 // Initialize SQLite session storage
@@ -441,15 +498,35 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Longest a PostgreSQL auth initialization waits for any lock.
+const AUTH_INIT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Initialize PostgreSQL session storage
 fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
-    // Test connection and create table
-    let mut client = postgres::Client::connect(url, postgres::NoTls)
+    // Serialize bootstrap/migration, including concurrent legacy-token upgrades.
+    // Already-current startup below performs catalog reads only.
+    let mut connection = postgres::Client::connect(url, postgres::NoTls)
         .map_err(|e| format!("Failed to connect to PostgreSQL: {}", e))?;
-
+    let mut client = connection
+        .transaction()
+        .map_err(|e| postgres_schema_error("begin initialization", &e))?;
+    // Bound every lock wait in this transaction (the advisory lock and any
+    // later ALTER TABLE): a stalled holder fails startup with an error instead
+    // of hanging every process that starts.
     client
-        .execute(
-            "CREATE TABLE IF NOT EXISTS auth_sessions (
+        .batch_execute(&format!(
+            "SET LOCAL lock_timeout = '{}ms'",
+            AUTH_INIT_LOCK_TIMEOUT.as_millis()
+        ))
+        .map_err(|e| postgres_schema_error("set lock timeout", &e))?;
+    client.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended('ntnt:auth:local-one-time-token-migration', 0))", &[]
+    ).map_err(|e| postgres_schema_error("lock initialization", &e))?;
+
+    ensure_postgres_table(
+        &mut client,
+        "auth_sessions",
+        "CREATE TABLE IF NOT EXISTS auth_sessions (
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
             provider TEXT NOT NULL,
@@ -468,35 +545,40 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             created_at BIGINT NOT NULL,
             expires_at BIGINT NOT NULL
         )",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create sessions table: {}", e))?;
+    )?;
 
-    run_postgres_migration(
+    ensure_postgres_column(
         &mut client,
+        "auth_sessions",
+        "device_name",
         "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS device_name TEXT",
     )?;
-    run_postgres_migration(
+    ensure_postgres_column(
         &mut client,
+        "auth_sessions",
+        "user_agent_hash",
         "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS user_agent_hash TEXT",
     )?;
-    run_postgres_migration(
+    ensure_postgres_column(
         &mut client,
+        "auth_sessions",
+        "last_ip_hash",
         "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS last_ip_hash TEXT",
     )?;
 
     // Index for cleanup queries
-    client
-        .execute(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON auth_sessions(expires_at)",
-            &[],
-        )
-        .ok(); // Ignore if already exists
+    ensure_postgres_index(
+        &mut client,
+        "auth_sessions",
+        "idx_sessions_expires",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON auth_sessions(expires_at)",
+    )?;
 
     // OAuth state table for CSRF protection
-    client
-        .execute(
-            "CREATE TABLE IF NOT EXISTS auth_oauth_states (
+    ensure_postgres_table(
+        &mut client,
+        "auth_oauth_states",
+        "CREATE TABLE IF NOT EXISTS auth_oauth_states (
             state TEXT PRIMARY KEY,
             nonce TEXT,
             pkce_verifier TEXT,
@@ -508,42 +590,46 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             last_ip_hash TEXT,
             created_at BIGINT NOT NULL
         )",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create oauth_states table: {}", e))?;
+    )?;
 
-    run_postgres_migration(
-        &mut client,
+    ensure_postgres_column(
+        &mut client, "auth_oauth_states", "remember_me",
         "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS remember_me BOOLEAN NOT NULL DEFAULT FALSE",
     )?;
-    run_postgres_migration(
+    ensure_postgres_column(
         &mut client,
+        "auth_oauth_states",
+        "device_name",
         "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS device_name TEXT",
     )?;
-    run_postgres_migration(
+    ensure_postgres_column(
         &mut client,
+        "auth_oauth_states",
+        "user_agent_hash",
         "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS user_agent_hash TEXT",
     )?;
-    run_postgres_migration(
+    ensure_postgres_column(
         &mut client,
+        "auth_oauth_states",
+        "last_ip_hash",
         "ALTER TABLE auth_oauth_states ADD COLUMN IF NOT EXISTS last_ip_hash TEXT",
     )?;
 
     // Exchange token table for Safari ITP cookie workaround
-    client
-        .execute(
-            "CREATE TABLE IF NOT EXISTS auth_exchange_tokens (
+    ensure_postgres_table(
+        &mut client,
+        "auth_exchange_tokens",
+        "CREATE TABLE IF NOT EXISTS auth_exchange_tokens (
             token TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
             created_at BIGINT NOT NULL
         )",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create exchange_tokens table: {}", e))?;
+    )?;
 
-    client
-        .execute(
-            "CREATE TABLE IF NOT EXISTS auth_challenges (
+    ensure_postgres_table(
+        &mut client,
+        "auth_challenges",
+        "CREATE TABLE IF NOT EXISTS auth_challenges (
             id TEXT PRIMARY KEY,
             subject_id TEXT NOT NULL,
             provider TEXT NOT NULL,
@@ -553,45 +639,45 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             created_at BIGINT NOT NULL,
             expires_at BIGINT NOT NULL
         )",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create auth_challenges table: {}", e))?;
+    )?;
 
-    run_postgres_migration(
+    ensure_postgres_column(
         &mut client,
+        "auth_challenges",
+        "csrf_token",
         "ALTER TABLE auth_challenges ADD COLUMN IF NOT EXISTS csrf_token TEXT NOT NULL DEFAULT ''",
     )?;
 
-    client
-        .execute(
-            "CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expires_at)",
-            &[],
-        )
-        .ok();
+    ensure_postgres_index(
+        &mut client,
+        "auth_challenges",
+        "idx_auth_challenges_expires",
+        "CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expires_at)",
+    )?;
 
-    client
-        .execute(
-            "CREATE TABLE IF NOT EXISTS auth_rate_limits (
+    ensure_postgres_table(
+        &mut client,
+        "auth_rate_limits",
+        "CREATE TABLE IF NOT EXISTS auth_rate_limits (
             scope TEXT NOT NULL,
             key_hash TEXT NOT NULL,
             count BIGINT NOT NULL,
             expires_at BIGINT NOT NULL,
             PRIMARY KEY(scope, key_hash)
         )",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create auth_rate_limits table: {}", e))?;
+    )?;
 
-    client
-        .execute(
-            "CREATE INDEX IF NOT EXISTS idx_auth_rate_limits_expires ON auth_rate_limits(expires_at)",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create auth_rate_limits index: {}", e))?;
+    ensure_postgres_index(
+        &mut client,
+        "auth_rate_limits",
+        "idx_auth_rate_limits_expires",
+        "CREATE INDEX IF NOT EXISTS idx_auth_rate_limits_expires ON auth_rate_limits(expires_at)",
+    )?;
 
-    client
-        .execute(
-            "CREATE TABLE IF NOT EXISTS auth_local_identities (
+    ensure_postgres_table(
+        &mut client,
+        "auth_local_identities",
+        "CREATE TABLE IF NOT EXISTS auth_local_identities (
             id TEXT PRIMARY KEY,
             identifier_kind TEXT NOT NULL,
             identifier TEXT NOT NULL,
@@ -602,13 +688,12 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             metadata_json TEXT NOT NULL,
             UNIQUE(identifier_kind, identifier_normalized)
         )",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create auth_local_identities table: {}", e))?;
+    )?;
 
-    client
-        .execute(
-            "CREATE TABLE IF NOT EXISTS auth_local_credentials (
+    ensure_postgres_table(
+        &mut client,
+        "auth_local_credentials",
+        "CREATE TABLE IF NOT EXISTS auth_local_credentials (
             local_user_id TEXT PRIMARY KEY REFERENCES auth_local_identities(id) ON DELETE CASCADE,
             password_hash TEXT NOT NULL,
             password_hash_algorithm TEXT NOT NULL,
@@ -616,13 +701,12 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             password_changed_at BIGINT NOT NULL,
             must_change_password BOOLEAN NOT NULL DEFAULT FALSE
         )",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create auth_local_credentials table: {}", e))?;
+    )?;
 
-    client
-        .execute(
-            "CREATE TABLE IF NOT EXISTS auth_local_one_time_tokens (
+    ensure_postgres_table(
+        &mut client,
+        "auth_local_one_time_tokens",
+        "CREATE TABLE IF NOT EXISTS auth_local_one_time_tokens (
             purpose TEXT NOT NULL CHECK (purpose IN ('password_reset', 'magic_link')),
             selector TEXT PRIMARY KEY,
             local_user_id TEXT NOT NULL REFERENCES auth_local_identities(id) ON DELETE CASCADE,
@@ -630,53 +714,25 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
             created_at BIGINT NOT NULL,
             expires_at BIGINT NOT NULL
         )",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create auth_local_one_time_tokens table: {}", e))?;
+    )?;
 
-    client
-        .execute(
-            "CREATE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_expires ON auth_local_one_time_tokens(purpose, expires_at)",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create auth_local_one_time_tokens expiry index: {}", e))?;
+    ensure_postgres_index(&mut client, "auth_local_one_time_tokens", "idx_auth_local_one_time_tokens_expires", "CREATE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_expires ON auth_local_one_time_tokens(purpose, expires_at)")?;
 
-    client
-        .execute(
-            "CREATE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_user_purpose ON auth_local_one_time_tokens(local_user_id, purpose)",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create auth_local_one_time_tokens user index: {}", e))?;
+    ensure_postgres_index(&mut client, "auth_local_one_time_tokens", "idx_auth_local_one_time_tokens_user_purpose", "CREATE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_user_purpose ON auth_local_one_time_tokens(local_user_id, purpose)")?;
 
-    client
-        .execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_one_magic_link ON auth_local_one_time_tokens(local_user_id) WHERE purpose = 'magic_link'",
-            &[],
-        )
-        .map_err(|e| format!("Failed to create auth_local_one_time_tokens magic-link index: {}", e))?;
+    ensure_postgres_index(&mut client, "auth_local_one_time_tokens", "idx_auth_local_one_time_tokens_one_magic_link", "CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_local_one_time_tokens_one_magic_link ON auth_local_one_time_tokens(local_user_id) WHERE purpose = 'magic_link'")?;
 
-    let mut migration = client
-        .transaction()
-        .map_err(|e| format!("Failed to begin local one-time token migration: {}", e))?;
-    migration
-        .execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended('ntnt:auth:local-one-time-token-migration', 0))",
-            &[],
-        )
-        .map_err(|e| format!("Failed to lock local one-time token migration: {}", e))?;
-    let has_legacy_reset_table: bool = migration
+    postgres_schema::validate(&mut client)?;
+
+    let has_legacy_reset_table: bool = client
         .query_one(
-            "SELECT EXISTS (
-                SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema()
-                  AND table_name = 'auth_local_password_reset_tokens'
-            )",
+            "SELECT to_regclass('auth_local_password_reset_tokens') IS NOT NULL",
             &[],
         )
-        .map_err(|e| format!("Failed to inspect legacy password reset table: {}", e))?
+        .map_err(|e| postgres_schema_error("Failed to inspect legacy password reset table", &e))?
         .get(0);
     if has_legacy_reset_table {
-        migration
+        client
             .execute(
                 "INSERT INTO auth_local_one_time_tokens
                  (purpose, selector, local_user_id, token_hash, created_at, expires_at)
@@ -685,17 +741,19 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
                  ON CONFLICT DO NOTHING",
                 &[],
             )
-            .map_err(|e| format!("Failed to migrate legacy password reset tokens: {}", e))?;
-        migration
+            .map_err(|e| postgres_schema_error("Failed to migrate legacy password reset tokens", &e))?;
+        client
             .execute("DELETE FROM auth_local_password_reset_tokens", &[])
-            .map_err(|e| format!("Failed to clear legacy password reset tokens: {}", e))?;
-        migration
+            .map_err(|e| {
+                postgres_schema_error("Failed to clear legacy password reset tokens", &e)
+            })?;
+        client
             .execute("DROP TABLE auth_local_password_reset_tokens", &[])
-            .map_err(|e| format!("Failed to drop legacy password reset table: {}", e))?;
+            .map_err(|e| postgres_schema_error("Failed to drop legacy password reset table", &e))?;
     }
-    migration
-        .commit()
-        .map_err(|e| format!("Failed to commit local one-time token migration: {}", e))?;
+    client.commit().map_err(|e| {
+        postgres_schema_error("Failed to commit local one-time token migration", &e)
+    })?;
 
     // Store URL for later connections
     let mut pg_url = POSTGRES_URL.lock().unwrap();

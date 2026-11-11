@@ -241,6 +241,15 @@ jobs:
           RUST_MIN_STACK: 8388608
           NTNT_DB_TEST_ADMIN: host=127.0.0.1 user=postgres password=ntnt_db_fixture dbname=ntnt_db_catalog_control sslmode=disable
           NTNT_DB_TEST_HOST: 127.0.0.1
+      # These auth cases own separate databases/roles and run on every server
+      # version in this matrix, not only the PostgreSQL 16 + Redis backend job.
+      - name: Run auth runtime bootstrap and migration contracts
+        run: |
+          cargo test --locked --test auth_postgres_runtime_tests -- --ignored --test-threads=1 --nocapture
+          cargo test --locked --lib test_postgres_migrates_legacy_password_reset_tokens_without_replay_copy -- --test-threads=1 --nocapture
+        env:
+          RUST_MIN_STACK: 8388608
+          NTNT_AUTH_TEST_POSTGRES_URL: postgres://postgres:ntnt_db_fixture@localhost:5432/ntnt_db_catalog_control
 
   dependency-audit:
     name: RustSec audit
