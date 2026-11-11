@@ -4324,6 +4324,13 @@ get("/ws", fn(req) {
   default), a long callback delays HTTP requests. The receive backlog is a per-connection limit, not part of the
   realtime payload budget. Server pings
   every 30 s; WebSocket connections count against `max_connections`.
+- **Broadcasts:** `websocket(endpoint, map { "source": bus })` forwards every
+  `publish(bus, value)` made after the upgrade as one text message containing the
+  JSON value (no SSE `event`/`id`; put a type field in the value if you need one).
+  The value is encoded once for all sockets and SSE streams. A socket that falls
+  more than the bus `capacity` behind is closed with 1013: reconnect and refetch
+  state. There is no replay. The handle is the authority; never build bus names
+  from client input.
 - **Handshake auth is not ongoing authorization.** Recheck permissions inside
   `on_message` for sensitive commands; `state["user"]` is only what you stored.
 

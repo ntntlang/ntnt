@@ -1525,15 +1525,21 @@ pub fn init() -> HashMap<String, Value> {
     // upgraded only if this is the final, successful response. Denials and
     // redirects are sent as ordinary HTTP. `state` is the connection's initial
     // state: JSON data only (no functions, handles or secrets), at most 16 KiB.
-    // It is passed to each callback and replaced by its return value. Requires
-    // the async server (`ntnt run`); `ntnt test` returns 501.
+    // It is passed to each callback and replaced by its return value. `source`
+    // forwards a broadcast: each `publish()` after the upgrade is sent as one
+    // text message holding the published JSON value (SSE `event`/`id` are not
+    // added). A connection that falls behind the bus capacity is closed with
+    // 1013; reconnect and refetch state. Requires the async server
+    // (`ntnt run`); `ntnt test` returns 501.
     // @param endpoint A WebSocketEndpoint from ws_endpoint()
-    // @param options Optional map with `state`
+    // @param options Optional map with `state` and `source` (a Broadcast)
     // @returns An upgrade response
     // @see_also ws_endpoint, ws_send, ws_close
     // @since v0.6.1
     // @example get("/ws", fn(req) { websocket(echo, map { "state": map { "count": 0 } }) }) => Unit ~ "Accept a WebSocket"
     // @example websocket(chat, map { "state": map { "user": user["id"] } }) => Response ~ "Store the authenticated user's ID in state"
+    // @example websocket(live, map { "source": feed }) => Response ~ "Forward a broadcast to the socket"
+    // @error TypeError ~ "websocket() source must be a Broadcast from broadcast()" fix: "Pass the value returned by broadcast()"
     // @error TypeError ~ "websocket() requires an endpoint from ws_endpoint() as its first argument" fix: "Pass the value returned by ws_endpoint()"
     // @error TypeError ~ "WebSocket state must be JSON data" fix: "Store only Maps, Arrays, Strings, numbers, Bools or None"
     // @error TypeError ~ "WebSocket state is N bytes; the limit is 16384" fix: "Keep state small; store IDs and look records up in callbacks"

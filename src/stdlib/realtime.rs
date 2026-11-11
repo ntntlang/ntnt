@@ -181,6 +181,13 @@ pub struct Bus {
     tx: broadcast::Sender<Arc<EncodedEvent>>,
 }
 
+impl Bus {
+    /// A new receiver of events published after this call.
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<EncodedEvent>> {
+        self.tx.subscribe()
+    }
+}
+
 impl std::fmt::Debug for Bus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Broadcast({})", self.name)
@@ -196,9 +203,21 @@ impl Bus {
     }
 }
 
-/// One immutable, encoded SSE frame plus its budget charge.
+/// One immutable, encoded SSE frame plus its budget charge. The JSON value
+/// inside it is also the WebSocket text payload, so both protocols share one
+/// encoding.
 pub struct EncodedEvent {
     bytes: Vec<u8>,
+    /// Where the JSON value starts in `bytes` (it ends before the final `\n\n`).
+    json_start: usize,
+}
+
+impl EncodedEvent {
+    /// The published value as JSON text, for WebSocket delivery.
+    pub(crate) fn json(&self) -> &str {
+        let end = self.bytes.len().saturating_sub(2);
+        std::str::from_utf8(&self.bytes[self.json_start..end]).unwrap_or("null")
+    }
 }
 
 impl Drop for EncodedEvent {
@@ -344,7 +363,10 @@ pub fn publish_value(args: &[Value]) -> Result<Value> {
                     "realtime payload budget exhausted".into(),
                 )));
             }
-            let event = Arc::new(EncodedEvent { bytes: frame });
+            let event = Arc::new(EncodedEvent {
+                json_start: json_start(&frame),
+                bytes: frame,
+            });
             // No subscribers is a successful no-op, not replay storage.
             let _ = bus.tx.send(event);
             Ok(Value::ok(Value::Unit))
@@ -417,6 +439,16 @@ fn encode_frame_with_limit(
     out.extend_from_slice(b"\n\n");
     check_len(&out, max_bytes)?;
     Ok(out)
+}
+
+/// Offset of the JSON value in an encoded frame: just after the `data: `
+/// that starts a line. Event names and IDs cannot contain line breaks, so a
+/// `data: ` inside them is never at a line start.
+fn json_start(frame: &[u8]) -> usize {
+    (0..frame.len())
+        .find(|&i| (i == 0 || frame[i - 1] == b'\n') && frame[i..].starts_with(b"data: "))
+        .map(|i| i + 6)
+        .unwrap_or(frame.len())
 }
 
 fn check_len(out: &[u8], max_bytes: usize) -> std::result::Result<(), String> {
@@ -846,6 +878,22 @@ pub fn subscribers(bus: &Bus) -> usize {
 pub(crate) mod tests {
     use super::*;
 
+    #[test]
+    fn encoded_event_exposes_the_json_value_for_websockets() {
+        let mut m = HashMap::new();
+        m.insert("n".to_string(), Value::Int(1));
+        for (event, id) in [(None, None), (Some("xdata: y"), Some("data: 7"))] {
+            let frame = encode_frame(&Value::Map(m.clone()), event, id).unwrap();
+            let encoded = EncodedEvent {
+                json_start: json_start(&frame),
+                bytes: frame,
+            };
+            assert_eq!(encoded.json(), r#"{"n":1}"#);
+            // Not charged to the budget: avoid the Drop subtraction.
+            std::mem::forget(encoded);
+        }
+    }
+
     /// Stream and budget counters are process-global; tests that assert on
     /// or change them (here and in `websocket`) run one at a time. An
     /// async-aware lock, because async tests hold it across awaits. Sync
@@ -962,7 +1010,10 @@ pub(crate) mod tests {
         let _serial = COUNTERS.blocking_lock();
         let before = stats().1;
         assert!(reserve_payload(32, before + 32));
-        let event = Arc::new(EncodedEvent { bytes: vec![0; 32] });
+        let event = Arc::new(EncodedEvent {
+            bytes: vec![0; 32],
+            json_start: 0,
+        });
         let bytes = Bytes::from_owner(Frame(event.clone()));
         assert!(!reserve_payload(1, before + 32));
         drop(event);
