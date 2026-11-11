@@ -730,3 +730,40 @@ fn postgres_current_schema_accepts_dml_runtime_without_mutation() {
         "current owner startup must also be read-only"
     );
 }
+
+#[test]
+#[ignore = "requires disposable NTNT_AUTH_TEST_POSTGRES_URL (creates databases and roles)"]
+fn postgres_initialization_fails_instead_of_hanging_on_a_held_lock() {
+    // A stalled process holding the initialization lock must make startup
+    // fail with a lock-timeout error, not wait forever.
+    let mut f = Fixture::new();
+    f.bootstrap();
+    let mut holder = f.owner();
+    let mut held = holder.transaction().unwrap();
+    held.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended('ntnt:auth:local-one-time-token-migration', 0))",
+        &[],
+    )
+    .unwrap();
+    let url = f.runtime_url.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(Fixture::initialize(&url));
+    });
+    let started = Instant::now();
+    let result = rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("initialization still waiting on the lock after 60s");
+    let error = result.expect_err("initialization must fail while the lock is held");
+    assert!(
+        error.contains("lock initialization") && error.contains("55P03"),
+        "{error}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(25),
+        "{:?}",
+        started.elapsed()
+    );
+    held.rollback().unwrap();
+    Fixture::initialize(&f.runtime_url).expect("initialization once the lock is free");
+}

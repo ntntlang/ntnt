@@ -498,6 +498,9 @@ fn init_sqlite_sessions(path: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Longest a PostgreSQL auth initialization waits for any lock.
+const AUTH_INIT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Initialize PostgreSQL session storage
 fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
     // Serialize bootstrap/migration, including concurrent legacy-token upgrades.
@@ -507,6 +510,15 @@ fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
     let mut client = connection
         .transaction()
         .map_err(|e| postgres_schema_error("begin initialization", &e))?;
+    // Bound every lock wait in this transaction (the advisory lock and any
+    // later ALTER TABLE): a stalled holder fails startup with an error instead
+    // of hanging every process that starts.
+    client
+        .batch_execute(&format!(
+            "SET LOCAL lock_timeout = '{}ms'",
+            AUTH_INIT_LOCK_TIMEOUT.as_millis()
+        ))
+        .map_err(|e| postgres_schema_error("set lock timeout", &e))?;
     client.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended('ntnt:auth:local-one-time-token-migration', 0))", &[]
     ).map_err(|e| postgres_schema_error("lock initialization", &e))?;
