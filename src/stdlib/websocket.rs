@@ -42,6 +42,23 @@ pub const INBOX_BYTES: usize = 256 * 1024;
 pub const MAX_STATE_BYTES: usize = 16 * 1024;
 /// Callback jobs admitted (queued or running) across the process.
 pub const MAX_CALLBACK_JOBS: usize = 64;
+/// Default longest a connection may stay open (`max_lifetime_ms` overrides
+/// it per endpoint, never unlimited). The client then reconnects through the
+/// normal HTTP and auth pipeline.
+pub const DEFAULT_LIFETIME: Duration = Duration::from_secs(300);
+/// Allowed `max_lifetime_ms` range.
+pub const LIFETIME_RANGE_MS: std::ops::RangeInclusive<i64> = 1_000..=86_400_000;
+
+lazy_static::lazy_static! {
+    /// Bumped by each successful development reload; open connections close.
+    static ref CODE_GENERATION: watch::Sender<u64> = watch::channel(0).0;
+}
+
+/// Close every open WebSocket because the application code was reloaded.
+pub(crate) fn code_reloaded() {
+    CODE_GENERATION.send_modify(|generation| *generation += 1);
+}
+
 /// Default time a connection waits for one callback before closing
 /// (`callback_timeout_ms` overrides it per endpoint).
 pub const CALLBACK_DEADLINE: Duration = Duration::from_secs(30);
@@ -100,6 +117,8 @@ pub mod close_code {
     pub const POLICY: u16 = 1008;
     pub const TOO_BIG: u16 = 1009;
     pub const INTERNAL: u16 = 1011;
+    /// Development reload: the code serving this connection changed.
+    pub const SERVICE_RESTART: u16 = 1012;
     pub const TRY_AGAIN_LATER: u16 = 1013;
 }
 
@@ -289,6 +308,8 @@ pub struct EndpointConfig {
     pub has_close: bool,
     /// How long the connection waits for one callback.
     pub callback_deadline: Duration,
+    /// Longest the connection may stay open.
+    pub lifetime: Duration,
 }
 
 lazy_static::lazy_static! {
@@ -391,6 +412,7 @@ pub struct WsSpec {
     has_open: bool,
     has_close: bool,
     callback_deadline: Duration,
+    lifetime: Duration,
     /// Broadcast forwarded to this connection as text messages.
     source: Option<Arc<crate::stdlib::realtime::Bus>>,
 }
@@ -407,8 +429,16 @@ impl WsSpec {
             has_open: false,
             has_close: false,
             callback_deadline: CALLBACK_DEADLINE,
+            lifetime: DEFAULT_LIFETIME,
             source: None,
         }
+    }
+
+    /// Override the connection lifetime (internal tests).
+    #[doc(hidden)]
+    pub fn with_lifetime(mut self, lifetime: Duration) -> Self {
+        self.lifetime = lifetime;
+        self
     }
 
     /// Forward a broadcast to the connection (internal tests).
@@ -640,6 +670,7 @@ pub fn spec_from_response(
         has_open: config.has_open,
         has_close: config.has_close,
         callback_deadline: config.callback_deadline,
+        lifetime: config.lifetime,
         source,
     }))
 }
@@ -1075,6 +1106,12 @@ pub(crate) async fn run(
     );
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut pong_deadline: Option<Instant> = None;
+    // Finite by design: handshake authorization is not permanent, so the
+    // client must come back through the HTTP pipeline.
+    let expires = tokio::time::sleep(spec.lifetime);
+    tokio::pin!(expires);
+    let mut code_generation = CODE_GENERATION.subscribe();
+    code_generation.mark_unchanged();
     // Subscribe before the first message is read: only events published after
     // the upgrade are delivered, as with SSE. The receiver keeps the bus alive.
     let mut source = spec.source.as_ref().map(|bus| bus.subscribe());
@@ -1105,6 +1142,12 @@ pub(crate) async fn run(
                     if changed.is_err() || *shutdown.borrow() {
                         break 'run End::Close(close_code::GOING_AWAY, "server shutting down".into());
                     }
+                }
+                Ok(()) = code_generation.changed() => {
+                    break 'run End::Close(close_code::SERVICE_RESTART, "server code reloaded".into());
+                }
+                _ = &mut expires => {
+                    break 'run End::Close(close_code::GOING_AWAY, "connection lifetime reached".into());
                 }
                 _ = tokio::time::sleep_until(pong_wait.unwrap_or_else(Instant::now)), if pong_wait.is_some() => {
                     break 'run End::Drop;
@@ -1538,6 +1581,7 @@ mod tests {
             has_open: false,
             has_close: false,
             callback_deadline: CALLBACK_DEADLINE,
+            lifetime: DEFAULT_LIFETIME,
         };
         register_endpoint("unit-conflict", config.clone(), false).unwrap();
         register_endpoint("unit-conflict", config.clone(), false).unwrap();

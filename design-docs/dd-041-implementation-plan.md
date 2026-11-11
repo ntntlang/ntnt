@@ -173,7 +173,9 @@ Probes ran against the real `ntnt run` server and real Worker-mode interpreters,
 
 **Broadcast source:** `websocket(endpoint, { source: bus })` subscribes in the connection owner at upgrade and writes each event's JSON value (a slice of the single SSE encoding, held by the shared `Arc<EncodedEvent>` until copied into the frame) as a text message. `Lagged` closes with 1013. Tested via `ntnt run` with two workers: four sockets receive every event in order; with capacity 4 and 120 × 48 KiB events, a non-reading socket closes with 1013 while a healthy one receives all 120 in order. Each test fails with its behavior removed.
 
-**Not yet exercised:** connection lifetime limit, hot-reload closing of open sockets, respawned-worker quarantine end-to-end, and fairness under worker loss with saturated callbacks. These remain Slice B acceptance checks, not assumed results.
+**Lifetime and reload:** each owner holds a lifetime timer (`max_lifetime_ms`, default 300 s, 1 s–24 h, never unlimited) and closes with 1001 when it fires. A successful development reload of main source, routes, middleware or libs bumps a process code generation; owners watch it and close with 1012. Tested via `ntnt run`: lifetime close then reconnect, out-of-range lifetime rejected at startup, edit-then-reload closes the open socket and a new one runs the new callback. Each test fails with its behavior removed.
+
+**Not yet exercised:** respawned-worker quarantine end-to-end, and fairness under worker loss with saturated callbacks. These remain Slice B acceptance checks, not assumed results.
 
 ### Slice A — useful SSE, complete lifecycle and caps
 

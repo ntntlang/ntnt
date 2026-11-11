@@ -684,3 +684,121 @@ async fn socket_that_falls_behind_the_broadcast_is_closed_with_1013() {
     }
     reader.abort();
 }
+
+const LIFETIME_APP: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+fn echo(conn, message, state) {
+    ws_send(conn, message["data"])
+    return state
+}
+fn closed(state, info) {
+    print("CLOSED " + str(info["code"]) + " " + info["reason"])
+}
+let short = ws_endpoint("short", echo, map { "max_lifetime_ms": 1200, "on_close": closed })
+get("/ws", fn(req) { websocket(short) })
+get("/health", fn(req) { text("ok") })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+#[tokio::test]
+async fn connection_closes_at_its_lifetime_limit() {
+    let mut server = fixture::Fixture::start(LIFETIME_APP, &["run"], &[("NTNT_WORKERS", "2")]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    socket.send(Message::Text("hi".into())).await.unwrap();
+    assert_eq!(next_data(&mut socket).await, Message::Text("hi".into()));
+    let started = std::time::Instant::now();
+    assert_eq!(
+        close_frame(&mut socket).await,
+        Some((CloseCode::Away, "connection lifetime reached".to_string()))
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(3000),
+        "closed after {elapsed:?}"
+    );
+    // on_close sees why, and a reconnect goes through the HTTP pipeline again.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !server
+        .stdout()
+        .contains("CLOSED 1001 connection lifetime reached")
+    {
+        assert!(std::time::Instant::now() < deadline, "{}", server.stdout());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut again = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    again.send(Message::Text("back".into())).await.unwrap();
+    assert_eq!(next_data(&mut again).await, Message::Text("back".into()));
+}
+
+#[test]
+fn lifetime_must_be_finite_and_in_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app.tnt");
+    std::fs::write(
+        &app,
+        r#"
+import { text, ws_endpoint } from "std/http/server"
+let forever = ws_endpoint("forever", fn(conn, message, state) { state }, map { "max_lifetime_ms": 0 })
+get("/", fn(req) { text("ok") })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#,
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args(["run"])
+        .arg(&app)
+        .env_remove("NTNT_ENV")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("connections are never unlimited"),
+        "{stderr}"
+    );
+}
+
+const RELOAD_APP_V1: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+fn echo(conn, message, state) {
+    ws_send(conn, "v1:" + message["data"])
+    return state
+}
+let live = ws_endpoint("live", echo)
+get("/ws", fn(req) { websocket(live) })
+get("/health", fn(req) { text("ok") })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+#[tokio::test]
+async fn development_reload_closes_open_sockets_and_new_ones_use_new_code() {
+    // Development mode, one worker: hot reload applies on the next request.
+    let mut server = fixture::Fixture::start(RELOAD_APP_V1, &["run"], &[]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    socket.send(Message::Text("a".into())).await.unwrap();
+    assert_eq!(next_data(&mut socket).await, Message::Text("v1:a".into()));
+
+    // Make the change visible to mtime checks on coarse-grained filesystems.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    std::fs::write(
+        server.dir.path().join("fixture.tnt"),
+        RELOAD_APP_V1.replace("\"v1:\"", "\"v2:\""),
+    )
+    .unwrap();
+    let health = reqwest::get(format!("http://{addr}/health")).await.unwrap();
+    assert_eq!(health.text().await.unwrap(), "ok");
+
+    assert_eq!(
+        close_frame(&mut socket).await,
+        Some((CloseCode::Restart, "server code reloaded".to_string())),
+        "{}",
+        server.stderr()
+    );
+    let mut fresh = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    fresh.send(Message::Text("b".into())).await.unwrap();
+    assert_eq!(next_data(&mut fresh).await, Message::Text("v2:b".into()));
+}

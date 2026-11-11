@@ -1616,6 +1616,7 @@ impl Interpreter {
         let mut origins = None;
         let mut allow_missing = false;
         let mut callback_deadline = crate::stdlib::websocket::CALLBACK_DEADLINE;
+        let mut lifetime = crate::stdlib::websocket::DEFAULT_LIFETIME;
         match args.get(2) {
             None | Some(Value::Unit) => {}
             Some(Value::Map(options)) => {
@@ -1639,6 +1640,16 @@ impl Interpreter {
                         ("callback_timeout_ms", Value::Int(ms)) if (100..=300_000).contains(ms) => {
                             callback_deadline = std::time::Duration::from_millis(*ms as u64)
                         }
+                        ("max_lifetime_ms", Value::Int(ms))
+                            if crate::stdlib::websocket::LIFETIME_RANGE_MS.contains(ms) =>
+                        {
+                            lifetime = std::time::Duration::from_millis(*ms as u64)
+                        }
+                        ("max_lifetime_ms", _) => {
+                            return Err(IntentError::type_error(
+                                "ws_endpoint() max_lifetime_ms must be an Int from 1000 to 86400000 (connections are never unlimited)",
+                            ))
+                        }
                         ("callback_timeout_ms", _) => {
                             return Err(IntentError::type_error(
                                 "ws_endpoint() callback_timeout_ms must be an Int from 100 to 300000",
@@ -1661,7 +1672,7 @@ impl Interpreter {
                         }
                         _ => {
                             return Err(IntentError::type_error(format!(
-                                "unknown ws_endpoint() option: {key} (supported: on_open, on_close, origins, allow_missing_origin, callback_timeout_ms)"
+                                "unknown ws_endpoint() option: {key} (supported: on_open, on_close, origins, allow_missing_origin, callback_timeout_ms, max_lifetime_ms)"
                             )))
                         }
                     }
@@ -1693,6 +1704,7 @@ impl Interpreter {
             has_open: fns.on_open.is_some(),
             has_close: fns.on_close.is_some(),
             callback_deadline,
+            lifetime,
         };
         register_endpoint(&name, config, hot_reload)?;
         self.ws_endpoints.insert(name.clone(), fns);
@@ -10655,9 +10667,11 @@ impl Interpreter {
                     let HandlerRequest { request, reply_tx } = *handler_request;
 
                     // Hot-reload check: if main source file changed, reload it
+                    let mut reloaded = false;
                     if self.check_and_reload_main_source() {
                         // Routes changed - sync to async state
                         sync_routes_to_async(&self.server_state, &async_routes, &sync_rt);
+                        reloaded = true;
                     }
 
                     // Hot-reload check: if any lib module changed, reload them
@@ -10666,6 +10680,7 @@ impl Interpreter {
                     // Hot-reload check: if routes directory changed (new/deleted files)
                     if self.check_and_reload_routes_dir() {
                         sync_routes_to_async(&self.server_state, &async_routes, &sync_rt);
+                        reloaded = true;
                     }
 
                     // Hot-reload check: if jobs directory changed (new/deleted/modified job files)
@@ -10674,6 +10689,12 @@ impl Interpreter {
                     // Hot-reload check: if middleware file content changed
                     if self.check_and_reload_middleware() {
                         sync_routes_to_async(&self.server_state, &async_routes, &sync_rt);
+                        reloaded = true;
+                    }
+                    // Open WebSockets must not keep running callbacks against
+                    // code that has changed underneath them.
+                    if reloaded || lib_modules_changed {
+                        crate::stdlib::websocket::code_reloaded();
                     }
 
                     // Process the request and send response

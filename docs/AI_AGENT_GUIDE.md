@@ -4331,6 +4331,12 @@ get("/ws", fn(req) {
   more than the bus `capacity` behind is closed with 1013: reconnect and refetch
   state. There is no replay. The handle is the authority; never build bus names
   from client input.
+- **Lifetime:** every connection closes after `max_lifetime_ms` (default 300000,
+  i.e. 5 minutes; 1000-86400000, never unlimited) with 1001 "connection lifetime
+  reached". Reconnect in the client; the new handshake runs middleware and auth
+  again, so an expired session stops getting a socket.
+- **Development reload** closes open sockets with 1012 "server code reloaded" so
+  old state never runs against new callbacks; reconnect to get the new code.
 - **Handshake auth is not ongoing authorization.** Recheck permissions inside
   `on_message` for sensitive commands; `state["user"]` is only what you stored.
 

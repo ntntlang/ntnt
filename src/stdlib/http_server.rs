@@ -1486,12 +1486,15 @@ pub fn init() -> HashMap<String, Value> {
     // Origins), `allow_missing_origin` (for non-browser clients),
     // `callback_timeout_ms` (100-300000, default 30000, counted from when the
     // message is queued: past it the connection closes with 1011; a callback
-    // already running is not interrupted). Without `origins`, the origin of `SITE_URL` is
+    // already running is not interrupted), `max_lifetime_ms` (1000-86400000,
+    // default 300000: the connection then closes with 1001 and the client
+    // reconnects through the normal HTTP pipeline; never unlimited). In
+    // development, a hot reload closes open connections with 1012. Without `origins`, the origin of `SITE_URL` is
     // allowed; in development, localhost origins are allowed; in production
     // with neither, registration fails. Request Host headers are never trusted.
     // @param name Stable endpoint name (letters, digits, `_`, `-`, `.`)
     // @param on_message Function(conn, message, state) returning the next state
-    // @param options Optional map: on_open, on_close, origins, allow_missing_origin, callback_timeout_ms
+    // @param options Optional map: on_open, on_close, origins, allow_missing_origin, callback_timeout_ms, max_lifetime_ms
     // @returns A WebSocketEndpoint for websocket()
     // @see_also websocket, ws_send, ws_close
     // @since v0.6.1
@@ -1500,7 +1503,7 @@ pub fn init() -> HashMap<String, Value> {
     // @error RuntimeError ~ "ws_endpoint() can only be called during application setup, before the server starts serving" fix: "Call ws_endpoint at the top level of the app, before listen()"
     // @error RuntimeError ~ "ws_endpoint needs trusted origins in production: set SITE_URL or pass the `origins` option" fix: "Set SITE_URL or pass the origins option"
     // @error TypeError ~ "ws_endpoint() name must be 1-64 characters of letters, digits, '_', '-' or '.'" fix: "Use a short stable name such as chat"
-    // @error TypeError ~ "unknown ws_endpoint() option" fix: "Use on_open, on_close, origins, allow_missing_origin or callback_timeout_ms"
+    // @error TypeError ~ "unknown ws_endpoint() option" fix: "Use on_open, on_close, origins, allow_missing_origin, callback_timeout_ms or max_lifetime_ms"
     module.insert(
         "ws_endpoint".to_string(),
         Value::NativeFunction {
