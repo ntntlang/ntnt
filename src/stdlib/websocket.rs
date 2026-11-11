@@ -17,7 +17,7 @@
 //! explicit JSON state and a weak send handle, and commits the returned state.
 //! An internal echo handler tests the transport without an interpreter.
 
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message};
 use futures_util::StreamExt;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -915,7 +915,26 @@ fn error_end(error: axum::Error) -> End {
     }
 }
 
-async fn write(socket: &mut WebSocket, message: Message, timeout: Duration) -> bool {
+/// The owner works on any message stream and sink: the upgraded socket in
+/// production, a stand-in in tests that need exact scheduling.
+pub(crate) trait Socket:
+    futures_util::Stream<Item = std::result::Result<Message, axum::Error>>
+    + futures_util::Sink<Message, Error = axum::Error>
+    + Unpin
+    + Send
+{
+}
+
+impl<S> Socket for S where
+    S: futures_util::Stream<Item = std::result::Result<Message, axum::Error>>
+        + futures_util::Sink<Message, Error = axum::Error>
+        + Unpin
+        + Send
+{
+}
+
+async fn write(socket: &mut impl Socket, message: Message, timeout: Duration) -> bool {
+    use futures_util::SinkExt;
     matches!(
         tokio::time::timeout(timeout, socket.send(message)).await,
         Ok(Ok(()))
@@ -1021,7 +1040,7 @@ async fn wait_pending(
 
 /// Own one upgraded connection until it ends. The permit is released last.
 pub(crate) async fn run(
-    mut socket: WebSocket,
+    mut socket: impl Socket,
     spec: WsSpec,
     permit: StreamPermit,
     owner: OwnerGuard,
@@ -1126,29 +1145,6 @@ pub(crate) async fn run(
                         break 'run end;
                     }
                 }
-                // One encoding per publish; each connection writes the shared
-                // JSON as a text message. A connection that falls behind the
-                // bus capacity is closed rather than skipping events.
-                received = async { source.as_mut().expect("guarded").recv().await }, if source.is_some() => {
-                    use tokio::sync::broadcast::error::RecvError;
-                    match received {
-                        Ok(event) => {
-                            let text = event.json().to_owned();
-                            drop(event);
-                            if !write(&mut socket, Message::Text(text), timings.write_timeout).await {
-                                break 'run End::Drop;
-                            }
-                        }
-                        Err(RecvError::Lagged(_)) => {
-                            break 'run End::Close(
-                                close_code::TRY_AGAIN_LATER,
-                                "fell behind the broadcast".into(),
-                            );
-                        }
-                        // Every handle to the bus is gone: nothing more will arrive.
-                        Err(RecvError::Closed) => source = None,
-                    }
-                }
                 _ = ping.tick() => {
                     if pong_deadline.is_none() {
                         pong_deadline = Some(Instant::now() + timings.pong_timeout);
@@ -1193,6 +1189,34 @@ pub(crate) async fn run(
                                 break 'run end;
                             }
                         }
+                    }
+                }
+                // Last in the biased order: a busy broadcast must not starve
+                // client input or pongs (a pong left unread would time out a
+                // healthy client). Client input cannot starve this branch: it
+                // is bounded by the inbox/outbox limits, which close the
+                // connection when exceeded.
+                // One encoding per publish; each connection writes the shared
+                // JSON as a text message. A connection that falls behind the
+                // bus capacity is closed rather than skipping events.
+                received = async { source.as_mut().expect("guarded").recv().await }, if source.is_some() => {
+                    use tokio::sync::broadcast::error::RecvError;
+                    match received {
+                        Ok(event) => {
+                            let text = event.json().to_owned();
+                            drop(event);
+                            if !write(&mut socket, Message::Text(text), timings.write_timeout).await {
+                                break 'run End::Drop;
+                            }
+                        }
+                        Err(RecvError::Lagged(_)) => {
+                            break 'run End::Close(
+                                close_code::TRY_AGAIN_LATER,
+                                "fell behind the broadcast".into(),
+                            );
+                        }
+                        // Every handle to the bus is gone: nothing more will arrive.
+                        Err(RecvError::Closed) => source = None,
                     }
                 }
             }
@@ -1262,7 +1286,7 @@ pub(crate) async fn run(
 
 /// Poll until the peer finishes closing, which also flushes an automatic
 /// close reply, bounded by `limit`.
-async fn drain(socket: &mut WebSocket, limit: Duration) {
+async fn drain(socket: &mut impl Socket, limit: Duration) {
     let _ = tokio::time::timeout(limit, async {
         while let Some(Ok(_)) = socket.next().await {}
     })
@@ -1272,6 +1296,113 @@ async fn drain(socket: &mut WebSocket, limit: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stand-in socket: messages the test sends arrive as client input, and
+    /// every write completes at once and is recorded.
+    struct FakeSocket {
+        incoming: mpsc::UnboundedReceiver<Message>,
+        outgoing: mpsc::UnboundedSender<Message>,
+    }
+
+    impl futures_util::Stream for FakeSocket {
+        type Item = std::result::Result<Message, axum::Error>;
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.incoming.poll_recv(cx).map(|m| m.map(Ok))
+        }
+    }
+
+    impl futures_util::Sink<Message> for FakeSocket {
+        type Error = axum::Error;
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), axum::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn start_send(
+            self: std::pin::Pin<&mut Self>,
+            item: Message,
+        ) -> std::result::Result<(), axum::Error> {
+            let _ = self.outgoing.send(item);
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), axum::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), axum::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn client_input_is_served_before_a_ready_broadcast_backlog() {
+        // A broadcast backlog and a client message become ready together. The
+        // owner must read the client first (the same branch reads pongs), so
+        // a busy broadcast cannot delay pongs into a false pong timeout.
+        // Single-threaded runtime: the owner only runs when this test awaits.
+        let _serial = crate::stdlib::realtime::tests::COUNTERS.lock().await;
+        let mut options = HashMap::new();
+        options.insert("capacity".to_string(), Value::Int(1024));
+        let bus = match crate::stdlib::realtime::broadcast_value(&[
+            Value::String("ws-order-test".into()),
+            Value::Map(options),
+        ])
+        .unwrap()
+        {
+            Value::Broadcast(bus) => bus,
+            other => panic!("{other:?}"),
+        };
+        let (in_tx, in_rx) = mpsc::unbounded_channel();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let (permit, shutdown, max_event) = crate::stdlib::realtime::admit_connection().unwrap();
+        let spec = WsSpec::echo(OriginPolicy::default()).with_source(bus.clone());
+        let owner = tokio::spawn(run(
+            FakeSocket {
+                incoming: in_rx,
+                outgoing: out_tx,
+            },
+            spec,
+            permit,
+            OwnerGuard::new(),
+            shutdown,
+            effective_max_message(max_event),
+        ));
+        // Let the owner subscribe and park with nothing ready.
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        let value = Value::Broadcast(bus);
+        for n in 0..200 {
+            crate::stdlib::realtime::publish_value(&[value.clone(), Value::Int(n)]).unwrap();
+        }
+        in_tx.send(Message::Text("client".into())).unwrap();
+        let mut position = None;
+        for i in 0..=200 {
+            let message = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+                .await
+                .expect("owner stopped writing")
+                .expect("owner ended");
+            if message == Message::Text("client".into()) {
+                position = Some(i);
+                break;
+            }
+        }
+        assert!(
+            position.is_some_and(|p| p < 2),
+            "client echo written at position {position:?}, behind the broadcast backlog"
+        );
+        drop(in_tx);
+        owner.await.unwrap();
+    }
 
     #[test]
     fn origin_policy_is_exact_and_rejects_null() {
