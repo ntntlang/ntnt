@@ -204,6 +204,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
+    # Successful runs take about 5 minutes. Bounds a PostgreSQL server that
+    # stops responding mid-call, which no client-side timeout can interrupt.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

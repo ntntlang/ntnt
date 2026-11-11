@@ -1679,7 +1679,9 @@ fn reconcile(f: &Fixture, plan: &Value) -> Value {
 /// also bounded in the server by `statement_timeout`.
 fn wait_for_other_target_sessions_to_end(f: &Fixture) {
     const LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
-    let url = f.target_url.clone();
+    // connect_timeout bounds the connection attempt; statement_timeout below
+    // bounds each query in the server.
+    let url = format!("{} connect_timeout=5", f.target_url);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
