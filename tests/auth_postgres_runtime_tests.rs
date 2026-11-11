@@ -3,6 +3,9 @@
 //! Creates isolated databases and distinct owner/runtime roles; never use a live database.
 use ntnt::stdlib::auth::{ensure_auth_session_store, AuthConfig, SessionStore};
 use postgres::{Client, NoTls};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 struct Fixture {
     admin: Client,
@@ -66,14 +69,55 @@ impl Fixture {
         self.grant_runtime();
     }
     fn grant_runtime(&mut self) {
+        self.grant_runtime_in("public");
+    }
+    fn grant_runtime_in(&mut self, schema: &str) {
         self.owner()
             .batch_execute(&format!(
                 "GRANT CONNECT ON DATABASE {} TO {};
-             GRANT USAGE ON SCHEMA public TO {};
-             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {};",
+             GRANT USAGE ON SCHEMA {schema} TO {};
+             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema} TO {};",
                 self.database, self.runtime, self.runtime, self.runtime
             ))
             .unwrap();
+    }
+    fn non_public() -> Self {
+        let mut f = Self::new();
+        f.owner()
+            .batch_execute(&format!(
+                "CREATE SCHEMA auth_first; CREATE SCHEMA auth_data;
+             GRANT USAGE ON SCHEMA auth_first TO {}",
+                f.runtime
+            ))
+            .unwrap();
+        f.admin
+            .batch_execute(&format!(
+                "ALTER ROLE {} SET search_path=auth_data,public;
+             ALTER ROLE {} SET search_path=auth_first,auth_data,public",
+                f.owner, f.runtime
+            ))
+            .unwrap();
+        Self::initialize(&f.owner_url).unwrap();
+        f.grant_runtime_in("auth_data");
+        let counts = f.owner().query_one(
+            "SELECT (SELECT count(*) FROM pg_class WHERE relnamespace='auth_data'::regnamespace AND relkind='r'),
+                    (SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='r')", &[]
+        ).unwrap();
+        assert_eq!((counts.get::<_, i64>(0), counts.get::<_, i64>(1)), (8, 0));
+        let role = Client::connect(&f.runtime_url, NoTls).unwrap().query_one(
+            "SELECT current_schema()::text, has_schema_privilege(current_user, 'auth_first', 'CREATE'),
+                    has_schema_privilege(current_user, 'auth_data', 'CREATE'),
+                    pg_has_role(current_user, $1, 'MEMBER'), rolsuper, rolcreatedb, rolcreaterole,
+                    rolreplication, rolbypassrls FROM pg_roles WHERE rolname=current_user", &[&f.owner]
+        ).unwrap();
+        assert_eq!(role.get::<_, String>(0), "auth_first");
+        for column in 1..9 {
+            assert!(
+                !role.get::<_, bool>(column),
+                "runtime unexpectedly privileged"
+            );
+        }
+        f
     }
     fn snapshot(&mut self) -> String {
         // Includes catalog tuple versions: even a no-op ALTER or ACL write must be detected.
@@ -175,51 +219,16 @@ fn postgres_missing_and_legacy_schema_requires_bootstrap_authority() {
     }
 }
 
-struct Server(std::process::Child);
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
+fn auth_binary() -> PathBuf {
+    std::env::var_os("NTNT_AUTH_TEST_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_ntnt")))
 }
 
-#[test]
-#[ignore = "requires disposable NTNT_AUTH_TEST_POSTGRES_URL (creates databases and roles)"]
-fn postgres_dml_runtime_server_sign_in_lookup_persist_logout() {
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
-    let mut f = Fixture::new();
-    f.bootstrap();
-    let dir = tempfile::tempdir().unwrap();
-    let script = dir.path().join("server.tnt");
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let source = format!(
-        r#"
-import {{ enable_auth, sign_in_session, get_session, sign_out_session }} from "std/auth"
-import {{ get_env }} from "std/env"
-import {{ text }} from "std/http/server"
-enable_auth([], map {{ "session_store": unwrap(get_env("AUTH_STORE")), "session_secret": "fixture-only-session-secret", "cookie_secure": false }})
-get("/ready", fn(req) {{ return text("ready") }})
-get("/signin", fn(req) {{ return sign_in_session(text("signed-in"), req, map {{ "subject_id": "runtime-user", "provider": "local" }}) }})
-get("/session", fn(req) {{
-    let session = get_session(req) otherwise {{ return text("none") }}
-    return text("present")
-}})
-get("/logout", fn(req) {{ return sign_out_session(text("signed-out"), req) }})
-listen({port})
-"#
-    );
-    std::fs::write(&script, source).unwrap();
-    let binary = std::env::var_os("NTNT_AUTH_TEST_BINARY")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_BIN_EXE_ntnt")));
-    let lint = Command::new(&binary)
+fn lint_program(binary: &Path, script: &Path) {
+    let lint = Command::new(binary)
         .arg("lint")
-        .arg(&script)
+        .arg(script)
         .output()
         .unwrap();
     assert!(
@@ -228,46 +237,130 @@ listen({port})
         String::from_utf8_lossy(&lint.stdout),
         String::from_utf8_lossy(&lint.stderr)
     );
-    let log = dir.path().join("server.log");
-    let stdout = std::fs::File::create(&log).unwrap();
-    let mut server = Server(
-        Command::new(&binary)
-            .arg("run")
-            .arg(&script)
-            .env("AUTH_STORE", &f.runtime_url)
-            .env("NTNT_ENV", "production")
-            .env("NTNT_TYPE_MODE", "strict")
-            .env("NTNT_HTTP_WORKERS", "1")
-            .stdout(Stdio::from(stdout.try_clone().unwrap()))
-            .stderr(Stdio::from(stdout))
-            .spawn()
-            .unwrap(),
+}
+
+fn run_auth_program(url: &str, body: &str, variables: &[(&str, &str)]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("auth.tnt");
+    std::fs::write(&script, format!(r#"
+import {{ enable_auth }} from "std/auth"
+import {{ get_env }} from "std/env"
+enable_auth([], map {{ "session_store": unwrap(get_env("AUTH_STORE")), "session_secret": "fixture-only-session-secret", "cookie_secure": false }})
+{body}
+"#)).unwrap();
+    let binary = auth_binary();
+    lint_program(&binary, &script);
+    let mut command = Command::new(binary);
+    command
+        .arg("run")
+        .arg(&script)
+        .env("AUTH_STORE", url)
+        .env("NTNT_ENV", "production")
+        .env("NTNT_TYPE_MODE", "strict");
+    for &(key, value) in variables {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "auth program: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+struct Server(std::process::Child);
+impl Server {
+    fn start(
+        binary: &Path,
+        script: &Path,
+        url: &str,
+        log: &Path,
+        http: &reqwest::blocking::Client,
+        base: &str,
+    ) -> Self {
+        let stdout = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .unwrap();
+        let mut server = Self(
+            Command::new(binary)
+                .arg("run")
+                .arg(script)
+                .args(["--workers", "1"])
+                .env("AUTH_STORE", url)
+                .env("NTNT_ENV", "production")
+                .env("NTNT_TYPE_MODE", "strict")
+                .stdout(Stdio::from(stdout.try_clone().unwrap()))
+                .stderr(Stdio::from(stdout))
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(
+                server.0.try_wait().unwrap().is_none(),
+                "server exited during enable_auth: {}",
+                std::fs::read_to_string(log).unwrap()
+            );
+            if let Ok(response) = http.get(format!("{base}/ready")).send() {
+                if response.status().is_success() && response.text().unwrap() == "ready" {
+                    return server;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server readiness timed out: {}",
+                std::fs::read_to_string(log).unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn check_server_session_lifecycle(f: &mut Fixture) {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("server.tnt");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let source = format!(
+        r##"
+import {{ enable_auth, sign_in_session, get_session, sign_out_session }} from "std/auth"
+import {{ get_env }} from "std/env"
+import {{ text }} from "std/http/server"
+enable_auth([], map {{ "session_store": unwrap(get_env("AUTH_STORE")), "session_secret": "fixture-only-session-secret", "cookie_secure": false }})
+get("/ready", fn(req) {{ return text("ready") }})
+get("/signin", fn(req) {{ return sign_in_session(text("signed-in"), req, map {{ "subject_id": "runtime-user", "provider": "local", "email": "runtime@example.test", "data": map {{ "marker": "persisted" }} }}) }})
+get("/session", fn(req) {{
+    let session = get_session(req) otherwise {{ return text("none") }}
+    return text("#{{session.user.id}}|#{{session.user.email}}|#{{session.data.marker}}")
+}})
+get("/logout", fn(req) {{ return sign_out_session(text("signed-out"), req) }})
+listen({port})
+"##
+    );
+    std::fs::write(&script, source).unwrap();
+    let binary = auth_binary();
+    lint_program(&binary, &script);
+    let log = dir.path().join("server.log");
     let http = reqwest::blocking::Client::builder()
         .cookie_store(true)
         .timeout(Duration::from_secs(2))
         .build()
         .unwrap();
     let base = format!("http://127.0.0.1:{port}");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Ok(response) = http.get(format!("{base}/ready")).send() {
-            if response.status().is_success() {
-                break;
-            }
-        }
-        assert!(
-            server.0.try_wait().unwrap().is_none(),
-            "server exited during enable_auth: {}",
-            std::fs::read_to_string(&log).unwrap()
-        );
-        assert!(
-            Instant::now() < deadline,
-            "server readiness timed out: {}",
-            std::fs::read_to_string(&log).unwrap()
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    let server = Server::start(&binary, &script, &f.runtime_url, &log, &http, &base);
     let get = |path: &str| {
         http.get(format!("{base}{path}"))
             .send()
@@ -277,27 +370,51 @@ listen({port})
             .text()
             .unwrap()
     };
+    let expected = "local:runtime-user|runtime@example.test|persisted";
     assert_eq!(get("/session"), "none");
     assert_eq!(get("/signin"), "signed-in");
-    assert_eq!(get("/session"), "present");
-    let count = |client: &mut Client| {
-        client
+    assert_eq!(get("/session"), expected);
+    let row = f.owner().query_one("SELECT id, user_id, email, data_json::jsonb->>'marker' FROM auth_sessions WHERE user_id='local:runtime-user'", &[]).unwrap();
+    let session_id: String = row.get(0);
+    assert_eq!(
+        (
+            row.get::<_, String>(1),
+            row.get::<_, String>(2),
+            row.get::<_, String>(3)
+        ),
+        (
+            "local:runtime-user".into(),
+            "runtime@example.test".into(),
+            "persisted".into()
+        )
+    );
+    drop(server);
+    let server = Server::start(&binary, &script, &f.runtime_url, &log, &http, &base);
+    assert_eq!(
+        get("/session"),
+        expected,
+        "payload must survive process cold-start, not memory fallback"
+    );
+    assert_eq!(
+        f.owner()
             .query_one(
-                "SELECT count(*) FROM auth_sessions WHERE user_id='local:runtime-user'",
-                &[],
+                "SELECT id FROM auth_sessions WHERE user_id='local:runtime-user'",
+                &[]
             )
             .unwrap()
-            .get::<_, i64>(0)
-    };
-    assert_eq!(
-        count(&mut f.owner()),
-        1,
-        "session must persist in PostgreSQL, not memory fallback"
+            .get::<_, String>(0),
+        session_id
     );
     assert_eq!(get("/logout"), "signed-out");
     assert_eq!(get("/session"), "none");
     assert_eq!(
-        count(&mut f.owner()),
+        f.owner()
+            .query_one(
+                "SELECT count(*) FROM auth_sessions WHERE user_id='local:runtime-user'",
+                &[]
+            )
+            .unwrap()
+            .get::<_, i64>(0),
         0,
         "logout must delete persisted session"
     );
@@ -309,17 +426,111 @@ listen({port})
 
 #[test]
 #[ignore = "requires disposable NTNT_AUTH_TEST_POSTGRES_URL (creates databases and roles)"]
+fn postgres_dml_runtime_server_sign_in_lookup_persist_logout() {
+    let mut f = Fixture::new();
+    f.bootstrap();
+    check_server_session_lifecycle(&mut f);
+}
+
+#[test]
+#[ignore = "requires disposable NTNT_AUTH_TEST_POSTGRES_URL (creates databases and roles)"]
+fn postgres_non_public_schema_runtime_preserves_session_across_restart() {
+    let mut f = Fixture::non_public();
+    f.admin
+        .batch_execute(&format!(
+            "ALTER ROLE {} SET default_transaction_read_only=on",
+            f.runtime
+        ))
+        .unwrap();
+    Fixture::initialize(&f.runtime_url).expect("read-only startup in later non-public schema");
+    f.admin
+        .batch_execute(&format!(
+            "ALTER ROLE {} RESET default_transaction_read_only",
+            f.runtime
+        ))
+        .unwrap();
+    check_server_session_lifecycle(&mut f);
+}
+
+#[test]
+#[ignore = "requires disposable NTNT_AUTH_TEST_POSTGRES_URL (creates databases and roles)"]
+fn postgres_schema_validation_checks_constraint_enforcement_and_index_table() {
+    let mut f = Fixture::non_public();
+    for (mutation, repair, object) in [
+        ("ALTER TABLE auth_local_credentials DROP CONSTRAINT auth_local_credentials_local_user_id_fkey; ALTER TABLE auth_local_credentials ADD CONSTRAINT reviewed_fk FOREIGN KEY(local_user_id) REFERENCES auth_local_identities(id) ON DELETE CASCADE NOT VALID",
+         "ALTER TABLE auth_local_credentials VALIDATE CONSTRAINT reviewed_fk", "required constraint"),
+        ("ALTER TABLE auth_local_credentials ALTER CONSTRAINT reviewed_fk DEFERRABLE INITIALLY IMMEDIATE",
+         "ALTER TABLE auth_local_credentials ALTER CONSTRAINT reviewed_fk NOT DEFERRABLE", "required constraint"),
+        ("DROP INDEX idx_sessions_expires; CREATE TABLE index_decoy(expires_at bigint); CREATE INDEX idx_sessions_expires ON index_decoy(expires_at)",
+         "DROP INDEX idx_sessions_expires; DROP TABLE index_decoy; CREATE INDEX idx_sessions_expires ON auth_sessions(expires_at)", "idx_sessions_expires"),
+    ] {
+        f.owner().batch_execute(mutation).unwrap();
+        let error = Fixture::initialize(&f.runtime_url).expect_err("incompatible catalog shape must fail");
+        assert!(error.contains("incompatible") && error.contains(object), "unexpected rejection: {error}");
+        f.owner().batch_execute(repair).unwrap();
+        Fixture::initialize(&f.runtime_url).expect("canonical repair must restore startup");
+    }
+}
+
+#[test]
+#[ignore = "requires disposable NTNT_AUTH_TEST_POSTGRES_URL (creates databases and roles)"]
 fn postgres_legacy_token_failure_rolls_back_and_owner_can_migrate() {
     let mut f = Fixture::new();
     f.bootstrap();
     f.owner().batch_execute(
         "INSERT INTO auth_local_identities
-         VALUES ('legacy-user', 'email', 'legacy@example.test', 'legacy@example.test', 1, 1, 'active', '{}');
-         CREATE TABLE auth_local_password_reset_tokens (
-             selector TEXT PRIMARY KEY, local_user_id TEXT NOT NULL REFERENCES auth_local_identities(id) ON DELETE CASCADE,
-             token_hash TEXT NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL);
-         INSERT INTO auth_local_password_reset_tokens VALUES ('legacy-token', 'legacy-user', 'fixture-hash', 1, 9999999999);"
+         VALUES ('legacy-user', 'email', 'legacy@example.test', 'legacy@example.test', 1, 1, 'active', '{}')"
     ).unwrap();
+    // Issue through the public API, then stage the same hashed record in the legacy layout.
+    let output = run_auth_program(
+        &f.runtime_url,
+        r#"
+import { issue_password_reset } from "std/auth"
+import { stringify } from "std/json"
+let issued = unwrap(issue_password_reset("legacy@example.test"))
+print("ISSUED=#{stringify(issued)}")
+"#,
+        &[],
+    );
+    let issued: serde_json::Value = serde_json::from_str(
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix("ISSUED="))
+            .expect("issued-token payload"),
+    )
+    .unwrap();
+    assert_eq!(issued["status"], "accepted");
+    let token = issued["token"].as_str().unwrap().to_string();
+    let selector = issued["selector"].as_str().unwrap().to_string();
+    let token_hash: String;
+    {
+        let mut owner = f.owner();
+        token_hash = owner
+            .query_one(
+                "SELECT token_hash FROM auth_local_one_time_tokens WHERE selector=$1",
+                &[&selector],
+            )
+            .unwrap()
+            .get(0);
+        owner.batch_execute(
+            "CREATE TABLE auth_local_password_reset_tokens (
+                 selector TEXT PRIMARY KEY, local_user_id TEXT NOT NULL REFERENCES auth_local_identities(id) ON DELETE CASCADE,
+                 token_hash TEXT NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL)"
+        ).unwrap();
+        assert_eq!(owner.execute(
+            "INSERT INTO auth_local_password_reset_tokens SELECT selector,local_user_id,token_hash,created_at,expires_at
+             FROM auth_local_one_time_tokens WHERE selector=$1", &[&selector]
+        ).unwrap(), 1, "issued reset record must exist; dummy token material cannot satisfy this test");
+        assert_eq!(
+            owner
+                .execute(
+                    "DELETE FROM auth_local_one_time_tokens WHERE selector=$1",
+                    &[&selector]
+                )
+                .unwrap(),
+            1
+        );
+    }
     f.grant_runtime();
     let error =
         Fixture::initialize(&f.runtime_url).expect_err("runtime cannot drop a legacy owner table");
@@ -365,11 +576,11 @@ fn postgres_legacy_token_failure_rolls_back_and_owner_can_migrate() {
         .unwrap();
     Fixture::initialize(&f.owner_url).unwrap();
     let row = f.owner().query_one(
-        "SELECT purpose, local_user_id, token_hash FROM auth_local_one_time_tokens WHERE selector='legacy-token'", &[]
+        "SELECT purpose, local_user_id, token_hash FROM auth_local_one_time_tokens WHERE selector=$1", &[&selector]
     ).unwrap();
     assert_eq!(row.get::<_, String>(0), "password_reset");
     assert_eq!(row.get::<_, String>(1), "legacy-user");
-    assert_eq!(row.get::<_, String>(2), "fixture-hash");
+    assert_eq!(row.get::<_, String>(2), token_hash);
     assert!(f
         .owner()
         .query_one(
@@ -378,10 +589,42 @@ fn postgres_legacy_token_failure_rolls_back_and_owner_can_migrate() {
         )
         .unwrap()
         .get::<_, bool>(0));
-    f.owner()
-        .batch_execute("DELETE FROM auth_local_one_time_tokens")
-        .unwrap();
+    let consumed = run_auth_program(
+        &f.runtime_url,
+        r#"
+import { consume_password_reset, verify_local_password } from "std/auth"
+let consumed = unwrap(consume_password_reset(unwrap(get_env("RESET_TOKEN")), "rotated fixture password"))
+assert(consumed.local_user_id == "legacy-user")
+let verified = unwrap(verify_local_password("legacy@example.test", "rotated fixture password"))
+assert(verified.local_user_id == "legacy-user")
+print("CONSUMED")
+"#,
+        &[("RESET_TOKEN", token.as_str())],
+    );
+    assert!(consumed.lines().any(|line| line == "CONSUMED"));
+    assert_eq!(
+        f.owner()
+            .query_one("SELECT count(*) FROM auth_local_one_time_tokens", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
     Fixture::initialize(&f.runtime_url).unwrap();
+    let replay = run_auth_program(
+        &f.runtime_url,
+        r#"
+import { consume_password_reset, verify_local_password } from "std/auth"
+match consume_password_reset(unwrap(get_env("RESET_TOKEN")), "replayed fixture password") {
+    Err(message) => assert(message == "Invalid password reset token"),
+    Ok(_) => assert(false)
+}
+let verified = unwrap(verify_local_password("legacy@example.test", "rotated fixture password"))
+assert(verified.local_user_id == "legacy-user")
+print("REPLAY_REJECTED")
+"#,
+        &[("RESET_TOKEN", token.as_str())],
+    );
+    assert!(replay.lines().any(|line| line == "REPLAY_REJECTED"));
     assert_eq!(
         f.owner()
             .query_one("SELECT count(*) FROM auth_local_one_time_tokens", &[])
