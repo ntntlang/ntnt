@@ -684,3 +684,190 @@ async fn socket_that_falls_behind_the_broadcast_is_closed_with_1013() {
     }
     reader.abort();
 }
+
+/// Runs the shipped example on a free port, in development mode.
+struct Example {
+    child: std::process::Child,
+    addr: SocketAddr,
+    _log: tempfile::TempDir,
+}
+
+impl Example {
+    fn start() -> Self {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let log = tempfile::tempdir().unwrap();
+        let out = std::fs::File::create(log.path().join("out")).unwrap();
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args(["run", "examples/websocket_demo/server.tnt"])
+            .env_remove("NTNT_ENV")
+            .env_remove("SITE_URL")
+            .env_remove("NTNT_WORKERS")
+            .env("NTNT_LISTEN_PORT", port.to_string())
+            .stdout(std::process::Stdio::from(out.try_clone().unwrap()))
+            .stderr(std::process::Stdio::from(out))
+            .spawn()
+            .unwrap();
+        let mut example = Self {
+            child,
+            addr: SocketAddr::from(([127, 0, 0, 1], port)),
+            _log: log,
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(
+                example.child.try_wait().unwrap().is_none(),
+                "example exited: {}",
+                example.log()
+            );
+            if std::net::TcpStream::connect(example.addr).is_ok() {
+                return example;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "example not listening: {}",
+                example.log()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn log(&self) -> String {
+        std::fs::read_to_string(self._log.path().join("out")).unwrap_or_default()
+    }
+}
+
+impl Drop for Example {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[tokio::test]
+async fn websocket_example_echo_auth_and_feed_work_end_to_end() {
+    let example = Example::start();
+    let addr = example.addr;
+    let origin = origin(addr);
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // The page and its script are served.
+    let page = http.get(format!("http://{addr}/")).send().await.unwrap();
+    assert_eq!(page.status().as_u16(), 200, "{}", example.log());
+    let script = http
+        .get(format!("http://{addr}/static/app.js"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(script.status().as_u16(), 200);
+    assert!(script.text().await.unwrap().contains("new WebSocket"));
+
+    // Public echo keeps per-connection state.
+    let mut echo = connect(addr, "/ws/echo", Some(&origin)).await.unwrap();
+    echo.send(Message::Text("hi".into())).await.unwrap();
+    assert_eq!(next_data(&mut echo).await, Message::Text("#1 hi".into()));
+    echo.send(Message::Text("again".into())).await.unwrap();
+    assert_eq!(next_data(&mut echo).await, Message::Text("#2 again".into()));
+
+    // The feed refuses anonymous clients with ordinary HTTP.
+    match connect(addr, "/ws/feed", Some(&origin)).await {
+        Err(WsError::Http(response)) => assert_eq!(response.status().as_u16(), 401),
+        other => panic!("expected 401, got {other:?}"),
+    }
+
+    // Sign in and keep the session cookie.
+    let login = http
+        .post(format!("http://{addr}/login"))
+        .form(&[("email", "demo@example.com"), ("password", "demo-password")])
+        .send()
+        .await
+        .unwrap();
+    // Success and failure both redirect; only success goes to "/".
+    assert!(login.status().is_redirection(), "{}", example.log());
+    assert_eq!(
+        login
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok()),
+        Some("/"),
+        "login failed: {}",
+        example.log()
+    );
+    let cookie: String = login
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap().to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(!cookie.is_empty(), "no session cookie");
+
+    let mut request = format!("ws://{addr}/ws/feed")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", origin.parse().unwrap());
+    request
+        .headers_mut()
+        .insert("cookie", cookie.parse().unwrap());
+    let (mut feed, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(
+        next_data(&mut feed).await,
+        Message::Text("welcome demo@example.com".into())
+    );
+    feed.send(Message::Text("ping".into())).await.unwrap();
+    assert_eq!(
+        next_data(&mut feed).await,
+        Message::Text("pong for demo@example.com".into())
+    );
+
+    // Publish through the CSRF-protected form; the feed receives the JSON.
+    let signed_in_page = http
+        .get(format!("http://{addr}/"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let csrf = signed_in_page
+        .split("name=\"_csrf\" value=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("csrf field on the signed-in page")
+        .to_string();
+    let bad = http
+        .post(format!("http://{addr}/announce"))
+        .header("cookie", &cookie)
+        .form(&[("_csrf", "wrong"), ("text", "nope")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status().as_u16(), 403);
+    let ok = http
+        .post(format!("http://{addr}/announce"))
+        .header("cookie", &cookie)
+        .form(&[("_csrf", csrf.as_str()), ("text", "hello all")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status().as_u16(), 200, "{}", example.log());
+    let Message::Text(json) = next_data(&mut feed).await else {
+        panic!("expected a text announcement")
+    };
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"from": "demo@example.com", "text": "hello all"})
+    );
+}

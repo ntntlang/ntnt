@@ -4262,6 +4262,11 @@ process restarts), instead of serving new code next to old.
 
 ## WebSockets
 
+A complete runnable app is in [`examples/websocket_demo/`](../examples/websocket_demo/server.tnt):
+a public echo socket with per-connection state, and a signed-in feed that forwards
+a broadcast bus, with a CSRF-protected publish form and a browser client that
+reconnects after lifetime (1001), reload (1012) and overload (1013) closes.
+
 Two-way messages with `ws_endpoint()` and `websocket()`. Requires the async server
 (`ntnt run`); `ntnt test` returns 501 for `websocket()`. Prefer SSE plus ordinary
 POST requests unless clients really send frequent messages.

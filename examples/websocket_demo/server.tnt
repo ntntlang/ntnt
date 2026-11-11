@@ -1,0 +1,157 @@
+// NTNT WebSocket demo
+// Run: ntnt run examples/websocket_demo/server.tnt
+// Visit: http://localhost:8080  (sign in as demo@example.com / demo-password)
+//
+// - /ws/echo: public echo socket with per-connection state (a message count)
+// - /ws/feed: signed-in users only; forwards every announcement published to a
+//   broadcast bus, and answers "ping" itself
+// - POST /announce: signed-in users publish to the bus (CSRF-protected)
+//
+// Origins: in development, localhost origins are allowed. In production, set
+// SITE_URL (or pass "origins" to ws_endpoint) or startup fails.
+
+import { html, json, redirect, status, parse_form, ws_endpoint, websocket, ws_send } from "std/http/server"
+import { broadcast, publish } from "std/concurrent"
+import {
+    enable_auth,
+    bootstrap_local_user,
+    set_local_password,
+    verify_local_password,
+    sign_in_session,
+    current_user,
+    csrf_field,
+    verify_csrf,
+    auth_logout
+} from "std/auth"
+import { get_env } from "std/env"
+import { lower, trim, html_escape } from "std/string"
+
+let demo_email = "demo@example.com"
+let demo_password = get_env("DEMO_PASSWORD") ?? "demo-password"
+
+enable_auth([], "admin", map {
+    "session_secret": get_env("AUTH_SESSION_SECRET") ?? "dev-secret-for-the-websocket-demo-only",
+    "session_store": "memory",
+    "cookie_secure": get_env("AUTH_COOKIE_SECURE") == "true",
+    "logout_url": "/"
+})
+
+// One active demo account. Bootstrap accounts must change their password, so
+// rotate the temporary one right away.
+fn seed_demo_user() {
+    let temporary = "temporary-" + demo_password
+    let created = bootstrap_local_user(demo_email, temporary)
+    if is_ok(created) {
+        let _active = set_local_password(demo_email, temporary, demo_password)
+    }
+}
+seed_demo_user()
+
+// The feed bus. Only code holding this handle can publish to it.
+let announcements = broadcast("announcements", map { "capacity": 64 })
+
+// Echo: count messages in explicit per-connection state.
+fn echo_message(conn, message, state) {
+    let count = state["count"] + 1
+    if message["kind"] == "text" {
+        ws_send(conn, "#" + str(count) + " " + message["data"])
+    } else {
+        ws_send(conn, message["data"])
+    }
+    return map { "count": count }
+}
+let echo = ws_endpoint("echo", echo_message)
+
+// Feed: announcements arrive through the `source` option. Client messages are
+// handled here; recheck permissions for anything sensitive, because the
+// handshake check is not ongoing authorization.
+fn feed_message(conn, message, state) {
+    if message["data"] == "ping" {
+        ws_send(conn, "pong for " + state["email"])
+    }
+    return state
+}
+fn feed_opened(conn, state) {
+    ws_send(conn, "welcome " + state["email"])
+    return state
+}
+let feed = ws_endpoint("feed", feed_message, map { "on_open": feed_opened })
+
+get("/ws/echo", fn(req) {
+    return websocket(echo, map { "state": map { "count": 0 } })
+})
+
+get("/ws/feed", fn(req) {
+    // Middleware and this check run before the upgrade; a refusal opens nothing.
+    let user = current_user(req) otherwise { return status(401, "sign in first") }
+    return websocket(feed, map {
+        "state": map { "email": user["email"] },
+        "source": announcements
+    })
+})
+
+post("/announce", fn(req) {
+    let user = current_user(req) otherwise { return status(401, "sign in first") }
+    let form = parse_form(req)
+    if !verify_csrf(req, form["_csrf"] ?? "") {
+        return status(403, "bad csrf token")
+    }
+    let text = trim(form["text"] ?? "")
+    if text == "" {
+        return status(400, "empty announcement")
+    }
+    let sent = publish(announcements, map { "from": user["email"], "text": text })
+    if is_err(sent) {
+        return status(503, "could not publish")
+    }
+    return json(map { "ok": true })
+})
+
+post("/login", fn(req) {
+    let form = parse_form(req)
+    let verified = verify_local_password(lower(trim(form["email"] ?? "")), form["password"] ?? "")
+    let user = verified otherwise { return redirect("/?error=1") }
+    return sign_in_session(redirect("/"), req, map { "subject_id": user["subject_id"], "email": user["email"] })
+})
+
+post("/logout", fn(req) { auth_logout(req) })
+
+// Browser code lives in public/app.js (resolved next to this file).
+serve_static("/static", "./public", map { "extensions": ["js"] })
+
+get("/", fn(req) {
+    let signed_in = current_user(req)
+    let who = if is_some(signed_in) { html_escape(unwrap(signed_in)["email"]) } else { "" }
+    let csrf = if who != "" { csrf_field(req) } else { "" }
+    return html("""<!doctype html>
+<html><head><meta charset="utf-8"><title>NTNT WebSockets</title></head>
+<body>
+<h1>NTNT WebSockets</h1>
+<section>
+  <h2>Echo</h2>
+  <input id="echo-text" value="hello"> <button id="echo-send">Send</button>
+  <pre id="echo-log"></pre>
+</section>
+<section>
+  <h2>Announcements</h2>
+  {{#if who}}
+    <p>Signed in as {{who}}.</p>
+    <form method="post" action="/announce" id="announce">
+      {{{csrf}}}
+      <input name="text" placeholder="Announcement"> <button>Publish</button>
+    </form>
+    <form method="post" action="/logout">{{{csrf}}}<button>Sign out</button></form>
+    <pre id="feed-log"></pre>
+  {{#else}}
+    <form method="post" action="/login">
+      <input name="email" value="demo@example.com">
+      <input name="password" type="password" placeholder="demo-password">
+      <button>Sign in</button>
+    </form>
+  {{/if}}
+</section>
+<script src="/static/app.js"></script>
+</body></html>""")
+})
+
+listen(int(get_env("PORT") ?? "8080") ?? 8080)
