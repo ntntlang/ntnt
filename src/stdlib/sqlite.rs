@@ -185,7 +185,7 @@ fn sqlite_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         .map_err(|e| IntentError::runtime_error(format!("Query preparation failed: {}", e)))?;
 
     let column_count = stmt.column_count();
-    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let column_names: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
 
     let rows_result = stmt.query_map(rusqlite::params_from_iter(sqlite_params.iter()), |row| {
         let mut map = HashMap::new();
@@ -226,7 +226,7 @@ fn sqlite_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> 
         .map_err(|e| IntentError::runtime_error(format!("Query preparation failed: {}", e)))?;
 
     let column_count = stmt.column_count();
-    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let column_names: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
 
     match stmt.query_row(rusqlite::params_from_iter(sqlite_params.iter()), |row| {
         let mut map = HashMap::new();

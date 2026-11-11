@@ -205,6 +205,29 @@ fn sqlite_scratch_aliases_and_replaced_targets_fail_closed() {
     );
 }
 
+/// The allowlist is re-resolved before every statement of a script: a name
+/// dropped earlier must not keep authority and fall through to an eponymous
+/// virtual table, while a legitimately recreated name regains it.
+#[test]
+fn sqlite_authorizer_refreshes_relations_before_each_statement() {
+    let f = Fixture::new();
+    for sql in [
+        "CREATE TABLE json_each(value INTEGER); DROP TABLE json_each; CREATE TABLE t(value INTEGER); INSERT INTO t SELECT value FROM json_each('[1,2]');",
+        "CREATE TABLE json_tree(value INTEGER); CREATE TABLE t(value INTEGER); DROP TABLE json_tree; CREATE VIEW v AS SELECT value FROM json_tree('[1]');",
+    ] {
+        f.sql("0001_dropped.sql", sql);
+        let r = f.command("plan", &[]);
+        assert_ne!(r["outcome"], "pass", "{sql}: {r}");
+        assert_eq!(f.target().query_row("SELECT count(*) FROM sqlite_schema",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
+    f.sql(
+        "0001_dropped.sql",
+        "CREATE TABLE a(x INTEGER); DROP TABLE a; CREATE TABLE a(y INTEGER); INSERT INTO a VALUES(1); CREATE VIEW v AS SELECT y FROM a;",
+    );
+    let r = f.command("plan", &[]);
+    assert_eq!(r["outcome"], "pass", "{r}");
+}
+
 #[test]
 fn sqlite_native_authorizer_rejects_escape_and_opaque_programs() {
     let f = Fixture::new();

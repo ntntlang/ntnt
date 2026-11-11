@@ -4260,6 +4260,73 @@ files stop changing. A worker that crashes and restarts after files changed on d
 stays out of service until its source matches the running generation again (or the
 process restarts), instead of serving new code next to old.
 
+## WebSockets
+
+Two-way messages with `ws_endpoint()` and `websocket()`. Requires the async server
+(`ntnt run`); `ntnt test` returns 501 for `websocket()`. Prefer SSE plus ordinary
+POST requests unless clients really send frequent messages.
+
+```ntnt
+import { redirect, ws_endpoint, websocket, ws_send, ws_close } from "std/http/server"
+import { get_user } from "std/auth"
+
+fn on_message(conn, message, state) {
+    if message["kind"] != "text" {
+        ws_close(conn, 4000, "text only")
+        return state
+    }
+    let next = map { "user": state["user"], "count": state["count"] + 1 }
+    ws_send(conn, "#" + str(next["count"]) + ": " + message["data"])
+    return next
+}
+
+// Setup only, like a route. Calling it from a handler is an error.
+let chat = ws_endpoint("chat", on_message)
+
+get("/ws", fn(req) {
+    // Middleware/auth run first; a denial or redirect opens nothing.
+    // Take identity from the authenticated session, never a client header.
+    let user = get_user(req) otherwise { return redirect("/login") }
+    return websocket(chat, map { "state": map { "user": user["id"], "count": 0 } })
+})
+```
+
+- `on_message(conn, message, state)` runs on an HTTP worker, **one message at a time
+  per connection, in order**. `message` is `map { "kind": "text"|"binary", "data": ... }`
+  (binary data is an Array of 0-255 Ints). Return the next state, or `Ok(state)`.
+  Returning `Err(..)` or a runtime error closes the connection with 1011; state is
+  not updated. Side effects already done (sends, DB writes) are not undone.
+- **State is explicit**: JSON data only (no functions, handles or secrets), at most
+  16 KiB, passed in and returned by each callback. Module globals are per worker and
+  are not shared between connections or workers.
+- `ws_send(conn, data)` returns `Result<Unit, String>`. `Ok` means queued, not
+  delivered. Each connection queues at most 16 messages / 256 KiB; it never waits.
+- `ws_close(conn, code?, reason?)` closes after queued messages are written. Codes:
+  1000 or 3000-4999.
+- Options: `on_open(conn, state) -> state`, `on_close(state, info)` (best effort,
+  after the socket is gone), `origins`, `allow_missing_origin`,
+  `callback_timeout_ms` (default 30000).
+- `callback_timeout_ms` counts from when the message is queued, so under load a
+  callback can time out before it starts (it is then skipped). Past the limit the
+  connection closes with 1011; a callback already running is not interrupted and
+  runs to completion. `on_close` never runs at the same time as another callback
+  for that connection: it is skipped if an earlier callback is still running when
+  the connection has finished closing.
+- **Origins** are matched exactly; CORS does not apply. Default: the origin of
+  `SITE_URL`. In development without `SITE_URL`, localhost origins are allowed. In
+  production with neither `SITE_URL` nor `origins`, startup fails. `null` origins
+  are always refused; requests without an Origin need `allow_missing_origin: true`.
+- Limits: messages up to `max_event_bytes` (64 KiB default, at most 256 KiB); at most
+  4 unprocessed messages / 256 KiB per connection (more closes with 1008); 64 queued
+  callbacks per process (more closes with 1013). With several configured workers,
+  at most all but one run callbacks at once (counted from the configured workers,
+  so not while one is restarting). With one worker (the development
+  default), a long callback delays HTTP requests. The receive backlog is a per-connection limit, not part of the
+  realtime payload budget. Server pings
+  every 30 s; WebSocket connections count against `max_connections`.
+- **Handshake auth is not ongoing authorization.** Recheck permissions inside
+  `on_message` for sensitive commands; `state["user"]` is only what you stored.
+
 The 0.6.1 development runtime also records the exact file inputs parsed by each
 interpreter, rather than reconstructing source identity from mtimes or rereading
 files later. This is a DD-041 prerequisite, not a new NTNT API or a worker admission
