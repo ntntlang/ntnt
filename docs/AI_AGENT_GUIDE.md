@@ -4318,10 +4318,11 @@ get("/ws", fn(req) {
   are always refused; requests without an Origin need `allow_missing_origin: true`.
 - Limits: messages up to `max_event_bytes` (64 KiB default, at most 256 KiB); at most
   4 unprocessed messages / 256 KiB per connection (more closes with 1008); 64 queued
-  callbacks per process (more closes with 1013). With several configured workers,
-  at most all but one run callbacks at once (counted from the configured workers,
-  so not while one is restarting). With one worker (the development
-  default), a long callback delays HTTP requests. The receive backlog is a per-connection limit, not part of the
+  callbacks per process (more closes with 1013). With several workers serving, at
+  most all but one run callbacks at once, so one is always free for HTTP. This
+  follows the workers actually running: while one is down and restarting, fewer
+  callbacks run at once. With one worker (the development default), a long
+  callback delays HTTP requests. The receive backlog is a per-connection limit, not part of the
   realtime payload budget. Server pings
   every 30 s; WebSocket connections count against `max_connections`.
 - **Broadcasts:** `websocket(endpoint, map { "source": bus })` forwards every

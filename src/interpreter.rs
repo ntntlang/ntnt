@@ -10550,7 +10550,7 @@ impl Interpreter {
         let callback_rx = crate::stdlib::websocket::has_endpoints().then(|| {
             let (tx, rx) = crate::stdlib::websocket::callback_channel();
             crate::stdlib::websocket::install_callbacks(tx);
-            crate::stdlib::websocket::set_callback_workers(num_workers);
+            crate::stdlib::websocket::reset_callback_slots();
             rx
         });
         let source_file = self.main_source_file.clone().unwrap_or_default();
@@ -10646,6 +10646,10 @@ impl Interpreter {
 
         // Main thread (worker 0): process requests with hot-reload support
         self.setup_frozen = true;
+        // Callback slots follow the workers actually serving.
+        let _live = callback_rx
+            .as_ref()
+            .map(|_| crate::stdlib::websocket::LiveWorker::start());
         let mut http_in_row = 0;
         loop {
             // Block waiting for requests or WebSocket callbacks
@@ -11140,6 +11144,10 @@ impl Interpreter {
 
         // Worker request loop — no hot-reload, just process requests
         interpreter.setup_frozen = true;
+        // Counted as live only while serving; dropped on exit or panic.
+        let _live = callbacks
+            .as_ref()
+            .map(|_| crate::stdlib::websocket::LiveWorker::start());
         let mut http_in_row = 0;
         loop {
             match next_serve_work(&rx, callbacks.as_ref(), &mut http_in_row) {

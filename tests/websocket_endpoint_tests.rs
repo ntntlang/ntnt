@@ -684,3 +684,48 @@ async fn socket_that_falls_behind_the_broadcast_is_closed_with_1013() {
     }
     reader.abort();
 }
+
+const PARALLEL_APP: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+import { sleep_ms } from "std/concurrent"
+fn slow(conn, message, state) {
+    sleep_ms(1500)
+    ws_send(conn, "done:" + message["data"])
+    return state
+}
+let ep = ws_endpoint("slow", slow)
+get("/ws", fn(req) { websocket(ep) })
+get("/health", fn(req) { text("ok") })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+#[tokio::test]
+async fn callback_slots_scale_with_live_workers() {
+    // Three live workers: two may run callbacks at once, one stays for HTTP.
+    // Two slow callbacks on different sockets must overlap, and HTTP must
+    // still answer while they run.
+    let mut server = fixture::Fixture::start(PARALLEL_APP, &["run"], &[("NTNT_WORKERS", "3")]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let mut a = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    let mut b = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    let started = std::time::Instant::now();
+    a.send(Message::Text("a".into())).await.unwrap();
+    b.send(Message::Text("b".into())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let health_start = std::time::Instant::now();
+    let health = reqwest::get(format!("http://{addr}/health")).await.unwrap();
+    assert_eq!(health.text().await.unwrap(), "ok");
+    assert!(
+        health_start.elapsed() < Duration::from_millis(800),
+        "HTTP waited {:?} behind callbacks",
+        health_start.elapsed()
+    );
+    assert_eq!(next_data(&mut a).await, Message::Text("done:a".into()));
+    assert_eq!(next_data(&mut b).await, Message::Text("done:b".into()));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(2600),
+        "callbacks ran one after another ({elapsed:?}); expected two at once"
+    );
+}

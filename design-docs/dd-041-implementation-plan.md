@@ -173,7 +173,9 @@ Probes ran against the real `ntnt run` server and real Worker-mode interpreters,
 
 **Broadcast source:** `websocket(endpoint, { source: bus })` subscribes in the connection owner at upgrade and writes each event's JSON value (a slice of the single SSE encoding, held by the shared `Arc<EncodedEvent>` until copied into the frame) as a text message. `Lagged` closes with 1013. Tested via `ntnt run` with two workers: four sockets receive every event in order; with capacity 4 and 120 × 48 KiB events, a non-reading socket closes with 1013 while a healthy one receives all 120 in order. Each test fails with its behavior removed.
 
-**Not yet exercised:** connection lifetime limit, hot-reload closing of open sockets, respawned-worker quarantine end-to-end, and fairness under worker loss with saturated callbacks. These remain Slice B acceptance checks, not assumed results.
+**Live worker accounting:** callback slots are tokens in a pool sized to the workers actually serving (`max(live - 1, 1)`). Each serving loop holds a `LiveWorker` guard, dropped on exit or panic; when a worker stops, an idle token is withdrawn at once or the next returned one is retired, and a restarted worker restores its slot. Unit test covers start/stop/retire/restore; `callback_slots_scale_with_live_workers` (3 workers) shows two callbacks overlap while HTTP answers, and fails with secondary workers uncounted.
+
+**Not yet exercised:** connection lifetime limit, hot-reload closing of open sockets, respawned-worker quarantine end-to-end and fairness under worker loss with saturated callbacks (slot accounting now follows live workers; the end-to-end worker-loss case is not exercised). These remain Slice B acceptance checks, not assumed results.
 
 ### Slice A — useful SSE, complete lifecycle and caps
 
