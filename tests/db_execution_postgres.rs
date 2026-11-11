@@ -1672,6 +1672,33 @@ fn reconcile(f: &Fixture, plan: &Value) -> Value {
     serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
 }
+/// Block until the target database has no session other than this one, so
+/// work a disconnected client started has finished. Fails after 30 s.
+fn wait_for_other_target_sessions_to_end(f: &Fixture) {
+    let mut client = f.target();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let others: Vec<String> = client
+            .query(
+                "SELECT format('%s %s %s', pid, state, left(query, 60)) FROM pg_stat_activity
+                 WHERE datname = current_database() AND pid <> pg_backend_pid()
+                   AND backend_type = 'client backend'",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        if others.is_empty() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "target sessions still open after 30s: {others:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
 fn attempt_state(f: &Fixture) -> Option<String> {
     f.target()
         .query_opt(
@@ -1841,6 +1868,10 @@ fn lost_reconcile_commit_is_unknown_not_failed() {
     assert_eq!(r["outcome"], "unknown", "{r}");
     assert_eq!(r["reconciliation"]["pending_write"], "not_started", "{r}");
     f.target_url = direct;
+    // The proxy dropped only the acknowledgement, so the backend that ran the
+    // COMMIT may still be finishing it. Wait for every other session on the
+    // target to end (bounded) before checking that the commit landed.
+    wait_for_other_target_sessions_to_end(&f);
     // The commit did land; a fresh reconcile sees nothing left to do.
     assert_eq!(attempt_state(&f), None);
     assert_eq!(reconcile(&f, &plan)["reconciliation"]["resolution"], "none");
