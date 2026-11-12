@@ -336,7 +336,8 @@ fn endpoint_config(name: &str) -> Option<EndpointConfig> {
 /// The number of tokens follows the workers actually serving, not the
 /// configured count: with more than one live worker, one is always left for
 /// HTTP. When a worker stops, an idle token is withdrawn at once, or the next
-/// one returned is retired.
+/// one returned is retired. A worker that held its token across the stop
+/// revalidates it before running a callback (see [`CallbackSlot::revalidate`]).
 pub(crate) struct SlotPool {
     tx: flume::Sender<()>,
     rx: flume::Receiver<()>,
@@ -452,9 +453,40 @@ impl Drop for LiveWorker {
 /// returns (or retires) the token.
 pub(crate) struct CallbackSlot(&'static SlotPool);
 
+impl CallbackSlot {
+    /// Keep this slot to run a callback, unless a worker stopped while it was
+    /// held and more slots are out than the live workers allow. Then the slot
+    /// is retired and `None` returned: the caller puts the callback back with
+    /// [`requeue`] and stays free for HTTP.
+    pub(crate) fn revalidate(self) -> Option<Self> {
+        let pool = self.0;
+        let mut state = pool.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.retire == 0 {
+            drop(state);
+            return Some(self);
+        }
+        state.retire -= 1;
+        state.issued -= 1;
+        drop(state);
+        // Retired, so dropping it must not return the token.
+        std::mem::forget(self);
+        None
+    }
+}
+
 impl Drop for CallbackSlot {
     fn drop(&mut self) {
         self.0.release();
+    }
+}
+
+/// Put a callback job back on the queue for a worker that may run it. The
+/// queue has room (admission bounds the jobs in existence); if it has closed
+/// because the server is stopping, the job is dropped and its connection
+/// reports the callback as not run.
+pub(crate) fn requeue(job: CallbackJob) {
+    if let Some(tx) = callbacks() {
+        let _ = tx.try_send(job);
     }
 }
 
@@ -1685,6 +1717,30 @@ mod tests {
         assert_eq!(pool.tokens(), (1, 1));
         pool.reset();
         assert_eq!(pool.tokens(), (1, 1));
+    }
+
+    #[test]
+    fn slot_held_across_a_worker_loss_is_retired_before_a_callback() {
+        let pool: &'static SlotPool = Box::leak(Box::new(SlotPool::new()));
+        for _ in 0..3 {
+            pool.worker_started();
+        }
+        // Two workers wait for a callback, each holding a slot.
+        pool.rx.try_recv().unwrap();
+        pool.rx.try_recv().unwrap();
+        let (first, second) = (CallbackSlot(pool), CallbackSlot(pool));
+        // The third worker dies: one slot more is out than two workers allow.
+        pool.worker_stopped();
+        assert_eq!(pool.tokens(), (1, 0));
+        // The first holder to receive a callback gives its slot up instead.
+        assert!(first.revalidate().is_none());
+        assert_eq!(pool.tokens(), (1, 0));
+        // The other keeps its slot and returns it afterwards.
+        drop(second.revalidate().expect("one slot stays in service"));
+        assert_eq!(pool.tokens(), (1, 1));
+        // A restarted worker brings the second slot back.
+        pool.worker_started();
+        assert_eq!(pool.tokens(), (2, 2));
     }
 
     #[tokio::test]

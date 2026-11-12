@@ -685,6 +685,22 @@ async fn socket_that_falls_behind_the_broadcast_is_closed_with_1013() {
     reader.abort();
 }
 
+/// GET `path` with a deadline on the whole request and body, returning the
+/// body and how long it took.
+async fn timed_get(addr: SocketAddr, path: &str) -> (String, Duration) {
+    let started = std::time::Instant::now();
+    let body = tokio::time::timeout(Duration::from_secs(10), async {
+        reqwest::get(format!("http://{addr}{path}"))
+            .await?
+            .text()
+            .await
+    })
+    .await
+    .expect("no response within 10s")
+    .expect("request failed");
+    (body, started.elapsed())
+}
+
 const PARALLEL_APP: &str = r#"
 import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
 import { sleep_ms } from "std/concurrent"
@@ -713,13 +729,11 @@ async fn callback_slots_scale_with_live_workers() {
     a.send(Message::Text("a".into())).await.unwrap();
     b.send(Message::Text("b".into())).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let health_start = std::time::Instant::now();
-    let health = reqwest::get(format!("http://{addr}/health")).await.unwrap();
-    assert_eq!(health.text().await.unwrap(), "ok");
+    let (body, waited) = timed_get(addr, "/health").await;
+    assert_eq!(body, "ok");
     assert!(
-        health_start.elapsed() < Duration::from_millis(800),
-        "HTTP waited {:?} behind callbacks",
-        health_start.elapsed()
+        waited < Duration::from_millis(800),
+        "HTTP waited {waited:?} behind callbacks"
     );
     assert_eq!(next_data(&mut a).await, Message::Text("done:a".into()));
     assert_eq!(next_data(&mut b).await, Message::Text("done:b".into()));
@@ -728,4 +742,72 @@ async fn callback_slots_scale_with_live_workers() {
         elapsed < Duration::from_millis(2600),
         "callbacks ran one after another ({elapsed:?}); expected two at once"
     );
+}
+
+const WORKER_LOSS_APP: &str = r#"
+import { text, status, ws_endpoint, websocket, ws_send } from "std/http/server"
+import { sleep_ms } from "std/concurrent"
+let mut primary = true
+fn slow(conn, message, state) {
+    sleep_ms(1500)
+    ws_send(conn, "done:" + message["data"])
+    return state
+}
+let ep = ws_endpoint("slow", slow)
+get("/ws", fn(req) { websocket(ep) })
+get("/health", fn(req) { text("ok") })
+get("/crash", fn(req) {
+    // Worker 0 serves on the main thread: a crash there ends the process.
+    if primary {
+        return status(409, "primary worker")
+    }
+    // Integer overflow panics the Rust worker running this handler.
+    let n = -9223372036854775807 - 1
+    return text(str(n / -1))
+})
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+// listen() serves until shutdown on worker 0 and returns in the others.
+primary = false
+"#;
+
+#[tokio::test]
+async fn worker_loss_keeps_a_worker_free_for_http() {
+    // Three workers share two callback slots, and idle workers hold them while
+    // they wait. After one worker crashes, only one callback may run until it
+    // restarts (after a second), so HTTP is still answered at once.
+    let mut server = fixture::Fixture::start(WORKER_LOSS_APP, &["run"], &[("NTNT_WORKERS", "3")]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let mut a = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    let mut b = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    // Requests rotate between workers, and worker 0 refuses with 409.
+    let mut crashed = false;
+    for _ in 0..10 {
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            reqwest::get(format!("http://{addr}/crash")),
+        )
+        .await;
+        if !matches!(response, Ok(Ok(ref r)) if r.status() == 409) {
+            crashed = true;
+            break;
+        }
+    }
+    assert!(crashed, "no other worker took /crash: {}", server.stderr());
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !server.stderr().contains("crashed (panic)") {
+        assert!(std::time::Instant::now() < deadline, "{}", server.stderr());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    a.send(Message::Text("a".into())).await.unwrap();
+    b.send(Message::Text("b".into())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (body, waited) = timed_get(addr, "/health").await;
+    assert_eq!(body, "ok");
+    assert!(
+        waited < Duration::from_millis(500),
+        "HTTP waited {waited:?} for the crashed worker to restart"
+    );
+    assert_eq!(next_data(&mut a).await, Message::Text("done:a".into()));
+    assert_eq!(next_data(&mut b).await, Message::Text("done:b".into()));
 }
