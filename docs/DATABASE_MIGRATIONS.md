@@ -78,8 +78,8 @@ new plan has a new digest.
 ### PostgreSQL
 
 Provision a target database and a separate, disposable scratch database, each owned
-by its own unprivileged login role. Run this as a local administrator (for
-example `psql -U postgres -h /path/to/socket-dir -f provision.sql`):
+by its own unprivileged login role. Run this as a PostgreSQL superuser (for
+example `sudo -u postgres psql -f provision.sql` with a distribution package):
 
 ```sql
 -- provision.sql (local development only)
@@ -89,8 +89,15 @@ CREATE ROLE app_replay_owner LOGIN PASSWORD 'dev-only-replay';
 CREATE DATABASE app_replay OWNER app_replay_owner TEMPLATE template0;
 ```
 
+The roles log in over loopback (`127.0.0.1`) with these passwords. Logins follow the
+server's `pg_hba.conf`: distribution packages usually require passwords on loopback
+but authenticate Unix-socket logins with `peer`, which ignores passwords and admits
+only an operating-system user with the role's name. To use a Unix-socket directory
+as `host` instead, allow password authentication for these roles on local
+connections first.
+
 The managed schema must already exist on the target. Create it as the owner role,
-for example `psql -h /path/to/socket-dir -U app_owner -d app_development -c 'CREATE SCHEMA app'`.
+for example `PGPASSWORD=dev-only-owner psql -h 127.0.0.1 -U app_owner -d app_development -c 'CREATE SCHEMA app'`.
 Skip this if you use `schema = "public"`. Leave the scratch database empty.
 
 ```toml
@@ -127,13 +134,14 @@ CREATE TABLE app.accounts (
 
 Connection secrets are libpq key/value strings with exactly one `host`, the declared
 `user` and `dbname`, and **`sslmode=disable`**, with no `options`. For now, use a
-trusted local transport such as a Unix-socket directory. TLS is not yet supported;
-it is tracked in [#344](https://github.com/ntntlang/ntnt/issues/344).
+trusted local transport: loopback or a Unix-socket directory. TLS is not yet
+supported; it is tracked in [#344](https://github.com/ntntlang/ntnt/issues/344).
+Add `port=` if the server is not on 5432.
 
 ```sh
 export NTNT_ENV=development NTNT_SECRETS_PROVIDER=env
-export APP_DATABASE="host=/path/to/socket-dir user=app_owner dbname=app_development password=dev-only-owner sslmode=disable"
-export APP_REPLAY_DATABASE="host=/path/to/socket-dir user=app_replay_owner dbname=app_replay password=dev-only-replay sslmode=disable"
+export APP_DATABASE="host=127.0.0.1 user=app_owner dbname=app_development password=dev-only-owner sslmode=disable"
+export APP_REPLAY_DATABASE="host=127.0.0.1 user=app_replay_owner dbname=app_replay password=dev-only-replay sslmode=disable"
 
 ntnt db status --target development
 ntnt db plan --target development --out review.json
@@ -144,7 +152,9 @@ ntnt db verify --target development
 
 A secret without `sslmode=disable` (or with a different user, database or several
 hosts) fails with `DB_CONNECTION_CONFIG`. An unset or undeclared secret fails with
-`DB_SECRET`. Add `--json` to any command for the machine-readable report. If the
+`DB_SECRET`. A refused login fails with `DB_POSTGRES` and SQLSTATE `28P01` (wrong
+password) or `28000` (for example `peer`): check `pg_hba.conf` and the secret.
+Add `--json` to any command for the machine-readable report. If the
 manifest declares only one database, `--database` is optional; `--target` is
 always required.
 

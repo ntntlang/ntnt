@@ -39,7 +39,7 @@ impl Diagnostic {
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
             "DB_SECRET" => "Declare the named connection secret under [secrets.<NAME>] in ntnt.toml and make it resolvable through the configured std/secrets provider (development: an environment variable with that exact name; production: NTNT_SECRETS_PROVIDER=unix-socket). Never pass a connection URL on the command line.",
-            "DB_CONNECTION_CONFIG" => "Make the PostgreSQL connection secret name exactly one explicit host, the user and dbname declared as the target's role and database, and sslmode=disable on a trusted local transport (for example a Unix socket), with no startup options. TLS is not yet supported (see #344); never send credentials over an untrusted network.",
+            "DB_CONNECTION_CONFIG" => "Make the failing PostgreSQL connection secret (target or scratch) name exactly one explicit host, the user and dbname declared as that endpoint's role and database, and sslmode=disable on a trusted local transport (loopback or a Unix socket), with no startup options. TLS is not yet supported (see #344); never send credentials over an untrusted network.",
             "DB_CONFIG" => "Fix ntnt.toml or the command line as the message describes: declare [databases.<name>] with engine, schema, a confined relative migrations_dir and named targets, use logical secret references (a separate disposable scratch secret and a separate approval_secret), and pass --adopt-through only to plan. See docs/DATABASE_MIGRATIONS.md#quick-start.",
             "DB_ATTEMPT_UNRESOLVED" => "An earlier migrate stopped during a non-transactional migration. Make sure no migrate or index build is still running, then run `ntnt db reconcile --plan <the same approved plan>`; it records the outcome it observes or rolls the attempt back. Nothing else runs until then.",
             "DB_ATTEMPT_ACTIVE" => "The index build is still running in another session. Wait for it to finish or cancel that backend, then reconcile again.",
@@ -462,6 +462,7 @@ mod tests {
             (
                 "DB_CONNECTION_CONFIG",
                 [
+                    "target or scratch",
                     "one explicit host",
                     "sslmode=disable",
                     "no startup options",
