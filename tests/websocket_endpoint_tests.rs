@@ -751,10 +751,23 @@ impl Drop for Example {
 #[tokio::test]
 async fn websocket_example_echo_auth_and_feed_work_end_to_end() {
     let example = Example::start();
+    // Each request and handshake has its own limit, and the whole flow has a
+    // deadline, so a server that accepts connections and then stops answering
+    // fails the test instead of hanging it.
+    if tokio::time::timeout(Duration::from_secs(90), example_flow(&example))
+        .await
+        .is_err()
+    {
+        panic!("example flow exceeded 90s: {}", example.log());
+    }
+}
+
+async fn example_flow(example: &Example) {
     let addr = example.addr;
     let origin = origin(addr);
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
         .build()
         .unwrap();
 
@@ -775,6 +788,17 @@ async fn websocket_example_echo_auth_and_feed_work_end_to_end() {
     assert_eq!(next_data(&mut echo).await, Message::Text("#1 hi".into()));
     echo.send(Message::Text("again".into())).await.unwrap();
     assert_eq!(next_data(&mut echo).await, Message::Text("#2 again".into()));
+    // A maximum-size message is accepted, but "#3 " pushes the echo over the
+    // send limit: the example refuses it out loud and keeps the count.
+    echo.send(Message::Text("x".repeat(64 * 1024)))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_data(&mut echo).await,
+        Message::Text("not echoed: message too large".into())
+    );
+    echo.send(Message::Text("after".into())).await.unwrap();
+    assert_eq!(next_data(&mut echo).await, Message::Text("#3 after".into()));
 
     // The feed refuses anonymous clients with ordinary HTTP.
     match connect(addr, "/ws/feed", Some(&origin)).await {
@@ -819,7 +843,13 @@ async fn websocket_example_echo_auth_and_feed_work_end_to_end() {
     request
         .headers_mut()
         .insert("cookie", cookie.parse().unwrap());
-    let (mut feed, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let (mut feed, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .expect("feed handshake timed out")
+    .unwrap();
     assert_eq!(
         next_data(&mut feed).await,
         Message::Text("welcome demo@example.com".into())

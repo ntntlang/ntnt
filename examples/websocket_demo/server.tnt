@@ -50,15 +50,24 @@ seed_demo_user()
 // The feed bus. Only code holding this handle can publish to it.
 let announcements = broadcast("announcements", map { "capacity": 64 })
 
-// Echo: count messages in explicit per-connection state.
+// Echo: count messages in explicit per-connection state. ws_send returns a
+// Result: the "#N " prefix can push a maximum-size (64 KiB) text message over
+// the send limit. Refuse it out loud and keep the count instead of losing the
+// echo silently; if even the refusal cannot be queued, end the connection.
 fn echo_message(conn, message, state) {
     let count = state["count"] + 1
-    if message["kind"] == "text" {
-        ws_send(conn, "#" + str(count) + " " + message["data"])
-    } else {
-        ws_send(conn, message["data"])
+    let reply = if message["kind"] == "text" { "#" + str(count) + " " + message["data"] } else { message["data"] }
+    match ws_send(conn, reply) {
+        Ok(_) => {
+            return map { "count": count }
+        },
+        Err(e) => {
+            if is_err(ws_send(conn, "not echoed: " + e)) {
+                return Err("echo failed: " + e)
+            }
+            return state
+        }
     }
-    return map { "count": count }
 }
 let echo = ws_endpoint("echo", echo_message)
 
