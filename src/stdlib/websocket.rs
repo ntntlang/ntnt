@@ -59,6 +59,12 @@ pub(crate) fn code_reloaded() {
     CODE_GENERATION.send_modify(|generation| *generation += 1);
 }
 
+/// The current code generation. A connection keeps the generation its
+/// handshake ran under; its callbacks never run under another one.
+pub(crate) fn code_generation() -> u64 {
+    *CODE_GENERATION.borrow()
+}
+
 /// Default time a connection waits for one callback before closing
 /// (`callback_timeout_ms` overrides it per endpoint).
 pub const CALLBACK_DEADLINE: Duration = Duration::from_secs(30);
@@ -413,6 +419,8 @@ pub struct WsSpec {
     has_close: bool,
     callback_deadline: Duration,
     lifetime: Duration,
+    /// Code generation the handshake ran under, which built `state`.
+    generation: u64,
     /// Broadcast forwarded to this connection as text messages.
     source: Option<Arc<crate::stdlib::realtime::Bus>>,
 }
@@ -430,6 +438,7 @@ impl WsSpec {
             has_close: false,
             callback_deadline: CALLBACK_DEADLINE,
             lifetime: DEFAULT_LIFETIME,
+            generation: code_generation(),
             source: None,
         }
     }
@@ -497,6 +506,10 @@ pub struct CallbackJob {
     pub conn: WsHandle,
     /// Current state, encoded JSON.
     pub state: String,
+    /// Code generation that built the state. A worker never runs a callback
+    /// from another generation: after a development reload the endpoint's
+    /// callbacks are the new code.
+    pub generation: u64,
     pub event: CallbackEvent,
     /// Where the outcome goes; dropped unanswered if the owner has gone.
     pub reply: Reply,
@@ -671,6 +684,8 @@ pub fn spec_from_response(
         has_close: config.has_close,
         callback_deadline: config.callback_deadline,
         lifetime: config.lifetime,
+        // The handler that built `state` has just run on this worker.
+        generation: code_generation(),
         source,
     }))
 }
@@ -1011,6 +1026,8 @@ struct Session {
     /// True while the last started callback may still be executing.
     running: Arc<std::sync::atomic::AtomicBool>,
     deadline: Duration,
+    /// Code generation that built `state`.
+    generation: u64,
 }
 
 impl Session {
@@ -1028,6 +1045,7 @@ impl Session {
             endpoint: self.endpoint.clone(),
             conn: handle.clone(),
             state: self.state.clone(),
+            generation: self.generation,
             event,
             reply: Reply {
                 tx: reply,
@@ -1098,6 +1116,7 @@ pub(crate) async fn run(
             pending: None,
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             deadline: spec.callback_deadline,
+            generation: spec.generation,
         }),
     };
     let mut ping = tokio::time::interval_at(
@@ -1110,8 +1129,10 @@ pub(crate) async fn run(
     // client must come back through the HTTP pipeline.
     let expires = tokio::time::sleep(spec.lifetime);
     tokio::pin!(expires);
-    let mut code_generation = CODE_GENERATION.subscribe();
-    code_generation.mark_unchanged();
+    let mut code_changes = CODE_GENERATION.subscribe();
+    // An upgrade that completes just after a reload carries state built by
+    // the old code: close it before any callback can run.
+    let reloaded_since_handshake = *code_changes.borrow_and_update() != spec.generation;
     // Subscribe before the first message is read: only events published after
     // the upgrade are delivered, as with SSE. The receiver keeps the bus alive.
     let mut source = spec.source.as_ref().map(|bus| bus.subscribe());
@@ -1119,6 +1140,9 @@ pub(crate) async fn run(
     let mut requested_close: Option<(u16, String)> = None;
 
     let end = 'run: {
+        if reloaded_since_handshake {
+            break 'run End::Close(close_code::SERVICE_RESTART, "server code reloaded".into());
+        }
         if let Some(session) = session.as_mut() {
             if spec.has_open && !session.start(&handle, CallbackEvent::Open) {
                 break 'run overloaded();
@@ -1143,7 +1167,7 @@ pub(crate) async fn run(
                         break 'run End::Close(close_code::GOING_AWAY, "server shutting down".into());
                     }
                 }
-                Ok(()) = code_generation.changed() => {
+                Ok(()) = code_changes.changed() => {
                     break 'run End::Close(close_code::SERVICE_RESTART, "server code reloaded".into());
                 }
                 _ = &mut expires => {
@@ -1305,6 +1329,16 @@ pub(crate) async fn run(
             if session.running.load(Ordering::Acquire) {
                 eprintln!(
                     "[websocket {}] on_close skipped: an earlier callback is still running",
+                    session.endpoint
+                );
+                drop(owner);
+                return;
+            }
+            // After a development reload the endpoint's on_close is the new
+            // code; it must never receive state built by the old code.
+            if session.generation != code_generation() {
+                eprintln!(
+                    "[websocket {}] on_close skipped: server code reloaded",
                     session.endpoint
                 );
                 drop(owner);

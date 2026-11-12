@@ -734,26 +734,21 @@ async fn connection_closes_at_its_lifetime_limit() {
 
 #[test]
 fn lifetime_must_be_finite_and_in_range() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = dir.path().join("app.tnt");
-    std::fs::write(
-        &app,
+    let mut app = fixture::Fixture::start(
         r#"
 import { text, ws_endpoint } from "std/http/server"
 let forever = ws_endpoint("forever", fn(conn, message, state) { state }, map { "max_lifetime_ms": 0 })
 get("/", fn(req) { text("ok") })
 listen(0, map { "readiness": "json", "host": "127.0.0.1" })
 "#,
-    )
-    .unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
-        .args(["run"])
-        .arg(&app)
-        .env_remove("NTNT_ENV")
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
+        &["run"],
+        &[],
+    );
+    // wait() has a deadline: if validation accepted 0, the server would keep
+    // serving, and the test fails (and the fixture kills it) instead of hanging.
+    let status = app.wait();
+    let stderr = app.stderr();
+    assert!(!status.success(), "{stderr}");
     assert!(
         stderr.contains("connections are never unlimited"),
         "{stderr}"
@@ -801,4 +796,152 @@ async fn development_reload_closes_open_sockets_and_new_ones_use_new_code() {
     let mut fresh = connect(addr, "/ws", Some(&origin)).await.unwrap();
     fresh.send(Message::Text("b".into())).await.unwrap();
     assert_eq!(next_data(&mut fresh).await, Message::Text("v2:b".into()));
+}
+
+const STATE_RELOAD_APP: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+import { sleep_ms } from "std/concurrent"
+fn on_message(conn, message, state) {
+    if message["data"] == "slow" {
+        sleep_ms(1500)
+    }
+    print("MESSAGE v1 " + state["schema"] + " " + message["data"])
+    ws_send(conn, "v1:" + message["data"])
+    return state
+}
+fn on_close(state, info) {
+    print("CLOSE v1 " + state["schema"] + " " + str(info["code"]))
+}
+let live = ws_endpoint("live", on_message, map { "on_close": on_close })
+get("/ws", fn(req) { websocket(live, map { "state": map { "schema": "old" } }) })
+get("/health", fn(req) { text("ok") })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+#[tokio::test]
+async fn development_reload_never_runs_new_callbacks_on_old_state() {
+    // Development mode, one worker: the reload applies on the next request.
+    let mut server = fixture::Fixture::start(STATE_RELOAD_APP, &["run"], &[]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let mut old = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    old.send(Message::Text("a".into())).await.unwrap();
+    assert_eq!(next_data(&mut old).await, Message::Text("v1:a".into()));
+
+    // Make the change visible to mtime checks on coarse-grained filesystems.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    // Hold the only worker in a slow callback and queue a message behind it.
+    // Then change the callbacks and the state shape, and send the request
+    // that reloads them: the worker takes that request first, so the queued
+    // message and the old socket's on_close would meet the new code.
+    old.send(Message::Text("slow".into())).await.unwrap();
+    old.send(Message::Text("queued".into())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::fs::write(
+        server.dir.path().join("fixture.tnt"),
+        STATE_RELOAD_APP
+            .replace("v1", "v2")
+            .replace("\"old\"", "\"new\""),
+    )
+    .unwrap();
+    let health = tokio::spawn(tokio::time::timeout(
+        Duration::from_secs(10),
+        reqwest::get(format!("http://{addr}/health")),
+    ));
+    assert_eq!(
+        close_frame(&mut old).await,
+        Some((CloseCode::Restart, "server code reloaded".to_string())),
+        "{}",
+        server.stderr()
+    );
+    let health = health.await.unwrap().expect("reload request timed out");
+    assert_eq!(health.unwrap().text().await.unwrap(), "ok");
+
+    // A new connection gets the new code and state, on_close included.
+    let mut fresh = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    fresh.send(Message::Text("b".into())).await.unwrap();
+    assert_eq!(next_data(&mut fresh).await, Message::Text("v2:b".into()));
+    fresh.close(None).await.unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !server.stdout().contains("CLOSE v2 new 1000") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{}\n{}",
+            server.stdout(),
+            server.stderr()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The old connection's queued message and on_close were never run on the
+    // new code; the old on_close cannot run either, its code is gone.
+    let stdout = server.stdout();
+    assert!(!stdout.contains("v2 old"), "{stdout}");
+    assert!(!stdout.contains("CLOSE v1"), "{stdout}");
+    assert!(
+        server
+            .stderr()
+            .contains("on_close skipped: server code reloaded"),
+        "{}",
+        server.stderr()
+    );
+}
+
+const ROUTE_RELOAD_APP: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+fn echo(conn, message, state) {
+    ws_send(conn, message["data"])
+    return state
+}
+let live = ws_endpoint("live", echo)
+get("/ws", fn(req) { websocket(live) })
+routes("ROUTES_DIR")
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+#[tokio::test]
+async fn editing_a_route_file_in_place_closes_open_sockets() {
+    let routes = tempfile::tempdir().unwrap();
+    let page = routes.path().join("page.tnt");
+    // Import explicitly: a route file reloaded in place does not get the
+    // prelude again.
+    let route = |version: &str| {
+        format!(
+            "import {{ text }} from \"std/http/server\"\nexport fn get(req) {{\n    return text(\"{version}\")\n}}\n"
+        )
+    };
+    std::fs::write(&page, route("route-v1")).unwrap();
+    // Forward slashes keep a Windows path valid inside the string literal.
+    let dir = routes.path().to_string_lossy().replace('\\', "/");
+    let mut server =
+        fixture::Fixture::start(&ROUTE_RELOAD_APP.replace("ROUTES_DIR", &dir), &["run"], &[]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let get_page = || async {
+        http.get(format!("http://{addr}/page"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    };
+    assert_eq!(get_page().await, "route-v1", "{}", server.stderr());
+    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    socket.send(Message::Text("a".into())).await.unwrap();
+    assert_eq!(next_data(&mut socket).await, Message::Text("a".into()));
+
+    // Edit the existing route file in place (its directory does not change).
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    std::fs::write(&page, route("route-v2")).unwrap();
+    assert_eq!(get_page().await, "route-v2", "{}", server.stderr());
+    assert_eq!(
+        close_frame(&mut socket).await,
+        Some((CloseCode::Restart, "server code reloaded".to_string())),
+        "{}",
+        server.stderr()
+    );
 }

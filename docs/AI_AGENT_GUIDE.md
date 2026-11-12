@@ -4335,8 +4335,10 @@ get("/ws", fn(req) {
   i.e. 5 minutes; 1000-86400000, never unlimited) with 1001 "connection lifetime
   reached". Reconnect in the client; the new handshake runs middleware and auth
   again, so an expired session stops getting a socket.
-- **Development reload** closes open sockets with 1012 "server code reloaded" so
-  old state never runs against new callbacks; reconnect to get the new code.
+- **Development reload** (main file, route file, middleware or lib) closes open
+  sockets with 1012 "server code reloaded" so old state never runs against new
+  callbacks: their queued messages and `on_close` are not run on the reloaded
+  code. Reconnect to get the new code.
 - **Handshake auth is not ongoing authorization.** Recheck permissions inside
   `on_message` for sensitive commands; `state["user"]` is only what you stored.
 

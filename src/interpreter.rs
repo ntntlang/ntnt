@@ -1722,6 +1722,16 @@ impl Interpreter {
             return;
         }
         let reply = job.reply;
+        // This state was built by code that has since been reloaded, and the
+        // connection is closing with 1012. The endpoint's callbacks are now the
+        // new code: never run them on it (`on_close` included).
+        if job.generation != crate::stdlib::websocket::code_generation() {
+            reply.send(match job.event {
+                CallbackEvent::Close { .. } => Ok(job.state),
+                _ => Err("not run: server code reloaded".into()),
+            });
+            return;
+        }
         let Some(fns) = self.ws_endpoints.get(&job.endpoint).cloned() else {
             reply.send(Err(format!(
                 "ws_endpoint {:?} is not registered in this worker",
@@ -10846,6 +10856,9 @@ impl Interpreter {
                                 );
                                 handler = new_handler;
                                 println!("[hot-reload] Reloaded: {}", file_path);
+                                // Editing a route file in place does not change
+                                // its directory, so the serve loop did not see it.
+                                crate::stdlib::websocket::code_reloaded();
                             }
                             Err(e) => {
                                 eprintln!("[hot-reload] Error reloading {}: {}", file_path, e);
