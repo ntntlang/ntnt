@@ -4339,8 +4339,9 @@ get("/ws", fn(req) {
   sockets with 1012 "server code reloaded" so old state never runs against new
   callbacks: their queued messages and `on_close` are not run on the reloaded
   code. Reconnect to get the new code. With `NTNT_WORKERS>1` only worker 0
-  reloads: until a restart, the other workers run no WebSocket callbacks, and a
-  socket they accept closes with 1012 at once so the client reconnects.
+  reloads: until the server restarts, the other workers (even one that restarts
+  after a crash) run no WebSocket callbacks, and a socket they accept closes with
+  1012 at once so the client reconnects.
 - **Handshake auth is not ongoing authorization.** Recheck permissions inside
   `on_message` for sensitive commands; `state["user"]` is only what you stored.
 

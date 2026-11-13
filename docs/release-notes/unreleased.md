@@ -55,7 +55,7 @@ through middleware and auth again. A development hot reload (including a route
 file edited in place) closes open sockets with 1012 so old connection state never
 runs against new code: their queued messages and `on_close` are skipped. With
 several development workers, those that have not reloaded run no WebSocket
-callbacks and close sockets they accept with 1012 until restarted. Existing HTTP
+callbacks and close sockets they accept with 1012 until the server restarts. Existing HTTP
 and SSE behavior is unchanged.
 
 ## DD-041: exact loaded-source provenance

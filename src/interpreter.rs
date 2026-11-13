@@ -1049,8 +1049,10 @@ pub struct Interpreter {
     ws_endpoints: HashMap<String, WsEndpointFns>,
     /// Set when this interpreter starts serving; later setup-only calls fail.
     setup_frozen: bool,
-    /// Code generation of the code this interpreter has loaded. Only worker 0
-    /// hot-reloads; another worker keeps its generation until it restarts.
+    /// Code generation of the code this interpreter has loaded: the startup
+    /// generation (0) until it hot-reloads. Only worker 0 reloads. A worker
+    /// that restarts later is checked against the startup source before it
+    /// serves, so it is on generation 0 as well, never on the current one.
     code_generation: u64,
     /// Current file path (for relative imports)
     current_file: Option<String>,
@@ -1358,7 +1360,7 @@ impl Interpreter {
             listen_source: None,
             ws_endpoints: HashMap::new(),
             setup_frozen: false,
-            code_generation: crate::stdlib::websocket::code_generation(),
+            code_generation: 0,
             current_file: None,
             server_state: crate::stdlib::http_server::ServerState::new(),
             test_mode: None,

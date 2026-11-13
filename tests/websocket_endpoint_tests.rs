@@ -651,6 +651,135 @@ async fn stale_development_worker_never_mixes_old_and_new_code() {
     );
 }
 
+const RESTART_APP: &str = r#"
+import { text, status, ws_endpoint, websocket, ws_send } from "std/http/server"
+import { sleep_ms } from "std/concurrent"
+print("LOADED v1")
+let mut primary = true
+fn on_message(conn, message, state) {
+    print("MESSAGE v1 " + state["schema"])
+    ws_send(conn, "v1:" + state["schema"])
+    return state
+}
+let live = ws_endpoint("live", on_message)
+get("/ws", fn(req) { websocket(live, map { "state": map { "schema": "old" } }) })
+get("/version", fn(req) { text("v1") })
+get("/hold", fn(req) {
+    if !primary {
+        return status(409, "not worker 0")
+    }
+    print("HOLD_BEGIN")
+    sleep_ms(6000)
+    return text("held")
+})
+get("/crash", fn(req) {
+    // Worker 0 serves on the main thread: a crash there ends the process.
+    if primary {
+        return status(409, "worker 0")
+    }
+    // Integer overflow panics the Rust worker running this handler.
+    let n = -9223372036854775807 - 1
+    return text(str(n / -1))
+})
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+// listen() serves until shutdown on worker 0 and returns in the others.
+primary = false
+"#;
+
+#[tokio::test]
+async fn worker_restarted_after_reload_takes_no_websocket_work() {
+    // Reload v1 to v2 on worker 0 and keep a v2 socket open. Then, with
+    // worker 0 busy, revert the file to v1 and crash worker 1: its restart
+    // loads v1, which still matches the startup source. It must not run the
+    // v1 callback on the v2 socket's state.
+    let mut server = fixture::Fixture::start(RESTART_APP, &["run"], &[("NTNT_WORKERS", "2")]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let app = server.dir.path().join("fixture.tnt");
+    let started = std::fs::metadata(&app).unwrap().modified().unwrap();
+    let write = |source: &str, ahead: u64| {
+        std::fs::write(&app, source).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&app)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(started + Duration::from_secs(ahead)))
+            .unwrap();
+    };
+    // A hot reload re-runs the file and listen() returns there too, so the
+    // reloaded worker 0 must keep `primary`.
+    write(
+        &RESTART_APP
+            .replace("v1", "v2")
+            .replace("\"old\"", "\"new\"")
+            .replace("\nprimary = false\n", "\n"),
+        2,
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while get_body(addr, "/version").await != "v2" {
+        assert!(std::time::Instant::now() < deadline, "{}", server.stderr());
+    }
+    // A v2 socket on worker 0 (sockets that reach worker 1 close with 1012).
+    let mut fresh = None;
+    for _ in 0..20 {
+        let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
+        let _ = socket.send(Message::Text("x".into())).await;
+        if let Message::Text(reply) = next_data(&mut socket).await {
+            assert_eq!(reply, "v2:new");
+            fresh = Some(socket);
+            break;
+        }
+    }
+    let mut fresh = fresh.expect("no socket reached worker 0");
+    // Hold worker 0 (worker 1 refuses /hold), so later requests reach worker 1.
+    let hold = tokio::spawn(async move {
+        for _ in 0..20 {
+            if get_body(addr, "/hold").await == "held" {
+                return;
+            }
+        }
+        panic!("worker 0 never took /hold");
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !server.stdout().contains("HOLD_BEGIN") {
+        assert!(std::time::Instant::now() < deadline, "{}", server.stderr());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    write(RESTART_APP, 4);
+    let _ = tokio::time::timeout(
+        Duration::from_secs(10),
+        reqwest::get(format!("http://{addr}/crash")),
+    )
+    .await;
+    // Worker 1 restarts after a second and loads v1 again.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while server.stdout().matches("LOADED v1").count() < 3 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{}\n{}",
+            server.stdout(),
+            server.stderr()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Only worker 0 has the code that built this state; it answers once free.
+    fresh.send(Message::Text("y".into())).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(15), next_data(&mut fresh))
+        .await
+        .expect("no reply within 15s");
+    assert_eq!(reply, Message::Text("v2:new".into()), "{}", server.stdout());
+    assert!(
+        !server.stdout().contains("MESSAGE v1 new"),
+        "{}",
+        server.stdout()
+    );
+    tokio::time::timeout(Duration::from_secs(15), hold)
+        .await
+        .expect("hold did not finish")
+        .unwrap();
+}
+
 #[test]
 fn ntnt_test_reports_websocket_as_unsupported() {
     let dir = tempfile::tempdir().unwrap();
