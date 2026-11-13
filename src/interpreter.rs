@@ -5597,6 +5597,16 @@ impl Interpreter {
         Ok(routes)
     }
 
+    /// Globals a route file sees: builtins, types, stdlib modules and the
+    /// prelude. Shared by the first load and a development reload of one file,
+    /// so the two cannot drift apart.
+    fn define_route_globals(&mut self) {
+        self.define_builtins();
+        self.define_builtin_types();
+        self.define_stdlib();
+        self.define_prelude();
+    }
+
     /// Process a single route file and extract HTTP method handlers.
     /// Returns one `DiscoveredRoute` per handler: (method, pattern, handler,
     /// file_path, imported_files, parsed per-route rate).
@@ -5633,11 +5643,7 @@ impl Interpreter {
         self.environment = Environment::shared(Environment::new());
         self.current_file = Some(file_path.to_string_lossy().to_string());
 
-        // Re-define builtins, types, and stdlib modules
-        self.define_builtins();
-        self.define_builtin_types();
-        self.define_stdlib();
-        self.define_prelude();
+        self.define_route_globals();
 
         // Inject lib modules into the environment
         for (name, exports) in lib_modules {
@@ -5734,10 +5740,8 @@ impl Interpreter {
         self.environment = Environment::shared(Environment::new());
         self.current_file = Some(file_path.to_string());
 
-        // Re-define builtins, types, and stdlib modules
-        self.define_builtins();
-        self.define_builtin_types();
-        self.define_stdlib();
+        // The same globals as the first load, prelude included (#357).
+        self.define_route_globals();
 
         // Inject lib modules (same as initial route processing)
         for (name, exports) in &self.lib_modules {
