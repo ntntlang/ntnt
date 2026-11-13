@@ -54,15 +54,15 @@ compatibility, and cannot preempt blocked user/native setup. Readiness uses the
 actual post-bind address. An outer Axum response filter and a bounded tiny_http serialization writer
 remove selected fixture headers without replacing HTTP parsing or framing.
 
-## Native database inspection and planning (#245, first increment)
+## Native database management (#245)
 
 `src/migrations/` owns immutable SQL/metadata capture, versioned results, history
-validation, PostgreSQL catalog fingerprints, applied-prefix drift and target-bound
+validation, PostgreSQL and SQLite catalog fingerprints, applied-prefix drift and target-bound
 plans. Named `[databases.<name>]` definitions separate logical stores from deployment
 targets; selection, migration capture, credentials and scratch stay scoped to one
 store, and plans bind the logical store/target labels plus physical identity.
-`ntnt db status|plan|verify` dispatches to that core without invoking the
-interpreter or the existing source `ntnt migrate` command. Captured manifest
+`ntnt db status|plan|verify|migrate|reconcile` dispatches to that core without
+invoking the interpreter or the existing source `ntnt migrate` command. Captured manifest
 secret declarations reuse the existing native secrets providers without reopening
 source policy or changing interpreter-global secret state.
 
@@ -89,8 +89,11 @@ this same executor: a matching source-prefix baseline becomes one adopted checkp
 not fictional applied history. Recognized owned PostgreSQL v1 history can be imported
 with unchanged source checksums and distinct imported states. Manifest adoption checks
 run under ownership; normal inspect/verify never reruns historical transition checks.
-Nontransactional operations, query lint and application/startup migration integration
-remain later work. See [Database Migrations](docs/DATABASE_MIGRATIONS.md) for each
+The one non-transactional operation is a lone PostgreSQL `CREATE INDEX CONCURRENTLY`:
+a committed `running` ledger row brackets the build, and `ntnt db reconcile` resolves
+an interrupted attempt from observed catalog state without rerunning SQL. Other
+non-transactional DDL, schema-aware query analysis and application/startup migration
+integration remain later work. See [Database Migrations](docs/DATABASE_MIGRATIONS.md) for each
 engine's exact coverage, authority boundary, deadlines and recovery limitations.
 
 ## Source Structure

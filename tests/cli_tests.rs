@@ -2,7 +2,7 @@
 //!
 //! Tests the CLI commands: check, inspect, validate, parse, lex
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Helper to run ntnt command and capture output
 fn run_ntnt(args: &[&str]) -> (String, String, i32) {
@@ -1274,4 +1274,56 @@ fn provider_named_health_starts_oauth_instead_of_health_route() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     // OAuth start redirects to the provider (302); the health route would be 200.
     assert!(stdout.contains("[RESPONSE] 302"), "{stdout}");
+}
+
+/// Run ntnt with a hard deadline. Output goes to files so a full pipe cannot
+/// block the child. On expiry the child is killed and reaped, and the test
+/// fails with what it printed instead of hanging the suite.
+fn run_ntnt_with_deadline(args: &[&str], limit: std::time::Duration) -> (String, String, i32) {
+    let dir = tempfile::tempdir().unwrap();
+    let stdout_path = dir.path().join("stdout");
+    let stderr_path = dir.path().join("stderr");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args(args)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(std::fs::File::create(&stdout_path).unwrap()))
+        .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()))
+        .spawn()
+        .expect("Failed to execute ntnt");
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            // Already exited between try_wait and kill is fine: wait reaps either way.
+            let _ = child.kill();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stdout = std::fs::read_to_string(&stdout_path).unwrap();
+    let stderr = std::fs::read_to_string(&stderr_path).unwrap();
+    let Some(status) = status else {
+        panic!("ntnt {args:?} did not exit within {limit:?}\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    };
+    (stdout, stderr, status.code().unwrap_or(-1))
+}
+
+/// #245: an empty test selection is never success. `ntnt test` with no
+/// requests must fail rather than report a zero-request pass.
+#[test]
+fn ntnt_test_without_requests_is_not_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = dir.path().join("server.tnt");
+    std::fs::write(&server, "get(\"/\", fn(req) { return text(\"ok\") })\n").unwrap();
+    let (stdout, stderr, code) = run_ntnt_with_deadline(
+        &["test", server.to_str().unwrap()],
+        std::time::Duration::from_secs(60),
+    );
+    assert_ne!(code, 0, "zero requests must not pass: {stdout}");
+    assert!(stderr.contains("No requests specified"), "{stderr}");
+    assert!(!stdout.contains("passed"), "{stdout}");
 }

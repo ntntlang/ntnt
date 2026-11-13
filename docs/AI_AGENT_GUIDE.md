@@ -1710,6 +1710,12 @@ ntnt db plan --target development --json --out review.json
 ntnt db verify --target development --against review.json --json
 ```
 
+**New project?** Follow [Database Migrations → Quick start](DATABASE_MIGRATIONS.md#quick-start).
+It gives a minimal `ntnt.toml`, `migrations/0001_initial.sql`, local target/scratch
+provisioning, and the `status` → `plan` → approve the `plan_digest` → `migrate` →
+`verify` loop for SQLite and PostgreSQL. PostgreSQL connection secrets currently
+require `sslmode=disable` on a trusted local transport; TLS is tracked in #344.
+
 Configure logical stores under `[databases.<name>]`, each with its own migration
 directory, named targets, and disposable scratch database using declared
 `std/secrets` references. Select `--database app --target development`; omit
