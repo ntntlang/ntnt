@@ -1492,7 +1492,9 @@ pub fn init() -> HashMap<String, Value> {
     // reconnects through the normal HTTP pipeline; never unlimited). In
     // development, a successful hot reload (main file, route file, middleware
     // or lib) closes open connections with 1012; callbacks still queued for them
-    // and their `on_close` are not run on the reloaded code. Without `origins`, the origin of `SITE_URL` is
+    // and their `on_close` are not run on the reloaded code. With several
+    // development workers only worker 0 reloads: until restarted, the others run
+    // no callbacks and close the sockets they accept with 1012. Without `origins`, the origin of `SITE_URL` is
     // allowed; in development, localhost origins are allowed; in production
     // with neither, registration fails. Request Host headers are never trusted.
     // @param name Stable endpoint name (letters, digits, `_`, `-`, `.`)

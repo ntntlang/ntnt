@@ -55,8 +55,14 @@ lazy_static::lazy_static! {
 }
 
 /// Close every open WebSocket because the application code was reloaded.
-pub(crate) fn code_reloaded() {
-    CODE_GENERATION.send_modify(|generation| *generation += 1);
+/// Returns the new generation, which the reloading interpreter now runs.
+pub(crate) fn code_reloaded() -> u64 {
+    let mut reloaded = 0;
+    CODE_GENERATION.send_modify(|generation| {
+        *generation += 1;
+        reloaded = *generation;
+    });
+    reloaded
 }
 
 /// The current code generation. A connection keeps the generation its
@@ -450,6 +456,12 @@ impl WsSpec {
         self
     }
 
+    /// Record the code generation of the interpreter whose handler built
+    /// `state`.
+    pub(crate) fn set_generation(&mut self, generation: u64) {
+        self.generation = generation;
+    }
+
     /// Forward a broadcast to the connection (internal tests).
     #[doc(hidden)]
     pub fn with_source(mut self, bus: Arc<crate::stdlib::realtime::Bus>) -> Self {
@@ -550,6 +562,16 @@ impl CallbackJob {
     /// Skip work for a connection that has already ended.
     pub fn is_stale(&self) -> bool {
         self.reply.is_closed()
+    }
+
+    /// Put the job back on the queue for a worker that may run it. The queue
+    /// has room (admission bounds the jobs in existence); if it has closed
+    /// because the server is stopping, the job is dropped and its connection
+    /// reports the callback as not run.
+    pub(crate) fn requeue(self) {
+        if let Some(tx) = callbacks() {
+            let _ = tx.try_send(self);
+        }
     }
 }
 

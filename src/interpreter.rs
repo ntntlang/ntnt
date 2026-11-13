@@ -1049,6 +1049,9 @@ pub struct Interpreter {
     ws_endpoints: HashMap<String, WsEndpointFns>,
     /// Set when this interpreter starts serving; later setup-only calls fail.
     setup_frozen: bool,
+    /// Code generation of the code this interpreter has loaded. Only worker 0
+    /// hot-reloads; another worker keeps its generation until it restarts.
+    code_generation: u64,
     /// Current file path (for relative imports)
     current_file: Option<String>,
     /// HTTP server state for routing
@@ -1355,6 +1358,7 @@ impl Interpreter {
             listen_source: None,
             ws_endpoints: HashMap::new(),
             setup_frozen: false,
+            code_generation: crate::stdlib::websocket::code_generation(),
             current_file: None,
             server_state: crate::stdlib::http_server::ServerState::new(),
             test_mode: None,
@@ -1719,6 +1723,16 @@ impl Interpreter {
             decode_state, encode_state, CallbackEvent, WsData, WsValue,
         };
         if job.is_stale() {
+            return;
+        }
+        // A worker still on code from before the last reload (only worker 0
+        // hot-reloads) must not run a current connection's callbacks: put the
+        // job back for a worker that has the code. This worker then stops
+        // taking callbacks (see `run_worker`).
+        if job.generation == crate::stdlib::websocket::code_generation()
+            && job.generation != self.code_generation
+        {
+            job.requeue();
             return;
         }
         let reply = job.reply;
@@ -10704,7 +10718,7 @@ impl Interpreter {
                     // Open WebSockets must not keep running callbacks against
                     // code that has changed underneath them.
                     if reloaded || lib_modules_changed {
-                        crate::stdlib::websocket::code_reloaded();
+                        self.code_generation = crate::stdlib::websocket::code_reloaded();
                     }
 
                     // Process the request and send response
@@ -10783,8 +10797,24 @@ impl Interpreter {
         message
     }
 
-    /// Process a single HTTP request: find route, run middleware, call handler, apply CORS
+    /// Process a single HTTP request (see [`Self::serve_request`]). A WebSocket
+    /// it accepts records this interpreter's code generation, so a worker that
+    /// missed a development reload hands out state that its connection owner
+    /// closes with 1012 before any callback runs.
     fn process_request(
+        &mut self,
+        request: crate::stdlib::http_bridge::BridgeRequest,
+        lib_modules_changed: bool,
+    ) -> crate::stdlib::http_bridge::BridgeResponse {
+        let mut response = self.serve_request(request, lib_modules_changed);
+        if let Some(ws) = response.ws.as_mut() {
+            ws.set_generation(self.code_generation);
+        }
+        response
+    }
+
+    /// Process a single HTTP request: find route, run middleware, call handler, apply CORS
+    fn serve_request(
         &mut self,
         request: crate::stdlib::http_bridge::BridgeRequest,
         lib_modules_changed: bool,
@@ -10858,7 +10888,7 @@ impl Interpreter {
                                 println!("[hot-reload] Reloaded: {}", file_path);
                                 // Editing a route file in place does not change
                                 // its directory, so the serve loop did not see it.
-                                crate::stdlib::websocket::code_reloaded();
+                                self.code_generation = crate::stdlib::websocket::code_reloaded();
                             }
                             Err(e) => {
                                 eprintln!("[hot-reload] Error reloading {}: {}", file_path, e);
@@ -11176,7 +11206,15 @@ impl Interpreter {
         interpreter.setup_frozen = true;
         let mut http_in_row = 0;
         loop {
-            match next_serve_work(&rx, callbacks.as_ref(), &mut http_in_row) {
+            // After worker 0 reloads the code, this worker still runs the old
+            // code: it serves HTTP but takes no WebSocket callbacks until restart.
+            let current =
+                interpreter.code_generation == crate::stdlib::websocket::code_generation();
+            match next_serve_work(
+                &rx,
+                callbacks.as_ref().filter(|_| current),
+                &mut http_in_row,
+            ) {
                 ServeWork::Http(handler_request) => {
                     let HandlerRequest { request, reply_tx } = *handler_request;
                     let bridge_response = interpreter.process_request(request, false);

@@ -302,6 +302,355 @@ async fn sigterm_closes_open_sockets_with_going_away() {
     assert!(status.success(), "server did not exit cleanly: {status:?}");
 }
 
+/// GET `path` with a deadline on the whole request and body.
+async fn get_body(addr: SocketAddr, path: &'static str) -> String {
+    tokio::time::timeout(Duration::from_secs(10), async move {
+        reqwest::get(format!("http://{addr}{path}"))
+            .await?
+            .text()
+            .await
+    })
+    .await
+    .expect("no response within 10s")
+    .expect("request failed")
+}
+
+const LIFETIME_APP: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+fn echo(conn, message, state) {
+    ws_send(conn, message["data"])
+    return state
+}
+fn closed(state, info) {
+    print("CLOSED " + str(info["code"]) + " " + info["reason"])
+}
+let short = ws_endpoint("short", echo, map { "max_lifetime_ms": 1200, "on_close": closed })
+get("/ws", fn(req) { websocket(short) })
+get("/health", fn(req) { text("ok") })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+#[tokio::test]
+async fn connection_closes_at_its_lifetime_limit() {
+    let mut server = fixture::Fixture::start(LIFETIME_APP, &["run"], &[("NTNT_WORKERS", "2")]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    socket.send(Message::Text("hi".into())).await.unwrap();
+    assert_eq!(next_data(&mut socket).await, Message::Text("hi".into()));
+    let started = std::time::Instant::now();
+    assert_eq!(
+        close_frame(&mut socket).await,
+        Some((CloseCode::Away, "connection lifetime reached".to_string()))
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(3000),
+        "closed after {elapsed:?}"
+    );
+    // on_close sees why, and a reconnect goes through the HTTP pipeline again.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !server
+        .stdout()
+        .contains("CLOSED 1001 connection lifetime reached")
+    {
+        assert!(std::time::Instant::now() < deadline, "{}", server.stdout());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut again = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    again.send(Message::Text("back".into())).await.unwrap();
+    assert_eq!(next_data(&mut again).await, Message::Text("back".into()));
+}
+
+#[test]
+fn lifetime_must_be_finite_and_in_range() {
+    let mut app = fixture::Fixture::start(
+        r#"
+import { text, ws_endpoint } from "std/http/server"
+let forever = ws_endpoint("forever", fn(conn, message, state) { state }, map { "max_lifetime_ms": 0 })
+get("/", fn(req) { text("ok") })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#,
+        &["run"],
+        &[],
+    );
+    // wait() has a deadline: if validation accepted 0, the server would keep
+    // serving, and the test fails (and the fixture kills it) instead of hanging.
+    let status = app.wait();
+    let stderr = app.stderr();
+    assert!(!status.success(), "{stderr}");
+    assert!(
+        stderr.contains("connections are never unlimited"),
+        "{stderr}"
+    );
+}
+
+const RELOAD_APP_V1: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+fn echo(conn, message, state) {
+    ws_send(conn, "v1:" + message["data"])
+    return state
+}
+let live = ws_endpoint("live", echo)
+get("/ws", fn(req) { websocket(live) })
+get("/health", fn(req) { text("ok") })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+#[tokio::test]
+async fn development_reload_closes_open_sockets_and_new_ones_use_new_code() {
+    // Development mode, one worker: hot reload applies on the next request.
+    let mut server = fixture::Fixture::start(RELOAD_APP_V1, &["run"], &[]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    socket.send(Message::Text("a".into())).await.unwrap();
+    assert_eq!(next_data(&mut socket).await, Message::Text("v1:a".into()));
+
+    // Make the change visible to mtime checks on coarse-grained filesystems.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    std::fs::write(
+        server.dir.path().join("fixture.tnt"),
+        RELOAD_APP_V1.replace("\"v1:\"", "\"v2:\""),
+    )
+    .unwrap();
+    assert_eq!(get_body(addr, "/health").await, "ok");
+
+    assert_eq!(
+        close_frame(&mut socket).await,
+        Some((CloseCode::Restart, "server code reloaded".to_string())),
+        "{}",
+        server.stderr()
+    );
+    let mut fresh = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    fresh.send(Message::Text("b".into())).await.unwrap();
+    assert_eq!(next_data(&mut fresh).await, Message::Text("v2:b".into()));
+}
+
+const STATE_RELOAD_APP: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+import { sleep_ms } from "std/concurrent"
+fn on_message(conn, message, state) {
+    if message["data"] == "slow" {
+        sleep_ms(1500)
+    }
+    print("MESSAGE v1 " + state["schema"] + " " + message["data"])
+    ws_send(conn, "v1:" + message["data"])
+    return state
+}
+fn on_close(state, info) {
+    print("CLOSE v1 " + state["schema"] + " " + str(info["code"]))
+}
+let live = ws_endpoint("live", on_message, map { "on_close": on_close })
+get("/ws", fn(req) { websocket(live, map { "state": map { "schema": "old" } }) })
+get("/health", fn(req) { text("ok") })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+#[tokio::test]
+async fn development_reload_never_runs_new_callbacks_on_old_state() {
+    // Development mode, one worker: the reload applies on the next request.
+    let mut server = fixture::Fixture::start(STATE_RELOAD_APP, &["run"], &[]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let mut old = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    old.send(Message::Text("a".into())).await.unwrap();
+    assert_eq!(next_data(&mut old).await, Message::Text("v1:a".into()));
+
+    // Make the change visible to mtime checks on coarse-grained filesystems.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    // Hold the only worker in a slow callback and queue a message behind it.
+    // Then change the callbacks and the state shape, and send the request
+    // that reloads them: the worker takes that request first, so the queued
+    // message and the old socket's on_close would meet the new code.
+    old.send(Message::Text("slow".into())).await.unwrap();
+    old.send(Message::Text("queued".into())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::fs::write(
+        server.dir.path().join("fixture.tnt"),
+        STATE_RELOAD_APP
+            .replace("v1", "v2")
+            .replace("\"old\"", "\"new\""),
+    )
+    .unwrap();
+    let health = tokio::spawn(get_body(addr, "/health"));
+    assert_eq!(
+        close_frame(&mut old).await,
+        Some((CloseCode::Restart, "server code reloaded".to_string())),
+        "{}",
+        server.stderr()
+    );
+    assert_eq!(health.await.unwrap(), "ok");
+
+    // A new connection gets the new code and state, on_close included.
+    let mut fresh = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    fresh.send(Message::Text("b".into())).await.unwrap();
+    assert_eq!(next_data(&mut fresh).await, Message::Text("v2:b".into()));
+    fresh.close(None).await.unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !server.stdout().contains("CLOSE v2 new 1000") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{}\n{}",
+            server.stdout(),
+            server.stderr()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The old connection's queued message and on_close were never run on the
+    // new code; the old on_close cannot run either, its code is gone.
+    let stdout = server.stdout();
+    assert!(!stdout.contains("v2 old"), "{stdout}");
+    assert!(!stdout.contains("CLOSE v1"), "{stdout}");
+    assert!(
+        server
+            .stderr()
+            .contains("on_close skipped: server code reloaded"),
+        "{}",
+        server.stderr()
+    );
+}
+
+const ROUTE_RELOAD_APP: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+fn echo(conn, message, state) {
+    ws_send(conn, message["data"])
+    return state
+}
+let live = ws_endpoint("live", echo)
+get("/ws", fn(req) { websocket(live) })
+routes("ROUTES_DIR")
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+#[tokio::test]
+async fn editing_a_route_file_in_place_closes_open_sockets() {
+    let routes = tempfile::tempdir().unwrap();
+    let page = routes.path().join("page.tnt");
+    // The explicit import keeps this test independent of how a reloaded route
+    // gets the prelude (#357, fixed in #358).
+    let route = |version: &str| {
+        format!(
+            "import {{ text }} from \"std/http/server\"\nexport fn get(req) {{\n    return text(\"{version}\")\n}}\n"
+        )
+    };
+    std::fs::write(&page, route("route-v1")).unwrap();
+    // Forward slashes keep a Windows path valid inside the string literal.
+    let dir = routes.path().to_string_lossy().replace('\\', "/");
+    let mut server =
+        fixture::Fixture::start(&ROUTE_RELOAD_APP.replace("ROUTES_DIR", &dir), &["run"], &[]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let get_page = || async {
+        http.get(format!("http://{addr}/page"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    };
+    assert_eq!(get_page().await, "route-v1", "{}", server.stderr());
+    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
+    socket.send(Message::Text("a".into())).await.unwrap();
+    assert_eq!(next_data(&mut socket).await, Message::Text("a".into()));
+
+    // Edit the existing route file in place (its directory does not change).
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    std::fs::write(&page, route("route-v2")).unwrap();
+    assert_eq!(get_page().await, "route-v2", "{}", server.stderr());
+    assert_eq!(
+        close_frame(&mut socket).await,
+        Some((CloseCode::Restart, "server code reloaded".to_string())),
+        "{}",
+        server.stderr()
+    );
+}
+
+const STALE_WORKER_APP: &str = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+fn on_message(conn, message, state) {
+    print("MESSAGE v1 " + state["schema"])
+    ws_send(conn, "v1:" + state["schema"])
+    return state
+}
+let live = ws_endpoint("live", on_message)
+get("/ws", fn(req) { websocket(live, map { "state": map { "schema": "old" } }) })
+get("/version", fn(req) { text("v1") })
+listen(0, map { "readiness": "json", "host": "127.0.0.1" })
+"#;
+
+#[tokio::test]
+async fn stale_development_worker_never_mixes_old_and_new_code() {
+    // Two development workers: only worker 0 reloads, so worker 1 keeps the
+    // old code until it restarts. Old state must never reach the new
+    // callbacks, and new state must never reach the old ones.
+    let mut server = fixture::Fixture::start(STALE_WORKER_APP, &["run"], &[("NTNT_WORKERS", "2")]);
+    let addr = server.ready();
+    let origin = origin(addr);
+    let app = server.dir.path().join("fixture.tnt");
+    let previous = std::fs::metadata(&app).unwrap().modified().unwrap();
+    std::fs::write(
+        &app,
+        STALE_WORKER_APP
+            .replace("v1", "v2")
+            .replace("\"old\"", "\"new\""),
+    )
+    .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&app)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(previous + Duration::from_secs(2)))
+        .unwrap();
+    // Requests alternate between the workers; worker 0 reloads on its next one.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while get_body(addr, "/version").await != "v2" {
+        assert!(std::time::Instant::now() < deadline, "{}", server.stderr());
+    }
+    let mut replies = Vec::new();
+    for _ in 0..20 {
+        let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
+        let _ = socket.send(Message::Text("x".into())).await;
+        let frame = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                    other => return other,
+                }
+            }
+        })
+        .await
+        .expect("no frame within 10s");
+        match frame {
+            Some(Ok(Message::Text(reply))) => replies.push(reply),
+            // A socket that reached worker 1 closes before any callback runs.
+            Some(Ok(Message::Close(Some(close)))) => {
+                assert_eq!(close.code, CloseCode::Restart, "{}", close.reason)
+            }
+            other => panic!("unexpected {other:?}: {}", server.stderr()),
+        }
+        if replies.len() >= 4 {
+            break;
+        }
+    }
+    assert!(!replies.is_empty(), "no socket reached the reloaded worker");
+    assert!(
+        replies.iter().all(|reply| reply == "v2:new"),
+        "{replies:?}\n{}",
+        server.stdout()
+    );
+    let stdout = server.stdout();
+    assert!(
+        !stdout.contains("MESSAGE v2 old") && !stdout.contains("MESSAGE v1 new"),
+        "{stdout}"
+    );
+}
+
 #[test]
 fn ntnt_test_reports_websocket_as_unsupported() {
     let dir = tempfile::tempdir().unwrap();
@@ -683,265 +1032,4 @@ async fn socket_that_falls_behind_the_broadcast_is_closed_with_1013() {
         );
     }
     reader.abort();
-}
-
-const LIFETIME_APP: &str = r#"
-import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
-fn echo(conn, message, state) {
-    ws_send(conn, message["data"])
-    return state
-}
-fn closed(state, info) {
-    print("CLOSED " + str(info["code"]) + " " + info["reason"])
-}
-let short = ws_endpoint("short", echo, map { "max_lifetime_ms": 1200, "on_close": closed })
-get("/ws", fn(req) { websocket(short) })
-get("/health", fn(req) { text("ok") })
-listen(0, map { "readiness": "json", "host": "127.0.0.1" })
-"#;
-
-#[tokio::test]
-async fn connection_closes_at_its_lifetime_limit() {
-    let mut server = fixture::Fixture::start(LIFETIME_APP, &["run"], &[("NTNT_WORKERS", "2")]);
-    let addr = server.ready();
-    let origin = origin(addr);
-    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
-    socket.send(Message::Text("hi".into())).await.unwrap();
-    assert_eq!(next_data(&mut socket).await, Message::Text("hi".into()));
-    let started = std::time::Instant::now();
-    assert_eq!(
-        close_frame(&mut socket).await,
-        Some((CloseCode::Away, "connection lifetime reached".to_string()))
-    );
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(3000),
-        "closed after {elapsed:?}"
-    );
-    // on_close sees why, and a reconnect goes through the HTTP pipeline again.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !server
-        .stdout()
-        .contains("CLOSED 1001 connection lifetime reached")
-    {
-        assert!(std::time::Instant::now() < deadline, "{}", server.stdout());
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut again = connect(addr, "/ws", Some(&origin)).await.unwrap();
-    again.send(Message::Text("back".into())).await.unwrap();
-    assert_eq!(next_data(&mut again).await, Message::Text("back".into()));
-}
-
-#[test]
-fn lifetime_must_be_finite_and_in_range() {
-    let mut app = fixture::Fixture::start(
-        r#"
-import { text, ws_endpoint } from "std/http/server"
-let forever = ws_endpoint("forever", fn(conn, message, state) { state }, map { "max_lifetime_ms": 0 })
-get("/", fn(req) { text("ok") })
-listen(0, map { "readiness": "json", "host": "127.0.0.1" })
-"#,
-        &["run"],
-        &[],
-    );
-    // wait() has a deadline: if validation accepted 0, the server would keep
-    // serving, and the test fails (and the fixture kills it) instead of hanging.
-    let status = app.wait();
-    let stderr = app.stderr();
-    assert!(!status.success(), "{stderr}");
-    assert!(
-        stderr.contains("connections are never unlimited"),
-        "{stderr}"
-    );
-}
-
-const RELOAD_APP_V1: &str = r#"
-import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
-fn echo(conn, message, state) {
-    ws_send(conn, "v1:" + message["data"])
-    return state
-}
-let live = ws_endpoint("live", echo)
-get("/ws", fn(req) { websocket(live) })
-get("/health", fn(req) { text("ok") })
-listen(0, map { "readiness": "json", "host": "127.0.0.1" })
-"#;
-
-#[tokio::test]
-async fn development_reload_closes_open_sockets_and_new_ones_use_new_code() {
-    // Development mode, one worker: hot reload applies on the next request.
-    let mut server = fixture::Fixture::start(RELOAD_APP_V1, &["run"], &[]);
-    let addr = server.ready();
-    let origin = origin(addr);
-    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
-    socket.send(Message::Text("a".into())).await.unwrap();
-    assert_eq!(next_data(&mut socket).await, Message::Text("v1:a".into()));
-
-    // Make the change visible to mtime checks on coarse-grained filesystems.
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    std::fs::write(
-        server.dir.path().join("fixture.tnt"),
-        RELOAD_APP_V1.replace("\"v1:\"", "\"v2:\""),
-    )
-    .unwrap();
-    let health = reqwest::get(format!("http://{addr}/health")).await.unwrap();
-    assert_eq!(health.text().await.unwrap(), "ok");
-
-    assert_eq!(
-        close_frame(&mut socket).await,
-        Some((CloseCode::Restart, "server code reloaded".to_string())),
-        "{}",
-        server.stderr()
-    );
-    let mut fresh = connect(addr, "/ws", Some(&origin)).await.unwrap();
-    fresh.send(Message::Text("b".into())).await.unwrap();
-    assert_eq!(next_data(&mut fresh).await, Message::Text("v2:b".into()));
-}
-
-const STATE_RELOAD_APP: &str = r#"
-import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
-import { sleep_ms } from "std/concurrent"
-fn on_message(conn, message, state) {
-    if message["data"] == "slow" {
-        sleep_ms(1500)
-    }
-    print("MESSAGE v1 " + state["schema"] + " " + message["data"])
-    ws_send(conn, "v1:" + message["data"])
-    return state
-}
-fn on_close(state, info) {
-    print("CLOSE v1 " + state["schema"] + " " + str(info["code"]))
-}
-let live = ws_endpoint("live", on_message, map { "on_close": on_close })
-get("/ws", fn(req) { websocket(live, map { "state": map { "schema": "old" } }) })
-get("/health", fn(req) { text("ok") })
-listen(0, map { "readiness": "json", "host": "127.0.0.1" })
-"#;
-
-#[tokio::test]
-async fn development_reload_never_runs_new_callbacks_on_old_state() {
-    // Development mode, one worker: the reload applies on the next request.
-    let mut server = fixture::Fixture::start(STATE_RELOAD_APP, &["run"], &[]);
-    let addr = server.ready();
-    let origin = origin(addr);
-    let mut old = connect(addr, "/ws", Some(&origin)).await.unwrap();
-    old.send(Message::Text("a".into())).await.unwrap();
-    assert_eq!(next_data(&mut old).await, Message::Text("v1:a".into()));
-
-    // Make the change visible to mtime checks on coarse-grained filesystems.
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    // Hold the only worker in a slow callback and queue a message behind it.
-    // Then change the callbacks and the state shape, and send the request
-    // that reloads them: the worker takes that request first, so the queued
-    // message and the old socket's on_close would meet the new code.
-    old.send(Message::Text("slow".into())).await.unwrap();
-    old.send(Message::Text("queued".into())).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    std::fs::write(
-        server.dir.path().join("fixture.tnt"),
-        STATE_RELOAD_APP
-            .replace("v1", "v2")
-            .replace("\"old\"", "\"new\""),
-    )
-    .unwrap();
-    let health = tokio::spawn(tokio::time::timeout(
-        Duration::from_secs(10),
-        reqwest::get(format!("http://{addr}/health")),
-    ));
-    assert_eq!(
-        close_frame(&mut old).await,
-        Some((CloseCode::Restart, "server code reloaded".to_string())),
-        "{}",
-        server.stderr()
-    );
-    let health = health.await.unwrap().expect("reload request timed out");
-    assert_eq!(health.unwrap().text().await.unwrap(), "ok");
-
-    // A new connection gets the new code and state, on_close included.
-    let mut fresh = connect(addr, "/ws", Some(&origin)).await.unwrap();
-    fresh.send(Message::Text("b".into())).await.unwrap();
-    assert_eq!(next_data(&mut fresh).await, Message::Text("v2:b".into()));
-    fresh.close(None).await.unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !server.stdout().contains("CLOSE v2 new 1000") {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{}\n{}",
-            server.stdout(),
-            server.stderr()
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    // The old connection's queued message and on_close were never run on the
-    // new code; the old on_close cannot run either, its code is gone.
-    let stdout = server.stdout();
-    assert!(!stdout.contains("v2 old"), "{stdout}");
-    assert!(!stdout.contains("CLOSE v1"), "{stdout}");
-    assert!(
-        server
-            .stderr()
-            .contains("on_close skipped: server code reloaded"),
-        "{}",
-        server.stderr()
-    );
-}
-
-const ROUTE_RELOAD_APP: &str = r#"
-import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
-fn echo(conn, message, state) {
-    ws_send(conn, message["data"])
-    return state
-}
-let live = ws_endpoint("live", echo)
-get("/ws", fn(req) { websocket(live) })
-routes("ROUTES_DIR")
-listen(0, map { "readiness": "json", "host": "127.0.0.1" })
-"#;
-
-#[tokio::test]
-async fn editing_a_route_file_in_place_closes_open_sockets() {
-    let routes = tempfile::tempdir().unwrap();
-    let page = routes.path().join("page.tnt");
-    // Import explicitly: a route file reloaded in place does not get the
-    // prelude again.
-    let route = |version: &str| {
-        format!(
-            "import {{ text }} from \"std/http/server\"\nexport fn get(req) {{\n    return text(\"{version}\")\n}}\n"
-        )
-    };
-    std::fs::write(&page, route("route-v1")).unwrap();
-    // Forward slashes keep a Windows path valid inside the string literal.
-    let dir = routes.path().to_string_lossy().replace('\\', "/");
-    let mut server =
-        fixture::Fixture::start(&ROUTE_RELOAD_APP.replace("ROUTES_DIR", &dir), &["run"], &[]);
-    let addr = server.ready();
-    let origin = origin(addr);
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .unwrap();
-    let get_page = || async {
-        http.get(format!("http://{addr}/page"))
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap()
-    };
-    assert_eq!(get_page().await, "route-v1", "{}", server.stderr());
-    let mut socket = connect(addr, "/ws", Some(&origin)).await.unwrap();
-    socket.send(Message::Text("a".into())).await.unwrap();
-    assert_eq!(next_data(&mut socket).await, Message::Text("a".into()));
-
-    // Edit the existing route file in place (its directory does not change).
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    std::fs::write(&page, route("route-v2")).unwrap();
-    assert_eq!(get_page().await, "route-v2", "{}", server.stderr());
-    assert_eq!(
-        close_frame(&mut socket).await,
-        Some((CloseCode::Restart, "server code reloaded".to_string())),
-        "{}",
-        server.stderr()
-    );
 }
