@@ -252,6 +252,39 @@ fn readiness_once_across_hot_reload_and_port_override() {
     assert!(!failed.stdout().contains("NTNT_READY"));
 }
 #[test]
+fn route_file_edited_in_place_keeps_the_prelude() {
+    // #357: reloading a route file in place dropped prelude names such as text().
+    let routes = tempfile::tempdir().unwrap();
+    let page = routes.path().join("page.tnt");
+    let route = |body: &str| format!("export fn get(req) {{\n    return text(\"{body}\")\n}}\n");
+    std::fs::write(&page, route("route-v1")).unwrap();
+    // Forward slashes keep a Windows path valid inside the string literal.
+    let dir = routes.path().to_string_lossy().replace('\\', "/");
+    let source = format!(
+        "routes(\"{dir}\")\nlisten(0, map {{ \"fixture\": true, \"readiness\": \"json\" }})"
+    );
+    let mut server = fixture::Fixture::start(&source, &["run"], &[("NTNT_WORKERS", "1")]);
+    let addr = server.ready();
+    let first = String::from_utf8_lossy(&request(addr, "/page", "GET")).into_owned();
+    assert!(first.contains("route-v1"), "{first}\n{}", server.stderr());
+    // Edit in place and move the modification time forward, rather than
+    // sleeping past coarse filesystem timestamps.
+    let previous = std::fs::metadata(&page).unwrap().modified().unwrap();
+    std::fs::write(&page, route("route-v2")).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&page)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(previous + Duration::from_secs(2)))
+        .unwrap();
+    let reloaded = String::from_utf8_lossy(&request(addr, "/page", "GET")).into_owned();
+    assert!(
+        reloaded.starts_with("HTTP/1.1 200") && reloaded.contains("route-v2"),
+        "{reloaded}\n{}",
+        server.stderr()
+    );
+}
+#[test]
 fn sync_test_port_precedes_environment_override() {
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = reservation.local_addr().unwrap().port();
