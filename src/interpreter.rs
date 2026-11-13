@@ -806,9 +806,10 @@ fn recv_either<A, B>(left: &flume::Receiver<A>, right: &flume::Receiver<B>) -> E
 /// for has already been taken by another worker, it parks again without
 /// registering anew, and any other signal it received is stranded. A request
 /// then waits for some later, unrelated message, and that worker never wakes
-/// again. flume's async receivers register again after such a miss. They do it
-/// in a separate step, though, and a message sent in between wakes nobody, so
-/// both channels are checked once more before waiting.
+/// again. Here every wakeup registers a fresh pair of flume async receives,
+/// each of which checks its queue and registers in one step, and drops the
+/// previous pair. Polling a woken receive again would instead register it once
+/// more on every wakeup.
 fn either_next<'a, A: 'a, B: 'a>(
     left: &'a flume::Receiver<A>,
     right: &'a flume::Receiver<B>,
@@ -816,18 +817,20 @@ fn either_next<'a, A: 'a, B: 'a>(
     use std::future::Future;
     use std::pin::Pin;
     use std::task::Poll;
-    let mut left_next = left.recv_async();
-    let mut right_next = right.recv_async();
-    std::future::poll_fn(move |cx| loop {
+    let mut registered = None;
+    std::future::poll_fn(move |cx| {
+        let mut left_next = left.recv_async();
         if let Poll::Ready(message) = Pin::new(&mut left_next).poll(cx) {
             return Poll::Ready(Either::Left(message));
         }
+        let mut right_next = right.recv_async();
         if let Poll::Ready(message) = Pin::new(&mut right_next).poll(cx) {
             return Poll::Ready(Either::Right(message));
         }
-        if left.is_empty() && right.is_empty() {
-            return Poll::Pending;
-        }
+        // Stay registered while parked. Dropping the previous pair removes its
+        // registrations, and one that was woken passes its wakeup on.
+        drop(registered.replace((left_next, right_next)));
+        Poll::Pending
     })
 }
 
@@ -933,11 +936,12 @@ fn next_serve_work(
 
 #[cfg(test)]
 mod serve_wait_tests {
-    use super::{either_next, next_serve_work, Either, ServeWork};
+    use super::{either_next, next_serve_work, ServeWork};
     use std::collections::HashMap;
     use std::future::Future;
-    use std::sync::{Arc, Mutex};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
     use std::time::Duration;
 
     fn request() -> crate::stdlib::http_bridge::HandlerRequest {
@@ -997,33 +1001,41 @@ mod serve_wait_tests {
     }
 
     #[test]
-    fn wait_sees_a_message_sent_while_a_woken_receiver_registers_again() {
-        // flume calls a changed waker inside the gap between a woken
-        // receiver's failed try and its new registration; send exactly then.
-        struct SendOnWake(Mutex<Option<flume::Sender<u32>>>);
-        impl Wake for SendOnWake {
+    fn repeated_lost_races_keep_one_registration_per_channel() {
+        // A worker loses an HTTP race and then many slot races. It must stay
+        // registered once per channel; re-polling a woken flume receive adds
+        // another registration every time. Dropping a channel's last sender
+        // wakes each registration once, so count those wakeups.
+        struct CountWakes(AtomicUsize);
+        impl Wake for CountWakes {
             fn wake(self: Arc<Self>) {
                 self.wake_by_ref();
             }
             fn wake_by_ref(self: &Arc<Self>) {
-                if let Some(tx) = self.0.lock().unwrap().take() {
-                    tx.send(2).unwrap();
-                }
+                self.0.fetch_add(1, Ordering::SeqCst);
             }
         }
-        let (tx, rx) = flume::unbounded::<u32>();
-        let (_other_tx, other_rx) = flume::unbounded::<()>();
-        let mut next = std::pin::pin!(either_next(&rx, &other_rx));
-        let mut quiet = Context::from_waker(Waker::noop());
-        assert!(next.as_mut().poll(&mut quiet).is_pending());
-        // A message wakes the receiver, and another worker takes it.
-        tx.send(1).unwrap();
-        assert_eq!(rx.try_recv(), Ok(1));
-        let sends = Waker::from(Arc::new(SendOnWake(Mutex::new(Some(tx.clone())))));
-        match next.as_mut().poll(&mut Context::from_waker(&sends)) {
-            Poll::Ready(Either::Left(Ok(2))) => {}
-            other => panic!("missed the message sent while registering again: {other:?}"),
+        let (http_tx, http_rx) = flume::unbounded::<u32>();
+        let (slot_tx, slot_rx) = flume::unbounded::<()>();
+        let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let waker = Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut next = std::pin::pin!(either_next(&http_rx, &slot_rx));
+        assert!(next.as_mut().poll(&mut cx).is_pending());
+        http_tx.send(1).unwrap();
+        assert_eq!(http_rx.try_recv(), Ok(1));
+        assert!(next.as_mut().poll(&mut cx).is_pending());
+        for _ in 0..1000 {
+            slot_tx.send(()).unwrap();
+            assert_eq!(slot_rx.try_recv(), Ok(()));
+            assert!(next.as_mut().poll(&mut cx).is_pending());
         }
+        wakes.0.store(0, Ordering::SeqCst);
+        drop(http_tx);
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "HTTP registrations");
+        wakes.0.store(0, Ordering::SeqCst);
+        drop(slot_tx);
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "slot registrations");
     }
 }
 
