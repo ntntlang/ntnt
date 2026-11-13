@@ -46,6 +46,7 @@ Code examples demonstrating NTNT language features.
 | [magic_link_flow.tnt](magic_link_flow.tnt) | Coordinated std/auth magic-link request and confirmation flow |
 | [postgres_demo.tnt](postgres_demo.tnt) | Database integration |
 | [redirect_demo.tnt](redirect_demo.tnt) | HTTP redirects |
+| [websocket_demo/](websocket_demo/) | WebSockets: public echo with per-connection state, and a signed-in feed fed by a broadcast bus |
 
 ## Standard Library
 
