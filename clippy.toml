@@ -1,0 +1,6 @@
+# A woken flume::Selector handles one signal per wakeup and parks again when
+# another receiver took that message, stranding its other signals. Workers wait
+# with recv_either in src/interpreter.rs instead.
+disallowed-types = [
+    { path = "flume::Selector", reason = "strands wakeups when another receiver takes the message; use recv_either" },
+]
