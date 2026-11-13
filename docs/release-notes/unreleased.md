@@ -49,8 +49,14 @@ callback still delays HTTP. Shutdown closes sockets with 1001.
 text message with the published JSON value, encoded once and shared with SSE.
 A socket that falls behind the bus capacity is closed with 1013.
 
-Not yet: a connection lifetime limit, closing
-sockets on development hot reload. Existing HTTP and SSE behavior is unchanged.
+Connections have a finite lifetime: `max_lifetime_ms` (default 5 minutes, at
+most 24 hours, never unlimited) closes them with 1001 so clients reconnect
+through middleware and auth again. A development hot reload (including a route
+file edited in place) closes open sockets with 1012 so old connection state never
+runs against new code: their queued messages and `on_close` are skipped. With
+several development workers, those that have not reloaded run no WebSocket
+callbacks and close sockets they accept with 1012 until the server restarts. Existing HTTP
+and SSE behavior is unchanged.
 
 ## DD-041: exact loaded-source provenance
 

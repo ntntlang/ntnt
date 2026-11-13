@@ -4337,6 +4337,17 @@ get("/ws", fn(req) {
   more than the bus `capacity` behind is closed with 1013: reconnect and refetch
   state. There is no replay. The handle is the authority; never build bus names
   from client input.
+- **Lifetime:** every connection closes after `max_lifetime_ms` (default 300000,
+  i.e. 5 minutes; 1000-86400000, never unlimited) with 1001 "connection lifetime
+  reached". Reconnect in the client; the new handshake runs middleware and auth
+  again, so an expired session stops getting a socket.
+- **Development reload** (main file, route file, middleware or lib) closes open
+  sockets with 1012 "server code reloaded" so old state never runs against new
+  callbacks: their queued messages and `on_close` are not run on the reloaded
+  code. Reconnect to get the new code. With `NTNT_WORKERS>1` only worker 0
+  reloads: until the server restarts, the other workers (even one that restarts
+  after a crash) run no WebSocket callbacks, and a socket they accept closes with
+  1012 at once so the client reconnects.
 - **Handshake auth is not ongoing authorization.** Recheck permissions inside
   `on_message` for sensitive commands; `state["user"]` is only what you stored.
 
