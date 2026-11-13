@@ -457,7 +457,7 @@ impl CallbackSlot {
     /// Keep this slot to run a callback, unless a worker stopped while it was
     /// held and more slots are out than the live workers allow. Then the slot
     /// is retired and `None` returned: the caller puts the callback back with
-    /// [`requeue`] and stays free for HTTP.
+    /// [`CallbackJob::requeue`] and stays free for HTTP.
     pub(crate) fn revalidate(self) -> Option<Self> {
         let pool = self.0;
         let mut state = pool.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -477,16 +477,6 @@ impl CallbackSlot {
 impl Drop for CallbackSlot {
     fn drop(&mut self) {
         self.0.release();
-    }
-}
-
-/// Put a callback job back on the queue for a worker that may run it. The
-/// queue has room (admission bounds the jobs in existence); if it has closed
-/// because the server is stopping, the job is dropped and its connection
-/// reports the callback as not run.
-pub(crate) fn requeue(job: CallbackJob) {
-    if let Some(tx) = callbacks() {
-        let _ = tx.try_send(job);
     }
 }
 
@@ -641,6 +631,16 @@ impl CallbackJob {
     /// Skip work for a connection that has already ended.
     pub fn is_stale(&self) -> bool {
         self.reply.is_closed()
+    }
+
+    /// Put the job back on the queue for a worker that may run it. The queue
+    /// has room (admission bounds the jobs in existence); if it has closed
+    /// because the server is stopping, the job is dropped and its connection
+    /// reports the callback as not run.
+    pub(crate) fn requeue(self) {
+        if let Some(tx) = callbacks() {
+            let _ = tx.try_send(self);
+        }
     }
 }
 

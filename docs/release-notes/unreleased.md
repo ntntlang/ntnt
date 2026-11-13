@@ -40,8 +40,10 @@ Each connection has a bounded send queue charged to the realtime payload budget
 and a separately bounded receive backlog (4 messages / 256 KiB). A process-wide
 callback queue (64) and, with more than one worker serving, a limit of all but
 one worker running callbacks keep one worker free for HTTP. The limit follows the
-workers actually running, so it still holds while a worker is down and
-restarting. With a single worker, a long callback still delays HTTP. Shutdown closes sockets with 1001.
+workers actually running: after a worker stops, new callbacks start only within
+the smaller limit. Callbacks already running are not interrupted, so if they
+occupy every surviving worker when one crashes, HTTP waits for one of them to
+finish or for the restart. With a single worker, a long callback still delays HTTP. Shutdown closes sockets with 1001.
 `ntnt test` returns 501 for `websocket()`.
 
 `websocket(endpoint, map { "source": bus })` forwards each later `publish()` as a

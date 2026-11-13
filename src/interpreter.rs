@@ -791,7 +791,7 @@ fn next_serve_work(
     callbacks: Option<&crate::stdlib::websocket::CallbackReceiver>,
     http_in_row: &mut usize,
 ) -> ServeWork {
-    use crate::stdlib::websocket::{claimed_slot, requeue, slot_tokens, try_callback_slot};
+    use crate::stdlib::websocket::{claimed_slot, slot_tokens, try_callback_slot};
     let Some(callbacks) = callbacks else {
         return match http.recv() {
             Ok(request) => ServeWork::Http(Box::new(request)),
@@ -875,7 +875,7 @@ fn next_serve_work(
                 *http_in_row = 0;
                 return ServeWork::Callback(job, slot);
             }
-            None => requeue(job),
+            None => job.requeue(),
         }
     }
 }
