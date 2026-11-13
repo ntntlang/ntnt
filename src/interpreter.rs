@@ -784,6 +784,75 @@ enum ServeWork {
 /// HTTP requests served in a row before a waiting callback is preferred.
 const HTTP_PER_CALLBACK: usize = 4;
 
+/// A message from one of two channels (see [`either_next`]).
+#[derive(Debug)]
+enum Either<A, B> {
+    Left(A),
+    Right(B),
+}
+
+type EitherNext<A, B> =
+    Either<std::result::Result<A, flume::RecvError>, std::result::Result<B, flume::RecvError>>;
+
+/// Block until a message arrives on either channel, preferring `left`.
+fn recv_either<A, B>(left: &flume::Receiver<A>, right: &flume::Receiver<B>) -> EitherNext<A, B> {
+    block_on(either_next(left, right))
+}
+
+/// The next message on either channel, preferring `left`.
+///
+/// Workers must not wait with `flume::Selector` (clippy.toml forbids it). A
+/// woken selector handles one signal per wakeup: when the message it was woken
+/// for has already been taken by another worker, it parks again without
+/// registering anew, and any other signal it received is stranded. A request
+/// then waits for some later, unrelated message, and that worker never wakes
+/// again. flume's async receivers register again after such a miss. They do it
+/// in a separate step, though, and a message sent in between wakes nobody, so
+/// both channels are checked once more before waiting.
+fn either_next<'a, A: 'a, B: 'a>(
+    left: &'a flume::Receiver<A>,
+    right: &'a flume::Receiver<B>,
+) -> impl std::future::Future<Output = EitherNext<A, B>> + 'a {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::Poll;
+    let mut left_next = left.recv_async();
+    let mut right_next = right.recv_async();
+    std::future::poll_fn(move |cx| loop {
+        if let Poll::Ready(message) = Pin::new(&mut left_next).poll(cx) {
+            return Poll::Ready(Either::Left(message));
+        }
+        if let Poll::Ready(message) = Pin::new(&mut right_next).poll(cx) {
+            return Poll::Ready(Either::Right(message));
+        }
+        if left.is_empty() && right.is_empty() {
+            return Poll::Pending;
+        }
+    })
+}
+
+/// Drive `future` on this thread, parking while it is pending.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+        std::thread::park();
+    }
+}
+
 /// Next unit of work. HTTP is preferred, but a waiting callback runs at
 /// least once every `HTTP_PER_CALLBACK` requests so neither starves.
 fn next_serve_work(
@@ -804,24 +873,14 @@ fn next_serve_work(
         // wakes this one instead of leaving queued callbacks unserved.
         let slot = match try_callback_slot() {
             Some(slot) => slot,
-            None => {
-                enum Wait {
-                    Http(Option<Box<crate::stdlib::http_bridge::HandlerRequest>>),
-                    Slot,
+            None => match recv_either(http, slot_tokens()) {
+                Either::Left(Ok(request)) => {
+                    *http_in_row += 1;
+                    return ServeWork::Http(Box::new(request));
                 }
-                let wait = flume::Selector::new()
-                    .recv(http, |r| Wait::Http(r.ok().map(Box::new)))
-                    .recv(slot_tokens(), |_| Wait::Slot)
-                    .wait();
-                match wait {
-                    Wait::Http(Some(request)) => {
-                        *http_in_row += 1;
-                        return ServeWork::Http(request);
-                    }
-                    Wait::Http(None) => return ServeWork::Closed,
-                    Wait::Slot => claimed_slot(),
-                }
-            }
+                Either::Left(Err(_)) => return ServeWork::Closed,
+                Either::Right(_) => claimed_slot(),
+            },
         };
         let job = if *http_in_row >= HTTP_PER_CALLBACK {
             callbacks.try_recv().ok()
@@ -839,24 +898,16 @@ fn next_serve_work(
                     Err(flume::TryRecvError::Disconnected) => return ServeWork::Closed,
                     Err(flume::TryRecvError::Empty) => {}
                 }
-                enum Ready {
-                    Http(Option<Box<crate::stdlib::http_bridge::HandlerRequest>>),
-                    Callback(Option<crate::stdlib::websocket::CallbackJob>),
-                }
-                let ready = flume::Selector::new()
-                    .recv(http, |r| Ready::Http(r.ok().map(Box::new)))
-                    .recv(callbacks, |r| Ready::Callback(r.ok()))
-                    .wait();
-                match ready {
+                match recv_either(http, callbacks) {
                     // Taking HTTP returns the slot (dropped here), waking a waiting worker.
-                    Ready::Http(Some(request)) => {
+                    Either::Left(Ok(request)) => {
                         *http_in_row += 1;
-                        return ServeWork::Http(request);
+                        return ServeWork::Http(Box::new(request));
                     }
-                    Ready::Callback(Some(job)) => job,
-                    Ready::Http(None) => return ServeWork::Closed,
+                    Either::Right(Ok(job)) => job,
+                    Either::Left(Err(_)) => return ServeWork::Closed,
                     // The callback queue never closes before HTTP; fall back to HTTP.
-                    Ready::Callback(None) => {
+                    Either::Right(Err(_)) => {
                         drop(slot);
                         return match http.recv() {
                             Ok(request) => ServeWork::Http(Box::new(request)),
@@ -876,6 +927,102 @@ fn next_serve_work(
                 return ServeWork::Callback(job, slot);
             }
             None => job.requeue(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod serve_wait_tests {
+    use super::{either_next, next_serve_work, Either, ServeWork};
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Wake, Waker};
+    use std::time::Duration;
+
+    fn request() -> crate::stdlib::http_bridge::HandlerRequest {
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        crate::stdlib::http_bridge::HandlerRequest {
+            request: crate::stdlib::http_bridge::BridgeRequest {
+                method: "GET".into(),
+                path: "/".into(),
+                url: "http://localhost/".into(),
+                query: String::new(),
+                query_params: HashMap::new(),
+                params: HashMap::new(),
+                headers: HashMap::new(),
+                body: String::new(),
+                body_bytes: Vec::new(),
+                id: "lost-wakeup".into(),
+                ip: "127.0.0.1".into(),
+                peer_ip: "127.0.0.1".into(),
+                client_ip: "127.0.0.1".into(),
+                protocol: "http".into(),
+            },
+            reply_tx,
+        }
+    }
+
+    #[test]
+    fn worker_gets_a_request_after_losing_the_slot_it_was_woken_for() {
+        // The only test that uses the process-wide slot pool. With no live
+        // workers it holds one slot.
+        use crate::stdlib::websocket::{callback_channel, try_callback_slot};
+        let (_callback_tx, callback_rx) = callback_channel();
+        for _ in 0..100 {
+            let (http_tx, http_rx) = flume::unbounded();
+            // Hold the slot so the worker waits for HTTP or a returned slot.
+            let held = try_callback_slot().expect("the pool has a slot");
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let worker = {
+                let callback_rx = callback_rx.clone();
+                std::thread::spawn(move || {
+                    let work = next_serve_work(&http_rx, Some(&callback_rx), &mut 0);
+                    let _ = done_tx.send(matches!(work, ServeWork::Http(_)));
+                })
+            };
+            std::thread::sleep(Duration::from_millis(2));
+            // Returning the slot wakes the worker, but another worker takes
+            // the slot first; then a request arrives.
+            drop(held);
+            let taken = try_callback_slot();
+            http_tx.send(request()).unwrap();
+            let got_http = done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("the waiting worker missed the request");
+            assert!(got_http);
+            drop(taken);
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn wait_sees_a_message_sent_while_a_woken_receiver_registers_again() {
+        // flume calls a changed waker inside the gap between a woken
+        // receiver's failed try and its new registration; send exactly then.
+        struct SendOnWake(Mutex<Option<flume::Sender<u32>>>);
+        impl Wake for SendOnWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                if let Some(tx) = self.0.lock().unwrap().take() {
+                    tx.send(2).unwrap();
+                }
+            }
+        }
+        let (tx, rx) = flume::unbounded::<u32>();
+        let (_other_tx, other_rx) = flume::unbounded::<()>();
+        let mut next = std::pin::pin!(either_next(&rx, &other_rx));
+        let mut quiet = Context::from_waker(Waker::noop());
+        assert!(next.as_mut().poll(&mut quiet).is_pending());
+        // A message wakes the receiver, and another worker takes it.
+        tx.send(1).unwrap();
+        assert_eq!(rx.try_recv(), Ok(1));
+        let sends = Waker::from(Arc::new(SendOnWake(Mutex::new(Some(tx.clone())))));
+        match next.as_mut().poll(&mut Context::from_waker(&sends)) {
+            Poll::Ready(Either::Left(Ok(2))) => {}
+            other => panic!("missed the message sent while registering again: {other:?}"),
         }
     }
 }
