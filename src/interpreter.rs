@@ -798,70 +798,84 @@ fn next_serve_work(
             Err(_) => ServeWork::Closed,
         };
     };
-    // Without a callback slot, wait for HTTP or for a slot to be returned.
-    // Waiting on the slot too means capacity released by another worker
-    // wakes this one instead of leaving queued callbacks unserved.
-    let slot = match try_callback_slot() {
-        Some(slot) => slot,
-        None => {
-            enum Wait {
-                Http(Option<Box<crate::stdlib::http_bridge::HandlerRequest>>),
-                Slot,
-            }
-            let wait = flume::Selector::new()
-                .recv(http, |r| Wait::Http(r.ok().map(Box::new)))
-                .recv(slot_tokens(), |_| Wait::Slot)
-                .wait();
-            match wait {
-                Wait::Http(Some(request)) => {
-                    *http_in_row += 1;
-                    return ServeWork::Http(request);
+    loop {
+        // Without a callback slot, wait for HTTP or for a slot to be returned.
+        // Waiting on the slot too means capacity released by another worker
+        // wakes this one instead of leaving queued callbacks unserved.
+        let slot = match try_callback_slot() {
+            Some(slot) => slot,
+            None => {
+                enum Wait {
+                    Http(Option<Box<crate::stdlib::http_bridge::HandlerRequest>>),
+                    Slot,
                 }
-                Wait::Http(None) => return ServeWork::Closed,
-                Wait::Slot => claimed_slot(),
+                let wait = flume::Selector::new()
+                    .recv(http, |r| Wait::Http(r.ok().map(Box::new)))
+                    .recv(slot_tokens(), |_| Wait::Slot)
+                    .wait();
+                match wait {
+                    Wait::Http(Some(request)) => {
+                        *http_in_row += 1;
+                        return ServeWork::Http(request);
+                    }
+                    Wait::Http(None) => return ServeWork::Closed,
+                    Wait::Slot => claimed_slot(),
+                }
             }
-        }
-    };
-    if *http_in_row >= HTTP_PER_CALLBACK {
-        if let Ok(job) = callbacks.try_recv() {
-            *http_in_row = 0;
-            return ServeWork::Callback(job, slot);
-        }
-    }
-    match http.try_recv() {
-        Ok(request) => {
-            *http_in_row += 1;
-            return ServeWork::Http(Box::new(request));
-        }
-        Err(flume::TryRecvError::Disconnected) => return ServeWork::Closed,
-        Err(flume::TryRecvError::Empty) => {}
-    }
-    enum Ready {
-        Http(Option<Box<crate::stdlib::http_bridge::HandlerRequest>>),
-        Callback(Option<crate::stdlib::websocket::CallbackJob>),
-    }
-    let ready = flume::Selector::new()
-        .recv(http, |r| Ready::Http(r.ok().map(Box::new)))
-        .recv(callbacks, |r| Ready::Callback(r.ok()))
-        .wait();
-    match ready {
-        // Taking HTTP returns the slot (dropped here), waking a waiting worker.
-        Ready::Http(Some(request)) => {
-            *http_in_row += 1;
-            ServeWork::Http(request)
-        }
-        Ready::Callback(Some(job)) => {
-            *http_in_row = 0;
-            ServeWork::Callback(job, slot)
-        }
-        Ready::Http(None) => ServeWork::Closed,
-        // The callback queue never closes before HTTP; fall back to HTTP.
-        Ready::Callback(None) => {
-            drop(slot);
-            match http.recv() {
-                Ok(request) => ServeWork::Http(Box::new(request)),
-                Err(_) => ServeWork::Closed,
+        };
+        let job = if *http_in_row >= HTTP_PER_CALLBACK {
+            callbacks.try_recv().ok()
+        } else {
+            None
+        };
+        let job = match job {
+            Some(job) => job,
+            None => {
+                match http.try_recv() {
+                    Ok(request) => {
+                        *http_in_row += 1;
+                        return ServeWork::Http(Box::new(request));
+                    }
+                    Err(flume::TryRecvError::Disconnected) => return ServeWork::Closed,
+                    Err(flume::TryRecvError::Empty) => {}
+                }
+                enum Ready {
+                    Http(Option<Box<crate::stdlib::http_bridge::HandlerRequest>>),
+                    Callback(Option<crate::stdlib::websocket::CallbackJob>),
+                }
+                let ready = flume::Selector::new()
+                    .recv(http, |r| Ready::Http(r.ok().map(Box::new)))
+                    .recv(callbacks, |r| Ready::Callback(r.ok()))
+                    .wait();
+                match ready {
+                    // Taking HTTP returns the slot (dropped here), waking a waiting worker.
+                    Ready::Http(Some(request)) => {
+                        *http_in_row += 1;
+                        return ServeWork::Http(request);
+                    }
+                    Ready::Callback(Some(job)) => job,
+                    Ready::Http(None) => return ServeWork::Closed,
+                    // The callback queue never closes before HTTP; fall back to HTTP.
+                    Ready::Callback(None) => {
+                        drop(slot);
+                        return match http.recv() {
+                            Ok(request) => ServeWork::Http(Box::new(request)),
+                            Err(_) => ServeWork::Closed,
+                        };
+                    }
+                }
             }
+        };
+        // A worker that stopped while this slot was held (waiting here) can
+        // leave more slots out than the live workers allow. Then this one is
+        // retired, the callback goes back to the queue, and this worker stays
+        // free for HTTP.
+        match slot.revalidate() {
+            Some(slot) => {
+                *http_in_row = 0;
+                return ServeWork::Callback(job, slot);
+            }
+            None => job.requeue(),
         }
     }
 }
@@ -10592,7 +10606,7 @@ impl Interpreter {
         let callback_rx = crate::stdlib::websocket::has_endpoints().then(|| {
             let (tx, rx) = crate::stdlib::websocket::callback_channel();
             crate::stdlib::websocket::install_callbacks(tx);
-            crate::stdlib::websocket::set_callback_workers(num_workers);
+            crate::stdlib::websocket::reset_callback_slots();
             rx
         });
         let source_file = self.main_source_file.clone().unwrap_or_default();
@@ -10688,6 +10702,10 @@ impl Interpreter {
 
         // Main thread (worker 0): process requests with hot-reload support
         self.setup_frozen = true;
+        // Callback slots follow the workers actually serving.
+        let _live = callback_rx
+            .as_ref()
+            .map(|_| crate::stdlib::websocket::LiveWorker::start());
         let mut http_in_row = 0;
         loop {
             // Block waiting for requests or WebSocket callbacks
@@ -11210,6 +11228,10 @@ impl Interpreter {
 
         // Worker request loop — no hot-reload, just process requests
         interpreter.setup_frozen = true;
+        // Counted as live only while serving; dropped on exit or panic.
+        let _live = callbacks
+            .as_ref()
+            .map(|_| crate::stdlib::websocket::LiveWorker::start());
         let mut http_in_row = 0;
         loop {
             // After worker 0 reloads the code, this worker still runs the old

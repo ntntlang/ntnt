@@ -38,11 +38,12 @@ Origins are matched exactly: the `origins` option, else the origin of `SITE_URL`
 else localhost in development. Production startup fails without one of them.
 Each connection has a bounded send queue charged to the realtime payload budget
 and a separately bounded receive backlog (4 messages / 256 KiB). A process-wide
-callback queue (64) and, with more than one configured worker, a limit of all but
-one worker running callbacks limit how far sockets can delay requests. The limit
-uses the configured worker count: while a worker is down and restarting, the
-remaining workers can all be running callbacks. With a single worker, a long
-callback still delays HTTP. Shutdown closes sockets with 1001.
+callback queue (64) and, with more than one worker serving, a limit of all but
+one worker running callbacks keep one worker free for HTTP. The limit follows the
+workers actually running: after a worker stops, new callbacks start only within
+the smaller limit. Callbacks already running are not interrupted, so if they
+occupy every surviving worker when one crashes, HTTP waits for one of them to
+finish or for the restart. With a single worker, a long callback still delays HTTP. Shutdown closes sockets with 1001.
 `ntnt test` returns 501 for `websocket()`.
 
 `websocket(endpoint, map { "source": bus })` forwards each later `publish()` as a
