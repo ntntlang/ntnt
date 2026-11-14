@@ -4,6 +4,15 @@ See [NTNT v0.6.0](v0.6.0.md) for the curated announcement, upgrade guidance and
 retained implementation measurement notes. The 0.5.7 development cycle is included
 in 0.6.0; there was no separately published 0.5.7 release.
 
+## Runtime and lint fixes
+
+- Integer division and remainder report runtime errors instead of panicking on
+  `Int::MIN / -1`, `Int::MIN % -1`, or a zero divisor. HTTP handlers return an
+  error response without terminating the server. (#354)
+- Imports used only in a `let ... otherwise` recovery block count as used,
+  including destructuring declarations and nested recovery blocks. Aliased imports
+  are tracked by their local binding names. (#305)
+
 ## HTTP server fixes
 
 - Static-file mounts match URL path boundaries: an allowlisted `/assets` mount

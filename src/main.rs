@@ -5427,7 +5427,7 @@ fn analyze_ast_warnings(ast: &ntnt::ast::Program, _source: &str) -> Vec<serde_js
         match unwrap_located(stmt) {
             Statement::Import { items, .. } => {
                 for item in items {
-                    imports.push(item.name.clone());
+                    imports.push(item.alias.as_ref().unwrap_or(&item.name).clone());
                 }
             }
             _ => {
@@ -5735,12 +5735,22 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
 
     match stmt {
         Statement::Expression(expr) => collect_from_expr(expr, names),
-        Statement::Let { value, pattern, .. } => {
+        Statement::Let {
+            value,
+            pattern,
+            otherwise,
+            ..
+        } => {
             if let Some(expr) = value {
                 collect_from_expr(expr, names);
             }
             if let Some(pat) = pattern {
                 collect_from_pattern(pat, names);
+            }
+            if let Some(block) = otherwise {
+                for s in &block.statements {
+                    collect_used_names(s, names);
+                }
             }
         }
         Statement::Function { body, contract, .. } => {
