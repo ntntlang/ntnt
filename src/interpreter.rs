@@ -6194,24 +6194,26 @@ impl Interpreter {
                                 // Extract error value for binding as `err`
                                 let err_val = values.first().cloned().unwrap_or(Value::Unit);
 
-                                // Create scope with `err` bound, execute otherwise block
-                                let previous = Rc::clone(&self.environment);
-                                self.environment = Environment::shared(Environment::with_parent(
-                                    Rc::clone(&previous),
+                                // Create scope with `err` bound, execute otherwise block.
+                                let recovery_env = Environment::shared(Environment::with_parent(
+                                    Rc::clone(&self.environment),
                                 ));
-                                self.environment
-                                    .borrow_mut()
-                                    .define("err".to_string(), err_val);
+                                recovery_env.borrow_mut().define("err".to_string(), err_val);
 
-                                let mut result = Value::Unit;
-                                for s in &otherwise_block.statements {
-                                    result = self.eval_statement(s)?;
-                                    match result {
-                                        Value::Return(_) | Value::Break | Value::Continue => break,
-                                        _ => {}
-                                    }
-                                }
-                                cycles::retire(std::mem::replace(&mut self.environment, previous));
+                                let result =
+                                    self.with_environment(recovery_env, |interpreter| {
+                                        let mut result = Value::Unit;
+                                        for s in &otherwise_block.statements {
+                                            result = interpreter.eval_statement(s)?;
+                                            match result {
+                                                Value::Return(_)
+                                                | Value::Break
+                                                | Value::Continue => break,
+                                                _ => {}
+                                            }
+                                        }
+                                        Ok(result)
+                                    })?;
 
                                 // Otherwise block must diverge
                                 match result {
@@ -8240,46 +8242,22 @@ impl Interpreter {
 
                 for arm in arms {
                     if let Some(bindings) = self.match_pattern(&arm.pattern, &value)? {
-                        // Check guard if present
-                        if let Some(guard) = &arm.guard {
-                            // Create new scope with pattern bindings
-                            let previous = Rc::clone(&self.environment);
-                            self.environment =
-                                Environment::shared(Environment::with_parent(Rc::clone(&previous)));
+                        let arm_env = Environment::shared(Environment::with_parent(Rc::clone(
+                            &self.environment,
+                        )));
+                        for (name, val) in bindings {
+                            arm_env.borrow_mut().define(name, val);
+                        }
 
-                            // Bind pattern variables
-                            for (name, val) in &bindings {
-                                self.environment
-                                    .borrow_mut()
-                                    .define(name.clone(), val.clone());
+                        let result = self.with_environment(arm_env, |interpreter| {
+                            if let Some(guard) = &arm.guard {
+                                if !interpreter.eval_expression(guard)?.is_truthy() {
+                                    return Ok(None); // Try the next arm.
+                                }
                             }
-
-                            let guard_result = self.eval_expression(guard)?;
-
-                            if !guard_result.is_truthy() {
-                                cycles::retire(std::mem::replace(&mut self.environment, previous));
-                                continue; // Guard failed, try next arm
-                            }
-
-                            // Guard passed, evaluate body
-                            let result = self.eval_expression(&arm.body)?;
-                            cycles::retire(std::mem::replace(&mut self.environment, previous));
-                            return Ok(result);
-                        } else {
-                            // No guard, create scope and evaluate body
-                            let previous = Rc::clone(&self.environment);
-                            self.environment =
-                                Environment::shared(Environment::with_parent(Rc::clone(&previous)));
-
-                            // Bind pattern variables
-                            for (name, val) in &bindings {
-                                self.environment
-                                    .borrow_mut()
-                                    .define(name.clone(), val.clone());
-                            }
-
-                            let result = self.eval_expression(&arm.body)?;
-                            cycles::retire(std::mem::replace(&mut self.environment, previous));
+                            interpreter.eval_expression(&arm.body).map(Some)
+                        })?;
+                        if let Some(result) = result {
                             return Ok(result);
                         }
                     }
@@ -11817,8 +11795,7 @@ impl Interpreter {
         };
 
         // Create a temporary environment with struct fields as variables
-        let previous = Rc::clone(&self.environment);
-        let inv_env = Environment::shared(Environment::with_parent(Rc::clone(&previous)));
+        let inv_env = Environment::shared(Environment::with_parent(Rc::clone(&self.environment)));
 
         // Bind struct fields to environment (also bind 'self' to the struct)
         for (field_name, field_val) in fields {
@@ -11830,43 +11807,42 @@ impl Interpreter {
             .borrow_mut()
             .define("self".to_string(), struct_val.clone());
 
-        self.environment = inv_env;
+        self.with_environment(inv_env, |interpreter| {
+            for inv_expr in &invariants {
+                let condition_str = Self::format_expression(inv_expr);
+                let result = match interpreter.eval_expression(inv_expr) {
+                    Err(IntentError::UndefinedVariable { name, .. })
+                        if interpreter.task_interpreter =>
+                    {
+                        return Err(IntentError::runtime_error(format!(
+                            "Invariant for '{struct_name}' uses '{name}', which isn't available inside a task: \
+                             struct rules that call helpers or read constants aren't supported in tasks yet. \
+                             Build this struct outside the task, or make the rule use only the struct's own fields."
+                        )));
+                    }
+                    other => other?,
+                };
 
-        // Check each invariant
-        for inv_expr in &invariants {
-            let condition_str = Self::format_expression(inv_expr);
-            let result = match self.eval_expression(inv_expr) {
-                Err(IntentError::UndefinedVariable { name, .. }) if self.task_interpreter => {
-                    cycles::retire(std::mem::replace(&mut self.environment, previous));
-                    return Err(IntentError::runtime_error(format!(
-                        "Invariant for '{struct_name}' uses '{name}', which isn't available inside a task: \
-                         struct rules that call helpers or read constants aren't supported in tasks yet. \
-                         Build this struct outside the task, or make the rule use only the struct's own fields."
-                    )));
+                if !result.is_truthy() {
+                    // Capture field values before with_environment restores the caller.
+                    let values = interpreter.collect_clause_values(inv_expr);
+                    return Err(IntentError::ContractViolation {
+                        message: format!(
+                            "Invariant violated for '{}': {}",
+                            struct_name, condition_str
+                        ),
+                        // Invariant expressions don't carry parsed lines yet
+                        line: 0,
+                        call_line: interpreter.current_line,
+                        values,
+                    });
                 }
-                other => other?,
-            };
-
-            if !result.is_truthy() {
-                // Field values are read from inv_env before the restore
-                let values = self.collect_clause_values(inv_expr);
-                cycles::retire(std::mem::replace(&mut self.environment, previous));
-                return Err(IntentError::ContractViolation {
-                    message: format!(
-                        "Invariant violated for '{}': {}",
-                        struct_name, condition_str
-                    ),
-                    // Invariant expressions don't carry parsed lines yet
-                    line: 0,
-                    call_line: self.current_line,
-                    values,
-                });
+                interpreter
+                    .contracts
+                    .check_invariant(&condition_str, true, None)?;
             }
-            self.contracts.check_invariant(&condition_str, true, None)?;
-        }
-
-        cycles::retire(std::mem::replace(&mut self.environment, previous));
-        Ok(())
+            Ok(())
+        })
     }
 
     fn values_equal(a: &Value, b: &Value) -> bool {

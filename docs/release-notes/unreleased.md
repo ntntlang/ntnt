@@ -27,6 +27,15 @@ Native Rust embedders constructing `Value::Function` must convert the environmen
 shared-binding semantics are unchanged. This is automatic memory reclamation,
 not a new deterministic resource-close API.
 
+## Runtime scope restoration
+
+- Match arms restore the enclosing scope before propagating runtime errors from
+  a guard or body, so `otherwise` recovery sees the caller's bindings.
+- Struct-invariant evaluation errors also restore the caller's scope; contract
+  diagnostics still report the struct's field values, not shadowed caller values.
+- Errors inside a `let` recovery block no longer leak its temporary bindings into
+  subsequent evaluation or deferred cleanup.
+
 ## DD-041: WebSockets
 
 Applications can accept WebSockets. Register an endpoint during setup with

@@ -1,9 +1,10 @@
-//! Function-call frame restoration (#183 part 1).
+//! Function-call and temporary-scope restoration (#183).
 //!
 //! A user function call temporarily replaces the interpreter's scope, its
-//! deferred-statement list and its `old()`/`result` contract context. Every
-//! test here runs on one reused interpreter whose caller frame is seeded with
-//! non-empty state, so "reset to empty" cannot pass for "restored".
+//! deferred-statement list and its `old()`/`result` contract context. Match,
+//! invariant and recovery scopes must also restore before propagating errors.
+//! Restoration checks seed a reused interpreter with non-empty caller state,
+//! so "reset to empty" cannot pass for "restored".
 use super::*;
 use crate::contracts::{OldValues, StoredValue};
 use crate::{lexer::Lexer, parser::Parser};
@@ -649,4 +650,127 @@ fn control_contract_diagnostics_read_callee_values() {
         }
         assert_eq!(int(eval_src(&mut interpreter, "a")), 999);
     }
+}
+
+#[test]
+fn match_errors_restore_outer_scope() {
+    for expression in [
+        "match 73 { own => 1 / 0 }",
+        "match 73 { own if true => 1 / 0 }",
+        "match 73 { own if 1 / 0 > 0 => 0, _ => 0 }",
+    ] {
+        let err = assert_failed_call_restores("", expression, &[]);
+        assert!(matches!(err, IntentError::DivisionByZero { .. }), "{err:?}");
+
+        // Recovery must see the enclosing local, not the arm's shadowing binding.
+        let mut interpreter = Interpreter::new();
+        let source = format!(
+            "fn recover() {{ let own = 42\n \
+             let value = {expression} otherwise {{ return own }}\n \
+             return value }}\nrecover()"
+        );
+        assert_eq!(int(eval_src(&mut interpreter, &source)), 42, "{expression}");
+    }
+}
+
+#[test]
+fn invariant_evaluation_error_restores_outer_scope() {
+    let definitions = "struct Checked { own: Int, divisor: Int }\n \
+                       impl Checked { invariant own / divisor > 0 }";
+    let expression = "Checked { own: 73, divisor: 0 }";
+    let err = assert_failed_call_restores(definitions, expression, &["divisor", "self"]);
+    assert!(matches!(err, IntentError::DivisionByZero { .. }), "{err:?}");
+
+    let mut interpreter = Interpreter::new();
+    let source = format!(
+        "{definitions}\nfn recover() {{ let own = 42\n \
+         let value = {expression} otherwise {{ return own }}\n \
+         return 0 }}\nrecover()"
+    );
+    assert_eq!(int(eval_src(&mut interpreter, &source)), 42);
+}
+
+#[test]
+fn otherwise_error_restores_outer_scope() {
+    let statement = r#"let value = Err("initial") otherwise {
+        let own = 73
+        1 / 0
+        return own
+    }"#;
+    let err = assert_failed_call_restores("", statement, &["err"]);
+    assert!(matches!(err, IntentError::DivisionByZero { .. }), "{err:?}");
+
+    // A failed recovery must not change the scope used by the function's defer.
+    let mut interpreter = Interpreter::new();
+    let source = format!(
+        "let mut seen = 0\nfn fail() {{ let own = 42\n \
+         defer seen = own\n{statement}\n}}\nlet _ = try {{ fail() }}\nseen"
+    );
+    assert_eq!(int(eval_src(&mut interpreter, &source)), 42);
+}
+
+#[test]
+fn control_match_restores_after_success_and_false_guard() {
+    for (source, expected) in [
+        ("match 73 { own => own }", 73),
+        ("match 73 { own if true => own }", 73),
+        ("match 73 { own if false => 0, _ => own }", 42),
+    ] {
+        let mut interpreter = Interpreter::new();
+        let seed = seed_caller_frame(&mut interpreter);
+        assert_eq!(
+            int(eval_src(&mut interpreter, source)),
+            expected,
+            "{source}"
+        );
+        assert_restored(&interpreter, &seed);
+    }
+}
+
+#[test]
+fn control_match_closure_keeps_capture_until_last_release() {
+    for source in [
+        "match 73 { own => { fn captured() { own }\n captured } }",
+        "match 73 { own if false => fn() { 0 }, own => { fn captured() { own }\n captured } }",
+    ] {
+        let mut interpreter = Interpreter::new();
+        let outer = Rc::clone(&interpreter.environment);
+        let callback = eval_src(&mut interpreter, source).unwrap();
+        assert!(Rc::ptr_eq(&interpreter.environment, &outer));
+        let Value::Function { closure, .. } = &callback else {
+            panic!("expected a captured function, got {callback:?}");
+        };
+        let weak = Rc::downgrade(closure);
+        assert_eq!(int(interpreter.call_function(callback.clone(), vec![])), 73);
+        assert!(weak.upgrade().is_some(), "live capture was collected");
+        drop(callback);
+        cycles::collect(true);
+        assert!(weak.upgrade().is_none(), "retired arm capture leaked");
+    }
+}
+
+#[test]
+fn control_invariant_diagnostics_read_fields_before_restore() {
+    let mut interpreter = Interpreter::new();
+    let seed = seed_caller_frame(&mut interpreter);
+    eval_src(
+        &mut interpreter,
+        "struct Checked { own: Int }\nimpl Checked { invariant own > 100 }",
+    )
+    .unwrap();
+    match eval_src(&mut interpreter, "Checked { own: 1 }") {
+        Err(IntentError::ContractViolation { values, .. }) => assert!(
+            values
+                .iter()
+                .any(|(name, value)| name == "own" && value == "1"),
+            "diagnostics read the wrong scope: {values:?}"
+        ),
+        other => panic!("expected ContractViolation, got {other:?}"),
+    }
+    assert_restored(&interpreter, &seed);
+    assert!(matches!(
+        eval_src(&mut interpreter, "Checked { own: 101 }"),
+        Ok(Value::Struct { .. })
+    ));
+    assert_restored(&interpreter, &seed);
 }
