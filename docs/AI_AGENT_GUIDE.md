@@ -4343,8 +4343,9 @@ get("/ws", fn(req) {
   JSON value (no SSE `event`/`id`; put a type field in the value if you need one).
   The value is encoded once for all sockets and SSE streams. A socket that falls
   more than the bus `capacity` behind is closed with 1013: reconnect and refetch
-  state. There is no replay. The handle is the authority; never build bus names
-  from client input.
+  state. There is no replay. The broadcast subscription is released before the
+  close handshake and `on_close`, so neither can retain unread events. The handle
+  is the authority; never build bus names from client input.
 - **Lifetime:** every connection closes after `max_lifetime_ms` (default 300000,
   i.e. 5 minutes; 1000-86400000, never unlimited) with 1001 "connection lifetime
   reached". Reconnect in the client; the new handshake runs middleware and auth

@@ -8,6 +8,8 @@ in 0.6.0; there was no separately published 0.5.7 release.
 
 - Static-file mounts match URL path boundaries: an allowlisted `/assets` mount
   no longer hides a sibling such as `/assets-img`, regardless of registration order.
+- Closing WebSockets release their broadcast subscription before the close
+  handshake and `on_close`, so slow teardown cannot exhaust the shared event budget.
 
 ## Runtime memory lifetime
 

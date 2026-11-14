@@ -1436,7 +1436,9 @@ pub(crate) async fn run(
         }
     };
 
-    // Stop accepting new messages before the close handshake.
+    // Stop accepting new messages and release unread broadcast events before
+    // the close handshake or any application on_close callback can wait.
+    drop(source);
     drop(handle);
     drop(tx);
     rx.close();

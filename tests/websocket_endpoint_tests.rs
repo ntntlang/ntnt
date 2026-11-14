@@ -1239,6 +1239,78 @@ async fn broadcast_source_reaches_every_socket_across_workers() {
 }
 
 #[tokio::test]
+async fn closed_socket_releases_its_source_before_on_close_returns() {
+    // Each publish needs the entire budget. Even one event retained by the
+    // closed socket makes the next publish fail, not just a sufficiently large burst.
+    let payload = "x".repeat(512 - b"data: \"\"\n\n".len());
+    let source = r#"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
+import { broadcast, publish, sleep_ms } from "std/concurrent"
+import { exists } from "std/fs"
+let feed = broadcast("feed", map { "capacity": 4 })
+fn on_message(conn, message, state) {
+    ws_send(conn, message["data"])
+    return state
+}
+fn closed(state, info) {
+    print("SOURCE_CLOSE_BEGIN")
+    while !exists("release-close") { sleep_ms(10) }
+    print("SOURCE_CLOSE_END")
+}
+let live = ws_endpoint("live", on_message, map { "on_close": closed })
+get("/ws", fn(req) { websocket(live, map { "source": feed }) })
+get("/probe", fn(req) {
+    for n in 0..3 {
+        let queued = publish(feed, "FULL_BUDGET_PAYLOAD") otherwise { return text(err) }
+    }
+    return text("released")
+})
+listen(0, map {
+    "fixture": true, "readiness": "json",
+    "realtime": map { "max_event_bytes": 512, "max_payload_bytes": 512 }
+})
+"#
+    .replace("FULL_BUDGET_PAYLOAD", &payload);
+    for workers in ["2", "3"] {
+        let mut server = fixture::Fixture::start(&source, &["run"], &[("NTNT_WORKERS", workers)]);
+        let addr = server.ready();
+        assert_eq!(get_body(addr, "/probe").await, "released");
+        let mut socket = connect(addr, "/ws", Some(&origin(addr))).await.unwrap();
+        // The round trip proves the connection has subscribed before it closes.
+        socket.send(Message::Text("hi".into())).await.unwrap();
+        assert_eq!(next_data(&mut socket).await, Message::Text("hi".into()));
+        socket.close(None).await.unwrap();
+        let _ = close_frame(&mut socket).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !server.stdout().contains("SOURCE_CLOSE_BEGIN") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{}",
+                server.stderr()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            get_body(addr, "/probe").await,
+            "released",
+            "{}",
+            server.stderr()
+        );
+        assert!(!server.stdout().contains("SOURCE_CLOSE_END"));
+        std::fs::write(server.dir.path().join("release-close"), "").unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !server.stdout().contains("SOURCE_CLOSE_END") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{}",
+                server.stderr()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn socket_that_falls_behind_the_broadcast_is_closed_with_1013() {
     let mut server = fixture::Fixture::start(BROADCAST_APP, &["run"], &[("NTNT_WORKERS", "2")]);
     let addr = server.ready();
