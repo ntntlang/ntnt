@@ -1311,6 +1311,95 @@ listen(0, map {
 }
 
 #[tokio::test]
+async fn oversized_broadcast_closes_websocket_with_1009_but_still_reaches_sse() {
+    let source = r#"
+import { text, ws_endpoint, websocket, ws_send, sse } from "std/http/server"
+import { broadcast, publish } from "std/concurrent"
+import { repeat } from "std/string"
+let feed = broadcast("feed", map { "capacity": 4 })
+fn on_message(conn, message, state) {
+    ws_send(conn, message["data"])
+    return state
+}
+let live = ws_endpoint("live", on_message)
+get("/ws", fn(req) { websocket(live, map { "source": feed }) })
+get("/sse", fn(req) { sse(feed) })
+get("/pub", fn(req) {
+    let size = int(req.query_params["size"] ?? "0") ?? 0
+    return text(str(is_ok(publish(feed, repeat("x", size)))))
+})
+listen(0, map {
+    "fixture": true, "readiness": "json",
+    "realtime": map { "max_event_bytes": 1048576 }
+})
+"#;
+    let limit = ntnt::stdlib::websocket::OUTBOX_BYTES;
+    for workers in ["1", "2"] {
+        let mut server = fixture::Fixture::start(source, &["run"], &[("NTNT_WORKERS", workers)]);
+        let addr = server.ready();
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let mut sse = http.get(format!("http://{addr}/sse")).send().await.unwrap();
+        assert_eq!(sse.status().as_u16(), 200);
+        // JSON adds two quote bytes. Test the exact message limit, one byte
+        // above it (still below the codec write buffer), and above that buffer.
+        for size in [limit - 2, limit - 1, 400_000] {
+            let mut socket = connect(addr, "/ws", Some(&origin(addr))).await.unwrap();
+            socket.send(Message::Text("ready".into())).await.unwrap();
+            assert_eq!(next_data(&mut socket).await, Message::Text("ready".into()));
+            let published = http
+                .get(format!("http://{addr}/pub?size={size}"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert_eq!(published, "true", "{}", server.stderr());
+            let json = format!("\"{}\"", "x".repeat(size));
+            if json.len() <= limit {
+                assert_eq!(next_data(&mut socket).await, Message::Text(json.clone()));
+                socket.close(None).await.unwrap();
+            } else {
+                match next_data(&mut socket).await {
+                    Message::Close(Some(frame)) => {
+                        assert_eq!(frame.code, CloseCode::Size);
+                        assert_eq!(frame.reason, "message too large");
+                    }
+                    Message::Text(text) => {
+                        panic!("forwarded an oversized {} byte message", text.len())
+                    }
+                    other => panic!("expected a 1009 close, got {other:?}"),
+                }
+                // Flush the peer's automatic close reply.
+                socket.flush().await.unwrap();
+            }
+            let expected = format!("data: {json}\n\n");
+            let mut received = Vec::new();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !received
+                    .windows(expected.len())
+                    .any(|w| w == expected.as_bytes())
+                {
+                    let chunk = sse.chunk().await.unwrap().expect("SSE stream ended");
+                    received.extend_from_slice(&chunk);
+                    assert!(received.len() < 2 * 1024 * 1024, "unexpected SSE data");
+                }
+            })
+            .await
+            .expect("broadcast did not reach SSE");
+        }
+        assert!(
+            server.stderr().contains("broadcast message too large"),
+            "{}",
+            server.stderr()
+        );
+    }
+}
+
+#[tokio::test]
 async fn socket_that_falls_behind_the_broadcast_is_closed_with_1013() {
     let mut server = fixture::Fixture::start(BROADCAST_APP, &["run"], &[("NTNT_WORKERS", "2")]);
     let addr = server.ready();

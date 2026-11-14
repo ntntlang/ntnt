@@ -8572,7 +8572,7 @@ websocket(endpoint: WebSocketEndpoint, options?: Map) -> Response
 
 Accept a WebSocket from a GET handler.
 
-Middleware and your own authorization run first; the connection is upgraded only if this is the final, successful response. Denials and redirects are sent as ordinary HTTP. `state` is the connection's initial state: JSON data only (no functions, handles or secrets), at most 16 KiB. It is passed to each callback and replaced by its return value. `source` forwards a broadcast: each `publish()` after the upgrade is sent as one text message holding the published JSON value (SSE `event`/`id` are not added). A connection that falls behind the bus capacity is closed with 1013; reconnect and refetch state. Requires the async server (`ntnt run`); `ntnt test` returns 501.
+Middleware and your own authorization run first; the connection is upgraded only if this is the final, successful response. Denials and redirects are sent as ordinary HTTP. `state` is the connection's initial state: JSON data only (no functions, handles or secrets), at most 16 KiB. It is passed to each callback and replaced by its return value. `source` forwards a broadcast: each `publish()` after the upgrade is sent as one text message holding the published JSON value (SSE `event`/`id` are not added). JSON above the connection's message limit (`max_event_bytes`, capped at 256 KiB) closes that socket with 1009; publication and other subscribers are unaffected. A connection that falls behind the bus capacity is closed with 1013; reconnect and refetch state. The source subscription is released before the close handshake and `on_close`. Requires the async server (`ntnt run`); `ntnt test` returns 501.
 
 **Parameters:**
 
