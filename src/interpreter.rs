@@ -22,6 +22,8 @@ use std::rc::Rc;
 
 mod cycles;
 pub use cycles::Closure;
+#[cfg(test)]
+mod worker_failure_tests;
 
 /// Opaque sender handle for a concurrent channel.
 ///
@@ -1574,6 +1576,8 @@ impl Interpreter {
         interpreter.define_builtin_types();
         interpreter.define_stdlib();
         interpreter.define_prelude();
+        #[cfg(test)]
+        worker_failure_tests::install(&mut interpreter);
         interpreter.builtin_bindings = interpreter.environment.borrow().values.clone();
         interpreter
     }
