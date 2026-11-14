@@ -4,6 +4,11 @@ See [NTNT v0.6.0](v0.6.0.md) for the curated announcement, upgrade guidance and
 retained implementation measurement notes. The 0.5.7 development cycle is included
 in 0.6.0; there was no separately published 0.5.7 release.
 
+## HTTP server fixes
+
+- Static-file mounts match URL path boundaries: an allowlisted `/assets` mount
+  no longer hides a sibling such as `/assets-img`, regardless of registration order.
+
 ## Runtime memory lifetime
 
 The runtime automatically collects unreachable closure/environment cycles. This

@@ -260,8 +260,15 @@ impl AsyncServerState {
     pub async fn find_static_file(&self, path: &str) -> Option<(String, String)> {
         let dirs = self.static_dirs.read().await;
         for dir in dirs.iter() {
-            if path.starts_with(&dir.url_prefix) {
-                let relative = path.strip_prefix(&dir.url_prefix).unwrap_or("");
+            if let Some(relative) = path.strip_prefix(&dir.url_prefix) {
+                // Match a whole mount path, not a sibling such as /assets-img
+                // when the registered prefix is /assets.
+                if !dir.url_prefix.ends_with('/')
+                    && !relative.is_empty()
+                    && !relative.starts_with('/')
+                {
+                    continue;
+                }
                 let relative = relative.trim_start_matches('/');
 
                 // Security: reject path traversal attempts
