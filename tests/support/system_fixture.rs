@@ -11,9 +11,12 @@ pub struct Fixture {
 impl Fixture {
     pub fn start(source: &str, args: &[&str], env: &[(&str, &str)]) -> Self {
         Self::start_with_command(source, env, |file| {
-            let mut command = Command::new(
-                option_env!("CARGO_BIN_EXE_ntnt").expect("CLI fixture needs the ntnt binary"),
-            );
+            // Lib-test fixtures have no Cargo-provided CLI path and supply
+            // their own command through start_with_command instead.
+            let Some(binary) = option_env!("CARGO_BIN_EXE_ntnt") else {
+                panic!("CLI fixture needs the ntnt binary");
+            };
+            let mut command = Command::new(binary);
             command.args(args).arg(file);
             command
         })
