@@ -98,6 +98,49 @@ fn allowlist_enforced_by_async_server_in_development_and_production() {
 }
 
 #[test]
+fn overlapping_mount_prefixes_use_path_boundaries() {
+    for prefix in ["/assets", "/assets/"] {
+        for reverse in [false, true] {
+            let css = format!(
+                "serve_static(\"{prefix}\", \"./css\", map {{ \"extensions\": [\"css\"] }})"
+            );
+            let image = "serve_static(\"/assets-img\", \"./img\")";
+            let mounts = if reverse {
+                format!("{image}\n{css}")
+            } else {
+                format!("{css}\n{image}")
+            };
+            let source = format!(
+                "{mounts}\nlisten(0, map {{ \"fixture\": true, \"readiness\": \"json\" }})"
+            );
+            let mut server = fixture::Fixture::start(&source, &["run"], &[("NTNT_WORKERS", "2")]);
+            let css_dir = server.dir.path().join("css");
+            fs::create_dir_all(css_dir.join("-other")).unwrap();
+            fs::write(css_dir.join("site.css"), "body{}").unwrap();
+            fs::write(css_dir.join("-other/site.css"), "wrong mount").unwrap();
+            fs::create_dir(server.dir.path().join("img")).unwrap();
+            fs::write(server.dir.path().join("img/icon.png"), "PNG").unwrap();
+            let addr = server.ready();
+            for (path, expected) in [
+                ("/assets-img/icon.png", 200),
+                ("/assets/site.css", 200),
+                ("/assets-other/site.css", 404),
+                ("/assets/icon.png", 404),
+            ] {
+                let (status, text) = request(addr, path);
+                assert_eq!(
+                    status, expected,
+                    "prefix={prefix} reverse={reverse} {path}: {text}"
+                );
+                if path == "/assets-img/icon.png" {
+                    assert!(text.ends_with("PNG"), "{text}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn invalid_options_fail_at_registration() {
     for (options, needle) in [
         (r#"map { "extensions": [] }"#, "at least one"),

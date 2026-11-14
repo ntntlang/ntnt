@@ -4,6 +4,16 @@ See [NTNT v0.6.0](v0.6.0.md) for the curated announcement, upgrade guidance and
 retained implementation measurement notes. The 0.5.7 development cycle is included
 in 0.6.0; there was no separately published 0.5.7 release.
 
+## HTTP server fixes
+
+- Static-file mounts match URL path boundaries: an allowlisted `/assets` mount
+  no longer hides a sibling such as `/assets-img`, regardless of registration order.
+- Closing WebSockets release their broadcast subscription before the close
+  handshake and `on_close`, so slow teardown cannot exhaust the shared event budget.
+- Broadcast JSON above a WebSocket's message limit closes that socket with 1009
+  and logs the size, instead of silently dropping the transport. Publication and
+  delivery to SSE subscribers still succeed within their configured event limit.
+
 ## Runtime memory lifetime
 
 The runtime automatically collects unreachable closure/environment cycles. This

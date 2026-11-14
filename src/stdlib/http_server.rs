@@ -1536,9 +1536,12 @@ pub fn init() -> HashMap<String, Value> {
     // It is passed to each callback and replaced by its return value. `source`
     // forwards a broadcast: each `publish()` after the upgrade is sent as one
     // text message holding the published JSON value (SSE `event`/`id` are not
-    // added). A connection that falls behind the bus capacity is closed with
-    // 1013; reconnect and refetch state. Requires the async server
-    // (`ntnt run`); `ntnt test` returns 501.
+    // added). JSON above the connection's message limit (`max_event_bytes`,
+    // capped at 256 KiB) closes that socket with 1009; publication and other
+    // subscribers are unaffected. A connection that falls behind the bus
+    // capacity is closed with 1013; reconnect and refetch state. The source
+    // subscription is released before the close handshake and `on_close`.
+    // Requires the async server (`ntnt run`); `ntnt test` returns 501.
     // @param endpoint A WebSocketEndpoint from ws_endpoint()
     // @param options Optional map with `state` and `source` (a Broadcast)
     // @returns An upgrade response

@@ -1416,7 +1416,15 @@ pub(crate) async fn run(
                     use tokio::sync::broadcast::error::RecvError;
                     match received {
                         Ok(event) => {
-                            let text = event.json().to_owned();
+                            let json = event.json();
+                            if json.len() > max_message {
+                                eprintln!(
+                                    "[websocket] broadcast message too large: {} bytes (limit {max_message})",
+                                    json.len()
+                                );
+                                break 'run End::Close(close_code::TOO_BIG, "message too large".into());
+                            }
+                            let text = json.to_owned();
                             drop(event);
                             if !write(&mut socket, Message::Text(text), timings.write_timeout).await {
                                 break 'run End::Drop;
@@ -1436,7 +1444,9 @@ pub(crate) async fn run(
         }
     };
 
-    // Stop accepting new messages before the close handshake.
+    // Stop accepting new messages and release unread broadcast events before
+    // the close handshake or any application on_close callback can wait.
+    drop(source);
     drop(handle);
     drop(tx);
     rx.close();
