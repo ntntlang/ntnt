@@ -12,6 +12,14 @@ fn assert_runtime_error(expression: &str, message: &str) {
 }
 
 #[test]
+fn worker_panic_injection_is_not_exposed_in_cli() {
+    assert_runtime_error(
+        "test_worker_panic()",
+        "Undefined variable: test_worker_panic",
+    );
+}
+
+#[test]
 fn integer_division_overflow_is_runtime_error() {
     assert_runtime_error("minimum / -1", "Integer overflow in division");
 }
