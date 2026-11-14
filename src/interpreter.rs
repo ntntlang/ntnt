@@ -11982,11 +11982,17 @@ impl Interpreter {
             (BinaryOp::Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
             (BinaryOp::Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
             (BinaryOp::Mul, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
-            (BinaryOp::Div, Value::Int(_), Value::Int(0)) => {
+            (BinaryOp::Div | BinaryOp::Mod, Value::Int(_), Value::Int(0)) => {
                 Err(IntentError::DivisionByZero { line: 0 })
             }
-            (BinaryOp::Div, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a / b)),
-            (BinaryOp::Mod, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
+            (BinaryOp::Div, Value::Int(a), Value::Int(b)) => a
+                .checked_div(b)
+                .map(Value::Int)
+                .ok_or_else(|| IntentError::runtime_error("Integer overflow in division")),
+            (BinaryOp::Mod, Value::Int(a), Value::Int(b)) => a
+                .checked_rem(b)
+                .map(Value::Int)
+                .ok_or_else(|| IntentError::runtime_error("Integer overflow in remainder")),
             (BinaryOp::Pow, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.pow(b as u32))),
 
             // Float arithmetic
