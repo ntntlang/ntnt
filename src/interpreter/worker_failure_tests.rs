@@ -239,9 +239,24 @@ async fn worker_restarted_after_reload_takes_no_websocket_work() {
 const WORKER_LOSS_APP: &str = r#"
 import { text, status, ws_endpoint, websocket, ws_send } from "std/http/server"
 import { sleep_ms } from "std/concurrent"
+import { exists } from "std/fs"
+import { monotonic_now } from "std/time"
+fn wait_until_removed(path) {
+    let deadline = monotonic_now() + 30000
+    while exists(path) {
+        assert(monotonic_now() < deadline)
+        sleep_ms(10)
+    }
+}
+// Absent during initial startup; a restart waits before becoming a live worker.
+if exists(RESTART_BLOCK) {
+    print("RESTART_WAIT")
+    wait_until_removed(RESTART_BLOCK)
+}
 let mut primary = true
 fn slow(conn, message, state) {
-    sleep_ms(1500)
+    print("CALLBACK_BEGIN")
+    wait_until_removed(CALLBACK_BLOCK)
     ws_send(conn, "done:" + message["data"])
     return state
 }
@@ -259,15 +274,31 @@ get("/crash", fn(req) {
 listen(0, map { "readiness": "json", "host": "127.0.0.1" })
 // listen() serves until shutdown on worker 0 and returns in the others.
 primary = false
+print("SECONDARY_SETUP")
 "#;
 
 #[tokio::test]
 async fn worker_loss_keeps_a_worker_free_for_http() {
-    // Three workers share two callback slots, and idle workers hold them while
-    // they wait. After one worker crashes, only one callback may run until it
-    // restarts (after a second), so HTTP is still answered at once.
-    let mut server = start(WORKER_LOSS_APP, &[("NTNT_WORKERS", "3")]);
+    // Three workers share two callback slots. Hold the restarted worker in
+    // setup, even past its backoff, so only one of the two live workers may
+    // run a callback. The other must answer HTTP while that callback is held.
+    let gates = tempfile::tempdir().unwrap();
+    let restart_block = gates.path().join("restart-block");
+    let callback_block = gates.path().join("callback-block");
+    std::fs::write(&callback_block, b"blocked").unwrap();
+    let source = WORKER_LOSS_APP
+        .replace(
+            "RESTART_BLOCK",
+            &serde_json::to_string(restart_block.to_str().unwrap()).unwrap(),
+        )
+        .replace(
+            "CALLBACK_BLOCK",
+            &serde_json::to_string(callback_block.to_str().unwrap()).unwrap(),
+        );
+    let mut server = start(&source, &[("NTNT_WORKERS", "3")]);
     let addr = server.ready();
+    // All initial workers have passed setup; only a restarted one sees this.
+    std::fs::write(&restart_block, b"blocked").unwrap();
     let origin = origin(addr);
     let mut a = connect(addr, "/ws", Some(&origin)).await.unwrap();
     let mut b = connect(addr, "/ws", Some(&origin)).await.unwrap();
@@ -290,15 +321,54 @@ async fn worker_loss_keeps_a_worker_free_for_http() {
         assert!(std::time::Instant::now() < deadline, "{}", server.stderr());
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    // Observe the restart inside its setup gate, not just the panic log. This
+    // guarantees the reduced live pool even if the test was descheduled for
+    // longer than the supervisor's one-second restart backoff.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !server.stdout().contains("RESTART_WAIT") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restarted worker did not reach restart gate: {}\n{}",
+            server.stdout(),
+            server.stderr()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     a.send(Message::Text("a".into())).await.unwrap();
     b.send(Message::Text("b".into())).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let (body, waited) = timed_get(addr, "/health").await;
-    assert_eq!(body, "ok");
-    assert!(
-        waited < Duration::from_millis(500),
-        "HTTP waited {waited:?} for the crashed worker to restart"
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !server.stdout().contains("CALLBACK_BEGIN") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no callback reached its gate: {}\n{}",
+            server.stdout(),
+            server.stderr()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Neither callbacks nor the restarted worker can unblock HTTP by finishing:
+    // the parent releases both gates only after this bounded request succeeds.
+    assert_eq!(get_body(addr, "/health").await, "ok");
+    assert_eq!(
+        server.stdout().matches("CALLBACK_BEGIN").count(),
+        1,
+        "more than one callback ran with two live workers: {}",
+        server.stdout()
     );
+    std::fs::remove_file(&callback_block).unwrap();
+    std::fs::remove_file(&restart_block).unwrap();
     assert_eq!(next_data(&mut a).await, Message::Text("done:a".into()));
     assert_eq!(next_data(&mut b).await, Message::Text("done:b".into()));
+    // Initial readiness required both secondary setups. A third proves the
+    // supervisor's restarted interpreter completed setup after the release.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while server.stdout().matches("SECONDARY_SETUP").count() < 3 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restarted worker did not finish setup: {}\n{}",
+            server.stdout(),
+            server.stderr()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
