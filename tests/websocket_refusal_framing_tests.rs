@@ -14,7 +14,7 @@ const ORIGIN: &str = "https://app.example.com";
 const HANDSHAKE: &str =
     "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
 const APP: &str = r#"
-import { ws_endpoint, websocket, ws_send } from "std/http/server"
+import { text, ws_endpoint, websocket, ws_send } from "std/http/server"
 fn echo(conn, message, state) {
     ws_send(conn, message["data"])
     return state
@@ -22,6 +22,7 @@ fn echo(conn, message, state) {
 let endpoint = ws_endpoint("echo", echo, map { "origins": ["https://app.example.com"] })
 enable_csp(map { "default-src": "'none'" })
 get("/ws", fn(req) { websocket(endpoint) })
+get("/buffered", fn(req) { text("Ordinary buffered HTTP responses must still negotiate gzip compression.") })
 listen(0, map {
     "fixture": true, "readiness": "json",
     "realtime": map { "max_connections": 1 }
@@ -44,7 +45,7 @@ fn start() -> (fixture::Fixture, SocketAddr) {
 
 /// Read the actual HTTP/1 bytes without decoding chunked framing or forcing
 /// connection-close framing. Bound both the response size and the whole read.
-async fn refusal(addr: SocketAddr, headers: &str, encoding: &str) -> String {
+async fn refusal(addr: SocketAddr, headers: &str, encoding: &str) -> Vec<u8> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         stream
@@ -79,19 +80,24 @@ async fn refusal(addr: SocketAddr, headers: &str, encoding: &str) -> String {
                 break;
             }
         }
-        String::from_utf8(bytes).unwrap()
+        bytes
     })
     .await
     .expect("refusal did not complete within 5s")
 }
 
-fn assert_refusal(wire: &str, status: u16, expected_body: &str) {
-    let (head, body) = wire.split_once("\r\n\r\n").expect("HTTP response");
+fn assert_refusal(wire: &[u8], status: u16, expected_body: &str) {
+    let end = wire
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("HTTP response");
+    let head = std::str::from_utf8(&wire[..end]).unwrap();
+    let body = &wire[end + 4..];
     let mut lines = head.lines();
     let status_line = lines.next().unwrap();
     assert!(
         status_line.starts_with(&format!("HTTP/1.1 {status} ")),
-        "{wire}"
+        "{head}"
     );
     let mut headers = HeaderMap::new();
     for line in lines {
@@ -104,10 +110,14 @@ fn assert_refusal(wire: &str, status: u16, expected_body: &str) {
     assert_eq!(
         headers.get("content-length").and_then(|v| v.to_str().ok()),
         Some(expected_body.len().to_string().as_str()),
-        "finite refusal must advertise its byte length: {wire}"
+        "finite refusal must advertise its byte length: {head}; body: {body:?}"
     );
     assert_eq!(headers.get_all("content-length").iter().count(), 1);
-    assert_eq!(body, expected_body, "body must be complete and unchunked");
+    assert_eq!(
+        body,
+        expected_body.as_bytes(),
+        "body must be complete and unchunked"
+    );
     for name in [
         "transfer-encoding",
         "content-encoding",
@@ -116,7 +126,7 @@ fn assert_refusal(wire: &str, status: u16, expected_body: &str) {
         "sec-websocket-protocol",
         "sec-websocket-extensions",
     ] {
-        assert!(!headers.contains_key(name), "unexpected {name}: {wire}");
+        assert!(!headers.contains_key(name), "unexpected {name}: {head}");
     }
     assert_eq!(headers["content-type"], "text/plain; charset=utf-8");
     assert_eq!(headers["cache-control"], "no-store");
@@ -175,12 +185,39 @@ async fn malformed_upgrade_has_a_complete_fixed_length_http1_body() {
 }
 
 #[tokio::test]
+async fn ordinary_http_responses_still_negotiate_gzip() {
+    let (_server, addr) = start();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let mut response = client
+        .get(format!("http://{addr}/buffered"))
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.unwrap() {
+        bytes.extend_from_slice(&chunk);
+        assert!(bytes.len() < 16 * 1024, "buffered response exceeded cap");
+    }
+    assert!(bytes.starts_with(b"\x1f\x8b"), "gzip body magic missing");
+}
+
+#[tokio::test]
 async fn admission_refusal_has_fixed_length_without_changing_successful_upgrades() {
     let (_server, addr) = start();
     let mut request = format!("ws://{addr}/ws").into_client_request().unwrap();
     request
         .headers_mut()
         .insert("origin", ORIGIN.parse().unwrap());
+    request
+        .headers_mut()
+        .insert("accept-encoding", "gzip".parse().unwrap());
     let (mut socket, handshake) = tokio::time::timeout(
         Duration::from_secs(5),
         tokio_tungstenite::connect_async(request),
@@ -207,13 +244,12 @@ async fn admission_refusal_has_fixed_length_without_changing_successful_upgrades
     })
     .await
     .expect("echo timed out");
-    let wire = refusal(
-        addr,
-        &format!("{HANDSHAKE}Origin: {ORIGIN}\r\n"),
-        "identity",
-    )
-    .await;
-    assert_refusal(&wire, 503, "Too many open realtime connections");
+    // This message is large enough for the default compression threshold.
+    // Accepting gzip must not erase the finite refusal's fixed framing.
+    for encoding in ["identity", "gzip"] {
+        let wire = refusal(addr, &format!("{HANDSHAKE}Origin: {ORIGIN}\r\n"), encoding).await;
+        assert_refusal(&wire, 503, "Too many open realtime connections");
+    }
     tokio::time::timeout(Duration::from_secs(5), socket.close(None))
         .await
         .expect("close timed out")

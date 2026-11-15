@@ -43,7 +43,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tower_http::{
-    compression::CompressionLayer, cors::CorsLayer, timeout::TimeoutLayer, trace::TraceLayer,
+    compression::{
+        predicate::{DefaultPredicate, Predicate},
+        CompressionLayer,
+    },
+    cors::CorsLayer,
+    timeout::TimeoutLayer,
+    trace::TraceLayer,
 };
 
 use super::http_server::{get_default_security_headers, CorsConfig, CspConfig};
@@ -636,6 +642,10 @@ const WS_FIXED_HEADERS: [&str; 9] = [
     "transfer-encoding",
 ];
 
+/// Keep finite WebSocket refusals uncompressed so their byte length survives.
+#[derive(Clone, Copy)]
+struct FixedWsRefusal;
+
 /// A refused handshake: plain text, no upgrade, no connection opened.
 fn ws_refusal(
     status: StatusCode,
@@ -654,6 +664,7 @@ fn ws_refusal(
         builder = builder.header("retry-after", "5");
     }
     let mut resp = builder.body(Body::from(message)).expect("static response");
+    resp.extensions_mut().insert(FixedWsRefusal);
     apply_async_security_headers(&mut resp, csp);
     resp
 }
@@ -1542,7 +1553,13 @@ fn build_app(
 
     // 2. Compression
     if config.enable_compression {
-        app = app.layer(CompressionLayer::new());
+        app = app.layer(
+            CompressionLayer::new().compress_when(DefaultPredicate::new().and(
+                |_, _, _: &axum::http::HeaderMap, extensions: &axum::http::Extensions| {
+                    extensions.get::<FixedWsRefusal>().is_none()
+                },
+            )),
+        );
     }
 
     // 3. Tracing
