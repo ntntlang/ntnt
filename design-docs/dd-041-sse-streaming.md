@@ -1,6 +1,6 @@
 # DD-041: Native SSE and WebSockets
 
-**Status:** Slice A (native SSE) shipped in v0.6.0. The v0.6.1 development line adds exact loaded-source provenance; Slice B (WebSockets) is partly implemented: `ws_endpoint`, `websocket`, `ws_send` and `ws_close` with worker callbacks; broadcast `source`, connection lifetime limits and reload closing.
+**Status:** Slice A (native SSE) shipped in v0.6.0. The v0.6.1 candidate implements bounded process-local WebSockets, worker callbacks, broadcast `source`, finite socket lifetime, reload closing, setup-source parity and different-source worker quarantine. The accepted design is not fully closed; current limits and deferred guarantees are separated below.
 **Author:** Larri
 **Created:** 2026-03-17
 **Revised:** 2026-10-25
@@ -9,7 +9,7 @@
 
 Approval accepts the two-slice design direction, not a claim of shipped APIs or authorization to implement/deploy. API details and numerical defaults remain subject to the feasibility and measurement gates below.
 
-The [implementation plan](dd-041-implementation-plan.md) records the executed Gate 0 probes and remaining WebSocket acceptance checks. #295 merged the native SSE implementation; #298 merged the interpreter-context function prerequisite. The design below includes proposed Slice B behavior, not a claim that every original invariant has shipped.
+The [implementation plan](dd-041-implementation-plan.md) records historical Gate 0 probes and subsequent implementation. #295 supplied SSE; #298 supplied the interpreter-context registration primitive. **The implemented boundary below describes current behavior. Sections 1–8 retain the accepted target design, including requirements beyond 0.6.1; they are not a completed feature checklist.**
 
 ## Implemented boundary
 
@@ -25,21 +25,56 @@ topic sizing must accommodate transient setup buses alongside already-live proce
 buses. Initial worker setup is now gated before bind/readiness when a live setup
 bus or explicit realtime listen map exists: errors fail startup, and one shared
 10-second deadline bounds the decision. Use an empty realtime map for request-only
-bus creation. This does not establish program-generation/endpoint compatibility.
+bus creation. WebSocket endpoint applications also use this realtime startup path.
 Limits change only on
 process restart. The async protocol tests, not synchronous `ntnt test`, exercise SSE.
 
-The current bus registry, accounting and cancellation are **process-scoped**, not
-isolated per embedded server/application generation. It does not implement finite
-connection leases or immediate authorization revocation. The callback registry,
-worker generation-compatibility barrier, quarantined respawn, WebSocket upgrade,
-Origin policy and callback-vs-HTTP fairness remain Slice B work. Those original
-requirements are not completed merely by the SSE merge. The rest of this DD is
-the accepted target design; use the AI guide/generated API docs for the implemented
-SSE signatures and configuration. Initial worker success is now checked, but
-post-start supervision still uses the previous retry policy. No forced interruption
-of blocked application/native setup is promised; CLI startup failures exit the
-process, while Rust embedding code must account for non-preemptible work.
+The bus registry, accounting and cancellation remain **process-scoped**, not
+isolated per embedded server/application generation. There is no replay, durable
+broker or cross-process publication.
+
+The 0.6.1 APIs `ws_endpoint`, `websocket`, `ws_send` and `ws_close` support
+setup-registered worker-local callbacks, bounded explicit JSON state/queues,
+optional broadcast forwarding, exact Origins, finite WebSocket lifetime, and
+shutdown/reload closes. Realtime workers compare exact setup-loaded source before
+bind/readiness; a restarted worker loading different source remains out of service.
+Native endpoint configuration is checked, but full callback/captured-value identity
+and post-`listen` lazy inputs are not frozen into that source comparison.
+
+Live-worker callback admission normally leaves HTTP capacity when several workers
+serve. It does not preempt callbacks already running after a worker fails; those
+can occupy every survivor until completion/restart. One-worker callbacks can delay
+HTTP. The common wait uses fresh flume async receives, not `flume::Selector`.
+Post-start supervision retains its existing retry/backoff policy. No forced
+interruption of blocked application/native setup is promised; CLI startup failures
+exit the process, while Rust embedding must account for non-preemptible work.
+
+### Production adoption and remaining boundaries
+
+- Use one application per process and immutable production source. Configure
+  public Origins explicitly; run middleware/application authorization before
+  opening a stream or socket. Reauthorize sensitive commands: copied connection
+  state and handshake authentication are not ongoing permission checks.
+- WebSocket lifetime is finite (default five minutes; one second–24 hours), so
+  reconnect runs admission/auth again. It is not immediate revocation, and SSE
+  does not gain a finite authorization lease. Applications requiring immediate
+  revocation need their own verified integration before protected-stream adoption.
+- Handle lifetime 1001, reload 1012 and overload 1013 closes, reconnect, and refetch
+  authoritative state. `publish`/`ws_send` success means queued, not received.
+- Use the real async `ntnt run` server. Synchronous `ntnt test` returns 501 for
+  SSE/WebSocket responses. WebSockets use HTTP/1.1 upgrade, not extended CONNECT
+  or HTTP/3. Test your actual proxy path; do not infer it from a buffered Intent test.
+- Default development uses one worker. With `NTNT_WORKERS>1`, only worker 0 reloads;
+  other workers can serve old HTTP code and refuse current WebSocket work until
+  restart. Coordinated reload is #361, not a delivered production-upgrade protocol.
+- Per-application realtime isolation, full frozen program/endpoint attestation,
+  inherited task provenance, combined saturation/fair-recovery coverage beyond
+  existing worker-loss tests, aggregate downstream transport-buffer accounting
+  and hard SSE socket-write/teardown guarantees remain deferred or unproven.
+
+See the [agent guide](../docs/AI_AGENT_GUIDE.md#websockets),
+[release announcement](../docs/release-notes/v0.6.1.md) and current async tests.
+These boundaries do not mark every original DD invariant complete.
 
 ### Loaded-source prerequisite (v0.6.1 development)
 
@@ -48,14 +83,15 @@ passed to the parser. Immutable `ParsedSource` binds that AST to its input witho
 adding fields to `Program`; interpreter snapshots retain cached input provenance,
 track direct libs/middleware/routes/jobs as well as transitive imports, and reject
 source-less or mixed-source attestation. Existing evaluation and reload continue
-to work; no new public NTNT realtime API is introduced.
+to work; this ledger adds no new NTNT syntax. The realtime APIs above consume it
+without turning every observed-source snapshot into full program attestation.
 
-This is observed-source provenance only. Lazy imports can add inputs after a
-snapshot, and a fresh task interpreter does not inherit its parent's ledger.
-Runtime/endpoint identity, a corresponding primary/worker setup boundary,
-quarantined respawn, and coordinated source-change/reload transitions still need
-the actual generation protocol. Do not treat a source snapshot as eligibility or
-claim these remaining Slice B requirements are implemented.
+The source ledger records observed inputs; a fresh task interpreter does not
+inherit its parent's ledger, and lazy imports can add files later. The runtime now
+uses corresponding first-`listen`/server-block snapshots for startup parity and
+different-source respawn quarantine. That source-only eligibility check is not
+full frozen program/callback identity, per-application isolation or coordinated
+reload. Native endpoint configuration checks do not close those broader gaps.
 
 ## 1. Decision
 
@@ -65,7 +101,10 @@ Use SSE for dashboards, notifications, progress, live logs, and server-to-browse
 
 This is a **medium runtime/server feature, not a server rewrite**. Axum already supplies both transports. SSE is the smaller portion; safe WebSocket callbacks and lifecycle integration are the consequential work. Tentatively allow roughly one to two focused engineering weeks for both, including tests, subject to the integration spikes below. This is a planning estimate, not a delivery commitment or an estimate derived from the old DD's line count.
 
-## 2. What already exists
+## 2. Design baseline (v0.5.6, historical)
+
+The following observations and source line references describe the design
+baseline, not the current 0.6.1 runtime summarized above.
 
 - The [previous DD-041: Real-Time Streaming — SSE & Broadcast Channels](https://github.com/ntntlang/ntnt/blob/v0.5.6/design-docs/dd-041-sse-streaming.md) was an unimplemented SSE draft, including a later multi-worker design review. This revision replaces it.
 - [DD-058](https://github.com/ntntlang/ntnt/blob/v0.5.6/design-docs/dd-058-stdlib-gaps.md), [http_updates.md](https://github.com/ntntlang/ntnt/blob/v0.5.6/design-docs/http_updates.md), and ROADMAP Phase 10.5 contain WebSocket sketches. They do not establish a coherent shipped API.
@@ -89,7 +128,7 @@ Ordinary response builders, normal middleware before streaming, named buses shar
 
 ## 3. Public surface: small and additive
 
-The SSE APIs (`broadcast`, `publish`, `sse`) are implemented for v0.6.0. WebSocket APIs and later lifecycle requirements below remain **proposed**; consult the AI guide for current operational coverage. None of these APIs was available in v0.5.6. No new parser syntax or route DSL is required.
+The SSE APIs (`broadcast`, `publish`, `sse`) are implemented for v0.6.0; the WebSocket APIs below are implemented in the 0.6.1 candidate. Later lifecycle/isolation requirements in the accepted target are not all delivered; consult the implemented boundary and agent guide. None of these APIs was available in v0.5.6. No new parser syntax or route DSL is required.
 
 - `std/concurrent.broadcast(name, options?) -> Broadcast`: a named, runtime-scoped native fan-out source.
 - `std/concurrent.publish(bus, value, event_options?) -> Result<Unit, String>`: validate and JSON-encode once, then publish without waiting for any client. Zero subscribers is a successful no-op, not replay storage. Optional `event` and `id` fields are SSE metadata; neither is an authorization grant.
@@ -120,7 +159,7 @@ get("/events/metrics", fn(req) {
 
 The browser uses `new EventSource('/events/metrics')`. Each SSE `data:` contains the JSON encoding of the published value. A String is therefore a JSON string, not raw SSE markup. Event names and IDs are validated against control-character injection and bounded independently.
 
-### WebSocket example — proposed API
+### WebSocket example — implemented async API
 
 ```ntnt
 import { ws_endpoint, websocket, ws_send } from "std/http/server"
@@ -183,7 +222,7 @@ Timeout is not CPU preemption. Existing NTNT loops and some native calls cannot 
 
 ## 5. Fan-out, ownership and resource bounds
 
-Use `tokio::sync::broadcast<Arc<EncodedEvent>>`. Publishing is synchronous and nonblocking; receivers await asynchronously. A shared immutable encoded payload avoids cloning the NTNT value or re-serializing JSON for each subscriber. A transport frame may be encoded once per protocol, not once per recipient. Use Axum's SSE event/keep-alive implementation and WebSocket codec rather than handwritten wire parsers.
+Use `tokio::sync::broadcast<Arc<EncodedEvent>>`. Publishing is synchronous and nonblocking; receivers await asynchronously. Application JSON is encoded once, and SSE frame bytes are shared through the streaming body. The maintained WebSocket codec requires bounded owned message copies per recipient; this is not per-subscriber NTNT-value serialization or a zero-copy codec claim. Reuse Axum's streaming body and maintained WebSocket codec; a small shared SSE encoder/heartbeat is not a handwritten HTTP/WebSocket parser. Downstream codec/kernel copies are separate from the application payload budget.
 
 Bus names resolve inside the same application/server generation across all interpreter workers and in-process tasks. They are **not** shared between different applications or OS processes. Initialization must propagate the namespace to workers/task captures; do not use a global bare-name registry that merges unrelated servers. A live native handle grants publish/subscribe authority; a browser-supplied String does not. Bound topic creation, reject incompatible redefinitions, and use weak registry entries/reference ownership so transient names do not accumulate forever. Capturing a Broadcast into an in-process task is supported explicitly; peers/endpoints/response capabilities are not general task/channel/job payloads.
 
@@ -253,7 +292,7 @@ Enable Axum's `ws` feature, assess the resulting dependency/advisory delta, pres
 - Native Rust integration clients should drive the protocol tests. Existing synchronous `ntnt test` mode must fail clearly for unsupported streaming/upgrade execution instead of buffering forever or silently passing; ordinary existing tests remain intact. Do not count documentary `.intent` scenarios as executed streaming assertions.
 - Relevant existing tests, platform CI, generated stdlib docs/type signatures, API examples, release notes and dependency security checks are updated for each shipped slice.
 
-## 9. Evidence from this design pass
+## 9. Evidence from the original design pass (historical)
 
 The repository/current dependencies were inspected; no NTNT server implementation was changed. A disposable offline Rust probe compiled against exact Tokio 1.53.3 and passed assertions for shared immutable fan-out payloads, bounded oldest eviction with an explicit lag error, synchronous worker publication to async receive, and the no-receiver condition. This removes the justification for a handwritten ring solely to obtain drop-oldest behavior. It does **not** prove the future NTNT bridge, callback dispatcher, browser/proxy integration, or memory targets.
 
@@ -261,4 +300,4 @@ Additional reference behavior was checked in the pinned tower-http 0.5.2 timeout
 
 ## 10. Accepted direction and implementation gate
 
-The maintainer has accepted the two-slice direction: process-local live delivery and explicit state, without replay/brokers/rooms/generators. Gate 0 and Slice A have landed; see the implemented boundary above. Slice B must still prove upgrade ownership, worker readiness/generation compatibility and fairness under worker loss before its proposed APIs are considered available. If requirements include cross-process job push, durable replay, arbitrary request-local closures, or immediate session revocation, revise that scope explicitly; those materially change the work.
+The maintainer accepted process-local live delivery and explicit state, without replay/brokers/rooms/generators. SSE is published in 0.6.0 and the 0.6.1 candidate provides the WebSocket APIs and scoped source/worker protections described above. Their availability is not full closure of every accepted target invariant. Keep the remaining isolation/identity, coordinated-reload, combined-load and transport-bound work explicit. Requirements for cross-process push, durable replay, arbitrary request-local closures or immediate revocation materially change the scope and need their own contract.

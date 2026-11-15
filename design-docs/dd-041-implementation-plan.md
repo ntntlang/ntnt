@@ -1,9 +1,45 @@
 # DD-041 implementation plan: native SSE, then WebSockets
 
-**Status:** Gate 0 executed on 2026-10-26; Slice A (SSE), process resource caps and initial worker readiness shipped in v0.6.0. Exact loaded-source provenance is the next v0.6.1 development prerequisite. Slice B remains unimplemented and gated on its own acceptance checks.
+**Status:** Slice A (SSE), process resource caps and initial worker readiness shipped in v0.6.0. The v0.6.1 candidate implements bounded process-local WebSockets, setup-source parity and different-source worker quarantine. The original DD is not fully closed: see the current boundary and remaining acceptance work below.
 **Gate 0 baseline (historical):** `58710b9b9b9468575257ccc141dcbaed639d468b` (DD-041 merged); the runtime/Cargo at that baseline matched v0.5.6, not current main.
 **Design:** [DD-041](dd-041-sse-streaming.md).
-**Publication:** Historical implementation plan plus Gate 0 evidence. The task lists below describe the accepted target, not a claim that every planned invariant landed in Slice A. See DD-041's implemented boundary for process scope, missing finite leases and deferred generation work. Initial worker setup now gates realtime bind/readiness with fail-fast errors and a shared 10-second deadline; this is not program-generation/endpoint parity or quarantined rejoin. #298 has merged the interpreter-context function prerequisite; it is no longer a blocker to Slice B.
+**Publication:** Historical implementation plan, feasibility evidence and subsequent implementation record. The task lists describe the accepted target, not a completed release checklist. The current boundary here and in [DD-041](dd-041-sse-streaming.md#implemented-boundary) governs adoption; old baseline observations do not override it. #298 supplied the interpreter-context registration primitive used by the implemented APIs.
+
+## Current release boundary and adoption (0.6.1)
+
+- `ws_endpoint`, `websocket`, `ws_send` and `ws_close` are implemented through the
+  real async server. Setup registration freezes before serving and checks native
+  endpoint configuration. Worker-local callbacks use explicit bounded JSON state;
+  text/binary messages, hooks, broadcast `source`, exact Origins, finite socket
+  lifetime, shutdown and reload closes are supported.
+- Realtime startup compares exact loaded source at the corresponding first
+  `listen`/server-block boundary before bind/readiness. Different-source restarted
+  workers stay out of service. Native endpoint-configuration checks are not full
+  callback/captured-environment attestation or a snapshot of later lazy imports.
+- Callbacks share HTTP workers and bounded admission. Live-worker accounting
+  normally reserves HTTP capacity with several workers, but cannot preempt
+  callbacks already occupying survivors after a crash. One-worker blocking
+  callbacks still delay HTTP. The common wait path uses fresh flume async receives
+  (`recv_either`), not `flume::Selector`.
+- Production adoption means immutable application source, one application per
+  process, configured public Origins, authorization before the handshake, and
+  per-command reauthorization where needed. Finite WebSocket age forces periodic
+  re-handshake; it is not immediate revocation. Reconnect and reconcile state:
+  neither SSE nor WebSockets provide replay, durable delivery or cross-process fan-out.
+- Default development uses one worker. With several development workers only
+  worker 0 reloads; others can serve old HTTP code and refuse current WebSocket
+  work until restart. This is not coordinated application reload (#361).
+- Still deferred or not fully demonstrated: per-embedded-application realtime
+  isolation, complete frozen program/endpoint identity (including post-`listen`
+  lazy inputs and task provenance), coordinated reload, combined saturation/fair
+  recovery beyond the existing worker-loss cases, and independent aggregate
+  transport-buffer/hard SSE socket-teardown guarantees. Do not mark these closed
+  because the public WebSocket API exists.
+
+Use the [agent guide](../docs/AI_AGENT_GUIDE.md#websockets),
+[versioned announcement](../docs/release-notes/v0.6.1.md), and actual async tests
+for current operational semantics. The historical probes below are not fresh
+0.6.1 release benchmarks.
 
 ### Current provenance boundary and next generation work
 
@@ -31,12 +67,12 @@ disk without restarting the process) stays out of service, retried with the
 existing backoff, until its source matches the committed generation again; files
 must not be relabeled as the running generation. Buffered-only apps are unchanged.
 
-Not covered yet, and still Slice B acceptance work: frozen endpoint/callback
-configuration (WebSocket endpoints do not exist yet), validation of lazy imports
-loaded after `listen`, provenance for task-created interpreters, and coordinated
-reload into a new generation. The runtime build is identical across workers of
-one process, so it is not part of the fingerprint. No endpoint placeholder,
-application namespace or callback queue is added in this step.
+The source fingerprint does not fully attest callback/captured-environment
+identity, lazy imports loaded after `listen`, or task-created interpreters.
+WebSocket endpoints and their native configuration checks now exist; complete
+frozen program/endpoint parity and coordinated reload remain separate work. The
+runtime build is identical across workers of one process, so it is not part of
+this source-only fingerprint. Application namespace isolation is not implemented.
 
 ## Outcome and limits
 
@@ -45,6 +81,11 @@ Ordinary NTNT applications can return SSE or WebSocket responses through existin
 Deliver SSE independently before WebSockets, but validate the WebSocket callback seam early enough not to fossilize an incompatible SSE ownership API. No new syntax, `ExecutionMode`, general async interpreter, general actor framework, durable messaging/broker, rooms, replay, client SDK or generic native-extension dispatch redesign. Do not fix unrelated capability/GC problems inside this feature. The quality objective is a small coherent addition with demonstrable invariants—not an unprovable promise of zero future technical debt.
 
 ## 1. Concrete findings to settle before freezing implementation
+
+The findings and proposed implementation steps in §§1–3 record the original
+design baseline/accepted target, not a statement that the following work is all
+still absent. In particular, startup ordering and the callback seam have since
+changed as described in the current boundary and implementation record.
 
 ### A. Separate JSON serialization from transport copies
 
@@ -150,7 +191,7 @@ These are coherent implementation boundaries, not a requirement for one micro-PR
 
 ### Gate 0 outcome (executed 2026-10-26)
 
-Probes ran against the real `ntnt run` server and real Worker-mode interpreters, using disposable scratch patches that have since been deleted. No public API, stub or registry landed. Pre-existing defects that Gate 0 surfaced are tracked separately so this feature does not carry them: #289 and #290 are merged; the builtin-shadowing defect is open as #293 (#291 was a superseded stopgap).
+Probes ran against the real `ntnt run` server and real Worker-mode interpreters, using disposable scratch patches that have since been deleted. Gate 0 itself landed no public API, stub or registry. Pre-existing defects surfaced there were handled separately: #289 and #290 merged; builtin shadowing was tracked in #293 (#291 was a superseded stopgap) and was subsequently fixed in v0.6.0.
 
 **Ownership/transport (real bridge + Axum server, HTTP/1.1 and HTTP/2):**
 
@@ -161,23 +202,25 @@ Probes ran against the real `ntnt run` server and real Worker-mode interpreters,
 **Callbacks and worker semantics (real `Interpreter`, Worker mode):**
 
 - A callback invoked through ordinary `call_function` with explicit state in/out behaves as §3 requires. Plain value and `Ok(state)` commit; returned `Err` and runtime errors (e.g. a failed `assert`) are failures and do not commit. Task spawning inside a callback works. `call_depth`, the environment frame and the deferred list are restored after every call, including failures. Transitive helper imports resolve.
-- Canonical identity: an interpreter-aware native keyed on the resolved `NativeFunction` (the `sort_by` path) agrees across named import, alias and module-qualified calls. The spelling-keyed fast paths in call evaluation, and server-action dispatch by raw identifier, do **not** let user definitions shadow builtins. This is pre-existing and unfixed; the replacement design is tracked in #293. The realtime registration hook must use the value-based (resolved callee) path only and must not rely on spelling-keyed dispatch.
+- Canonical identity at the probe baseline: an interpreter-aware native keyed on the resolved `NativeFunction` (the `sort_by` path) agreed across named import, alias and module-qualified calls, while spelling-keyed call/server-action fast paths did not permit ordinary shadowing. #293 subsequently fixed that pre-existing defect. Realtime registration uses the resolved-value path, not the spelling of an identifier.
 - Capability parity: secondary workers silently dropped `enqueue` (capability gate returned Unit): with 4 workers, 30 of 40 request-time enqueues were lost. Pre-existing; fixed in #290. Callback execution must reuse the request-phase capability set, and tests must assert real return values, because missing capabilities become silent Unit.
 - Two work queues: a worker blocks without busy-waiting until the HTTP queue or, depending on whether it holds a callback slot, the callback queue or a returned slot has work. The first implementation waited with `flume::Selector`, which strands wakeups: a woken selector handles one signal and parks again without registering when another worker took that message, so a request could wait for an unrelated one and the worker never woke again (#359). Workers now register a fresh pair of flume async receives on every wakeup, each of which checks its queue and registers in one step, and drop the previous pair (polling a woken flume receive again would register it once more each time); `clippy.toml` disallows `flume::Selector`. HTTP preference after a callback is a `try_recv` policy in the shared worker service, with no second interpreter pool.
-- Source identity: a worker's tracked imports include nested imports, so a fingerprint over main + tracked import bytes changes when only a transitive helper changes. This establishes only the source-bytes input to §1.D's generation identity. Resolved import identities, runtime build identity and frozen endpoint configuration, plus the generation barrier and respawn quarantine themselves, were not exercised and remain Slice B acceptance checks.
-- Readiness ordering: confirmed by source that the async server binds and emits readiness before secondary workers start, and workers retry startup indefinitely. The realtime readiness barrier (§1.D) must gate the existing startup handshake on worker setup/compatibility and bound startup retries. This is ordering work in `run_async_http_server`, not a loader rewrite.
+- Source identity at Gate 0: a transitive helper change altered the source-bytes input. The probe did not establish a generation barrier or quarantine. Later implementation adds exact resolved parser-input tracking, corresponding setup-source comparison and supervised-worker source rejection/rejoin; full program/endpoint identity remains outside that proof.
+- Readiness ordering at Gate 0: the listener originally bound before secondary initialization and retried setup indefinitely. Realtime startup now gates bind/readiness on initial setup/source agreement with a shared deadline; buffered-only apps retain their previous startup path.
 
-**WebSocket transport (Slice B steps 1 and 4):** Axum's `ws` feature is enabled; it adds `tokio-tungstenite`, `tungstenite` 0.24 and `utf-8`, with a clean advisory audit. The async server takes the `OnUpgrade` before request conversion, runs the normal pipeline, and upgrades only a successful final response carrying a WebSocket description. Denials, redirects, errors, plain or malformed requests, POSTs and foreign/`null`/missing Origins open nothing and hold no permit. Application cookies and headers reach the 101 response; handshake headers cannot be overridden. One task owns each connection: bounded outbox (16 messages, 256 KiB, charged to the payload budget), weak send handles that fail closed, explicit codec limits from `max_event_bytes`, server ping with a pong deadline, 1009/1007/1002 closes, and 1001 with bounded drain on shutdown. The permit is released when that task ends. No NTNT API opens a WebSocket yet; tests use an internal echo handler through the real server and bridge.
+### Subsequent WebSocket implementation record (0.6.1)
 
-**WebSocket endpoints (Slice B steps 2-3):** `ws_endpoint` is setup-only (frozen when an interpreter starts serving; task interpreters and request-time calls fail). Every worker evaluates it; callback Values stay in that worker, and only the name and configuration (origins, hooks) go into a process registry, where a different configuration fails startup. Endpoint apps use the realtime startup path, so the source-generation check covers them. Connection owners send callback jobs (endpoint, weak conn handle, encoded state, event) to one bounded queue; admission is a nonblocking 64-permit semaphore, so a full pool closes with 1013 instead of creating waiters. Workers select over HTTP and callbacks with a `flume::Selector`, prefer HTTP but take a waiting callback at least every 4 requests, and with more than one worker only `workers - 1` may run callbacks. One callback is in flight per connection; returned state commits only on success; a 30-second deadline closes with 1011. Ping/pong and close continue while a callback runs. Inbound backlog is 4 messages / 256 KiB (1008 beyond). Origins: endpoint `origins`, else `SITE_URL`'s origin, else loopback in development; production fails closed. Tested through `ntnt run` with two workers, including SIGTERM 1001 and `ntnt test` 501.
+**WebSocket transport (Slice B steps 1 and 4):** Axum's `ws` feature uses the maintained WebSocket codec. The async server takes the `OnUpgrade` before request conversion, runs the normal pipeline, and upgrades only a successful final response carrying a WebSocket description. Denials, redirects, errors, plain or malformed requests, POSTs and disallowed Origins open nothing and hold no permit. Application cookies and headers reach the 101 response; handshake headers cannot be overridden. One task owns each connection: bounded outbox (16 messages, 256 KiB, charged to the payload budget), weak send handles that fail closed, explicit codec limits from `max_event_bytes`, server ping with a pong deadline, 1009/1007/1002 closes, and 1001 with bounded drain on shutdown. The permit is released when that task ends. Public endpoints now use this transport; the original internal-echo fixture remains focused transport coverage. Finite native refusals carry an explicit UTF-8 byte length and are excluded from compression; ordinary HTTP compression and SSE retain their own behavior.
 
-**Live worker accounting:** callback slots are tokens in a pool sized to the workers actually serving (`max(live - 1, 1)`). Each serving loop holds a `LiveWorker` guard, dropped on exit or panic; when a worker stops, an idle token is withdrawn at once or the next returned one is retired, and a restarted worker restores its slot. A worker that held its token across the stop revalidates it before running a callback: an excess token is retired and the callback goes back to the queue. Unit tests cover start/stop/retire/restore and revalidation; `callback_slots_scale_with_live_workers` (3 workers) shows two callbacks overlap while HTTP answers, and fails with secondary workers uncounted; `worker_loss_keeps_a_worker_free_for_http` crashes a secondary worker while both survivors hold slots and shows HTTP is still answered at once, and fails without revalidation. Callbacks already running when a worker stops are not interrupted, so they can occupy every survivor until one finishes or the worker restarts; fairness among many queued callbacks under worker loss is not exercised.
+**WebSocket endpoints (Slice B steps 2-3):** `ws_endpoint` is setup-only (frozen when an interpreter starts serving; task interpreters and request-time calls fail). Every worker evaluates it; callback Values stay in that worker, and only the name and configuration (origins, hooks) go into a process registry, where a different configuration fails startup. Endpoint apps use the realtime startup path, so the source-generation check covers them. Connection owners send callback jobs (endpoint, weak conn handle, encoded state, event) to one bounded queue; admission is a nonblocking 64-permit semaphore, so a full pool closes with 1013 instead of creating waiters. Workers wait through the shared `recv_either` path with fresh flume async receives, prefer HTTP but take a waiting callback at least every 4 requests, and with more than one worker only `workers - 1` may run callbacks. One callback is in flight per connection; returned state commits only on success; a 30-second deadline closes with 1011. Ping/pong and close continue while a callback runs. Inbound backlog is 4 messages / 256 KiB (1008 beyond). Origins: endpoint `origins`, else `SITE_URL`'s origin, else loopback in development; production fails closed. Tested through `ntnt run` with two workers, including SIGTERM 1001 and `ntnt test` 501.
+
+**Live worker accounting:** callback slots are tokens rebalanced from workers actually serving (`max(live - 1, 1)`). The token floor supports single-worker operation; it does not execute callbacks without a serving worker. Each serving loop holds a `LiveWorker` guard, dropped on exit or panic; when a worker stops, an idle token is withdrawn at once or the next returned one is retired, and a restarted worker restores its slot. A worker that held its token across the stop revalidates it before running a callback: an excess token is retired and the callback goes back to the queue. Unit tests cover start/stop/retire/restore and revalidation; `callback_slots_scale_with_live_workers` (3 workers) shows two callbacks overlap while HTTP answers, and fails with secondary workers uncounted; `worker_loss_keeps_a_worker_free_for_http` crashes a secondary worker while both survivors hold slots and shows HTTP is still answered at once, and fails without revalidation. Callbacks already running when a worker stops are not interrupted, so they can occupy every survivor until one finishes or the worker restarts; fairness among many queued callbacks under worker loss is not exercised.
 
 **Broadcast source:** `websocket(endpoint, { source: bus })` subscribes in the connection owner at upgrade and writes each event's JSON value (a slice of the single SSE encoding, held by the shared `Arc<EncodedEvent>` until copied into the frame) as a text message. `Lagged` closes with 1013. Tested via `ntnt run` with two workers: four sockets receive every event in order; with capacity 4 and 120 × 48 KiB events, a non-reading socket closes with 1013 while a healthy one receives all 120 in order. Each test fails with its behavior removed.
 
 **Lifetime and reload:** each owner holds a lifetime timer (`max_lifetime_ms`, default 300 s, 1 s–24 h, never unlimited) and closes with 1001 when it fires. A successful development reload of main source, routes (including a route file edited in place), middleware or libs bumps a process code generation; owners watch it and close with 1012. Each connection keeps the generation its handshake ran under, and a worker never runs a callback from an older generation, so a message queued before the reload and the old connection's `on_close` never meet the new code. Each interpreter also records the generation of the code it loaded: only worker 0 reloads, so another worker's upgrades carry its older generation and close with 1012 at once, and it takes no callbacks (a job it had already received goes back to the queue). A worker that restarts after a reload is checked against the startup source, so it stays on the startup generation and out of WebSocket work. Tested via `ntnt run`: lifetime close then reconnect, out-of-range lifetime rejected at startup, edit-then-reload closes the open socket and a new one runs the new callback, a queued message and `on_close` are not run on reloaded callbacks, editing a route file in place closes open sockets, with two workers no reply ever mixes old and new code or state, and a worker restarted on reverted source after a reload runs no callbacks. Each test fails with its behavior removed.
 
-**Not yet exercised:** respawned-worker quarantine end-to-end, and fairness under worker loss with saturated callbacks. These remain Slice B acceptance checks, not assumed results.
+**Scoped coverage, not full DD closure:** `test_supervised_realtime_worker_restart_serves_only_the_committed_source` exercises changed-source rejection/rejoin, and the worker-failure fixtures cover stale-generation callback rejection and reduced-pool HTTP reservation. They do not establish complete frozen program/endpoint parity or every combined saturated-callback/fair-recovery scenario. Those broader checks remain explicit follow-up work.
 
 ### Slice A — useful SSE, complete lifecycle and caps
 
@@ -208,7 +251,7 @@ Choose final default limits and any lease policy from the measurements/consumer 
 
 **Reuse:** `tests/support/system_fixture.rs` supplies temporary workspaces, actual compiled CLI path, port-zero JSON readiness, bounded output and child cleanup; `tests/http_listen_options_tests.rs` already tests async production workers and sync CLI paths. Extend only the protocol client/lifecycle helpers needed. Do not create another web-app test framework or use fixed ports/blind readiness sleeps. The fixture's Drop kills a child; graceful shutdown tests must signal/wait and assert graceful exit separately before that fallback can run.
 
-Suggested new native integration targets: `tests/realtime_sse_tests.rs` and `tests/realtime_websocket_tests.rs`. These names are planned files, not existing executed tests. Place pure encoding/ownership tests with the native core. Retain existing tests in `tests/http_listen_options_tests.rs`, `tests/concurrency_tests.rs`, `src/interpreter/frame_restore_tests.rs`, auth tests, language/type-checker tests and existing CLI/native-test rejection checks.
+Existing native integration targets include `tests/realtime_sse_tests.rs`, `tests/realtime_worker_startup_tests.rs`, and `tests/websocket_{transport,endpoint,refusal_framing,shutdown}_tests.rs`. `tests/source_provenance_tests.rs` and interpreter/worker-failure tests cover the source and worker boundaries. Pure encoding/ownership checks remain with the native core. Synchronous Intent/HTTP assertions do not substitute for these real async tests.
 
 Each slice needs these relevant assertions—not a Cartesian test matrix:
 
@@ -227,8 +270,8 @@ cargo fmt -- --check
 cargo build --profile dev-release --locked
 cargo test --locked --lib realtime
 cargo test --locked --test realtime_sse_tests
-# After B exists:
-cargo test --locked --test realtime_websocket_tests
+cargo test --locked --test websocket_transport_tests --test websocket_endpoint_tests
+cargo test --locked --test websocket_refusal_framing_tests --test websocket_shutdown_tests
 # Fresh optimized binary before generation:
 ./target/dev-release/ntnt docs --generate
 # Final implementation integration: checkout-local target, process-per-test isolation
@@ -255,6 +298,6 @@ For ordinary HTTP/CLI/template baseline comparison, reuse `scripts/bench/run-ben
 
 **Actually observed (Gate 0):** disposable probes against the real `ntnt run` server and Worker-mode interpreters, recorded under §4 "Gate 0 outcome". These were feasibility probes, not the feature implementation or its regression suite.
 
-**Still to prove after Gate 0:** request-lease teardown through the final-response path (Slice A), WS codec-buffer allowance and upgrade ownership, generation/readiness barrier implementation and quarantined respawn, and HTTP fairness/RSS under live load and worker loss (Slice B). See the Gate 0 outcome under §4 for what was measured. Suggested DD defaults, the tentative implementation estimate and a documentation bot's confidence do not settle them.
+**Historical post-Gate-0 checklist:** request-lease teardown, upgrade ownership, generation/readiness, quarantine and fairness were implementation requirements at that point, not evidence that current APIs are absent. Subsequent tests/implementation are recorded above. The current release boundary identifies remaining full-identity/isolation, coordinated-reload, combined-load and transport-buffer/teardown uncertainty; historical probe measurements do not settle those gaps.
 
-**Independent review disposition:** the reviewer found no blocker to proceeding with Gate 0 and three medium-severity acceptance gaps, not proof that the final feature is feasible. Source inspection confirmed the startup-before-workers ordering, supervised workers rereading source, and the downstream HTTP codec copy paths. This revision addresses them with (1) explicit readiness/generation/quarantine steps and delay/conflict/helper-change cases, (2) a separate HTTP/SSE as well as WS transport-buffer allowance and stalled-writer cases, and (3) live-eligibility admission plus a truthful degraded-capacity contract and combined failure/load test. These are plan corrections, not executed feature regressions or a second reviewer verdict. Numeric limits, final lease policy and any requirement for immediate authorization revocation remain decisions to settle before public API/behavior freeze. No additional design merge or feature implementation has occurred.
+**Independent review disposition:** the reviewer found no blocker to proceeding with Gate 0 and three medium-severity acceptance gaps, not proof that the final feature is feasible. Source inspection confirmed the startup-before-workers ordering, supervised workers rereading source, and the downstream HTTP codec copy paths. This revision addresses them with (1) explicit readiness/generation/quarantine steps and delay/conflict/helper-change cases, (2) a separate HTTP/SSE as well as WS transport-buffer allowance and stalled-writer cases, and (3) live-eligibility admission plus a truthful degraded-capacity contract and combined failure/load test. These are plan corrections, not executed feature regressions or a second reviewer verdict. Numeric limits, final lease policy and any requirement for immediate authorization revocation remain decisions to settle before public API/behavior freeze. At that design-review point no feature implementation had occurred; this historical review disposition is not a verdict on the subsequently implemented runtime.

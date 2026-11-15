@@ -1,16 +1,38 @@
 # Changelog
 
-## Unreleased (0.6.1)
+## Unreleased
 
-See [unreleased notes](docs/release-notes/unreleased.md): `ntnt db` on real PostgreSQL
-applications, narrower migration locks, and `pulldown-cmark` 0.13.6 (RUSTSEC-2026-0433).
+No additional changes recorded after the prepared 0.6.1 candidate.
+
+## 0.6.1
+
+See the [versioned announcement and upgrade guidance](docs/release-notes/v0.6.1.md).
+
+### Added
+
+- Native WebSocket endpoints, explicit connection state, worker callbacks, shared
+  broadcast sources, bounded queues, exact-Origin policy and finite lifetimes.
+- Exact loaded-source snapshots and realtime startup source parity, with
+  different-source restarted workers kept out of service.
+- Broader PostgreSQL migration replay/catalog coverage, lock predictions and
+  reporting, and guarded concurrent-index execution/reconciliation.
 
 ### Fixed
 
-- Automatically reclaim unreachable closure/environment cycles, including imported
-  modules in completed tasks and local closures in persistent interpreters (#183).
-  Escaped callbacks retain their lexical state and are collectible even when their
-  last owner is released after the original interpreter exits.
+- Restore caller scope after match, invariant and `otherwise` evaluation errors;
+  report integer division/remainder overflow and zero divisors without panicking.
+- Count imports referenced by `otherwise` recovery blocks as used.
+- Reclaim unreachable closure/environment cycles, including imported modules in
+  completed tasks and local closures in persistent interpreters (#183). Escaped
+  callbacks retain their lexical state until their final reachable owner releases it.
+- Avoid lost worker wakeups across HTTP/callback queues; retain the full route
+  prelude when reloading a route file edited in place.
+- Respect static-mount path boundaries and serve async `.mjs` as JavaScript.
+- Release WebSocket broadcast subscriptions before slow close teardown, report
+  oversized broadcast delivery with 1009, and preserve complete finite upgrade
+  refusals through proxies without disabling ordinary HTTP compression.
+- Remove the final migration re-lock pass; allow already-current PostgreSQL auth
+  schema startup with runtime DML privileges rather than redundant DDL.
 
 ### Native embedding
 
