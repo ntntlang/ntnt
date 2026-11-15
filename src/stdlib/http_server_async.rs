@@ -644,6 +644,9 @@ fn ws_refusal(
 ) -> Response<Body> {
     let mut builder = Response::builder()
         .status(status)
+        // Compression middleware can erase the size hint even for identity
+        // bodies. Keep finite refusals explicitly framed for upgrade proxies.
+        .header(header::CONTENT_LENGTH, message.len())
         .header("content-type", "text/plain; charset=utf-8")
         .header("cache-control", "no-store")
         .header("server", "ntnt-async");
