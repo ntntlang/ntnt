@@ -4362,18 +4362,20 @@ get("/ws", fn(req) {
 - **Handshake auth is not ongoing authorization.** Recheck permissions inside
   `on_message` for sensitive commands; `state["user"]` is only what you stored.
 
-The 0.6.1 development runtime also records the exact file inputs parsed by each
-interpreter, rather than reconstructing source identity from mtimes or rereading
-files later. This is a DD-041 prerequisite, not a new NTNT API or a worker admission
-check. Imports remain lazy, caches retain their original source identity, and
-existing reload behavior is unchanged. See the source-provenance section in
-[ARCHITECTURE.md](../ARCHITECTURE.md) for the Rust embedding boundary.
+The 0.6.1 runtime records the exact file inputs parsed by each interpreter,
+rather than reconstructing source identity from mtimes or rereading files later.
+The realtime startup check above consumes that provenance at the corresponding
+`listen` boundary and quarantines different-source restarted workers. Endpoint
+registration also checks its native configuration, but this is not full
+callback/captured-value identity or a frozen snapshot of every later import.
+Imports remain lazy; task interpreters do not inherit the source ledger.
+See [ARCHITECTURE.md](../ARCHITECTURE.md) for the Rust embedding boundary.
 
-This checks successful initialization, **not** source/endpoint-generation parity,
-quarantined respawn or callback capacity. Established workers retain their existing
-restart/backoff policy. The startup deadline does not preempt arbitrary application
-code: the CLI exits on startup failure; a Rust embedder must not treat an error as
-proof that blocked setup/native work has been forcibly interrupted.
+Setup success/source parity does not make arbitrary native setup preemptible or
+provide coordinated development reload. Established workers retain the existing
+restart/backoff policy, and callback admission separately follows live serving
+workers. The CLI exits on startup failure; a Rust embedder must not treat an error
+as proof that blocked setup/native work has been forcibly interrupted.
 Limits are fixed before binding/readiness and require a process restart to change;
 hot reload does not reconfigure them. Standalone scripts retain the default caps.
 The synchronous test server validates the configuration but still returns 501 for
