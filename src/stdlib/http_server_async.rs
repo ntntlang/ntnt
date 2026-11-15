@@ -908,7 +908,7 @@ fn guess_mime_type(path: &str) -> &'static str {
     match ext.as_str() {
         "html" | "htm" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
-        "js" => "application/javascript; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
         "json" => "application/json; charset=utf-8",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
