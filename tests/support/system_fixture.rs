@@ -10,12 +10,28 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn start(source: &str, args: &[&str], env: &[(&str, &str)]) -> Self {
+        Self::start_with_command(source, env, |file| {
+            // Lib-test fixtures have no Cargo-provided CLI path and supply
+            // their own command through start_with_command instead.
+            let Some(binary) = option_env!("CARGO_BIN_EXE_ntnt") else {
+                panic!("CLI fixture needs the ntnt binary");
+            };
+            let mut command = Command::new(binary);
+            command.args(args).arg(file);
+            command
+        })
+    }
+    pub fn start_with_command(
+        source: &str,
+        env: &[(&str, &str)],
+        make_command: impl FnOnce(&Path) -> Command,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("fixture.tnt");
         fs::write(&file, source).unwrap();
         let stdout = fs::File::create(dir.path().join("stdout")).unwrap();
         let stderr = fs::File::create(dir.path().join("stderr")).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ntnt"));
+        let mut command = make_command(&file);
         for key in [
             "NTNT_ENV",
             "APP_ENV",
@@ -33,8 +49,6 @@ impl Fixture {
             .env("NTNT_TYPE_MODE", "strict")
             .env("NTNT_LINT_MODE", "strict");
         command
-            .args(args)
-            .arg(&file)
             .envs(env.iter().copied())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));

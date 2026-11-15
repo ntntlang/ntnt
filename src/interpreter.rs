@@ -22,6 +22,8 @@ use std::rc::Rc;
 
 mod cycles;
 pub use cycles::Closure;
+#[cfg(test)]
+mod worker_failure_tests;
 
 /// Opaque sender handle for a concurrent channel.
 ///
@@ -1574,6 +1576,8 @@ impl Interpreter {
         interpreter.define_builtin_types();
         interpreter.define_stdlib();
         interpreter.define_prelude();
+        #[cfg(test)]
+        worker_failure_tests::install(&mut interpreter);
         interpreter.builtin_bindings = interpreter.environment.borrow().values.clone();
         interpreter
     }
@@ -11982,11 +11986,17 @@ impl Interpreter {
             (BinaryOp::Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
             (BinaryOp::Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
             (BinaryOp::Mul, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
-            (BinaryOp::Div, Value::Int(_), Value::Int(0)) => {
+            (BinaryOp::Div | BinaryOp::Mod, Value::Int(_), Value::Int(0)) => {
                 Err(IntentError::DivisionByZero { line: 0 })
             }
-            (BinaryOp::Div, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a / b)),
-            (BinaryOp::Mod, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
+            (BinaryOp::Div, Value::Int(a), Value::Int(b)) => a
+                .checked_div(b)
+                .map(Value::Int)
+                .ok_or_else(|| IntentError::runtime_error("Integer overflow in division")),
+            (BinaryOp::Mod, Value::Int(a), Value::Int(b)) => a
+                .checked_rem(b)
+                .map(Value::Int)
+                .ok_or_else(|| IntentError::runtime_error("Integer overflow in remainder")),
             (BinaryOp::Pow, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.pow(b as u32))),
 
             // Float arithmetic
