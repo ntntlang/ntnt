@@ -98,6 +98,61 @@ fn allowlist_enforced_by_async_server_in_development_and_production() {
 }
 
 #[test]
+fn javascript_modules_have_javascript_mime_in_async_server() {
+    const MODULE: &str = "export const moduleLoaded = true;\n";
+    const MIME: &str = "application/javascript; charset=utf-8";
+    let source = r#"
+serve_static("/assets", "./public", map { "extensions": ["js", "mjs"] })
+listen(0, map { "fixture": true, "readiness": "json" })
+"#;
+    let mut lint = fixture::Fixture::start(source, &["lint", "--strict"], &[]);
+    assert!(lint.wait().success(), "{}", lint.stderr());
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .no_proxy()
+        .build()
+        .unwrap();
+    for env in [
+        vec![("NTNT_WORKERS", "1")],
+        vec![("NTNT_ENV", "production"), ("NTNT_WORKERS", "2")],
+    ] {
+        let mut server = fixture::Fixture::start(source, &["run"], &env);
+        let public = server.dir.path().join("public");
+        fs::create_dir(&public).unwrap();
+        for name in ["sample.js", "sample.mjs"] {
+            fs::write(public.join(name), MODULE).unwrap();
+        }
+        let addr = server.ready();
+        let paths = [
+            "/assets/sample.js",
+            "/assets/sample.js?v=1",
+            "/assets/sample.mjs",
+            "/assets/sample.mjs?v=1",
+        ];
+        let mut content_types = Vec::new();
+        for path in paths {
+            let response = client.get(format!("http://{addr}{path}")).send().unwrap();
+            assert_eq!(response.status(), 200, "{env:?} {path}");
+            assert_eq!(response.headers()["server"], "ntnt-async", "{path}");
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            content_types.push((
+                path,
+                response.headers()["content-type"]
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+            ));
+            assert_eq!(response.text().unwrap(), MODULE, "{path}");
+        }
+        assert_eq!(
+            content_types,
+            paths.map(|path| (path, MIME.to_owned())),
+            "{env:?}"
+        );
+    }
+}
+
+#[test]
 fn overlapping_mount_prefixes_use_path_boundaries() {
     for prefix in ["/assets", "/assets/"] {
         for reverse in [false, true] {
