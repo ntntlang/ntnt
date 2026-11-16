@@ -213,7 +213,11 @@ and scratch sessions. It must be explicit:
   explicitly. Set `hostaddr=` to connect to an address while `host` stays the name
   the certificate must match.
 - **`verify-ca`**: the same chain check without the host-name check, for a server
-  reached by a name its certificate does not carry.
+  reached by a name its certificate does not carry. It needs
+  `sslrootcert=/absolute/path/ca.pem` holding the CA that issues your database's
+  certificates, and never uses the host CA store: without the name check, any
+  certificate a host-store CA issued to anyone, for any name, would pass. Like libpq,
+  `ntnt db` rejects `verify-ca` without `sslrootcert` or with `sslrootcert=system`.
 - **`require`**: TLS without verifying the server. It protects against passive
   observers only; anyone on the path can impersonate the server. Output and plans
   report it as unverified.
@@ -225,10 +229,11 @@ export APP_DATABASE="host=db.example.com user=app_owner dbname=app_production ss
 export APP_DATABASE="host=10.0.4.12 user=app_owner dbname=app sslmode=verify-full sslrootcert=/etc/ntnt/db-ca.pem password=..."
 ```
 
-A missing `sslmode`, `prefer`/`allow` (which can fall back to plaintext),
-`sslrootcert` with `require` or `disable`, and a relative `sslrootcert` path fail with
-`DB_CONNECTION_CONFIG`. In key/value secrets a backslash escapes the next character,
-so write Windows paths with forward slashes (`sslrootcert=C:/certs/db-ca.pem`). TLS needs a TCP host: a Unix-socket host must use `disable`.
+A missing `sslmode`, `prefer`/`allow` (which can fall back to plaintext), `verify-ca`
+without an `sslrootcert` file, `sslrootcert` with `require` or `disable`, and a
+relative `sslrootcert` path fail with `DB_CONNECTION_CONFIG`. In key/value secrets a
+backslash escapes the next character, so write Windows paths with forward slashes
+(`sslrootcert=C:/certs/db-ca.pem`). TLS needs a TCP host: a Unix-socket host must use `disable`.
 Client certificates (`sslcert`/`sslkey`), CRLs and `channel_binding=require` are not
 supported. SCRAM authentication runs without channel binding, so the certificate
 check is what authenticates the server.

@@ -4,7 +4,8 @@
 
 `ntnt db` can now manage remote and managed PostgreSQL. The connection secret's
 `sslmode` accepts libpq's `verify-full`, `verify-ca` and `require`, with `sslrootcert`
-for a private CA (#344).
+for a private CA (#344). `verify-ca`, which skips the host-name check, requires an
+`sslrootcert` CA file and never trusts the host CA store.
 
 - **Verified by default.** `verify-full` checks the certificate chain and the host
   name against the host CA store, the store NTNT's other TLS clients use, or only

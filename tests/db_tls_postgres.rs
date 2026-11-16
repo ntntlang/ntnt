@@ -361,14 +361,51 @@ fn certificate_and_host_name_failures_stop_before_any_sql() {
     // fixture CA.
     for tls in [
         format!("sslmode=verify-full sslrootcert={}", f.other_ca),
+        format!("sslmode=verify-ca sslrootcert={}", f.other_ca),
         "sslmode=verify-full".to_string(),
-        "sslmode=verify-ca sslrootcert=system".to_string(),
     ] {
         let message = tls_failure(&f.run("status", "127.0.0.1", &tls));
         assert!(message.contains("trusted CA"), "{tls}: {message}");
     }
     // Nothing ran: no plan was possible, so nothing could be migrated.
     assert!(!f.table_exists());
+}
+
+#[test]
+#[ignore = "requires the TLS PostgreSQL fixture; mandatory CI db catalog lane"]
+fn verify_ca_never_trusts_the_host_ca_store() {
+    let f = TlsFixture::new();
+    // The fixture CA stands in for a public CA in the host store, and its
+    // certificate for 127.0.0.1 for one issued to someone else's name.
+    let with_host_store = |host: &str, tls: &str| {
+        let mut status = f.process("status", host, tls);
+        status.env("SSL_CERT_FILE", &f.ca);
+        f.json(status)
+    };
+    let trusted = with_host_store("127.0.0.1", "sslmode=verify-full");
+    assert_eq!(trusted["outcome"], "pass", "{trusted}");
+    assert_eq!(
+        trusted["target"]["identity"]["transport"]["roots"],
+        "system"
+    );
+    let message = tls_failure(&with_host_store(
+        "db.ntnt-tls.invalid",
+        "sslmode=verify-full",
+    ));
+    assert!(message.contains("host name"), "{message}");
+    // Without the name check, host-store roots would accept that certificate.
+    for tls in ["sslmode=verify-ca", "sslmode=verify-ca sslrootcert=system"] {
+        let r = with_host_store("db.ntnt-tls.invalid", tls);
+        assert_ne!(r["outcome"], "pass", "{tls}: {r}");
+        assert!(r["target"]["identity"].is_null(), "{tls}: {r}");
+        assert!(
+            r["diagnostics"].as_array().unwrap().iter().any(|d| {
+                d["code"] == "DB_CONNECTION_CONFIG"
+                    && d["message"].as_str().unwrap().contains("sslrootcert=")
+            }),
+            "{tls}: {r}"
+        );
+    }
 }
 
 #[test]

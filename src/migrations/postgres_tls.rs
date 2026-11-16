@@ -60,6 +60,7 @@ impl Mode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RootSource {
     /// The host CA store (or SSL_CERT_FILE / SSL_CERT_DIR), shared with NTNT's other TLS clients.
+    /// verify-full only: verify-ca does not check the host name.
     System,
     /// An absolute path to a PEM file holding the only trusted CA certificates.
     File(PathBuf),
@@ -77,6 +78,11 @@ fn config_error(message: &str) -> Diagnostic {
 }
 fn invalid_secret() -> Diagnostic {
     config_error("Invalid connection secret; details suppressed.")
+}
+fn verify_ca_needs_file() -> Diagnostic {
+    config_error(
+        "sslmode=verify-ca needs sslrootcert=/absolute/path/ca.pem naming the CA that issued the server certificate. verify-ca does not check the host name, so with the host CA store it would accept any certificate those CAs issued, for any name. Use sslmode=verify-full with the host CA store.",
+    )
 }
 
 /// The remaining (still secret) connection string and the TLS keyword values.
@@ -299,15 +305,17 @@ fn transport(tls: Vec<(String, String)>) -> Result<Transport> {
         }
     };
     let roots = match (mode, roots) {
-        (Mode::VerifyCa | Mode::VerifyFull, None) => Some(RootSource::System),
-        (Mode::VerifyCa | Mode::VerifyFull, Some(value)) if value == "system" => {
-            Some(RootSource::System)
-        }
+        (Mode::VerifyFull, None) => Some(RootSource::System),
+        (Mode::VerifyFull, Some(value)) if value == "system" => Some(RootSource::System),
+        // Without the host-name check, a host-store CA would vouch for any
+        // certificate it issued to anyone, for any name. libpq refuses this too.
+        (Mode::VerifyCa, None) => return Err(verify_ca_needs_file()),
+        (Mode::VerifyCa, Some(value)) if value == "system" => return Err(verify_ca_needs_file()),
         (Mode::VerifyCa | Mode::VerifyFull, Some(path)) => {
             let path = PathBuf::from(path);
             if !path.is_absolute() {
                 return Err(config_error(
-                    "sslrootcert must be an absolute path to a PEM file of CA certificates, or `system`.",
+                    "sslrootcert must be an absolute path to a PEM file of CA certificates, or `system` with sslmode=verify-full.",
                 ));
             }
             Some(RootSource::File(path))
@@ -375,10 +383,12 @@ impl Transport {
             (Mode::VerifyFull, Some(roots)) => {
                 builder.with_root_certificates(roots).with_no_client_auth()
             }
-            (Mode::VerifyCa, Some(roots)) => builder
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(ChainOnly { roots, provider }))
-                .with_no_client_auth(),
+            (Mode::VerifyCa, Some(roots)) if matches!(self.roots, Some(RootSource::File(_))) => {
+                builder
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(ChainOnly { roots, provider }))
+                    .with_no_client_auth()
+            }
             (Mode::Require, None) => builder
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(Unverified { provider }))
@@ -728,10 +738,13 @@ mod tests {
 
     #[test]
     fn keyword_form_matches_tokio_postgres_spacing_and_escapes() {
-        let (rest, tls) =
-            parse("  host = h  user=u\\ x dbname = d\tsslmode = verify-ca   ").unwrap();
+        let (rest, tls) = parse(&format!(
+            "  host = h  user=u\\ x dbname = d\tsslmode = verify-ca sslrootcert = '{}'   ",
+            absolute("ca.pem")
+        ))
+        .unwrap();
         assert_eq!(tls.mode, Mode::VerifyCa);
-        assert_eq!(tls.roots, Some(RootSource::System));
+        assert_eq!(tls.roots, Some(RootSource::File(absolute("ca.pem").into())));
         let config: tokio_postgres::Config = rest.parse().unwrap();
         assert_eq!(config.get_user(), Some("u x"));
         assert_eq!(config.get_dbname(), Some("d"));
@@ -796,6 +809,44 @@ mod tests {
     }
 
     #[test]
+    fn verify_ca_requires_a_ca_file() {
+        // verify-ca skips the host-name check, so host-store roots would accept
+        // any certificate a public CA issued to anyone, for any name.
+        for secret in [
+            "host=h sslmode=verify-ca",
+            "host=h sslmode=verify-ca sslrootcert=system",
+            "postgres://u@h/d?sslmode=verify-ca",
+            "postgres://u@h/d?sslrootcert=system&sslmode=verify-ca",
+        ] {
+            let error = parse(secret).unwrap_err();
+            assert_eq!(error.code, "DB_CONNECTION_CONFIG", "{secret}");
+            assert!(error.message.contains("sslrootcert="), "{secret}: {error}");
+        }
+        let (_, tls) = parse(&format!(
+            "host=h sslmode=verify-ca sslrootcert={}",
+            absolute("ca.pem")
+        ))
+        .unwrap();
+        assert_eq!(tls.mode, Mode::VerifyCa);
+        assert_eq!(tls.roots, Some(RootSource::File(absolute("ca.pem").into())));
+        // verify-full keeps the host CA store as its default.
+        assert_eq!(
+            parse("host=h sslmode=verify-full").unwrap().1.roots,
+            Some(RootSource::System)
+        );
+    }
+
+    #[test]
+    fn verify_ca_never_builds_a_chain_only_verifier_over_host_roots() {
+        let transport = Transport {
+            mode: Mode::VerifyCa,
+            roots: Some(RootSource::System),
+        };
+        let error = connector(&transport).err().expect("rejected");
+        assert_eq!(error.code, "DB_TLS", "{error}");
+    }
+
+    #[test]
     fn percent_decoding_matches_the_url_parser() {
         assert_eq!(percent_decode("%2Fetc%2fca.pem").unwrap(), "/etc/ca.pem");
         assert_eq!(percent_decode("100%").unwrap(), "100%");
@@ -809,6 +860,8 @@ mod tests {
             "host=h password=hunter2 sslmode=prefer",
             "host=h password=hunter2",
             "host=h password=hunter2 sslmode=verify-full sslrootcert=hunter2.pem",
+            "host=h password=hunter2 sslmode=verify-ca",
+            "host=h password=hunter2 sslmode=verify-ca sslrootcert=system",
             "postgres://u:hunter2@h/d?sslmode=bogus",
         ] {
             let error = parse(secret).unwrap_err();

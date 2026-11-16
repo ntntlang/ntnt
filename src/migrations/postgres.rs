@@ -1019,6 +1019,15 @@ mod tests {
     #[test]
     fn tls_modes_never_fall_back_to_plaintext() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // verify-ca needs a CA file. Any CA will do: no handshake starts below.
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.pem");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let key = rcgen::KeyPair::generate().unwrap();
+        std::fs::write(&ca, params.self_signed(&key).unwrap().pem()).unwrap();
+        // A backslash escapes in key/value secrets, so use forward slashes.
+        let ca = ca.to_str().unwrap().replace('\\', "/");
         // A server without TLS answers PostgreSQL's SSLRequest with 'N'. Every TLS
         // mode must stop there rather than continue with a plaintext startup.
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1026,7 +1035,11 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            for mode in ["require", "verify-ca", "verify-full"] {
+            for tls in [
+                "sslmode=require".to_string(),
+                format!("sslmode=verify-ca sslrootcert='{ca}'"),
+                "sslmode=verify-full".to_string(),
+            ] {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let port = listener.local_addr().unwrap().port();
                 let server = tokio::spawn(async move {
@@ -1045,19 +1058,19 @@ mod tests {
                 });
                 let secret = crate::interpreter::SecretValue::new(
                     "FIXTURE",
-                    format!("host=127.0.0.1 port={port} user=app dbname=app password=fixture-only sslmode={mode}"),
+                    format!("host=127.0.0.1 port={port} user=app dbname=app password=fixture-only {tls}"),
                 )
                 .unwrap();
                 let error = Postgres::connect(&secret, &fixture_endpoint())
                     .await
                     .err()
                     .expect("a TLS mode must not connect without TLS");
-                assert_eq!(error.code, "DB_TLS", "{mode}: {error}");
+                assert_eq!(error.code, "DB_TLS", "{tls}: {error}");
                 assert!(error.message.contains("No plaintext fallback"), "{error}");
                 let (request, rest) = server.await.unwrap();
                 // SSLRequest: length 8, request code 80877103.
-                assert_eq!(request, [0, 0, 0, 8, 4, 210, 22, 47], "{mode}");
-                assert!(rest.is_empty(), "{mode}: client continued in plaintext: {rest:?}");
+                assert_eq!(request, [0, 0, 0, 8, 4, 210, 22, 47], "{tls}");
+                assert!(rest.is_empty(), "{tls}: client continued in plaintext: {rest:?}");
             }
         });
     }
