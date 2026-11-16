@@ -804,6 +804,39 @@ mod tests {
         );
     }
 
+    /// The Linux NFS client emulates `flock` with a byte-range lock on the whole file,
+    /// which is refused (`EBADF`) on a descriptor not open for writing. Every Linux
+    /// filesystem applies that rule to `fcntl` locks, so the manifest handle init
+    /// locks must take an exclusive one.
+    #[cfg(unix)]
+    #[test]
+    fn the_manifest_handle_takes_an_exclusive_byte_range_lock() {
+        use std::os::fd::AsRawFd;
+        fn byte_range_lock(file: &File) -> std::io::Result<()> {
+            // SAFETY: an all-zero flock is a valid value; the fields are set below.
+            let mut range: libc::flock = unsafe { std::mem::zeroed() };
+            range.l_type = libc::F_WRLCK as libc::c_short;
+            range.l_whence = libc::SEEK_SET as libc::c_short;
+            // l_start = l_len = 0: the whole file.
+            // SAFETY: a live descriptor and a valid flock that outlives the call.
+            match unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &range) } {
+                -1 => Err(std::io::Error::last_os_error()),
+                _ => Ok(()),
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ntnt.toml");
+        std::fs::write(&path, "[lint]\n").unwrap();
+        let read_only = File::open(&path).unwrap();
+        assert_eq!(
+            byte_range_lock(&read_only).unwrap_err().raw_os_error(),
+            Some(libc::EBADF),
+            "a read-only descriptor cannot take an exclusive byte-range lock"
+        );
+        drop(read_only);
+        byte_range_lock(&input_file::open_replaceable(&path).unwrap()).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn manifest_replacement_keeps_the_file_mode() {

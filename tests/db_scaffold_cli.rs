@@ -402,6 +402,54 @@ fn init_refuses_a_manifest_another_init_is_updating() {
     pass(root.path(), &["init", "--engine", "sqlite"]);
 }
 
+/// A manifest the user may not write is refused as an I/O failure whose next action
+/// asks for a writable ntnt.toml, and init writes nothing.
+#[test]
+fn init_refuses_a_manifest_it_cannot_write() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("ntnt.toml");
+    std::fs::write(&path, "[lint]\nstrict = true\n").unwrap();
+    let writable = std::fs::metadata(&path).unwrap().permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(&path, read_only).unwrap();
+    // A process that may write it anyway (root on Unix) cannot observe the refusal.
+    if std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .is_err()
+    {
+        let before = snapshot(root.path());
+        let r = refused(
+            root.path(),
+            &["init", "--engine", "sqlite"],
+            "DB_SCAFFOLD_IO",
+        );
+        let diagnostic = &r["diagnostics"][0];
+        assert!(
+            diagnostic["message"]
+                .as_str()
+                .unwrap()
+                .contains("not writable"),
+            "{r}"
+        );
+        assert!(
+            diagnostic["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("writable regular file"),
+            "{r}"
+        );
+        assert_eq!(
+            snapshot(root.path()),
+            before,
+            "a refused init changed files"
+        );
+        assert!(!root.path().join("migrations").exists());
+    }
+    std::fs::set_permissions(&path, writable).unwrap();
+}
+
 #[test]
 fn init_never_replaces_a_non_directory_migrations_path_or_shares_a_directory() {
     let root = tempfile::tempdir().unwrap();
