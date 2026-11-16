@@ -241,11 +241,13 @@ bundle and point `sslrootcert` at it; publicly trusted certificates work with th
 default.
 
 The transport is part of each session's identity: `sslmode`, the trust source
-(`system`, or `file` with the file's SHA-256), whether the server reports the session
-encrypted (`pg_stat_ssl`) and the TLS version. Plans bind the target's identity, so a
-plan reviewed over `verify-full` fails as stale if `migrate` connects with `require`
-or `disable`, and a changed `sslrootcert` file needs a new plan. Human output prints a
-`Transport:` line.
+(`system`, or `file` with the file's SHA-256), the TLS version this client negotiated
+(`tls_version`), and whether PostgreSQL reports its own end of the session as SSL
+(`server_ssl`, from `pg_stat_ssl`). Behind a TLS-terminating proxy or pooler,
+`server_ssl` is `false` even though the client's connection is verified TLS. Plans bind
+the target's identity, so a plan reviewed over `verify-full` fails as stale if
+`migrate` connects with `require` or `disable`, and a changed `sslrootcert` file needs
+a new plan. Human output prints a `Transport:` line.
 
 ## Exact-plan authority and execution
 

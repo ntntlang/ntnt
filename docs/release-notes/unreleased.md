@@ -12,10 +12,11 @@ for a private CA (#344).
 - **No plaintext fallback.** A missing `sslmode` and `prefer`/`allow` are rejected.
   Every TLS mode fails with `DB_TLS` when the server does not offer TLS. Certificate
   and host-name failures stop before any SQL runs.
-- **Plans bind the transport.** Each session reports its `sslmode`, trust source and
-  the server-observed encryption. A plan reviewed over `verify-full` is stale over
-  `require` or `disable`. `require` (encrypted, unverified) must be chosen explicitly
-  and is reported as unverified.
+- **Plans bind the transport.** Each session reports its `sslmode`, trust source
+  and negotiated TLS version, plus what PostgreSQL reports for its own end
+  (`server_ssl`, which is false behind a TLS-terminating proxy or pooler). A plan
+  reviewed over `verify-full` is stale over `require` or `disable`. `require`
+  (encrypted, unverified) must be chosen explicitly and is reported as unverified.
 - **Upgrade:** the target identity now includes the transport, so plans made by
   0.6.1 must be regenerated. `sslmode=disable` secrets keep working unchanged.
 

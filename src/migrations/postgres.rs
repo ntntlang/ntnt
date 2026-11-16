@@ -65,7 +65,7 @@ fn quote(identifier: &str) -> String {
 pub(crate) struct Postgres {
     client: Client,
     task: tokio::task::JoinHandle<()>,
-    /// Requested transport (sslmode and trust source); identity adds what the server observed.
+    /// sslmode, trust source and the TLS version this client negotiated.
     transport: Value,
 }
 impl Drop for Postgres {
@@ -82,8 +82,9 @@ pub(crate) struct Identity {
     pub version: i32,
     pub settings: Value,
     pub authority: Value,
-    /// sslmode, trust source and the server-observed encryption of this session.
-    /// Part of the plan binding: a plan made over TLS cannot run over a weaker transport.
+    /// sslmode, trust source, the TLS version this client negotiated, and whether
+    /// PostgreSQL reports its own session leg as SSL (`server_ssl`). Part of the
+    /// plan binding: a plan made over TLS cannot run over a weaker transport.
     pub transport: Value,
 }
 use super::model::{Catalog, History, HistoryEntry};
@@ -144,7 +145,7 @@ impl Postgres {
         config.connect_timeout(IO_TIMEOUT);
         config.application_name("ntnt-db-inspect-v1");
         config.options("-c default_transaction_read_only=on -c search_path=pg_catalog -c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000 -c standard_conforming_strings=on -c row_security=off");
-        let (connector, transport) = transport.connector()?;
+        let (connector, mut transport) = transport.connector().await?;
         let (client, task) = match connector {
             None => {
                 let (client, connection) = bounded(config.connect(NoTls)).await?;
@@ -154,6 +155,7 @@ impl Postgres {
                 (client, task)
             }
             Some(tls) => {
+                let negotiated = tls.clone();
                 let (client, connection) =
                     match tokio::time::timeout(IO_TIMEOUT, config.connect(tls)).await {
                         Ok(Ok(pair)) => pair,
@@ -166,6 +168,9 @@ impl Postgres {
                 let task = tokio::spawn(async move {
                     let _ = connection.await;
                 });
+                // What this client negotiated is the transport it controls; a
+                // TLS-terminating proxy does not change it.
+                transport["tls_version"] = json!(negotiated.negotiated_version());
                 (client, task)
             }
         };
@@ -227,22 +232,20 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
  'roles',(SELECT jsonb_agg(jsonb_build_object('role',r.rolname,'superuser',r.rolsuper,'createdb',r.rolcreatedb,'createrole',r.rolcreaterole,'inherit',r.rolinherit,'bypassrls',r.rolbypassrls,'replication',r.rolreplication) ORDER BY r.rolname) FROM pg_catalog.pg_roles r JOIN roles ON r.oid=roles.oid),
  'memberships',(SELECT jsonb_agg(jsonb_build_object('member',pg_get_userbyid(m.member),'role',pg_get_userbyid(m.roleid),'admin',m.admin_option,'inherit',pg_catalog.to_jsonb(m)->'inherit_option','set',pg_catalog.to_jsonb(m)->'set_option') ORDER BY pg_get_userbyid(m.member),pg_get_userbyid(m.roleid)) FROM pg_catalog.pg_auth_members m JOIN roles r ON m.member=r.oid))
 "#,&[])).await?.get::<_,Value>(0);
-        // Confirm with the server that this session's transport is what was requested.
-        let ssl = bounded(self.client.query_one(
-            "SELECT s.ssl, s.version FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()",
+        // The server's own view of this session. Directly connected it matches
+        // the client; behind a TLS-terminating proxy or pooler it describes the
+        // proxy's leg and can be false while the client connection is verified TLS.
+        let server_ssl: bool = bounded(self.client.query_one(
+            "SELECT s.ssl FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()",
             &[],
         ))
-        .await?;
-        let encrypted: bool = ssl.get(0);
+        .await?
+        .get(0);
         let mut transport = self.transport.clone();
-        if encrypted != (transport["sslmode"] != "disable") {
-            return Err(Diagnostic::new(
-                "DB_TLS",
-                "The server reports a different transport than the connection requested.",
-            ));
+        if transport.get("tls_version").is_none() {
+            transport["tls_version"] = Value::Null;
         }
-        transport["encrypted"] = json!(encrypted);
-        transport["tls_version"] = json!(ssl.get::<_, Option<String>>(1));
+        transport["server_ssl"] = json!(server_ssl);
         let identity = Identity {
             cluster: r.get(0),
             database_oid: r.get(1),

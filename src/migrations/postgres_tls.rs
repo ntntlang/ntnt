@@ -19,8 +19,9 @@ use std::future::Future;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_postgres::tls::{ChannelBinding, MakeTlsConnect, TlsConnect, TlsStream};
 use tokio_postgres::Socket;
@@ -28,6 +29,9 @@ use zeroize::Zeroizing;
 
 /// Largest accepted `sslrootcert` file. CA bundles are far smaller.
 const MAX_ROOTS_BYTES: u64 = 1_048_576;
+/// Reading trust anchors runs off the runtime thread under this deadline, so a
+/// slow filesystem cannot stall a command beyond its other bounds.
+const ROOTS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The transport requested by the connection secret's `sslmode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,19 +206,25 @@ fn split_url(s: &str, prefix_len: usize) -> Result<Split> {
         return Ok((Zeroizing::new(s.to_string()), Vec::new()));
     };
     let query_start = prefix_len + credentials_end + question;
-    let query = &s[query_start + 1..];
+    let mut rest = &s[query_start + 1..];
     let mut kept: Vec<&str> = Vec::new();
     let mut tls = Vec::new();
-    if !query.is_empty() {
-        for segment in query.split('&') {
-            let (key, value) = segment.split_once('=').ok_or_else(invalid_secret)?;
-            let key = percent_decode(key)?;
-            if is_tls_keyword(&key) {
-                tls.push((key, percent_decode(value)?));
-            } else {
-                kept.push(segment);
-            }
+    // Same walk as tokio-postgres: key up to the next '=', value up to the next
+    // '&' (consumed) or the end. A trailing '&' therefore ends the query.
+    while !rest.is_empty() {
+        let equals = rest.find('=').ok_or_else(invalid_secret)?;
+        let after = &rest[equals + 1..];
+        let (value, next) = match after.find('&') {
+            Some(amp) => (&after[..amp], &after[amp + 1..]),
+            None => (after, ""),
+        };
+        let key = percent_decode(&rest[..equals])?;
+        if is_tls_keyword(&key) {
+            tls.push((key, percent_decode(value)?));
+        } else {
+            kept.push(&rest[..equals + 1 + value.len()]);
         }
+        rest = next;
     }
     let head = &s[..query_start];
     let rest = if kept.is_empty() {
@@ -318,26 +328,45 @@ impl Transport {
     }
     /// Load trust anchors and build the connector, or `None` for plaintext.
     /// Also returns the transport description that identity reports bind.
-    pub(crate) fn connector(&self) -> Result<(Option<MakeRustls>, Value)> {
+    /// Filesystem and host-store reads run off the runtime thread with a deadline.
+    pub(crate) async fn connector(&self) -> Result<(Option<MakeRustls>, Value)> {
         let mut description = json!({"sslmode": self.mode.as_str(), "roots": null});
         if self.mode == Mode::Disable {
             return Ok((None, description));
         }
-        let roots = match &self.roots {
-            None => None,
-            Some(RootSource::System) => {
-                description["roots"] = json!("system");
-                let trust = crate::stdlib::tls_trust::host_trust()
-                    .map_err(|message| Diagnostic::new("DB_TLS", &message))?;
-                Some(trust.roots.clone())
-            }
-            Some(RootSource::File(path)) => {
-                let (store, sha256) = file_roots(path)?;
-                description["roots"] = json!("file");
-                description["roots_sha256"] = json!(sha256);
-                Some(Arc::new(store))
+        let source = self.roots.clone();
+        let loaded = tokio::time::timeout(
+            ROOTS_TIMEOUT,
+            tokio::task::spawn_blocking(move || match source {
+                None => Ok(None),
+                Some(RootSource::System) => crate::stdlib::tls_trust::host_trust()
+                    .map(|trust| Some((trust.roots.clone(), None)))
+                    .map_err(|message| Diagnostic::new("DB_TLS", &message)),
+                Some(RootSource::File(path)) => {
+                    file_roots(&path).map(|(store, sha256)| Some((Arc::new(store), Some(sha256))))
+                }
+            }),
+        )
+        .await;
+        let roots = match loaded {
+            Ok(Ok(result)) => result?,
+            Ok(Err(_)) => return Err(Diagnostic::new("DB_TLS", "TLS configuration failed.")),
+            Err(_) => {
+                return Err(config_error(
+                    "Reading sslrootcert or the host CA store did not finish in time.",
+                ))
             }
         };
+        let roots = roots.map(|(store, sha256)| {
+            match sha256 {
+                Some(sha256) => {
+                    description["roots"] = json!("file");
+                    description["roots_sha256"] = json!(sha256);
+                }
+                None => description["roots"] = json!("system"),
+            }
+            store
+        });
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
@@ -361,6 +390,7 @@ impl Transport {
         Ok((
             Some(MakeRustls {
                 config: Arc::new(config),
+                negotiated: Arc::default(),
             }),
             description,
         ))
@@ -374,7 +404,17 @@ fn file_roots(path: &std::path::Path) -> Result<(RootCertStore, String)> {
             "sslrootcert must name a readable PEM file of CA certificates (at most 1 MiB).",
         )
     };
-    let file = std::fs::File::open(path).map_err(|_| unreadable())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    // A FIFO without a writer would block a plain open; open without waiting and
+    // reject anything that is not a regular file. Symlinks are followed (mounted
+    // secrets are often symlinks to the real file).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|_| unreadable())?;
     let metadata = file.metadata().map_err(|_| unreadable())?;
     if !metadata.is_file() || metadata.len() > MAX_ROOTS_BYTES {
         return Err(unreadable());
@@ -513,6 +553,18 @@ impl ServerCertVerifier for Unverified {
 #[derive(Clone)]
 pub(crate) struct MakeRustls {
     config: Arc<rustls::ClientConfig>,
+    /// Protocol version of the last completed handshake, as this client saw it.
+    negotiated: Arc<Mutex<Option<&'static str>>>,
+}
+impl MakeRustls {
+    /// The TLS version this client negotiated, e.g. "TLSv1.3". A TLS-terminating
+    /// proxy in front of PostgreSQL does not change it.
+    pub(crate) fn negotiated_version(&self) -> Option<&'static str> {
+        *self
+            .negotiated
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 impl MakeTlsConnect<Socket> for MakeRustls {
     type Stream = RustlsStream;
@@ -524,12 +576,14 @@ impl MakeTlsConnect<Socket> for MakeRustls {
         Ok(RustlsConnect {
             config: self.config.clone(),
             name,
+            negotiated: self.negotiated.clone(),
         })
     }
 }
 pub(crate) struct RustlsConnect {
     config: Arc<rustls::ClientConfig>,
     name: ServerName<'static>,
+    negotiated: Arc<Mutex<Option<&'static str>>>,
 }
 impl TlsConnect<Socket> for RustlsConnect {
     type Stream = RustlsStream;
@@ -537,10 +591,19 @@ impl TlsConnect<Socket> for RustlsConnect {
     type Future = Pin<Box<dyn Future<Output = io::Result<RustlsStream>> + Send>>;
     fn connect(self, stream: Socket) -> Self::Future {
         Box::pin(async move {
-            tokio_rustls::TlsConnector::from(self.config)
+            let stream = tokio_rustls::TlsConnector::from(self.config)
                 .connect(self.name, stream)
-                .await
-                .map(|stream| RustlsStream(Box::new(stream)))
+                .await?;
+            let version = match stream.get_ref().1.protocol_version() {
+                Some(rustls::ProtocolVersion::TLSv1_3) => Some("TLSv1.3"),
+                Some(rustls::ProtocolVersion::TLSv1_2) => Some("TLSv1.2"),
+                _ => None,
+            };
+            *self
+                .negotiated
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = version;
+            Ok(RustlsStream(Box::new(stream)))
         })
     }
 }
@@ -756,6 +819,41 @@ mod tests {
         }
     }
 
+    /// Like `database_runtime`: a blocked off-thread read cannot hold up shutdown.
+    fn connector(transport: &Transport) -> Result<(Option<MakeRustls>, Value)> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(transport.connector());
+        runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+        result
+    }
+
+    #[test]
+    fn url_form_accepts_a_trailing_ampersand_like_the_driver() {
+        for (secret, mode) in [
+            ("postgres://app@db/app?sslmode=disable&", Mode::Disable),
+            (
+                "postgres://app@db/app?application_name=x&sslmode=verify-full&",
+                Mode::VerifyFull,
+            ),
+            (
+                "postgres://app@db/app?sslmode=require&application_name=x&",
+                Mode::Require,
+            ),
+        ] {
+            let (rest, tls) = parse(secret).unwrap();
+            assert_eq!(tls.mode, mode, "{secret}");
+            let config: tokio_postgres::Config = rest.parse().unwrap();
+            assert_eq!(config.get_user(), Some("app"), "{secret}");
+        }
+        // Only the trailing separator is accepted: an empty parameter in the
+        // middle passes through unchanged and the driver rejects it, as before.
+        let (rest, _) = parse("postgres://app@db/app?sslmode=disable&&application_name=x").unwrap();
+        assert!(rest.parse::<tokio_postgres::Config>().is_err());
+    }
+
     #[test]
     fn root_file_must_hold_a_usable_certificate() {
         let dir = tempfile::tempdir().unwrap();
@@ -772,8 +870,35 @@ mod tests {
                 mode: Mode::VerifyFull,
                 roots: Some(RootSource::File(path.clone())),
             };
-            let error = transport.connector().err().expect("unusable roots");
+            let error = connector(&transport).err().expect("unusable roots");
             assert_eq!(error.code, "DB_CONNECTION_CONFIG", "{path:?}: {error}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_root_file_is_rejected_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("roots.pem");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: a valid NUL-terminated path; mkfifo has no other preconditions.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let transport = Transport {
+            mode: Mode::VerifyFull,
+            roots: Some(RootSource::File(fifo)),
+        };
+        // No writer ever opens the FIFO. It must be rejected at once as not a
+        // regular file, not merely cut off by the trust-loading deadline. Run on
+        // a watchdog thread so a regression fails here instead of hanging.
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(connector(&transport).err());
+        });
+        let error = result
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("loading a FIFO as sslrootcert must not block")
+            .expect("a FIFO is not a usable root file");
+        assert_eq!(error.code, "DB_CONNECTION_CONFIG");
+        assert!(error.message.contains("readable PEM file"), "{error}");
     }
 }
