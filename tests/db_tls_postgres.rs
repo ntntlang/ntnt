@@ -166,13 +166,15 @@ disposable = true
 impl Drop for TlsFixture {
     fn drop(&mut self) {
         for name in [&self.target, &self.scratch] {
-            let _ = std::panic::catch_unwind(|| {
-                fixture_sql(
-                    &self.admin,
-                    &format!("SET lock_timeout = '10s'; SET statement_timeout = '30s'; DROP DATABASE {name} WITH (FORCE); DROP ROLE {name}"),
-                    false,
-                )
-            });
+            // One statement per call: a multi-statement batch runs as a single
+            // implicit transaction, which DROP DATABASE refuses. Each call is
+            // bounded by FIXTURE_DEADLINE.
+            for sql in [
+                format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"),
+                format!("DROP ROLE IF EXISTS {name}"),
+            ] {
+                let _ = std::panic::catch_unwind(|| fixture_sql(&self.admin, &sql, false));
+            }
         }
     }
 }
