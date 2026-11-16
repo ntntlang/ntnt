@@ -1710,16 +1710,21 @@ ntnt db plan --target development --json --out review.json
 ntnt db verify --target development --against review.json --json
 ```
 
-**New project?** Follow [Database Migrations → Quick start](DATABASE_MIGRATIONS.md#quick-start).
-It gives a minimal `ntnt.toml`, `migrations/0001_initial.sql`, local target/scratch
-provisioning, and the `status` → `plan` → approve the `plan_digest` → `migrate` →
-`verify` loop for SQLite and PostgreSQL. PostgreSQL connection secrets currently
-require `sslmode=disable` on a trusted local transport; TLS is tracked in #344.
+**New project?** Run `ntnt db init --engine sqlite` (or `--engine postgresql`) to
+declare `[databases.app]` with its secret names (never values) in `ntnt.toml` and
+create `migrations/`, then `ntnt db new initial` to create
+`migrations/0001_initial.sql`. Neither command needs a secret or a connection, and
+neither overwrites a file. Then follow
+[Database Migrations → Quick start](DATABASE_MIGRATIONS.md#quick-start) for local
+target/scratch provisioning and the `status` → `plan` → approve the `plan_digest` →
+`migrate` → `verify` loop for SQLite and PostgreSQL. PostgreSQL connection secrets
+currently require `sslmode=disable` on a trusted local transport; TLS is tracked in #344.
 
 Configure logical stores under `[databases.<name>]`, each with its own migration
 directory, named targets, and disposable scratch database using declared
 `std/secrets` references. Select `--database app --target development`; omit
-`--database` only when exactly one store is declared. `--target` is always required.
+`--database` only when exactly one store is declared. `--target` is required by
+every command except `init` and `new`.
 Only the selected store is inspected, and its logical name is bound into plans.
 These commands never initialize or mutate
 the target, execute SQL checks, or adopt an existing database. They compare the live

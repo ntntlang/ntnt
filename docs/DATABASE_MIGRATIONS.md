@@ -3,6 +3,8 @@
 `ntnt db` implements the PostgreSQL and SQLite transactional subsets of issue #245: read-only inspection/planning and separately authorized exact-plan execution. Both native adapters use one inventory, plan/approval protocol, history validation and execution/recovery loop. Keep an engine-native immutable SQL history for each logical store; this is portable tooling, **not portable SQL**, an ORM, or an authored desired-schema DSL.
 
 ```sh
+ntnt db init --engine postgresql
+ntnt db new add_accounts
 ntnt db status --target development --json
 ntnt db plan --target development --json --out review.json
 ntnt db verify --target development --json
@@ -11,7 +13,7 @@ ntnt db migrate --database app --target development --plan review.json --json
 ntnt db status --target development --object accounts
 ```
 
-`status` and `verify` inspect history and compare the observed catalog with replay at the **applied prefix**. `plan` additionally replays pending SQL and captures a non-authorizing review artifact. Pending migrations are not drift. `--object` is a case-sensitive substring filter on displayed catalog keys; it never narrows verification, hides incomplete coverage, or changes the plan binding. Without `--json`, the same result is rendered for humans.
+`init` and `new` only write local scaffolding: a manifest section that names secrets, and empty numbered migration files (see [Quick start](#quick-start)). `status` and `verify` inspect history and compare the observed catalog with replay at the **applied prefix**. `plan` additionally replays pending SQL and captures a non-authorizing review artifact. Pending migrations are not drift. `--object` is a case-sensitive substring filter on displayed catalog keys; it never narrows verification, hides incomplete coverage, or changes the plan binding. Without `--json`, the same result is rendered for humans.
 
 `migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Explicit reviewed baseline adoption and recognized PostgreSQL legacy-history import use that same executor; see below. The only non-transactional operation is a lone PostgreSQL `CREATE INDEX CONCURRENTLY` (see [Concurrent index builds](#concurrent-index-builds)); backfill orchestration and query lint are not implemented. PostgreSQL migrations may include transactional DML such as seed rows; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
 
@@ -22,7 +24,30 @@ project directory that holds `ntnt.toml`. They are for local development only.
 Production uses the Unix-socket secrets provider and a separately protected
 approval; see the rest of this document before deploying.
 
+Two commands write the starting files. Neither reads a secret value or connects
+to a database:
+
+```sh
+ntnt db init --engine sqlite    # or --engine postgresql
+ntnt db new initial             # creates migrations/0001_initial.sql
+```
+
+`init` writes the commented `ntnt.toml` configuration shown below for the chosen
+engine, declares its secret names (never values) and creates `migrations/`. It
+prints the remaining steps. `--database <name>` (lowercase ASCII letters, digits
+and underscores, at most 50 characters) replaces `app`; the secret names and the
+PostgreSQL schema, role and database names derive from it. If `ntnt.toml` exists,
+`init` appends the section and keeps every existing byte. It refuses, changing
+nothing, when the manifest already declares that database or one of those secrets,
+or when another declared database already uses `migrations/`. `new` numbers the
+file after the highest existing ID, zero-padded to four digits (or wider, to match
+existing files). Migration names use lowercase ASCII letters, digits and
+underscores, and `new` never overwrites a file. Writing the same files by hand
+works just as well.
+
 ### SQLite
+
+`ntnt db init --engine sqlite` writes this manifest (its comments are omitted here):
 
 ```toml
 # ntnt.toml
@@ -43,6 +68,8 @@ disposable = true
 [secrets.APP_REPLAY_FILE]
 [secrets.APP_MIGRATION_APPROVAL]
 ```
+
+Write the first migration below the comment header of the file `ntnt db new initial` created:
 
 ```sql
 -- migrations/0001_initial.sql
@@ -72,8 +99,8 @@ ntnt db verify --target development
 
 `migrate` without `APP_MIGRATION_APPROVAL` fails with `DB_APPROVAL_REQUIRED` and
 writes nothing. Rerunning the same plan reports `already_applied`. For the next
-change, add `migrations/0002_<name>.sql` and plan, approve and migrate again. Each
-new plan has a new digest.
+change, run `ntnt db new <name>` (it creates `migrations/0002_<name>.sql`), write
+its SQL, and plan, approve and migrate again. Each new plan has a new digest.
 
 ### PostgreSQL
 
@@ -99,6 +126,8 @@ connections first.
 The managed schema must already exist on the target. Create it as the owner role,
 for example `PGPASSWORD=dev-only-owner psql -h 127.0.0.1 -U app_owner -d app_development -c 'CREATE SCHEMA app'`.
 Skip this if you use `schema = "public"`. Leave the scratch database empty.
+
+`ntnt db init --engine postgresql` writes this manifest (its comments are omitted here):
 
 ```toml
 # ntnt.toml
@@ -156,7 +185,7 @@ hosts) fails with `DB_CONNECTION_CONFIG`. An unset or undeclared secret fails wi
 password) or `28000` (for example `peer`): check `pg_hba.conf` and the secret.
 Add `--json` to any command for the machine-readable report. If the
 manifest declares only one database, `--database` is optional; `--target` is
-always required.
+required by every command except `init` and `new`.
 
 ## Explicit configuration and secrets
 
@@ -193,7 +222,7 @@ required = true
 ```
 
 - Declare logical stores as `[databases.<name>]`. `--database <name>` selects one; omit it only when exactly one database is declared. Unknown or ambiguous selection fails before connection lookup. Names start with an ASCII letter and contain at most 63 ASCII letters, digits, underscores or hyphens.
-- Select a named deployment target with `--target`; it is always required, even for a single database or target. There is no fallback connection, URL argument, `url_env` alias, plaintext manifest credential, or `--force` bypass. Unknown fields in the selected database definition are errors.
+- Select a named deployment target with `--target`; inspection and execution always require it, even for a single database or target. There is no fallback connection, URL argument, `url_env` alias, plaintext manifest credential, or `--force` bypass. Unknown fields in the selected database definition are errors.
 - Connections reuse the existing **`std/secrets` providers and declaration validation**. Development's environment provider reads the exact logical name. Production uses the configured Unix-socket provider; the environment provider remains disabled in production. See [Secrets Agent Protocol](secrets-agent-protocol.md). Declarations are read from the captured manifest, not reopened during replay.
 - A connection secret must specify exactly one host, the declared `user`/`dbname`, and **`sslmode=disable`**, with no startup `options`. This initial adapter reuses the existing NoTLS driver. Use a trusted local Unix socket or a separately secured local transport; do not send credentials over an untrusted plaintext network. TLS transport is not implemented and there is no silent TLS downgrade.
 - Physical database, role and managed-schema names use ASCII letters/digits/underscores, start with a letter, and are at most 63 bytes. SQL object identifiers may be quoted. System schemas and `_ntnt` cannot be the managed schema; `public` is supported and is where most applications keep their tables.
@@ -255,6 +284,11 @@ required = true
 ntnt db plan --database app --target development --json
 ntnt db plan --database analytics --target development --json
 ```
+
+`ntnt db init` always uses `migrations/` and refuses when another declared database
+already uses that directory; declare such a database by hand, as above.
+`ntnt db new <name> --database analytics` numbers files in that database's own
+directory.
 
 Only the selected store's migration directory and connection secrets are accessed. Other stores may be unprovisioned or use a future adapter; their backend-specific fields are not interpreted by this operation. Registry names/table shapes and the shared secret declaration boundary remain validated. Each invocation operates on one logical database—there is no implicit `--all`, cross-database execution, or distributed transaction.
 

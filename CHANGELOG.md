@@ -2,7 +2,13 @@
 
 ## Unreleased (0.6.2)
 
-No changes recorded yet. See [unreleased notes](docs/release-notes/unreleased.md).
+See [unreleased notes](docs/release-notes/unreleased.md).
+
+### Added
+
+- `ntnt db init` declares a SQLite or PostgreSQL database and its secret names in
+  `ntnt.toml` and creates `migrations/`; `ntnt db new <name>` creates the next
+  numbered migration file. Neither writes secret values or overwrites a file (#348).
 
 ## 0.6.1
 

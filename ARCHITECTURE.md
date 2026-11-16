@@ -64,7 +64,10 @@ store, and plans bind the logical store/target labels plus physical identity.
 `ntnt db status|plan|verify|migrate|reconcile` dispatches to that core without
 invoking the interpreter or the existing source `ntnt migrate` command. Captured manifest
 secret declarations reuse the existing native secrets providers without reopening
-source policy or changing interpreter-global secret state.
+source policy or changing interpreter-global secret state. `ntnt db init|new`
+(`scaffold.rs`) only write local files: a manifest section that names secrets,
+validated with the same selection rules before it is written (an existing manifest
+is replaced atomically), and new-only numbered migration files.
 
 Two concrete native adapters own catalog/dialect coverage, connection identity,
 locking and operation/version capabilities. The shared core owns immutable inputs,

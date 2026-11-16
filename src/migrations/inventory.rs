@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub(super) const MAX_INPUT_BYTES: usize = 1_048_576;
 
@@ -194,16 +194,20 @@ impl CapturedInputs {
             state: "adopted".into(),
         })
     }
-    /// Capture the manifest and exactly one logical database's ordered migration inputs.
-    /// Ambiguous selection and malformed registry entries fail before credential lookup;
-    /// unselected stores' directories are not visited. Exact bytes and logical selection
-    /// participate in plan identity, while secret resolution remains a later operation.
-    pub fn load(manifest: &Path, target: &str, database: Option<&str>) -> Result<Self> {
-        let bytes = file_bytes(manifest)?;
-        let document: toml::Value = std::str::from_utf8(&bytes)
+    /// Parse captured manifest bytes; invalid UTF-8 or TOML is a configuration error.
+    pub(super) fn parse(bytes: &[u8]) -> Result<toml::Value> {
+        std::str::from_utf8(bytes)
             .ok()
             .and_then(|s| s.parse().ok())
-            .ok_or_else(|| invalid("Invalid UTF-8/TOML manifest."))?;
+            .ok_or_else(|| invalid("Invalid UTF-8/TOML manifest."))
+    }
+    /// Select exactly one named logical database and validate its definition.
+    /// `database` may be omitted only when exactly one is declared. Only the selected
+    /// definition is interpreted; no directory, target or secret is accessed here.
+    pub(super) fn select(
+        document: &toml::Value,
+        database: Option<&str>,
+    ) -> Result<(String, Database)> {
         if document.get("database").is_some() {
             return Err(invalid("Use named [databases.<name>] tables instead of the prototype [database] table; the two forms cannot be mixed."));
         }
@@ -261,6 +265,11 @@ impl CapturedInputs {
         {
             return Err(Diagnostic::new("DB_CHECK_UNSUPPORTED", "Adoption checks require bounded names and the supported schema-qualified SELECT expression subset."));
         }
+        Ok((database_name, config))
+    }
+    /// Resolve the selected target and validate its endpoint, scratch and approval
+    /// references. Secret names are validated here; their values are never read.
+    pub(super) fn endpoint(config: &Database, target: &str) -> Result<Endpoint> {
         let endpoint = config
             .targets
             .get(target)
@@ -297,6 +306,11 @@ impl CapturedInputs {
                 "Approval must use a separately named secret, never a connection secret.",
             ));
         }
+        Ok(endpoint)
+    }
+    /// Resolve the confined migration directory relative to the manifest. Every
+    /// component must already exist as a directory, never a link.
+    pub(super) fn migrations_dir(manifest: &Path, config: &Database) -> Result<PathBuf> {
         // Portable lexical confinement; never reinterpret backslashes/drives on a different OS.
         if config.migrations_dir.is_empty()
             || config.migrations_dir.contains(['\\', ':', '\0'])
@@ -322,6 +336,18 @@ impl CapturedInputs {
                 return Err(invalid("Migration directories cannot be links."));
             }
         }
+        Ok(dir)
+    }
+    /// Capture the manifest and exactly one logical database's ordered migration inputs.
+    /// Ambiguous selection and malformed registry entries fail before credential lookup;
+    /// unselected stores' directories are not visited. Exact bytes and logical selection
+    /// participate in plan identity, while secret resolution remains a later operation.
+    pub fn load(manifest: &Path, target: &str, database: Option<&str>) -> Result<Self> {
+        let bytes = file_bytes(manifest)?;
+        let document = Self::parse(&bytes)?;
+        let (database_name, config) = Self::select(&document, database)?;
+        let endpoint = Self::endpoint(&config, target)?;
+        let dir = Self::migrations_dir(manifest, &config)?;
         let mut sources = BTreeMap::new();
         let mut total_bytes = 0usize;
         for entry in

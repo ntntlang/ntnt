@@ -10,6 +10,7 @@ mod inventory;
 mod model;
 mod postgres;
 mod report;
+mod scaffold;
 mod sqlite;
 mod sqlite_file;
 use serde::Serialize;
@@ -30,7 +31,7 @@ impl Diagnostic {
             "DB_ADOPTION_INPUT" => "Select an exact source-prefix ID with plan --adopt-through and declare named adoption_checks. Only absent history or matching recognized legacy history is eligible; never reset or rewrite a ledger to force adoption.",
             "DB_SQLITE_RECOVERY_REQUIRED" => "If a writer is active, wait for it to finish and retry inspection. Otherwise rerun migrate with the same approved plan to recover and reconcile under ownership; do not delete the journal or make inspection writable.",
             "DB_REFERENCE_UNAVAILABLE" => "Configure [databases.<name>.scratch] for the selected database with a distinct disposable database and secret, then rerun inspection.",
-            "DB_DATABASE_REQUIRED" | "DB_DATABASE_UNKNOWN" => "Select a declared [databases.<name>] with --database <name>. --database may be omitted only when exactly one logical database is declared; --target is always required.",
+            "DB_DATABASE_REQUIRED" | "DB_DATABASE_UNKNOWN" => "Select a declared [databases.<name>] with --database <name>. --database may be omitted only when exactly one logical database is declared; --target is required by every command except init and new.",
             "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty engine-matching scratch database/file. PostgreSQL requires a separate unprivileged owner role. Do not reset the selected target.",
             "DB_REPLAY_UNSUPPORTED" => "Review the named migration's analysis.unknowns against docs/DATABASE_MIGRATIONS.md. Remove transaction control, role/session changes and other non-transactional statements from migration files. The one supported non-transactional migration is a lone named CREATE INDEX CONCURRENTLY without checks.",
             "DB_COVERAGE_INCOMPLETE" | "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
@@ -50,6 +51,11 @@ impl Diagnostic {
             "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_APPROVAL_REQUIRED" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
             "DB_OUTPUT" => "Select a new output filename with a writable parent directory; existing files are never replaced.",
             "DB_OUTPUT_LIMIT" => "Reduce the saved report using --object, or reduce oversized migration metadata. No artifact was written; verification is never truncated to fit.",
+            "DB_INIT_CONFLICT" => "Nothing was written. Choose another --database name (its secret names derive from it), or edit the existing [databases.<name>] and [secrets.<NAME>] declarations by hand; init never changes existing declarations or replaces an existing migrations path. Give a further database its own migrations_dir as in docs/DATABASE_MIGRATIONS.md#multiple-databases-in-one-application.",
+            "DB_INIT_NAME" => "Pass --database with 1-50 lowercase ASCII letters, digits or underscores, starting with a letter (for example --database app). Names starting with pg_ and information_schema are reserved; secret, role and database names are derived from this name.",
+            "DB_MIGRATION_NAME" => "Use 1-64 lowercase ASCII letters, digits or underscores, for example `ntnt db new add_accounts`; the numeric ID and .sql suffix are added for you.",
+            "DB_MIGRATION_EXISTS" => "The existing file was left unchanged. Rerun `ntnt db new` to take the next free ID; never edit or renumber a migration that has been applied.",
+            "DB_SCAFFOLD_IO" => "Make the project and migrations directories writable and keep ntnt.toml a writable regular file, then rerun. Existing files are never truncated: an existing ntnt.toml is replaced only by a complete, synced copy with the new section appended.",
             _ => "Correct the reported input or configuration using docs/DATABASE_MIGRATIONS.md; inspect committed progress before retrying any migration.",
         };
         Self {
@@ -69,7 +75,8 @@ impl std::error::Error for Diagnostic {}
 pub type Result<T> = std::result::Result<T, Diagnostic>;
 
 #[derive(clap::Args)]
-/// Inspect database history/catalogs or execute a separately authorized exact plan.
+/// Scaffold first-time setup, inspect database history/catalogs, or execute a
+/// separately authorized exact plan.
 pub struct DbArgs {
     #[command(subcommand)]
     pub command: DbCommand,
@@ -77,6 +84,10 @@ pub struct DbArgs {
 #[derive(clap::Subcommand)]
 /// Read-only observations and explicit execution share captured inputs and catalog evidence.
 pub enum DbCommand {
+    /// Declare a logical database in ntnt.toml (secret names only) and create migrations/.
+    Init(InitArgs),
+    /// Create the next numbered SQL migration file (no secrets or connection needed).
+    New(NewArgs),
     /// Inspect catalog, migration history, pending changes and drift (read-only target).
     Status(Options),
     /// Capture a target-bound, non-authorizing plan (never applies target SQL).
@@ -122,6 +133,41 @@ pub struct Options {
     /// Plan explicit adoption through this migration ID; never execute its old SQL.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub adopt_through: Option<u64>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+/// Engine of a newly declared logical database.
+pub enum Engine {
+    Sqlite,
+    Postgresql,
+}
+#[derive(clap::Args)]
+/// First-time setup: declare one logical database without secret values or a connection.
+pub struct InitArgs {
+    /// Database engine of the new logical database.
+    #[arg(long, value_enum)]
+    pub engine: Engine,
+    /// Logical database name; secret, role and database names derive from it.
+    #[arg(long, default_value = "app")]
+    pub database: String,
+    /// Manifest to create, or to extend without changing its existing bytes.
+    #[arg(long, default_value = "ntnt.toml")]
+    pub manifest: PathBuf,
+    #[arg(long)]
+    pub json: bool,
+}
+#[derive(clap::Args)]
+/// Create the next numbered SQL migration; existing files are never replaced.
+pub struct NewArgs {
+    /// Migration name: lowercase ASCII letters, digits and underscores (add_accounts).
+    pub name: String,
+    #[arg(long, default_value = "ntnt.toml")]
+    pub manifest: PathBuf,
+    /// Logical database name; optional only when exactly one is declared.
+    #[arg(long)]
+    pub database: Option<String>,
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Run one database operation with an outer deadline and bounded runtime teardown.
@@ -197,6 +243,8 @@ fn save_report(path: &std::path::Path, command: &str, report: &serde_json::Value
 /// Returns an error after rendering any failed or unknown result.
 pub fn run(args: DbArgs) -> anyhow::Result<()> {
     let (command, options, execution_plan) = match args.command {
+        DbCommand::Init(args) => return scaffold::init(&args),
+        DbCommand::New(args) => return scaffold::new(&args),
         DbCommand::Status(o) => ("status", o, None),
         DbCommand::Plan(o) => ("plan", o, None),
         DbCommand::Verify(o) => ("verify", o, None),
@@ -484,6 +532,29 @@ mod tests {
                 "DB_SECRET",
                 ["[secrets.<NAME>]", "std/secrets provider", "exact name"].as_slice(),
             ),
+            (
+                "DB_INIT_CONFLICT",
+                [
+                    "Nothing was written",
+                    "--database",
+                    "by hand",
+                    "#multiple-databases-in-one-application",
+                ]
+                .as_slice(),
+            ),
+            (
+                "DB_INIT_NAME",
+                ["--database", "lowercase", "50", "pg_"].as_slice(),
+            ),
+            (
+                "DB_MIGRATION_NAME",
+                ["lowercase", "64", "ntnt db new add_accounts"].as_slice(),
+            ),
+            (
+                "DB_MIGRATION_EXISTS",
+                ["left unchanged", "Rerun `ntnt db new`"].as_slice(),
+            ),
+            ("DB_SCAFFOLD_IO", ["writable", "never truncated"].as_slice()),
         ] {
             let action = super::Diagnostic::new(code, "x").next_action;
             assert_ne!(action, generic, "{code} uses the generic next action");
